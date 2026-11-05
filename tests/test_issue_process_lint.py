@@ -640,3 +640,90 @@ def test_the_index_row_does_not_overstate_template_coverage():
                 if "working_process" in p.read_text(encoding="utf-8")]
     assert carriers == ["agent_finding.yml"], carriers
     assert "agent_finding.yml" in row
+
+
+# --- review round 5: the resolution window, the release anchor, the skipped claims ------------
+# Round 3's review found that the 16-character window — added so `Refs, as agreed, #12` counts —
+# was ALSO applied to the RESOLVING words, so a prose sentence manufactured a closing resolution
+# and arm 1 reported clean. That is a false PASS, the direction this module ranks worst, and it is
+# the #10534 hole the arm exists to close.
+
+
+@pytest.mark.parametrize("body", [
+    "Refs #12\n\nThe fix in #12 was reviewed this morning.\n",
+    "Refs #12\n\nResolved by the approach discussed in #12.\n",
+    "Refs #12\n\nSee the closure notes in #12.\n",
+])
+def test_prose_containing_a_resolving_word_does_not_resolve_the_claim(body):
+    """A resolving word must be followed by punctuation/whitespace, not by 16 characters of prose."""
+    assert L.claims(body, None, None)["closing"] == []
+    assert [f.arm for f in L.classify_pr(body, 1)] == [L.ARM_PR]
+
+
+@pytest.mark.parametrize("closer, group", [
+    ("Closes #12", "closing"),
+    ("closes #12", "closing"),
+    ("Closes: #12", "closing"),
+    ("Fixes #12", "closing"),
+    ("Resolves #12", "closing"),
+    ("Satisfies #12", "satisfies"),
+])
+def test_a_real_closing_keyword_still_resolves(closer, group):
+    """The control: tightening the window must not stop `Closes #N` from resolving."""
+    body = "Refs #12\n" + closer + "\n"
+    assert L.claims(body, None, None)[group] == [12]
+    assert L.classify_pr(body, 1) == []
+
+
+def test_the_lenient_window_is_kept_for_linking_words():
+    """The other control: the leniency is what makes `Refs, as agreed, #12` a claim, so it stays
+    for the LINKING words even though it was removed from the resolving ones."""
+    assert L.claims("Refs, as agreed, #12\n", None, None)["weak"] == [12]
+
+
+@pytest.mark.parametrize("marker, released", [
+    ("3.2c — released 2026-11-05", True),
+    ("3.2c (released)", True),
+    ("3.2c: released 2026-11-05", True),
+    ("3.2c [released]", True),
+    ("3.2c. Released 2026-11-05", True),
+    # A HYPHEN is the in-word separator of every branch slug, so a bare `-` must not be a
+    # delimiter — these are live WIP, and reading them as released is a silent miss.
+    ("11077 — branch feat/retrieval-none-mode — box cell-3", False),
+    ("11077 — branch feat/x — box cell-3 — since 2026-11-05T09:00Z (none pending)", False),
+    ("3.2c — branch fix/unclaimed-issue-arm2 — box c", False),
+    ("3.2c — branch released-work", False),
+    ("3.2c — free tier refactor", False),
+])
+def test_the_release_anchor_is_correct_in_both_directions(marker, released):
+    assert (L.in_flight_markers(["IN FLIGHT: " + marker]) == []) is released
+
+
+def test_a_qualified_claim_skipped_offline_is_reported_not_silently_dropped(tmp_path, capsys):
+    """Offline, the repo is unknown, so `owner/repo#N` is neither claimed nor forgotten (F3).
+
+    Dropping it silently measured a SMALLER population than the same body with `--repo` and
+    reported clean for content it had not read — the shape this module refuses everywhere else.
+    """
+    body = tmp_path / "b.md"
+    body.write_text("Refs daniel-ospina/tortoise#12\n", encoding="utf-8")
+    L.main(["--body-file", str(body)])
+    out = capsys.readouterr().out
+    assert "were NOT read" in out and "--repo" in out
+    # ...and with the repo supplied the same body IS read, and flagged.
+    L.main(["--body-file", str(body), "--repo", "daniel-ospina/tortoise"])
+    out = capsys.readouterr().out
+    assert "[pr-unclaimed-issue]" in out
+
+
+def test_the_arm_table_states_the_claiming_word_requirement():
+    """The arm table is the tool's own spec, and the spec a maintainer reads before editing
+    `CLAIM_RE`. It used to claim a bare `#N` is flagged, which is the 68 %-false-positive
+    behaviour that was deliberately removed — a table describing it invites restoring it.
+    """
+    doc = L.__doc__ or ""
+    assert "a bare\n                           ``#N`` on that line" not in doc
+    assert "claiming word" in doc
+    assert "comma-continued list" in doc.lower()
+    # ...and it agrees with the code: a bare `#N` with no claiming word is a mention.
+    assert L.classify_pr("This reds only #10 and #11, the two criterion ids.\n", 1) == []
