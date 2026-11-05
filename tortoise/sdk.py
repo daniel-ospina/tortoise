@@ -20290,56 +20290,24 @@ class TortoiseSDK:
                     continue
                 _rdict = (dict(_rel.properties)
                           if hasattr(_rel, "properties") else {})
-                # ⛔ Only a STRING token reaches the predicate: a raw-written
-                # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
-                # and ``direction_flows`` tests membership in a frozenset — so
-                # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. ⚠️ The three cases below are DIFFERENT,
-                # and none is read off ``create_direct_edge`` blindly: a string
-                # is judged on the leg set ``direction_flows`` gives it, a
-                # present non-string is judged BOTH ways (the hashable reader
-                # verdict, and the fail-closed stand-in where no reader verdict
-                # exists), and only the ABSENT case takes the creation door's
-                # canonical form — because that is the token the door WRITES,
-                # so no reader ever sees a door-made absent edge. A *string*
-                # token passes through verbatim (one outside the vocabulary is
-                # read by ``direction_flows`` as both ways — the leg set the EP
-                # backstop sees, so a door reading it more narrowly would judge
-                # ONE leg of a two-leg factor (the backstop NARROWS, it does not
-                # drop — measured: such a factor loads as ``'<-'`` with
-                # ``skipped == []``); an ABSENT token takes the
-                # edge TYPE's default (what ``create_direct_edge``
-                # canonicalizes it to before judging — deliberately NOT
+                # ⛔ ONE reader — no door-local copy of the direction policy
+                # (#10520 A4). The stored token goes straight to
+                # ``_canonical_direction``, the same canonicalization
+                # ``create_direct_edge`` applies, and the VERDICT then comes from
+                # ``claim_class.direction_blocks_create`` ->
+                # ``live.direction_flows``, the same normalizer the EP backstop
+                # reads. A PRESENT value is returned VERBATIM (only ABSENT is
+                # replaced by the edge TYPE's default — deliberately NOT
                 # ``ep.py``'s ``coalesce(r.direction, 'bidirectional')``, which
                 # would be the over-refusal the directionless-NAND pin exists to
-                # prevent); a PRESENT non-string token is judged BOTH ways: a
-                # HASHABLE one (``3``, ``True``) is read as both ways by
-                # ``direction_flows`` and ``ep.py``, so both ways matches the
-                # leg set they see, while an UNHASHABLE one (list/map) makes
-                # ``direction_flows`` raise ``TypeError`` — there is no reader
-                # verdict to mirror, so both ways is the fail-closed stand-in
-                # (and keeps that value out of a frozenset membership test).
+                # prevent), and a present JUNK value is read as BOTH ways by
+                # ``direction_flows`` — which is also the fail-closed reading the
+                # EP backstop sees, and it keeps an unhashable value out of a
+                # frozenset membership test. ⛔ Do NOT reintroduce a per-value
+                # branch here: a second copy of the policy is what let this door
+                # publish its own token as ``judged`` in the refusal below.
                 _raw_dir = _rdict.get("direction")
-                if isinstance(_raw_dir, str):
-                    _eff_dir = self._canonical_direction(_rtype, _raw_dir)
-                elif _raw_dir is None:
-                    # ABSENT: the edge TYPE's own default (NAND ->
-                    # ``unidirectional``), exactly as ``create_direct_edge``
-                    # canonicalizes it before judging.
-                    _eff_dir = self._canonical_direction(_rtype, None)
-                else:
-                    # ⛔ A PRESENT non-string token is NOT "absent" to any
-                    # reader: ``live.direction_flows`` reads it as BOTH ways
-                    # (unknown ⇒ the mutual default), which is also the leg set
-                    # ``ep.py`` sees. Judging it as the type default would judge
-                    # ONE leg of a two-leg wiring — for NAND that let a supersede
-                    # write ``asserted -[NAND {junk}]-> derived``, whose backward
-                    # leg is the override ``create_direct_edge(NAND, …,
-                    # 'bidirectional')`` refuses (measured). Both ways is the
-                    # fail-CLOSED reading, and it also keeps the unhashable case
-                    # away from ``direction_flows``' frozenset membership (which
-                    # raises ``TypeError``).
-                    _eff_dir = "bidirectional"
+                _eff_dir = self._canonical_direction(_rtype, _raw_dir)
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                     _src_classes, _tgt_classes = _new_classes, _tid_classes
