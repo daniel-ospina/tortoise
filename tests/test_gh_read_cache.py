@@ -344,6 +344,10 @@ class CacheTest(unittest.TestCase):
             ("-R", "o/n", "pr", "checks", "42"),
             ("--json", "number", "pr", "view", "1"),
             ("-R", "o/n", "run", "view", "123"),
+            # a ROOT flag and its value: `-R` is not in `_API_VALUE_FLAGS` (it is not an
+            # `api` flag), so the position test must treat its value as skippable by the
+            # "immediately follows a flag" rule rather than by the flag table.
+            ("--repo", "o/n", "pr", "view", "42"),
             # the residual the cycle-5 review named: a porcelain value-flag before the verb.
             ("--limit", "5", "pr", "list"),
             # ⛔ AN ABSOLUTE URL IS A ROUTE gh FORWARDS VERBATIM. Every declared mutable
@@ -404,9 +408,19 @@ class CacheTest(unittest.TestCase):
             ("issue", "list", "-R", "graphql/graphql-js"),
             ("label", "list", "-R", "graphql/graphql-js"),
             ("label", "create", "api", "--description", "graphql"),
-            # ⛔ AND AN ARGUMENT NAMED `api` IS NOT THE VERB: treating it as one made the
-            # flag's value the route and refused this read.
+            # ⛔ AND A ROUTE-SHAPED ARGUMENT IS NOT A ROUTE. This pins the shape
+            # (`api/graphql` is a repo some lane may legitimately view) and does NOT
+            # discriminate the "first token named `api` is the verb" mutant — no token here
+            # IS `api`, so that mutant never fires on it. The case below is the one that
+            # does; measured, not assumed.
             ("repo", "view", "api/graphql"),
+            # ⛔ AND AN ARGUMENT NAMED `api` IS NOT THE VERB, nor does an argument named after
+            # ANY verb start a candidate: reading `api` out of the ARGUMENTS made the next
+            # token the route and refused this read, and starting a suffix at every verb WORD
+            # refused `run view` / `pr view` inside a search query.
+            ("repo", "view", "api", "graphql"),
+            ("search", "issues", "run", "view"),
+            ("search", "code", "pr", "view"),
             ("search", "issues", "graphql", "--repo", "graphql/graphql-js"),
             # ⛔ AND A `repos/`-SHAPED SEARCH QUERY IS A QUERY. Matching `repos/…` tokens
             # wherever they sit refused these as "command 'api repos/{repo}/actions/runs'".

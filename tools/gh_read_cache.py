@@ -732,6 +732,30 @@ def _api_route(argv: tuple[str, ...]) -> str | None:
     return None
 
 
+def _verb_positions(argv: tuple[str, ...]) -> list[int]:
+    """Indices where a gh VERB can sit: every earlier token is a flag or a flag's value.
+
+    ⛔ A SUFFIX MAY START AT A VERB POSITION, NOT AT ANY VERB WORD. `gh` accepts a
+    subcommand's own flags AND their values BEFORE the verb (`-X GET api …`, `-R o/n pr
+    view 42`, `--limit 5 pr list` — all measured accepted), so the verb is not argv[0].
+    But offering a suffix at every OCCURRENCE of a verb word let a PORCELAIN ARGUMENT that
+    happens to BE one start a suffix: `search issues run view` and `search code pr view`
+    were refused as "command 'run view'" — the same false refusal `repo view
+    graphql/graphql-js` and `search code repos/o/n/actions/runs` already fixed, reopened
+    one class over. An index qualifies when everything before it is a flag, or a value
+    immediately following a flag, so `run`/`pr`/`api` sitting among a command's own
+    arguments is an argument, while the same token behind leading flags is the verb.
+    """
+    return [
+        i
+        for i in range(len(argv))
+        if all(
+            argv[k].startswith("-") or (k > 0 and argv[k - 1].startswith("-"))
+            for k in range(i)
+        )
+    ]
+
+
 def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     """The strings a mutable-route pattern are allowed to match.
 
@@ -758,6 +782,11 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     the verb wherever the flags sat. A suffix starts only at a token that IS one of this
     module's own verbs, so an argument that merely looks route-shaped cannot start one.
 
+    ⛔ AND ONLY AT A VERB POSITION. `_verb_positions` is the other half of that boundary: a
+    suffix starting at EVERY verb WORD let a porcelain argument that IS one start a suffix
+    (`search issues run view`, `search code pr view` — both refused, measured), so the
+    candidate set is now the suffixes that begin where a verb may actually sit.
+
     ⛔ AND THE ROUTE IS NORMALISED PER RFC 3986, WHICH IS BROADER THAN THE EDGE. Spellings
     that used to slip past, each measured: a leading slash (`api /repos/…`) and any number
     of them (`api //graphql`); an ABSOLUTE URL (`api
@@ -766,12 +795,17 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     `repos/..` to the API root (`https://api.github.com/repos/../rate_limit` → 200), so
     `api repos/../graphql` was a LIVE graphql read served at rc=0.
 
-    ⛔ AND `normpath` COLLAPSES MORE THAN THE EDGE DOES — which is over-refusal, not an
-    over-claim. Measured, the edge collapses exactly ONE dot-segment shape:
-    `/repos/../rate_limit` → 200, while `/foo/../rate_limit`,
-    `/repos/o/../rate_limit` and `/repos/o/n/../../rate_limit` all → 404. So any
-    dot-segment candidate this function adds can only refuse a read the server would have
-    404'd anyway.
+    ⛔ AND `normpath` IS NOT THE EDGE'S RULE — it is a SUPERSET of it, applied to every
+    route. Measured unauthenticated, with `--path-as-is` and no redirect following:
+    `/repos/../rate_limit` → 200, `/repos/../graphql` → 401 (i.e. it resolved to the
+    graphql endpoint), while `/foo/../rate_limit`, `/users/../rate_limit`,
+    `/orgs/../rate_limit`, `/repos/o/../rate_limit` and `/repos/o/n/../../rate_limit` all
+    → 404. So the edge collapses the prefix `repos/..` and NOT dot segments in general —
+    there is no single normalisation rule behind those six answers, which is exactly why
+    `normpath` (RFC 3986 §5.2.4) must not be described as "the way the server resolves
+    it". A dot-segment candidate can therefore refuse a spelling the edge would have
+    404'd: that is deliberate OVER-refusal of something no caller should write, bounded to
+    the shapes measured here and not to a general claim about the server.
 
     ⛔ BUT A PERCENT-ESCAPED SEGMENT IS NOT DECODED BY ANYONE. This file used to claim
     `p%75lls` "decodes to `pulls` inside gh"; measured against the live API, `gh` forwards
@@ -790,15 +824,19 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     norm = [tok.lstrip("/") for tok in raw]
     unq = [urllib.parse.unquote(tok) for tok in norm]
     candidates = [" ".join(raw), " ".join(norm), " ".join(unq)]
-    # ⛔ THE VERB MAY SIT ANYWHERE: `gh -X GET api graphql` and `gh -R o/n pr view 42` are
-    # accepted by gh, and anchoring at argv[0] served every one of them. A suffix starts
-    # only at a token that IS one of this module's verbs.
+    # ⛔ THE VERB MAY SIT ANYWHERE A VERB CAN: `gh -X GET api graphql` and
+    # `gh -R o/n pr view 42` are accepted by gh, and anchoring at argv[0] served every one
+    # of them. A suffix starts only at a token that IS one of this module's verbs — AND
+    # only at a VERB POSITION (`_verb_positions`), because starting one at every verb WORD
+    # refused `search issues run view` as "run view".
     # ⚠️ THE `_VERB_TOKENS` FILTER IS NOT ITSELF PINNED, AND CANNOT BE: every pattern in
-    # `MUTABLE_ARGV` begins with a verb, so a suffix starting anywhere else can never match
-    # — removing the filter leaves the suite green (measured). It is kept as a boundary on
-    # the candidate set and as the statement of intent above, not as a behaviour. Do not
-    # read a green mutant here as missing coverage.
-    candidates.extend(" ".join(unq[i:]) for i, tok in enumerate(unq) if tok in _VERB_TOKENS)
+    # `MUTABLE_ARGV` begins with a verb, so a suffix starting at a non-verb token can never
+    # match — removing the filter leaves the suite green (measured). It is kept as a
+    # boundary on the candidate set and as the statement of intent above, not as a
+    # behaviour. Do not read a green mutant here as missing coverage.
+    candidates.extend(
+        " ".join(unq[i:]) for i in _verb_positions(unq) if unq[i] in _VERB_TOKENS
+    )
     route = _api_route(raw)
     if route is not None:
         route = urllib.parse.unquote(route)
@@ -890,6 +928,9 @@ _MUTABLE_PREFIXES: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = tu
 #   gh --limit 5 pr list --help   -> the `pr list` help
 # Deriving the set from MUTABLE_ARGV means a future entry cannot be added without its verb
 # becoming reachable here.
+# ⛔ AND IT IS HALF THE CONDITION: `_verb_positions` decides WHERE such a token may start a
+# candidate. Membership alone started one at every verb WORD, which refused porcelain
+# arguments that happen to be verbs (`search issues run view`).
 _VERB_TOKENS = frozenset(tokens[0] for tokens, _why in MUTABLE_ARGV)
 
 
