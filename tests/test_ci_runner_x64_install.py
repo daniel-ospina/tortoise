@@ -3757,6 +3757,10 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     Mutation: revert any of the five refs to its pre-fix number -> RED with the line it actually
     hit. A ref that lands two files away is worse than none: a fixer sent there edits workflow
     routing or a shell script the sentence never named.
+
+    The pin reads TWO runbooks. `docs/ops/ci-runner-x64.md` carries the refs above; #6744 drifted
+    the two `python-ci.yml` refs in `docs/ops/batch-integration.md`, which no gate read, so that
+    file is pinned here too rather than in a second test that could be deleted independently.
     """
     runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
 
@@ -3837,6 +3841,47 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     ), (
         f"the runbook cites tools/runner_autoscale.py:{n} as the installer invocation, but that "
         f"line is {at('tools/runner_autoscale.py', n)!r}"
+    )
+
+    # ── The SECOND runbook, which this pin never read (#6744) ───────────────────────────────────
+    # `docs/ops/batch-integration.md` cites `python-ci.yml` by line twice, and BOTH were exactly
+    # right on `main` (`:1844`, `:1911`). #6744 inserts 70 lines into the `test` job's `strategy`
+    # block (`python-ci.yml:748`) and 15/12 further down, so both numbers now land on unrelated
+    # comments (`:1844` on a host-wide `ps`-count note, `:1911` on the presence-form header) — and
+    # NOTHING red, because the only cross-file-ref gate in the repo read `ci-runner-x64.md` alone.
+    # Both sentences are load-bearing there: the first carries the "ARM64 VMs resolve
+    # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at 32m12s
+    # of a 30m budget" measurement the section argues a fold-routing decision on.
+    #
+    # Pinned by SENTENCE, like the refs above, so an offset-shifted number reds here instead of
+    # passing the `1 <= n <= EOF` range check that let it ship.
+    # Mutation: revert either number to its pre-#6744 value -> RED naming the line it actually hit.
+    batch = (REPO_ROOT / "docs" / "ops" / "batch-integration.md").read_text()
+
+    m = re.search(
+        r"resolve `ubuntu-latest` to a \*\*~2\u00d7 slower\*\* class \(`python-ci\.yml:(\d+)`\)", batch
+    )
+    assert m is not None, (
+        "batch-integration.md no longer cites `python-ci.yml:<line>` for the ARM64 ~2x-slower "
+        "class — re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert "~2x slower class" in at(".github/workflows/python-ci.yml", n), (
+        f"batch-integration.md cites python-ci.yml:{n} for the ARM64 ~2x-slower class, but that "
+        f"line is {at('.github/workflows/python-ci.yml', n)!r}"
+    )
+
+    m = re.search(
+        r"killed the canary at \*\*32m12s of a 30m budget\*\* \(`python-ci\.yml:(\d+)`\)", batch
+    )
+    assert m is not None, (
+        "batch-integration.md no longer cites `python-ci.yml:<line>` for the canary killed at "
+        "32m12s of a 30m budget — re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert "32m12s of a 30m budget" in at(".github/workflows/python-ci.yml", n), (
+        f"batch-integration.md cites python-ci.yml:{n} for the canary killed at 32m12s, but that "
+        f"line is {at('.github/workflows/python-ci.yml', n)!r}"
     )
 
 

@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: batch-integration, ci-wall-clock, ci-headroom-guards
 aboutObjects: tortoise, "#10399", "#10897", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
 created: 2026-10-31
-updated: 2026-11-04
+updated: 2026-11-05
 ---
 
 # Batch integration — the gate is the batch, not the PR
@@ -1252,8 +1252,8 @@ contended box — holds the fold's required legs PENDING with nothing to answer 
 `docs/ops/ci-runner-x64.md` records for every pool-only departure (`:773-779`); and the pool is
 MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
 same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
-ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:1844`) and one of them
-killed the canary at **32m12s of a 30m budget** (`python-ci.yml:1911`) — the same failure this section
+ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:1914`) and one of them
+killed the canary at **32m12s of a 30m budget** (`python-ci.yml:1981`) — the same failure this section
 cites as the reason the `canary_producer` row is exempt. A priority mechanism that routes a fold onto a
 slower or stalled class makes the fold slower, which is the opposite of its purpose. Declare the class
 **and** the reason the fold may have it: on this fleet that reason is "dedicated fold capacity exists",
