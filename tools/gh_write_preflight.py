@@ -306,17 +306,40 @@ def _printable_base(api_base: str) -> str:
     return api_base
 
 
-def _scrub(text: str) -> str:
-    """Remove anything token-shaped from UNTRUSTED text before it is echoed into a verdict.
+def _scrub(text: str, secret: str = "") -> str:
+    """Remove anything credential-shaped from UNTRUSTED text before it is echoed into a verdict.
 
-    ⛔ THE RESPONSE BODY IS THE CALLER'S OPPONENT (review cycle 4). Every `detail` is printed on the
-    verdict line, and a responder that echoes the request headers puts `<TOKEN>` in its own body — the
-    module's absolute guarantee ("the credential is NEVER printed … in any output") is only true if the
-    echoed text is scrubbed, because `!r` escaping alone only removes newlines. The pattern set is the
-    documented token prefixes; an unparseable-but-token-shaped string is still redacted, which is the
-    safe direction for a value we are only trying to be read `as-is` never.
+    ⛔ THE RESPONSE BODY AND ITS HEADERS ARE THE CALLER'S OPPONENT (review cycles 4–6). Every `detail`
+    is printed on the verdict line (and `--json` serialises the whole result), and a responder that
+    echoes the request headers puts `<TOKEN>` in its own output — the module's absolute guarantee
+    ("the credential is NEVER printed … in any output") is only true if the echoed text is scrubbed,
+    because `!r` escaping alone only removes newlines.
+
+    ⛔ REDACT BY VALUE **AND** BY SHAPE. The prefix regex cannot see a credential that has no documented
+    prefix — a legacy 40-hex PAT, or any non-GitHub value in `GH_TOKEN` (which `token_shape()` already
+    anticipates by returning "unrecognised prefix") — so the resolved value is removed explicitly first.
+    The regex stays as belt-and-braces for a token that appears in text the value-replace missed.
     """
-    return re.sub(r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+", "<redacted-token>", text or "")
+    out = text or ""
+    if secret:
+        out = out.replace(secret, "<redacted-token>")
+    return re.sub(r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+", "<redacted-token>", out)
+
+
+def _sanitise_result(res: dict, secret: str) -> dict:
+    """Scrub every field of the verdict that is built from RESPONSE TEXT, by value and by shape.
+
+    One place, because the printing paths are several (the OK line, the refusal line, the human summary
+    on stderr, and `--json`), and a fix applied per call site left `ratelimit_remaining` raw after
+    cycles 5 and 6 both closed a sibling header — the exact "scrub at the source" lesson.
+    """
+    for key in ("detail", "ratelimit_remaining", "scopes"):
+        if isinstance(res.get(key), str):
+            res[key] = _scrub(res[key], secret)
+    if isinstance(res.get("surfaces"), dict):
+        res["surfaces"] = {k: (_scrub(v, secret) if isinstance(v, str) else v)
+                           for k, v in res["surfaces"].items()}
+    return res
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -732,7 +755,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     token, source = resolve_credential()
-    res = preflight(args.repo, args.api_base.rstrip("/"), token, source)
+    res = _sanitise_result(preflight(args.repo, args.api_base.rstrip("/"), token, source), token)
 
     if args.json:
         print(json.dumps(res, indent=2, sort_keys=True))

@@ -919,6 +919,23 @@ def test_response_headers_cannot_echo_a_credential_or_forge_a_line():
         f"a response header FORGED a pass line: {blob!r}"
 
 
+def test_a_prefixless_credential_is_redacted_by_value_not_only_by_shape():
+    """Redaction must not depend on a documented prefix (review cycle 6). A legacy 40-hex PAT — or any
+    non-GitHub value in `GH_TOKEN`, which `token_shape()` explicitly anticipates — has no `ghp_` shape,
+    so the prefix regex cannot see it; only removing the RESOLVED VALUE closes the echo."""
+    secret = "0123456789abcdef0123456789abcdef01234567"
+    hostile = (200, {"x-oauth-scopes": f"repo, {secret}",
+                     "x-ratelimit-remaining": secret},
+               '{"default_branch":"main"}')
+    with _Stub(read=hostile) as s:
+        env = _env(s.base, secret)
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    assert p.returncode == 0, blob          # all three probes answer 422 on this stub
+    assert secret not in blob, f"the credential VALUE reached the output: {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
