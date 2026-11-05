@@ -30,6 +30,7 @@ The modes, one test each:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping
@@ -347,12 +348,14 @@ def test_a_non_bool_tree_from_a_fixture_is_not_a_clean_tree(value: Any) -> None:
 def test_a_malformed_timeout_knob_warns_and_keeps_the_default(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Parsed at import, `int(os.environ.get(...))` raised BEFORE `main()`, so `main()`'s
-    "exactly one verdict line" backstop could not see it and the process exited 1 with NO
-    line. Measured: `READY_GATE_GH_TIMEOUT=1m` -> ValueError, no verdict.
+    """`_env_int`'s own semantics: a malformed knob warns by name and takes the default.
 
-    Mutation check: restoring `GH_TIMEOUT = int(os.environ.get(...))` makes the module raise
-    at import and fails the import of this test module outright.
+    ⛔ This arm asserts the HELPER, and on its own it is UNFALSIFIABLE for the defect the fix
+    exists for. Restoring `GH_TIMEOUT = int(os.environ.get(...))` at module level while
+    keeping `_env_int` leaves this arm GREEN, because `monkeypatch.setenv` runs AFTER this
+    module (and `tools.ready_for_owner`) is already imported and the knob is not ambient.
+    Measured: `1 passed` on that mutation. `…_is_caught_in_a_FRESH_PROCESS` below is the arm
+    that reds; this one covers the fallback semantics it cannot.
     """
     monkeypatch.setenv("READY_GATE_GH_TIMEOUT", "1m")
     assert rfo._env_int("READY_GATE_GH_TIMEOUT", 60) == 60
@@ -365,6 +368,69 @@ def test_a_malformed_timeout_knob_warns_and_keeps_the_default(
     monkeypatch.delenv("READY_GATE_GH_TIMEOUT", raising=False)
     assert rfo._env_int("READY_GATE_GH_TIMEOUT", 60) == 60
     assert capsys.readouterr().err == ""
+
+
+def test_a_malformed_timeout_knob_is_caught_in_a_FRESH_PROCESS() -> None:
+    """THE property the fix exists for: the MODULE still imports — and therefore still reaches
+    `main()` and prints its one verdict line — with malformed knobs in the ambient environment.
+
+    Module-level `int(os.environ.get(...))` raised `ValueError` BEFORE `main()`, and `main()`'s
+    "a read that is not a verdict must never become a traceback with NO line" backstop lives
+    INSIDE `main()`, so it could not see it. Measured pre-fix:
+
+        READY_GATE_GH_TIMEOUT=1m uv run python tools/ready_for_owner.py 1
+          -> ValueError: invalid literal for int() with base 10: '1m'
+          -> exit 1, NO verdict line
+
+    Mutation check (this is the arm that reds): re-introducing the module-level parse makes
+    `import tools.ready_for_owner` raise in the child, so `returncode != 0` and `Traceback`
+    appears in stderr. A `monkeypatch.setenv` on the already-imported module cannot detect it.
+    """
+    env = {**os.environ, "READY_GATE_GH_TIMEOUT": "1m", "READY_GATE_GIT_TIMEOUT": "2m"}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import tools.ready_for_owner as m; print(m.GH_TIMEOUT, m.GIT_TIMEOUT)"],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, f"{proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.stdout.strip() == "60 180", proc.stdout
+    # both knobs warned BY NAME, and neither was silently reinterpreted
+    assert "READY_GATE_GH_TIMEOUT" in proc.stderr, proc.stderr
+    assert "READY_GATE_GIT_TIMEOUT" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("value", ["false", "unstable", 0, 1])
+def test_a_non_bool_head_stable_from_a_fixture_is_never_a_stable_head(value: Any) -> None:
+    """`bool("false")` is `True`, so the old `bool()` coercion INVENTED a boolean: a payload
+    that literally says the head did NOT stay put was graded a STABLE head and passed
+    condition 5 (`if probe.head_stable is False`). Measured pre-fix:
+
+        head_stable='false'    -> coerced True  -> passed=True reason=''
+        head_stable='unstable' -> coerced True  -> passed=True reason=''
+
+    A value that is not a real `bool` is now "not read" (`_tri_bool`), which fails CLOSED as
+    `unreadable` — never as a pass, and never as a claim about the head. The `merged` and
+    `is_draft` fields take the same coercion and previously failed closed only by accident
+    (a string coerced to `True` reads as merged/draft); they are `_tri_bool` now too.
+
+    Mutation check: reverting `head_stable` to `bool(data["head_stable"])` turns the `"false"`
+    and `"unstable"` arms green and fails this test.
+    """
+    check = _check("exclusions", head_stable=value)
+    assert check.passed is False, f"head_stable={value!r} graded PASS"
+    assert check.unreadable is True, check.reason
+    assert check.reason == "unreadable", check.reason
+
+
+def test_a_real_bool_head_stable_is_still_graded_by_its_value() -> None:
+    """The strict coercion must not turn the two REAL answers into `unreadable`."""
+    assert _check("exclusions", head_stable=True).passed is True
+    moved = _assert_fails("exclusions", "head-moved-mid-read", head_stable=False)
+    assert moved.passed is False
 
 
 def test_non_main_base_is_not_ready() -> None:

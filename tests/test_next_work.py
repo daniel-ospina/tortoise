@@ -2912,16 +2912,13 @@ def test_the_footer_does_not_call_rows_pickable_on_a_refused_run():
 def test_a_malformed_pace_knob_cannot_decide_an_exit_code(
     monkeypatch, capsys
 ):
-    """`PACE_SECONDS` was parsed at import, so a bad knob raised BEFORE the snapshot was read
-    and the process exited **1** — the code this module defines as "the queue was read but NO
-    unit is pickable: that is an answer" (`tools/next_work.py:112`, `:2289-2305`), which a
-    consumer honours by stopping the lane. Measured: `NEXT_WORK_PACE=0.2s` -> ValueError,
-    exit 1, no snapshot read.
+    """`NEXT_WORK_PACE` malformed → the default, a one-shot named warning, never an exit code.
 
-    Mutation check: re-introducing the module-level
-    `PACE_SECONDS = float(os.environ.get("NEXT_WORK_PACE", "0.2"))` makes the import raise and
-    fails this module's import outright; reverting only the fallback in `pace_seconds()` fails
-    the `0.2s` arm below.
+    ⛔ This arm asserts `pace_seconds()`, and on its own it is UNFALSIFIABLE for the defect the
+    fix exists for. A PARTIAL regression that keeps `pace_seconds()` and re-adds the
+    module-level `PACE_SECONDS = float(os.environ.get(...))` leaves this arm GREEN, because
+    `monkeypatch.setenv` runs after `tools.next_work` is already imported and the knob is not
+    ambient. Measured: `1 passed`. `…_is_caught_in_a_FRESH_PROCESS` below is the arm that reds.
     """
     from tools import next_work
 
@@ -2933,9 +2930,38 @@ def test_a_malformed_pace_knob_cannot_decide_an_exit_code(
     next_work.pace_seconds()
     assert capsys.readouterr().err == ""
 
-    # a well-formed knob still wins, and an unset one takes the default silently
     monkeypatch.setenv("NEXT_WORK_PACE", "0")
     assert next_work.pace_seconds() == 0.0
-    monkeypatch.delenv("NEXT_WORK_PACE", raising=False)
-    assert next_work.pace_seconds() == next_work.PACE_SECONDS_DEFAULT
-    assert capsys.readouterr().err == ""
+
+
+def test_a_malformed_pace_knob_is_caught_in_a_FRESH_PROCESS() -> None:
+    """THE property the fix exists for: the MODULE still imports — so a run still reaches the
+    snapshot read and can answer "the queue was read and NO unit is pickable" — with a
+    malformed knob in the ambient environment.
+
+    Module-level `float(os.environ.get(...))` raised `ValueError` before anything was read and
+    the process exited **1**, the code this tool defines as that answer; a consumer keying on
+    the exit code stops the lane. Measured pre-fix:
+
+        NEXT_WORK_PACE=0.2s uv run python tools/next_work.py
+          -> ValueError: could not convert string to float: '0.2s'
+          -> exit 1 with no snapshot read
+
+    Mutation check (this is the arm that reds): re-introducing the module-level parse makes
+    `import tools.next_work` raise in the child, so `returncode != 0`. A `monkeypatch.setenv`
+    on the already-imported module cannot detect it.
+    """
+    env = {**os.environ, "NEXT_WORK_PACE": "0.2s"}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import tools.next_work as m; print(m.pace_seconds())"],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, f"{proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.stdout.strip() == "0.2", proc.stdout
+    assert "NEXT_WORK_PACE" in proc.stderr and "0.2s" in proc.stderr, proc.stderr
+

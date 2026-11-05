@@ -466,6 +466,24 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _tri_bool(value: Any) -> bool | None:
+    """A tri-state field as `bool | None`, refusing to INVENT a boolean.
+
+    ⛔ `bool("false")` is `True`. Coercing an uncoerced `--fixture` value with `bool()` is a
+    FAIL-OPEN for any field graded by `is False` / `is True`: measured on `head_stable`,
+
+        'false'    -> bool() -> True   -> passed=True  reason=''   ← says head did NOT stay put
+        'unstable' -> bool() -> True   -> passed=True  reason=''
+
+    Only a real `bool` is evidence; anything else is "not read", and every consumer of that
+    `None` below fails CLOSED (`exclusions` reports `unreadable`). The live collectors already
+    return `bool | None`; this is the `--fixture` door.
+    """
+    if isinstance(value, bool):
+        return value
+    return None
+
+
 GH_TIMEOUT = _env_int("READY_GATE_GH_TIMEOUT", 60)
 GIT_TIMEOUT = _env_int("READY_GATE_GIT_TIMEOUT", 180)
 
@@ -642,7 +660,7 @@ def check_tree(probe: Probe) -> Check:
         # the fixture one — but a PASS over a value that says "dirty" is exactly the
         # fail-open this check exists to prevent. `None` is graded unreadable just above, so
         # anything reaching here that is not the literal `True` is not evidence of a clean
-        # tree, and the same `is not True` shape is used at `:908` for the CONFLICTING arm.
+        # tree. The CONFLICTING arm further down uses the same `is not True` shape.
         return Check("tree", False, probe.tree_raw or "dirty", "dirty")
     return Check("tree", True, f"{probe.tree_raw} {flag}".strip())
 
@@ -2084,7 +2102,11 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         base=str(data.get("base", "main")),
         # None (absent or explicit null) is "not read" — the fail-closed default — so a
         # fixture that omits `is_draft`/`merged` cannot accidentally read as not-a-draft.
-        is_draft=None if data.get("is_draft") is None else bool(data["is_draft"]),
+        # ⛔ `_tri_bool`, not `bool(...)`: `bool("false")` is `True`, which INVENTED a boolean
+        # from a value that is not one. These three are the only tri-state fields a fixture can
+        # set, and `head_stable` graded by `is False` was the one that failed OPEN (see
+        # `_tri_bool`). A non-bool now reads as None = "not read", which fails closed.
+        is_draft=_tri_bool(data.get("is_draft")),
         mergeable=str(data.get("mergeable", "UNKNOWN")),
         merge_state=str(data.get("merge_state", "")),
         head_committed_at=str(data.get("head_committed_at", "")),
@@ -2096,8 +2118,8 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         ),
         labels_raw=str(data.get("labels_raw", "")),
         pr_state=str(data.get("pr_state", "open")),
-        merged=None if data.get("merged") is None else bool(data["merged"]),
-        head_stable=None if data.get("head_stable") is None else bool(data["head_stable"]),
+        merged=_tri_bool(data.get("merged")),
+        head_stable=_tri_bool(data.get("head_stable")),
         tree=data.get("tree"),
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,
