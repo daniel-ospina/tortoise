@@ -12,9 +12,15 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 76 mutation rows have now been run
-(**73 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **75 are KILLED**; M49 survives ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. Every row in the ledger below was run
+against the tree at its own head, and each row states its OWN result; **M49 is the ONLY survivor**,
+and it survives by the documented layering (the row says which). ⛔ THE TOTALS ARE DELIBERATELY
+ABSENT, not re-derived: a running total here re-stales on the next row any round adds — the exact
+failure this header has now had twice (the collected-case counts were dropped in `75c91b0ed` and
+these totals went stale in `ebd389d34`, which added M76-M78 without touching them). The ledger rows
+are the authority for the mutation count; `--collect-only` is the authority for the case count.
+⛔ M1≡M31, M24≡M44 and M26≡M43 were re-run in later rounds rather than re-labelled, so an id may
+name a re-run of an earlier one:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -40,7 +46,7 @@ M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly
   M72 runner/label EMPTY string allowed .............. KILLED   M73 endpoint check removed from the door ..... KILLED
   M74 decode denylist restored ....................... KILLED   M75 empty-repo scope "@main" accepted ....... KILLED
   M76 the endpoint door is a DENY-LIST again .......... KILLED   M77 argv SHAPE check removed (-X POST) ...... KILLED
-  M78 `scope_for` skips the empty repo/branch check ... KILLED
+  M78 `scope_for` skips the empty repo/branch check ... KILLED   M79 shape guard back AFTER the flag loop .. KILLED
 ⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
 parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
 satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
@@ -53,6 +59,11 @@ only itself, plus the families the deny-list never named (`/git/refs/…`, `/bra
   accepted): **10 failed, 310 passed**. M78 (both `scope_for` empty-input refusals disabled):
   **6 failed, 314 passed** — including both `--no-cache` CLI arms, which is the non-vacuity the
   P3 asked for: the pre-fix CLI really did spend the call.
+  M79 (`34ac43e354`'s shape guard put BACK below the projection-flag loop, i.e. the exact pre-fix
+  ordering): **7 failed, 322 passed**. The seven are the two new arms — five of the six
+  `declare_invariant` shapes and two of the three read-path shapes — and the two that stay green
+  are the BARE-STRING argvs, which iterate harmlessly and are refused by `_endpoint_refusal`
+  either way: a mutation row must state what it does NOT cover, or it is the M73 shape again.
 ⛔ M67 SURVIVED on its first test, which passed a DICT page where a LIST page is required — the
 SHAPE guard satisfied it and the empty-name check was unreachable. Fixed, then KILLED.
 ⛔ M67's EMPTY-STRING sibling (M72, cycle-16 review) reached the same blocker from the other side:
@@ -2303,6 +2314,67 @@ def test_the_door_is_EXACT_membership_not_a_prefix() -> None:
     # A non-sequence argv is REFUSED, not iterated (a bare string would otherwise walk its chars).
     for bad in ("api repos/{repo}", None, 42):
         assert C._endpoint_refusal(bad) is not None, bad
+
+
+@pytest.mark.parametrize(
+    "bad_argv",
+    [
+        None,
+        42,
+        "api repos/{repo}",
+        ("api", 1),
+        ("api", None),
+        ("api", "repos/{repo}", 7),
+    ],
+)
+def test_the_door_REFUSES_a_malformed_argv_THROUGH_the_path_that_RUNS(bad_argv) -> None:
+    """⛔ A PIN THAT CALLED `_endpoint_refusal` DIRECTLY COULD NOT FAIL FOR THIS.
+
+    `_validate_spec` iterated the argv in its projection-flag loop BEFORE calling
+    `_endpoint_refusal`, so the helper's `isinstance` guard was UNREACHABLE from every door that
+    actually runs. Measured at `34ac43e354` (the head this review found it at):
+
+        declare_invariant(…, argv=None)      → TypeError: 'NoneType' object is not iterable
+        declare_invariant(…, argv=42)        → TypeError: 'int' object is not iterable
+        declare_invariant(…, argv=("api",1)) → AttributeError: 'int' object has no attribute
+                                               'startswith'
+
+    Fail-closed — nothing was cached — but a traceback where the module promises
+    `MutableReadRefused`, and the review measured the helper directly, which is why the old pin
+    stayed green. This goes through `declare_invariant`, the documented extension path.
+    """
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(
+            "repo.identity",
+            ttl_s=3600,
+            argv=bad_argv,
+            projection="probe-v1",
+            project=lambda d: d,
+        )
+    assert "repo.identity" not in C.INVARIANTS
+
+
+@pytest.mark.parametrize("bad_argv", [None, ("api", 1), "api repos/{repo}"])
+def test_a_malformed_argv_is_REFUSED_on_the_READ_path_too(bad_argv, tmp_path: Path) -> None:
+    """The same shape guard, injected STRAIGHT INTO `INVARIANTS` so the refusal is pinned on
+    `read()` — the path that actually runs per call — and not only at the declaration door. Before
+    the fix this raised `TypeError`/`AttributeError` out of `read()`, past its documented contract.
+    """
+    key = "repo.identity"
+    C.INVARIANTS[key] = C.Invariant(
+        ttl_s=3600,
+        argv=bad_argv,  # type: ignore[arg-type]  — the malformed value IS the subject
+        projection="malformed-argv-v1",
+        project=lambda d: d,
+    )
+    try:
+        r = Counter()
+        with pytest.raises(C.MutableReadRefused):
+            _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
+        assert r.n == 0, "a malformed argv reached the reader"
+        assert not list(tmp_path.iterdir()), "a refused read must not create an entry"
+    finally:
+        C.INVARIANTS.pop(key, None)
 
 
 def test_declare_invariant_still_accepts_the_registrys_own_endpoints() -> None:

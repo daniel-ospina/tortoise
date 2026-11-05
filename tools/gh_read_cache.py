@@ -25,6 +25,13 @@ WHAT THIS IS NOT
   (:class:`MutableReadRefused`); there is no pass-through.
 * **Not `gh-gate`.** The gate decides WHEN a call may happen; this decides WHETHER it needs to.
   A hit never reaches the gate at all.
+* **Not `gh api --cache <duration>`.** `gh` ships a first-party TTL cache on the same command
+  (https://cli.github.com/manual/gh_api, *"Cache the response, e.g. `3600s`, `60m`, `1h`"*). It
+  caches the RAW response with no scope identity, no projection and no shape refusal, so it can
+  serve a cached error document as an answer — R1/R2/R4 are precisely what it cannot deliver, which
+  is why this module exists. "Every admitted call is a live network call" is a statement about
+  THIS module's argv only: ⛔ the adoption lane must check the deployed `gh` shim's argv for that
+  flag before wiring this in, or every read here bypasses it and the cache saves nothing.
 * **Not a stale-serving cache.** See FAIL-CLOSED.
 
 ⛔ WHY THE PROJECTION LIVES IN PYTHON AND NOT IN `--jq`
@@ -844,10 +851,27 @@ def _validate_spec(key: str, argv: Sequence[str], projection: str, project: Any)
             f"{key!r} declares no usable projection id ({projection!r}). It is the cache-identity "
             f"stamp, so it must name the projection's SHAPE."
         )
-    # ⛔ THE gh PROJECTION FLAGS FIRST, so `--jq` is refused for the reason it is actually wrong
-    # (projection is this module's job) rather than as an anonymous "unexpected flag" below.
+    # ⛔ THE SHAPE GUARD RUNS BEFORE ANYTHING ITERATES THE ARGV. `_endpoint_refusal` refuses a
+    # non-sequence argv, but it used to be called AFTER the projection-flag loop below had already
+    # iterated it — so the helper's `isinstance` guard was UNREACHABLE from the path that runs:
+    # `declare_invariant(k, argv=None)` raised `TypeError: 'NoneType' object is not iterable` and
+    # `("api", 1)` raised `AttributeError: 'int' object has no attribute 'startswith'` (measured
+    # at `34ac43e354`). Fail-closed — nothing was cached — but a traceback where this module
+    # promises `MutableReadRefused`, and the pin in the suite called the helper DIRECTLY, so it
+    # could not fail for this (the M27/M67/M72 unreachability class).
+    if not isinstance(argv, (list, tuple)):
+        raise MutableReadRefused(
+            f"{key!r} cannot be an invariant: {_endpoint_refusal(argv)}. An invariant-sounding KEY "
+            f"is not an invariant READ — caching this would replay a past state as the current one."
+        )
+    # ⛔ THE gh PROJECTION FLAGS NEXT, so `--jq` is refused for the reason it is actually wrong
+    # (projection is this module's job) rather than as an anonymous "unexpected flag" below. A
+    # NON-STRING element is skipped HERE and refused below with `_endpoint_refusal`'s shape reason —
+    # iterating it with `.startswith` is what used to turn `("api", 1)` into an AttributeError.
     for a in argv:
-        if a in _FORBIDDEN_ARGV_FLAGS or a.startswith(("--jq=", "--template=", "-q=")):
+        if isinstance(a, str) and (
+            a in _FORBIDDEN_ARGV_FLAGS or a.startswith(("--jq=", "--template=", "-q="))
+        ):
             raise TtlNotPermitted(
                 f"{key!r} carries {a!r} in its argv. Projection is this module's job: `gh api "
                 f"--paginate --slurp --jq` is REFUSED by gh 2.103.3 ('--slurp is not supported with "
