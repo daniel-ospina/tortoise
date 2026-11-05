@@ -334,3 +334,47 @@ def test_an_unreadable_counter_is_reported_and_never_raises(baseline,
     # And the endpoint that promises never to 5xx still answers.
     body = asyncio.run(ha.health())
     assert body["wait_bound_breaches"]["error"]
+
+
+# ── 10: the bare family never reads "this build cannot see breaches" ─────
+
+def test_the_metrics_exposition_carries_both_surfaces_at_zero():
+    """`/metrics` must show a ZERO for each surface before any breach.
+
+    The JSON body pads `by_surface` to both keys (#3253's rule), which is why
+    test 1 can tell "no breach measured" from "this build cannot see
+    breaches". A labelled `Counter` child is created LAZILY, on its first
+    `.labels()`, so the exposition the runbook also points operators at
+    (`prometheus_client.generate_latest()`, which `serve_health` serves) carried
+    only the family's HELP/TYPE lines until a first refusal happened — the same
+    absent-vs-zero ambiguity, on the other surface. Measured pre-fix:
+
+        ``tortoise_wait_bound_breaches_total`` appears with NO `{surface=…}`
+        sample at all in a fresh interpreter.
+
+    ⛔ A FRESH PROCESS, on purpose: this file's own tests increment both
+    children, and the counters are PROCESS-global, so an in-process assertion
+    would pass on the unfixed code whenever an earlier test ran first — green
+    for the wrong reason, which is exactly what a vacuous pin looks like here.
+    """
+    import subprocess
+    import sys
+
+    script = (
+        "from prometheus_client import generate_latest\n"
+        "import tortoise.monitoring\n"
+        "print(generate_latest().decode(), end='')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=180)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+    series = [line for line in proc.stdout.splitlines()
+              if line.startswith("tortoise_wait_bound_breaches_total{")]
+    assert set(series) == {
+        'tortoise_wait_bound_breaches_total{surface="mcp"} 0.0',
+        'tortoise_wait_bound_breaches_total{surface="rest"} 0.0',
+    }, (
+        "the exposition must declare BOTH bounded surface children at import, "
+        "so a scrape before the first refusal reads 0 (measured) rather than "
+        "absent (unreadable): " f"{series}")

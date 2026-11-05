@@ -824,6 +824,26 @@ WAIT_BOUND_BREACH_COUNT = Counter(
     "Requests refused because the transport wait bound expired (#10602)",
     ["surface"],
 )
+# ⛔ INITIALISE BOTH CHILDREN AT IMPORT, so `/metrics` carries the same
+# absent-vs-zero guarantee the JSON body gets from `wait_bound_breach_counts`'
+# padding — the rule the whole channel is built on (#3253). A labelled counter
+# creates a child lazily, on first `.labels()`, so without these two lines
+# `generate_latest()` exports NO `{surface="mcp"}` / `{surface="rest"}` series
+# until a breach happens, and an operator scraping the exposition cannot tell
+# "no breach was measured" from "this build cannot see breaches" — the second
+# reading is exactly the false reassurance #10602 exists to remove. Measured on
+# the pre-init head in a fresh interpreter: the family's HELP/TYPE lines are
+# present and there are ZERO `surface` samples.
+#
+# The bounded set is what makes this legal: `surface` has two literal values, so
+# this declares the entire (finite) child set once instead of guessing at
+# unbounded label values. That is the Prometheus client's own guidance —
+# "labeled metrics … should provide a way to initialize a child with its default
+# value—typically by calling `.labels()`" (client_python/instrumenting/labels/,
+# writing_clientlibs/) and the Zen of Prometheus' "export zero-valued series you
+# know exist".
+for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
+    WAIT_BOUND_BREACH_COUNT.labels(surface=_surface)
 # #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
 #
 # The arm itself is #10119's and is correct: an id absent from the live graph at
