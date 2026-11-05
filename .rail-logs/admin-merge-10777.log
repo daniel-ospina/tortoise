@@ -1,0 +1,16 @@
+admin-merge: repo daniel-ospina/tortoise (resolved from checkout origin (/tmp/cell-t3/.worktrees/prd-10777)) — checkout daniel-ospina/tortoise
+admin-merge: PR #10777 head a86248161c81d916ab7343a26c416818398e9815
+ci-failure-set: · run 41880934108 is NOT completed but has ZERO jobs — GitHub never expanded it into a job, so it cannot still be running; NOT counted as pending (#1623)
+admin-merge: ✗ BLOCK — no run of the lane actually TESTED head a86248161c81d916ab7343a26c416818398e9815 (lane: python-ci.yml).
+   completed=0 run(s), of which tested=0.
+   A cancelled or skipped run is finished but exercised nothing, so an
+   empty failing set proves nothing about this revision.
+   The lane 'python-ci.yml' has NO run for this head at all, but its workflow DOES
+   declare a PR trigger — so either no run of it landed on THIS head (a
+   'paths:' filter, or not yet started), or the selector names a different
+   lane. Confirm the lane and that CI ran for this head; if this repo splits
+   its lanes by trigger, add --any-workflow.
+   Confirm the lane is the right one (--workflow) and that CI ran for this head.
+   If this repo splits its lanes by trigger, add --any-workflow BEFORE the -- separator
+   and re-run (after '--' only 'gh pr merge' flags belong; a lane selector written there is
+    recovered with a warning, and any other parser flag is refused).
