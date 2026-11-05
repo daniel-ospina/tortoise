@@ -53,7 +53,7 @@ assertion:
 
 ## 2. The children
 
-### C1 — `test-design: the vector layer — integration-surface map`
+### C1 — **#11084** `test-design: the vector layer — integration-surface map`
 - **O:** produce the surface map `epic-workflow`'s Test-Design Gate requires — every integration surface this
   epic touches, the test layer assigned to each, and the failure mode each guards.
 - **I:** surfaces enumerated from `04-plan.md` §5–§6 (the gate default, the consult point, the register leaf,
@@ -62,7 +62,7 @@ assertion:
   children cite it.
 - **Complexity:** standard · **Blocked by:** none · **Blocks:** C6.
 
-### C2 — `the embedding exemption register gets a production home; DoD rows 1–2 re-scored`
+### C2 — **#11085** `the embedding exemption register gets a production home; DoD rows 1–2 re-scored`
 - **O:** move the authority for *"this writer is legitimately exempt"* out of a read-only measurement script
   and into the product, so "no silent bypass" is a property of the system rather than of a report.
 - **I:** a runtime-resolvable register in `tortoise/` keyed `module::symbol`; **three** writers that today
@@ -76,7 +76,7 @@ assertion:
 - ⚠️ **Not a second rule set.** It classifies *writers*; `value_gate.RULES` remains the only statement of
   what earns a vector.
 
-### C3 — `arm the EMBED gate by default and record the measured write-rate effect`
+### C3 — **#11086** `arm the EMBED gate by default and record the measured write-rate effect`
 - **O:** make "what earns an embedding" the write path's operative rule rather than an opt-in flag.
 - **I:** `TORTOISE_EMBED_GATE` set in each shipped config surface that exists (`.env.example`,
   `docker-compose.yml`, `config/`, CI workflows); the **measured** change in the embedding write rate
@@ -88,7 +88,7 @@ assertion:
 - ⚠️ **This is `#5008`'s own ordering**, not a new judgement: *"the rate effect is measurable before it is
   trusted."*
 
-### C4 — `report the vector contract positively — the serves/indexes pair for every label`
+### C4 — **#11087** `report the vector contract positively — the serves/indexes pair for every label`
 - **O:** make which labels the vector leg searches and which the store indexes a fact the system states,
   instead of one reconstructed by hand.
 - **I:** `_record_vector_index_inventory` (`projection/__init__.py:18491`) emits the pair for **every** served
@@ -101,7 +101,7 @@ assertion:
   — its *warning* claim stands, its *silence* claim is what this ends. Stated so it is not read as a regression.
 - ⚠️ **Corrected premise, and it changes the size of this child.** `_vector_indexed_labels` is assigned **unconditionally** (`:18570`); `if gap:` (`:18577`) gates only the **`log.warning`**, and `tests/test_4997_vector_index_parity.py:415` already asserts the attribute for a no-gap store. **What is missing is the SERVED set** — it is never retained — so this needs **new state**, not one un-gated emit. It is still **not** a second inventory: it extends the one function that already reads the catalogue.
 
-### C5 — `census the unretrievable vectors, and carry the surface call for removing them`
+### C5 — **#11088** `census the unretrievable vectors, and carry the surface call for removing them`
 - **O:** quantify the stored vectors that no index and no efficient query path can serve, and put the
   consequence of removing them in front of the owner — because removal is a **surface change**.
 - **I:** a **read-only** dry-run census naming every label whose stored vectors have no vector index, with
@@ -120,7 +120,7 @@ assertion:
 - ⚠️ **Also in this child:** reconcile `#10976`'s (c) and `#7879`'s *"vectors out"* to **"pending V1"** —
   both currently read V1 as answered while §12.1c says `NOT DECIDED — owner's call`.
 
-### C6 — `capstone: clickthrough verification for the vector layer`
+### C6 — **#11089** `capstone: clickthrough verification for the vector layer`
 - **O:** the final end-to-end gate `epic-workflow`'s Capstone Gate requires — the epic cannot be marked
   complete without it passing.
 - **I:** a checklist = the epic's E2E cases **+** every integration surface from C1, each verified through

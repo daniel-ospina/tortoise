@@ -295,7 +295,7 @@ survives is what nobody else owns:
 1. **The embedding rule is written and switched off** — a real defect, in nobody else's scope.
 2. **The exemption authority lives only in a read-only measurement script** — three write paths have no
 declared exemption in the product.
-3. **Four of five served labels carry vectors with no index and no query path** — and the *removal* of the
+3. **Four of five served labels carry vectors with no index and no efficient query path** — and the *removal* of the
    unretrievable ones is authorised by the 2026-10-08 billing corollary (**later** than the 2026-09-24
    "keep the vectors" direction, and narrower: keep the searchable ones, remove the ones that can never be
    retrieved). ⚠️ This is a **contradiction-test result**, not an assumption — see scope §1.
