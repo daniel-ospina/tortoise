@@ -1860,19 +1860,20 @@ class Statement:
     #: built from the driver's message alone cannot say WHICH column disagreed
     #: with the graph. #9548 lost 302 rows to exactly that silence: every one was
     #: reported as `InvalidTextRepresentation` and nothing else.
-    #: ⚠️ `None` is ACCEPTED here and normalized to `()` in :meth:`__post_init__`.
-    #: It is not a third spelling this module invented: on `main` the third
-    #: positional field WAS `columns`, so `Statement(sql, params, None)` — a real
-    #: in-tree call shape, `tests/test_record_searchkeys_10620.py::
-    #: test_an_unattributed_update_names_every_set_column` — landed in THIS field
+    #: ⚠️ `None` is ACCEPTED here at RUNTIME and normalized to `()` in
+    #: :meth:`__post_init__`. It is not a third spelling this module invented: on
+    #: `main` the third positional field WAS `columns`, so
+    #: `Statement(sql, params, None)` — a real in-tree call shape,
+    #: `tests/test_record_searchkeys_10620.py::
+    #: test_an_unattributed_update_names_every_set_column` — lands in THIS field
     #: after the fold put `param_columns` third (#9956). `None` and `()` mean the
     #: same thing here ("declines to state the pairing"), so the normalization is
     #: faithful rather than a repair — but leaving `None` in the field made the
     #: REPORTER a trap (#10726 review P3): `value_types()` iterated it and raised
     #: `TypeError` from inside the report, replacing the driver's real cause with
-    #: a traceback from the diagnostic. Do not delete this normalization while
-    #: that call shape exists in the tree.
-    param_columns: tuple[str, ...] | None = ()
+    #: a traceback from the diagnostic. Do not delete the normalization while an
+    #: in-tree caller spells this field `None`.
+    param_columns: tuple[str, ...] = ()
 
     #: The columns this statement writes, in `params` order — or ``None`` when
     #: they cannot be paired off positionally. The upsert's key may be a
@@ -1957,12 +1958,12 @@ class Statement:
             jsonb = frozenset()
         pairs: list[str] = []
         seen: set[int] = set()
-        # `or ()`: `param_columns` is normalized in `__post_init__`, and this
-        # keeps the "Never raises" clause above true of THIS function without
-        # depending on that normalization — a `TypeError` raised here is raised
-        # FROM the report, which is the one thing the clause forbids (#10726
-        # review P3).
-        for index, name in enumerate(self.param_columns or ()):
+        # No guard here on purpose: `param_columns` is normalized to a tuple in
+        # `__post_init__`, so a guard at this site would be unreachable code —
+        # and a branch nothing can reach is coverage that is not there, this
+        # method's own subject (#10692 review P2). The field is the place to fix
+        # it, and `test_a_none_pairing_cannot_make_the_reporter_raise` pins it.
+        for index, name in enumerate(self.param_columns):
             if not name or index in seen or index >= len(self.params):
                 continue
             seen.add(index)
