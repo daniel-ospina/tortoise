@@ -587,7 +587,8 @@ independent, and the token measured on #10930 is the mirror of that shape. This 
 proves one of the three. If your lane LANDS — comments the evidence on the PR, closes constituents,
 closes delivered issues — `exit 0` proves none of that, so prove those two surfaces by the operation
 itself before you start. ⛔ **The route selects the grant, but not always uniquely** — which is why a
-naive two-route proof false-PASSes the exact token #10930 records:
+naive two-route proof false-PASSes a token of #10945's shape (`Contents` + `Pull requests`, no
+`Issues`):
   - `PATCH /repos/{o}/{r}/pulls/{n}` (no-op title) needs `Pull requests` write and nothing else, so it
     is a valid leg. #10930 measured it **residue-free** on a PR number.
   - `PATCH /repos/{o}/{r}/issues/{n}` is documented as **at least one of** `Issues` **or** `Pull
