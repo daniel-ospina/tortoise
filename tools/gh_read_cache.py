@@ -1242,6 +1242,15 @@ def read(
     trusting the caller, because a caller-supplied ``"global@"`` would let two accounts share one
     identity entry.
 
+    ⛔ ``scope`` IS A CLAIM ABOUT WHAT ``reader`` READ, and this function cannot check it. The
+    reader contract is ``reader(key)`` — ``_gh_reader`` closes over its OWN ``repo``/``branch`` — so
+    ``read("repo.metadata", scope="o/a@main", reader=_gh_reader("o/b", "main"))`` stores repo B's
+    answer under repo A's scope and serves it to A for the whole TTL. That is R1's exact
+    wrong-subject outcome reached through the caller instead of the cache, and the envelope cannot
+    detect it: the entry is well-formed, freshly stamped, correctly scoped and honestly digested.
+    A caller must derive both from ONE source (``main()`` derives both from ``a.repo``/``a.branch``);
+    a reader that could disagree with ``scope`` is a wiring bug, not a cache bug.
+
     ``reader`` is injected on purpose: correctness is testable without a network, and the CLI is
     the only place that knows about `gh`.
 

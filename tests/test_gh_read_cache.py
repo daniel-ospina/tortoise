@@ -304,6 +304,46 @@ def test_a_different_branch_is_a_different_entry(tmp_path: Path) -> None:
     assert r.n == 2
 
 
+def test_two_branches_of_one_LONG_named_repo_never_thrash_one_entry(tmp_path: Path) -> None:
+    """⛔ The SCOPE component of the FILENAME DIGEST, pinned — and it was not.
+
+    `_filename` is `…-{_slug(key)}-{_slug(scope)[:20]}-{payload_id}.json`, and the readable slug is
+    TRUNCATED to 20 characters. Every scope in the test above is short enough that the READABLE
+    half already differs, so the whole scope contribution of `payload_id` could be deleted with the
+    suite green (measured: 329/329) — the readable half carried the identity alone.
+
+    Real scopes are longer than 20 characters once slugged: `daniel-ospina/tortoise@main` and
+    `daniel-ospina/tortoise@release` BOTH slug to `daniel-ospina-tortoi`, so with the digest's
+    component gone the two branches share one filename — and `_load` then rejects it on the
+    envelope's scope, so every single access is a MISS and the cache is silently DISABLED for the
+    pair. Measured on the mutant: 8 alternating reads -> 8 live reads, 1 file (shipped: 2 reads).
+
+    That is the burn this module exists to stop, and it fails in complete silence — correctness is
+    unharmed (the envelope still refuses the wrong subject), which is exactly why nothing reds.
+    """
+    main_scope = "daniel-ospina/tortoise@main"
+    release_scope = "daniel-ospina/tortoise@release"
+    assert C._slug(main_scope)[:20] == C._slug(release_scope)[:20], (
+        "the readable half must actually collide or this test proves nothing about the digest"
+    )
+    assert C._cache_path("repo.required_set", main_scope).name != (
+        C._cache_path("repo.required_set", release_scope).name
+    ), "two branches of one repo share ONE cache filename — the digest lost its scope component"
+
+    r = Counter()
+    for i in range(4):
+        _read("repo.required_set", now=1000.0 + i, reader=r, cache_dir=tmp_path, scope=main_scope)
+        _read(
+            "repo.required_set",
+            now=1000.0 + i,
+            reader=r,
+            cache_dir=tmp_path,
+            scope=release_scope,
+        )
+    assert r.n == 2, f"two branches thrashed one entry: {r.n} live reads, expected 2"
+    assert len(list(tmp_path.iterdir())) == 2, "each scope must own its own entry"
+
+
 def test_scope_is_required(tmp_path: Path) -> None:
     """A caller cannot FORGET the scope — it is a required keyword, not a defaulted one."""
     r = Counter()
@@ -1852,6 +1892,7 @@ def test_changing_a_keys_endpoint_invalidates_the_cached_entry(tmp_path: Path) -
     # allow-list, so `repos/{repo}/somewhere-else` would be refused before the identity check ran
     # and this test would pass without ever exercising the argv digest.
     monkeypatch_argv = ("api", "repos/{repo}/labels")
+    original = C.INVARIANTS[key]
     C.INVARIANTS[key] = dataclasses.replace(C.INVARIANTS[key], argv=monkeypatch_argv)
     try:
         r2 = Counter()
@@ -1861,7 +1902,12 @@ def test_changing_a_keys_endpoint_invalidates_the_cached_entry(tmp_path: Path) -
             "cache identity"
         )
     finally:
-        C.INVARIANTS[key] = dataclasses.replace(C.INVARIANTS[key], argv=("api", "repos/{repo}"))
+        # ⛔ RESTORE THE ORIGINAL OBJECT, not `dataclasses.replace(...)` of the mutant. A rebuilt
+        # spec is a NEW object, so its `id()` no longer matches `_IMPORT_CHECK` and
+        # `test_the_import_time_registry_guard_actually_RAN` is left stale — it passes only because
+        # this file happens to run before it. Measured with the two node ids in the other order:
+        # `Extra items in the left set: 'repo.metadata#…'` / `right set: 'repo.metadata#…'`.
+        C.INVARIANTS[key] = original
 
 
 def test_the_envelope_records_the_argv(tmp_path: Path) -> None:
