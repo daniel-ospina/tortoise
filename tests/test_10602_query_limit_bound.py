@@ -35,7 +35,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: I001
+import pytest
 
 
 class _StubSDK:
@@ -111,7 +111,7 @@ def test_limit_is_honoured_on_the_plain_structural_path(stub_factory):
     stub holds 5 rows and a bound of 2 must select 2 of them.
     """
     from tortoise.mcp_server import tortoise_query
-    stub = stub_factory(n_points=5)
+    stub_factory(n_points=5)
     result = tortoise_query(kind="statement", limit=2)
     assert isinstance(result, list), "the plain path must stay a plain list"
     assert len(result) == 2, f"limit ignored: asked for 2, got {len(result)} of 5"
@@ -162,7 +162,7 @@ def test_a_legitimately_empty_result_is_not_an_error(stub_factory):
     it must not become an error, and must not be an `_SafeError`.
     """
     from tortoise.mcp_server import _SafeError, tortoise_query
-    stub = stub_factory(n_points=0)
+    stub_factory(n_points=0)
     result = tortoise_query(kind="statement", limit=5)
     assert not isinstance(result, _SafeError), "an empty read is not a failure"
     assert result in ([], ) or (isinstance(result, dict)
@@ -184,19 +184,23 @@ def test_a_real_failure_still_surfaces_through_the_bound(stub_factory):
 
 
 def test_a_reserved_filter_key_is_a_structured_error_not_a_typeerror(stub_factory):
-    """#10602 review F3 — the bound must not turn a clean refusal into a crash.
+    """#10602 review F3 + round-6 finding 2 — a reserved name must get the documented refusal.
 
-    `skip`/`limit`/`kind` are reserved filter keys
-    (`tortoise/security.py::validate_filter_key`) AND the names the bounded path
-    passes as explicit parameters, so a caller's `filters={"limit": 5}` collides
-    at the `_safe(...)` call site. That call site is INSIDE `_safe`'s `try` (only
-    the HANDLER's own scope is bypassed), so pre-fix the collision came back as a
-    structured `_SafeError` carrying the interpreter's `got multiple values for
-    argument 'limit'` text instead of the documented "Reserved filter key"
-    refusal. Before the bound, the same input reached `validate_filter_key`
-    inside `_safe` and came back with that message. Fails on the value
-    `"Reserved filter key" in result["error"]`; the fixture reaches it because
-    the stub holds 5 points and the filter dict carries a colliding key.
+    `skip`/`limit` are reserved filter keys (`security.validate_filter_key`) AND
+    the names the bounded path passes to `_safe(...)` itself, so
+    `filters={"limit": 5}` is a duplicate keyword while BINDING that call —
+    outside `_safe`'s try — and escaped the tool body as a bare TypeError
+    (measured by neutralising the guard). `kind` collides the other way: it is
+    `paginated_query`'s first POSITIONAL argument, so the duplicate forms inside
+    `_safe` and came back as a structured error carrying the internal signature
+    instead of this message. Both are guarded above the arms, so all three names
+    must answer with "Reserved filter key".
+
+    Fails on the value `isinstance(result, _SafeError)` and on the message text:
+    before the guard the plain path reached `validate_filter_key` inside `_safe`
+    and returned the structured error, while the bounded path crashed (`limit` /
+    `skip`) or answered with the raw SDK signature (`kind`). The fixture reaches
+    it because 5 > 0 points and the filter dict carries a colliding key.
     """
     from tortoise.mcp_server import _SafeError, tortoise_query
     stub_factory(n_points=5)
@@ -212,22 +216,22 @@ def test_reserved_filter_key_is_refused_on_EVERY_bounded_arm(stub_factory):
     """F3's class, not just its instance — review round 2's finding 3.
 
     The collision was closed on the plain arm while the `offset=`/`page=` arm
-    eight lines away still returned the interpreter text (pre-existing, but the
-    F3 wording claimed the class was closed). One guard above BOTH arms is what
+    eight lines away still raised a bare TypeError (pre-existing, but the F3
+    wording claimed the class was closed). One guard above BOTH arms is what
     closes it, so this asserts every arm that forwards `filters` — for every
-    reserved name the guard's own message advertises, `kind` included (review
-    round 6: the guard checked 2 of the 4 names it names).
+    reserved name the guard advertises (`skip`, `limit`, `kind`; round-6 finding 2
+    showed `kind` was the one it did not check).
     """
     from tortoise.mcp_server import _SafeError, tortoise_query
     stub_factory(n_points=5)
-    for kwargs in ({"kind": "statement"},
-                   {"kind": "statement", "offset": 0},
-                   {"kind": "statement", "page": 1}):
-        for bad in ({"limit": 5}, {"kind": "statement"}):
+    for bad in ({"limit": 5}, {"skip": 3}, {"kind": "statement"}):
+        for kwargs in ({"kind": "statement"},
+                       {"kind": "statement", "offset": 0},
+                       {"kind": "statement", "page": 1}):
             result = tortoise_query(filters=bad, **kwargs)
             assert isinstance(result, _SafeError), (
-                f"filters={bad} {kwargs} escaped as {type(result).__name__} "
-                "instead of a structured refusal")
+                f"filters={bad} on {kwargs} escaped as "
+                f"{type(result).__name__} instead of a structured refusal")
             assert "Reserved filter key" in str(result.get("error", "")), result
 
 

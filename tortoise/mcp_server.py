@@ -3785,34 +3785,33 @@ def tortoise_query(kind: str | None = None,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
-    # #10602 review (F3): `skip`/`limit`/`kind` are reserved filter keys
-    # (`tortoise/security.py::validate_filter_key` reserves exactly `kind`,
-    # `skip`, `limit` and `kind_<n>`) AND they are the names BOTH bounded arms
-    # below pass as explicit parameters, so a caller's `filters={"limit": 5}`
-    # would collide with the `_safe(...)` call sites. Pre-fix that collision did
-    # NOT escape as a bare TypeError: the call site is INSIDE `_safe`'s `try`
-    # (only the HANDLER's own scope is bypassed), and `_safe` catches the
-    # duplicate-argument TypeError along with everything else — so the caller got
-    # a `_SafeError` carrying `paginated_query() got multiple values for argument
-    # 'limit'` instead of the documented "Reserved filter key" refusal the plain
-    # path used to return. Refused ONCE here, above BOTH arms: the F3 finding was
-    # that the plain path kept the reserved-key message while the `offset=`/`page=`
-    # arm eight lines away returned the interpreter text, and one guard above the
-    # branch is what closes the class rather than the one instance of it.
-    # `kind` is in the intersection because it is a POSITIONAL parameter of
-    # `paginated_query` (tortoise/sdk.py) and `_public_filters` does not drop it
-    # (its only drop list is PRIVATE_FILTER_KEYS), so `filters={"kind": ...}`
-    # produced the same duplicate-argument text — the round-6 review found the
-    # guard checking 2 of the 4 names its own refusal message advertises.
-    # The set is READ from its owner (`tortoise/security.py`), not re-typed here:
-    # a second copy is what drifted, and a `frozenset` literal in this handler is
-    # not even fingerprint-stable — `tools/surface_manifest.py::_code_digest`
-    # reprs `co_consts`, and a 3-element frozenset's repr order follows string
-    # hashes, so `tortoise_query`'s recorded `served_from` digest would differ
-    # between CI processes (measured: 4 distinct digests across 6 PYTHONHASHSEED
-    # values). A name lookup keeps the digest deterministic.
-    # `tag`/`text` are not reached here: the `tag` arm ignores `filters` and the
-    # `text` arm never forwards them, so neither can collide.
+    # #10602 review (F3, then round-6 finding 2): `kind`, `skip` and `limit` are
+    # reserved filter keys (`security.validate_filter_key`) AND names the binding
+    # below already binds, so a caller's `filters={"limit": 5}` collides. The two
+    # collisions FAIL DIFFERENTLY, and covering both is the point (both measured on
+    # this tree by neutralising this guard):
+    #   * `skip`/`limit` are passed to `_safe(...)` itself, so the duplicate is
+    #     raised while BINDING THAT CALL — outside `_safe`'s try, which therefore
+    #     never sees it — and escapes the tool body as a bare TypeError.
+    #   * `kind` is the accessor's first POSITIONAL argument, so the duplicate forms
+    #     INSIDE `_safe` (`paginated_query(kind, **{"kind": …})`) and is caught
+    #     there — a structured error, but one carrying the internal signature
+    #     `paginated_query() got multiple values for argument 'kind'` instead of the
+    #     documented "Reserved filter key" refusal. Guarding only {skip, limit}
+    #     left that message wrong, which is why the round-6 review reds it.
+    # Refused ONCE here, above BOTH arms: the F3 finding was that the plain arm was
+    # closed while the `offset=`/`page=` arm still raised (a pre-existing hole eight
+    # lines away), and one guard above the branch closes the class rather than the
+    # one instance of it.
+    # The set is READ from its owner (`tortoise/security.py`), not re-typed here: a
+    # second copy is what drifted, and a `frozenset` literal in this handler is not
+    # even fingerprint-stable — `tools/surface_manifest.py::_code_digest` reprs
+    # `co_consts`, and a multi-element frozenset's repr order follows string hashes,
+    # so `tortoise_query`'s recorded `served_from` digest would differ between
+    # processes (measured: distinct digests across runs of one unchanged tree). A
+    # name lookup keeps the digest deterministic.
+    # `tag`/`text` forward no caller filters at all, so a refusal on those arms is
+    # redundant-but-harmless rather than a check on a real collision.
     from tortoise.security import _RESERVED_FILTER_KEYS
 
     _filters = _public_filters(filters)
@@ -4029,10 +4028,11 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
 
     Kept for one release with grace; will be removed in the next release.
     Migrate to: tortoise_query(tag=tag, offset=0, limit=N), walking it while
-    `hasMore` is true. The bare `tortoise_query(tag=tag)` caps the RESPONSE at
-    the un-paginated default (100) and answers a plain list with no
-    `hasMore`/`total`, so a large read through it cannot be told from a complete
-    one — the loss this alias exists to avoid.
+    `hasMore` is true. The PAGED form returns {results, total, hasMore}; the bare
+    `tortoise_query(tag=tag)` caps the RESPONSE at the un-paginated default (100)
+    and answers a plain list with no `hasMore`/`total`, so a large read through it
+    cannot be told from a complete one — the loss this alias exists to avoid, and
+    the #8447 §1 shape this tool's users would otherwise walk into.
 
     Note: passes include_retracted=True to preserve this tool's pre-#888 behavior
     (raw tag results incl. tombstones); the new tortoise_query(tag=...) default
@@ -4044,10 +4044,10 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     an answer this signature cannot page into an incomplete one that looks
     complete. The value is `_TAG_ALIAS_LIMIT` — a POPULATION-SIZED CAP, not a
     validated ceiling: no SDK limit guard runs on this path (see that constant's
-    own comment), so it restores the pre-bound behaviour for any realistic tag
-    and TRUNCATES above 10,000 tagged rows. The SERVED description of this tool
-    says so out loud, because this signature offers no `offset`/`page` with which
-    to walk the truncation.
+    own comment, which this text must keep agreeing with), so it restores the
+    pre-bound behaviour for any realistic tag and TRUNCATES above 10,000 tagged
+    rows. The SERVED description of this tool says so out loud, because this
+    signature offers no `offset`/`page` with which to walk the truncation.
     """
     return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 
