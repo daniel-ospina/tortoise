@@ -3275,30 +3275,37 @@ def _duplicate_key_loader():
             self.duplicate_keys: list[tuple[str, int, int]] = []
 
         def construct_mapping(self, node, deep=False):
-            # `flatten_mapping` PREPENDS the pairs a `<<:` merge brings in, so
-            # the mapping's OWN pairs are the ones it started with — at the
-            # tail of `node.value` afterwards. Count only those: a merged pair
-            # the document overrides is the YAML merge type's documented
-            # purpose, not data loss (#10790 review r2 P2,
-            # https://yaml.org/type/merge.html — "inserted into the current
-            # mapping, unless the key already exists in it"). A duplicate
-            # INSIDE an anchored mapping is still caught: the anchor's own
-            # MappingNode is constructed on its own, with no merge in play.
-            own_pairs_from = 0
             if isinstance(node, yaml.MappingNode):
-                own_pairs_from = len(node.value)
+                # #10790 review r2 P2: count the pairs the DOCUMENT wrote
+                # BEFORE `flatten_mapping` prepends the merge-sourced ones. Only
+                # a document-written pair can be a duplicate: a `<<:` key the
+                # document then overrides is the merge type's documented purpose
+                # (yaml.org/type/merge.html, "unless the key already exists in
+                # it", Example 1 `# Override`), and `yaml.safe_load` resolves it
+                # to the document's own value — which is exactly what this loader
+                # must keep doing. A duplicate INSIDE an anchored mapping is
+                # still caught: that MappingNode is constructed on its own, with
+                # no merge in play.
+                own_pairs = len(node.value)
                 self.flatten_mapping(node)
-                own_pairs_from = len(node.value) - own_pairs_from
+                first_own = len(node.value) - own_pairs
+            else:  # pragma: no cover - SafeConstructor only maps MappingNodes
+                first_own = 0
             seen: dict[object, int] = {}
             mapping = {}
             for index, (key_node, value_node) in enumerate(node.value):
+                if index < first_own:
+                    # Introduced by `<<:`: an inherited pair, never a repeat of
+                    # one this document wrote, so it cannot be data loss.
+                    mapping[self.construct_object(key_node, deep=deep)] = (
+                        self.construct_object(value_node, deep=deep))
+                    continue
                 key = self.construct_object(key_node, deep=deep)
                 line = key_node.start_mark.line + 1
-                if index >= own_pairs_from:
-                    if key in seen:
-                        self.duplicate_keys.append((str(key), seen[key], line))
-                    else:
-                        seen[key] = line
+                if key in seen:
+                    self.duplicate_keys.append((str(key), seen[key], line))
+                else:
+                    seen[key] = line
                 mapping[key] = self.construct_object(value_node, deep=deep)
             return mapping
 

@@ -5707,43 +5707,6 @@ def test_the_real_manifest_has_no_duplicate_mapping_key():
     assert manifest["durations"], "the durations map must not be empty"
 
 
-def test_a_merge_key_override_is_not_a_duplicate_mapping_key(tmp_path):
-    """#10790 review r2 P2: a legal `<<:` override must not be a false RED.
-
-    The YAML merge type inserts a merged mapping's pairs "unless the key already
-    exists in it" (https://yaml.org/type/merge.html, Example 1 `# Override`), so
-    the document's own pair wins by definition. `flatten_mapping` PREPENDS the
-    merged pairs, which made the pre-fix detector report both occurrences as a
-    duplicate — a permanent false block in the required `manifest-integrity`
-    job for every `--integrity` / `ci_manifest` / `--refresh-durations` reader.
-
-    Both guards must accept it, and they must agree on the RESULT too, not just
-    on "no error": the parse is what the packer uses.
-    """
-    from tools import ci_selection as cs
-    from tools import registry_integrity
-
-    doc = """\
-base: &b
-  a: 1
-  b: 2
-child:
-  <<: *b
-  a: 3
-"""
-    parsed = cs.parse_manifest_text(doc)
-    assert parsed["child"] == {"a": 3, "b": 2}, parsed["child"]
-    # The pre-fix loader raised here; state the pre-fix library behaviour so the
-    # arm keeps meaning if pyyaml ever changes.
-    assert yaml.safe_load(doc)["child"] == parsed["child"]
-
-    path = tmp_path / "merge-override.yml"
-    path.write_text(doc)
-    assert registry_integrity.check_registry(path) == [], (
-        "registry_integrity reads the node graph and already accepted this "
-        "shape; the two guards must not disagree")
-
-
 def test_a_duplicate_inside_an_anchored_mapping_is_still_refused():
     """The merge override must not widen into "ignore everything merged".
 
@@ -5768,11 +5731,12 @@ child:
 def test_the_two_duplicate_key_guards_agree_on_a_duplicate(tmp_path):
     """#10790 review r2 Issue 1: the division of labour is executable, not prose.
 
-    `tools/registry_integrity.py` (file-as-text, `yaml.compose`) and
-    `ci_selection.parse_manifest_text` (reader-side parse) are two guards on one
-    hazard. This pins that they return the same VERDICT on the same document, so
-    a future "consolidation" that deletes one of them has to delete a failing
-    test rather than an unstated assumption.
+    `tools/registry_integrity.py` (file-as-text, `yaml.compose`, the validator
+    `.gitattributes` pairs with `merge=union`) and
+    `ci_selection.parse_manifest_text` (the parse every READER takes) are two
+    guards on one hazard. This pins that they return the same VERDICT on the
+    same document, so a future "consolidation" that deletes one of them has to
+    delete a failing test rather than an unstated assumption.
     """
     from tools import ci_selection as cs
     from tools import registry_integrity
@@ -5786,6 +5750,78 @@ def test_the_two_duplicate_key_guards_agree_on_a_duplicate(tmp_path):
     assert any(repr(key) in issue for issue in issues), issues
     with pytest.raises(cs.DuplicateManifestKeyError):
         cs.parse_manifest_text(poisoned)
+
+
+def test_the_two_duplicate_key_guards_agree_on_a_merge_override(tmp_path):
+    """The agreement runs both ways: neither guard may refuse a legal override.
+
+    Measured pre-fix: `parse_manifest_text` raised on `MERGE_KEY_OVERRIDE_DOC`
+    while `registry_integrity.check_registry` accepted it — one hazard, two
+    verdicts, in one required job.
+    """
+    from tools import ci_selection as cs
+    from tools import registry_integrity
+
+    path = tmp_path / "merge-override.yml"
+    path.write_text(MERGE_KEY_OVERRIDE_DOC)
+    assert registry_integrity.check_registry(path) == [], (
+        "registry_integrity reads the node graph and accepts a merge override")
+    assert cs.parse_manifest_text(MERGE_KEY_OVERRIDE_DOC) == yaml.safe_load(
+        MERGE_KEY_OVERRIDE_DOC)
+
+
+# A YAML merge key (`<<:`) makes a key appear TWICE in the node pyyaml hands the
+# constructor: `flatten_mapping` PREPENDS the merged pairs, so the document's own
+# pair and the inherited twin both sit in `node.value`. That is the SPEC's
+# documented override — yaml.org/type/merge.html: the pairs are inserted "unless
+# the key already exists in it", Example 1 is literally titled `# Override` —
+# and `yaml.safe_load` resolves it to the document's own value. Reporting it as a
+# duplicate reds a legal document in a REQUIRED check, with a diagnostic that
+# actively misleads ("usually a stale union-merge copy") for a shape that is by
+# construction not one.
+#
+# Only pairs the DOCUMENT itself wrote can be a duplicate. Measured on the
+# pre-fix loader: `parse_manifest_text` raised `duplicate mapping key 'weight':
+# line 7 repeats line 3` on the document below while `yaml.safe_load` and
+# `tools/registry_integrity.check_registry` (the sibling gate in the same
+# `manifest-integrity` job) both accepted it.
+MERGE_KEY_OVERRIDE_DOC = """\
+defaults: &defaults
+  weight: 2.0
+  note: carried
+fresh:
+  <<: *defaults
+  weight: 9.5
+"""
+
+
+def test_a_merge_key_override_is_NOT_a_duplicate():
+    """`<<:` overriding an inherited key is the spec's purpose, not data loss."""
+    from tools import ci_selection as cs
+
+    # The authority: what the library (and every plain reader) resolves this to.
+    expected = yaml.safe_load(MERGE_KEY_OVERRIDE_DOC)
+    assert expected["fresh"] == {"weight": 9.5, "note": "carried"}, expected
+
+    assert cs.parse_manifest_text(MERGE_KEY_OVERRIDE_DOC) == expected, (
+        "the strict loader must resolve a merge-key override exactly as "
+        "`yaml.safe_load` does — the document's own pair wins"
+    )
+
+
+def test_a_real_duplicate_beside_a_merge_key_is_still_refused():
+    """The merge-key carve-out must not blind the detector: own pairs still red."""
+    from tools import ci_selection as cs
+
+    doc = MERGE_KEY_OVERRIDE_DOC + "  weight: 10.0\n"
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.parse_manifest_text(doc)
+    issues = excinfo.value.issues
+    assert len(issues) == 1, issues
+    # The pair named is the DOCUMENT's two rows (7 and 6), never the inherited
+    # line 2 — a reader is pointed at the edit that created the duplicate.
+    assert "'weight'" in issues[0], issues[0]
+    assert "line 7 repeats line 6" in issues[0], issues[0]
 
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
