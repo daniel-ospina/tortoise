@@ -103,8 +103,14 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter BEFORE every other import. The POSITION is
+# the property this exists for, not this file's current import list: the corpus
+# rule (`tests/test_entry_point_python_guard.py`, property 1) requires `import
+# sys` + the guard to precede all other imports, because a module-level
+# 3.11+-only import — `from datetime import UTC`, present in sibling tools —
+# raises ImportError on an old interpreter before any LATER-placed guard could
+# run. This file imports no `datetime` today; the guard is hoisted anyway so the
+# rule holds uniformly instead of being re-litigated per import list.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "
