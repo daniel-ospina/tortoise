@@ -3205,8 +3205,16 @@ async def run_control_plane_call(fn, *, op: str,
                 # ``in_flight`` is None once the future is done, so nothing
                 # downstream could recover the value — the result IS the verdict,
                 # and #5840's single record is ``completed``.
+                # ⛔ ``future.result()`` BEFORE the record, never after: the
+                # ``future_exc`` above is a SNAPSHOT, and ``_stamped`` appends its
+                # stamp BEFORE the worker publishes the outcome — so a callable
+                # that settled in between raises HERE even though the snapshot
+                # said "nothing published yet". Assigning the record first would
+                # then count a FAILED callable as ``completed``, the one thing
+                # #5840's single record promises never to do.
+                result = future.result()
                 outcome = "completed"
-                return future.result()
+                return result
             if (answered_in_time
                     and not isinstance(future_exc, _WorkerBacklogFull)):
                 # ``future_exc is exc`` is the callable's OWN ``TimeoutError``
@@ -3333,8 +3341,14 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
             # No clock is needed on this arm: the value is already in hand, so
             # there is nothing left to wait for.
             if future.done() and not future.cancelled() and future_exc is None:
+                # As in the sibling arm: the ``future_exc`` snapshot can be stale
+                # (the stamp is appended BEFORE the worker publishes the outcome),
+                # so ``result()`` is authoritative and is called BEFORE the record
+                # is assigned — otherwise a callable that raised in between would
+                # be counted ``completed``.
+                result = future.result()
                 outcome = "completed"
-                return future.result()
+                return result
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"

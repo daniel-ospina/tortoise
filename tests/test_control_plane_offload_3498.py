@@ -1858,6 +1858,54 @@ def test_a_re_await_returns_a_finished_result_instead_of_a_bound_miss(monkeypatc
         "never saturated")
 
 
+def test_a_re_await_records_a_racing_failure_as_a_domain_error(monkeypatch):
+    """#10941: the record must not say ``completed`` for a callable that raised.
+
+    ``future_exc`` is a SNAPSHOT read, and ``_stamped`` appends its stamp BEFORE
+    the worker publishes the outcome — so the snapshot can see "nothing published
+    yet" while the arm, a few statements later, sees a settled FAILURE. Assigning
+    ``outcome = "completed"`` before ``future.result()`` then recorded ``completed``
+    for a callable that raised: the one thing #5840's single record promises never
+    to do, and what the metric vocabulary's `domain_error` child exists to say.
+    This stub pins the interleaving — ``exception()`` answers "not settled",
+    ``result()`` carries the callable's real failure.
+    """
+
+    class _SettlingFuture:
+        """Nothing published when asked for an exception; settled when asked for its value."""
+
+        def cancelled(self):
+            return False
+
+        def done(self):
+            return True
+
+        def exception(self):
+            return None  # the STALE snapshot: the worker has not published yet
+
+        def result(self):
+            raise RuntimeError("store said no")
+
+    async def _expire(future, *, timeout, cancel_on_timeout=True):
+        raise TimeoutError("the bound expired")
+
+    monkeypatch.setattr(monitoring, "_await_future", _expire)
+
+    async def _run():
+        return await monitoring.reawait_control_plane_call(
+            _SettlingFuture(), op="reawait-racing-failure", timeout=0.05)
+
+    with pytest.raises(RuntimeError, match="store said no"):
+        asyncio.run(_run())
+    records = [r for r in monitoring.control_plane_offload_records()
+               if r[0] == "reawait-racing-failure"]
+    assert [r[2] for r in records] == ["domain_error"], (
+        f"a failed callable was recorded as {[r[2] for r in records]!r} — the "
+        "witness snapshot raced the settle, and the record must not claim "
+        "`completed` for work that raised")
+
+
+
 def test_a_genuine_re_armed_bound_miss_still_refuses_and_counts_running():
     """The other direction, so "never call it a bound miss" cannot pass above.
 

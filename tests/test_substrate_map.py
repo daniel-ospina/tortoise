@@ -212,8 +212,9 @@ def _population_drift(read: list[Path]) -> list[Path]:
 
     The discriminating direction is untouched: every path a `_label_hits()` that
     had wandered off the index could read is INSIDE the checkout (`stray` in
-    `test_a_same_thread_read_outside_the_index_is_still_drift`, an untracked file
-    under `tortoise/`), so it is still reported.
+    `test_a_same_thread_read_outside_the_index_is_still_drift` — a TRACKED file
+    under `tests/`, so it is inside the checkout but outside the `tortoise/`
+    population the index covers), so it is still reported.
 
     `is_relative_to` is the right test here rather than `resolve()`: it is
     documented as string-based, neither accessing the filesystem nor treating
