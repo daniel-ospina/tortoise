@@ -1671,9 +1671,13 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 #   • PER-SECTION (§9.4 by heading slice): the `:Source.summary` COUNT. This is
 #     the one that catches an ADDITIVE wrong instruction on a different line of
 #     §9.4, which a per-line check cannot see at all.
-#   • WHOLE-DOCUMENT: the retired-blur absence, deliberately, because that
-#     sentence is a claim about the S1 narrative wherever it appears, and scoping
-#     it to §9.4 would let it return in §10 unremarked.
+#   • WHOLE-DOCUMENT: BOTH retired phrasings' ABSENCE — the §9.4 blur and the
+#     §12.1b footnote's *"indexing an existing field"* — deliberately, because
+#     each is a claim about what the vector reads wherever it appears: scoping
+#     the blur to §9.4 would let it return in §10 unremarked, and scoping the
+#     footnote phrase to §12.1b's ONE footnote line would let it return in the
+#     paragraph immediately above that line, which is where a designer reads the
+#     same instruction (measured: line-scoped, that re-add stayed GREEN).
 #
 # A presence-only `in` check over the whole document would stay green while §9.4
 # itself was reverted, as long as one copy of the correct sentence survived
@@ -1853,11 +1857,13 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     the section), so the run stops there and the blur assertion after it is
     never reached. ⚠️ Naming the blur as the failing assertion would be an
     inference, not a measurement — BOTH retired strings ARE present at that
-    tree (1 each), and the §12.1b assertion over the footnote reds on
-    `_RETIRED_VECTOR_FOOTNOTE` (⚠️ the helper `_source_vector_footnote` asserts
-    only the anchor's presence and uniqueness and then RETURNS the line; the red
-    comes from the caller's assert on what it returns), but that half is not
-    executed by a plain run at all. From `b748df7d0` (the base before the rebase,
+    tree (1 each), and the §12.1b half's assertion reds on
+    `_RETIRED_VECTOR_FOOTNOTE` asserted ABSENT over the WHOLE document (⚠️ the
+    helper `_source_vector_footnote` asserts only the anchor's presence and
+    uniqueness and then RETURNS the line for the three POSITIVE asserts; the
+    absence assert deliberately does not read that one line, so a re-add in the
+    paragraph above it is caught too), but that half is not executed by a plain
+    run at all. From `b748df7d0` (the base before the rebase,
     post-`#10978`) onward NEITHER retired string is present, and neither is
     present at this head's base `e2584e2cb` — nor at any commit of THIS branch:
     both of this branch's bases already carried `#10978`'s correction (`b748df7d0`
@@ -1974,13 +1980,28 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # ── §12.1b: the section that decides WHERE vectors live may not order the
     #    design §9.4 forbids ──
     footnote = _source_vector_footnote(text)
-    assert _RETIRED_VECTOR_FOOTNOTE not in footnote, (
-        f"§12.1b's `:Source` footnote is back to *\"§9.4's summary vector "
+    # ⛔ WHOLE-DOCUMENT, mirroring the blur assert above — and the asymmetry was a
+    # real HOLE. This used to read `not in footnote`, i.e. it inspected ONE
+    # physical line (the anchor line `_source_vector_footnote` returns), while the
+    # claim it advertises is *"the retired instruction is ABSENT"*. §12.1b's
+    # paragraph immediately above that footnote is where a designer reads the same
+    # instruction, so re-adding the phrase there left this pin GREEN — measured by
+    # replay: with the phrase transplanted into the paragraph above the footnote,
+    # the line-scoped assert passed and nothing else in the file looks at the
+    # string (0 occurrences document-wide today, so the wider scope is free). The
+    # three POSITIVE asserts below stay line-scoped on purpose: that sentence is
+    # the contract, and widening THEIR scope would let a copy elsewhere satisfy
+    # them while the footnote itself was reverted.
+    assert _RETIRED_VECTOR_FOOTNOTE not in text, (
+        f"the document is back to *\"§9.4's summary vector "
         f"{_RETIRED_VECTOR_FOOTNOTE}\"* — once `#10852` lands an episodic "
         f"`:Source.summary` is a topic lexicon, so that sentence would tell a "
         f"designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
-        f"`summary` the Source holds is {summary_section} metadata")
+        f"`summary` the Source holds is {summary_section} metadata. "
+        f"(Asserted over the WHOLE document, not only §12.1b's footnote line: the "
+        f"instruction is wrong wherever §12.1b states it, and the paragraph "
+        f"above the footnote is where it was last read)")
     assert home in footnote, (
         f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
         f"decides where vectors live must point at the narrative's real home, "
