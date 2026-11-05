@@ -693,6 +693,69 @@ def test_the_routing_index_census_matches_the_record_migrations():
         )
 
 
+# ── the label check, PER OCCURRENCE (it used to be first-occurrence only) ─────
+# #11064's round-7 review measured that the two retired-sentence guards below
+# were **fail-open for the exact regression they document**. Both were written
+# as a first-occurrence pair — `at = text.find(retired)`, `labelled =
+# text.find(marker)`, `assert labelled < at` — and `find` returns the EARLIEST
+# match of each. The #7879 row is a single ~7,000-character line that already
+# carries one `SUPERSEDED` at offset ~1,631 (the A8 cell) and the retained R1
+# clause at ~6,421 with its own label at ~6,298, so the pair degraded to "the row
+# contains the word SUPERSEDED somewhere before this sentence". Replayed against
+# the head, that guard stayed GREEN for both mutations it exists to reject:
+#
+#   * append the retired sentence as a LIVE claim ("…and the record is NOT ARMED
+#     on the hosted deployment, so R1 is not work to pick up.") — the edit shape
+#     this row has actually taken every round; and
+#   * delete the label that covers the retained R1 clause, leaving only the
+#     unrelated earlier A8-cell label.
+#
+# A green run over either is a FALSE PASS on the premise that cost lane
+# `p0-10000` a whole write-path verification (#10000), which is the defect class
+# this PR exists to close — a gate that reports OK over the artifact being wrong.
+#
+# So the label requirement is now per occurrence AND adjacent: every occurrence
+# needs a `SUPERSEDED` marker before it with **no sentence boundary in between**,
+# i.e. the marker must be in the SAME sentence as the sentence it retires. That
+# is what "labelled history" means here, and it is the property both mutations
+# above break. `test_the_retired_sentence_guard_rejects_its_own_regressions`
+# pins the property by MUTATING this head's text and requiring a red — so the
+# guard's non-vacuity is executed, not asserted in a docstring.
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s|$)|;\s")
+
+
+def _assert_retired_claim_is_labelled(
+    text: str,
+    needle: str,
+    *,
+    where: str,
+    remedy: str,
+) -> None:
+    """Raise unless EVERY `needle` in `text` carries its own `SUPERSEDED` label.
+
+    Per occurrence, not first-occurrence (see the block comment above): a
+    retired sentence may be kept as labelled history — this repo's convention for
+    an overridden ruling — but each retained copy must be inside the sentence
+    whose marker labels it. A copy with no marker before it, or with the covering
+    marker a sentence away (so it was never actually covering this clause), is
+    telling a reader something was measured false as if it were live.
+    """
+    for match in re.finditer(re.escape(needle), text):
+        marker_at = text.rfind(_INDEX_SUPERSEDED_MARKER, 0, match.start())
+        assert marker_at != -1, (
+            f"{where} asserts {needle!r} with no "
+            f"{_INDEX_SUPERSEDED_MARKER} marker before it — that is a live "
+            f"instruction, not labelled history. {remedy}"
+        )
+        gap = text[marker_at + len(_INDEX_SUPERSEDED_MARKER) : match.start()]
+        assert not _SENTENCE_BOUNDARY_RE.search(gap), (
+            f"{where} asserts {needle!r} with the nearest "
+            f"{_INDEX_SUPERSEDED_MARKER} marker a SENTENCE away ({gap[:160]!r}); "
+            "a marker in an earlier clause does not label this one, so the "
+            f"sentence still reads as live. {remedy}"
+        )
+
+
 def _index_record_row() -> str:
     """The routing index's #7879 row — exactly one, or a loud failure."""
     rows = [
@@ -755,15 +818,15 @@ def test_the_routing_index_declares_the_measured_arming_not_the_census():
         "into an anonymous assertion"
     )
     for retired in _INDEX_RETIRED_ARMING:
-        at = row.find(retired)
-        if at == -1:
-            continue
-        labelled = row.find(_INDEX_SUPERSEDED_MARKER)
-        assert labelled != -1 and labelled < at, (
-            f"docs/00_index.md's #7879 row asserts {retired!r} with no "
-            f"{_INDEX_SUPERSEDED_MARKER} marker before it — that is a live "
-            "instruction, false since 2026-10-26 (#9548 comment 6407834085). Keep "
-            "the sentence only as labelled history, as 08 §A8 and 09 do"
+        _assert_retired_claim_is_labelled(
+            row,
+            retired,
+            where="docs/00_index.md's #7879 row",
+            remedy=(
+                "That sentence is false since 2026-10-26 (#9548 comment "
+                "6407834085). Keep it only as labelled history, as 08 §A8 and 09 "
+                "do — one `SUPERSEDED` in the SAME sentence, not an earlier cell"
+            ),
         )
     # The row and the docs it routes to must AGREE — that disagreement is the
     # finding, not the stale row on its own.
@@ -886,17 +949,17 @@ def test_the_epic_r8_drill_blocker_agrees_with_the_runbook():
             "`journal_event` + `point` row and a DIRECT backup-capable DSN; an "
             "operator reading R8 must not be sent back to the arming premise"
         )
-    retired_at = section.find(_DRILL_RETIRED_ATTRIBUTION)
-    if retired_at != -1:
-        labelled_at = section.find(_INDEX_SUPERSEDED_MARKER)
-        assert labelled_at != -1 and labelled_at < retired_at, (
-            "08-hosted-prerequisites.md §R8 attributes the unmeasured drill to "
-            f"{_DRILL_RETIRED_ATTRIBUTION!r} with no "
-            f"{_INDEX_SUPERSEDED_MARKER} marker before it — both of those "
-            "blockers are satisfied (2026-10-26 arming; #9551 closed "
-            "2026-10-23), so as a live attribution it sends a lane to redo work "
-            "that is done. Keep it only as labelled history"
-        )
+    _assert_retired_claim_is_labelled(
+        section,
+        _DRILL_RETIRED_ATTRIBUTION,
+        where="08-hosted-prerequisites.md §R8",
+        remedy=(
+            "Both of those blockers are satisfied (2026-10-26 arming; #9551 "
+            "closed 2026-10-23), so as a live attribution it sends a lane to "
+            "redo work that is done. Keep it only as labelled history — one "
+            "`SUPERSEDED` in the SAME sentence, not an earlier section"
+        ),
+    )
     # …and the two artifacts must still agree, which is the finding itself.
     runbook_rows = [
         line
@@ -914,6 +977,114 @@ def test_the_epic_r8_drill_blocker_agrees_with_the_runbook():
             f"docs/infra-runbook.md §9's armed-record drill row no longer names "
             f"{anchor!r} as part of the blocker — re-derive 08 §R8's attribution "
             "with it rather than letting the two drift apart again"
+        )
+
+
+def test_the_retired_sentence_guard_rejects_its_own_regressions():
+    """The label guard is executed against the mutations it exists to reject.
+
+    The #11064 round-7 review measured that the two pins above were **fail-open**:
+    both located the retired sentence and the `SUPERSEDED` marker with
+    first-occurrence `find`, so on the real #7879 row — one ~7,000-character
+    line carrying an unrelated `SUPERSEDED` ~4,800 characters earlier — the check
+    reduced to "the word appears somewhere before this sentence", and it stayed
+    GREEN for both regressions below. A green run over a stale premise is a false
+    PASS, and a false PASS is the one verdict this whole file exists to prevent.
+
+    Restating the guard as "per occurrence + same sentence" is only half the
+    fix: the half that can rot is a docstring claiming a property nothing
+    executes. So this test takes the REAL head text — not a fixture, so it cannot
+    drift from the artifact — applies each mutation, and requires a red:
+
+    1. **append** the retired sentence as a live claim at the end of the row. This
+       is the edit shape the row has taken every round (a correction lands, and
+       the next sentence appended after it re-asserts the old premise);
+    2. **strip the covering label** from the retained clause, leaving the
+       unrelated earlier A8-cell marker as the only `SUPERSEDED` in the row.
+
+    Both mutations leave the first-occurrence check green — that is measured, not
+    supposed — and both must raise here. If the guard is ever weakened back to a
+    first-occurrence shape, this test reds on the mutation it no longer catches.
+    """
+    row = _index_record_row()
+    marker = _INDEX_SUPERSEDED_MARKER
+
+    # The head row is green under the guard — otherwise the mutations below
+    # would prove nothing about the guard (they would only restate a failure).
+    for retired in _INDEX_RETIRED_ARMING:
+        _assert_retired_claim_is_labelled(
+            row, retired, where="the head row", remedy="fix the row"
+        )
+
+    # The needle to mutate has to be one the head actually RETAINS: a needle that
+    # occurs zero times iterates zero times, so mutating it would prove nothing.
+    # Which retired sentence survives is the row's business, so it is read off the
+    # row rather than hard-coded.
+    retained = [n for n in _INDEX_RETIRED_ARMING if n in row]
+    assert retained, (
+        "the #7879 row retains none of "
+        f"{_INDEX_RETIRED_ARMING} — this pin mutates a retained sentence, so "
+        "either the row was rewritten (drop the mutation that no longer applies) "
+        "or labelled history was deleted rather than kept"
+    )
+    needle = retained[0]
+
+    # MUTATION 1 — the stale premise re-appended as a live claim. `find`-based
+    # first-occurrence logic sees the earlier, unrelated marker and passes;
+    # per-occurrence logic sees no marker inside this sentence and reds.
+    mutated_append = f"{row} In short: {needle}."
+    first_needle = mutated_append.find(needle)
+    assert mutated_append.rfind(needle) >= len(row), (
+        "the append mutation did not land a second occurrence after the head "
+        "row, so it does not exercise the appended-live-claim shape"
+    )
+    assert mutated_append.find(marker) < first_needle, (
+        "the append mutation must leave a `SUPERSEDED` BEFORE the first "
+        f"{needle!r}, or a first-occurrence check would red anyway and the "
+        "mutation tests nothing"
+    )
+    try:
+        _assert_retired_claim_is_labelled(
+            mutated_append, needle, where="the append mutation", remedy="none"
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "the retired-sentence guard accepted a row that re-appends "
+            f"{needle!r} as a LIVE claim — it is fail-open for the regression it "
+            "documents (the earlier `SUPERSEDED` it matched is an unrelated "
+            "clause). Require the label per occurrence AND in the same sentence"
+        )
+
+    # MUTATION 2 — the covering label deleted from the retained clause. Its own
+    # marker sits in the same sentence; removing it must red even though an
+    # unrelated `SUPERSEDED` still exists earlier in the row.
+    covering_at = row.rfind(marker, 0, row.find(needle))
+    assert covering_at != -1, (
+        "the head row no longer carries a `SUPERSEDED` marker before "
+        f"{needle!r} — the retained clause lost its own label, which is the "
+        "defect this pin exists to catch"
+    )
+    mutated_strip = row[:covering_at] + row[covering_at + len(marker) :]
+    assert marker in mutated_strip[: mutated_strip.find(needle)], (
+        "the strip mutation left no `SUPERSEDED` before the retained "
+        f"{needle!r}, so it no longer isolates the first-occurrence defect (a "
+        "first-occurrence check would red too). The row is expected to carry an "
+        "unrelated earlier marker"
+    )
+    try:
+        _assert_retired_claim_is_labelled(
+            mutated_strip, needle, where="the strip mutation", remedy="none"
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "the retired-sentence guard accepted a row whose retained "
+            f"{needle!r} lost its OWN `SUPERSEDED` label, because an unrelated "
+            "earlier marker still existed — that is the first-occurrence "
+            "defect. Require the label in the same sentence as the sentence"
         )
 
 
