@@ -6429,8 +6429,9 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     3. no monopolisation — the three matrices overlap (all start after
        `changes`), so the per-PR maximum MATRIX hold is their SUM and it must
        leave the rest of the measured pool to other PRs: `sum <= 12 - 3`. It
-       bounds MATRIX slots only: the eligible non-matrix jobs are bounded by
-       the pool, not by this invariant.
+       bounds MATRIX slots only: the eligible non-matrix jobs are not bounded
+       by it — up to 8 can run alongside the matrices, and the pool does not
+       bound those either (see the workflow comment).
 
     ⛔ It deliberately says nothing about job ORDER or the matrix contents: the
     shard set is still the selector's, so `max-parallel` cannot skip a leg, and

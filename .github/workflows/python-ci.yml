@@ -775,8 +775,8 @@ jobs:
       #       runners outside any one PR's matrix bound so three other PRs can
       #       make progress on their matrix legs:
       #       `sum <= pool - 3 = 9`, i.e. with equal caps `C <= 3`. This bounds
-      #       MATRIX slots only; the concurrent non-matrix jobs are bounded by
-      #       the pool, not by this invariant (see WHAT THIS DOES NOT DO).
+      #       MATRIX slots only; the eligible non-matrix jobs are bounded by
+      #       neither this invariant nor the pool (see WHAT THIS DOES NOT DO).
       # The interval simulation over those same 9 runs — each job keeps its own
       # observed start as an earliest bound, so the delta is an UPPER bound that
       # does NOT credit back the queue this PR no longer waits behind — gives
