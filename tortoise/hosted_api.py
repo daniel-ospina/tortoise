@@ -1454,9 +1454,11 @@ def _registry_anchor() -> TortoiseSDK:
     string AND the ``TORTOISE_DB_PATH`` pin (see ``_registry_probe_identity``;
     a change in either closes the stale handle and rebuilds, so a test's private
     lane, a per-test path re-bind or a process reconfiguration can never be
-    served the old server or the old derived graph), built under
-    ``_KEEPALIVE_LOCK`` so two threads
-    cannot both build one, and closed by ``_reset_registry_probe_sdk()`` (the
+    served the old server or the old derived graph), built OUTSIDE
+    ``_KEEPALIVE_LOCK`` and installed under it with a re-check (so two threads
+    cannot both hold a cached handle and a losing builder closes its own — the
+    lock is deliberately NOT held across the construction, #8867 finding 2),
+    and closed by ``_reset_registry_probe_sdk()`` (the
     suite's isolation hook). Sharing it with the probe is deliberate: both want
     "the one registry connection this process holds", and a second cache would
     be the drift ``_control_plane_source``'s docstring warns about (#2823/#2340).
