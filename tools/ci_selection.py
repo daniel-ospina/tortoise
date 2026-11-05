@@ -1661,10 +1661,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `path.startswith(CORE_ALSO)`), not in `TOOL_CARVEOUTS` — a `TOOL_CARVEOUTS` member
              # forces the FULL matrix, and this one deliberately yields `core` only. The mechanism
              # is the same `startswith`, so an EXACT path claims only the spelling that exists
-             # today and silently re-opens this very drop for a rename or a split-out sibling
+             # today and silently re-opens this very drop for a split-out sibling
              # (`gh_write_preflight_<something>.py`): the gate would again be a diff that runs none
              # of its own arms. Over-matching costs extra CI on a file that is not the tool;
              # under-matching ships the write proof nobody runs.
+             # ⛔ The prefix does NOT buy RENAME survival — a renamed `tools/write_preflight.py` no
+             # longer carries the stem, and nothing here claims it. Said explicitly because this
+             # sentence previously read as if both shapes were covered, which is the "a pin that
+             # does not exist" class (the prefix case's docstring states the same boundary; a
+             # rename-detection pin belongs with the diff that performs the rename).
              "tools/gh_write_preflight",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
