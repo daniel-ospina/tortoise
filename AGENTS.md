@@ -574,7 +574,9 @@ It does **not** probe `Issues: write` or `Pull requests: write`, so `exit 0` doe
 create, a PR comment, a constituent-PR close, or an issue close — any of those can 403 on a token
 whose contents half is fine, and vice versa. #10930 records the requirement exactly: a **landing**
 lane's preflight must prove **three grants** — `Contents`, `Pull requests`, `Issues` — **not two**,
-because #10945's two-leg probe passed tokens that then died at the issue-close step. This gate
+because #10945's two legs were `Contents` and `Pull requests` **only**, so a token holding those two
+and **no** `Issues: write` passes that probe and then fails at its first issue close — the grants are
+independent, and the token measured on #10930 is the mirror of that shape. This gate
 proves one of the three. If your lane LANDS — comments the evidence on the PR, closes constituents,
 closes delivered issues — `exit 0` proves none of that, so prove those two surfaces by the operation
 itself before you start: read → `PATCH` the title back unchanged → re-read, once on an issue number
