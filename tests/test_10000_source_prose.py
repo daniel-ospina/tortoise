@@ -733,6 +733,76 @@ def test_the_lexicon_still_prefers_the_most_frequent_words():
     assert len(topics) == 6, topics
 
 
+def test_a_non_latin_transcript_still_derives_and_is_findable(sdk):
+    """The presence test's word class must not be ASCII (#10852 review, P2).
+
+    The token pattern was ``[A-Za-z][A-Za-z0-9_-]*`` — an ASCII word class — so
+    a Cyrillic, Greek, Hebrew, Arabic or CJK transcript had no word tokens as
+    far as ``_session_source_metadata`` could see and took the ``("", [])``
+    arm. Since #10000 BOTH derived columns come from that one token list, so
+    such a session's ``:Source`` was written ``summary=''`` and with **no**
+    ``_searchText`` at all — unfindable through
+    ``tortoise_fts_query(entity_type='source')``, which is the #3518 regression
+    the function's own docstring says it exists to prevent.
+
+    ⛔ MEASURED PRE-FIX (`5e9bd35cb`): every shape below derives `('', [])`,
+    which is what the first assertion reds on. The fix is the word class, not a
+    special case: ``[^\\W\\d_][\\w-]*`` is a Unicode LETTER followed by word
+    characters — identical behaviour for ASCII, correct for every other script.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    shapes = {
+        "russian": "пользователь: мы решили перенести релиз на пятницу",
+        "greek": "ο χρήστης: μεταφέραμε την κυκλοφορία",
+        "arabic": "المستخدم: قررنا تأجيل الإصدار",
+        "chinese": "我们今天讨论迁移计划",
+    }
+    for script, transcript in shapes.items():
+        summary, topics = _session_source_metadata(transcript)
+        assert topics, (
+            f"a {script} transcript derived NO lexicon — the presence test's "
+            "word class is ASCII-only, so this session is written summary='' "
+            "with no _searchText and cannot be found (#3518)")
+        assert summary == DISPLAY_PREFIX + ", ".join(topics), (summary, topics)
+        # ⛔ The framing labels are still filtered, in every script: the
+        # stopword/framing sets are ASCII but they are a PRECISION filter, and
+        # the russian shape's own `пользователь` is NOT one of them — it is the
+        # word the session used, so it belongs in the lexicon.
+        assert not ({"user", "assistant", "speaker"} & set(topics)), topics
+
+    # ⛔ NEGATIVE CONTROL — the widening stops at "letters are present". A word
+    # class that matched anything (``\\S+``, say) would give the punctuation and
+    # framing-only shapes a "lexicon" built from ``"..."`` / ``"user"``, which
+    # is the same defect swapped end for end. These are unchanged by the fix and
+    # must stay silent.
+    for wordless in ("", "   ", "...", "?!", "user:\nassistant:"):
+        assert _session_source_metadata(wordless) == ("", []), wordless
+
+    # ── the live leg: the derived pair actually reaches the node and the index
+    cyrillic_turns = [
+        {"role": "user",
+         "content": "пользователь: перенеси релиз на пятницу"},
+        {"role": "assistant", "content": "договорились, пятницу"},
+    ]
+    sdk.capture_session(conversation=cyrillic_turns,
+                        session_id="sess-cyrillic-10000")
+    row = _source_rows(sdk)["session:sess-cyrillic-10000"]
+    assert row[1], (
+        "the Cyrillic session's :Source got no _searchText, so it is unfindable "
+        f"through the Source FTS index: {row!r}")
+    assert row[0].startswith(DISPLAY_PREFIX), row
+    assert row[1] in row[0], (
+        "the indexed value is not the lexicon the display value carries — the "
+        f"two derived columns split: {row!r}")
+    assert "пятниц" in row[1], row
+
+    found = [r["id"] for r in sdk.tortoise_fts_query("пятницу",
+                                                     entity_type="source")]
+    assert "session:sess-cyrillic-10000" in found, (
+        f"the Cyrillic session is not findable by a word it used: {row!r} -> {found}")
+
+
 def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk, tmp_path):
     """``summary`` and ``_searchText`` are two views of ONE derivation.
 

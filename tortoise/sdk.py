@@ -4191,6 +4191,24 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     reintroduced one arm over (#10852 review, P2). The presence test is
     therefore WIDTH-FREE and the floor lives in the content filter.
 
+    ⛔ The presence test is SCRIPT-FREE too — same class, one word over. The
+    token pattern used to be ``[A-Za-z][A-Za-z0-9_-]*``, an ASCII word class, so
+    a Cyrillic, Greek, Hebrew, Arabic, Devanagari, Thai or CJK transcript had NO
+    word tokens as far as this function could see and took the ``("", [])``
+    arm: ``summary=''`` and no ``_searchText`` — the #3518 unfindability, for a
+    whole class of languages (#10852 review, P2). The pattern is now
+    ``[^\\W\\d_][\\w-]*`` (a Unicode LETTER, then word characters), which is the
+    same shape as before for ASCII and correct for every script Python's ``re``
+    knows. The stopword and framing sets stay ASCII — that is only a PRECISION
+    filter (``.lower()`` still folds Latin), never a presence decision.
+
+    ⚠️ Stated residual: a script that does not delimit words with spaces (CJK,
+    Thai) yields ONE run per script run, so such a transcript's descriptor can
+    carry that run whole. Splitting it needs a segmenter (RediSearch ships one
+    for Chinese via Friso), not a regex — and the alternative here, returning
+    ``("", [])``, is the unfindability this function exists to prevent. Named
+    rather than silently traded.
+
     ⛔ The descriptor is a function of the word MULTISET — frequency order, ties
     broken by the token itself (``_session_source_lexicon``), so it does NOT
     depend on the transcript's word order — and it never quotes: a summary that
@@ -4219,8 +4237,11 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     # docstring. A pattern with ``{2,}`` here conflates "no lexicon" with "no
     # word tokens of 3+ characters", and that conflated case is a real, reachable
     # transcript (``"User: ok go"`` — a kept turn with no long word).
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]*",
-                                   transcript.lower())
+    # ⛔ SCRIPT-FREE too: ``[^\\W\\d_]`` is a Unicode LETTER, so this is the same
+    # word class as ``[A-Za-z]`` for English and a correct one for every other
+    # script — an ASCII class made a Cyrillic/CJK transcript wordless and wrote
+    # it ``summary=''`` with no ``_searchText`` (#10852 review, P2).
+    words = [w for w in re.findall(r"[^\W\d_][\w-]*", transcript.lower())
              if w not in _SESSION_SOURCE_FRAMING_TOKENS]
     if not words:  # no word tokens at all (empty/blank/punctuation-only,
         return "", []  # or nothing but the transcript's own Speaker: labels)
