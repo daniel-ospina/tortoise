@@ -1948,7 +1948,7 @@ reading of a graph that has since grown 2.7×, and the ≈50 MB payload is that 
 additive estimate over three labels — it was never a current payload reading either. The row now carries
 the **2026-11-04 graph reading** from `live-v4` (`#10976`): **93 MB of index total on a 195 MB graph**,
 with the 93 MB named as the TOTAL index size of which only part is HNSW; and it names the payload axis as
-§12.1b's **2026-09-24** measurement — **33,580 embeddings ≈ 51.6 MB**, of which the unindexed
+§12.1a's **2026-09-24** measurement — **33,580 embeddings ≈ 51.6 MB**, of which the unindexed
 `Object`+`Event` population (**12,657 ≈ 19.4 MB, 38 % of every vector stored**) is the removable subset
 `#5090`'s 2026-10-08 arithmetic justifies. **No decision changed: V1 remains OPEN and the row says so.**
 
@@ -2001,13 +2001,16 @@ vector stored**, which is `#5090`'s 2026-10-08 SCOPE correction — not a re-mea
 probe's own docstring says the 12,657 count *"is 2026-09-24 and is not to be re-quoted"*, and `--census`
 re-measures it per label on a named graph at a timestamp.
 
-**The places that still cited it, all now dated.** §0's bill summary; §12.1's *"45 MB of indices +
-51.6 MB of embeddings + 16 MB of text"*; §12.1b's derived *"Stored vector properties ≈ 50 MB"* sentence
-(now carrying that 2026-09-24 estimate, with the unindexed 19.4 MB named as the removable subset rather
-than as a current payload reading); §12.1d's per-node ratio; §12.3's *"≈50 MB … against 141 MB"*; §13's
-attribute-byte sentence; and two cross-references that would otherwise have gone stale in the other
-direction — §0's *"§2 and §12 state 141 MB and 45 MB"* (now `§12.1b's 2026-09-24 table`) and the cost
-model's *"on a ~141 MB graph"* (kept as that date's reading, with the 2026-11-04 reading named beside it).
+**The places that still cited it, all now dated** — named by their ACTUAL section, because the first
+draft of this list named six and got five of them wrong: **§2.2**'s bill summary and its *"45 MB of
+indices + 51.6 MB of embeddings + 16 MB of text"* line (`:175`, `:185`); **§12.1**'s *"Stored vector
+properties ≈ 50 MB"* sentence (`:945`); **§12.1a**'s per-node ratio (`:1030`); **§12.2**'s *"≈50 MB …
+against 141 MB"* (`:1129`); **§12.8**'s attribute-byte sentence (`:1395`); and **§13**'s V3 bullet
+(`:1476`), which still stated the 12,657 count and *"13.5 % of the graph"* with no date at all — now
+dated to the 141 MB graph it was measured on. Two cross-references that would otherwise have gone stale
+in the other direction are fixed the same way: §1's *"§2 and §12 state 141 MB and 45 MB"* (now
+`§12.1's 2026-09-24 table`) and the cost model's *"on a ~141 MB graph"* (kept as that date's reading,
+with the 2026-11-04 reading named beside it).
 
 **What was deliberately NOT done: no per-node ratio from the new reading.** The 2026-09-24 ratio,
 1.34 embeddings per node, is over **capped** nodes (~25,000). The 2026-11-04 reading's node base is
