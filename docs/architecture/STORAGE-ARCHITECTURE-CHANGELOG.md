@@ -2009,7 +2009,7 @@ place it stood.
 2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. **Every leg
 is a VECTOR COUNT × bytes-per-vector, not an attribute line** — `Object` 7,859 and `Event` 4,798 are the
 two counts the measurement found (§12.1b), and the third leg is the remainder the estimate attributed to
-`Point`, 20,923 of 33,580. At the exact `1,536 B` per vector (384 × float32 — §2.2 states that width), those are
+`Point`, 20,923 of 33,580. At the exact `1,536 B` per vector (384 × float32 — §5.2 states that width at `:418`), those are
 12.1 / 7.4 / 32.1 MB — sum **≈51.6 MB**, which is the `33,580 embeddings ≈ 51.6 MB` §12.1a reports; the
 head-line **≈50 MB** is that same population at the rounded `1.5 KB = 1,500 B` the original estimate used,
 **not a second reading.** ⚠️ **Two things the
