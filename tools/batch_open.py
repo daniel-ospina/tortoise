@@ -629,29 +629,40 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
                 "reverse-apply exited 0 but was NOT silent — the fold tree does not "
                 f"carry this change: {noise[:300]}"
             )
-        if conflicting:
-            # Reached only if a three-way apply is reintroduced: a conflict means
-            # the fold tree does NOT carry this change, whatever the status says.
-            return "NOT-CONTAINED", (
-                "reverse-apply reported a CONFLICT in the fold tree — the change is "
-                f"not contained: {(applied.stderr or applied.stdout).strip()[:300]}"
-            )
-        if applied.returncode > 1:
-            # ⛔ rc > 1 IS "THE MEASUREMENT DID NOT HAPPEN", NOT A VERDICT (#10941 review).
+        if applied.returncode > 1 or applied.returncode < 0:
+            # ⛔ rc > 1 (OR A SIGNAL, WHICH PYTHON REPORTS AS A NEGATIVE rc) IS "THE
+            # MEASUREMENT DID NOT HAPPEN", NOT A VERDICT (#10941 review).
             # `git apply` uses rc=1 for "the patch does not apply", and THAT is the
             # measurement answering NOT-CONTAINED. Every other code means the
             # comparison never ran: `_run` reports a missing binary as 127 and a hang
-            # as 124, and git itself uses 128 for a broken repo/index. Folding those
-            # into NOT-CONTAINED told the operator "REFUSED … closing would destroy
-            # work" and exited 1 ("at least one NOT contained") about a comparison
-            # that was never made — contradicting the tool's own contract, which
-            # reserves exit 2 / UNMEASURABLE for exactly this. Reproduced with a
+            # as 124, git itself uses 128 for a broken repo/index, and `subprocess.run`
+            # reports a SIGNAL-KILLED child as a NEGATIVE code (an OOM kill is -9) —
+            # so `> 1` alone still folded a killed `git` into NOT-CONTAINED. Folding
+            # those into NOT-CONTAINED told the operator "REFUSED … closing would
+            # destroy work" and exited 1 ("at least one NOT contained") about a
+            # comparison that was never made — contradicting the tool's own contract,
+            # which reserves exit 2 / UNMEASURABLE for exactly this. Reproduced with a
             # monkeypatched rc=124: the operator was told a timed-out `git` meant the
             # work was missing.
+            # ⛔ THIS ARM RUNS BEFORE THE `conflicting` ONE. Tested the other way round, a
+            # git-level failure whose output happened to contain "conflict" (or git's
+            # own "patch does not apply") was still read as a containment verdict
+            # through the conflict branch, leaving the class this arm fixes alive by
+            # ORDER. Not reachable through `_run`'s own shapes today (124/127/128 carry
+            # no such text), which is exactly why it is closed structurally.
             return "UNMEASURABLE", (
                 "reverse-apply did not run: "
                 f"git exited {applied.returncode} — "
                 f"{(applied.stderr or applied.stdout).strip()[:200]}"
+            )
+        if conflicting:
+            # Reached for rc=0 (a three-way apply reporting a conflict) and for rc=1,
+            # whose `error: … patch does not apply` is git's own way of saying the fold
+            # tree does NOT carry this change, whatever the status says. A git-level
+            # failure is classified ABOVE, so it can never be read as a verdict here.
+            return "NOT-CONTAINED", (
+                "reverse-apply reported a CONFLICT in the fold tree — the change is "
+                f"not contained: {(applied.stderr or applied.stdout).strip()[:300]}"
             )
         return "NOT-CONTAINED", f"reverse-apply failed: {applied.stderr.strip()[:300]}"
     finally:
