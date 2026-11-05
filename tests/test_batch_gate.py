@@ -553,15 +553,15 @@ def test_a_named_repo_is_threaded_into_every_gh_call(
     silently mutating another one records a falsehood on the wrong repository, the
     same class as a false containment proof.
 
-    Every mutating and reading `gh` invocation is asserted to carry the flag, so a
-    future call added without it fails here.
+    This test drives exactly ONE `gh` invocation, so it measures the HELPER — that
+    `_gh` injects the flag at all. It does NOT assert anything about the call sites.
 
-    ⛔ SCOPE, corrected: this test calls `_gh` DIRECTLY, so it measures the HELPER,
-    not the call sites. It cannot see `main()` handing `_gh` the wrong repo —
-    measured: replacing `args.repo` with `None` at all four `main()` call sites left
-    this file green. The CLI-half is
-    `test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes`; the two are
-    deliberately separate because they fail for different reasons.
+    ⛔ SCOPE, corrected: the sentence here used to claim "every mutating and reading
+    `gh` invocation is asserted to carry the flag, so a future call added without it
+    fails here". Measured false — the test calls `_gh` directly, and replacing
+    `args.repo` with `None` at every `main()` call site left this file green. The
+    call-site half is `test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes`;
+    the two are separate tests because they fail for different reasons.
     """
     seen: list[list[str]] = []
     def fake_run(argv, **kwargs):
