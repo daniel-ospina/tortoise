@@ -114,7 +114,7 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 **When:** a user walks from a theme
 **Then:** they reach its **initiatives**, each initiative's epics, and each epic's issues — the four-level path the 2026-11-05 ruling fixed (theme → initiative → epic → issue, `docs/epics/2026-11-05-5087-extractor-v4/06-pack-logic-decisions.md` §KIN-R)
 **And:** a rebuild from the journal reproduces the same edges
-**And:** a pair the packs do **not** declare — including a direct theme → epic hop, which the new level makes illegal — produces no edge
+**And:** a pair the packs do **not** declare — e.g. `dev:theme --hasPart--> dev:issue`, which no `dev` relation and no `dev` `hierarchies:` path declares — produces no edge. ⚠️ **The direct `theme → epic` hop is explicitly NOT in that set:** `packs/dev/manifest.yaml:148-153` declares it and `:192-194` lists it in `hierarchies:`, and no ruling retires it — deleting it would be an owner-gated pack-vocabulary edit (`#11000`), so it is named here rather than assumed away
 
 ### E2E-5: a failed lookup does not become a new belief
 
