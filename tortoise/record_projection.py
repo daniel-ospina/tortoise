@@ -709,11 +709,18 @@ class RecordStatementError(RecordProjectionError):
     withholds (`search_keys=<15 chars withheld>`) came back verbatim through the
     driver's own `CONTEXT` clause. See :func:`_primary_message`.
 
-    ⛔ THE LINE IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
+    ⛔ THE MESSAGE FORM IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
     (:func:`_failure_line`), because `record_writer._bounded_cause` keeps the
-    HEAD of a message: a line over its limit loses the TAIL, which is where this
-    method puts the driver's fault clause — the half that says what went wrong
-    (#10648 review P2).
+    HEAD of a message: a line over its limit loses the TAIL, which is where that
+    form puts the driver's fault clause — the half that says what went wrong
+    (#10648 review P2). ⚠️ That budget argument holds for the MESSAGE arm only,
+    and this note said it as though it covered the class: the cause form puts the
+    fault at the HEAD and :func:`Statement.attribution` — a column list of
+    unbounded length — in the TAIL, so an over-budget cause-form line loses the
+    SUBJECT instead. Nothing is lost that matters (`_bounded_cause` is applied to
+    a message this class RECEIVES, not to one it composes, and both arms keep the
+    fault), but a reader who trusted the sentence above would size the two arms
+    wrongly (#10726 review, P3).
 
     ⚠️ TWO CALL SHAPES, because two lineages of this attribution met in the
     batch fold and both are load-bearing:
@@ -1595,7 +1602,6 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
         if type_name.lower() == "jsonb":
             found.add((table, column))
     return frozenset(column for _table, column in found)
-
 
 
 def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:

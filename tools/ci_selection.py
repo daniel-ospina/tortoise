@@ -6226,6 +6226,7 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     pipelines must not drop any of them, and composing them in ONE place keeps the
     invariant (every check reachable from one entry point) while keeping main's
     coverage.
+
     An ImportError is reported as an issue, never swallowed: returning ``[]``
     would leave ``--integrity`` GREEN with none of these checks having run —
     the "silent omission with every gate green" class they exist to kill.

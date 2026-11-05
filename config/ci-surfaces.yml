@@ -9619,14 +9619,19 @@ durations:
   # no parametrize, no pytestmark and no collect_ignore, so pytest's collection
   # follows `^def test_`. The DB-free legs are the ones that run on
   # the fast lane; the ONE Postgres leg SKIPS without `TEST_RECORD_DB_URI` (the
-  # #9551 job arms it, not this leg). MEASURED LOCALLY on this host 2026-11-04 at
-  # this head as a sanity bound, not as a weight:
-  # `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest
-  # tests/test_9548_record_search_keys_shape.py -q -p no:cacheprovider` ->
-  # 7.31 s wall, the ONE Postgres leg skipping — ABOVE the 2.0 flat weight, so the flat
-  # reading UNDERSTATES it until a sweep replaces this row (the
-  # `test_state_value_verbatim_10360.py` precedent: the point of the row is
-  # existence + coverage, not an accurate shard weight).
+  # #9551 job arms it, not this leg). ⛔ A LOCAL wall-clock reading is deliberately
+  # NOT stated, and this note carried one until the #10726 review: `"7.31 s wall"`
+  # (2026-11-04), which re-measured the same file at **2.5 s / ~3.9 s wall** on
+  # 2026-11-05 (three consecutive runs, all `13 passed, 1 skipped`). It moved by
+  # ~1.8x with nothing but the host and the day — a frozen reading of exactly the
+  # class this row's FIRST paragraph exists to end, and the reason
+  # `test_rail_detach.py`'s row states none either. What the 2.0 IS: the flat
+  # `DEFAULT_FAST_WEIGHT`, deliberately, because #2818/#3419 forbid a local reading
+  # as a shard-layout input for a PR-added file — so the point of the row is
+  # existence + coverage, not an accurate shard weight (the
+  # `test_state_value_verbatim_10360.py` precedent), and
+  # `tools/ci_timing.py --refresh-durations` replaces it from junit once a
+  # push-to-main sweep includes it.
   # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   # #9078's guard, added by a PR: a new fast-pool file can never have a CI

@@ -381,7 +381,7 @@ def test_a_synthetic_tree_reaches_the_forward_and_fail_closed_arms(tmp_path):
       rule would JSON-quote strings bound to a now-`text` column: no error, no
       counter, silent corruption;
     * an empty directory must RAISE, because an empty set silently disables the
-      encoding and the 22Q02 row drops come back.
+      encoding and the 22P02 row drops come back.
     """
     import shutil
 
@@ -677,10 +677,16 @@ def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
     # `20261102000002`, so it can no longer carry the `→jsonb` shapes this test
     # exists to pin. `payload` is still declared `jsonb`, so all three shapes
     # remain reachable through a hand-built statement.
-    def _types(*, value: str, columns: tuple[str, ...] = ("payload",)):
+    def _types(*, value: str, param_columns: tuple[str, ...] = ("payload",)):
+        # ⚠️ `param_columns=`, BY KEYWORD. `Statement`'s fields are
+        # `(sql, params, param_columns, columns)`, so passing this third
+        # positionally binds it to `param_columns` and leaves `columns` None —
+        # which is what `value_types()` reads, so the pin would still hold, but
+        # the spelling would reproduce the exact mis-binding `_upsert_statement`
+        # names as the #9956 defect.
         return Statement(
             "INSERT INTO public.event (payload) VALUES (%s)",
-            (value,), columns).value_types()
+            (value,), param_columns=param_columns).value_types()
 
     # 1. The GOOD binding: a `str` the map calls `jsonb` whose value IS a
     #    JSON document — what `_jsonb_or_scalar` emits for a `jsonb` column.

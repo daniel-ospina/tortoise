@@ -323,7 +323,7 @@ def test_a_recycled_pid_without_procfs_does_not_read_waiting(tmp_path, monkeypat
 
 
 def test_a_LIVE_pid_in_ANOTHER_group_is_not_our_rail():
-    """⛔ THE RECYCLED-PID CASE `_in_group` EXISTS FOR, and it was unpinned.
+    """⛔ THE RECYCLED-PID CASE `_in_group` EXISTS FOR — the one no other test ASKS it about.
 
     `_in_group` is the module's stated *"THE ownership test for the rail
     process"*, and on the `pgid=` path it is the ONLY identity probe: the
@@ -332,13 +332,28 @@ def test_a_LIVE_pid_in_ANOTHER_group_is_not_our_rail():
     reads `waiting` — reported alive forever AND refusing every later `start`
     on the PR, the unrailable wedge this module exists to remove.
 
-    Measured (#10726 review): replacing `_in_group`'s body with `return True`
-    left `tests/test_rail_detach.py` at 46 passed, i.e. NOTHING pinned the
-    rejection. The four pre-existing killed/fork-window/recycled tests all
-    exercise the TRUE direction (a child that really is in the group) or the
-    argv-marker path with `pgid=None`; the dead-pid case is caught by
-    `_proc_stat_letter`/procfs, so the uncovered case was precisely the
-    recycled-*live*-pid one.
+    ⛔ WHY THIS TEST EXISTS, stated by BEHAVIOUR and not by a count, because the
+    count this paragraph used to carry is not re-derivable. It said *"replacing
+    `_in_group`'s body with `return True` left `tests/test_rail_detach.py` at 46
+    passed, i.e. NOTHING pinned the rejection"*. Measured at this head, the
+    mutant reds **2** tests — this one and `origin/main`'s
+    `test_a_permission_denied_probe_keeps_the_claim_and_only_esrch_is_gone`
+    (`assert rd._in_group(pid, 42) is False`, its own control arm), which the
+    forward-merge brought in — so "NOTHING pinned it" is false at this head, and
+    the figure is a frozen count of a file the merge has since grown (45
+    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`, 76 here). Reproduce with a
+    plugin that sets `rail_detach._in_group = lambda pid, pgid: True`:
+    `2 failed, 75 passed`.
+
+    The gap this test fills survives that correction, and it is narrower than the
+    old sentence claimed: every other test reaches `_in_group`'s rejecting
+    direction only through `getpgid` RAISING (`ProcessLookupError` for a reaped
+    pid) or by monkeypatching `os.getpgid` — never by ASKING it about a LIVE pid
+    in a foreign group. That non-raising `False` arm is the one that stops a
+    recycled live pid reading `waiting`, which is the unrailable wedge stated
+    above. The killed/fork-window/recycled tests all exercise the TRUE direction
+    (a child that really is in the group) or the argv-marker path with
+    `pgid=None`; the dead-pid case is caught by `_proc_stat_letter`/procfs.
 
     No procfs, no `ps`: a child started in its OWN session is a live pid this
     process does not own, which is the whole predicate.
