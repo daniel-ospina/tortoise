@@ -4111,9 +4111,15 @@ _SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
 
 #: #10000: the transcript's own FRAMING labels — the ``Speaker: text`` prefix
 #: ``_session_llm_transcript`` writes for every turn. They are not vocabulary the
-#: session used, so they may never become a topic: the stopword arm already drops
-#: the three it names, but the STOPWORD-ONLY fallback below reads the UNFILTERED
-#: word list, so it re-admitted ``user``/``assistant`` for every
+#: session used, so they may never become a topic, and THIS set is the only thing
+#: that stops them: ``_session_source_metadata`` applies it to the token list
+#: BEFORE both the content filter and the stopword-only fallback, so neither arm
+#: can re-admit a label. Three of the five (``user``/``assistant``/``speaker``)
+#: are coincidentally also members of ``_SESSION_SOURCE_STOPWORDS``, which hides
+#: the need in the CONTENT arm — but not in the fallback, which reads the token
+#: list itself, and not at all for ``system``/``tool``, which no stopword list
+#: carries. So do not read this set as partly redundant: before it existed the
+#: fallback admitted ``user``/``assistant`` as the WHOLE lexicon of every
 #: acknowledgement-only session — a constant token pair in the Source FTS index,
 #: i.e. the same measurable defect ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out
 #: of ``_searchText`` to avoid (under the OR-union every such session would match
@@ -4164,9 +4170,10 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     capture already derives, and they keep a captured session findable through
     ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
     and the reason this function must return SOMETHING for a non-empty
-    transcript. ``("", [])`` only for a transcript with no word tokens at all
-    (empty, blank, punctuation-only, or nothing but the ``Speaker:`` framing
-    labels).
+    transcript. ``("", [])`` only when the transcript has no token of its OWN
+    at all — empty, blank, punctuation-only, or nothing but the ``Speaker:``
+    framing labels. The question is about TOKENS, never about letters or width:
+    a number is a token too (see the DIGIT-ONLY note below).
 
     ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") takes the UNFILTERED content
     list rather than returning nothing. Returning nothing blanked an
@@ -4201,6 +4208,23 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     same shape as before for ASCII and correct for every script Python's ``re``
     knows. The stopword and framing sets stay ASCII — that is only a PRECISION
     filter (``.lower()`` still folds Latin), never a presence decision.
+
+    ⛔ DIGIT-ONLY is the third dimension of the same hole (#10852 review), and
+    the one the SCRIPT fix left behind: ``[^\\W\\d_]`` excludes digits as well
+    as non-ASCII. A transcript whose only non-framing tokens are numbers
+    (``"User: 42\\nAssistant: 100 200"`` — an ID/number-only session) therefore
+    had NO word tokens, took the ``("", [])`` arm, and was written
+    ``summary=''`` with ``_searchText`` NULL: silent on the node and absent from
+    the Source FTS index. Against ``main`` that is a genuine REGRESSION, not
+    only a doc inaccuracy — the pre-#10000 derivation fell back to
+    ``transcript.strip()[:200]``, so those digits DID reach the index (as prose,
+    the §9.1/D1 violation this change removes — but the findability was real),
+    and RediSearch tokenises on whitespace and punctuation, so a numeric run is
+    an ordinary index term rather than something search cannot express. The
+    presence test is therefore ``[^\\W_][\\w-]*`` — any run of word characters
+    that is not underscore-only, LETTER **or** DIGIT — while the CONTENT arm
+    keeps the letter class below, so a numeric token keeps a digit-only session
+    findable through the fallback without ranking against the session's words.
 
     ⚠️ Stated residual: a script that does not delimit words with spaces (CJK,
     Thai) yields ONE run per script run, so such a transcript's descriptor can
@@ -4241,18 +4265,28 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     # word class as ``[A-Za-z]`` for English and a correct one for every other
     # script — an ASCII class made a Cyrillic/CJK transcript wordless and wrote
     # it ``summary=''`` with no ``_searchText`` (#10852 review, P2).
-    words = [w for w in re.findall(r"[^\W\d_][\w-]*", transcript.lower())
-             if w not in _SESSION_SOURCE_FRAMING_TOKENS]
-    if not words:  # no word tokens at all (empty/blank/punctuation-only,
+    # ⛔ …and DIGIT-SEEING (#10852 review): the presence test asks whether the
+    # transcript has a token of its OWN, which is not a question about letters.
+    # ``[^\W_]`` (a word character that is not ``_``) admits a LETTER-or-DIGIT
+    # run, so an ID/number-only session is presence-True; the CONTENT arm below
+    # keeps the letter class, so a numeric token still does not RANK against the
+    # session's words — it reaches the fallback, which is what keeps the session
+    # findable. Without this, ``"User: 42\nAssistant: 100 200"`` returned
+    # ``("", [])``: ``_searchText`` NULL and unfindable (#3518), a regression
+    # against the pre-#10000 prose derivation that DID index those digits.
+    tokens = [w for w in re.findall(r"[^\W_][\w-]*", transcript.lower())
+              if w not in _SESSION_SOURCE_FRAMING_TOKENS]
+    if not tokens:  # no tokens at all (empty/blank/punctuation-only,
         return "", []  # or nothing but the transcript's own Speaker: labels)
+    words = [w for w in tokens if re.match(r"[^\W\d_]", w)]
     counts = Counter(w for w in words
                      if w not in _SESSION_SOURCE_STOPWORDS and len(w) >= 3)
     topics = _session_source_lexicon(counts)
-    if not topics:  # stopword-only OR short-word-only: fall back to the
-        # transcript's own vocabulary. Both shapes are non-empty transcripts
-        # with nothing to derive a CONTENT lexicon from, and both must still
-        # yield a descriptor or the session is unfindable (#3518).
-        topics = _session_source_lexicon(Counter(words))
+    if not topics:  # stopword-only, short-word-only OR digit-only: fall back
+        # to the transcript's own vocabulary. All three shapes are non-empty
+        # transcripts with nothing to derive a CONTENT lexicon from, and each
+        # must still yield a descriptor or the session is unfindable (#3518).
+        topics = _session_source_lexicon(Counter(tokens))
     return _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics), topics
 
 

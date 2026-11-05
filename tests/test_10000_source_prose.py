@@ -815,6 +815,84 @@ def test_a_non_latin_transcript_still_derives_and_is_findable(sdk):
         f"the Cyrillic session is not findable by a word it used: {row!r} -> {found}")
 
 
+def test_a_digit_only_transcript_still_derives_and_is_findable(sdk):
+    """A transcript whose only tokens are NUMBERS must still derive a lexicon.
+
+    ⛔ MEASURED PRE-FIX at this branch's head: ``("", [])`` for every shape
+    below, which is what the first assertion reds on. The presence test was
+    ``[^\\W\\d_][\\w-]*`` — a Unicode LETTER — so a transcript whose only
+    non-framing tokens are digits had "no word tokens", took the ``("", [])"
+    arm, and this writer (which never passes ``summary`` to
+    ``_source_search_text``) wrote ``summary=''`` and ``_searchText`` NULL. The
+    session is then absent from the Source FTS index: the #3518 unfindability
+    the function's own docstring says it exists to prevent, for the one shape
+    an ID/number-only session has.
+
+    Against ``main`` this is a REGRESSION, not only a doc inaccuracy: the
+    pre-#10000 derivation fell back to ``transcript.strip()[:200]``, so those
+    digits DID reach the index (as prose, which is the §9.1/D1 violation this
+    change removes — but the findability was real). RediSearch tokenises on
+    whitespace and punctuation, so a numeric run is an ordinary index term.
+
+    The fix is the presence class, not a special case: ``[^\\W_][\\w-]*``
+    (any word-character run that is not underscore-only, letter OR digit) for
+    PRESENCE, with the letter class kept for the CONTENT/ranking arm — so a
+    numeric token keeps the session findable through the fallback without
+    displacing a word from the six-token descriptor.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    # ── the derivation: presence is about tokens, not about letters
+    summary, topics = _session_source_metadata("User: 42\nAssistant: 100 200")
+    assert topics, (
+        "a transcript whose only tokens are DIGITS derived no lexicon — the "
+        "presence test's word class excludes numbers, so this session is "
+        "written summary='' with no _searchText and cannot be found (#3518)")
+    assert summary == DISPLAY_PREFIX + ", ".join(topics), (summary, topics)
+    assert {"42", "100", "200"} <= set(topics), topics
+    # …and the framing labels are still gone from a digit-only transcript.
+    assert not ({"user", "assistant"} & set(topics)), topics
+
+    # ⛔ The CONTENT arm keeps its letter class: numbers do not RANK against the
+    # session's words. Without this leg the presence fix could be "solved" by
+    # putting digits in the ranking pool, which would let an ID crowd a word
+    # out of the descriptor of an ordinary session — the ranking this function's
+    # 3-character floor exists to protect.
+    _, mixed = _session_source_metadata(
+        "user: deployed 3 servers 4 replicas 5 shards")
+    assert mixed == ["deployed", "replicas", "servers", "shards"], (
+        f"a digit ranked against the session's words: {mixed!r}")
+
+    # ── the live leg: the derived pair reaches the node AND the index
+    sdk.capture_session(
+        conversation=[{"role": "user", "content": "42"},
+                      {"role": "assistant", "content": "100 200"}],
+        session_id="sess-digits-10000")
+    row = _source_rows(sdk)["session:sess-digits-10000"]
+    assert row[1], (
+        "the digit-only session's :Source got no _searchText, so it is "
+        f"unfindable through the Source FTS index: {row!r}")
+    assert row[0].startswith(DISPLAY_PREFIX), row
+    assert row[1] in row[0], (
+        "the indexed value is not the lexicon the display value carries — the "
+        f"two derived columns split: {row!r}")
+
+    found = [r["id"] for r in sdk.tortoise_fts_query("100",
+                                                    entity_type="source")]
+    assert "session:sess-digits-10000" in found, (
+        f"the digit-only session is not findable by a number it used: {row!r} -> {found}")
+
+    # ⛔ NEGATIVE CONTROL — widening for digits must NOT reach "anything is a
+    # token". A class that admitted punctuation or a bare underscore run would
+    # give these shapes a "lexicon", which is the same defect swapped end for
+    # end (and would index `"..."` for every punctuation-only session).
+    for wordless in ("", "   ", "...", "?!", "___", "---", ": ; ,",
+                     "user:\nassistant:", "user: ...\nassistant: ---"):
+        assert _session_source_metadata(wordless) == ("", []), (
+            f"a transcript with no token of its own ({wordless!r}) derived a "
+            "descriptor — the presence test was widened past 'tokens present'")
+
+
 def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk, tmp_path):
     """``summary`` and ``_searchText`` are two views of ONE derivation.
 
