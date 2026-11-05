@@ -58,7 +58,114 @@ def _client_for_env(monkeypatch, tmp_path, **env):
     return TestClient(selfhost.app)
 
 
-def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = True):
+#: How many times ``_wait_for_probe`` may RE-ARM a provably STRANDED probe
+#: slot. Bounded on purpose: the remedy must never turn a genuinely wedged
+#: product into a green test, so a slot that strands on every cycle still
+#: exhausts the wait and fails — pinned by
+#: ``test_the_strand_remedy_is_bounded``.
+_PROBE_STRAND_REARMS = 2
+
+
+def _stranded_slot_error(selfhost_mod) -> str | None:
+    """The coordinator's last verdict, IF it proves the slot was STRANDED.
+
+    Returns the error string only for the never-STARTED acquisition spelling
+    (``monitoring._PROBE_ACQUISITION_QUEUED_MSG``), else ``None``.
+
+    ⚠️ ``did not start`` is NOT ``was slow``. ``monitoring._acquire_on_probe_worker``
+    sets its ``started`` event as the WORKER picks the submission up, so this
+    spelling is emitted only when the item sat in the queue for its whole
+    budget — no measurement of the DB was attempted at all. That is what makes
+    the verdict safe to discard: a MEASURED failure (a dead DB, a black-holed
+    socket, an acquisition that raised) carries a different spelling, is never
+    re-armed past, and still fails the test.
+    """
+    from tortoise import monitoring as mon
+
+    error = selfhost_mod._HEALTH_PROBE.snapshot().get("error") or ""
+    if error.startswith(mon._PROBE_ACQUISITION_QUEUED_MSG):
+        return str(error)
+    return None
+
+
+def _rearm_stranded_probe(selfhost_mod) -> None:
+    """Give the next refresh a FREE slot after a provably stranded one.
+
+    ``monitoring._reset_probe_worker()`` is the documented escape hatch for
+    exactly this state ("when a probe thread is presumed wedged past any
+    realistic socket timeout"), and it is already what ``_client_for_env``
+    applies at FILE scope (#3396). Re-arming at TEST scope covers the strand a
+    test's own daemon creates mid-run, which no pre-test reset can reach.
+
+    The abandoned thread is not killed — it cannot be (CPython #87185) — it is
+    left behind a fresh slot, which is the whole point: the strand stops
+    costing the NEXT probe its measurement.
+    """
+    import tortoise.monitoring as mon
+
+    mon._reset_probe_worker()
+    selfhost_mod._HEALTH_PROBE.reset()
+
+
+#: How long either health wait may block before failing. NOT a product bound —
+#: it is the harness tolerance for a COLD embedded FalkorDB on a LOADED runner.
+#:
+#: The old 40 s was derived when the worst case was thought to be "setup 20 s +
+#: refresh 10 s". The real worst case is longer, because an overrun ABANDONS its
+#: worker rather than ending it (see ``_rearm_stranded_probe``), so recovery can
+#: cost a whole extra cold start: measured 2026-11-05 on a box at load 21.7,
+#: ``tests/test_selfhost.py`` took 81 s wall and the 40 s wait expired, while the
+#: SAME test passed in 6.6 s seconds later. CI job 126950495861 is the same
+#: shape at 4609 tests of concurrent load.
+#:
+#: It weakens nothing: the wait still returns only on a MEASURED ``ok=True``
+#: verdict (or, for readiness, a real 200), and a product that never becomes
+#: healthy still fails — it just fails after a budget a loaded box can meet.
+_HEALTH_VERDICT_WAIT_S = 90.0
+
+
+def _wait_for_ready(tc, timeout: float = _HEALTH_VERDICT_WAIT_S):
+    """Block until ``/health/ready`` answers 200, or fail naming its own 503.
+
+    The FIRST readiness read on a COLD daemon pays the embedded FalkorDB cold
+    start INSIDE the endpoint's own DB-leg allowance
+    (``selfhost._ready_probe_inner_bound_s`` = 5.5 s at the shipped defaults).
+    Measured 0.305 s on an idle box — ~18x headroom, which a loaded CI runner
+    does not leave: CI job 126950495861 answered this read 503 while the same
+    daemon answered 200 in 0.3 s both locally and at ``origin/main``. Asserting
+    200 on ONE cold attempt therefore asserts an environment property, not a
+    product one, so the cold start is established here as the PRECONDITION.
+
+    ⚠️ What this deliberately does NOT weaken: the endpoint's BOUNDED answer is
+    pinned precisely in ``tests/test_selfhost_health_probe_executor.py`` — the
+    ``_READY_PROBE_TIMEOUT_S``/``_ready_probe_inner_bound_s`` derivation, the
+    parked-worker false-503 pins, and
+    ``test_readiness_fan_in_does_not_produce_a_false_503`` — which is where a
+    boundedness regression belongs. THIS test's subject is "a healthy embedded
+    DB reports ready", and it still fails on a PERSISTENT not-ready (see
+    ``test_the_readiness_wait_still_fails_when_the_daemon_never_gets_ready``).
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    last = None
+    while True:
+        last = tc.get("/health/ready")
+        if last.status_code == 200:
+            return last
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"/health/ready never answered 200 within {timeout}s — last "
+                f"answer {last.status_code} {last.text!r} (a healthy embedded "
+                "DB must report ready; a bounded not-ready answer is the "
+                "endpoint's own contract, pinned in "
+                "tests/test_selfhost_health_probe_executor.py)"
+            )
+        time.sleep(0.1)
+
+
+def _wait_for_probe(selfhost_mod, timeout: float = _HEALTH_VERDICT_WAIT_S,
+                   *, require_ok: bool = True):
     """Block until the background liveness refresher's verdict has SETTLED.
 
     #2988: ``/health`` reads an in-memory snapshot, so a fresh process
@@ -77,12 +184,25 @@ def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = T
     ``require_ok=False`` when the test DELIBERATELY drives a failing probe and
     only needs the verdict to land.
 
+    AT TEST SCOPE (#3396): a strand this test's OWN daemon creates is not
+    reachable by ``_client_for_env``'s pre-test reset. A probe phase that
+    overruns its enforced deadline is ABANDONED, never cancelled (CPython
+    #87185), and the abandoned thread keeps the single process-lifetime slot
+    until its own call returns (``monitoring`` guarantee (c)) — while it does,
+    EVERY later acquisition queues and the daemon reads
+    ``probe sdk acquisition did not start within 2.0s`` on every refresh. CI
+    job 126950495861 measured exactly that for the full 40 s. A verdict with
+    that spelling carries NO measurement of the DB (the acquisition phase sets
+    its ``started`` event as the worker picks the submission up), so it is the
+    one verdict we may discard: see ``_stranded_slot_error``.
+
     On expiry the failure names the probe's OWN state instead of surfacing as a
     bare ``assert 'degraded' == 'ok'``, which misreads as a product divergence.
     """
     import time
 
     deadline = time.monotonic() + timeout
+    rearms = 0
     while True:
         info = selfhost_mod._HEALTH_PROBE.info()
         if info.get("result_age_s") is not None:
@@ -90,6 +210,13 @@ def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = T
                 return
             if selfhost_mod._HEALTH_PROBE.snapshot().get("ok") is True:
                 return
+            # A provably STRANDED slot: re-arm so the next cycle MEASURES
+            # instead of queueing. Bounded — a persistent wedge still fails.
+            if (rearms < _PROBE_STRAND_REARMS
+                    and _stranded_slot_error(selfhost_mod) is not None):
+                rearms += 1
+                _rearm_stranded_probe(selfhost_mod)
+                info = selfhost_mod._HEALTH_PROBE.info()
         if time.monotonic() >= deadline:
             if not require_ok:
                 raise AssertionError(
@@ -99,7 +226,8 @@ def _wait_for_probe(selfhost_mod, timeout: float = 40.0, *, require_ok: bool = T
             raise AssertionError(
                 "the selfhost daemon never became healthy within "
                 f"{timeout}s — snapshot "
-                f"{selfhost_mod._HEALTH_PROBE.snapshot()!r}, probe info {info!r}"
+                f"{selfhost_mod._HEALTH_PROBE.snapshot()!r}, probe info {info!r}, "
+                f"strand re-arms used {rearms}/{_PROBE_STRAND_REARMS}"
             )
         time.sleep(0.02)
 
@@ -417,7 +545,10 @@ class TestHealth:
     def test_health_ready_embedded(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
         with tc:
-            r = tc.get("/health/ready")
+            # Cold start is this test's PRECONDITION, not its subject — see
+            # ``_wait_for_ready`` (CI job 126950495861 read 503 here under load
+            # while the same daemon answered 200 in 0.3 s locally and on main).
+            r = _wait_for_ready(tc)
             assert r.status_code == 200
             assert r.json()["status"] == "ready"
 
@@ -459,6 +590,134 @@ class TestHealth:
                 _wait_for_probe(selfhost)
         finally:
             release.set()
+
+    def test_a_strand_created_by_this_daemons_own_probe_is_re_armed(
+            self, monkeypatch, tmp_path):
+        """#3396 at TEST scope: a strand created AFTER the client is built.
+
+        ``_client_for_env`` reset cannot reach this one: the slot is occupied by
+        the time this daemon's refresher first probes, so every acquisition
+        queues and the daemon reports ``probe sdk acquisition did not start
+        within 2.0s`` with no measurement of the DB at all. The wait must
+        RE-ARM the stranded slot (fresh worker) instead of waiting out the
+        deadline, and then assert on the real verdict.
+
+        Deterministic: the slot is wedged here, not inherited from whatever an
+        earlier file left behind.
+        """
+        import threading
+
+        import tortoise.monitoring as mon
+        from tortoise import selfhost
+
+        # A short refresh period keeps the recovery inside the test's own wait;
+        # it does not affect what is being asserted (a free slot is measured).
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k",
+                             TORTOISE_HEALTH_PROBE_INTERVAL="0.5")
+
+        started, release = threading.Event(), threading.Event()
+
+        def _block():
+            started.set()
+            release.wait(60)
+
+        occupied = mon._probe_worker()
+        occupied.submit(_block)
+        assert started.wait(30), "the shared probe worker never ran the blocker"
+        try:
+            with tc:
+                # 15 s: pre-fix this exhausts (strand never clears) and FAILS;
+                # with the re-arm the verdict lands in ~2-4 s.
+                _wait_for_probe(selfhost, timeout=15.0)
+                body = tc.get("/health").json()
+                assert body["status"] == "ok"
+                assert body["db"]["ok"] is True
+        finally:
+            release.set()
+
+    def test_the_strand_remedy_is_bounded(self, monkeypatch, tmp_path):
+        """The re-arm must never make a PERSISTENT strand look healthy.
+
+        Simulates a slot that strands on EVERY cycle — the probe itself reports
+        the never-STARTED spelling and never a measurement — so the wait must
+        give up after ``_PROBE_STRAND_REARMS`` re-arms and FAIL. What this pins
+        is that re-arming is BOUNDED: it is a remedy for a transient strand,
+        never a retry loop that could turn a wedged product green.
+        """
+        import sys
+
+        import tortoise.monitoring as mon
+        from tortoise import selfhost
+
+        def _always_queued(sdk=None, setup_timeout=None, *, acquire=None):
+            return {"ok": False, "observed": False, "latency_ms": 0.0,
+                    "error": f"{mon._PROBE_ACQUISITION_QUEUED_MSG}2.0s"}
+
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k",
+                             TORTOISE_HEALTH_PROBE_INTERVAL="0.5")
+        monkeypatch.setattr(mon, "probe_db", _always_queued)
+        calls = {"rearms": 0}
+        this_module = sys.modules[__name__]
+
+        def _counting_rearm(selfhost_mod):
+            calls["rearms"] += 1
+            selfhost_mod._HEALTH_PROBE.reset()
+
+        monkeypatch.setattr(this_module, "_rearm_stranded_probe", _counting_rearm)
+        with tc, pytest.raises(AssertionError) as excinfo:
+            _wait_for_probe(selfhost, timeout=3.0)
+        assert calls["rearms"] == _PROBE_STRAND_REARMS, (
+            "the strand remedy is not bounded — it re-armed "
+            f"{calls['rearms']} times; a persistent strand must fail the test")
+        assert "strand re-arms used" in str(excinfo.value), (
+            f"the failure must name the re-arm budget: {excinfo.value}")
+
+    def test_the_readiness_wait_waits_out_a_transient_not_ready(
+            self, monkeypatch, tmp_path):
+        """A transient cold-start 503 must be waited out, not asserted on.
+
+        Non-vacuous by construction: the first read really does answer 503 (the
+        leg is made to time out once) — a single-read assertion, which is what
+        the test did before, would fail on exactly this response.
+        """
+        from tortoise import selfhost
+
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        real = selfhost._run_bounded
+        state = {"calls": 0}
+
+        def _flaky(fn, allowance_s):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise TimeoutError("probe db leg overran its allowance")
+            return real(fn, allowance_s)
+
+        monkeypatch.setattr(selfhost, "_run_bounded", _flaky)
+        with tc:
+            first = tc.get("/health/ready")
+            assert first.status_code == 503, (
+                "the transient fault did not take effect — this test cannot "
+                f"prove the wait retries: {first.status_code} {first.text!r}")
+            r = _wait_for_ready(tc, timeout=15.0)
+            assert r.status_code == 200
+            assert r.json()["status"] == "ready"
+
+    def test_the_readiness_wait_still_fails_when_the_daemon_never_gets_ready(
+            self, monkeypatch, tmp_path):
+        """A PERSISTENT not-ready must still fail, naming the endpoint's 503."""
+        from tortoise import selfhost
+
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+
+        def _always_overruns(fn, allowance_s):
+            raise TimeoutError("probe db leg overran its allowance")
+
+        monkeypatch.setattr(selfhost, "_run_bounded", _always_overruns)
+        with tc, pytest.raises(AssertionError) as excinfo:
+            _wait_for_ready(tc, timeout=0.5)
+        message = str(excinfo.value)
+        assert "never answered 200" in message and "503" in message, (
+            f"the failure must name the endpoint's own answer: {message}")
 
 
 class TestMCPHandshake:
