@@ -2649,7 +2649,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert _SEAM_SYMBOL in cause, cause
     assert "no receipt carries stats['step_witness']" in cause, cause
     assert "INSTRUMENT gap" in cause, cause
-    assert "tortoise/sdk.py:12197" not in cause, cause
+    assert "tortoise/sdk.py:12234" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _SEAM_SYMBOL in unobserved["S2.3"], unobserved["S2.3"]
     # The cite resolves to the PRODUCTION fold — the seam is called from INSIDE
@@ -3753,10 +3753,10 @@ _BUNDLE_CITE = re.compile(
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12401", "sdk.py:12682", "sdk.py:2367", "edges.py:467",
+        "sdk.py:12438", "sdk.py:12719", "sdk.py:2367", "edges.py:467",
         "edges.py:494-503", "edges.py:2168-2192",
         "tortoise/extractor_v2.py:8278-8285", "tortoise/extractor_v2.py:8288-8292"),
-    r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
+    r"SUPERSEDED and its file is gone": ("sdk.py:12233",),
 }
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
@@ -3996,7 +3996,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `00_index.md`'s fold cite back to `12401` reds it). The RED COUNT is a
     property of the base, not of the rule set, so it is stamped with the commit it
     was measured at rather than asserted about `main`: 17 of the 44 cites red
-    across three rules at `0c7062af1` (`sdk.py:12679` for the meta fold, `12960`
+    across three rules at `0c7062af1` (`sdk.py:12716` for the meta fold, `12960`
     for the call that writes the references edge, `11851` for the entry point — a
     supersession comment, an ORDER comment and a counters line instead of the
     symbols), and 26 of the 44 red at `f86ae965b` (`52e2be157^`), the base #9850
@@ -4649,7 +4649,7 @@ _ENTRY_POINT_DOCS = (
 def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
     """The `:N` continuation naming the `_extract_session_v2` CALL is checked.
 
-    `_BUNDLE_CITE` only matches a cite that NAMES a file, so `(sdk.py:14297;
+    `_BUNDLE_CITE` only matches a cite that NAMES a file, so `(sdk.py:14334;
     called at :13334)` had exactly one checked number and one unverifiable one —
     and the unchecked half went stale TWICE on this branch, once at the commit
     that re-derived it (it was already `:13299` there). Re-staling it to a wrong
