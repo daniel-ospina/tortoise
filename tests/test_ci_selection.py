@@ -9597,6 +9597,197 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
         "wheel either way")
 
 
+def test_the_test_job_carries_no_unbounded_cache_post_step():
+    """#11063/#5219: the `test` job must carry NO unbounded cache post step.
+
+    `actions/cache@v4` saves in a POST step. That post step has no
+    `timeout-minutes` of its own and (#10182) it is charged against the job's
+    `timeout-minutes` like any other — an UNBOUNDED term, which headroom cannot
+    amortize. The defect this pins:
+
+    MEASURED (run 42000057137, job `test (d)` 127165076497, runner
+    `pi-runner-vm-6`, 90 m cap): the uv+pip restore MISSED
+    (`Cache not found for input keys: uv-pip-Linux-8755d72f…, uv-pip-Linux-`)
+    where other shards of the same run HIT it in 2-6 s, and the post step then
+    began uploading `Sent 0 of 3882423064` — a 3.88 GB archive, 5.9x the
+    662,393,744 B entry — at a sustained 0.89 MB/s (3,019,888,880 B in 3412 s).
+    Every WORK step was green (suite 10:28:58 → 10:45:07, orphan gate
+    10:45:54) and the job was `cancelled` at 11:51:54, 57 m 02 s into that post
+    step. `python-ci-gate` reads `cancelled` as RED by design (#5219), so a
+    REQUIRED check was WITHHELD by a cache upload on a passing shard.
+
+    TWO keys, TWO remedies, and the difference is which jobs write them:
+
+    * `uv-pip-<os>-<hash uv.lock>` is written by THIS JOB ALONE (asserted
+      below), so dropping its save would empty the cache for all nine shards and
+      re-add the cold torch download (140 wheels, ~3.2 GB) that #7612 exists to
+      remove. It is KEPT and BOUNDED: an explicit `actions/cache/save@v4` with
+      `timeout-minutes`, `continue-on-error` and a `cache-hit` gate.
+    * `hf-embedding-cache-v2-<os>` is written by four sibling jobs, so this job
+      takes the #10327 shape — restore-only, no save at all. (On this job the
+      same post step measured 8 m 57 s to move 78,130,925 B, 0.16 MB/s — 5.5x
+      the 1 m 38 s the carve-out job measured, which is why #10327 could leave
+      it there and this job cannot.)
+
+    Non-vacuous in both directions: the pre-fix bare `actions/cache@v4` steps
+    red the implicit-post-save assertion, and DELETING the bounded save reds the
+    presence assertion, so neither shape passes.
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    steps = job.get("steps", [])
+
+    def _path_of(step: dict) -> str:
+        return str((step.get("with") or {}).get("path") or "")
+
+    def _key_of(step: dict) -> str:
+        return str((step.get("with") or {}).get("key") or "")
+
+    implicit = [(s.get("name"), s.get("uses")) for s in steps
+                if str(s.get("uses") or "").startswith("actions/cache@")]
+    assert not implicit, (
+        f"the `test` job still carries implicit post-step cache SAVE(s) {implicit}. "
+        "That post step is UNBOUNDED and is charged against the job's "
+        "`timeout-minutes` (#10182), so the cap cannot amortize it: measured "
+        "57 m 02 s of upload against a 3.88 GB archive, ending `cancelled` and "
+        "withholding a REQUIRED check on a green shard (#11063). Use "
+        "`actions/cache/restore@` plus either a BOUNDED `actions/cache/save@` or "
+        "no save at all (when another job writes the key).")
+
+    uvpip = [s for s in steps if "~/.cache/uv" in _path_of(s)]
+    assert uvpip, (
+        "the `test` job no longer touches ~/.cache/uv at all — every shard would "
+        "then resolve and download its deps cold, which is what #7612 removed")
+    restores = [s for s in uvpip if s.get("uses") == "actions/cache/restore@v4"]
+    assert len(restores) == 1, (
+        "the `test` job's uv+pip cache step must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(restores)} of {len(uvpip)})")
+    restore = restores[0]
+    assert restore.get("continue-on-error") is True, (
+        "the uv+pip restore must be `continue-on-error: true` — a cache-SERVICE "
+        "error (transport/503) must never red the leg; a miss is the fail-open "
+        "case and install-cpu-torch downloads the pinned CPU wheel either way")
+    assert restore.get("id"), (
+        "the uv+pip restore needs an `id:` — the save step's `if:` reads its "
+        "`cache-hit` output to avoid re-uploading an entry already there")
+
+    saves = [s for s in uvpip if s.get("uses") == "actions/cache/save@v4"]
+    assert len(saves) == 1, (
+        "the `test` job must keep exactly ONE writer for "
+        f"`uv-pip-<os>-<hash uv.lock>` (found {len(saves)}) — it is the only job "
+        "that writes that key, so dropping it empties the cache for all nine "
+        "shards")
+    save = saves[0]
+    bound = save.get("timeout-minutes")
+    assert isinstance(bound, int) and bound > 0, (
+        f"the uv+pip save must carry a positive integer `timeout-minutes` (got "
+        f"{bound!r}) — an unbounded save is the defect (#11063): it killed a "
+        "green shard at the job cap")
+    assert save.get("continue-on-error") is True, (
+        "the bounded save must be `continue-on-error: true`: a save aborted at "
+        "its bound is a MISS, and a missing cache must never red a shard whose "
+        "suite passed (#5219)")
+    assert f"steps.{restore['id']}.outputs.cache-hit" in str(save.get("if") or ""), (
+        "the bounded save must be gated on the restore's `cache-hit` output — an "
+        "unconditional save re-uploads an entry the exact primary-key hit already "
+        "guarantees is there, and the service refuses that write anyway")
+    # Placement: as a POST step this save ran LAST. As a normal step it must also
+    # run last, or a bound that elapses here kills the job before the pytest-log
+    # artifact, the fail-closed skip-fail guard and the FalkorDB teardown run.
+    assert steps[-1] is save, (
+        "the bounded save must be the LAST step of the `test` job (it is at "
+        f"index {steps.index(save)} of {len(steps) - 1}): it may burn its whole "
+        "bound, and a bound elapsing must not pre-empt the pytest-log upload, the "
+        "skip-fail guard or the FalkorDB teardown (#11063/#6673)")
+
+    # The HF key takes the OTHER remedy: restore-only, because other jobs write it.
+    hf_here = [s for s in steps if "~/.cache/huggingface" in _path_of(s)]
+    assert hf_here, (
+        "the `test` job no longer restores the HF embedding cache — the dense "
+        "leg would download from huggingface.co on every run")
+    hf_saves = [s.get("uses") for s in hf_here
+                if str(s.get("uses") or "").endswith("/save@v4")
+                or str(s.get("uses") or "").startswith("actions/cache@")]
+    assert not hf_saves, (
+        f"the HF cache is now SAVED by the `test` job again {hf_saves}. Its post "
+        "step measured 8 m 57 s for 78,130,925 B (0.16 MB/s) on run 42000057137 "
+        "— 5.5x what the carve-out job measured for the same cache — and four "
+        "sibling jobs write `hf-embedding-cache-v2-<os>` on every run, so this "
+        "job's save buys nothing (#11063/#10327)")
+    hf_restores = [s for s in hf_here if s.get("uses") == "actions/cache/restore@v4"]
+    assert len(hf_restores) == 1 and hf_restores[0].get("continue-on-error") is True, (
+        "the HF restore must be exactly one `actions/cache/restore@v4` with "
+        "`continue-on-error: true`")
+    hf_key = _key_of(hf_restores[0])
+    hf_writers = [jid for jid, jd in wf["jobs"].items() if jid != "test"
+                  for s in (jd.get("steps") or [])
+                  if hf_key.split("${{")[0] in _key_of(s)
+                  and str(s.get("uses") or "").startswith("actions/cache@")]
+    assert hf_writers, (
+        "no other job writes the HF key any more — restore-only here would then "
+        "empty it and re-download the embedder from huggingface.co every run. "
+        "Re-derive this remedy rather than leaving a stale premise.")
+
+    # The premise the "keep a writer" decision rests on: `uv-pip-` has no other
+    # writer. If another job ever writes it, the reasoning above changes (the save
+    # could then be dropped outright, the #10327 shape) — assert, don't rot.
+    other_writers = [(jid, s.get("name"))
+                     for jid, jd in wf["jobs"].items() if jid != "test"
+                     for s in (jd.get("steps") or [])
+                     if "uv-pip-" in _key_of(s)]
+    assert not other_writers, (
+        f"another job now writes the uv+pip key as well {other_writers} — the "
+        "`test` job is no longer its only writer, so its save could be dropped "
+        "instead of bounded (#10327's shape). Re-derive the choice rather than "
+        "leaving this pin asserting a stale premise.")
+
+    # Arm 2 of `docs/ops/ci-wall-clock.md` §2: the cap must clear SUM x 1.5, and
+    # every term is read from the file (or parsed from it) rather than restated.
+    from tools.ci_selection import fast_matrix_include, push_legs
+    fast = fast_matrix_include(push_legs(load_manifest())["shards"])["include"]
+    worst_watchdog = max(int(e["watchdog_minutes"]) for e in fast)
+    pre_phase = _test_job_pre_phase_watchdog_minutes(steps)
+    embedders = [s for s in steps
+                 if str(s.get("name") or "").startswith("Embedding model REQUIRED")]
+    assert len(embedders) == 1, (
+        f"expected one embedder-provision step in the `test` job, found "
+        f"{len(embedders)} — the SUM below would then be wrong")
+    embedder = embedders[0].get("timeout-minutes")
+    assert isinstance(embedder, int) and embedder > 0, (
+        "the embedder-provision step must keep its own `timeout-minutes` — it is "
+        "a term in the job's SUM")
+    setup = 3      # measured `Set up job` 10:21:30 -> 10:24:32 on run 42000057137
+    lastfailed = 1  # measured 23 s (10:45:07 -> 10:45:30), same run
+    total = pre_phase + worst_watchdog + embedder + setup + bound + lastfailed
+    cap = job["timeout-minutes"]
+    assert total * 3 / 2 <= cap, (
+        f"the `test` job's SUM ({pre_phase}m pre-phase + {worst_watchdog}m worst "
+        f"shard watchdog + {embedder}m embedder + {setup}m setup + {bound}m "
+        f"bounded save + {lastfailed}m last-failed save = {total}m) x 1.5 = "
+        f"{(total * 3 / 2):g}m no longer clears its {cap}m cap. Arm 2 "
+        "(docs/ops/ci-wall-clock.md §2) requires the x1.5 margin on the SUM, not "
+        "the median, and a save killed at the cap reds a REQUIRED check (#5219). "
+        "The bound is the term to shrink: raising the cap instead re-opens "
+        "#3239's stale-head exposure.")
+
+
+def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
+    """The last-failed pre-phase's OWN watchdog, parsed from the run step.
+
+    It is a `timeout -s INT -k 10 <N>m` inside the pytest step (#6142). Parsed
+    rather than hardcoded: if it moves, the arm-2 SUM in the pin above must move
+    with it, and a restated literal is how a constant goes stale.
+    """
+    pattern = re.compile(r"timeout -s INT -k 10 (\d+)m ")
+    found = sorted({int(m) for s in steps
+                    for m in pattern.findall(str(s.get("run") or ""))})
+    assert len(found) >= 1, (
+        "could not parse any `timeout -s INT -k 10 <N>m` watchdog from the "
+        "`test` job's run steps — the pre-phase term of the arm-2 SUM is "
+        "unreadable, so this pin cannot bound anything")
+    return found[0]
+
+
 def _carve_matrix() -> dict:
     """W37: the carve-out matrix the workflow ACTUALLY expands.
 
