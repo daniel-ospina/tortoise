@@ -7916,16 +7916,30 @@ def _durations_rows_whose_chain_disagrees_with_its_citation(text: str):
 # to keep true, and `test_the_zero_case_guard_is_not_vacuous` supplies the
 # discrimination the clean map cannot.
 #
-# Nothing else caught it: the citation guard above only judges rows that NAME the
-# instrument (these do not), and the chain guard only judges rows that carry a
-# chain. This is the arithmetic invariant underneath both — a sentence cannot
-# report zero cases and more than zero passing — scoped to ONE sentence so the
-# map's legitimate history (`"33 passed" … (31 tests / 2.77 s BEFORE this
-# review)`, and `at 35 tests on an [earlier] idle host`) is not judged. A
-# same-sentence `0 … N>0` needs no history exemption: no correct note can say it.
+# One guard already covers PART of this, and saying otherwise invites its deletion:
+# `test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests` (`:7843`,
+# added by `ac129dec7`) flags ANY row whose note claims `0 tests` for a key that
+# resolves to a file defining `def test_` at any indent — on `02133e21b` it flags
+# all FOUR offenders, including both quoted above, so this class was never
+# unguarded. What it does not reach, and this pin adds: the `0 cases` spelling
+# (`_ZERO_CASE_COUNT_RE` matches only `0 tests`), a key that resolves to no
+# readable file under `TESTS_DIR` (that guard short-circuits on `defined == 0`),
+# and a zero that is not the phrase at all but any `0 <noun>` in the same
+# sentence as a passing reading. This pin is therefore NARROWER (one sentence,
+# so the map's legitimate history — `"33 passed" … (31 tests / 2.77 s BEFORE this
+# review)`, and `at 35 tests on an [earlier] idle host` — is not judged) and
+# WIDER in spelling. Keep both: neither subsumes the other. A same-sentence
+# `0 … N>0` needs no history exemption: no correct note can say it.
 _ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
 _PASSED_READING_RE = re.compile(r'"(\d+)\s+passed')
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;:])\s+")
+# ⛔ `:` is deliberately NOT a boundary (#10726 review round 2, P2).
+# `(embedded carve-out lane, **0 tests**): "8 passed in 5.82s"` splits AFTER the
+# zero claim, so with `:` in the class the two halves of one self-contradiction
+# land in different "sentences" and the row is silently skipped — the shape the
+# comment above quotes as an offender was the one shape the guard could not see.
+# Measured: at `02133e21b` this finds `test_5509` only; without `:`, both it and
+# `test_8864` are found, and the head map is still `[]`.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+")
 
 
 def _durations_rows_stating_zero_cases_beside_a_passing_reading(text: str):
@@ -7972,6 +7986,26 @@ def test_the_zero_case_guard_is_not_vacuous():
         "surfaces: []\n")
     offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(text)
     assert [k for k, _, _ in offenders] == ["test_contradiction.py"], offenders
+
+
+def test_the_zero_case_guard_sees_the_paren_then_colon_shape():
+    """The shape that got away with a `:` sentence boundary (#10726 review round 2).
+
+    Replayed against the revision its own comment names: at `02133e21b` the
+    offenders were `test_5509` (`0 tests, "16 passed…"`) and `test_8864`
+    (`(embedded carve-out lane, 0 tests): "8 passed in 5.82s"`). With `:` in
+    `_SENTENCE_SPLIT_RE` the second splits at the `):` and is skipped, so the
+    guard caught ONE of the two historical offenders. This arm fails if that
+    class comes back.
+    """
+    text = (
+        "durations:\n"
+        "  test_paren_colon.py: 1.0  # measured: Local reading on this host "
+        "(embedded carve-out lane, 0 tests): \"8 passed in 5.82s\" — the session "
+        "total.\n"
+        "surfaces: []\n")
+    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(text)
+    assert [k for k, _, _ in offenders] == ["test_paren_colon.py"], offenders
 
 
 def test_no_durations_row_staleness_chain_ends_on_a_count_it_denies():
