@@ -172,20 +172,14 @@ deliberately absent) are a rounding error beside the shared archive it restores 
 
 **Re-derived by the arm-2 rule from THIS run, not from the estimate this note used to carry.** It
 pre-computed `20 → 40` from an assumed ~9 m save; the measured save is **15.9 m (953 s) and was
-still in flight at the kill** — a CENSORED lower bound, since GitHub reported 79.8% sent — so the
-input, not the rule, was the thing that was wrong: **12 m in-step watchdog + ~1 m setup/provision +
-15.9 m save = 28.9 m × 1.5 = 43.4 → 50**. The censoring makes even that an underestimate, and the
-second reading agrees: a completed 3.6 GB save step (tar + transfer) is ~20 m — the transfer alone
-is 977 s at the observed ~3.7 MB/s, and the step also tars — which puts the SUM at ~33 m and
-33 × 1.5 = 49.5. The `~1 m setup` constant is understated too (this run's setup was 131 s:
-07:40:25 → 07:42:36), making the SUM ~30.1 m and 45.2 after the 1.5.
-
-**50 is therefore not the literal output of every reading, and that is deliberate.** Apply BOTH
-corrections at once and the SUM is 34.2 m; the rule's `× 1.5, round up` then gives 51.3 → 60. The
-rule exists to make the cap CLEAR the SUM, and 50 clears 34.2 m by 15.8 m; going to 60 would buy
-headroom nothing needs while widening the exposure the cap IS (§4's stale-head term). Read 50 as
-the exposure-bounded choice that satisfies the rule's purpose, not as 60 rounded down. Arm 2 rather
-than arm 1 for the reason it always
+still in flight at the kill** — a CENSORED lower bound, since GitHub reported 79.8% sent. Applied
+the same way every other row in this document is, with the completed save rather than the censored
+one: **12 m in-step watchdog + ~1 m setup/provision + ~20 m completed save = ~33 m; × 1.5 = 49.5 →
+50**. The ~20 m is the completed SAVE STEP (tar + transfer) — the transfer alone is 977 s at the
+~3.7 MB/s the log reports, and the step also tars — not the transfer alone. The censored 15.9 m is
+the floor under that figure, and it alone would give 43.4 → 50 as well, so the two brackets agree
+on 50. `× 1.5, round up to the next 10` on either reading is what §5's rule says; nothing here
+overrides it. Arm 2 rather than arm 1 for the reason it always
 was: the save this row pays on a key change is the SHARED archive, not its own downloads — so
 `2 × 15.43 = 30` is not the number.
 
@@ -195,15 +189,24 @@ different runner on a different day, so it does not by itself falsify it — but
 3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, `test`'s
 53 m — which clears its 90 m by 30 m either way — and the `test-carve-out` /
 `test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below) are
-optimistic by up to ~7 m if the measured figure is the normal one. Re-deriving them is owed and is
+optimistic by ~7 m against the censored 15.9 m and by ~11 m against the completed ~20 m — so the
+re-derivation owed below should use the ~20 m figure (at which `test-slow` is ~11 m PAST its cap,
+not merely level with it). Re-deriving them is owed and is
 deliberately NOT done here: nothing has measured any of the four being cancelled, and this
 document's rule is to move a cap from a measurement, not from a comparison of two samples.
 
 ⚠ It is not a free move: **the cap IS the stale-head exposure** (#3239), and 50 m is the most this
 job may hold a per-PR concurrency slot when it genuinely wedges (p50 1.62 m, p95 14.61 m).
-Restore-only — the arm `test-carve-out` took in #10327 — is NOT available here for the reason it
-was available there: that job's cap is pinned to 3× its measured pytest step, so it can never
-hold the SUM; this one can, and the owner of the trade-off is the document this note lives in.
+Restore-only — the arm `test-carve-out` took in #10327 — is NOT taken here, and that job's recorded
+rationale has three parts, two of which do not carry over. **It holds:** its cap is pinned to 3×
+its measured pytest step, so it could never hold the SUM, while this one can. **It does not:** the
+`UNBOUNDED save has no timeout` objection is answered by a cap that now clears the COMPLETED save
+rather than the censored one; and `nothing is lost by not saving, the key is written elsewhere
+unconditionally` WOULD apply (same key, `python-ci.yml:4251`) — but only because of the third
+reason. **What decides it here:** this job is the FASTEST participant (p50 1.62 m), so it reaches
+the post step first and is the one that warms the shared key for the long legs that start earlier
+and are tighter (`test-slow` sits AT its cap). Standing it down would move its ~20 m onto those
+legs — that is the amortization `test-carve-out`, which starts late and is capped, cannot offer.
 
 ⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
 itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job

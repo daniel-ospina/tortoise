@@ -4213,15 +4213,15 @@ jobs:
     #   = 28.9m  ->  x1.5 = 43.4  ->  50
     #
     # The 15.9m is 953 s (07:44:53 -> 08:00:46) and it is a CENSORED lower bound:
-    # killed at 79.8%, so the save never finished. A completed SAVE STEP (tar +
-    # transfer) on this 3.6 GB archive is ~20m — the transfer alone is 977 s at
-    # the observed ~3.7 MB/s, but the step also tars — which puts the SUM at
-    # ~33m. Apply BOTH corrections at once and the SUM is 34.2m: 34.2 x 1.5 = 51.3,
-    # which the rule's rounding would push to 60, so 50 is NOT the literal output
-    # of every reading. It is the choice the rule exists to serve: the cap must
-    # CLEAR the SUM, and 50 clears 34.2m by 15.8m, while a larger cap buys nothing
-    # and costs exposure (#3239). The document's pre-computed `20 -> 40` came from
-    # an ESTIMATED 9m save, so it is the INPUT that moved, not the rule.
+    # killed at 79.8%, so the save never finished. Applied the way every other row
+    # in docs/ops/ci-wall-clock.md is, with the COMPLETED save rather than the
+    # censored one: a 3.6 GB save STEP (tar + transfer; the transfer alone is 977 s
+    # at the ~3.7 MB/s the log reports) is ~20m, so 12 + ~1 + ~20 = ~33m and
+    # 33 x 1.5 = 49.5 -> 50. The censored 15.9m is the floor under that and alone
+    # gives 28.9 x 1.5 = 43.4 -> 50 as well, so both brackets agree. That is
+    # `x 1.5, round up to the next 10` — the document's rule, not an override.
+    # The document's pre-computed `20 -> 40` came from an ESTIMATED 9m save, so it
+    # is the INPUT that moved, not the rule.
     #
     # Raising the cap is the right arm HERE — and restore-only (#10327) is the
     # right arm for `test-carve-out` — because this cap has room to hold the SUM
