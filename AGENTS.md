@@ -506,9 +506,7 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   be confirmed. That is the `git push` path, so a lane can publish its branch (which is what every
   later step needs a remote ref for) — subject to the branch-ruleset caveat in the `push-refused`
   bullet below, which is the one sub-case of `push-refused` where the branch *namespace* — not the
-  credential — is what the remote rejects. (The other `push-refused` causes — no network, a transport
-  failure, or a push that exited 0 without reporting a ref update — are also not credential verdicts:
-  re-run, or read the detail line, before concluding "read-only".) Read the `cleanup`
+  credential — is what the remote rejects. Read the `cleanup`
   clause rather than assuming the remote is clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked
   for), or `deletion UNCONFIRMED` (the delete or its read-back failed — the credential still wrote;
   check the remote).
@@ -517,11 +515,16 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   `--json`. The `GH-WRITE-UNAVAILABLE` marker is different: it goes to stderr in **both** modes.
 - `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — the MARKER goes to **stderr** (stdout carries the
   human render, or pure JSON under `--json`). Do **not** start the work until the reason is
-  resolved, but the resolution differs by class and only the refusal class means "park": the
+  resolved, but the resolution differs by class and only a **credential** refusal means "park": the
   NO-VERDICT and environment tokens below are cleared by re-running or by fixing the invocation.
   `REASONS` is a **closed set of ten** and the module docstring publishes all of it. **Ten tokens,
   three groupings — plus one token that reads like a refusal and is not:**
-  - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network).
+  - **refusal** — `push-refused`. ⛔ **Three of its causes are NOT credential verdicts, so read the
+    detail before you park** — `REASONS` names them alongside the read-only case, and parking any of
+    them is the failure this rule exists to prevent: **no network**, a **transport failure**, and a
+    push that **exited 0 without reporting a ref update** (`nothing was written, so write capability
+    is not proven` — `tools/gh_write_preflight.py:831`). Those three are re-run or read-the-detail,
+    never "re-mint the credential".
     ⚠️ **A ruleset that restricts branch *creation* to a pattern (say `main`/`fix/*`) can refuse the
     PROBE's namespace `gh-write-preflight/…` while permitting YOUR OWN branch** — the tool's own
     STATED RESIDUAL, and it reports `push-refused` for a credential that CAN write. So a
@@ -585,12 +588,12 @@ whose contents half is fine, and vice versa. #10930 records the requirement exac
 lane's preflight must prove **three grants** — `Contents`, `Pull requests`, `Issues` — **not two**,
 because #10945's two legs were `Contents` and `Pull requests` **only**, so a token holding those two
 and **no** `Issues: write` passes that probe without ever measuring the third grant — the grants are
-independent, and the token measured on #10930 is the mirror of that shape. This gate
-proves one of the three. If your lane LANDS — comments the evidence on the PR, closes constituents,
-closes delivered issues — `exit 0` proves none of that, so prove those two surfaces by the operation
-itself before you start. ⛔ **The route selects the grant, but not always uniquely** — which is why a
-naive two-route proof false-PASSes a token of #10945's shape (`Contents` + `Pull requests`, no
-`Issues`):
+independent, and the token measured on #10930 is a shape where one grant is present and another
+absent. This gate proves one of the three. If your lane LANDS — comments the evidence on the PR,
+closes constituents, closes delivered issues — `exit 0` proves none of that, so prove those two
+surfaces by the operation itself before you start. ⛔ **The route selects the grant, but not always
+uniquely** — which is why a naive two-route proof false-PASSes a token of #10945's shape, holding
+`Contents` and `Pull requests` but no `Issues`:
 
 - `PATCH /repos/{o}/{r}/pulls/{n}` (no-op title) needs `Pull requests` write and nothing else, so it
   is a valid leg. #10930 measured it **residue-free** on a PR number.
