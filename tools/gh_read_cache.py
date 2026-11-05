@@ -157,6 +157,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import subprocess
 import tempfile
@@ -661,6 +662,16 @@ def _prefix_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
 # repos/o/n` offered `api graphql` as a candidate and refused a live read on a host
 # literally named `graphql` (`--hostname=graphql` needs no entry: the `=` form is one
 # token and is skipped as flag-shaped).
+#
+# ⛔ HAND-MAINTAINED, AND ITS FAILURE DIRECTION IS FAIL-OPEN. There is no way to ask `gh`
+# which of its flags take a value, so this list is read off `gh api --help` (complete at
+# gh 2.102.0: every value-taking flag present, every boolean absent — `--paginate`,
+# `--slurp`, `-i/--include`, `--silent`, `--verbose`, `--allow-escape-sequences`). A
+# `gh` release that ADDS a value-taking flag re-opens the hole, and which way it breaks
+# depends on the value's SHAPE: measured by dropping `-X`, `api -X GET graphql` is then
+# SERVED at rc=0 (the flag's value `GET` is taken as the route, so the real route is
+# never tested — FAIL-OPEN); dropping `--hostname` instead gives a false refusal, because
+# there the value happens to be route-shaped. Re-check this list after any `gh` upgrade.
 _API_VALUE_FLAGS = frozenset(
     {
         "-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field",
@@ -722,12 +733,21 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     spelling while refusing a real one: `search code repos/o/n/actions/runs` — a SEARCH
     QUERY — was refused as "command 'api repos/{repo}/actions/runs'".
 
-    ⛔ AND THE ROUTE IS NORMALISED THE WAY `gh` RESOLVES IT. Three spellings used to slip
-    past: a leading slash (`api /repos/…`), a percent-encoded segment (`p%75lls` decodes
-    to `pulls` inside gh), and — measured — an ABSOLUTE URL (`api
+    ⛔ AND THE ROUTE IS NORMALISED THE WAY THE SERVER RESOLVES IT. Spellings that used to
+    slip past, each measured: a leading slash (`api /repos/…`) and any number of them
+    (`api //graphql`); an ABSOLUTE URL (`api
     https://api.github.com/repos/o/n/actions/runs`), which gh forwards verbatim and which
-    matched no candidate at all. `//path` is normalised too, rather than stripping exactly
-    one slash.
+    matched no candidate at all; and a DOT-SEGMENT prefix — the edge resolves the literal
+    `repos/..` to the API root (`https://api.github.com/repos/../rate_limit` → 200 while
+    `.../foo/../rate_limit` → 404), so `api repos/../graphql` was a LIVE graphql read
+    served at rc=0.
+
+    ⛔ BUT A PERCENT-ESCAPED SEGMENT IS NOT DECODED BY ANYONE. This file used to claim
+    `p%75lls` "decodes to `pulls` inside gh"; measured against the live API, `gh` forwards
+    the escape verbatim and GitHub answers 404 (`/rate_lim%69t` → 404, `/rate_limit` →
+    200). The `unquote` is kept anyway and is load-bearing — it is what refuses
+    `api --paginate graph%71l` — so this is deliberate OVER-refusal of a spelling that
+    could not have worked, not a claim that gh resolves it.
 
     Pinned in both directions by
     `test_mutable_graphql_is_refused_with_a_leading_global_flag` and
@@ -748,6 +768,14 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
         route = route.lstrip("/")
         if route:
             candidates.append(f"api {route}")
+            # ⛔ A DOT SEGMENT IS A ROUTE SPELLING TOO, and the edge collapses it:
+            # `/repos/../rate_limit` answers 200 while `/foo/../rate_limit` answers 404,
+            # so `repos/../graphql` is a real graphql read. `normpath` is offered as an
+            # ADDITIONAL candidate and never replaces the literal one, so a route without
+            # dot segments is unaffected and the only possible effect is over-refusal.
+            dotted = posixpath.normpath(route).lstrip("/")
+            if dotted != route:
+                candidates.append(f"api {dotted}")
     return candidates
 
 
