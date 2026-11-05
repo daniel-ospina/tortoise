@@ -9933,6 +9933,94 @@ exec {real} "$@"
         self.assertIs(cp._pid_is_alive(-5), None)
         self.assertIs(cp._pid_is_alive(10 ** 30), None)
 
+    def test_the_process_scan_asks_ps_for_UNTRUNCATED_rows(self):
+        """Cycle-1 HIGH's reverse pin: without `-ww` a lane can be invisible.
+
+        procps truncates the `command=` field at the display width, and it
+        derives that width from `COLUMNS` even when stdout is a pipe (the
+        Debian manpage: repeated `-w` = unlimited width; `COLUMNS`/`--cols`
+        override it). A harness pane exports a narrow `COLUMNS`, so a truncated
+        row read as "not a `pi` row" and the running lane disappeared. The stub
+        below MODELS that truncation rather than asserting the argv alone: it
+        cuts the row at 80 columns unless it was invoked with `-ww`, so with the
+        flag removed the number beyond column 80 is genuinely lost and this test
+        goes red — not merely a string match on the command line.
+        """
+        pid = self._live_non_ancestor_pid()
+        trunc_dir = self.tmp / "ps-truncating"
+        trunc_dir.mkdir(parents=True, exist_ok=True)
+        stub = _write_exec(trunc_dir / "ps", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'wide=0\n'
+            'for a in "$@"; do [ "$a" = "-ww" ] && wide=1; done\n'
+            f'pad=$(printf "x%.0s" $(seq 1 200))\n'
+            f'row="{pid} 1 pi --prompt $pad issue-{ISSUE}"\n'
+            "printf '1 0 /sbin/init\\n'\n"
+            'if [ "$wide" = 1 ]; then printf "%s\\n" "$row"\n'
+            'else printf "%s\\n" "$(printf %s "$row" | cut -c1-80)"; fi\n'
+        ))
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_PROCESS_TABLE": "",
+            "COLLISION_PREFLIGHT_PS": str(stub),
+        })
+        self.assertIn(f"pid:{pid}", out)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_a_git_that_cannot_name_the_common_dir_is_not_a_clean_scan(self):
+        """Cycle-2 residual: a narrowed cwd arm must not read as a clean scan.
+
+        `--path-format=absolute` needs git >= 2.31. When the common dir cannot
+        be resolved the process arm's cwd check falls back to `target.path` —
+        which under the documented `--repo .` invocation is the CALLER'S OWN
+        worktree, so a peer in a sibling `.worktrees/…` is invisible. The
+        fallback stays (the arm keeps its leaf-argv and ancestor recall) but the
+        row now says the scan is NOT complete, so the narrowing cannot be
+        reported as CLEAN.
+        """
+        stub = _write_exec(self.tmp / "git-stub-no-common-dir", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'if [ "${1:-}" = "rev-parse" ]; then\n'
+            '  case "${*:2}" in\n'
+            '    *--git-common-dir*)\n'
+            '      echo "git-stub: refusing --git-common-dir" >&2; exit 128;;\n'
+            "  esac\n"
+            "fi\n"
+            'exec "${REAL_GIT:?REAL_GIT unset}" "$@"\n'
+        ))
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertIn("repo-root-unresolved", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("NOT clean", out)
+        self.assertNotEqual(rc, 0, out)
+
+    def test_a_git_without_path_format_still_finds_the_MAIN_worktree(self):
+        """The compat half: an old git must not narrow the arm at all.
+
+        A git that refuses `--path-format=absolute` but answers the portable
+        `--git-common-dir` (git < 2.31) is resolvable, so the cross-worktree
+        recall the cycle-1 HIGH restored must survive — and the run must NOT be
+        pushed to INCOMPLETE by the compat gap, which would block every lane on
+        such a host.
+        """
+        stub = _write_exec(self.tmp / "git-stub-old", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'case "${1:-} ${2:-}" in\n'
+            '  "rev-parse --path-format=absolute")\n'
+            '    echo "git-stub: unknown option path-format" >&2; exit 129;;\n'
+            "esac\n"
+            'exec "${REAL_GIT:?REAL_GIT unset}" "$@"\n'
+        ))
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("repo-root-unresolved", out)
+
 
 #: The parent's tests must not be collected twice (this subclass adds FOUR
 #: DEFECT ARMS, not a second copy of the 300-test suite). `unittest` collects

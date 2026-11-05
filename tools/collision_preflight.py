@@ -7105,8 +7105,24 @@ def _main_worktree_root(git_bin: str, path: str, timeout: float) -> str | None:
         path, timeout,
     )
     if rc != 0 or not out.strip():
-        return None
-    common = Path(out.strip())
+        # ⛔ `--path-format=absolute` lands in git 2.31 (2021). On an OLDER git
+        # this call fails while the rest of the scan — `git worktree list`, the
+        # branch and ref reads — still works, so the old code's `or target.path`
+        # fallback silently scoped the process arm's cwd check to the CALLER'S
+        # OWN worktree: every peer in a sibling `<hub>/.worktrees/…` became
+        # invisible while the row still claimed a complete scan (the cycle-1
+        # HIGH, re-opened by a compat gap). Retry the portable form and make the
+        # path absolute here, so the only failure left is a git that genuinely
+        # cannot answer — which the caller reports as NOT clean.
+        rc, out, _err, _to = _run(
+            [git_bin, "rev-parse", "--git-common-dir"], path, timeout)
+        if rc != 0 or not out.strip():
+            return None
+        common = Path(out.strip())
+        if not common.is_absolute():
+            common = Path(path) / common
+    else:
+        common = Path(out.strip())
     return str(common.parent) if common.name == ".git" else str(common)
 
 
@@ -8645,6 +8661,13 @@ def run_preflight(
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")
 
+    # The root the process arm's cwd check is scoped to, resolved ONCE so a
+    # failure is reported instead of silently narrowing the arm.
+    repo_root_for_scan = (
+        _main_worktree_root(git_bin, target.path, timeout)
+        if target.path else None
+    )
+
     # 4b. The LIVE-LANE surface (#1233). Placed after the git surfaces (whose
     #     worktree listing is not an input to it) and before the issue surface,
     #     so a lane that exists ONLY as a running process is still reported when
@@ -8661,10 +8684,26 @@ def run_preflight(
         # sibling `<hub>/.worktrees/...` directory and the arm went inert under
         # exactly the documented invocation, while reporting a complete scan.
         # `_main_worktree_root` is the same reader the repo already uses for
-        # sibling discovery; a failure there falls back to `target.path`.
-        repo_root=(_main_worktree_root(git_bin, target.path, timeout)
-                   or target.path) if target.path else None,
+        # sibling discovery.
+        repo_root=((repo_root_for_scan or target.path)
+                   if target.path else None),
     )
+    if target.path and repo_root_for_scan is None:
+        # ⛔ A NARROWED cwd ARM IS NOT A CLEAN SCAN (cycle-2 residual). When the
+        # main worktree cannot be resolved, the arm above falls back to
+        # `target.path` — which under the documented `--repo .` invocation is
+        # the CALLER'S OWN worktree, so a peer lane in a sibling
+        # `.worktrees/…` cannot be seen. That is exactly the fail-open the
+        # cycle-1 fix closed, reachable again by a git that cannot answer.
+        proc_surface = surfaces[SURFACE_PROCESSES]
+        proc_surface.incomplete(
+            "repo-root-unresolved: the main worktree root could not be resolved "
+            f"for {target.path} (`git rev-parse --git-common-dir` failed), so "
+            "the process arm's working-directory check is scoped to that path "
+            "only and a peer lane in a sibling `.worktrees/…` directory cannot "
+            "be seen — NOT a clean scan (NOT clean)"
+            + (f"; {proc_surface.note}" if proc_surface.note else "")
+        )
 
     # 5. Issue surface (assignee + HOLDER). It is scanned LAST only because that
     #    is where it has always been; it no longer depends on any local git
