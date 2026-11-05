@@ -1644,16 +1644,25 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # ════════════════════════════════════════════════════════════════════════════
 # §9.4 / §12.1b — WHAT THE SOURCE VECTOR EMBEDS (#10980 review, P2)
 # ════════════════════════════════════════════════════════════════════════════
-# ONE FILE, TWO ANSWERS. §9.4 was corrected to say the source vector's text is
-# the narrative in `public.session_narrative`, NOT `:Source.summary`; 432 lines
-# on, §12.1b's `:Source` footnote — the section that decides WHERE vectors live —
-# still told a designer that vector *"would be **indexing an existing field**"*,
-# i.e. embed the `summary` the Source already holds. Under `#10000` that field is
-# a topic lexicon (six content words behind a constant display prefix, `#10852`),
-# so the blurry section orders exactly the bag-of-words vector §9.4 forbids. The
-# reader who lands on §12.1b gets the wrong instruction for the same vector, and
-# nothing reds: both sentences are prose, and the graph stays green while a
-# designer embeds a word list and calls it a summary.
+# ONE FILE, TWO ANSWERS. §9.4 says the source vector's text is the narrative in
+# `public.session_narrative`, NOT `:Source.summary`; 432 lines on, §12.1b's
+# `:Source` footnote — the section that decides WHERE vectors live — told a
+# designer that vector *"would be **indexing an existing field**"*, i.e. embed
+# the `summary` the Source already holds. Under `#10000` that field is a topic
+# lexicon (six content words behind a constant display prefix, `#10852`), so the
+# blurry section ordered exactly the bag-of-words vector §9.4 forbids. The reader
+# who lands on §12.1b gets the wrong instruction for the same vector, and nothing
+# reds: both sentences are prose, and the graph stays green while a designer
+# embeds a word list and calls it a summary.
+#
+# ⚠️ THE PROSE FIX LANDED WITHOUT A PIN, and that is what this test is.
+# `origin/main`'s `b748df7d0` (#10978) corrected SEVEN sites of this conflation
+# (§9.4, §12.1b, §9.1, §12.1, §14.3's V2 row, and two CHANGELOG rows) — and no
+# test reds if an eighth site re-scatters it, or if a later edit rewords one of
+# those seven back. #10978 could not have caught an eighth. So the pins below are
+# asserted against the LANDED wording, not against a wording this branch prefers:
+# after #10978 this file must not disagree with `origin/main` about it, it must
+# keep saying it.
 #
 # ⛔ BOTH DIRECTIONS, and the PREMISE IS DERIVED. The narrative's home is read
 # from `record_projection.NARRATIVE_TABLE` — the projection's own constant, the
@@ -1662,9 +1671,13 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # other and with nothing else. The retired phrasings are asserted ABSENT as well
 # as the corrected pointer PRESENT: a presence-only pin certifies whichever text
 # happens to be there (the #10244 review's P2, measured on a frozen `§11.1`).
+# The positive assertions are scoped to their OWN paragraph, because a pointer
+# that appears elsewhere in the file is not a pointer in the section that needs
+# it — the §9.4/§12.1b split is precisely a "present somewhere" failure.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
+_SOURCE_VECTOR_SECTION_94_ANCHOR = "it is one vector attached to the `:Source` node"
 
 
 def _storage_doc_text() -> str:
@@ -1672,29 +1685,43 @@ def _storage_doc_text() -> str:
     return _STORAGE_DOC.read_text(encoding="utf-8")
 
 
-def _source_vector_footnote(text: str) -> str:
-    """§12.1b's `:Source` footnote, whole — the line, not a window around it.
+def _anchored_line(text: str, anchor: str, where: str) -> str:
+    """The whole line carrying `anchor` — the line, not a window around it.
 
     Anchored, never positional: a line number would drift silently on the first
     paragraph added above it, and the failure would then be *"the sentence is
     fine"* reported about a different sentence.
     """
-    at = text.find(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)
+    at = text.find(anchor)
     assert at != -1, (
-        f"{_STORAGE_DOC.name} no longer carries §12.1b's `:Source` footnote "
-        f"({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) — re-derive where §12.1b states "
-        "what the source vector would index before freezing a pointer at it")
+        f"{_STORAGE_DOC.name} no longer carries {where} ({anchor!r}) — re-derive "
+        f"where it states what the source vector would index before freezing a "
+        f"pointer at it")
     start = text.rfind("\n", 0, at) + 1
     return text[start:].split("\n", 1)[0]
+
+
+def _source_vector_footnote(text: str) -> str:
+    """§12.1b's `:Source` footnote — the section that decides WHERE vectors live."""
+    return _anchored_line(text, _SOURCE_VECTOR_FOOTNOTE_ANCHOR,
+                          "§12.1b's `:Source` footnote")
+
+
+def _source_vector_section_94(text: str) -> str:
+    """§9.4's paragraph on the `:Source` vector — what the vector READS."""
+    return _anchored_line(text, _SOURCE_VECTOR_SECTION_94_ANCHOR,
+                          "§9.4's `:Source`-vector paragraph")
 
 
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     """§9.4 and §12.1b may not disagree about what the source vector embeds.
 
-    *What value makes this test fail?* The pre-fix tree — measured: on
-    `origin/main` the §9.4 half fails on `_RETIRED_SUMMARY_BLUR` (present there,
-    absent here) and the §12.1b half fails on `_RETIRED_VECTOR_FOOTNOTE`
-    (present there and, until this fix, present here too).
+    *What value makes this test fail?* The pre-#10978 document, and any edit that
+    reinstates either retired phrasing. Measured against `b748df7d0^` (the tree
+    before #10978 corrected the prose): both retired strings are PRESENT there
+    and both positive pointers are ABSENT from their own paragraphs, so every
+    assertion below inverts — and #10978 landed the prose with no pin at all, so
+    before this test a re-scatter reddened nothing.
     *Does the test reach it?* Yes — the document is read from the tree and the
     home it must name is derived from the projection, not paraphrased here.
     """
@@ -1714,10 +1741,17 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     text = _storage_doc_text()
 
     # ── §9.4: the corrected pointer PRESENT, the summary/ narrative blur GONE ──
-    assert f"read from `{home}`, NOT from `:Source.summary`" in text, (
-        f"§9.4 no longer states that the source vector's text is read from "
-        f"`{home}` and NOT from `:Source.summary` — that distinction is what "
-        f"stops a design embedding a topic lexicon under #10000")
+    paragraph = _source_vector_section_94(text)
+    assert f"read from `{home}`" in paragraph, (
+        f"§9.4 no longer states that the source vector's embedded text is read "
+        f"from `{home}` — that is what stops a design embedding the topic "
+        f"lexicon `:Source.summary` becomes under #10000 (which lives in the "
+        f"record, §9.1, and is not a node field at all)")
+    assert "never from `:Source.summary`" in paragraph, (
+        f"§9.4 no longer forbids `:Source.summary` as the vector's input IN THE "
+        f"PARAGRAPH THAT CHOOSES THE INPUT — naming the record home without "
+        f"naming what it must not read leaves the blurry reading open, which is "
+        f"the whole P2 this pin answers")
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
         f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
@@ -1732,7 +1766,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"`:Source.summary` is a topic lexicon, so that sentence tells a "
         f"designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
-        f"`summary` the Source holds is §4.4 metadata")
+        f"`summary` the Source holds is §4.6 metadata")
     assert home in footnote, (
         f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
         f"decides where vectors live must point at the narrative's real home, "
