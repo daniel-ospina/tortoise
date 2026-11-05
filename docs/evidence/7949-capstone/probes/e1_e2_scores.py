@@ -360,6 +360,30 @@ def _count(where: str, field: str, value, ceiling: int | None = None) -> int:
     return int(value)
 
 
+def _unit_id_members(where: str, session_id, field: str, members: list) -> None:
+    """Every census member is a UNIT ID — a string, or a refusal.
+
+    ⛔ The census is compared as a SET, so a member of any other type raised
+    straight out of `set(ids)`: `TypeError: unhashable type: 'list'` — exit **1**
+    with a traceback, which an operator cannot tell from a crash, and NOT the exit
+    **2** refusal this module's docstring promises (#10610 review at
+    `ef4c448d7`, P2). It is the same class `_count`, `_float_token` and
+    `_consistent_share` already convert-and-refuse in this file; this is the one
+    guard the whole E2a partition rests on, so it cannot be the one that skips it.
+
+    A unit id is a string by construction: `e2a_value_units.py:151-152` writes
+    `value_ids` and `[uid for uid in value_ids …]`, and `value_bearing_ids` reads
+    `unit["id"]` out of the corpus gold — so a member that is not a string is an
+    edited record, not a shape this reader can grade.
+    """
+    for member in members:
+        if not isinstance(member, str):
+            raise _refuse(
+                f"{where}'s session {session_id!r} carries {field}={member!r}, "
+                "which is not a unit id — the census is a set of string ids, so "
+                "a member of another type is an edited record")
+
+
 def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
     """The totals a record STATES must be the sum of its own per-session census.
 
@@ -394,6 +418,13 @@ def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
             raise _refuse(f"{where} carries no value_ids/value_survived lists for "
                           f"session {session_id!r} — the census is what the "
                           "totals are summed from")
+        # ⛔ THE MEMBERS ARE CHECKED BEFORE THE SET OPERATIONS (#10610 review at
+        # `ef4c448d7`, P2): `set(ids)` on a list/dict member is an uncaught
+        # `TypeError`, so an edited census exited 1 with a traceback instead of
+        # the REFUSED line. Reading a member as a unit id is what makes the set
+        # relation below a comparison of units rather than of whatever JSON held.
+        _unit_id_members(where, session_id, "value_ids", ids)
+        _unit_id_members(where, session_id, "value_survived", kept)
         # ⛔ THE CENSUS IS A SET RELATION, not four lengths (#10610 review at
         # `f12471075`, P2). `e2a_value_units.py` writes `value_lost` beside the two
         # lists (`[v for v in value_ids if v not in survived]`), so a row that lists
@@ -417,6 +448,7 @@ def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
             if not isinstance(lost, list):
                 raise _refuse(f"{where}'s session {session_id!r} carries a "
                               "value_lost that is not a list")
+            _unit_id_members(where, session_id, "value_lost", lost)
             both = set(lost) & set(kept)
             if both:
                 raise _refuse(f"{where}'s session {session_id!r} lists "
