@@ -110,7 +110,9 @@ def facts(*, harness: str, hosted: bool = True,
     """Build the template's substitution table from runtime structured data.
 
     ``recording`` is the organization's LIVE ``session_recording`` flag as read
-    back from ``tortoise_onboarding_state`` / ``GET /v1/onboarding/state``.
+    back from ``tortoise_manage_sources(action="list")`` (its ``onboarding`` key)
+    or ``GET /v1/onboarding/state``. (Until #4282 Phase 3.2 the MCP read was
+    ``tortoise_onboarding_state``; that tool is off the surface.)
     ``None`` means unknown (the read did not happen, e.g. self-hosted) — never a
     fabricated default.
     """

@@ -72,11 +72,11 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter BEFORE every other import — a module-level
-# 3.11+-only import (`from datetime import UTC` below) raises ImportError first,
-# with no attributable message, which is the exact harm #5128 was filed for
-# (D9 shape). `_guard_index` in tests/test_entry_point_python_guard.py pins the
-# preamble shape `[docstring] [__future__] import sys <guard>`.
+# #5128: refuse a <3.12 interpreter before the imports below — `from datetime import UTC`
+# is module-level and 3.11+, so an older interpreter raises ImportError there before any
+# later guard could run (the guard must be the first statement after the docstring). The
+# corpus rule is `tests/test_entry_point_python_guard.py`, which pins the preamble shape
+# `[docstring] [__future__] import sys <guard>`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/ci_runner_labels.py requires Python >= 3.12 (got "
