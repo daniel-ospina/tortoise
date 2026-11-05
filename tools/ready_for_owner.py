@@ -74,10 +74,25 @@ merged, fully-green PR would otherwise exit 1, i.e. "a required check is red").
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# The guard cannot move ABOVE the `__future__` statement: a future import may be
+# preceded only by the docstring, comments, blank lines and other future imports
+# (PEP 236), so `import sys` + this guard immediately after it is the earliest
+# legal position — and the position `tests/test_entry_point_python_guard.py`
+# pins, so no other import can run ahead of the refusal.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/ready_for_owner.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/ready_for_owner.py`"
+    )
+
 import argparse
 import json
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
