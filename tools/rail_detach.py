@@ -240,7 +240,8 @@ FORBIDDEN_ENV = ("AGENT_ADMIN_MERGE_OVERRIDE",)
 
 RUN_ID_RE = re.compile(r"\brun (\d{5,})\b")
 MERGED_AT_RE = re.compile(r"✅ merged PR #(\d+) at ([0-9a-f]{7,40})")
-# admin-merge.sh:9033 — the SAME success with the merge commit deliberately not
+# admin-merge.sh's `✅ merged PR #N (state=…` success line — the SAME success with
+# the merge commit deliberately not
 # printed (it was unreadable). A merge with no sha is still a merge; the sha is
 # simply absent, and the artifact says so rather than substituting the head.
 MERGED_NO_SHA_RE = re.compile(r"✅ merged PR #(\d+) \(state=")
@@ -859,7 +860,10 @@ def _merge_evidence(log: str, pr: int, repo: str = "") -> tuple[str, str]:
     if m:
         # Already merged before this attempt: that merge commit belongs to the
         # earlier merge and is NOT this branch head (under a squash the head is
-        # never on main — admin-merge.sh:9033). Absent, never invented.
+        # never on main — admin-merge.sh's `✅ merged PR #N (state=` line). Absent,
+        # never invented. Cited by SYMBOL, not by line: a line cite re-stales every
+        # time that file grows, and this one had (it said :9033 while the line sat
+        # at :10696).
         return (MERGED, "") if _names_this_pr(m.group(1), pr) else ("", "")
     m = MERGED_NO_SHA_RE.search(log)
     if m:
@@ -1554,8 +1558,18 @@ def child_script(rail: Path, repo: str, pr: int, logp: Path, art: Path,
         # probes of one process always agree, and a recycled pid always differs. So
         # where procfs answers, identity is EXACT and needs no slack. Empty where
         # there is no procfs (macOS) — the reader then falls back to the wall stamp.
+        # ⛔ PARSED AFTER THE LAST `) `, like the reader (`_proc_start_ticks`), NOT
+        # positionally over the whole line. The comm field is parenthesised and may
+        # itself contain spaces AND parens, so a positional split shifts every later
+        # field — measured on a process whose comm is `a b)c`: `awk '{print $22}'`
+        # returns **0** where the reader returns the real starttime. A tick count that
+        # disagrees with the reader makes `_pid_is_a_stranger` conclude "not our rail"
+        # for a rail that IS ours, which reads `lost` and lets `start` put a SECOND
+        # rail on a PR that is still merging (#3061) — the fail-danger direction this
+        # anchor exists to close. `[)]` is escaped so the regex is an ERE in every awk.
         f"printf 'CHILD_START_TICKS=%s\\n' "
-        f"\"$(awk '{{print $22}}' /proc/$child/stat 2>/dev/null)\" >> {_shquote(art)}\n"
+        f"\"$(awk '{{ sub(/^.*[)] /, \"\"); print $20 }}' /proc/$child/stat 2>/dev/null)\" "
+        f">> {_shquote(art)}\n"
         f"wait \"$child\"; rc=$?\n"
         f"printf 'EXIT_ATTEMPT=%s\\nEXIT=%s\\nFINISHED_AT=%s\\n' "
         f"{_shquote(attempt)} \"$rc\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {_shquote(art)}\n"

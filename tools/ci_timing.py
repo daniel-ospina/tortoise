@@ -3280,14 +3280,13 @@ def integrity_problems(manifest_text: str) -> list[str]:
     every weight is the `0.0` sentinel, and a stale capture date) and both
     callers compose it, so the invariant is structural rather
     than a convention each caller has to re-implement. `check` reaches those
-    checks through `ci_manifest.map_issues`, which ALSO carries main's two
-    newer manifest checks (`fast_shard_issues` for the top-level `fast_shards`
-    declaration and `duplicate_entries` for the same-surface `merge=union`
-    gate) AND this branch's own `floor_issues` (a weight declared as a floor or a
-    pinned cap rather than a reading — ⚠️ `origin/main` has no `floor_issues` at
-    all, so it is not one of main's) — so when main added its two beside this
-    change they were folded into the same one place instead of being re-added at
-    this call site, and the third is composed there for exactly the same reason.
+    checks through `ci_manifest.map_issues`, which ALSO carries the newer
+    manifest checks (`fast_shard_issues` for the top-level `fast_shards`
+    declaration, `duplicate_entries` for the same-surface `merge=union` gate,
+    and `floor_issues` — a weight declared as a floor or a pinned cap rather
+    than a reading, which #10575 landed on main through #10704). All of them
+    are folded into the same one place instead of being re-added at this call
+    site — the half-wired state that composition exists to prevent.
     The one
     UNKNOWN class the
     enforcing gate promotes to RED — a capture stamp that is PRESENT but

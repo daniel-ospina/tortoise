@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -1104,8 +1105,8 @@ def test_already_merged_does_not_invent_a_merge_sha(tmp_path):
 
 
 def test_merged_without_a_printed_sha_is_still_merged(tmp_path):
-    """admin-merge.sh:9033 prints the same success with NO sha when the merge
-    commit was unreadable. A crash after that line is still a merge."""
+    """admin-merge.sh's `✅ merged PR #N (state=` line prints the same success with NO sha
+    when the merge commit was unreadable. A crash after that line is still a merge."""
     body = textwrap.dedent(
         """#!/usr/bin/env bash
         echo "admin-merge: ✅ merged PR #$1 (state=MERGED confirmed via the API) — the merge commit was NOT readable"
@@ -1862,6 +1863,54 @@ def test_the_ticks_anchor_is_exact_and_step_immune(tmp_path):
     finally:
         rail.kill()
         rail.wait()
+
+
+def test_the_written_ticks_anchor_parses_past_a_paren_containing_comm(tmp_path):
+    """The WRITER's `/proc/<pid>/stat` parse must agree with the READER's.
+
+    `_proc_start_ticks` splits after the LAST `) ` and says why: the comm field is
+    parenthesised and may itself contain spaces AND parens, so a positional split
+    over the whole line reads the WRONG field. The wrapper wrote the anchor with
+    `awk '{print $22}'` — a positional split — so the two halves of one identity
+    anchor disagreed for any process whose comm carries a space.
+
+    Why that is fail-danger rather than cosmetic: the writer's value is compared
+    against the reader's in `_pid_is_a_stranger`, and a mismatch means "not our
+    rail". That reads `lost`, which is the state `start` ACCEPTS — so a second rail
+    is put on a PR that is still merging (#3061), the exact hazard this anchor
+    exists to close.
+
+    Non-vacuity: arm 2 runs the old positional expression on the SAME synthetic
+    `/proc` line and asserts it does NOT produce the right field (measured on a
+    live process whose comm is `a b)c`: positional -> 0, reader -> the real ticks).
+    """
+    body = rd.child_script(Path("/x/admin-merge.sh"), "o/r", 42,
+                           tmp_path / "l.log", tmp_path / "a.txt", [])
+    script = body[-1]
+    parse_programs = [p for p in re.findall(r"awk '([^']*)'", script) if "sub(" in p]
+    assert len(parse_programs) == 1, (
+        f"expected exactly one parsing awk in the wrapper, found {parse_programs}")
+    assert "print $22" not in script, (
+        "the positional split over the whole line is back — it misses the field "
+        "whenever the comm carries a space (the reader's rsplit exists for that)")
+
+    # A synthetic `/proc/<pid>/stat`: comm `(a b)c)` — spaces AND a paren — and a
+    # distinctive field 22, so the wrong field cannot coincide with the right one.
+    fields = [str(n) for n in range(1, 41)]
+    fields[21] = "555777"                     # field 22 is starttime
+    stat = tmp_path / "stat"
+    stat.write_text(f"1234 (a b)c) {' '.join(fields[2:])}\n", encoding="utf-8")
+
+    expected = "555777"
+    got = subprocess.run(["awk", parse_programs[0], str(stat)],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert got == expected, f"the wrapper's awk reads {got!r}, not field 22 ({expected})"
+
+    positional = subprocess.run(["awk", "{print $22}", str(stat)],
+                               capture_output=True, text=True, check=True).stdout.strip()
+    assert positional != expected, (
+        "this fixture does not discriminate: the positional split happens to agree"
+        " here, so it proves nothing")
 
 
 def test_a_live_named_rail_with_no_child_started_keeps_the_documented_wedge(tmp_path):
