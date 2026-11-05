@@ -106,7 +106,7 @@ Usage
 -----
     uv run python tools/issue_process_lint.py --pr 11027
     uv run python tools/issue_process_lint.py --issue 4282
-    uv run python tools/issue_process_lint.py --pr 11027 --wip        # (issue arms only)
+    uv run python tools/issue_process_lint.py --issue 4282 --wip        # issue arms only
     uv run python tools/issue_process_lint.py --sweep                  # open PRs
     uv run python tools/issue_process_lint.py --sweep-issues --label P0-blocker --limit 20
     uv run python tools/issue_process_lint.py --body-file /tmp/body.md
@@ -634,6 +634,15 @@ def main(argv: list[str] | None = None) -> int:
         # One issue's verdict cannot speak for a population — that would flag (or clear) every
         # subject on a state measured for one of them.
         ap.error("--wip/--no-wip answer ONE issue; they cannot be applied to --sweep/--sweep-issues")
+    if wip is not None and not (args.issue is not None or args.issue_body_file is not None):
+        # `wip` is consumed by `classify_issue` ALONE — the two PR modes run arm 1 only. So
+        # `--pr 11027 --wip` (the line this module's own Usage block used to carry) injected a
+        # verdict that was then DISCARDED, and because `measured_rows` stayed empty the run printed
+        # no WIP line at all: the operator read arm 1's `rc 0` as covering the issue arm too. This
+        # module refuses a flag it cannot honour rather than silently measuring a different
+        # population than the one the flags name (the doctrine `--label`/`--sweep` and the
+        # population modes already follow).
+        ap.error("--wip/--no-wip answer ONE issue: they apply to --issue and --issue-body-file only")
     if args.label and args.sweep:
         # `--label` filters the ISSUE population (`sweep_issues`); `--sweep` reads PRs and has no
         # label filter — so the combination silently swept 50 unfiltered PRs while the doc's own

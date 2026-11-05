@@ -975,3 +975,76 @@ def test_the_doc_frontmatter_matches_its_peers():
             peer_domains.add(fm["domain"])
     assert front["type"] in peer_types, (front["type"], peer_types)
     assert front["domain"] in peer_domains, (front["domain"], peer_domains)
+
+
+# --- review round 10: `--wip` was accepted on the modes that never read it ---------------------
+# `wip` is consumed by `classify_issue` ALONE; `--pr` and `--body-file` run arm 1 only. So the flag
+# was silently DISCARDED there — and because `measured_rows` stayed empty, no WIP line printed
+# either, so an operator saw arm 1's `rc 0` and read "NOTHING FLAGGED" as covering arm 2 as well.
+# Worse, the module's own Usage block advertised exactly that combination (`--pr 11027 --wip`).
+# This module's doctrine everywhere else is to REFUSE a flag it cannot honour rather than silently
+# measure a different population than the flags name — so these pin the refusal.
+
+_MODES_THAT_READ_WIP = ("--issue", "--issue-body-file")
+_MODES_THAT_DO_NOT = ("--pr", "--body-file", "--sweep", "--sweep-issues")
+
+
+@pytest.mark.parametrize("flag", ["--wip", "--no-wip"])
+@pytest.mark.parametrize("mode", _MODES_THAT_DO_NOT)
+def test_a_wip_verdict_is_refused_on_every_mode_that_never_reads_it(mode, flag, tmp_path, capsys):
+    """`--wip` answers ONE issue. On a PR/population mode the verdict was dropped in silence."""
+    operand = {"--pr": "1", "--body-file": str(tmp_path / "b.md")}.get(mode)
+    argv = [mode] if operand is None else [mode, operand]
+    if mode == "--body-file":
+        (tmp_path / "b.md").write_text("Refs #1\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        L.main([*argv, flag])
+    assert exc.value.code == 2, (mode, flag, exc.value.code)
+    err = capsys.readouterr().err
+    # Named either by the pre-existing population refusal (`--sweep*`) or by this one — both say
+    # the flag answers ONE issue and name the flag, which is what makes it a refusal, not a no-op.
+    assert "--wip/--no-wip" in err, err
+
+
+def test_the_wip_flag_is_refused_through_the_real_cli_not_just_in_process(tmp_path):
+    """The refusal must survive the actual entry point (a subprocess, real argv, real exit code)."""
+    body = tmp_path / "b.md"
+    body.write_text("Refs #1\n", encoding="utf-8")
+    r = _run("--body-file", str(body), "--wip")
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "--issue and --issue-body-file only" in r.stderr
+
+
+@pytest.mark.parametrize("flag,want_wip", [("--wip", True), ("--no-wip", False)])
+def test_the_modes_that_do_read_wip_still_accept_it(flag, want_wip, tmp_path, monkeypatch):
+    """The control: the two ISSUE modes genuinely consume the verdict, so the refusal above must
+    not be a blanket one — that would remove the feature this flag exists for."""
+    body = tmp_path / "i.md"
+    body.write_text("# an issue body\n", encoding="utf-8")
+    captured = {}
+    real = L.classify_issue
+
+    def spy(bodies, number, wip=None, notes=None):
+        captured["wip"] = wip
+        return real(bodies, number, wip, notes)
+
+    monkeypatch.setattr(L, "classify_issue", spy)
+    L.main(["--issue-body-file", str(body), flag])
+    assert captured["wip"] is want_wip, captured
+
+    monkeypatch.setattr(L, "fetch_issue", lambda number, repo: ("# an issue\n", []))
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    L.main(["--issue", "4282", flag])
+    assert captured["wip"] is want_wip, captured
+
+
+def test_the_usage_block_never_advertises_wip_for_a_pr_mode():
+    """The module's Usage block carried `--pr 11027 --wip`, i.e. it documented the exact no-op this
+    round refuses — an operator copying it believed a WIP verdict had been injected."""
+    doc = L.__doc__ or ""
+    usage = doc[doc.index("Usage\n-----"):]
+    examples = [ln.strip() for ln in usage.splitlines()
+                if "issue_process_lint.py" in ln and ("--wip" in ln or "--no-wip" in ln)]
+    assert examples, "the Usage block no longer shows the flag at all"
+    for line in examples:
+        assert any(m in line for m in _MODES_THAT_READ_WIP), line
