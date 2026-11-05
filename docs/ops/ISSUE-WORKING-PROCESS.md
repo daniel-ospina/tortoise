@@ -1,8 +1,7 @@
 ---
 title: Working an issue — the process that travels with the issue
-status: draft
-type: ops
-domain: process
+type: operations
+domain: platform
 doc_status: live
 created: 2026-11-05
 ownedBy: organisation-design-team

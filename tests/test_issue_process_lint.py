@@ -901,3 +901,77 @@ def test_the_first_ref_clause_appears_only_where_it_applies():
     # both still name the real cause
     for d in (cont, plain):
         assert "no closing keyword of its own" in d
+
+
+# --- review round 9: the spec drifted from the code, and an undelivered frontmatter fix --------
+# Rounds 5, 6 and 8 each fixed the module's own spec table drifting from CLAIM_RE. Round 8 removed
+# `Related`/`See also` from the REGEX and left both names in the table and in `claims()`'s
+# contract — so a maintainer reading the spec re-adds them and re-opens round 8's P2, with nothing
+# going red. The pin below is the thing that makes that impossible.
+
+
+def test_the_arm_table_names_exactly_the_words_the_regex_claims():
+    """The table is the spec a maintainer edits `CLAIM_RE` from, so it is pinned to the regex."""
+    doc = L.__doc__ or ""
+    # The row WRAPS across lines, so read the whole clause, not a single line.
+    start = doc.index("attached to a **claiming word**")
+    table_row = doc[start:doc.index("and the closing/satisfies words", start)]
+    for word in ("Refs", "Part of", "serves", "addresses"):
+        assert word in table_row, (word, table_row)
+    # The two that must NOT be there — they say the PR does NOT serve the issue.
+    assert "Related``" not in table_row
+    assert "See also``" not in table_row
+    for word in ("Refs", "Part of", "serves", "addresses"):
+        assert L.classify_pr(f"{word} #1\n", 999), word
+    for gone in ("Related: #1", "See also #1"):
+        assert L.classify_pr(gone + "\n", 999) == [], gone
+
+
+def test_the_declared_silences_are_counted_and_listed():
+    """`Three populations are DELIBERATELY NOT FLAGGED` must match the number of bullets — the
+    same spec-vs-code drift, one level up."""
+    import re as _re
+    doc = L.__doc__ or ""
+    m = _re.search(r"(\w+) populations are DELIBERATELY NOT FLAGGED", doc)
+    assert m, "the declaration header is gone"
+    word = m.group(1).lower()
+    start = doc.index(m.group(0))
+    bullets = [ln for ln in doc[start:].splitlines() if ln.startswith("* a ")]
+    expected = {"two": 2, "three": 3, "four": 4, "five": 5}[word]
+    assert len(bullets) == expected, (word, len(bullets), bullets)
+
+
+def test_the_first_ref_clause_is_a_closing_keyword_rule_only():
+    """The FIRST-ref rule is about CLOSING keywords, so it must not appear for a linking-word list
+    — `Part of #A, #B` and `Refs #A, #B` are the DOMINANT shapes in the measured population."""
+    def detail(body):
+        d = L.classify_pr(body, 999)
+        return d[0].detail if d else ""
+    assert "FIRST ref" in detail("Closes #1, #2\n")
+    assert "FIRST ref" in detail("Satisfies #1, #2\n") or detail("Satisfies #1, #2\n") == ""
+    assert "FIRST ref" not in detail("Refs #1, #2\n")
+    assert "FIRST ref" not in detail("Part of #1, #2\n")
+    assert "FIRST ref" not in detail("Refs #1\n")
+
+
+def test_the_doc_frontmatter_matches_its_peers():
+    """Every other `docs/ops/` doc uses `type: operations` / `domain: platform` / `doc_status:`,
+    and none carries a `status:` key. This one said `type: ops` / `domain: process` beside a
+    `status: draft` that contradicted its own `doc_status: live`."""
+    import yaml
+    doc = (ROOT / "docs" / "ops" / "ISSUE-WORKING-PROCESS.md").read_text(encoding="utf-8")
+    front = yaml.safe_load(doc.split("---", 2)[1])
+    assert front["type"] == "operations"
+    assert front["domain"] == "platform"
+    assert front["doc_status"] == "live"
+    assert "status" not in front
+    peers = [(ROOT / "docs" / "ops" / p.name) for p in (ROOT / "docs" / "ops").glob("*.md")]
+    peer_types, peer_domains = set(), set()
+    for f in peers:
+        fm = yaml.safe_load(f.read_text(encoding="utf-8").split("---", 2)[1]) or {}
+        if "type" in fm:
+            peer_types.add(fm["type"])
+        if "domain" in fm:
+            peer_domains.add(fm["domain"])
+    assert front["type"] in peer_types, (front["type"], peer_types)
+    assert front["domain"] in peer_domains, (front["domain"], peer_domains)
