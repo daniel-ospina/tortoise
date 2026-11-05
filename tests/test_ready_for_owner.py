@@ -1000,6 +1000,20 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     ("P1 in scripts/x.sh:12", True),
     ("| P1 | the guard returns 0 |", True),
     ("| P1 | 2 |", True),
+    # ROUND-15: the three SHARED CLASSES review-pr.sh keys on — a numeral class (digits AND
+    # spelled), a finding-noun class, and `P<n>s?`. Enumerating a neighbourhood is the ratchet
+    # that made `2 remaining P1` block and `Three remaining P1` not.
+    ("CLEAN — Three remaining P1.", True),
+    ("Two new P1", True),
+    ("CLEAN — several open P2", True),
+    ("CLEAN — 4 defects remain unresolved.", True),
+    ("CLEAN — 5 errors remain unfixed.", True),
+    ("CLEAN — 2 regressions remain.", True),
+    ("CLEAN — 3 issues outstanding.", True),
+    ("CLEAN — several problems remain.", True),
+    ("CLEAN — the guard returns 0 (2 defects remain).", True),
+    ("CLEAN — 3 unresolved P1s.", True),
+    ("CLEAN — 2 open P2s remain.", True),
 )
 
 

@@ -167,10 +167,23 @@ QUEUE_BLOCKING_LABELS = frozenset({"superseded-by-fold"})
 #: ⛔ QUOTING A FINDING (`> [P1] …`) MUST STILL BLOCK — answering a finding by quoting
 #: it is normal review behaviour, and a `>` prefix read NEUTRAL (round 9). So do nested
 #: bullets and bold brackets.
+#: ⛔ THE THREE SHARED CLASSES `scripts/review-pr.sh` keys on. Every arm below composes
+#: THESE, instead of enumerating a neighbourhood: that enumeration is the ratchet that made
+#: `2 remaining P1` block while `Three remaining P1` did not, and made `2 open P1 findings
+#: remain` block while `4 defects remain unresolved` did not.
+NUMERAL = r"(?:[0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|several|multiple)"
+FINDING_NOUN = (
+    r"(?:findings?|blockers?|issues?|defects?|bugs?|failures?|errors?|regressions?"
+    r"|vulnerabilit(?:y|ies)|violations?|problems?)"
+)
+#: A severity token, `s`-PLURAL INCLUDED — `P1s: 2` recorded a signed clean record in
+#: `review-pr.sh`'s own history because neither reader knew the plural form.
+SEV = r"P[0-2]s?"
+
 #: `[P1]` OR `(P1)` — `scripts/review-pr.sh:1363` (`[\[(][Pp][0-2][\])]`) treats a
 #: parenthesised label as decorated, and a live body (#10902) writes `- **F1 (P2)**`.
 BLOCKING_RE = re.compile(
-    r"(?m)^\s*(?:[-*>]+\s*|\d+[.)]\s*)*\**`?(?:\[|\()?(P0|P1|P2)(?:\]|\))?\**`?\s*(?=\S|$)"
+    r"(?m)^\s*(?:[-*>]+\s*|[0-9]+[.)]\s*)*\**`?(?:\[|\()?(P0|P1|P2)s?(?:\]|\))?\**`?\s*(?=\S|$)"
 )
 ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
 #: A CLEAN outcome. ⛔ THE POSITIVE VOCABULARY IS THE RECORDER'S TOO: `Outcome: clean` is
@@ -235,7 +248,7 @@ FINDINGS_DECLARED_RE = re.compile(
 #: defect` are CLEAN reviews of a P3-only round, and reading the count alone blocked four
 #: such bodies measured across ten PRs — a permanent false NOT-READY, and a contradiction of
 #: this gate's own rule that a `[P3]` note does not block.
-ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])\b")
+ANY_SEVERITY_TOKEN_RE = re.compile(r"(?i)\bP([0-3])s?\b")
 #: ⛔ `no blocking` only counts as a DECLARATION when it ENDS there — "No blocking other
 #: than the P1" is the opposite claim, and matching it was the round-7→8 false PASS.
 ZERO_BLOCKING_RE = re.compile(
@@ -274,8 +287,8 @@ ISSUES_FOUND_RE = re.compile(r"(?i)(?<!no )\bissues?\s+found\b|\bISSUES\s+\d+\b"
 #: that still read NEUTRAL one round after the header fix: `P2:` followed by a
 #: `` `path:line` `` (the `${review-pr.sh}` USE cue), and a tally that counts a NON-ZERO
 #: blocking severity (`- P1: 0, P2: 2`). A finding NAMES A LOCATION.
-SEVERITY_LOCATED_RE = re.compile(r"(?i)\bP[0-2]\b[^.\n]{0,60}?`?[\w./-]*\.\w+:\d+")
-TALLY_NONZERO_RE = re.compile(r"(?i)\bP([0-2])\s*:\s*([1-9]\d*)\b")
+SEVERITY_LOCATED_RE = re.compile(r"(?i)\b" + SEV + r"\b[^.\n]{0,60}?`?[\w./-]*\.\w+:\d+")
+TALLY_NONZERO_RE = re.compile(r"(?i)\bP([0-2])s?\s*:\s*([1-9]\d*)\b")
 #: ⛔ PARITY WITH `scripts/review-pr.sh`'s OWN CUE LIST — the *label-noun-in-front* cue and
 #: the *table-row* cue, which this module did not have. Round 12 measured ten live shapes
 #: that declare a blocking finding and read NEUTRAL because every arm needed a line-lead, a
@@ -317,12 +330,30 @@ BLOCKING_COUNT_RE = re.compile(r"(?i)(?<!no )\b[1-9]\d*[ \t]+blocking\b")
 #: `COUNT_SCAN_AWK` (:1761-1929) and arm (b4) flag both, and both are recorded there as
 #: MEASURED fail-opens ("`CLEAN — 2 P1 findings.` produced NO blocking line and a `clean`
 #: record"). `CLEAN — 2 P1 findings.` matches CLEAR_RE, so without this the body reads CLEAR.
+#: `<numeral> [≤3 words] <finding noun>` — `review-pr.sh`'s `COUNT_SCAN_AWK` forward shape.
+#: `4 defects remain unresolved`, `5 errors remain unfixed`, `3 issues outstanding` all read
+#: NEUTRAL without it, one noun substitution away from the `2 P1 findings` form that was fixed.
+COUNTED_FINDING_RE = re.compile(
+    r"(?i)(?<![\w-])(?!"
+    + NUMERAL
+    + r"0\b)"
+    + NUMERAL
+    + r"(?:\s+\w+){0,3}\s+"
+    + FINDING_NOUN
+    + r"\b"
+)
 COUNT_BEFORE_TOKEN_RE = re.compile(
     # DIGITS only for the count-before-token arm: a spelled numeral is an ARTICLE as often
     # as a count ("One P2 was fixed" is not a finding), and the spelled form that DOES
     # count is `one blocking finding`, covered below.
-    r"(?i)(?<![\w-])[1-9]\d*(?:\s+\w+){0,3}\s+P[0-2]\b"
-    r"|\b(?:one|two|three|four|five|six|several)\s+blocking\s+finding"
+    r"(?i)(?<![\w-])(?!"
+    + NUMERAL
+    + r"0\b)"
+    + r"(?:[2-9]|[1-9][0-9]+|two|three|four|five|six|seven|eight|nine|ten|several|multiple)"
+    + r"(?:\s+\w+){0,3}\s+"
+    + SEV
+    + r"\b"
+    r"|\b" + NUMERAL + r"\s+blocking\s+" + FINDING_NOUN + r"\b"
 )
 #: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
 BRACKET_SEVERITY_RE = re.compile(
@@ -332,7 +363,7 @@ BRACKET_SEVERITY_RE = re.compile(
 #: A table row blocks only when it carries a DESCRIPTION cell — `review-pr.sh`'s
 #: table-scaffold rule (:1565): `| **P1** | 0 |`, `| P0 | P1 | P2 |` and `| 0 | 0 | 2 |` are a
 #: reviewer's own tally and must not block.
-TABLE_SEVERITY_ROW_RE = re.compile(r"(?im)^\s*\|\s*\**P[0-2]\**\s*\|\s*([^|\n]*)\|")
+TABLE_SEVERITY_ROW_RE = re.compile(r"(?im)^\s*\|\s*\**" + SEV + r"\**\s*\|\s*([^|\n]*)\|")
 
 
 def _table_finding(text: str) -> bool:
@@ -356,7 +387,7 @@ def _table_finding(text: str) -> bool:
 
 #: A severity COUNT of zero in any spelling — `P1: 0`, `**P1**: none.`, `P1: nil`, `P1: zero`.
 #: `review-pr.sh:1221-1224` exempts exactly these ("`**P0**: none.` is a count").
-ZERO_SEVERITY_COUNT_RE = re.compile(r"(?i)\bP[0-2]\b\**\s*:\s*\**\s*(?:0|none|nil|zero)\b")
+ZERO_SEVERITY_COUNT_RE = re.compile(r"(?i)\b" + SEV + r"\b\**\s*:\s*\**\s*(?:0|none|nil|zero)\b")
 
 #: A severity named in a HEADING, or a plain "do not land / known P1" verdict.
 SEVERITY_HEADING_RE = re.compile(
@@ -997,6 +1028,11 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
     if not (p3_only_declared or EXPLICIT_CLEAN_OUTCOME_RE.search(text)) and LABEL_NOUN_RE.search(
         text
     ):
+        return True
+    # A COUNTED FINDING (`4 defects remain unresolved`) is a SOFT arm: a body that declares
+    # it named nothing blocking is exempt, the same rule a declared count gets.
+    all_p3 = bool(severities) and severities <= {"3"}
+    if not (zero_blocking or all_p3) and COUNTED_FINDING_RE.search(text):
         return True
     counts = _declared_counts(text)
     if not counts:
