@@ -1866,24 +1866,39 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
         # read the shared record as this repo's own — the refusal was the right
         # answer for the wrong reason, and it must not be re-opened by making the
         # identity check correct.
-        if art.exists() and not _record_names_repo(art, repo):
-            raise Refused(
-                f"the artifact path {art} is occupied by ANOTHER repo's record — the "
-                "path, the log and the lock are shared, so launching here would "
-                "overwrite that rail's record and truncate its log; two repos whose "
-                "`owner/name` slug identically cannot be railed separately in one "
-                "--state-dir. Use a separate --state-dir for this repo."
-            )
-        # ⛔ AND THE LOG IS THE OTHER HALF OF THAT SHARED PATH. The check above is
-        # skipped the moment the artifact is gone — which is exactly the state this
-        # tool's OWN remedy creates (`rm <artifact>` clears a stale claim and stops
-        # nothing). The log is not removed with it, and the write below TRUNCATES it
-        # (`logp.open("w")`), so an orphan log left by a colliding repo would lose
-        # its `✅ merged …` line silently. One-sided, through the rail's own evidence
-        # line: a log with no attributable `repo <x>` line contradicts nothing (the
-        # same-repo `rm` residual stays exactly what it documents), while one naming
-        # a DIFFERENT repo is provably not ours to truncate.
-        if not art.exists() and logp.exists():
+        # ⛔ WHAT THE ARTIFACT **ATTESTS**, resolved once, because "the artifact is
+        # present" does NOT mean "it attests THIS repo". `_record_names_repo` is
+        # one-sided by design — a header write cut before its `REPO=` line must still
+        # read — so a TORN record is admitted, and gating the log check on
+        # `not art.exists()` let exactly that shape skip BOTH guards and truncate the
+        # colliding repo's log. `art_key` is therefore the positive attestation: ""
+        # means the path names nothing (absent, torn, or unreadable), which is not a
+        # claim this repo may act on.
+        art_key = ""
+        if art.exists():
+            try:
+                art_key = _repo_key(read_field(
+                    art.read_text(encoding="utf-8", errors="replace"), "REPO") or "")
+            except OSError:
+                art_key = ""
+            if art_key and art_key != repo:
+                raise Refused(
+                    f"the artifact path {art} is occupied by ANOTHER repo's record — the "
+                    "path, the log and the lock are shared, so launching here would "
+                    "overwrite that rail's record and truncate its log; two repos whose "
+                    "`owner/name` slug identically cannot be railed separately in one "
+                    "--state-dir. Use a separate --state-dir for this repo."
+                )
+        # ⛔ AND THE LOG IS THE OTHER HALF OF THAT SHARED PATH — checked whenever the
+        # artifact does not POSITIVELY attest this repo: absent (the state this tool's
+        # OWN remedy creates — `rm <artifact>` clears a stale claim and stops nothing)
+        # or torn (no `REPO=` to attest with). The log is not removed with either, and
+        # the write below TRUNCATES it (`logp.open("w")`), so another repo's
+        # `✅ merged …` line would go silently. One-sided, through the rail's own
+        # evidence line: a log with no attributable `repo <x>` line contradicts
+        # nothing (the same-repo `rm` residual stays exactly what it documents), while
+        # one naming a DIFFERENT repo is provably not ours to truncate.
+        if art_key != repo and logp.exists():
             try:
                 said = logp.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -1891,10 +1906,10 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
             if said and not _names_this_repo(said, repo):
                 raise Refused(
                     f"the log {logp.name} belongs to ANOTHER repo's rail (its own "
-                    "`admin-merge: repo <x>` line names a different target) — this "
-                    "repo's artifact is gone, but launching here would truncate that "
-                    "rail's output, including any merge evidence it holds. Use a "
-                    "separate --state-dir for this repo."
+                    "`admin-merge: repo <x>` line names a different target) — the "
+                    f"artifact {art.name} does not attest this repo, and launching "
+                    "here would truncate that rail's output, including any merge "
+                    "evidence it holds. Use a separate --state-dir for this repo."
                 )
         prior = collect(state_dir, repo, pr)
         # ⛔ AND THE GUARD ASKS A LIVENESS QUESTION, NOT A VERDICT ONE. `collect`

@@ -1216,6 +1216,31 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         assert "✅ merged PR #9" in orphan.read_text(encoding="utf-8"), \
             "the refused launch truncated an orphaned log's merge evidence"
 
+        # ── …AND A TORN ARTIFACT MUST NOT DEFEAT THAT LOG GUARD
+        # ⛔ The guard was gated on `not art.exists()`, but the ARTIFACT arm admits a
+        # record whose `REPO=` is absent (a torn header must still read), so a torn
+        # artifact skipped BOTH guards: `launch` rewrote it and truncated the
+        # colliding repo's log. The very shape fix #1 blesses is the shape that
+        # bypassed fix #2, so it is pinned here.
+        sd8 = tmp_path / "state8"
+        sd8.mkdir()
+        torn2 = sd8 / "rail-a-b-c-9.md"
+        torn2_log = torn2.with_suffix(".log")
+        torn2.write_text("# rail artifact — a/b-c#9\nPR=9\n", encoding="utf-8")
+        torn2_log.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=t2 (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        torn_before = torn2.read_text(encoding="utf-8")
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(9, cwd=co, state_dir=sd8, repo="a-b/c")
+        assert "belongs to ANOTHER repo" in str(exc.value), str(exc.value)
+        assert torn2.read_text(encoding="utf-8") == torn_before, \
+            "the refused launch rewrote a torn record"
+        assert "✅ merged PR #9" in torn2_log.read_text(encoding="utf-8"), \
+            "the refused launch truncated a torn record's log"
+
         # ── THE CARRIER ARM REQUIRES `SPAWNING=` (the shape `_collect_read` uses)
         # ⛔ Without the conjunct, `CHILD_PID` alone read LIVE — while the verdict
         # path only reaches its carrier logic under `SPAWNING=`. The two probes had
