@@ -2003,6 +2003,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # above. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "docs/00_index.md",
+             # #10704 review P2: the census doc those pins READ. Every claim
+             # ABOUT THE CENSUS in
+             # `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome`
+             # is bound to `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` (§2's
+             # citation form and cited symbols, §2a's parked-set summary, §5's
+             # mutation-evidence home, the hosted `/v1/points` MARKS row; the
+             # class's index-row pin binds `docs/00_index.md` instead, which has
+             # its own entry above). That path
+             # is under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so a census-only edit filtered to
+             # `changed == []` and took the docs-only early return: the pins that
+             # exist to catch exactly that drift never ran, and the `core`
+             # registration cannot fix it alone (a surface's test_files only run
+             # once the surface is ALREADY selected). Same #1349/#3332/#3616
+             # silent-drop class as the entries above. Measured:
+             # `_sel(["docs/architecture/BOUNDED-OPERATION-CONTRACT.md"])` pre-fix
+             # -> surfaces=[], no 8447 pin; post-fix -> ["core"] with
+             # `test_8447_truncation_marker.py`. Pinned by
+             # tests/test_ci_selection.py::test_the_8447_census_pins_run_on_a_census_doc_only_diff.
+             "docs/architecture/BOUNDED-OPERATION-CONTRACT.md",
              # #10605 review (P2): the OTHER half of the split-doc guard pair.
              # `docs/client-server-split.md` §8a is read by TWO guards, and one
              # does not imply the other: the `api` entry above reaches
@@ -6193,12 +6213,14 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     a non-empty map whose every weight is the `0.0` sentinel, and a stale
     capture date).
 
-    `ci_manifest.map_issues` also carries main's TWO newer manifest checks —
+    `ci_manifest.map_issues` also carries main's two newer manifest checks —
     `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
-    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) —
-    because they landed beside this change and the union of the two pipelines
-    must not drop either. Composing them here keeps the branch's invariant
-    (every check reachable from ONE place) while keeping main's coverage.
+    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) — and
+    `ci_manifest.floor_issues` (a weight declared as a floor/cap rather than a
+    reading, cut on this branch rather than inherited) beside them, because the
+    union of the two pipelines must not drop any of the three. Composing them here
+    keeps the branch's invariant (every check reachable from ONE place) while
+    keeping main's coverage.
 
     An ImportError is reported as an issue, never swallowed: returning ``[]``
     would leave ``--integrity`` GREEN with none of these checks having run —
@@ -6652,11 +6674,17 @@ def main() -> int:
         # now coerces as well, so the packer cannot raise at all). That order is
         # preserved inside `ci_manifest.map_issues`, which owns the composition
         # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
-        # `duration_coverage_issues`), main's two newer manifest checks
+        # `duration_coverage_issues`), main's newer manifest checks
         # (`fast_shard_issues` for the top-level `fast_shards` declaration and
-        # `duplicate_entries` for the same-surface `merge=union` gate — both
-        # landed beside this one while it was open, so BOTH were folded into the
-        # same one place rather than being re-added here), plus the
+        # `duplicate_entries` for the same-surface `merge=union` gate), and
+        # `floor_issues` for a weight declared as a floor/cap rather than a
+        # reading (⚠️ `floor_issues` was cut by #10575 on this branch and has since
+        # landed on `main` with that PR, through #10704 — so it is NOW one of
+        # main's and is composed in the shared place for the same reason as the
+        # other two; the sentence here used to say `origin/main` had none at all,
+        # which its own tree stopped being true of when #10704 landed).
+        # ALL of them are folded into the same one place rather than being
+        # re-added here, plus the
         # plausibility/freshness checks the validator adds (any weight the writer
         # could not have rendered — sub-floor, finer precision, or negative — a
         # non-empty map whose every weight is the `0.0` sentinel, and a stale
@@ -6665,10 +6693,20 @@ def main() -> int:
         #
         # `watchdog_headroom_issues` is the EXCEPTION, and deliberately composed
         # here instead: `ci_manifest` does not own it (main added it after this
-        # validator was cut, and `ci_manifest.map_issues` composes only the five
-        # above). It is re-added at this call site so the union of the two
-        # pipelines drops neither — the same rule the two folded-in checks
-        # followed. Both entry points compose it, so it stays single-sourced.
+        # validator was cut, and `ci_manifest.map_issues` does not compose it —
+        # see the list above, which is the whole of what it owns). It is re-added
+        # at this call site so the union of the two pipelines drops neither — the
+        # same rule the folded-in checks followed. Both entry points compose it,
+        # so it stays single-sourced.
+        #
+        # `duplicate_mapping_key_issues` (#5373) is composed FIRST for the same
+        # reason: `ci_manifest` does not own it either — the walk lives in
+        # `tools/registry_integrity.py` and is imported rather than re-spelled.
+        # Without it here, `--integrity` was structurally blind to a duplicate
+        # MAPPING key, which is the one class `config/ci-surfaces.yml`'s
+        # `merge=union` produces on every replay, and the weekly
+        # `--refresh-durations` then rewrites the FIRST copy in the text while
+        # every reader loads the LAST.
         problems = duplicate_mapping_key_issues() + missing + slow_file_issues(manifest) \
             + _manifest_contract_issues(manifest) \
             + carve_shard_issues(manifest) \
