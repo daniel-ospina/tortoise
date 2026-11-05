@@ -2866,6 +2866,7 @@ surfaces:
   # the change selects `api` and this `core` arm never runs. The file is now
   # DUAL-REGISTERED (see the `api` arm above).
   - test_7968_org_purge_rpc.py
+  - test_supabase_deploy_applier_config.py
   # #2886: the wiring seam's hermetic adapter guard
   # (`tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` over the
   # core's `resolve_temporal_aggregate`). Dual-registered (`core` + `eval`,

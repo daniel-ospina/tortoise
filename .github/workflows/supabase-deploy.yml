@@ -197,12 +197,20 @@ jobs:
       # describes the runner, not the deploy. Provide the tool or fail NAMING it.
       - name: Runner tool contract — provide gh (#9018)
         run: bash .github/scripts/runner-tools.sh ensure gh
+      # ⛔ PINNED, not `latest` (#10896). MEASURED: this step was `version: latest`, and the
+      # v2 → v3.0.0 release changed BOTH the config schema (`[inbucket]` removed, which made the
+      # very next `supabase db push` exit 1 on a config parse — see `supabase/config.toml`) and a
+      # flag (`--linked` deprecated in favour of `--remote`). An unpinned third-party binary on the
+      # ONLY automated path that applies production DDL means a routine upstream release silently
+      # disables production migration with no repo change to review: the failure reads as
+      # "deploy blocked", not "the applier is broken". Bump this deliberately, in a PR, with the
+      # config validated against the new schema.
       - uses: supabase/setup-cli@v1
         # ⛔ PINNED, NOT `latest` (#10593). The CLI is not an ordinary dependency here: its
         # MAJOR versions change the `supabase/config.toml` schema, and this workflow is the ONLY
         # door that applies migrations to production. 3.0.0 was published 2026-11-02T12:18Z; the
         # first and only apply attempted after that — run 42091073635, 2026-11-05T19:45:57Z —
-        # refused to load this repo's config, which still declares `[inbucket]`
+        # refused to load this repo's config, which THEN still declared `[inbucket]`
         # (`DbConfigLoadError` => exit 1 at CONFIG LOAD, before `db push` contacts the database):
         #
         #   [inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.
@@ -215,10 +223,18 @@ jobs:
         # 2.122.1 is `v2.stable`; measured at the same moment, it LOADS this config and fails only
         # for want of the access token CI supplies.
         #
-        # Moving to 3.x is a deliberate change, not a version bump: it must first migrate
-        # `config.toml` to v3's schema (and validate `supabase start`/`db reset` + the local-auth
-        # harnesses under it). `tests/test_supabase_cli_pin_10593.py` enforces the coupling — an
-        # exact pin, and no major-3 pin while the config still declares `[inbucket]`.
+        # The pin stays on the v2 line DELIBERATELY (#11100). `supabase/config.toml` HAS since been
+        # migrated off `[inbucket]` (#10896), so v3 would now LOAD it — measured, not assumed: on
+        # this tree BOTH v2.122.1 and v3.0.0 reach `AccessTokenRequiredError`, i.e. both get past
+        # config load, and `--yes` is a GLOBAL flag present in both. That is why the consent flags
+        # below are carried AT THIS PIN rather than gated on a major bump: on v2 they are a no-op,
+        # on v3 they are the difference between an apply and `HostedMutationConsentRequiredError`
+        # applying zero migrations. The bump itself stays a separate, deliberate change because the
+        # config is not yet v3-NATIVE — under 3.0.0 it still emits `auth.email.enable_signup` /
+        # `auth.sms.enable_signup` deprecations — and #11100 recorded that the major needs its own
+        # PR with a full local run (`supabase start` / `db reset` plus the local-auth harnesses).
+        # `tests/test_supabase_cli_pin_10593.py` enforces the coupling: an exact pin, and no
+        # major-3 pin while the config still declares `[inbucket]`.
         #
         # The exact pin buys schema stability at the cost of MANUAL patch uptake: an `x.y.z` inside
         # a `with:` input is invisible to Dependabot, so a v2-line security patch will not arrive
@@ -273,20 +289,28 @@ jobs:
       - name: Apply migrations
         # Token-based push (login role) — no DB password secret needed.
         # Proven 2026-08-10 against the premise-labs project.
+        #
+        # ⛔ `--yes` IS REQUIRED ON v3 (#10896). Every command that changes a HOSTED project is
+        # consent-gated, and the CLI cannot ask when stdin/stdout is not a terminal — which is
+        # every CI run. Without it v3.0.0 fails with `HostedMutationConsentRequiredError` and
+        # applies ZERO migrations, i.e. the same blast radius as the `[inbucket]` parse error this
+        # PR fixes, with a different message. Measured (v3.0.0 release notes): "Every command that
+        # changes a hosted project asks first, and fails unattended unless you pass `--yes` … This
+        # includes `db push`". `--yes` is also valid on v2, so this is not a forward-only change.
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
-        run: supabase db push --linked --include-all
+        run: supabase db push --linked --include-all --yes
       - name: Deploy waitlist-subscribe edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         run: |
           supabase functions deploy waitlist-subscribe \
-            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes
       - name: Deploy deck-view edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         # --no-verify-jwt: the gated /investors page POSTs from the browser with
         # no user JWT (#8732), same as waitlist-subscribe above.
         run: |
           supabase functions deploy deck-view \
-            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes
       - name: Deploy tenant-provision edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         # --no-verify-jwt is REQUIRED: the after_user_created auth hook sends
@@ -295,7 +319,7 @@ jobs:
         # or a matching user JWT; anon-key calls get 401.
         run: |
           supabase functions deploy tenant-provision \
-            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes
       # ══ #3627: THE CO-MOVE — step 3 of the flip sequence, IN THIS RUN ══════
       # The tenancy rename (20260915000001_tenancy_team_to_org.sql) is a hard
       # cut at the wire level (`provision_team` recreated with `p_org_id`;

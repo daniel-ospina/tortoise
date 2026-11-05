@@ -420,7 +420,7 @@ if [ -n "$BLOCKING" ]; then
       echo "  Remediation — decide PER VERSION, from prod (this gate sees versions, not schema):"
       echo "    (a) the objects are ABSENT — apply migrations first:"
       echo "        gh workflow run supabase-deploy.yml --ref main"
-      echo "        # or manually: supabase db push --linked --include-all (whole pending set, filename order)"
+      echo "        # or manually: supabase db push --linked --include-all --yes (whole pending set, filename order)"
       echo "    (b) the objects are PRESENT and only the version is unrecorded (bookkeeping"
       echo "        drift, #9613): record it WITHOUT running DDL —"
       echo "        supabase migration repair --linked --status applied <version>"
