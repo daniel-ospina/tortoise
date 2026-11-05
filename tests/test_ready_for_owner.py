@@ -330,6 +330,43 @@ def test_unreadable_tree_is_unreadable_not_clean() -> None:
     assert check.unreadable is True
 
 
+@pytest.mark.parametrize("value", ["dirty", "clean", 1, "true"])
+def test_a_non_bool_tree_from_a_fixture_is_not_a_clean_tree(value: Any) -> None:
+    """`probe.tree` is UNCOERCED from `--fixture` (`probe_from_dict`), so `not probe.tree`
+    graded the STRING "dirty" as PASS — a fail-open in the one condition whose job is "the
+    tree that will actually exist". Only the literal `True` is evidence of a clean tree.
+
+    Mutation check: reverting `check_tree` to `if not probe.tree:` turns the `"dirty"`,
+    `"clean"` and `1` arms green and fails this test.
+    """
+    check = _check("tree", tree=value)
+    assert check.passed is False, f"tree={value!r} graded PASS"
+    assert check.reason == "dirty"
+
+
+def test_a_malformed_timeout_knob_warns_and_keeps_the_default(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Parsed at import, `int(os.environ.get(...))` raised BEFORE `main()`, so `main()`'s
+    "exactly one verdict line" backstop could not see it and the process exited 1 with NO
+    line. Measured: `READY_GATE_GH_TIMEOUT=1m` -> ValueError, no verdict.
+
+    Mutation check: restoring `GH_TIMEOUT = int(os.environ.get(...))` makes the module raise
+    at import and fails the import of this test module outright.
+    """
+    monkeypatch.setenv("READY_GATE_GH_TIMEOUT", "1m")
+    assert rfo._env_int("READY_GATE_GH_TIMEOUT", 60) == 60
+    err = capsys.readouterr().err
+    assert "READY_GATE_GH_TIMEOUT" in err and "1m" in err, err
+    # …and a well-formed knob still wins, so the fallback is not "ignore the environment".
+    monkeypatch.setenv("READY_GATE_GH_TIMEOUT", "15")
+    assert rfo._env_int("READY_GATE_GH_TIMEOUT", 60) == 15
+    # an unset knob takes the default silently
+    monkeypatch.delenv("READY_GATE_GH_TIMEOUT", raising=False)
+    assert rfo._env_int("READY_GATE_GH_TIMEOUT", 60) == 60
+    assert capsys.readouterr().err == ""
+
+
 def test_non_main_base_is_not_ready() -> None:
     """#10597: a `Closes` merged into a sibling branch neither lands nor closes."""
     _assert_fails("tree", "base-not-main:", base="act-10465")

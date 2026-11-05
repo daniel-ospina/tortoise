@@ -1383,12 +1383,46 @@ def next_action(unit: Unit, repo: str) -> str | None:
 
 #: Seconds between GitHub calls. The API throttles per-call and a queue sweep
 #: makes ~50 of them, so the sweep is PACED rather than fanned out.
-PACE_SECONDS = float(os.environ.get("NEXT_WORK_PACE", "0.2"))
+#:
+#: ⛔ Parsed at USE time, not at import. As `float(os.environ.get(...))` at module level this
+#: raised `ValueError` before `main()`, and the process then exited **1** — the code this tool
+#: defines as "the queue was read but NO unit is pickable: that is an answer" (`:112`,
+#: `:2289-2305`, `:1735-1748`). A consumer keying on the exit code read "nothing to do" from a
+#: malformed knob. Measured:
+#:
+#:     NEXT_WORK_PACE=0.2s uv run python tools/next_work.py
+#:       -> ValueError: could not convert string to float: '0.2s'
+#:       -> exit 1 with no snapshot read at all
+#:
+#: So a bad value falls back to the documented default with a named warning on stderr, and can
+#: never decide an exit code.
+PACE_SECONDS_DEFAULT = 0.2
+_PACE_WARNED = False
+
+
+def pace_seconds() -> float:
+    """The pacing gap, read from `NEXT_WORK_PACE` on every use (see the block above)."""
+    global _PACE_WARNED
+    raw = os.environ.get("NEXT_WORK_PACE")
+    if raw is None or raw == "":
+        return PACE_SECONDS_DEFAULT
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        if not _PACE_WARNED:
+            _PACE_WARNED = True
+            print(
+                f"next-work: NEXT_WORK_PACE={raw!r} is not a number — using the default "
+                f"{PACE_SECONDS_DEFAULT}",
+                file=sys.stderr,
+            )
+        return PACE_SECONDS_DEFAULT
 
 
 def _pace() -> None:
-    if PACE_SECONDS > 0:
-        time.sleep(PACE_SECONDS)
+    gap = pace_seconds()
+    if gap > 0:
+        time.sleep(gap)
 
 
 def _unreadable(snap: Snapshot, what: str, detail: object) -> None:

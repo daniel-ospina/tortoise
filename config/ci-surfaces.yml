@@ -9926,9 +9926,14 @@ durations:
   test_ready_for_owner.py: 2.0  # #10962/#10968: a NEW file has no CI junit measurement (a file that
   # never ran cannot appear in an artifact), so this is `DEFAULT_FAST_WEIGHT`, NOT a local
   # reading — a local wall is forbidden as a shard-layout input (#2818/#3419/#9003). The
-  # local private-lane wall at this PR's head was ~18 s for 232 offline tests, stated only so
-  # the next sweep can compare; `tools/ci_timing.py --refresh-durations` replaces this row
-  # from junit once a push-to-main run includes it.
+  # local private-lane wall at this PR's head was ~18 s, stated only so the next sweep can
+  # compare. ⛔ The CASE COUNT is deliberately NOT quoted here: a hand-written count re-stales
+  # on every case a later round adds, which is why the rows above state the same rule and why
+  # this PR's own review cycle 1 removed a restated `25 arms` from `tools/ci_selection.py`.
+  # (A row that DOES quote a count — `test_ci_catch_history.py` below — pairs it with a test
+  # that re-derives it; this row has no such pin, so it quotes none.)
+  # `tools/ci_timing.py --refresh-durations` replaces this row from junit once a push-to-main
+  # run includes it.
   test_ci_catch_history.py: 3.1  # #10131: the offline tests, 69 of them — `grep -c '^def test_'`, re-run by `test_the_durations_note_counts_the_tests_this_file_actually_has` so the count cannot go stale silently — 9.0-28 s at the #10359 fix head (box-load dependent; the eleven tests added across the fix rounds are sub-second), `-q -p no:cacheprovider`. Every test is pure: an archived runs.json/jobs fixture plus in-memory JUnit zips, no DB and no network. Refresh it from the first post-merge run that includes the file — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 9.5
   test_compute_attribution.py: 0.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.2
   test_connector_scope.py: 1.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9

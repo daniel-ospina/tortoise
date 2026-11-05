@@ -2907,3 +2907,35 @@ def test_the_footer_does_not_call_rows_pickable_on_a_refused_run():
     text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
     assert "TOP 0 PICKABLE" in text
     assert "REFUSED" in text
+
+
+def test_a_malformed_pace_knob_cannot_decide_an_exit_code(
+    monkeypatch, capsys
+):
+    """`PACE_SECONDS` was parsed at import, so a bad knob raised BEFORE the snapshot was read
+    and the process exited **1** — the code this module defines as "the queue was read but NO
+    unit is pickable: that is an answer" (`tools/next_work.py:112`, `:2289-2305`), which a
+    consumer honours by stopping the lane. Measured: `NEXT_WORK_PACE=0.2s` -> ValueError,
+    exit 1, no snapshot read.
+
+    Mutation check: re-introducing the module-level
+    `PACE_SECONDS = float(os.environ.get("NEXT_WORK_PACE", "0.2"))` makes the import raise and
+    fails this module's import outright; reverting only the fallback in `pace_seconds()` fails
+    the `0.2s` arm below.
+    """
+    from tools import next_work
+
+    monkeypatch.setenv("NEXT_WORK_PACE", "0.2s")
+    assert next_work.pace_seconds() == next_work.PACE_SECONDS_DEFAULT
+    err = capsys.readouterr().err
+    assert "NEXT_WORK_PACE" in err and "0.2s" in err, err
+    # the warning is emitted ONCE, not on every paced call
+    next_work.pace_seconds()
+    assert capsys.readouterr().err == ""
+
+    # a well-formed knob still wins, and an unset one takes the default silently
+    monkeypatch.setenv("NEXT_WORK_PACE", "0")
+    assert next_work.pace_seconds() == 0.0
+    monkeypatch.delenv("NEXT_WORK_PACE", raising=False)
+    assert next_work.pace_seconds() == next_work.PACE_SECONDS_DEFAULT
+    assert capsys.readouterr().err == ""

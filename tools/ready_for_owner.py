@@ -437,8 +437,37 @@ REVIEW_OK_TOKENS = frozenset({"head", "carry"})
 #: ready, however the `--check-carry` token reads.
 CLEAN_REVIEW_VERDICTS = frozenset({"clean", "clean-micro", "clean-low"})
 
-GH_TIMEOUT = int(os.environ.get("READY_GATE_GH_TIMEOUT", "60"))
-GIT_TIMEOUT = int(os.environ.get("READY_GATE_GIT_TIMEOUT", "180"))
+def _env_int(name: str, default: int) -> int:
+    """A bounded knob from the environment, parsed WITHOUT risking the verdict contract.
+
+    ⛔ Parsed at module import, `int(os.environ.get(...))` raised ``ValueError`` before
+    ``main()`` — and ``main()``'s ``except Exception`` backstop (the OUTPUT CONTRACT, see
+    ``:1984``: "A read that is not a verdict must never become a traceback with NO line")
+    lives INSIDE ``main()``, so it cannot see a module-level raise. Measured with the
+    previous shape:
+
+        READY_GATE_GH_TIMEOUT=1m uv run python tools/ready_for_owner.py 1
+          -> ValueError: invalid literal for int() with base 10: '1m'
+          -> exit 1 with NO verdict line on stdout
+
+    A named warning on stderr plus the documented default keeps the contract: the run still
+    produces exactly one verdict line, and a bad knob is never silently reinterpreted.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        print(
+            f"ready-gate: {name}={raw!r} is not an integer — using the default {default}",
+            file=sys.stderr,
+        )
+        return default
+
+
+GH_TIMEOUT = _env_int("READY_GATE_GH_TIMEOUT", 60)
+GIT_TIMEOUT = _env_int("READY_GATE_GIT_TIMEOUT", 180)
 
 
 class ReadError(RuntimeError):
@@ -603,7 +632,17 @@ def check_tree(probe: Probe) -> Check:
             f"base={probe.base} head={probe.head[:12]} {flag}",
             f"base-not-main:{probe.base}",
         )
-    if not probe.tree:
+    if probe.tree is not True:
+        # ⛔ `is not True`, NOT `not probe.tree`. `probe.tree` arrives UNCOERCED from a
+        # `--fixture` payload (`:2062` `tree=data.get("tree")`), so a fixture whose value is
+        # the STRING "dirty" is TRUTHY and `not probe.tree` graded it PASS — measured:
+        #   tree='dirty' -> passed=True reason=''      (a value that literally says dirty)
+        #   tree=1       -> passed=True reason=''
+        # The live collector is safe (`_read_tree` returns `bool | None`), so this door is
+        # the fixture one — but a PASS over a value that says "dirty" is exactly the
+        # fail-open this check exists to prevent. `None` is graded unreadable just above, so
+        # anything reaching here that is not the literal `True` is not evidence of a clean
+        # tree, and the same `is not True` shape is used at `:908` for the CONFLICTING arm.
         return Check("tree", False, probe.tree_raw or "dirty", "dirty")
     return Check("tree", True, f"{probe.tree_raw} {flag}".strip())
 
