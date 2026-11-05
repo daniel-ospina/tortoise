@@ -839,7 +839,8 @@ def _fence_candidate(prefix: str, rest: str,
                   enclosing.depth)
 
 
-def strip_code(body: str, strict: bool = False) -> str:
+def strip_code(body: str, strict: bool = False, *,
+               stats: dict[str, int] | None = None) -> str:
     """Blank out the parts of a PR body that are CODE, not prose.
 
     ONLY fenced blocks are stripped. An INDENTED block is deliberately NOT: where
@@ -886,10 +887,24 @@ def strip_code(body: str, strict: bool = False) -> str:
     #N`) stays a claim. GitHub acts on a closing keyword in a quoted paragraph —
     only CODE is ignored — so blanking it would be the under-reporting direction
     that loses real closures.
+
+    `stats` (additive, never consulted by this module) is an OUT parameter for
+    callers that must report what the scan could not see. It receives ONE key:
+    `hidden_lines` — the number of lines left inside an UNTERMINATED fence, i.e.
+    lines this function blanked and nothing closed. That is a miss in the SILENT
+    direction (the rest of the body is never examined), so a caller whose
+    contract is "say when you could not measure" reports it instead of passing
+    over it. It is `0` when every block closed, and the count stops at a block's
+    own closer so a well-formed body never reports a hidden line. This is the
+    seam `tools/issue_process_lint.py` reads; it is deliberately NOT a return
+    type change, so the existing single-value callers are untouched.
     """
     out: list[str] = []
     fence: _Fence | None = None
     list_items: list[_ListItem] = []
+    # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
+    # opens or closes, so the value at the end is the unterminated block's tail.
+    hidden_lines = 0
     for raw in body.splitlines():
         line = raw.expandtabs(4)
         indent = len(line) - len(line.lstrip(" "))
@@ -954,6 +969,10 @@ def strip_code(body: str, strict: bool = False) -> str:
                 if (past <= _MAX_FENCE_INDENT
                         and _is_closer(line[column:], fence.opener)):
                     fence = None
+                # A closer is the LAST line the block hides; content before it
+                # counts (it is unmeasurable until the block ends), a closed
+                # block's tail does not.
+                hidden_lines = 0 if fence is None else hidden_lines + 1
                 out.append("")
                 continue
             # The container ended, so this line is FRESH: it may open a new fence
@@ -983,6 +1002,7 @@ def strip_code(body: str, strict: bool = False) -> str:
                               len(prefix) + rest_col))
         fence = _fence_candidate(prefix, rest, list_items)
         if fence:
+            hidden_lines = 0
             out.append("")
             continue
         # `rest_indent` is the ONLY indentation test: `line` was `expandtabs(4)`d
@@ -994,6 +1014,8 @@ def strip_code(body: str, strict: bool = False) -> str:
             out.append("")
             continue
         out.append(raw)   # prose: keep it, keywords and all
+    if stats is not None:
+        stats["hidden_lines"] = hidden_lines if fence is not None else 0
     return "\n".join(out)
 
 

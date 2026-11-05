@@ -73,9 +73,21 @@ Why the fence/inline-code scan
 ------------------------------
 ``tools/closes_landing.py`` already paid for the naive version of this: a fence opened on a
 list-marker line was read as prose and manufactured a ``lands``. The same naive read here would
-manufacture a *flag* about a line the author quoted rather than claimed. An **unterminated** fence
-hides the rest of the body from the scan, which is a MISS in the silent direction, so that case is
-reported in the output rather than passed over.
+manufacture a *flag* about a line the author quoted rather than claimed.
+
+That grammar is therefore **not re-derived here**. The first version of this module did re-derive it
+— it recognised a fence only when the first non-space character of the line was a backtick/tilde —
+and a quoted example written as ``- ```markdown`` (a fence ON the list-marker line) or ``> ```markdown``
+(inside a blockquote) was read as prose, so ``Refs #1234`` inside the quotation became a CLAIM and arm 1
+flagged a line the author quoted rather than claimed (review P2). A second copy of a grammar is how
+that drift happens; the hardened copy is ``tools/closes_landing.py::strip_code``, which carries the
+container rules (a fence may open ON the marker line, at the item's content column; a fence belongs
+to its container and ends when that container does; containers compare by DEPTH), so this module
+imports it instead of carrying a weaker third copy.
+
+An **unterminated** fence hides the rest of the body from the scan, which is a MISS in the silent
+direction, so that case is reported in the output — in EVERY mode that reads a body, including the
+sweeps, rather than only in the offline ones.
 
 Usage
 -----
@@ -110,6 +122,21 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# #5128-adjacent: the fence grammar is NOT duplicated here. `tools/closes_landing.py::strip_code`
+# carries the container rules this module needs (a fence may open ON a list-marker line, at the
+# item's content column; a fence belongs to its container and ends with it; containers compare by
+# DEPTH), and it is the copy a real CommonMark renderer is checked against in
+# `tests/test_closes_landing.py`. A second copy here was the review's P2 defect: a quoted example
+# inside `- ``` … ` or `> ``` … ` was read as prose, so the quote's `Refs #N` became a claim. The
+# repo-root insert is the pattern `tools/ask_spotcheck.py` uses for the same reason (this file runs
+# BOTH as a loose script, where `sys.path[0]` is `tools/`, and as `tools.issue_process_lint` from a
+# test, where it is the repo root).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.closes_landing import strip_code as _strip_fenced_blocks  # noqa: E402
 
 # --- exit codes (the caller's contract; see ADVISORY above) -------------------------------
 RC_CLEAN = 0
@@ -176,31 +203,21 @@ def strip_code(body: str) -> tuple[str, int]:
 
     `hidden_lines` is the number of lines an UNTERMINATED fence hid from the scan: that is a miss in
     the silent direction, so the caller reports it instead of passing over it.
+
+    The FENCE grammar is `tools/closes_landing.py::strip_code`'s — imported, not copied (see the
+    module docstring): it knows that a fence may open ON a list-marker line or inside a blockquote,
+    and that a fence ends with its container. This wrapper adds the two things that are this
+    module's own concern: HTML comments (which may span lines and contain fences) are removed
+    FIRST, and inline code spans are blanked AFTER, because `gh pr view #1234` is a command being
+    quoted, not a claim.
     """
     # HTML comments first — they may span lines and may contain fences.
     text = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
-    out: list[str] = []
-    fence_char, fence_len, hidden = "", 0, 0
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        if fence_char:
-            hidden += 1
-            run = len(stripped) - len(stripped.lstrip(fence_char))
-            if run >= fence_len and stripped[run:].strip() == "":
-                fence_char, fence_len = "", 0
-            continue
-        for char in ("`", "~"):
-            run = len(stripped) - len(stripped.lstrip(char))
-            if run >= 3:
-                fence_char, fence_len = char, run
-                break
-        else:
-            out.append(line)
-    unterminated = bool(fence_char)
-    joined = "\n".join(out)
+    stats: dict[str, int] = {}
+    text = _strip_fenced_blocks(text, stats=stats)
     # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim.
-    joined = re.sub(r"`[^`\n]*`", "", joined)
-    return joined, (hidden if unterminated else 0)
+    text = re.sub(r"`[^`\n]*`", "", text)
+    return text, stats.get("hidden_lines", 0)
 
 
 def claims(body: str, own_number: int | None = None,
@@ -210,7 +227,14 @@ def claims(body: str, own_number: int | None = None,
     `closing` / `satisfies` resolve an issue; `weak` (`Refs`, `Related`, `Part of`, `See also`)
     links nothing and closes nothing — that is the #10534 hole.
     """
-    text, _ = strip_code(body)
+    return _claims_in(strip_code(body)[0], own_number, repo)
+
+
+def _claims_in(text: str, own_number: int | None = None,
+               repo: str | None = None) -> dict[str, list[int]]:
+    """`claims` over ALREADY-normalised text, so a caller that needs `hidden_lines` from the same
+    pass does not strip the body twice (two passes of a pure function cannot disagree, but a caller
+    that reported a count from one pass and classified from another would be reading two bodies)."""
     found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": []}
     declined_lines = {i for i, line in enumerate(text.splitlines()) if DECLINE_RE.search(line)}
     line_starts = [0]
@@ -291,10 +315,20 @@ def in_flight_markers(comment_bodies: list[str]) -> list[str]:
 
 # --- the two arms ---------------------------------------------------------------------------
 def classify_pr(body: str, number: int | str, repo: str | None = None,
-                labels: list[str] | None = None) -> list[Finding]:
-    """ARM 1 — a PR that claims an issue which no keyword resolves."""
+                labels: list[str] | None = None,
+                notes: list[str] | None = None) -> list[Finding]:
+    """ARM 1 — a PR that claims an issue which no keyword resolves.
+
+    `notes`, when supplied, receives the UNTERMINATED-FENCE note for this body. It lives here rather
+    than in each CLI branch because only two of the four body-reading modes collected it: a
+    `--sweep` silently swallowed the one thing that says the scan could not see the rest of a body —
+    and a sweep is the one mode that reads a POPULATION (review P2, adjacent).
+    """
+    text, hidden = strip_code(body)
+    if hidden and notes is not None:
+        notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in #{number}")
     own = number if isinstance(number, int) and number > 0 else None
-    c = claims(body, own, repo)
+    c = _claims_in(text, own, repo)
     claimed = sorted((set(c["closing"]) | set(c["satisfies"]) | set(c["weak"]))
                      - set(c["declined"]))
     if not claimed:
@@ -402,8 +436,14 @@ def sweep_issues(repo: str | None, limit: int, label: str | None) -> list[tuple[
         args += ["--repo", repo]
     out = []
     for row in json.loads(_gh(args)):
-        _, bodies = fetch_issue(row["number"], repo)
-        out.append((row["number"], bodies))
+        # The issue's own BODY is a comment-shaped input, exactly as the offline
+        # `--issue-body-file` branch says: a checklist or a claim may live there. Discarding it here
+        # measured a strictly smaller population than the offline path for the SAME content, so an
+        # issue whose `## Satisfies` checklist sits in its body read as *WIP with no checklist*
+        # through `--sweep-issues` and *clean* through `--issue-body-file` (review P2). One
+        # population, one measurement.
+        body, bodies = fetch_issue(row["number"], repo)
+        out.append((row["number"], [body, *bodies]))
     return out
 
 
@@ -466,10 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         repo = resolve_repo(args.repo)
         if args.body_file is not None:
             body = args.body_file.read_text(encoding="utf-8")
-            hidden = strip_code(body)[1]
-            if hidden:
-                notes.append(f"unterminated fence hid {hidden} line(s) from the scan")
-            findings += classify_pr(body, "body-file", repo)
+            findings += classify_pr(body, "body-file", repo, notes=notes)
             population = "1 body (offline)"
         elif args.issue_body_file is not None:
             bodies = _comments_from_file(args.comments_file) if args.comments_file else []
@@ -481,21 +518,21 @@ def main(argv: list[str] | None = None) -> int:
             population = f"1 issue body + {len(bodies)} comment(s) (offline)"
         elif args.pr is not None:
             body, labels = fetch_pr(args.pr, repo)
-            hidden = strip_code(body)[1]
-            if hidden:
-                notes.append(f"unterminated fence hid {hidden} line(s) from the scan")
-            findings += classify_pr(body, args.pr, repo, labels)
+            findings += classify_pr(body, args.pr, repo, labels, notes=notes)
             population = "1 PR"
         elif args.issue is not None:
-            _, bodies = fetch_issue(args.issue, repo)
-            found, measured = classify_issue(bodies, args.issue, wip)
+            # The body is a comment-shaped input on the LIVE path too — the offline sibling twelve
+            # lines above has always said so; this one discarded it, so identical content got two
+            # verdicts depending on whether it was read from gh or from a file (review P2).
+            body, bodies = fetch_issue(args.issue, repo)
+            found, measured = classify_issue([body, *bodies], args.issue, wip)
             findings += found
             measured_rows.append(measured)
-            population = f"1 issue ({len(bodies)} comment(s))"
+            population = f"1 issue ({len(bodies)} comment(s) + body)"
         elif args.sweep:
             rows = sweep_prs(repo, args.limit)
             for number, body, labels in rows:
-                findings += classify_pr(body, number, repo, labels)
+                findings += classify_pr(body, number, repo, labels, notes=notes)
             population = f"{len(rows)} open PR(s)"
         else:  # --sweep-issues
             rows = sweep_issues(repo, args.limit, args.label)

@@ -1722,6 +1722,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # does not exist" class (the prefix case's docstring states the same boundary; a
              # rename-detection pin belongs with the diff that performs the rename).
              "tools/gh_write_preflight",
+             # #11077: tools/issue_process_lint.py owns tests/test_issue_process_lint.py
+             # (registered `core`), and the same silent drop applies: `tools/` is
+             # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches
+             # the tool, so a TOOL-ONLY change selected NO surface, took the
+             # docs-only early return and fell back to tier-1 smoke, where that file
+             # is not registered. The PR that can weaken the claim-vs-mention scan
+             # (widen the claiming-word window, drop the declined-reference escape,
+             # stop stripping quoted examples or inline code) would then be the one
+             # PR that never ran the cases pinning the false-positive population this
+             # tool exists to avoid flagging. Same #1349/#3332/#3616 class as the
+             # entry above. Pinned by
+             # tests/test_ci_selection.py::test_issue_process_lint_tool_change_selects_core_not_tier1.
+             "tools/issue_process_lint.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
