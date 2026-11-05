@@ -1029,6 +1029,15 @@ class CacheTest(unittest.TestCase):
         `account` unconditional made every lane in the fleet pay one call for one unchanged
         answer - the quota regression this tool exists to remove. `rate_limit` is per
         credential; `repo` must not be.
+
+        ⚠️ The sharing is INTENTIONAL but carries an access consequence the quota argument does
+        not cover: a second credential is served the first's entry at `rc=0`/`fresh: true` for a
+        repository it may not be entitled to see (an uncached read would 404). The field VALUES
+        are the repository's, so the answer is correct ABOUT the repo and wrong only as an
+        authority signal — a lane must not read `visibility`/`private` as "I am authorised".
+        Stated in `tools/gh_read_cache.py`'s cache-identity section; a lane needing its OWN
+        entitlement uses the `--argv` pass-through or an uncached `gh`. Named here so the
+        behaviour is a decision rather than an accident.
         """
         self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
         self.assertEqual(self.calls(), 1)

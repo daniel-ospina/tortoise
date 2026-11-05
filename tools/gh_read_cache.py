@@ -93,6 +93,15 @@ answered: it participates for EVERY route and is threaded into the request itsel
 is which CREDENTIAL answered: it participates only for an ACCOUNT-SCOPED route
 (`/rate_limit`, whose buckets are per instance and per token), because keying the `repo`
 projection by credential would cost every lane in the fleet a call for one unchanged answer.
+⚠️ THAT SHARING HAS AN ACCESS CONSEQUENCE, stated here so it is a decision and not an
+oversight: a second credential on the same box is served the first's `repo` entry at
+`rc=0`/`fresh: true` even for a repository it may not be entitled to see, where an uncached
+read would have 404'd. The FIELDS are the repository's and are correct about the repository, so
+nothing wrong is served ABOUT the repo — but a lane that reads `visibility`/`private`/
+`default_branch` off that answer can conclude it is AUTHORISED when it is not. The quota
+argument above is why the sharing stays; a lane that needs the answer to be about ITS OWN
+entitlement must not read it from this cache — use the `--argv` pass-through (which stores
+nothing, and carries the credential in the question) or an uncached `gh`.
 `repo`/`base` participate ONLY
 when the declared route actually references `{repo}`/`{base}`: keying them unconditionally
 fragmented the cache per branch/per repo for routes that do not vary by either, spending
