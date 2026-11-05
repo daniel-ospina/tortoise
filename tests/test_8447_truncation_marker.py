@@ -1091,6 +1091,101 @@ class TestTheCensusNamesItsEvidenceHome:
             "the census cites symbols the tree does not bind (renamed, moved or "
             f"invented), so its evidence cells point at nothing: {unresolved}")
 
+    @staticmethod
+    def _unresolved_symbol_citations(citations) -> list[str]:
+        """The `<module>::<name>` citations this tree does not bind.
+
+        Resolution is an AST walk over each cited module (functions, classes and
+        module-level bindings such as `TOOL_REGISTRY`), so a rename or a move reds
+        the caller instead of silently misdirecting a reader. Shared by the two
+        artifacts that cite the census's evidence — §2 of the doc, and the
+        `docs/00_index.md` row that routes a lane into it — because the same rot has
+        to red in both places or the upstream one drifts again.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        unresolved: list[str] = []
+        for module, name in citations:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            bound: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    bound.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name):
+                    bound.add(node.target.id)
+            if name not in bound:
+                unresolved.append(f"{module}::{name}")
+        return unresolved
+
+    def test_the_index_row_that_routes_readers_here_cites_no_line_numbers(self):
+        """The front door must speak the citation form the census speaks.
+
+        `docs/00_index.md`'s #8447 row is how a lane FINDS this census, and it
+        kept `sdk.py:28434` / `sdk.py:27022` / `sdk.py:34398` /
+        `event_store.py:974` after §2 itself was converted — the exact form the
+        pin above forbids, one artifact upstream of it. The coordinates were
+        exact when written, and `sdk.py` has already moved 695 lines under them
+        once (`62e3f2f61` -> `d72983b99`, #10523), so a lane following them from
+        the index lands wherever the last insertion put them. Same rule, same
+        artifact family: cite `<module>::<name>`, and resolve it.
+        """
+        import re
+        from pathlib import Path
+
+        index = (Path(__file__).resolve().parent.parent / "docs" / "00_index.md")
+        rows = [ln for ln in index.read_text(encoding="utf-8").splitlines()
+                if "docs/architecture/BOUNDED-OPERATION-CONTRACT.md" in ln]
+        assert len(rows) == 1, (
+            "expected exactly ONE docs/00_index.md row routing a reader into the "
+            f"census, found {len(rows)}")
+        row = rows[0]
+
+        stale = sorted(re.findall(r"[\w./-]+\.(?:py|ya?ml):\d[\w-]*", row))
+        assert not stale, (
+            "the index row cites absolute line numbers, which re-stale on the "
+            "next insertion into the file they point into — cite "
+            f"`<module>::<name>` instead: {stale}")
+
+        cited = sorted(set(re.findall(r"(tortoise/[\w/]+\.py)::([A-Za-z_]\w*)",
+                                     row)))
+        assert cited, (
+            "the index row names no `<module>::<name>` evidence this pin can "
+            "check — the pointer form regressed to something unresolvable")
+        unresolved = self._unresolved_symbol_citations(cited)
+        assert not unresolved, (
+            "the index row cites symbols the tree does not bind (renamed, moved "
+            f"or invented), so a reader is sent to nothing: {unresolved}")
+
+    def test_the_parked_summary_names_the_arm_the_census_measured(self):
+        """§2a's opening claim must carry its own scope.
+
+        Read alone, *"All six return a bare list"* is a claim about each whole
+        tool, and it contradicted the ⚠️ two paragraphs above it: `tortoise_query`
+        is censused on its `text=` arm, whose bare list is real, but its
+        STRUCTURAL arm (`text=None`) returns `{"results", "suggestion"}` on one
+        branch. A summary that over-reads its own disclosure is how the
+        disclosure stops being read — the parked set is the arm, not the tool.
+        """
+        park = self._census_section().split("### 2a.", 1)[1]
+        opening = park.split("All six return", 1)[1].split("\n\n", 1)[0]
+        assert "bare list" in opening, (
+            f"§2a no longer states what the parked surfaces return: {opening}")
+        assert "arm" in opening or "text=" in opening, (
+            "§2a's opening claim is not scoped to the arm/route the census "
+            "measured, so it reads as a statement about each whole tool — "
+            "`tortoise_query`'s structural arm returns `{'results', "
+            "'suggestion'}` on one branch (see the ⚠️ above), not a bare list")
+
     def test_every_test_the_contract_doc_names_exists(self):
         """A pointer to a TEST is only a pointer if that test resolves.
 
