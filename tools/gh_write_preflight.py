@@ -432,7 +432,15 @@ def _url_has_credential(url: str) -> bool:
     try:
         parts = urlsplit(url)
     except ValueError:
-        return False
+        # ⛔ AN UNPARSEABLE URL IS TREATED AS CARRYING A CREDENTIAL, never as data. `urlsplit`
+        # raises `ValueError("Invalid IPv6 URL")` for a netloc holding an unmatched `[`, so a
+        # pushurl like `https://user:pa[ss@host/r.git` fell through this arm as "no credential"
+        # while `redact()` masked the same string: the raw password went to `git ls-remote` on
+        # argv (0444 on a shared cell) AND git could not resolve it, so a writable credential was
+        # reported `remote-unreachable` — a leak and a false block from one arm. Returning True
+        # costs nothing: the target is reached through the `insteadOf` alias, which git resolves
+        # to this same URL (measured), and a URL git cannot parse fails the read either way.
+        return True
     if parts.password:
         return True
     # A userinfo with a password and NO parseable scheme, e.g. the scp-like

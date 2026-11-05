@@ -1101,6 +1101,43 @@ def test_scp_like_password_never_reaches_argv():
     assert _url_has_credential("/tmp/bare/remote@1.git") is False
 
 
+def test_an_unparseable_url_is_credited_with_a_secret_and_never_handed_raw():
+    """`urlsplit` RAISES on an unmatched `[`, so that arm must not answer "no credential".
+
+    Measured on the pre-fix head, one arm produced both failure modes at once:
+
+        urlsplit("https://user:pa[ssw0rd@example.invalid/r.git")
+            -> ValueError: Invalid IPv6 URL
+        _url_has_credential(same)                              -> False
+        _read_targets("origin", "https://x/fetch.git", [same]) -> [same]   # raw, on argv
+        redact(same)                       -> https://<userinfo-redacted>@example.invalid/r.git
+
+    So the password `pa[ssw0rd` went to `git ls-remote` as an argument — argv is mode 0444
+    (`/proc/<pid>/cmdline`), readable by every process on a cell lanes share — while `redact()`
+    masked the very same string in the display. And because git cannot parse that URL either, a
+    credential that CAN write was reported `remote-unreachable`: the false block this tool must
+    never add. Erring toward True here costs nothing, because the target is then reached through
+    the `insteadOf` alias, which git resolves to this same URL.
+    """
+    from urllib.parse import urlsplit
+
+    leaky = "https://user:pa[ssw0rd@example.invalid/r.git"
+    # The premise, asserted rather than assumed: no credential check AFTER the parse can run.
+    with pytest.raises(ValueError):
+        urlsplit(leaky)
+
+    assert _url_has_credential(leaky) is True, (
+        "an unparseable URL must be assumed to carry a secret — a false negative here puts the "
+        "password on world-readable argv"
+    )
+    targets = _read_targets("origin", "https://x/fetch.git", [leaky])
+    assert targets == ["gh-write-preflight-push0:"], targets
+    assert all(leaky not in t for t in targets), "the raw credential url reached argv"
+    env = _read_env("origin", "https://x/fetch.git", [leaky])
+    assert env["GIT_CONFIG_KEY_0"] == f"url.{leaky}.insteadOf", env
+    assert env["GIT_CONFIG_VALUE_0"] == "gh-write-preflight-push0:", env
+
+
 def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
     """Cleanup is confirmed by ls-remote, NOT by the delete's own exit code.
 
@@ -1543,18 +1580,6 @@ def test_documented_standalone_command_actually_runs():
     assert "requires TORTOISE_DB_URI" not in (proc.stdout + proc.stderr), (
         f"the session gate refused the documented command:{tail}"
     )
-
-
-if __name__ == "__main__":
-    # THE ONE BLOCK that makes the docstring's `Run standalone:` line real. The repo's session-start
-    # gate (`_p4_uri_required`, epic #1647 P4) refuses a URI-less pytest session, so the advertised
-    # command used to report 55 session-gate ERRORS for a suite that opens no graph at all — the
-    # carve-out is exactly right here and is not optional. `setdefault`, so an explicit value in the
-    # caller's env still wins. Same one-block fix, same reasoning, as
-    # tests/test_closes_landing.py's `__main__` (where a second mid-file copy once silently defeated
-    # it). Pinned by test_documented_standalone_command_actually_runs.
-    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
-    raise SystemExit(pytest.main([__file__, "-q"]))
 
 
 def test_noisy_ACCEPTING_remote_proves_the_write_against_real_git(tmp_path: Path):
@@ -2186,3 +2211,39 @@ def test_keep_ref_json_never_advertises_cleanup(tmp_path: Path, capsys):
     assert payload["kept_ref"] is True
     assert payload["cleaned_up"] is False, "a deliberately kept ref is not a clean cleanup"
     assert payload["leftover_ref"] is False, "kept_ref is not an accidental survivor"
+
+
+def test_the_carve_out_guard_is_the_LAST_block_in_this_file():
+    """No test may live below the `__main__` block that supplies the carve-out.
+
+    Measured at the pre-fix head: 26 cases sat below it. `pytest` re-imports the module, so they
+    were still collected and nothing was red — which is exactly why the drift is invisible: the
+    guard stops being "the one block" (the shape that silently defeated
+    `tests/test_closes_landing.py`'s carve-out with a second mid-file copy) while every check stays
+    green. Asserted structurally so the next append cannot re-create it.
+    """
+    source = Path(__file__).read_text()
+    guard = source.index('if __name__ == "__main__":')
+    below = source[guard:]
+    assert "\ndef test_" not in below, (
+        "a test was appended below the `__main__` carve-out guard — move it above so the guard "
+        "stays the only, last block"
+    )
+
+
+if __name__ == "__main__":
+    # THE ONE BLOCK that makes the docstring's `Run standalone:` line real. The repo's session-start
+    # gate (`_p4_uri_required`, epic #1647 P4) refuses a URI-less pytest session, so the advertised
+    # command used to report 55 session-gate ERRORS for a suite that opens no graph at all — the
+    # carve-out is exactly right here and is not optional. `setdefault`, so an explicit value in the
+    # caller's env still wins. Same one-block fix, same reasoning, as
+    # tests/test_closes_landing.py's `__main__` (where a second mid-file copy once silently defeated
+    # it). Pinned by test_documented_standalone_command_actually_runs.
+    #
+    # ⛔ IT STAYS THE **LAST** BLOCK IN THE FILE. Every case lives above this line on purpose: a test
+    # appended below it re-creates the shape that silently defeated `tests/test_closes_landing.py`'s
+    # carve-out, and reads as "the guard is the one place, except here". (`pytest` re-imports the
+    # module so such a case is still collected, which is exactly why the drift is invisible until
+    # the guard stops being the only copy.)
+    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
+    raise SystemExit(pytest.main([__file__, "-q"]))
