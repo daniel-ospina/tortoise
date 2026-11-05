@@ -81,7 +81,10 @@ def test_config_has_no_section_the_cli_rejects() -> None:
 
 def test_local_smtp_keeps_the_mail_catcher_settings() -> None:
     """The rename must not drop the settings the local dev workflow reads (#801/#863)."""
-    text = CONFIG.read_text(encoding="utf-8")
+    # Deliberately asserts on the PARSED doc, never on the raw text: what this test guards is
+    # *settings*, and TOML keys are literal, so `doc["local_smtp"]` proves the same thing a
+    # substring search would — without a second read of a file `_config_doc()` already read
+    # (a redundant re-read is F841, not an assertion: ruff check . is a required check, #11104).
     doc = _config_doc()
     assert "local_smtp" in doc, "[local_smtp] section not found (#10896)"
     section = doc["local_smtp"]
