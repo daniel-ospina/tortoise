@@ -790,9 +790,10 @@ jobs:
       # 8 of this workflow's 12 non-matrix jobs are eligible concurrently with
       # the matrices (3 carry no `needs:`; the fourth `needs:`-less job is
       # `changes`, which the matrices wait on and so cannot overlap them; 5 need
-      # only `changes`). A PR therefore requests up to 17 jobs, and only the
-      # POOL (12 concurrent) bounds the total: the cap bounds the FAN-OUT, not
-      # the total.
+      # only `changes`). On a full selection a PR REQUESTS 28 jobs (17 matrix
+      # legs + 11 non-matrix; `canary-streak` is push-gated), at most 17 of them
+      # CONCURRENTLY (9 matrix slots + the 8 eligible non-matrix) -- and only
+      # the POOL (12) bounds that. The cap bounds the FAN-OUT, not the total.
       # ⛔ AND WHAT IT CANNOT DO: `max-parallel` limits START order only. Every
       # bound in this job is measured from runner pickup (the in-step watchdog
       # is started INSIDE the job), so a start delayed by the cap can never
@@ -2027,14 +2028,17 @@ jobs:
       #
       # #6744: bounded like the fast matrix, and for the same derivation — read
       # the `test` job's `max-parallel` comment for the measurement and the two
-      # inequalities. `3` here costs ONE extra wave (ceil(5/3) = 2 instead of 1)
-      # and that cost is the one accepted wall regression in the change:
-      # measured leg wall p50 8.9m → the band goes ~13m → ~18m, still narrower
-      # than the fast band under the same cap (3 waves × 10.5m ≈ 31.5m), so it
-      # does not become the run's widest matrix. Capping at 5 instead (keeping
-      # its single wave) would put a PR's maximum hold at 3 + 5 + 3 = 11 of the
-      # 12 measured runners — failing inequality (b) and reinstating exactly the
-      # monopolisation this exists to remove.
+      # inequalities. `3` here costs ONE extra wave (ceil(5/3) = 2 instead of 1),
+      # the one wave THIS matrix adds: measured leg wall p50 8.9m → the band goes
+      # ~13m → ~18m, still narrower than the fast band under the same cap
+      # (3 waves × 10.5m ≈ 31.5m), so it does not become the run's widest matrix.
+      # It is NOT the whole regression — the fast matrix is pinned at its 3-wave
+      # ceiling too, and the run-level cost is the simulation's matrix-band end
+      # delta (+17.9m p50 / +23.2m max), which is the figure a rollback decision
+      # must use. Capping at 5 instead (keeping its single wave) would put a PR's
+      # maximum MATRIX hold at 3 + 5 + 3 = 11 of the 12 measured runners —
+      # failing inequality (b) and reinstating exactly the monopolisation this
+      # exists to remove.
       max-parallel: 3
       matrix: ${{ fromJSON(needs.changes.outputs.slow_matrix) }}
     name: test-slow (${{ matrix.half }})

@@ -366,7 +366,8 @@ reading it as one would be wrong — `.github/workflows/mirror-images.yml` still
 `matrix` with no cap. That one is out of scope rather than overlooked: it is not PR-triggered
 (`workflow_dispatch` plus a nightly `schedule`), so it has no per-PR fan-out to bound, and its
 `matrix` is a static 3-target `include:` list (mirroring registry images), not a shard set that
-grows with the suite. It is
+grows with the suite — and it runs on a hosted `ubuntu-24.04` runner, so it cannot take a slot
+from the self-hosted pool this section measures. It is
 recorded here only so a later reader does not mistake this section for "every matrix in the repo
 is bounded".
 
@@ -411,10 +412,16 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 | 5 / 3 / 3 | 10 / 12 | +8.1 m / +9.6 m |
 | unset | 11 / 18 | 0 / 0 |
 
-The accepted regression is the slow matrix's second wave (`ceil(5/3)`): its band goes ~13 m →
-~18 m, still narrower than the fast band under the same cap (~31.5 m), so it does not become the
-run's widest leg. Capping slow at 5 to keep its single wave would put a PR's hold at 11 of 12
-runners and fail invariant 2.
+**The accepted regression has two components, and only the run-level number judges it.** The slow
+matrix gains its second wave (`ceil(5/3)` = 2): its band goes ~13 m → ~18 m, still narrower than
+the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. The fast
+matrix's band is pinned at `ceil(9/3)` = 3 waves — inside the measured 2–4 wave band, so it costs
+a wave on the runs where the pool delivered those 9 shards in 2 and saves one where it took 4. The
+pair is what the simulation's **matrix-band end delta of +17.9 m p50 / +23.2 m max** (table above)
+records, and that — not the slow matrix's ~5 m in isolation — is the figure a keep-vs-rollback
+reading must use (see "The re-derivation cannot use per-job queue wait", below). Capping slow at
+5 to keep its single wave would put a PR's maximum **matrix** hold at 11 of 12 runners and fail
+invariant 2.
 
 ⛔ **The clock this is judged on.** `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`,
 §3), so a cap protects **other** PRs from this one. It does **not** make the capped PR finish
@@ -427,11 +434,12 @@ matrices**: `manifest-integrity`, `surface-guard` and `workflow-lint` carry no `
 and `test-concurrency-falkor`, `packs-compile`, `test-track-b`, `test-d14-hosted-api` and
 `test-record-postgres` need only `changes` — the same trigger the three matrices wait on.
 (`changes` is itself a fourth `needs:`-less job and is excluded from the 8 deliberately: the
-matrices wait on it, so it cannot overlap them.) A PR therefore requests up to 17 jobs (9 matrix +
-8 non-matrix) and its total hold is bounded by **the pool — 12 concurrent**, not by this cap and
-not by 9. The cap is a fairness bound on the
-FAN-OUT (which is what was unbounded, and what made one PR own the pool); it is not a total
-concurrency budget, and reading 9 as one would understate the hold by up to a third.
+matrices wait on it, so it cannot overlap them.) On a full selection a PR therefore **requests 28
+jobs** (17 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-gated), of which at
+most **17 can run concurrently** (9 matrix slots + the 8 eligible non-matrix), and only **the pool
+— 12 — bounds that**. Not the cap, and not 9. The cap is a fairness bound on the FAN-OUT (which is
+what was unbounded, and what made one PR own the pool); it is not a total concurrency budget, and
+reading 9 as one would understate the hold by up to a third.
 
 ⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
 these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a
