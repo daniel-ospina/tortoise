@@ -326,8 +326,15 @@ def _scrub(text: str, secret: str = "") -> str:
             _i = 0
             while _i < len(out):
                 if out[_i:_i + 8] in windows:
+                    # ⛔ ANCHOR THE EXTENSION (review cycle 20). `out[_i:_j+1] in secret` is a FREE substring
+                    # test, and a 1-2 char continuation is virtually always a substring of any token — so
+                    # the redaction ran far past the fragment and mangled text that was never a credential
+                    # (measured: the marker was placed INSIDE an unrelated 40-hex value). Extend only while
+                    # the span still matches the SAME position in the secret.
+                    _p = secret.find(out[_i:_i + 8])
                     _j = _i + 8
-                    while _j < len(out) and out[_i:_j + 1] in secret:
+                    while (_j < len(out) and _p >= 0
+                           and secret[_p:_p + (_j + 1 - _i)] == out[_i:_j + 1]):
                         _j += 1
                     pieces.append("<redacted-token>")
                     _i = _j
@@ -521,7 +528,10 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
     """Run one write-surface probe. Returns {'ok': bool, 'reason': str, 'detail': str, 'status': int}."""
     status, headers, payload = _request(url, token, method="POST", body=body)
     if status == 0:
-        return {"ok": False, "reason": "transport", "detail": f"could not reach {url!r}: transport failure ({len(payload)} bytes of response text, not echoed)",
+        # ⛔ NEVER THE RAW URL (review cycles 17-20): it embeds the caller-supplied `api_base` PATH, and a
+        # legacy value there survives both scrubs when the credential that resolves is a different one.
+        # The READ probe already reports `_printable_base(api_base)`; this branch is the same rule.
+        return {"ok": False, "reason": "transport", "detail": f"could not reach {_printable_base(url)}: transport failure ({len(payload)} bytes of response text, not echoed)",
                 "status": 0}
     if status in _WRITE_OK:
         return {"ok": True, "reason": "permitted",
