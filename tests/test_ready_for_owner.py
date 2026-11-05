@@ -1230,3 +1230,12 @@ def test_an_unread_config_does_not_claim_the_contract_is_satisfied(tmp_path, cap
     out = capsys.readouterr().out
     assert "contract satisfied" not in out, out
     assert "not measured" in out
+
+
+def test_importing_the_verdict_module_does_not_grow_sys_path():
+    """`_cv()` used to `sys.path.insert` on every call — once per check-run group."""
+    evaluate(required(), all_green())
+    before = len(sys.path)
+    for _ in range(5):
+        evaluate(required(), all_green())
+    assert len(sys.path) == before

@@ -149,6 +149,7 @@ import importlib.util
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -293,9 +294,13 @@ def derive_required_set(
     """The required set: `.mergify.yml` first, the committed snapshot as fallback.
 
     Raises `Unreadable` when BOTH are unavailable — the caller must then FAIL,
-    never assume. The snapshot is compared whenever the config DID parse, and a
-    disagreement is reported in `notes` (the config is what Mergify enforces, so
-    it wins; the snapshot is inert and cannot enforce anything).
+    never assume. When the config DID parse, the snapshot is a CROSS-CHECK and the
+    direction of a disagreement decides the outcome: a name the record requires but
+    the config does not derive becomes `unsafe_drift`, which `evaluate()` refuses as
+    `FAIL(config-error)` — the record is the live picture and a config edit cannot
+    remove a live requirement, so grading would certify against a smaller set than
+    the queue blocks on. The opposite direction only means the record is stale
+    (`notes`, inert). `--live` settles which side is current.
     """
     mergify_path = mergify_path or MERGIFY_PATH
     notes: list[str] = []
@@ -509,8 +514,13 @@ def _groups_for(verdict: Any, name: str) -> list[Any]:
     return [g for g in verdict.groups if g.job == name]
 
 
+@lru_cache(maxsize=1)
 def _cv() -> Any:
-    """`tools.ci_verdict`, imported on demand (pure callers need no sys.path work)."""
+    """`tools.ci_verdict`, imported once.
+
+    `sys.path.insert` on EVERY call grew the path with a duplicate entry per
+    check-run group (it is called from the in-flight scan and from every row).
+    """
     sys.path.insert(0, str(REPO_ROOT))
     from tools import ci_verdict
 
@@ -636,8 +646,7 @@ def evaluate_head(
     sha: str,
 ) -> GateResult:
     """Fetch the head's check surface and evaluate. Raises `Unreadable` on a read failure."""
-    sys.path.insert(0, str(REPO_ROOT))
-    from tools import ci_verdict
+    ci_verdict = _cv()
 
     try:
         verdict = ci_verdict.read_verdict(repo, sha)
