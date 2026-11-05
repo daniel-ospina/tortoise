@@ -523,30 +523,37 @@ def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
     credential at all: `GH_WRITE_PREFLIGHT_API=http://127.0.0.1:40933`, token
     `ghp_NOT_A_REAL_CREDENTIAL` → rc 0, `GH-WRITE-OK(issues+pull-requests+contents writable)`, and no
     output naming the base. Here the base is a host that is neither GitHub nor loopback, so the ONLY
-    acceptable outcome is a refusal that happens before any request: reason `usage`, no OK line, and —
-    because `_validate_api_base` runs ahead of the probe — no DNS or TCP contact at all.
+    acceptable outcome is a refusal that reports `usage`, names no pass, and does not crash.
+
+    ⛔ THE CLASS IS PINNED BY THE `usage` REASON, NOT BY A STUB. This arm runs the tool with its base
+    pointed at `api.github.example.com`, so the tool never knows which server `_Stub()` bound — a
+    `seen == []` assertion here would be TRUE FOR EVERY IMPLEMENTATION of the tool (including one that
+    sent the READ probe first and only then refused), i.e. an enforcer whose condition can never fire.
+    The direct, reachable observation — `seen == []` against a base that IS the live stub, so a tool
+    that ordered the probe ahead of `_validate_api_base` would be caught — lives in
+    `test_api_base_carrying_credentials_is_refused_and_never_echoed` below, which is where the
+    "refused before any contact" claim is actually evidenced (review P3, F1).
 
     Pre-fix, this same invocation reached the network and reported `GH-WRITE-UNAVAILABLE(transport)`,
     i.e. it both sent the credential nobody had vetted and blamed the token's environment for it.
     """
-    with _Stub() as s:
-        rc, out, err = _run("http://api.github.example.com", token="ghp_NOT_A_REAL_CREDENTIAL")
-        seen = list(s.seen)
+    rc, out, err = _run("http://api.github.example.com", token="ghp_NOT_A_REAL_CREDENTIAL")
     assert rc != 0, f"an unvetted endpoint produced a PASS: {out}"
     assert "GH-WRITE-UNAVAILABLE(usage)" in out, out
     assert "GH-WRITE-OK" not in out, out
     assert "api.github.example.com" in out, out
-    assert seen == [], f"the tool contacted something before validating the base: {seen}"
     assert "Traceback" not in err, err
 
 
 def test_api_base_carrying_credentials_is_refused_and_never_echoed():
     """`user:pass@` in the base is (a) refused and (b) NOT reprinted in the refusal (review round 7).
 
-    Reachability is the point: this base names the LIVE stub, so a tool without the check would run
-    the whole probe sequence against it and print `GH-WRITE-OK` for `ghp_NOT_A_REAL_CREDENTIAL` — the
-    stub records every request, so `seen == []` is the direct evidence that the refusal happened
-    before the credential left the process.
+    Reachability is the point, and THIS is the arm that carries it (review P3, F1): the base names the
+    LIVE stub, so a tool that ran its probe sequence before `_validate_api_base` would send the request
+    to `seen` and (had the payload been valid) print `GH-WRITE-OK` for `ghp_NOT_A_REAL_CREDENTIAL`.
+    `seen == []` here is therefore a real observation about the ORDER of validation and contact —
+    delete that assertion and a reordering that moves the READ probe ahead of the base validation goes
+    undetected.
     """
     with _Stub() as s:
         rc, out, err = _run(f"http://user:hunter2@{s.base.split('//', 1)[1]}",
@@ -1268,6 +1275,53 @@ def test_the_git_credential_residual_is_stated_where_a_lane_reads_it():
     block = "\n".join(agents.splitlines()[i:i + 6])
     assert "provided `git` resolves the same credential" in block, \
         f"the HARD RULE states a guarantee wider than the tool proves: {block!r}"
+
+
+def test_the_reason_table_does_not_send_a_lane_into_a_rerun_loop_on_forbidden():
+    """`forbidden` is STRUCTURAL: the HARD RULE must not file it under *transient* (P3, F2).
+
+    `forbidden` is emitted at five places in the tool, and the ones that matter are structural, not
+    transient: a `2xx` on a must-be-invalid payload (a proxy/WAF/captive portal rewrote the request,
+    or a redirect was followed — `_write_probe`), ANY unexpected status (the docstring names a `410`
+    for Issues-disabled and a `451` — `:601`, `:727`), and a `403` that named neither a rate limit,
+    SSO, nor a resource permission (`_classify_403`). None of those changes on a second attempt, so a
+    lane following the HARD RULE's old "Re-run; do not park the work" would loop forever on a
+    condition the tool itself (correctly) never lets it past.
+
+    The HARD RULE is the artifact a lane is told to read instead of the exit code, so the bucket a
+    reason sits in IS its instruction. This pins the bucket, and pins the tool's own docstring to the
+    same class, so neither artifact can drift back alone.
+    """
+    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    lines = agents.splitlines()
+
+    def bucket(name: str) -> str:
+        hits = [i for i, ln in enumerate(lines) if f"**{name}**" in ln]
+        assert len(hits) == 1, f"expected exactly one {name!r} reason bucket, found {len(hits)}"
+        block = [lines[hits[0]]]
+        for ln in lines[hits[0] + 1:]:
+            if not ln.strip() or ln.startswith("  - **"):
+                break
+            block.append(ln)
+        return "\n".join(block)
+
+    transient = bucket("transient")
+    assert "forbidden" not in transient, (
+        "AGENTS.md files `forbidden` under *transient*, so it tells a lane to RE-RUN a structural "
+        f"refusal (a 410 with Issues disabled, a 2xx rewritten by a proxy) forever: {transient!r}")
+
+    structural = bucket("structural")
+    assert "forbidden" in structural, (
+        f"`forbidden` has no home in the reason table's classes: {structural!r}")
+    low = structural.lower()
+    assert "re-run" in low and "re-mint" in low, (
+        f"the structural bucket must say what NOT to do, or a lane invents its own retry policy: {structural!r}")
+
+    tool_src = TOOL.read_text(encoding="utf-8")
+    reason_doc = [ln for ln in tool_src.splitlines() if ln.startswith("  forbidden")]
+    assert len(reason_doc) == 1, f"expected one docstring `forbidden` row, found {len(reason_doc)}"
+    assert "STRUCTURAL" in reason_doc[0], (
+        f"the tool's reason table still reads as a retryable class: {reason_doc[0]!r}")
 
 
 if __name__ == "__main__":

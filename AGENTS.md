@@ -509,10 +509,17 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   - **environment** — `usage`, `wrong-host`, `repo-not-visible`, `sso-unauthorized`: the invocation or the
     access is wrong. ⛔ **Do NOT re-mint the token** — fix the `--repo`/`$OR` value (the documented command
     reads `$OR`, so an unset one answers `usage`), the host, the repo access, or the SSO authorisation.
-  - **transient** — `rate-limited`, `server-error`, `transport`, `forbidden`: GitHub, or the path to it,
-    failed. **Re-run; do not re-mint the token and do not park the work.** The tool orders the rate-limit
-    check ahead of every permission verdict precisely so a shared-account limit is not charged to the
-    credential.
+  - **transient** — `rate-limited`, `server-error`, `transport`: GitHub, or the path to it, failed
+    while it was working. **Re-run; do not re-mint the token and do not park the work.** The tool orders
+    the rate-limit check ahead of every permission verdict precisely so a shared-account limit is not
+    charged to the credential.
+  - **structural** — `forbidden`: the response did not come from GitHub's normal validation path (a
+    proxy, WAF, captive portal or followed redirect rewriting the request — a `2xx` on a must-be-invalid
+    payload lands here), or the surface is unavailable on this repo (a `410` with Issues disabled, a
+    `451`), or a `403` that named neither a rate limit, SSO, nor a resource permission. ⛔ **Do NOT
+    re-mint the token and do NOT re-run** — nothing about the credential or the next attempt changes it,
+    so a re-run loop never terminates. Read `detail` and the `surfaces` map in the `--json` verdict,
+    report the reason, and let a human decide whether the repo setting or the network path is the fix.
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
 `$HOME/.config/gh/hosts.yml`, so a box with two credentials resolves whichever the environment happens to

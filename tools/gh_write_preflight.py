@@ -137,8 +137,12 @@ REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
   soonest; `detail` and the `surfaces` map name every refused surface, so nothing is hidden. Every
   one of these is fixed by the same action: re-mint the token carrying ALL THREE write permissions.
   sso-unauthorized             403 naming SAML/SSO — authorise the token for the org
-  forbidden                    4xx that is neither a permission refusal nor a known class (e.g. 410
-                               Issues-disabled, 400 from a proxy, 451) — NOT charged to the token
+  forbidden                    STRUCTURAL — re-running cannot change it, and it is NOT charged to the
+                               token: a 4xx that is neither a permission refusal nor a known class
+                               (410 Issues-disabled, 400 from a proxy/WAF, 451), a 403 naming neither
+                               a rate limit, SSO, nor a resource permission, or a 2xx on a
+                               must-be-invalid payload (the request was rewritten, so nothing was
+                               proven). Report it; do not re-run and do not re-mint for it.
   transport                    could not reach the API — NOT a verdict about the token
   usage                        bad arguments — including an `--api-base` / `$GH_WRITE_PREFLIGHT_API`
                                that is neither DEFAULT_API nor a loopback stub, or one carrying a query,
