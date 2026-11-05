@@ -93,6 +93,28 @@ WHAT IT PROBES, AND WHY EACH CHOICE IS THE ONE IT IS
 6. **REDIRECTS ARE NEVER FOLLOWED.** Only `422` counts as "authorised"; a 2xx on a must-be-invalid
    payload is evidence the response did not come from GitHub's validation path. See `_WRITE_OK`.
 
+⛔ WHAT THE VERDICT DOES NOT COVER — the credential **`git`** uses
+───────────────────────────────────────────────────────────────────────
+The six probes above prove the capability of the credential **`gh` resolves**: the same
+`GH_TOKEN` → `GITHUB_TOKEN` → `GH_CONFIG_DIR`/hosts.yml chain as `objective.py::_gh_token` and
+`pr-doctor.py::_gh_token`, so the three tools cannot disagree about who the lane is.
+
+They do **NOT** prove that `git` resolves the SAME credential, and `exit 0` is routinely read as if
+they did. `git` reads `credential.helper`, which on a healthy box is
+`!gh auth git-credential` — and on a box that has been through a token re-mint can be `store` or
+`osxkeychain` still holding the OLDER PAT, or unset, which #10930 records on a real box alongside
+that same token's `git push` → `403`. So:
+  * `exit 0` means **"the token `gh` found can write"**, and a box whose helper disagrees can still
+    be refused at push — the false-PASS class this tool exists to close, one layer further out;
+  * symmetrically, `exit 1` on a box whose helper carries a different, WRITE-capable credential
+    refuses a lane whose `push` would have succeeded.
+
+Checking the helper is a DIFFERENT measurement — compare what `git credential fill` answers for
+`protocol=https host=github.com` with the resolved token, name a `git-credential-differs` reason
+when they disagree — and is deliberately not this tool's. Stated here rather than left implied for
+the same reason the keyring residual is (`_gh_config_path`): a promise wider than the measurement
+is the defect, not the residual.
+
 REASONS (`GH-WRITE-UNAVAILABLE(<reason>)`), each with its own fix
 ─────────────────────────────────────────────────────────────────
   no-credential                no GH_TOKEN, no GITHUB_TOKEN, no github.com entry in hosts.yml
@@ -437,7 +459,14 @@ def _token_from_hosts() -> tuple[str, str]:
 
 
 def resolve_credential() -> tuple[str, str]:
-    """Return (token, source). `source` is a LABEL, never a value."""
+    """Return (token, source). `source` is a LABEL, never a value.
+
+    This is the credential **`gh`** resolves (the `objective.py` / `pr-doctor.py` chain). It is NOT
+    necessarily the credential `git` uses — `git` reads `credential.helper`, which can hold a
+    different or older PAT, or be unset. `exit 0` therefore means "this token can write", not
+    "this box's `git push` will be accepted"; see the module docstring's
+    "WHAT THE VERDICT DOES NOT COVER" note.
+    """
     host = (os.environ.get("GH_HOST") or "github.com").strip().lower()
     if host in ("github.com", "api.github.com"):
         for var in ("GH_TOKEN", "GITHUB_TOKEN"):

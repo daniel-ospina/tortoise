@@ -492,7 +492,10 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 **One line, before delivery work:** `uv run python tools/gh_write_preflight.py --repo "$OR"`
 
 - `exit 0` = `GH-WRITE-OK(issues+pull-requests+contents writable @ https://api.github.com)` — the credential
-  carries Issues, Pull-requests and Contents write, so it will not be refused at push/comment/close time.
+  carries Issues, Pull-requests and Contents write, so it will not be refused at push/comment/close time,
+  **provided `git` resolves the same credential** (its `credential.helper` may hold a different, older PAT,
+  or be unset — #10930 records a box where it was, alongside that token's `git push` → `403`; the tool proves
+  the token `gh` resolves, not `git`'s).
   ⛔ **A pass whose OK line names any endpoint other than `https://api.github.com` is NOT a pass** — that is
   the hermetic test seam (`GH_WRITE_PREFLIGHT_API`), so unset it and re-run. (The tool proves those three
   grants; it does not promise a branch-protection rule will accept the merge.)

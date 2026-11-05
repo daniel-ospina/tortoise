@@ -1207,6 +1207,34 @@ def test_inputs_that_are_not_credentials_are_still_never_echoed_as_one():
     assert secret not in blob, f"the hosts.yml user: line was echoed: {blob!r}"
 
 
+def test_the_git_credential_residual_is_stated_where_a_lane_reads_it():
+    """`exit 0` proves the credential **`gh`** resolves, not the one **`git`** uses (P2-3).
+
+    `git` reads `credential.helper`, which can hold a different or older PAT, or be unset (the box
+    #10930 records: unset, alongside that token's `git push` -> 403). Where that holds, a box prints
+    `GH-WRITE-OK` and the push is still refused — the false-PASS class the AGENTS.md HARD RULE
+    exists to close, one layer further out.
+
+    The fix for the review's P2-3 is to state the residual rather than widen the promise, so this
+    pins the statement: an edit that drops the caveat from either artifact — the tool's own
+    docstring (where the keyring residual already lives) or the AGENTS.md line a lane actually
+    reads — reds here instead of silently re-widening the guarantee.
+    """
+    tool_src = TOOL.read_text(encoding="utf-8")
+    assert "WHAT THE VERDICT DOES NOT COVER" in tool_src, \
+        "the tool docstring lost its \"does not cover the credential git uses\" section"
+    assert "credential.helper" in tool_src, \
+        "the residual must NAME credential.helper, or it says nothing checkable"
+
+    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    ok_line = [ln for ln in agents.splitlines() if "GH-WRITE-OK(issues+pull-requests+contents" in ln]
+    assert len(ok_line) == 1, f"expected exactly one GH-WRITE-OK contract line, found {len(ok_line)}"
+    i = agents.splitlines().index(ok_line[0])
+    block = "\n".join(agents.splitlines()[i:i + 6])
+    assert "provided `git` resolves the same credential" in block, \
+        f"the HARD RULE states a guarantee wider than the tool proves: {block!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

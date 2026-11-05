@@ -14121,6 +14121,26 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
+def test_gh_write_preflight_runs_on_a_tools_only_change():
+    # #10930: `tests/test_gh_write_preflight.py` (registered `core`) pins
+    # `tools/gh_write_preflight.py` — the credential write-capability gate wired
+    # as a HARD RULE in AGENTS.md, whose weakening (adding 200 to `_WRITE_OK`,
+    # dropping `_validate_api_base`, deleting the contents probe) turns a refusal
+    # into a FALSE PASS. `tools/` is a flat NON_PYTHON_PREFIXES entry and the
+    # tool matches no SOURCE_PATTERNS row, so before the CORE_ALSO entry a
+    # preflight-only diff was filtered out BEFORE the "not matched -> core"
+    # fallback and selected NO surface at all: the gate's own pins never ran on
+    # the file they hold (the #1349/#3332/#3616 silent-drop class).
+    # Mutation check: removing the CORE_ALSO entry fails the arm below
+    # (surfaces == [] and the suite absent from test_files); dropping
+    # `test_gh_write_preflight.py` from the manifest's `core` test list fails the
+    # last arm.
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
