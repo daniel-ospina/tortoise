@@ -133,6 +133,53 @@ def test_the_decline_still_works_when_the_quoted_keyword_has_been_blanked():
     assert L.classify_pr("Refs #10602 — deliberately not a closing one.\n", 1) == []
 
 
+@pytest.mark.parametrize("body,why", [
+    ("Refs #1234 — the estimate does not close the delta.", "`does not close` + a transitive object"),
+    ("Refs #1234 — mitigates the symptom; does not close the root.", "the phrase follows a semicolon"),
+    ("Refs #1234 — the numbers are not close to the target.", "`not close` + a preposition"),
+    ("Refs #1234 — no closing costs involved.", "`no closing` + an object"),
+    ("Refs #1234 — non-closing reference, see the review.", "`non-closing` + a noun"),
+])
+def test_ordinary_closing_prose_does_not_delete_the_claim(body, why):
+    """F1, the remainder the round before left unanchored — measured at `fb2913a966`.
+
+    Round 11 anchored the `deliberately not` alternative and left the other four (`does not clos`,
+    `not … clos`, `no closing`, `non-closing`) matching ANYWHERE on the line. Because
+    `declined_lines` is computed per line and applied to EVERY ref on that line, each of the five
+    bodies below read CLEAN — the claim was silently dropped — while the bare control
+    `Refs #1234` flagged. That is a false PASS in the #10534 direction, the one this module ranks
+    worst; every one of these bodies is prose about something OTHER than the reference.
+
+    GitHub does not honour a decline either (its closing-keyword match does not understand
+    negation), so "the author answered" is true only when the sentence really is about the
+    reference — which is exactly what these five do not require. All five are RED against the
+    pre-fix regex (verified by re-running them with the old `DECLINE_RE` swapped back in:
+    5 failed / 0 passed).
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[1234]], why
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #1234 — this does not close the issue.", "clause-terminal, naming the reference"),
+    ("Refs #1234 — not a closing one.", "article + closing word + reference noun"),
+    ("Refs #1234 — non-closing keyword.", "compound adjective + reference noun"),
+    ("Refs #1234 — non-closing.", "compound adjective, clause-terminal"),
+    ("Refs #1234 — no closing.", "`no closing`, clause-terminal"),
+    ("Refs #1234 — does not close.", "`does not close`, clause-terminal"),
+])
+def test_a_statement_about_the_reference_is_still_a_decline(body, why):
+    """The other side of the same narrowing: an author who says the reference is not closing is
+    answering, and flagging them punishes exactly the honesty the process block asks for.
+
+    The tail admitted after the closing word is the REFERENCE and nothing else — that closed list
+    is what separates `does not close the issue` (a decline) from `does not close the delta`
+    (prose), and it is why this is a grammar rather than a wider word list.
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [1234], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
 def test_the_prs_own_number_is_never_a_claim():
     assert L.classify_pr("Refs #77\n", 77) == []
 

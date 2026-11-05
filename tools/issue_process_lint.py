@@ -213,16 +213,47 @@ _EMPH = r"[\s*_`]+"
 # Both halves are load-bearing, and the pinned case is why the alternative cannot simply be deleted:
 # in the body `Refs #10602 — deliberately **not** \`Closes\``, `strip_code` blanks the inline-code
 # keyword, so what reaches this regex is `deliberately **not**   .` — punctuation only, no `clos`
-# left to match (the sibling `not{_EMPH}(?:a{_EMPH})?clos` alternative cannot see it either). A
-# decline that names the keyword in prose (`deliberately not a closing one`) still declines,
-# through that sibling, so nothing legitimate is lost by tightening this one.
+# left to match; a decline that names the closing word in prose (`deliberately not a closing one`)
+# must still decline, so nothing legitimate is lost by tightening.
+#
+# ⛔ The SAME test applies to the other four alternatives, which were left unanchored (F1, the
+# unfixed remainder of the round before): `declined_lines` is computed per line and applied to
+# EVERY ref on that line, so an ordinary English `does not close` sharing the line deleted the
+# claim beside it. Measured at `fb2913a966`, each of these read CLEAN while the control
+# `Refs #1234` alone flagged:
+#     `Refs #1234 — the estimate does not close the delta.`
+#     `Refs #1234 — mitigates the symptom; does not close the root.`
+#     `Refs #1234 — the numbers are not close to the target.`
+#     `Refs #1234 — no closing costs involved.`
+#     `Refs #1234 — non-closing reference, see the review.`
+# None of them is about the reference, so the closing word now has to END its clause or name the
+# reference it is about. Two properties make that decidable rather than a word list:
+#   * `deliberately` is the AUTHOR-FACING convention (the process block asks for exactly this
+#     phrase), and it does not appear by accident on a claim line about something else — so it
+#     keeps the looser rule: clause-terminal, or naming the closing word (`not a closing keyword,
+#     see the plan` — the appositive continuation is the reason a comma is admitted after the
+#     reference noun).
+#   * the ordinary-English shapes carry no such marker, so they must be clause-terminal, and a
+#     tail is admitted ONLY when it is the reference itself (`does not close the issue`, `not a
+#     closing one`). A transitive object that is not one of those (`does not close the delta`, `not
+#     close to the target`, `no closing costs involved`) is prose about something else.
 _DECLINE_TAIL = r"[\s*_`.,;:!?()\[\]—–-]*"
 _CLOSING_STEM = (r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]?|ing)?"
                  r"|resolv(?:e[sd]?|ing)?|satisf(?:y|ies|ied|ying))\b")
+# What a decline may name AFTER the closing word: the reference, and nothing else. Closed and short
+# on purpose — every word admitted here widens the silent-dropped-claim surface, and a `closing`
+# followed by one of them is a sentence about the reference by construction.
+_REF_NOUN = (r"(?:one|ones|ref|refs|reference|references|issue|issues|keyword|keywords"
+             r"|commit|commits|pr|prs)\b")
+_DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
 DECLINE_RE = re.compile(
-    rf"deliberately{_EMPH}not(?={_DECLINE_TAIL}(?:$|{_CLOSING_STEM}{_DECLINE_TAIL}$))"
-    rf"|does{_EMPH}not{_EMPH}clos|not{_EMPH}(?:a{_EMPH})?clos"
-    rf"|non-closing|no{_EMPH}closing",
+    # (a) the author's convention: `deliberately not …`
+    rf"deliberately{_EMPH}not"
+    rf"(?={_DECLINE_TAIL}$"
+    rf"|{_EMPH}{_DET}{_CLOSING_STEM}(?:{_EMPH}{_DET}{_REF_NOUN})?{_DECLINE_TAIL}(?:$|[,;]))"
+    # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
+    rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
+    rf"(?:{_EMPH}{_DET}{_REF_NOUN})?{_DECLINE_TAIL}$",
     re.IGNORECASE,
 )
 SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
