@@ -190,15 +190,20 @@ def _connection(endpoint):
 
     from tortoise.projection import _bounded_server_socket_kwargs
 
-    bound = _bounded_server_socket_kwargs()
+    # ⛔ The resolver is splatted INLINE in both calls, not hoisted into a local:
+    # `tests/test_bounded_raw_clients_3065.py` is the systemic pin that a tool-surface
+    # client carries a read bound, and it reads the CALL's keywords. Hoisting the
+    # splat made this file's two clients read as UNBOUNDED to that gate.
     client = redis.Redis(
         host=endpoint.host, port=endpoint.port,
         username=endpoint.username, password=endpoint.password,
-        ssl=endpoint.ssl, decode_responses=True, **bound,
+        ssl=endpoint.ssl, decode_responses=True,
+        **_bounded_server_socket_kwargs(),
     )
     db = FalkorDB(host=endpoint.host, port=endpoint.port,
                   username=endpoint.username, password=endpoint.password,
-                  ssl=endpoint.ssl, **bound)
+                  ssl=endpoint.ssl,
+                  **_bounded_server_socket_kwargs())
     return client, db.select_graph(endpoint.graph_name)
 
 
