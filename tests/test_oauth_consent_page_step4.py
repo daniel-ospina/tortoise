@@ -1404,8 +1404,11 @@ def test_the_predicates_docstring_does_not_claim_the_EMITTER_calls_it() -> None:
     """
     from urllib.parse import parse_qs, urlsplit
 
-    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM, consent_bounce_url
-    from tortoise.oauth import presented_consent_attempt_key
+    from tortoise.oauth import (
+        CONSENT_ATTEMPT_KEY_PARAM,
+        consent_bounce_url,
+        presented_consent_attempt_key,
+    )
 
     blank_first = (
         f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
