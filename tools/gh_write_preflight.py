@@ -30,28 +30,32 @@ up says so and names the ref, and no path returns while silently leaving one beh
 Exit codes (callers branch on them; they are not interchangeable)
 ----------------------------------------------------------------
     0   GH-WRITE-OK(...)                     the credential can write; the probe ref is gone
-    1   GH-WRITE-UNAVAILABLE(<reason>)       MEASURED refusal — a lane must not start
+    1   GH-WRITE-UNAVAILABLE(<reason>)       a refusal — do not start. Two shapes land here: a
+                                              MEASURED credential refusal (`contents-write-denied`,
+                                              `workflow-scope-denied`, `push-refused`) and a
+                                              mechanical repo-state refusal
+                                              (`no-remote`, `no-git-checkout`) whose own footer
+                                              says so — read the reason, not just the code
     2   GH-WRITE-UNAVAILABLE(cannot-verify:<reason>)   the probe COULD NOT RUN (usage, missing
-                                                      tool, timeout, unconfirmable). A
+                                                      tool, timeout, unconfirmable), or it ran and
+                                                      could not prove its own claim
+                                                      (`cleanup-failed`, `ls-remote-mismatch`). A
                                                       cannot-verify is never a pass — still non-zero.
 
-Reasons (stable, greppable — the whole point is that a lane's log says which one)
+Reasons (stable, greppable — the whole point is that a lane's log says which one). Each row's
+bracket is its exit code, and `tests/test_gh_write_preflight.py` compares it with the code's own
+`exit_code_for()` so the table cannot drift again (review N1); a row must stay on ONE line to be
+checked, so keep the marker at the end of an unwrapped row.
 -------------------------------------------------------------------------------
-    no-remote                  no `origin` to probe (and no --repo to assert against)
-    no-git-checkout            --workdir is not a git work tree
-    contents-write-denied      the server refused the push (403 / "Permission to … denied")
-    workflow-scope-denied      a PAT without the `workflow` scope, on a branch touching
-                               `.github/workflows/*` — a MEASURED refusal, and the incident's shape
-    cannot-verify:git-push-form  the push never reached the credential (mirror/signed-refspec/
-                               ref-lock configuration); a repo problem, not a credential one
-    push-refused               the push failed for another measured reason (SSH key, DNS, …)
-    ls-remote-mismatch         push reported success but the ref is not on the remote, or its sha
-                               differs — the write did not land as claimed
-    cleanup-failed             the probe WROTE and the ref could not be removed — names the ref
-    probe-ref-exists           a ref of the probe name already exists (refusing to reuse it) —
-                               cannot-verify, because nothing about the credential was measured
-    cannot-verify:*            usage / bad-repo-argument / repo-mismatch / git-missing / timeout /
-                               ls-remote-failed / probe-error / probe-ref-exists
+    no-remote                  no `origin` to probe (and no --repo to assert against)   [exit 1]
+    no-git-checkout            --workdir is not a git work tree                          [exit 1]
+    contents-write-denied      the server refused the push (403 / "Permission to … denied") [1]
+    workflow-scope-denied      a PAT without the `workflow` scope, on a branch touching `.github/workflows/*` [exit 1]
+    push-refused               the push failed for another measured reason (SSH key, DNS, …) [exit 1]
+    cannot-verify:git-push-form  the push never reached the credential (mirror/signed-refspec/ref-lock config) [2]
+    ls-remote-mismatch         push exited 0 but the ref is not on the remote, or its sha differs [2]
+    cleanup-failed             the probe WROTE and the ref could not be removed — names the ref [2]
+    cannot-verify:*            usage/bad-repo-argument/repo-mismatch/git-missing/timeout/ls-remote-failed/probe-error/probe-ref-exists [2]
 
 `--repo` is an ASSERTION, never a redirect
 ------------------------------------------
@@ -703,10 +707,34 @@ def probe(cwd: Path, repo: str, targets: list[str], timeout: int = DEFAULT_TIMEO
         # This NO LONGER reports `cleanup-failed` for a ref that never existed: it reaches `_cleanup`
         # only when a ref is measured PRESENT.
         present, pok = _exists_any(cwd, targets, ref, timeout)
-        if pok and present:
+        if not pok:
+            # ⛔ THE UNMEASURED-PRESENCE ARM (review P2). `_confirmed_all` answers "" for absent-on-a-
+            # target AND for present-with-DISAGREEING-shas; the presence read above separates them, but
+            # when THAT read fails the answer is neither — presence is unknown. Falling straight through
+            # returned a `ls-remote-mismatch` whose detail named no ref and no leftover, WITHOUT ever
+            # attempting the delete, so a probe whose write DID land (the disagreeing state) left one
+            # branch per run on every pushurl, silently and forever — while the file's own invariant
+            # ("no path returns while silently leaving one behind") said otherwise.
+            # `_cleanup` is safe to call here: it is IDEMPOTENT and confirms by `ls-remote`, so it
+            # cannot report a false leftover, and it attempts the delete even though the presence read
+            # failed. The reason stays `cannot-verify` — the write was NOT measured everywhere — but the
+            # wording is `_after_push_failure`'s: name the ref, say where it may be, give the remedy.
+            detail = _cleanup(cwd, targets, ref, timeout)
+            v.reason = "cannot-verify:ls-remote-failed"
+            v.detail = (
+                f"the push exited 0 but whether {ref} landed on EVERY push target could not be "
+                f"confirmed (the presence read failed), so it may be on "
+                f"{v.target or '<unresolved>'}"
+                + ("" if not detail else f" (the delete also could not be confirmed: {detail})")
+                + f" — check it and delete it by hand if present: git ls-remote --heads <target> {ref}"
+            )
+            return v
+        if present:
             detail = _cleanup(cwd, targets, ref, timeout)
             if detail:
                 return _cleanup_failure(v, detail)
+        # measured ABSENT on at least one target: nothing landed, so there is nothing to delete and
+        # no cleanup claim to make (`cleanup-failed` here would assert "the credential CAN write").
         v.reason = "ls-remote-mismatch"
         v.detail = (
             f"push exited 0 but {ref} is not on EVERY push target "
@@ -906,15 +934,31 @@ def main(argv: list[str] | None = None) -> int:
         verdict,
         json_out=args.json,
         quiet=args.quiet,
-        # ⛔ `cleanup-failed` belongs here, NOT in the measured-refusal bucket: its own detail says the
-        # credential CAN write (the write was measured). Exiting 1 told a lane that CAN deliver
-        # "do not start" — and because each run left another probe ref behind, it would say so forever.
-        # ⛔ `ls-remote-mismatch` belongs here too: the push exited 0, so NO credential refusal was
-        # measured — the write simply was not observable everywhere. `cleanup-failed` likewise says the
-        # credential CAN write in its own detail.
-        cannot_verify=verdict.reason.startswith("cannot-verify")
-        or verdict.reason in ("cleanup-failed", "ls-remote-mismatch"),
+        # ⛔ `cleanup-failed` and `ls-remote-mismatch` are NOT the measured-refusal bucket, and
+        # `_emit` now derives the code from `verdict.reason` through `exit_code_for()` — the single
+        # owner of that rule — so this argument can never disagree with the reason above it.
+        cannot_verify=exit_code_for(verdict.reason) == 2,
     )
+
+
+# ⛔ THE BUCKET RULE, IN ONE PLACE (review N1). The docstring's reason table states an exit code per
+# reason and callers branch on it (`agrep -q GH-WRITE-OK` / exit 2 == "not a refusal"). Deriving the
+# code from the REASON here — and having `_emit` derive it too — means no call site can pick a bucket
+# that disagrees with the reason it just emitted, which is how the PR body came to list `cleanup-failed`
+# under exit 1 while the code exits 2.
+_CANNOT_VERIFY_REASONS = ("cleanup-failed", "ls-remote-mismatch")
+
+
+def exit_code_for(reason: str) -> int:
+    """2 for `cannot-verify*` and for a probe that ran but could not prove its claim; else 1.
+
+    ⛔ `cleanup-failed` and `ls-remote-mismatch` are 2, not 1: in both the write was measured (or the
+    push exited 0), so nothing about the CREDENTIAL was refused — `cleanup-failed`'s own detail says
+    the credential CAN write, and exiting 1 told a lane that can deliver "do not start".
+    """
+    if reason.startswith("cannot-verify") or reason in _CANNOT_VERIFY_REASONS:
+        return 2
+    return 1
 
 
 def _emit(verdict: Verdict, *, json_out: bool, quiet: bool, cannot_verify: bool = False) -> int:
@@ -928,6 +972,10 @@ def _emit(verdict: Verdict, *, json_out: bool, quiet: bool, cannot_verify: bool 
         if json_out:
             print(json.dumps(verdict.as_dict(), sort_keys=True))
         return 0
+
+    # the ONE bucket decision, derived from the reason the caller just emitted (the `cannot_verify`
+    # argument is accepted for call-site readability and never allowed to disagree with the reason)
+    cannot_verify = cannot_verify or exit_code_for(verdict.reason) == 2
 
     # ⛔ THE FOOTER MUST MATCH THE BUCKET. It always said "fix the credential" — including for
     # `cannot-verify:git-push-form` (a `remote.origin.mirror` problem, decided before any credential is

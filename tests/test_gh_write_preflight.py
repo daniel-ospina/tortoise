@@ -1,4 +1,4 @@
-"""Hermetic tests for tools/gh_write_preflight.py (#10951, agent-infra#3453).
+"""Hermetic tests for tools/gh_write_preflight.py (#11006, agent-infra#3453).
 
 No network, no Docker, no FalkorDB, no credential. The "credential" is simulated at the layer that
 actually decides it — the REMOTE:
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1086,6 +1087,95 @@ exec {GIT} "$@"
     assert "gh-write-preflight" not in _git("ls-remote", "--heads", str(second), cwd=clone).stdout
 
 
+def test_an_unreadable_presence_read_still_attempts_the_delete(tmp_path: Path) -> None:
+    """⛔ REVIEW P2. The file's own invariant (`tools/gh_write_preflight.py`, module docstring) is that
+    every failure path after a successful push ATTEMPTS the delete and **no path returns while silently
+    leaving one behind**. The disagreeing-shas arm asked the presence question — but only deleted when
+    that read SUCCEEDED (`if pok and present:`), so a failed presence read fell straight through: no
+    delete attempted, a `ls-remote-mismatch` whose detail named no ref and no leftover, exit 1. When the
+    disagreeing state was REAL, that left one probe branch on EVERY pushurl, per run, forever.
+
+    The wiring is the same as `test_targets_that_disagree_still_clean_up` (a real push to both bare
+    remotes; a stub only for the read) with one difference: from the fifth read onward the stub FAILS
+    (exit 128, git's own unreadable-remote shape) — so `_confirmed_all` is driven to the disagreeing
+    state and the presence read that follows it is unreadable.
+
+    Mutation check: restoring `if pok and present:` leaves both refs on disk and fails the two
+    "left behind" asserts; the reason/exit asserts pin that the arm still reports `cannot-verify`
+    (nothing about the credential was refused) rather than `cleanup-failed` or a measured refusal.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    first = tmp_path / "first4.git"
+    second = tmp_path / "second4.git"
+    _git("init", "--bare", "-q", str(first), cwd=tmp_path)
+    _git("init", "--bare", "-q", str(second), cwd=tmp_path)
+    _git("remote", "set-url", "origin", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(second), cwd=clone)
+    counter = tmp_path / "lsr.count"
+    bindir = _stub_bin(
+        tmp_path,
+        f"""#!/bin/sh
+is_remote=0
+for a in "$@"; do [ "$a" = "ls-remote" ] && is_remote=1; done
+if [ "$is_remote" = 1 ]; then
+  n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "{counter}"
+  # reads 1-2 are the PRE-check: nothing exists yet
+  [ "$n" -le 2 ] && exit 0
+  # reads 3-4 are the post-push confirm: the two targets report DIFFERENT shas
+  [ "$n" -eq 3 ] && {{ printf '%s\\t%s\\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$(for r in "$@"; do case "$r" in gh-write-preflight-*) echo "refs/heads/$r";; esac; done)"; exit 0; }}
+  [ "$n" -eq 4 ] && {{ printf '%s\\t%s\\n' "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$(for r in "$@"; do case "$r" in gh-write-preflight-*) echo "refs/heads/$r";; esac; done)"; exit 0; }}
+  # from here the remote is UNREADABLE — the presence read and the post-delete confirm both fail
+  echo 'stub: cannot list' >&2
+  exit 128
+fi
+exec {GIT} "$@"
+""",
+    )
+    res = _run_with_path(clone, bindir)
+    combined = res.stdout + res.stderr
+    assert "git-missing" not in combined, combined
+    assert res.returncode == 2, f"an unmeasured presence is a cannot-verify, not a refusal: {combined}"
+    assert "cannot-verify:ls-remote-failed" in combined, combined
+    assert "cleanup-failed" not in combined, combined
+    # the verdict must NAME the ref it may have left — this is what an operator acts on
+    assert "gh-write-preflight" in combined, combined
+    assert "git ls-remote --heads" in combined, f"the remedy must be given: {combined}"
+    # ⛔ AND THE DELETE WAS ATTEMPTED: the ref is physically gone from both targets
+    assert "gh-write-preflight" not in _git("ls-remote", "--heads", str(first), cwd=clone).stdout, (
+        f"a landed ref was left on the first push target: {combined}"
+    )
+    assert "gh-write-preflight" not in _git("ls-remote", "--heads", str(second), cwd=clone).stdout, (
+        f"a landed ref was left on the second push target: {combined}"
+    )
+
+
+def test_the_docstring_exit_code_for_every_reason_matches_the_code() -> None:
+    """⛔ REVIEW N1. The docstring is what `AGENTS.md` sends a lane to for the exit-code mapping, and it
+    had drifted from the code: the reason table listed `cleanup-failed` with no bucket at all while the
+    code exits 2 for it, and exit 1 was described as a "MEASURED refusal" although `no-remote` exits 1
+    with a footer that says nothing about the credential was measured. A lane that branches on the
+    NUMBER (`[ $? -eq 1 ]` -> do not start) reads a repo-config problem as a dead token.
+
+    Pinned the mechanical way: every reason row that carries an `[exit N]` / `[N]` marker is compared
+    with `exit_code_for(reason)` — the single owner `_emit` now derives its code from. Rows that wrap
+    across lines are not matched (the marker must end the line), so the assert on the specific reasons
+    below keeps this from passing vacuously on an empty match set.
+    """
+    mod = _load_tool()
+    doc = mod.__doc__ or ""
+    rows = re.findall(r"^    ([A-Za-z*][\w:*.-]*)\s{2,}.*\[(?:exit )?([12])\]$", doc, re.M)
+    keys = {k for k, _ in rows}
+    for required in ("no-remote", "cleanup-failed", "ls-remote-mismatch", "push-refused"):
+        assert required in keys, f"{required} lost its exit-code row in the docstring: {sorted(keys)}"
+    for reason, stated in rows:
+        probe_reason = "cannot-verify:anything" if reason.endswith("*") else reason
+        assert mod.exit_code_for(probe_reason) == int(stated), (
+            f"the docstring says {reason} exits {stated} but exit_code_for() answers "
+            f"{mod.exit_code_for(probe_reason)}"
+        )
+
+
 def test_a_second_refusing_pushurl_cannot_pass(tmp_path: Path) -> None:
     """\u26d4 FALSE PASS, measured round 11. `remote.origin.pushurl` is MULTI-VALUED: `git push origin`
     writes to every pushurl and fails if any refuses, while `ls-remote` reads one URL at a time. When the
@@ -1125,6 +1215,17 @@ def test_probe_uses_and_labels_the_PUSH_url_not_the_fetch_url(tmp_path: Path) ->
     upstream one — certifying a repo it never wrote to, the exact class `--repo` exists to prevent.
     The push target is now resolved with `--push` and used for every git operation, so a lane that
     writes to its fork measures the fork.
+
+    ⛔ HERMETIC AND NON-VACUOUS BY CONSTRUCTION (review P1). The earlier version ended with
+    `_git("ls-remote", "--heads", "origin")` on this fork-style origin, which is the FETCH url
+    `https://github.com/daniel-ospina/upstream.git` — a REAL outbound call to a repository that is not
+    this project's (breaking the module contract "no network"), and one that can only PASS: an
+    unreachable/401/404 remote prints nothing, and `"gh-write-preflight" not in ""` is trivially true.
+    The call the assertion was written to guard was the single thing that could make it green. A `git`
+    stub now RECORDS every argv and falls through to the real git, and the assertions are made on that
+    log: the confirming read EXISTS and addressed the PUSH target, and NOTHING addressed the fetch url.
+    Mutation check: making `_push_targets()` resolve with the fetch url again puts
+    `https://github.com/…` in a logged argv and fails the last assert.
     """
     clone = _make_remote_and_clone(tmp_path)
     other = tmp_path / "fork.git"
@@ -1132,7 +1233,15 @@ def test_probe_uses_and_labels_the_PUSH_url_not_the_fetch_url(tmp_path: Path) ->
     _git("remote", "set-url", "origin", "https://github.com/daniel-ospina/upstream.git", cwd=clone)
     _git("remote", "set-url", "--push", "origin", str(other), cwd=clone)
 
-    res = _run(clone)
+    log = tmp_path / "git-argv.log"
+    bindir = _stub_bin(
+        tmp_path,
+        f"""#!/bin/sh
+printf '%s\\n' "$*" >> '{log}'
+exec {GIT} "$@"
+""",
+    )
+    res = _run_with_path(clone, bindir)
     combined = res.stdout + res.stderr
     assert res.returncode == 0, f"a lane that can push to its fork must pass: {combined}"
     # the label is the checkout's own identity (the fetch url), and the split is stated explicitly
@@ -1140,8 +1249,14 @@ def test_probe_uses_and_labels_the_PUSH_url_not_the_fetch_url(tmp_path: Path) ->
     # the write really went to the pushurl target, and to nothing else
     heads = _git("ls-remote", "--heads", str(other), cwd=clone).stdout
     assert heads == "", f"the probe ref was left on the push target: {heads}"
-    upstream_refs = _git("ls-remote", "--heads", "origin", cwd=clone).stdout
-    assert "gh-write-preflight" not in upstream_refs, upstream_refs
+    # ⛔ the stub actually ran: without this, both assertions below are vacuous
+    calls = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert calls, "the git stub never ran — the argv assertions would be vacuous"
+    assert "git-missing" not in combined, combined
+    # ⛔ the confirmation is REAL and it addressed the PUSH target …
+    assert [c for c in calls if "ls-remote" in c and str(other) in c], calls
+    # … and NOT ONE git operation addressed the FETCH url (the upstream repo is never contacted)
+    assert not [c for c in calls if "github.com" in c], calls
 
 
 def test_probe_ref_is_unique_across_runs_in_the_same_second(tmp_path: Path) -> None:
