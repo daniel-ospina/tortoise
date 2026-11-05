@@ -793,6 +793,13 @@ def test_the_clear_guard_grades_both_directions_on_its_own() -> None:
         # down clears. Stated in `asserts_a_clear`'s docstring; this arm makes the trade
         # visible, so a later tightening has to come here and change a test on purpose.
         "**Verdict: CLEAN.**\n\nExcept the concern raised in cycle 4.",
+        # ⛔ CYCLE 7, FINDING 2 — real clears this guard REFUSED at the previous head: a
+        # coordinated completion (`the P1 and the P2`), a negated LIST with `or`, and the
+        # qualifier `new`. Each is an over-block (#10962 direction), not a fail-open.
+        "**Verdict: CLEAN.**\n\nI fixed the P1 and the P2 in 4f450ae81.",
+        "**Verdict: CLEAN.**\n\nNo P0, P1 or P2 findings remain.",
+        "**Verdict: CLEAN.**\n\nNo new P1 findings; the fold is clean.",
+        "Verdict: CLEAN — no P1 outstanding, all P2s closed.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
     # …and standing the severity arm down does NOT stand down the retraction rules (1)–(3)
@@ -933,6 +940,30 @@ def test_a_verdict_that_is_RETRACTED_in_the_same_sentence_cannot_close_a_finding
         "**Verdict: CLEAN** — cycle 4.\n\nExcept the open P1 below.",
         "**Verdict: CLEAN** (cycle 5).\n\n— except the open P1",
         "**Verdict: CLEAN** — cycle 4.\n\nThe P1 below is still open.",
+        # ⛔ CYCLE 7, FINDING 1 — a BLANK LINE IS A WHITESPACE-ONLY LINE, not `\n\n`. Each of
+        # these CLEARED at the previous head because `find("\n\n", …)` missed the boundary
+        # entirely and the severity arm was never reached: one trailing space, one tab, an
+        # NBSP, or a CRLF pair defeated the whole guard.
+        "**Verdict: CLEAN.**\n \nThe rail has an unresolved P1 in check_gates.",
+        "**Verdict: CLEAN.**\n  \nThe rail has an unresolved P1 in check_gates.",
+        "**Verdict: CLEAN.**\n\t\nThe rail has an unresolved P1 in check_gates.",
+        "**Verdict: CLEAN.**\n\xa0\nThe rail has an unresolved P1 in check_gates.",
+        "**Verdict: CLEAN.**\r\n\r\nThe rail has an unresolved P1 in check_gates.",
+        # ⛔ CYCLE 7, FINDING 3 — the inverted gradient. The severity arm was graded per LINE
+        # and the word rules per PARAGRAPH, so a live P1 on the NEXT LINE was invisible while
+        # the same sentence a paragraph down blocked, and the window covered exactly one
+        # paragraph so a fourth newline was a cliff. The severity arm is now graded over the
+        # whole suffix and the word arm to the end of the body.
+        "**Verdict: CLEAN.**\nI count one P1 in the rail.",
+        "**Verdict: CLEAN.**\n\nFine.\n\nI count one P1 in the rail.",
+        "**Verdict: CLEAN.**\n\nFine.\n\n\nI count one P1 in the rail.",
+        # ⛔ CYCLE 7, FINDING 4 (the PLURAL) is pinned in `test_the_severity_arm_reads_the_PLURAL`
+        # instead of here: a body whose ONLY fault is a plural severity token (`P1s: 2`,
+        # `P1s remain open.`) is ALSO read as a blocking-finding body by `_grades_as_blocking`,
+        # so end to end the two arms are indistinguishable and the raw shape this loop asserts
+        # on would be ambiguous. The guard's own behaviour is what that arm measures.
+        # …and a coordinated completion must not leak ACROSS a contrastive onto a live token
+        "Verdict: CLEAN; the earlier P2 was fixed, but the P1 is still there.",
     ):
         comments = [
             {
@@ -2529,3 +2560,34 @@ def test_the_retraction_rule_source_is_the_same_text_in_both_forms() -> None:
     assert rfo._R3_EXCEPTION not in rfo._NEXT_PARA_RETRACTION_RE.pattern
     for fragment in (rfo._R1_NO_LONGER, rfo._R2_ATTRIBUTED, rfo._R4_WORDS):
         assert fragment in rfo._NEXT_PARA_RETRACTION_RE.pattern
+
+
+def test_the_severity_arm_reads_the_PLURAL() -> None:
+    """`P1s` is a review summary's own spelling, and the clear guard must read it.
+
+    Review cycle 7, finding 4. `_SEVERITY_TOKEN_RE` required a word boundary straight after
+    `P[0-2]`, so `P1s` never matched — while the SAME module reads the plural in
+    `ANY_SEVERITY_TOKEN_RE` (`P([0-3])s?`) and in `SEV` (`P[0-2]s?`), the latter carrying a
+    comment that a plural `P1s: 2` had already recorded a clean record because neither reader
+    knew the form. A clear guard that cannot see the plural is the third reader with the same
+    blind spot, in the one place it decides whether a verdict counts.
+
+    Pinned directly against `asserts_a_clear` rather than through `check_blocking_finding`,
+    because `P1s: 2` on its own is ALSO a blocking-finding body for `_grades_as_blocking` —
+    end to end the two arms are indistinguishable, and the guard's own behaviour is what this
+    arm exists to measure.
+    """
+    for body in (
+        "**Verdict: CLEAN.** — P1s: 2",
+        "**Verdict: CLEAN.**\n\nP1s remain open.",
+        "**Verdict: CLEAN.** — two P2s are still unfixed.",
+        "**Verdict: CLEAN.**\n\nP0s outstanding.",
+    ):
+        assert rfo.asserts_a_clear(body) is False, body
+    # …and the plural in a COMPLETION is still a clear, so the arm is not a blanket ban
+    for body in (
+        "**Verdict: CLEAN.** No P1s outstanding.",
+        "**Verdict: CLEAN.** — all P2s closed.",
+        "**Verdict: CLEAN.**\n\nThe P1s are all closed.",
+    ):
+        assert rfo.asserts_a_clear(body) is True, body
