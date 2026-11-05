@@ -2899,6 +2899,18 @@ def test_a_negation_that_reaches_a_completion_verb_does_not_clear_the_finding() 
         "**Verdict: CLEAN.** No P1 changes were made.",
         "**Verdict: CLEAN.** No P1 fix landed.",
         "**Verdict: CLEAN.** No P2 was fixed, and no P1 either.",
+        # The SECOND review cycle's corpus: the adverb slot between auxiliary and completion is a
+        # CLASS, so every adverb works, and the absolute negations (`not one`, `nothing`) are
+        # reached by their own arm. Each of these cleared and printed READY-FOR-OWNER before it.
+        "**Verdict: CLEAN.** No P1 was ever fixed.",
+        "**Verdict: CLEAN.** No P1 was actually addressed.",
+        "**Verdict: CLEAN.** None of the P1 findings has ever been fixed.",
+        "**Verdict: CLEAN.** None of the P1 items was properly addressed.",
+        "**Verdict: CLEAN.** No P1 was fully resolved.",
+        "**Verdict: CLEAN.** No P1 whatsoever was addressed.",
+        "**Verdict: CLEAN.** Not one P1 was fixed.",
+        "**Verdict: CLEAN.** Not a single P1 was addressed.",
+        "**Verdict: CLEAN.** Nothing about the P1 was fixed.",
     ):
         assert rfo.asserts_a_clear(body) is False, body
 
@@ -2914,6 +2926,10 @@ _NEGATED_LIVENESS_CLEARS = (
     "**Verdict: CLEAN.** No P1 blockers are left open.",
     "**Verdict: CLEAN.** No P0/P1/P2 findings remain.",
     "**Verdict: CLEAN.** No P1 was left unresolved.",
+    # …and the absolute-negation arm must not reach across a clause break: these are real clears.
+    "**Verdict: CLEAN.** Nothing else changed; no P1 remains.",
+    "**Verdict: CLEAN.** Nothing was broken, and no P1 remains.",
+    "**Verdict: CLEAN.**\n\nno other blockers",
 )
 
 

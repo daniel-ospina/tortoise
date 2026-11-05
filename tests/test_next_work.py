@@ -2931,9 +2931,26 @@ def test_each_gate_refusal_prescribes_its_own_edit(condition, want):
 @pytest.mark.parametrize("bad", ["x", 1, None, [1]])
 def test_a_non_object_pull_element_is_refused_and_named(tmp_path: Path, bad):
     """An element that is not a pull was left to the outer frame, which raised in
-    `build_units` before `render` — so the refusal never printed."""
+    `build_units` before `render` — so the refusal never printed.
+
+    ⛔ THIS TEST ASSERTS THE NAMED REFUSAL, NOT THE EXIT CODE (fold review, P0). It used to
+    assert only `_run_main(...) == 2`, and `main`'s outer frame converts the crash into that
+    same exit code — so the assertion was satisfied by BOTH the fixed and the broken code.
+    Measured: deleting the guard at `tools/next_work.py:565-573` left this test green
+    (`4 passed`) while the tool's output degraded from
+    `pull element 1` to `AttributeError: 'int' object has no attribute 'get'`. That is the
+    same trap `test_a_wrong_typed_issues_or_pulls_is_named_not_a_TypeError` documents in its
+    own docstring, one sibling over. The refusal is now read from the PRIMARY SOURCE
+    (`Snapshot.unreadable`, where the guard appends it), which the broken code cannot produce
+    at all — it raises out of `from_json` first.
+    """
+    from tools.next_work import Snapshot
+
     raw = _rich_snapshot().to_json()
     raw["pulls"].append(bad)
+    snap = Snapshot.from_json(raw)
+    assert any("pull element" in u for u in snap.unreadable), (bad, snap.unreadable)
+    # …and the refusal reaches the operator, rather than a traceback summary
     path = tmp_path / "bad-pull-element.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     assert _run_main(["--from", str(path), "--repo", REPO]) == 2, bad

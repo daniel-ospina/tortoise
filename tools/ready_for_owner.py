@@ -430,6 +430,15 @@ _SEVERITY_PREDICATE_AFTER_RE = re.compile(
 #: progressive spellings that regex cannot (`being fixed`, `were addressed`), and it does NOT
 #: accept a liveness predicate — `No P1 remains.` / `No P1 is open.` are real clears, so widening
 #: the liveness side here would reintroduce the #10962 false NOT-READY in the other direction.
+#:
+#: ⛔ AND ITS SLOTS ARE CLASSES, NOT SPELLINGS (fold review, P1). The first version enumerated the
+#: adverbs between the auxiliary and the verb (`been|now|already|both|all|yet`), so every other
+#: adverb re-opened the same false PASS — measured through `check_blocking_finding`: `No P1 was
+#: ever fixed.`, `…actually addressed.`, `…fully resolved.`, `None of the P1 items was properly
+#: addressed.` all PASSed and printed `READY-FOR-OWNER`. The slot is now "up to three plain words"
+#: — bounded, and forbidden from crossing a coordinator or clause punctuation, so it cannot run
+#: away from the token — because the CATEGORY is the finding and an enumerated list of adverbs is
+#: the anti-pattern this file names at `:237` ("The categories, not the spellings").
 _SEVERITY_COMPLETION_NEGATED_AFTER_RE = re.compile(
     r"(?i)\s*"
     # the noun the token modifies (`None of the P1 findings were …`, `No P1 changes were …`)
@@ -437,9 +446,19 @@ _SEVERITY_COMPLETION_NEGATED_AFTER_RE = re.compile(
     r"\s+)?"
     # the copula/auxiliary that carries the completion (`were`, `is`, `has been`, `being`)
     r"(?:(?:is|are|was|were|has|have|had|being)\s+)?"
-    r"(?:been\s+|now\s+|already\s+|both\s+|all\s+|yet\s+)*"
+    # ANY intervening adverbs, bounded to three words and confined to the same clause
+    r"(?:(?!\b(?:and|but|or|however|yet|so)\b)[^\W\d_]+\s+){0,3}"
     # THE COMPLETION ITSELF. Only a completion — never a liveness word.
     r"(?:closed|fixed|resolved|addressed|landed|gone|made)\b"
+)
+#: ⛔ AND `no/without/zero/none of` IS NOT THE ONLY WAY TO SAY IT (fold review, P1).
+#: `Not one P1 was fixed.` / `Not a single P1 was addressed.` / `Nothing about the P1 was fixed.`
+#: are the same negation in a form `_SEVERITY_NEGATED_BEFORE_RE` cannot reach, because it requires
+#: the negation to sit ADJACENT to the token. These absolutes tolerate a short intervening phrase
+#: (`nothing about the`, `not a single one of the`) and are still confined to one clause, so they
+#: cannot reach across a `;` or a sentence. Measured before this arm: all three cleared an open P1.
+_SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE = re.compile(
+    r"(?i)\b(?:not\s+one|not\s+a\s+single|nothing|none\s+of|not\s+any\s+of)\b[^.!?;\n]{0,40}\Z"
 )
 #: ⛔ A VERDICT ATTRIBUTED TO ANOTHER ARTIFACT IS A CITATION. The preamble is graded to the
 #: START OF THE LINE — an arbitrary character cap bought nothing and cost a bypass: the same
@@ -537,7 +556,8 @@ def _retracted_from(text: str, end: int) -> bool:
         # re-learned four times), and only a COMPLETION verb counts: a liveness predicate after
         # the token (`remains`, `is open`, `needs work`) is itself negated by the `no`, so
         # `No P1 remains.` still clears.
-        if _SEVERITY_NEGATED_BEFORE_RE.search(left):
+        if _SEVERITY_NEGATED_BEFORE_RE.search(left) or \
+                _SEVERITY_ABSOLUTE_NEGATION_BEFORE_RE.search(left):
             if _SEVERITY_COMPLETION_NEGATED_AFTER_RE.match(suffix, token.end()):
                 return True
             continue
