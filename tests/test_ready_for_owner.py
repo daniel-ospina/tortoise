@@ -14,7 +14,10 @@ The modes, one test each:
 
 * a required check concluded ``cancelled``           → NOT-READY   (``test_cancelled_*``)
 * a required check concluded ``null``                → NOT-READY   (``test_null_*``)
-* a required check never scheduled                   → NOT-READY   (``test_missing_*``)
+* a required **entry** check never scheduled          → NOT-READY   (``test_missing_*``)
+  (a ``merge_conditions`` check with no run at the head is DEFERRED and PASSES —
+  ``test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY``: that is the live
+  shape of every author head, and treating it as missing is NOT-READY forever)
 * a required check still in flight                   → NOT-READY   (``test_in_flight_*``)
 * a required check ``skipped``/``neutral``           → NOT-READY   (``test_skipped_*``)
 * a red that a cancellation re-ran over              → NOT-READY   (``test_voided_red_*``)
@@ -246,7 +249,12 @@ def test_null_conclusion_required_check_is_not_ready() -> None:
 
 
 def test_missing_required_check_is_not_ready() -> None:
-    # #10962's live shape: no `python-ci-gate` run exists at all on the head.
+    # An ENTRY context with no run at all on the head. `_assert_fails` builds a FLAT
+    # pre-split fixture (`required` carries every name, `required_deferred` is `()`), so
+    # `python-ci-gate` is treated as an entry check here — which is the only sense in which
+    # this is "#10962's live shape".
+    # ⛔ The LIVE head shape — zero `python-ci-gate` runs, with it being MERGE-TIME — is
+    # DEFERRED and PASSES: see test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY.
     groups = [
         _group(job, check_id=1000 + i) for i, job in enumerate(REQUIRED) if job != "python-ci-gate"
     ]

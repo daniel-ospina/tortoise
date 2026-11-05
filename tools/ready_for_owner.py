@@ -1348,15 +1348,15 @@ def check_gates(probe: Probe) -> Check:
         )
     if not probe.required:
         # A READABLE config whose every check is merge-time: nothing is decided at the
-        # head, so PASS would be a claim about nothing. This is a configuration fact,
-        # not a read failure — but it still refuses, and says which it is.
+        # head, so PASS would be a claim about nothing. This is a CONFIGURATION fact, not a
+        # read failure — so it refuses as `FAIL`, NOT `FAIL(unreadable)`: `unreadable`
+        # means "could not be read, RETRY" in this module's vocabulary, and retrying will
+        # not change a config.
         return Check(
             "gates",
             False,
             f"entry=0 merge-time={len(probe.required_deferred)} [{source}]",
-            "unreadable: every required check is merge-time, so nothing is evaluated "
-            "against the PR head",
-            unreadable=True,
+            "every required check is merge-time, so nothing is evaluated against the PR head",
         )
     if probe.groups is None:
         return Check(
@@ -2140,7 +2140,7 @@ def _read_required_contexts(workdir: Path) -> tuple[RequiredSet, str]:
     re-creates the false NOT-READY, so it is a refusal rather than a verdict.
     """
     try:
-        required = derive_from_ref(workdir, f"origin/{PROTECTED_BRANCH}")
+        required = derive_from_ref(workdir, f"origin/{PROTECTED_BRANCH}", timeout=GIT_TIMEOUT)
     except (GuardUnreadable, RequiredSetUnreadable, RequiredSetConfigError) as exc:
         # A config error is a VERDICT about the repo's contract, and an unreadable
         # config is "I could not read it". Both REFUSE; neither may fall back to a
