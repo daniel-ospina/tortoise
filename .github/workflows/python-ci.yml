@@ -4184,9 +4184,47 @@ jobs:
     # against a warm database, and ~100s when the container first applies the
     # record migrations. The arm-gate tests this PR adds (they run the gate over
     # fixture XMLs) take the collection to 70 — measured 2026-10-23 on a fresh
-    # container: 70 passed / 0 skipped in ~194s, migrations included. 20m is a
-    # runaway bound, not a measurement-thin one.
-    timeout-minutes: 20
+    # container: 70 passed / 0 skipped in ~194s, migrations included.
+    #
+    # ⛔ 50, NOT 20, and the WORK is not why. `20m is a runaway bound, not a
+    # measurement-thin one` was the reasoning here and the post-step falsified it:
+    # the bound was never measured against the SUM of this job's steps, and the
+    # `actions/cache` save POST-step (#10182) is charged against it like any other
+    # step. MEASURED (run 41975408278, job 127110027242, head 9e32e81a3):
+    #
+    #   07:40:25  job starts (cap 20m)
+    #   07:42:36  pytest starts        07:44:46  pytest ends — 130s, 0 failed
+    #   07:44:53  work is DONE (postgres stopped); every WORK step green
+    #   07:44:53  `Post Cache pip dependency caches` begins a ~3.6 GB save
+    #   08:00:46  killed at 79.8% (2,885,681,152 of 3,616,385,407 sent) when the
+    #             20m cap elapsed -> conclusion `cancelled`
+    #
+    # `python-ci-gate` reads `cancelled` as red BY DESIGN (#5219: a cancelled leg
+    # certifies nothing), so a green leg reddened a REQUIRED check on a diff that
+    # never touched this job — the #5219 / #10327 class, on the one job
+    # `docs/ops/ci-wall-clock.md` had already flagged as arm-2 and left for a
+    # measurement. This is that measurement.
+    #
+    # Derived per that document's arm-2 rule (`cap = SUM x 1.5, rounded UP to the
+    # next 10m`), from THIS run rather than from the estimate the document
+    # pre-computed, because the estimate is the term the run falsified:
+    #
+    #   12m in-step pytest watchdog + ~1m setup/provision + >=16m observed save
+    #   = 29m  ->  x1.5 = 43.5  ->  50
+    #
+    # The save is a CENSORED lower bound (killed at 79.8%, so it never finished);
+    # at this runner's ~3.7 MB/s a full 3.6 GB upload is ~20m, i.e. a completed
+    # save puts the SUM at ~33m and still rounds to 50. The document's
+    # pre-computed `20 -> 40` came from an ESTIMATED 9m save, so it is the INPUT
+    # that moved, not the rule.
+    #
+    # Raising the cap is the right arm HERE — and restore-only (#10327) is the
+    # right arm for `test-carve-out` — because this cap has room to hold the SUM
+    # while that one is pinned to 3x its measured pytest step. It is not free:
+    # the cap IS the stale-head exposure (#3239), so 50m is the most this job may
+    # hold a per-PR concurrency slot when it genuinely wedges (p50 1.62m, p95
+    # 14.61m — `docs/ops/ci-wall-clock.md`).
+    timeout-minutes: 50
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
       # no `TORTOISE_DB_URI`, so `tests/conftest.py`'s epic #1647 P4 gate needs
