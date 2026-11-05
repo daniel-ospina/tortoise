@@ -5221,12 +5221,18 @@ _RETRACTED_E2_RENDER_ABSENCE = (
 )
 
 
-#: The BOLD verdict token the `#9080` row states E2 under. A selector keyed on one
-#: literal word (`BLOCKED`) went stale the moment #10610 review issue 1 moved the
-#: row to `E2 RED` — and it stayed green, because the same line still carries E1's
-#: `BLOCKED`. Reading the token rather than the word keeps the leg's subject alive
-#: across a verdict change (a verdict moves by re-running the probe, not by editing
-#: this regex).
+#: The BOLD verdict token the `#9080` row states E2 under. The selector reads the
+#: TOKEN (`**E2 <WORD>**`), not one literal word, because the word is the part that
+#: MOVES: `#9889`'s record scores this row RED (8 of 14), and `docs/00_index.md` says
+#: in the same breath that "the row is not moved here, because a row moves only by
+#: re-running the probe". So the index still reads `**E2 BLOCKED**` at this head and
+#: a `BLOCKED`-keyed selector would drop the row out of this leg's subject the moment
+#: the re-run moves the token — the leg would then pass over nothing, which is the
+#: exact failure `assert e2_verdict_rows` below is written to refuse.
+#: (#10610 review cycle 2, P3: an earlier revision said review issue 1 HAD moved the
+#: row to `E2 RED`. Measured false — every branch revision of that file at this head
+#: reads `**E2 BLOCKED**`, and `origin/main` reads the same — so the sentence is
+#: restored to the hypothetical it can support.)
 _E2_VERDICT_ROW = re.compile(r"\*\*E2 (?:BLOCKED|RED|GREEN)\*\*")
 
 
@@ -5288,10 +5294,13 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
     #    that states E2's verdict must name the live blocker and must not name the
     #    closed one, whichever words it uses to do it — AND whichever verdict word
     #    it uses. The selector below reads the BOLD verdict token (`**E2 <WORD>**`),
-    #    not one literal: #10610 review issue 1 moved this row from `E2 BLOCKED`
-    #    to `E2 RED` (the `#9889` record scores the row), and a selector keyed on
-    #    `BLOCKED` would have dropped the row out of this leg's subject while the
-    #    leg went on passing on E1's own verdict word in the same line.
+    #    not one literal: `#9889`'s record scores this row RED, and `docs/00_index.md`
+    #    states that "the row is not moved here, because a row moves only by
+    #    re-running the probe". So the row reads `E2 BLOCKED` today and will read
+    #    `E2 RED` after that re-run, and a selector keyed on `BLOCKED` would drop it
+    #    out of this leg's subject on the day the verdict legitimately moves —
+    #    quietly, since E1's token (`**E1 REFUSED as shipped**`) sits in the same
+    #    line and the leg would still find a row to assert over.
     e2_verdict_rows = [line for line in index.splitlines()
                        if _E2_VERDICT_ROW.search(line)]
     assert e2_verdict_rows, (

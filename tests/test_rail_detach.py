@@ -116,14 +116,18 @@ def launch(state_dir, co, pr=7, **kw):
 #: kill is, and so is the peer red below: the box, not the rail.
 #:
 #: ⛔ `test (d)` WAS ALSO RED ON THE SAME RUN, and saying so is the point. This
-#: comment used to say "the run's other seven shards were green"; `gh run view
-#: 42006117288 --json jobs` reports NINE `test (…)` legs — `(a)`,`(b)`,`(c)`,`(f)`,
-#: `(g)`,`(h)`,`(i)` success and `(d)`,`(e)` failure. Eight were green, not seven,
-#: and `(d)`'s red is `tests/test_codex_capture_hook.py::
-#: test_hook_detaches_so_codex_cannot_kill_the_capture` — a SPAWN-LATENCY miss on
-#: the same seam (see that file's `_WORKER_DEADLINE_S`, which records it). Two
-#: independent spawn-latency reds on one contended box is the measurement; one red
-#: beside a silently-dropped peer is the kind of proof this repo keeps catching.
+#: comment used to say "the run's other seven shards were green", which reads as "all
+#: of the others were green" — they were not. `gh api
+#: repos/daniel-ospina/tortoise/actions/runs/42006117288/jobs` reports NINE `test (…)`
+#: legs: SEVEN success (`(a)`,`(b)`,`(c)`,`(f)`,`(g)`,`(h)`,`(i)`) and TWO failures,
+#: `(e)` and `(d)`. `(d)`'s red is
+#: `tests/test_codex_capture_hook.py::test_hook_detaches_so_codex_cannot_kill_the_capture`
+#: — a SPAWN-LATENCY miss on the same seam (that file's `_WORKER_DEADLINE_S` records
+#: it). Two independent spawn-latency reds on one contended box is the measurement;
+#: one red beside a silently-dropped peer is the weaker, self-serving version.
+#: (Cycle 1 corrected only the wrong count and wrote "eight were green", which is
+#: also wrong — eight was the number of OTHER legs — so the count is now stated as
+#: what the job list prints: nine legs, seven green, two red, and nothing else.)
 #:
 #: ⛔ RE-APPLIED ON MAIN'S TREE (PR #10610's conflicted head, 2026-11-05).
 #: `origin/main` rewrote this file independently (#10777 → #10975): the `gh`-absent
