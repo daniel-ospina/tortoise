@@ -40,11 +40,14 @@ Two backing sources exist, and no third is admitted:
 ``cimd-origin``
     Client ID Metadata Documents (#2847): ``client_id`` is a URL and the AS
     fetched the metadata document from it under the full SSRF control set, so
-    the client demonstrably controls that origin. The name rendered is the
-    **host**, never the document's self-asserted ``client_name`` — the same
-    rule ``tortoise/cimd.py`` already applies when it persists the row. This is
-    the "metadata from an origin the client demonstrably controls" half, and it
-    needs no new machinery: it is already built.
+    the client demonstrably controls that origin. What is rendered is that
+    origin — ``An app at <host> (<client_id>)`` (#10482) — and NEVER the
+    document's self-asserted ``client_name``: the host is the same value
+    ``tortoise/cimd.py`` already applies when it persists the row, presented as
+    an ORIGIN rather than as the client's NAME, because a client chooses its
+    whole host including its leftmost labels and a reader anchors on exactly
+    those. This is the "metadata from an origin the client demonstrably
+    controls" half, and it needs no new machinery: it is already built.
 
 ``self-declared`` — NOT a source, the ABSENCE of one
     Everything else, which is every DCR registration until an operator attests
@@ -96,18 +99,19 @@ Checked against the two recorded decision homes, both verified present on
 ``#3524`` is **CLOSED** and its body never carried (i) — so nothing but #8218
 tracks this half.
 
-Known residual — #10482 (filed, NOT fixed here)
+The #10482 residual — FIXED
 ---------------------------------------------
 A CIMD client chooses its own host, including its **leftmost labels**, and
 readers anchor on exactly those: ``https://claude.ai.mcp-relay.example/…``
-renders ``claude.ai.mcp-relay.example (…) wants to access your Tortoise MCP
-surface.`` — a *backed*, unlabelled identity whose first three tokens are a
-brand the client does not own. Strictly narrower than the pre-fix shape (an
-owned, fully-printed domain instead of arbitrary free text), which is why it is
-filed rather than re-worded here; the leading candidate fix is to stop
-presenting the host AS the client's name ("An app at <host>"), which changes
-only `consent_client_line`. Tracked in **#10482** — the one home a later lane
-actually reads.
+USED TO render ``claude.ai.mcp-relay.example (…) wants to access your Tortoise
+MCP surface.`` — a *backed*, unlabelled identity whose first three tokens are a
+brand the client does not own.
+
+FIXED (#10482): a CIMD identity is now rendered as an ORIGIN, not a name —
+``An app at <host> (<client_id>) …`` — so the owned domain stays visible and
+no reader is invited to take its leading labels as a brand. The allowlist arm
+is untouched (an operator-attested name is still the sentence subject), and
+storage, backing and ``display_name`` are unchanged.
 """
 
 from __future__ import annotations
@@ -244,10 +248,11 @@ def _cimd_host(client_id: object) -> str | None:
     if not parsed.hostname.isascii():
         return None
     # ⛔ What this does NOT refuse: the host's LEFTMOST LABELS are the client's
-    # to choose, so a brand-prefixed host (`claude.ai.mcp-relay.example`) still
-    # renders as a backed name. Known residual, documented in the module
-    # docstring and tracked in #10482 — deliberately not a denylist of brand
-    # tokens, which is the "special-case one forbidden word" non-fix.
+    # to choose — `claude.ai.mcp-relay.example` is still a VALID CIMD origin.
+    # It is no longer rendered as the client's NAME: `consent_client_line`
+    # (fixed in #10482) presents it as an ORIGIN — `An app at <host>` — so a
+    # brand-prefixed host cannot read as a backed identity. Do not "fix" this
+    # with a denylist of brand tokens; see the module docstring.
     return parsed.hostname
 
 
@@ -289,6 +294,22 @@ def consent_client_line(identity: ClientIdentity) -> str:
     review rounds deleting.
     """
     handle = identity.client_id or "unknown client"
+    # ⛔ A CIMD origin is NOT a name (#10482, the #8218 residual). The client
+    # owns its whole host, including the LEFTMOST labels, and a reader anchors
+    # on exactly those: rendered as the sentence SUBJECT,
+    # ``claude.ai.mcp-relay.example`` reads as a brand, which is the payload
+    # #8218 withholds through every other arm. The domain stays visible (it IS
+    # the one thing that backs the claim) but the sentence says what it is —
+    # an ORIGIN the client controls, not an identity anyone attested. Fixed
+    # HERE, in the one sentence builder, rather than at each page: a page that
+    # composed its own copy would be a second identity source, and two sources
+    # that can disagree is the class #3524 spent ten review rounds deleting.
+    # Storage, backing and ``display_name`` are untouched.
+    if identity.backed_by == BACKED_BY_CIMD_ORIGIN and identity.display_name:
+        return (f"An app at {identity.display_name} ({handle}) wants to access "
+                "your Tortoise MCP surface. That domain comes from its "
+                "client_id URL; it is not an app name this server has on "
+                "record.")
     if identity.backed:
         return (f"{identity.display_name} ({handle}) wants to access your "
                 "Tortoise MCP surface.")
