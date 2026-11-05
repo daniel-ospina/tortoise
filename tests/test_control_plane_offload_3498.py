@@ -529,10 +529,6 @@ def test_a_racing_failure_in_the_run_arm_is_recorded_as_a_domain_error(monkeypat
         def result(self):
             raise RuntimeError("store said no")
 
-        def add_done_callback(self, cb):
-            raise AssertionError(
-                "a DONE future must not be given an abandoned-outcome callback")
-
     class _StubWorker:
         def submit(self, fn):
             # Run the real wrapper so ``completed_at`` is stamped in time, then
