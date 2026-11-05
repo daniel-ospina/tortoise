@@ -239,11 +239,12 @@ labels; *4 surfaces exist / 6 walked*.
 ### 7.1 Why REPOINT rather than PROCEED
 
 PROCEED would have implied the epic's existing acceptance still describes its work. It does not: one of
-four DoD rows is MET, one is an owner decision, and **the two PARTIAL rows are partial for DIFFERENT
-reasons** — **row 1** on its own product arms (the gate is `set ON in: none` on the shipped default, and
-one write path embeds outside it), which is what S1 exists to close; **row 2** by the measuring
-instrument's own design (`tools/dod_5090_probe.py:1264`: *"the census CLASSIFIES the unresolved set; it
-does not license moving this verdict"*), which holds while a writer is unresolved. **REPOINT** is option **C** from `#7879`'s own
+four DoD rows is MET, one is an owner decision, and **both PARTIAL rows share the instrument-side hold** —
+the 15 embedding writers with no recognised producer call, the population §1.3 names
+(`unresolved_writes` for row 1, the same set as `unknown` for row 2; the probe's own comment says so).
+**Row 1 carries a second, product-side cause as well** — the gate is `set ON in: none` on the shipped
+default and one write path embeds outside it — and **S1/S2 do not on their own flip row 1 to `MET`**:
+the unresolved-writer hold survives them, which is what C2/C3 are for. **REPOINT** is option **C** from `#7879`'s own
 re-measurement comments — retire completed scope from the acceptance, keep the epic open on exactly what
 remains, and let the owner close it when the decision lands. It is neither discharge (§1.2 A1) nor
 re-scoping upward (inventing children the neighbours already own).

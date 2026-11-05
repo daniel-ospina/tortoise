@@ -56,7 +56,9 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   reported, not tolerated.
 - **Second precedent: `#4997` had to reconstruct the gap by hand.** `CALL db.indexes()` plus reading two
   functions. The pattern conclusion — *"if the system holds the fact, the system should state it"* — is
-  why scope item 4 is a closing-out item rather than new work.
+  why this is S4 in the scope: a closing-out item **plus one piece of new state** — the served set is never
+  retained today (`projection/__init__.py:18552` computes it locally; only `measured & served` is stored at
+  `:18570`), so it is not one line (`03-scope.md` S4's corrected premise; `05-decompose.md` C4).
 
 ## Workflow Pattern Research
 
