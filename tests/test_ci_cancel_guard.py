@@ -572,13 +572,20 @@ def test_a_non_numeric_seam_value_is_refused_not_ignored(fixture):
     `--fake-elapsed` used to be `type=float`, so argparse rejected `abc` with SystemExit(2)
     before any tool code ran and this case still passed with the guard's own refusal
     deleted. The seam is parsed and validated by `_elapsed_override` from the raw
-    string, so the refusal is the TOOL's — delete the `except Unreadable:` arm in
-    `main` and this exits 1 on a traceback instead of 64.
+    string, so the refusal is the TOOL's.
 
     ⛔ 64, NOT 2: the argv is wrong, the GitHub surface was never read. `2` is this
     tool's FAIL-CLOSED code for an unreadable surface, and reporting a typo as one
     contradicts the tool's own exit table — and `--max-age`'s identical typo already
     exits 64.
+
+    Non-vacuity, MEASURED (review of #10963): delete the `if args.fake_elapsed is not
+    None:` arm in `main` and this case does NOT crash — `_elapsed_override` then raises
+    inside `evaluate`, whose `except Unreadable` prints `FAIL-CLOSED … is not a number`
+    and exits **2**. The arm is therefore what turns "a typo'd argv announced as an
+    unreadable GitHub surface that nothing ever read" into a usage error, and that is the
+    defect this case pins. (An earlier wording of this docstring claimed a
+    traceback/exit 1, which is not what the mutation does.)
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
@@ -607,6 +614,43 @@ def test_a_widened_comparison_window_may_not_authorise_a_post(fixture):
     r = guard(fixture, "41840910128", "--apply", "--max-age", "100000")
     assert r.returncode == 64, r.stdout + r.stderr
     assert "max-age" in r.stderr, r.stderr
+    assert fixture.cancelled() == []
+
+
+def test_evaluate_itself_refuses_a_widened_window(fixture):
+    """#10963 review, P2: the ceiling lived ONLY at the CLI boundary.
+
+    `main` refuses `--max-age > 60`, but `evaluate` is where the window is CONSUMED and
+    the module's doctrine is stated in in-process terms ("no caller can skip the check by
+    calling `decide` directly"). Driven directly at the pre-fix head, `evaluate(..., 10**6)`
+    returned the identical widened `PERMIT` the pre-fix CLI produced, so the guarantee held
+    for argv and not for a caller. The bound now lives with the measurement.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    env = dict(os.environ)
+    env["GH_BIN"] = fixture.gh
+    env["GH_FIXTURE_DIR"] = str(fixture.dir)
+    env.pop("GITHUB_TOKEN", None)
+    script = (
+        "import importlib.util, sys;"
+        "spec = importlib.util.spec_from_file_location('g', sys.argv[1]);"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "print(m.evaluate('daniel-ospina/tortoise', 41840910128, int(sys.argv[2]))[0])"
+    )
+
+    def drive(window):
+        return subprocess.run([sys.executable, "-c", script, str(TOOL), window],
+                              capture_output=True, text=True, env=env, timeout=120)
+
+    at_contract = drive(str(60))
+    assert at_contract.returncode == 0, at_contract.stderr
+    assert at_contract.stdout.strip() == "PERMIT", at_contract.stdout
+
+    widened = drive("1000000")
+    assert widened.returncode != 0, widened.stdout + widened.stderr
+    assert "wider than" in widened.stderr, widened.stderr
     assert fixture.cancelled() == []
 
 

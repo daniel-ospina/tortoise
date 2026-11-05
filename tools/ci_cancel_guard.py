@@ -406,6 +406,18 @@ def evaluate(repo: str, run_id: int, max_age: int,
     measurement of the same kind). Only `act` issues the POST, so no caller can
     skip the check by calling `decide` directly.
     """
+    if max_age > MAX_COMPARISON_AGE_S:
+        # ⛔ THE BOUND LIVES WITH THE MEASUREMENT, NOT WITH ONE CALLER. `main` refuses
+        # a widened `--max-age` with 64, but THIS function is where the window is
+        # consumed, and the doctrine above is stated in in-process terms ("no caller
+        # can skip the check by calling `decide` directly"). Without this arm the
+        # guarantee held for argv and not for a direct caller — `evaluate(..., 10**6)`
+        # returned the identical widened PERMIT the pre-fix CLI produced (review of
+        # #10963). Unreachable from the CLI: `main` refuses first, with a usage message.
+        raise Unreadable(
+            f"max_age {max_age}s is wider than the {MAX_COMPARISON_AGE_S}s window "
+            "this guard is built on — a caller-supplied window may not widen the "
+            "staleness check")
     fake = _elapsed_override(fake_elapsed)
     if fake is not None:
         verdict, detail = decide(repo, run_id)
