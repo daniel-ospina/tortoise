@@ -161,7 +161,7 @@ So **the movement of funds has a home**; what is missing is the *durable provisi
 - **DECIDED 2026-11-05 — left deliberately OPEN:** *"ownedBy Subject or Object, we leave it open because it can be quite varied (a person can own something, or a person can own a company that owns something)."* So the **target may be a Subject or an Object**, and the pack does not have to pick one.
 - **What that requires of the canonical document (ONTOLOGY §3.6/§3.7):** `ownedBy` today is defined as **Entity → Subject** only. The ruling widens it to **Entity → (Subject | Object)**, which is a topology change and therefore needs exactly the approval just given.
 - **How the ambiguity is resolved mechanically — the edge's own `direction`, not the predicate:** `->` means the **target** owns the source (`investment --ownedBy--> fund` = the fund owns the investment); `<-` means the **source** owns the target (`investment --ownedBy--> company` with `<-` reads *the investment has an ownership stake in the company*). The value `ownedBy` therefore stays single-direction-agnostic at the table level and the per-edge direction carries the meaning.
-- ⚠️ **The risk this accepts, stated so it is not discovered later:** with an open target and a per-edge direction, `ownedBy` no longer distinguishes *"A owns B"* from *"A is a stake in B"* by its predicate alone — a reader must read the direction field. `venture:holds` stays as its own predicate for the stake sense, and the census reports direction per row so a mis-signed edge is visible rather than plausible.
+- ⚠️ **The risk this accepts, stated so it is not discovered later:** with an open target and a per-edge direction, `ownedBy` no longer distinguishes *"A owns B"* from *"A is a stake in B"* by its predicate alone — a reader must read the direction field. `venture:holds` therefore maps onto `ownedBy` **with the direction inverted** (`<-`, the investment has an ownership stake in the company) rather than staying a separate word — the direction carries the sense. ⚠️ **Round 2 had said "keep `holds` as its own predicate"; the owner's ruling supersedes that** ("ownedBy is the right one, we just need the proper direction"), so it is recorded here rather than left as two answers. The census reports direction per row so a mis-signed edge is visible rather than plausible.
 
 ## KIN-1 · "is theme bigger than epic?" — **yes, and the level in between is what is missing**
 
@@ -195,7 +195,7 @@ Strategic theme  →  Initiative / Portfolio epic  →  Epic  →  Feature  → 
 
 ## 🔺 Gap found while doing this research — and it affects the census (#11083's own scope)
 
-**`hierarchies:` is a second declaration surface, and the census only counted `relations`.** Six packs declare hierarchy paths the relations list does not contain:
+**`hierarchies:` is a second declaration surface, and the census only counted `relations`.** **Four** packs declare hierarchy paths the relations list does not contain (`agent-ops`, `portfolio` and `pm` declare none):
 
 ```
 dev               Theme → Epic, Epic → Issue                        (hasPart)
@@ -204,7 +204,7 @@ product-strategy  Product → Feature                                  (hasPart)
 venture           Investment → Program, Program → Asset              (hasPart)
 ```
 
-9 declared hierarchy paths across 4 packs (the other 3 declare none). **A census that reads only `relations` would under-count the declared business logic by a third** — and `producedBy` above is precisely a relation duplicating a hierarchy path, which is the drift the census exists to expose. `#11083`'s scope is corrected accordingly.
+**6 declared hierarchy paths across 4 packs.** So the declared population is **42** (36 relations + 6 hierarchies), and a census that reads only `relations` under-counts it by **14%** — a sixth, not a third — and `producedBy` above is precisely a relation duplicating a hierarchy path, which is the drift the census exists to expose. `#11083`'s scope is corrected accordingly.
 
 ---
 

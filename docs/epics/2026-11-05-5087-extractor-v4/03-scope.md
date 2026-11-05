@@ -17,16 +17,16 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 
 ### In Scope
 
-1. **A mention is not an entity** — the referentiality test at S2.2, and the mention channel S2.1 never had (`#11021`).
+1. **A mention is not an entity** — the referentiality test at S2.2, and the mention channel S2.1 never had (`#11021`). **This item owns the arbiter probe** (the 25 owner-labelled rows plus the 12 most-referenced rows a name-pattern rule would have deleted); item 2 *consumes* that reading rather than re-measuring it, so an outcome cannot be credited to both.
 2. **The selection arm runs on the fleet door** — mechanical predicate default ON, the reference question available to an armed arbiter, and no candidate classified that consolidation will delete (`#10996`).
 3. **Identity is a gate** — an unresolved lookup HOLDs, never mints; one transaction across S3/S5/S6 (`#10997`).
 4. **The against-graph check fails closed** — an unchecked item is held, not committed (`#10998`).
 5. **The batch's own story is wired** — an entity↔entity channel in the output contract, and E4 read off a real-extraction receipt (`#10999`).
-6. **The pack's declared vocabulary widens** — `subclassOf` reaches the classifier (`#11000`).
+6. **The pack's declared vocabulary widens, and gains the initiative level** — `subclassOf` reaches the classifier, and `dev:initiative` becomes a real kind between theme and epic (owner ruling 2026-11-05): `theme --hasPart--> initiative --hasPart--> epic --decomposesInto--> issue`, with `initiative` removed from `dev:theme`'s synonyms and the near-miss set reshuffled (`#11000` declares it; `#11001` materialises it).
 7. **The declared business relations become edges** — replayable, from the pack's own declaration (`#11001`).
 8. **The eight steps are actually the eight steps** — a bounded re-narrate, and S4's gap-filling relocated before `run_s4` goes (`#11002`).
 9. **The epic can say what its own doors write** — the per-door census (`#10995`), and the integration-surface map (`#10994`).
-10. **The packs' declared connection logic is constructed, and that is now an acceptance row** — per-pack declared → writable → written census, the four `pm` relations that bind no write path, the retired semantics values, and the Subject-rooted spine reported with an owner-approval route (`#11083`; sixth capstone row, owner ruling 2026-11-05).
+10. **The packs' declared connection logic is constructed, and that is now an acceptance row** — per-pack declared → writable → written census over **both** declaration surfaces (`relations` and `hierarchies`), the four `pm` relations that bind no write path, and the Subject-rooted spine reported with an owner-approval route (`#11083`; sixth capstone row, owner ruling 2026-11-05). ⚠️ **The meanings are RULED, not aligned by find-and-replace:** `funds` and `produces` return as meanings (direction `->`/`IMPL` and `<-`/`IMPL`) with their `SEMANTICS_TRANSITION` entries removed under an **`OVERRIDES:` on `#7848`**; `ownedBy` targets a Subject **or** an Object with the per-edge `direction` carrying the meaning; and `producedBy` + the pack's own `Program → Asset` `hasPart` path are **both** written and are **not** a duplicate.
 
 ### Out of Scope
 
@@ -40,6 +40,11 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 - **The claim-class write path (L8)** — `#9417`/`#9727`/`#9819`, **all closed** (re-measured 2026-11-05).
 - **Vector reaping** — **`#4997`** (closed), `#4998` (merged PR).
 - **The legacy rule extractor / documents door** — **`#4432`** (owner dispatched it elsewhere).
+- **The seam's element attribution** — **`#10176`**: a **precondition of the first *armed* scored run**, not of the epic (`02-research-brief.md`). Item 2's proof is externally gated on it.
+- **The ~4,900-Object backfill** — **`#5059`**, beside `#5333`; it co-owns the population question and is not this epic's to run.
+- **E4's receipt retrievability** — **`#9596`**, which item 5's "E4 read off a real-extraction receipt" leans on.
+- **The EMBED gate** — `#5008`, **closed and `implemented`** (`config/v4-mechanisms.yml`); the residual is a rate measurement, not work here.
+- **The fan-out / sufficiency bound** — `fanout_cap` is **`implemented`** at 200; the router half is `#5009`.
 - **Any new MCP tool or public SDK method** — none is needed; if one becomes necessary it needs Daniel's approval first.
 
 ### Boundary Rationale
@@ -58,16 +63,16 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 | `subclassOf` widening (#11000) | Asking about "work items" finds the issues, not just the ones literally typed `workItem`. |
 | business hierarchy (#11001) | You can walk goals → initiatives → work items instead of reading a flat list of objects. |
 | eight steps / re-narrate (#11002) | A session that was summarised badly is retried once instead of silently losing its content. |
-| census + surface map (#10995, #10994) | Every later claim about "the extractor improved" is checkable per door, so a fix that misses the fleet's own path is caught. |
-| pack connection logic (#11083) | A company, its goals and its work are connected because the pack says they are — and if a pack says it badly, the census names it instead of the graph quietly staying flat. |
+| census + surface map (#10995, #10994) | **The operator** can say whether a change reached the fleet's own write path *before* it is believed — no improvement is claimed per door without a count, and a door nobody measured says so. |
+| pack connection logic (#11083) | A company, its goals and its work are connected because the pack says they are — and if a pack says it badly, **the operator is told which declaration is missing** instead of the graph quietly staying flat. |
 
 ## Complexity Ratings
 
 | Axis | Rating | Rationale |
 |---|---|---|
 | UX | **low** | no user-visible surface of its own; the changes surface as better recall and legible node names |
-| Architecture | **high** | ten children, six touching the 10.7k-line pipeline body, one transaction boundary across three steps, and a new channel through the prompt contract |
-| Ontology | **high** | a mention/entity distinction the canonical document does not yet name, plus `hasPart`'s two declared topologies (Point→Point in §3.1, Object→Object in §3.7) |
+| Architecture | **high** | eleven children, seven touching the 13.6k-line pipeline body (`wc -l tortoise/extractor_v2.py` = 13,614 at HEAD), one transaction boundary across three steps, and a new channel through the prompt contract |
+| Ontology | **high** | a mention/entity distinction the canonical document does not yet name, plus `hasPart`'s two declared topologies (Point→Point in §3.1, Object→Object in §3.7) — **and, since the 2026-11-05 rulings: a new pack kind (`dev:initiative`) with a near-miss reshuffle, an `ownedBy` topology widening (Entity → Subject **or** Object), two `SEMANTICS_VALUES` additions (one needing a `<-` direction no table value has ever produced), and two `SEMANTICS_TRANSITION` removals that reverse `#7848`** |
 | Accessibility | **n/a** | no UI surface in scope |
 
 **### Axis Research Notes** *(issue #231 D11 — required for each `medium+` axis)*
@@ -83,16 +88,17 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 **Then:** no `:Object` named `the timeout command` exists
 **And:** the claim that carried it is still retrievable, with the mention recorded against it
 
-### E2E-2: the same thing, twice, is one thing
+### E2E-2: the same thing, twice, is one thing — a CONTROL
 **Given:** two sessions that each mention `the parity harness`, and a graph that already holds one
-**When:** the second capture resolves identities
+**When:** the second capture resolves the **exact** name
 **Then:** the second capture attaches to the existing node
-**And:** no second node is created; an unresolved lookup would have held instead of minting
+**And:** no second node is created
+⚠️ **This case passes on today's code and is kept deliberately as a control** — it proves the fix does not break the attach path. Its discriminating sibling is E2E-8 (the partial prior set), and E2E-5 (the unresolved lookup).
 
 ### E2E-3: one session's claims argue with each other
 **Given:** a session whose narrative states that A changed because of B
 **When:** the batch is committed
-**Then:** an edge exists between A and B
+**Then:** an edge **of the pack-declared class** exists between A and B (operator vs structural is not interchangeable, and its recorded `direction` must run A→B as the story states — an inverted edge is a wrong claim, not a cosmetic one)
 **And:** the planted operator edges for that session are wired and persisted, scored on a **real-extraction** receipt
 
 ### E2E-4: the pack's map is walkable
@@ -108,6 +114,13 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 **Then:** the affected candidates are held, not minted
 **And:** a later run against the same graph commits them once the lookup resolves
 
+### E2E-8: an unchecked item is not committed
+**Given:** an item whose against-graph check did **not** complete (a partial Job-2 pass)
+**When:** the run commits
+**Then:** that item is **held**, not committed
+**And:** held / committed / discarded are three distinct counts, so nothing is silently folded into one of them
+*(Scope item 4. It previously had no case of its own — E2E-5 was doing both jobs with two different assertions.)*
+
 ### E2E-6: the graph can be asked what its doors write
 **Given:** the frozen corpus
 **When:** the census runs
@@ -115,7 +128,7 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 **And:** a door nothing measured reads `UNMEASURED`, never zero
 
 ### E2E-7: the packs' declared business logic is the one we construct
-**Given:** the four shipped packs (`dev`, `pm`, `venture`, `product-strategy`) and their **two** declaration surfaces — `relations` and `hierarchies`
+**Given:** all **seven** shipped packs (`agent-ops`, `dev`, `investment-portfolio-manager`, `marketing`, `product-strategy`, `project-management`, `venture`), and their **two** declaration surfaces — `relations` and `hierarchies` (the four that declare hierarchy paths are `dev`, `marketing`, `product-strategy`, `venture`; `pm` contributes the four unwritable relations)
 **When:** the pack census runs
 **Then:** every declared connection reports **declared → writable → written**, and any declared connection the writer cannot produce is named rather than totalled away
 **And:** the effective **direction** is reported per row, so a meaning that runs backwards is visible

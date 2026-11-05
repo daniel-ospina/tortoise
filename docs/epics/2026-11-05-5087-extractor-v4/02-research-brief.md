@@ -59,3 +59,15 @@ aboutObjects: "#5087, EXTRACTOR-V4-ARCHITECTURE.md, STORAGE-ARCHITECTURE.md"
 - `2026-11-05 · rung-2 · lab` — Microsoft GraphRAG indexes **named** entities with descriptions.
 - `2026-11-05 · rung-2 · pitfalls` — *"over-extraction … entity explosion"* is a named production failure (DEG-RAG, arXiv 2510.14271, **preprint**); the repair is entity resolution + a judge, not deletion of committed rows.
 - `2026-11-05 · internal` — `sdk.py` carries the comment *"the 'non-referential mention promoted to a node'"*; `definite_description_backfill.py` exposes `is_bare_definite_description` and `is_positively_bare_definite_description`; **nothing in the write path consumes either.**
+
+## Review record (epic-verify Step 4)
+
+**Three fresh-context review rounds, all findings applied — no round was closed by convergence or by a cap.**
+
+| round | issues found | what was wrong | disposition |
+|---|---|---|---|
+| 1 | **5** (2 P1, 3 P2) | the 62.3% share carried no date or denominator and was attributed to `#4894` (which is the *mechanism* audit, 50 instances, not the ratio); the jev cost figure was presented as measured; the source accounting did not reconcile (4 queries vs 10 sources); arXiv 2510.14271 was unlabelled as a preprint and the quoted sentence was not pinned to one source; the Hindsight timeline was wrong by two dates | all 5 applied — the ratio now names 4,900/7,859 measured 2026-09-24, the cost is **computed not measured**, the ledger reconciles to 10 sources / 6 entries, each source carries its status, and the timeline reads `opinion` deleted 2026-01-15 / `confidence_score` dropped 2026-04-02 |
+| 2 | **2** (both P2) | a magnitude with an **inverted base** ("a population 32% larger" — 7,859 is 48% larger than 5,314, not the reverse); and `S0a`/`S0b` described as "proposals, not shipped" when the mechanism is `state: implemented` in `config/v4-mechanisms.yml` with `source_identity.py` and a test behind it | both applied — the base is stated the right way round and marked not-composable; the proposal-stage framing now attaches to the *step placement*, not the code |
+| 3 | **1** (P2) | the base-inversion fix had not propagated to every sentence | applied; round 3 otherwise confirmed items 1–5 and the four align assumptions (high/medium/medium/high) |
+
+**What this round could not do, stated rather than implied:** it has **no measurement of our own arbiter** — no row in this brief is a score of the referentiality judgement on our data. That is by design (`#11021` owns the probe), and the register's "medium" on that assumption is the honest reading until the probe exists.

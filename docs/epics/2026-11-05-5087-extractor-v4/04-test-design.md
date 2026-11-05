@@ -36,7 +36,7 @@ Doors: **D1** hosted `POST /v1/sessions` · **D2** SDK `capture_session` · **D3
 | **SF12** | all × the census | what each door wrote, per step | contract | a door nobody measured reading `0` instead of `UNMEASURED` |
 | **SF13** | the pack declaration → the writer | `relations`/`chains`/`hierarchies` → edges | integration | an edge class with no replay route (`live != rebuild`); `hierarchies` read as an edge declaration when it is a UI slot |
 | **SF14** | S6 → the capstone probe | committed rows + receipt → E1–**E6** rows | integration | a row scored on an arm whose environment was not read back; a metric quoted from a page rather than the holdings |
-| **SF15** | the packs' declarations → the writer | `relations` **and** `hierarchies` → declared / writable / written, per pack | integration | a declared connection that binds no write path reported as a count rather than named; a meaning that runs the wrong way (direction unread); a relation duplicating a `hierarchies` path |
+| **SF15** | the packs' declarations → the writer | `relations` **and** `hierarchies` → declared / writable / written, per pack | integration | a word renamed away by `SEMANTICS_TRANSITION` instead of honoured (`funds`→`transacts`, `produces`→`causes`); a per-edge **direction** that inverts the meaning; a declared connection that binds no write path reported as a count rather than named. ⚠️ **Not** a relation that duplicates a `hierarchies` path — `producedBy` + `Program → Asset` is ruled intentional (containment vs production), so flagging it would red on correct behaviour |
 
 ## Surfaces this epic deliberately does NOT test, and why
 
