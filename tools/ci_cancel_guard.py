@@ -388,9 +388,14 @@ def _elapsed_override(raw: str | None) -> float | None:
     except ValueError:
         # A typo'd seam must not be silently ignored: it would take the real path and
         # still be rendered as if the seam had been used.
-        raise Unreadable(f"{_FAKE_ELAPSED_SEAM} {raw!r} is not a number") from None
+        # ⛔ `ValueError`, NOT `Unreadable`: the caller's argv is wrong and no surface was
+        # read. `Unreadable` means "a surface the decision depends on could not be read
+        # COMPLETELY" and is what the readers raise; reusing it here would make a typo'd
+        # seam indistinguishable from an unreadable GitHub, IN PROCESS — the same
+        # argv-vs-surface conflation the CLI already refuses (review of #10963).
+        raise ValueError(f"{_FAKE_ELAPSED_SEAM} {raw!r} is not a number") from None
     if not math.isfinite(value) or value < 0:
-        raise Unreadable(f"{_FAKE_ELAPSED_SEAM} {raw!r} is not a representable age")
+        raise ValueError(f"{_FAKE_ELAPSED_SEAM} {raw!r} is not a representable age")
     return value
 
 
@@ -416,11 +421,12 @@ def evaluate(repo: str, run_id: int, max_age: int,
         # 10**6)` returns the identical widened PERMIT the pre-fix CLI produced.
         #
         # ⛔ `ValueError`, NOT `Unreadable`. `Unreadable` means "a surface the decision
-        # depends on could not be read COMPLETELY" and its only handler maps to exit 2
-        # ("a surface could not be read"). Nothing is read here and no surface is at
-        # fault — the CALLER's contract is violated — so reusing it would reintroduce,
-        # one layer down, the exact argv-vs-surface conflation this module fixed for the
-        # typo'd `--fake-elapsed` (review of #10963). A programming error should be loud.
+        # depends on could not be read COMPLETELY" and is what the readers raise
+        # (handled at the `evaluate` call as exit 2, and at `act` as exit 1). Nothing is
+        # read here and no surface is at fault — the CALLER's contract is violated — so
+        # reusing it would reintroduce, one layer down, the exact argv-vs-surface
+        # conflation this module fixed for the typo'd `--fake-elapsed` (review of
+        # #10963). A programming error should be loud.
         raise ValueError(
             f"max_age {max_age}s is wider than the {MAX_COMPARISON_AGE_S}s window "
             "this guard is built on — a caller-supplied window may not widen the "
@@ -594,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
         # (review of #10963, P2). Validated HERE, before any read, for the same reason.
         try:
             _elapsed_override(args.fake_elapsed)
-        except Unreadable as exc:
+        except ValueError as exc:
             print(f"ci_cancel_guard: {exc} — the argv is wrong, so nothing was read "
                   "and NOTHING was cancelled", file=sys.stderr)
             return 64

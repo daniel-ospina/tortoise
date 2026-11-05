@@ -580,12 +580,12 @@ def test_a_non_numeric_seam_value_is_refused_not_ignored(fixture):
     exits 64.
 
     Non-vacuity, MEASURED (review of #10963): delete the `if args.fake_elapsed is not
-    None:` arm in `main` and this case does NOT crash — `_elapsed_override` then raises
-    inside `evaluate`, whose `except Unreadable` prints `FAIL-CLOSED … is not a number`
-    and exits **2**. The arm is therefore what turns "a typo'd argv announced as an
-    unreadable GitHub surface that nothing ever read" into a usage error, and that is the
-    defect this case pins. (An earlier wording of this docstring claimed a
-    traceback/exit 1, which is not what the mutation does.)
+    None:` arm in `main` and this case does NOT pass — `_elapsed_override` then raises an
+    uncaught `ValueError` inside `evaluate`, so the tool exits **1** on a traceback with
+    nothing cancelled, instead of 64 with a usage message. The arm is what turns a typo'd
+    argv into a usage error rather than a crash-or-a-surface-claim, and that is the defect
+    this case pins. (Emptied of a specific exit code on purpose: this docstring has twice
+    asserted a mechanism that the mutation did not produce — measure before you write it.)
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
