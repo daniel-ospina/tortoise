@@ -1994,7 +1994,8 @@ reds on that shape — its `_CHANGE_NARRATION` dated-stamp arm matches `CORRECTE
 the before/after narration `#8542` moved out of the three design documents. The guard is the executable
 half of the rule stated at the top of this file: the design document states the design and the
 measurement; this file keeps the record of how it got there. Measured at the PR head: 0 `_CHANGE_NARRATION`
-hits in `STORAGE-ARCHITECTURE.md` after the move, against 2 before it (lines 1090 and 1518).
+hits in `STORAGE-ARCHITECTURE.md` after the move, against 2 before it (lines 1090 and 1518) — at
+`9f5a41939`, this branch's first draft, which is the ref to reproduce it at.
 
 ## The rest of the register still cited the retracted figures — each now carries the date of the reading it belongs to (`#5090`, 2026-11-05)
 

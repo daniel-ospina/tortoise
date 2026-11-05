@@ -18,7 +18,7 @@ aboutObjects: "epic #5090, embed gate, vector index, unindexed embeddings, test-
 > **Why this was rewritten.** The first revision proposed *"decide whether the vectors move to Postgres"*
 > as this epic's central item. **That is not this epic's question** — the storage architecture is
 > **`#4333`**'s (owner re-scope, 2026-09-23), V1's home is **`STORAGE-ARCHITECTURE.md` §14.3**, and the
-> changelog records *"#5090 is a **consumer** of the vector layer, not the enumeration."* The second
+> changelog records *"#5090 is a **consumer** of the vector layer, not the enumeration"*. The second
 > revision also **drops two levers the record had already refused**: self-hosting (owner, 2026-11-05:
 > *"not now"*) and embedding quantization (on §15's do-not-re-invent list — *"no engine to apply it to"*).
 
