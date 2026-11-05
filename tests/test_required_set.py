@@ -292,9 +292,12 @@ def test_a_context_the_config_derives_and_the_record_lacks_also_refuses(tmp_path
 
 
 def test_derive_from_ref_discloses_the_COMMIT_for_an_annotated_tag(tmp_path: Path) -> None:
-    """`git rev-parse --verify <ref>` returns the TAG OBJECT; `git show <ref>:<path>` reads
-    the COMMIT the tag points at. Disclosing the tag object's sha would name an object
-    whose files were never the ones read, which is the opposite of provenance.
+    """`git rev-parse --verify <ref>` returns the TAG OBJECT for an annotated tag, so a
+    disclosure built on it would name an object that is not a commit — and the provenance
+    line exists to name the commit whose tree was read.
+
+    (The blob reads are pinned to the resolved `sha`, and git peels `<rev>:<path>` itself,
+    so the defect this pins is the WRONG NAME in the disclosure, not different bytes.)
 
     Remove `^{commit}` from the `rev-parse` call and this reds (the disclosed sha becomes
     the tag's).
@@ -325,8 +328,9 @@ def test_derive_from_ref_discloses_the_COMMIT_for_an_annotated_tag(tmp_path: Pat
 
 
 def test_derive_from_ref_discloses_the_sha_it_read(tmp_path: Path) -> None:
-    """`git show <ref>` does not fetch, so freshness cannot be asserted — it must be
-    DISCLOSED. The sha in `source` is the only honest statement about what was read.
+    """Resolving a ref (`git rev-parse`) does not fetch, so freshness cannot be asserted —
+    it must be DISCLOSED. The sha in `source` is the only honest statement about what was
+    read.
 
     Drop the `git rev-parse` and the `source` loses the sha; a stale protected ref then
     reads exactly like a fresh one.

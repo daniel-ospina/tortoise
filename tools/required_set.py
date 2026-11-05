@@ -349,12 +349,13 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
     ``ref`` is a parameter because `--required-set --ref HEAD` is a legitimate
     diagnostic ("what would this BRANCH require?"); it is not a default, because the
     protected ref is the authoritative answer. ⛔ It reads the last COMMIT on that ref
-    (`git show <ref>:<rel>` — both files as committed), never the working tree, so an
-    uncommitted edit to either file is invisible here BY DESIGN: a gate that read
-    uncommitted bytes would be reading the very tree it is judging.
+    (``git show <sha>:<rel>``, where `<sha>` is the peeled commit — both files as
+    committed), never the working tree, so an uncommitted edit to either file is invisible
+    here BY DESIGN: a gate that read uncommitted bytes would be reading the very tree it is
+    judging.
 
-    ⛔ IT DOES NOT FETCH, AND IT DOES NOT PRETEND TO. `git show <ref>:<rel>` succeeds on any
-    ref that EXISTS, however stale, so freshness is not something this function can assert.
+    ⛔ IT DOES NOT FETCH, AND IT DOES NOT PRETEND TO. Resolving a ref succeeds whenever that
+    ref EXISTS, however stale, so freshness is not something this function can assert.
     What it does instead is DISCLOSE the sha it read (`source` carries `<ref> (<sha12>)`), so
     a stale protected ref is visible in every verdict rather than being invisible. A caller
     that needs a fresh ref must fetch it: `ready_for_owner.collect_probe` does, via
@@ -366,9 +367,12 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
     def _rev_parse() -> str:
         """The COMMIT `ref` resolves to HERE — so the caller can see what was read.
 
-        ``^{commit}`` is load-bearing: bare ``--verify`` returns the TAG OBJECT for an
-        annotated tag, while ``git show <ref>:<path>`` reads the COMMIT the tag points at,
-        so the disclosed sha would name an object whose files were never the ones read.
+        ``^{commit}`` is load-bearing for the DISCLOSURE: bare ``--verify`` returns the TAG
+        OBJECT for an annotated tag, so the sha in `source` would name an object that is not
+        a commit — and the provenance line exists precisely to name the commit whose tree
+        was read. (Since the blob reads are pinned to `sha` rather than to `ref`, a
+        tag-object sha would still read the same bytes — git peels `<rev>:<path>` itself —
+        so the defect this prevents is a WRONG NAME in the disclosure, not different bytes.)
         """
         try:
             proc = subprocess.run(
