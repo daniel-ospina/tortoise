@@ -323,15 +323,28 @@ def _scrub(text: str, secret: str = "") -> str:
     out = text or ""
     if secret:
         out = out.replace(secret, "<redacted-token>")
-        # ⛔ TRUNCATED AND FOLDED COPIES ARE THE TYPICAL ECHO (review cycle 8). A proxy/WAF that returns an
-        # excerpt of the blocked request — or a responder that folds a long header — prints a PREFIX or a
-        # SUFFIX of the credential, not the whole value, so the exact replace above cannot see it and the
-        # prefix regex cannot help a value with no documented shape. Descending length so the longest
-        # match wins; the suffix half is required, because a fold can put the tail on its own line.
+        # ⛔ MATCH **ANY WINDOW** OF THE VALUE, NOT JUST ITS ENDS (review cycles 8-9). A proxy that returns
+        # an excerpt, or a responder that folds a long header, echoes a FRAGMENT — and the fragment need
+        # not touch either end (a fixed-width "here is what you sent" panel elides both ends and prints the
+        # middle). End-anchored replaces missed exactly that, and the shape regex cannot help a value with
+        # no documented prefix. So: index every 8-char window of the credential, slide an 8-char window
+        # over the text, and extend the match while the extended needle is still a substring of the value.
+        # 8 chars is the shortest fragment this tool treats as identifying (the tests' own standard).
         if len(secret) >= 8:
-            for _n in range(len(secret) - 1, 7, -1):
-                out = out.replace(secret[:_n], "<redacted-token>")
-                out = out.replace(secret[-_n:], "<redacted-token>")
+            windows = {secret[_i:_i + 8] for _i in range(len(secret) - 7)}
+            pieces: list[str] = []
+            _i = 0
+            while _i < len(out):
+                if out[_i:_i + 8] in windows:
+                    _j = _i + 8
+                    while _j < len(out) and out[_i:_j + 1] in secret:
+                        _j += 1
+                    pieces.append("<redacted-token>")
+                    _i = _j
+                else:
+                    pieces.append(out[_i])
+                    _i += 1
+            out = "".join(pieces)
     return re.sub(r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+", "<redacted-token>", out)
 
 

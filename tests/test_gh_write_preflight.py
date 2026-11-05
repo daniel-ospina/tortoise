@@ -990,6 +990,34 @@ def test_a_TRUNCATED_echo_of_the_credential_is_redacted_too():
         assert secret[-8:] not in blob, f"a folded echo leaked the credential SUFFIX: {blob!r}"
 
 
+def test_an_INTERIOR_fragment_of_the_credential_is_redacted_too():
+    """A fragment need not touch either end of the value (review cycle 9).
+
+    A fixed-width "here is what you sent" panel elides both ends and prints the MIDDLE, and a
+    multi-segment fold leaves an interior segment unanchored — so end-anchored redaction leaks."""
+    secret = "Zq7HXq65" + "fut3Bk4rNw0EP8q0KYb9JvsW5L6pu33vmJJ6RX62kX4JP4Kh8s" + "J256vd3aE"
+    middle = secret[20:70]                       # 50 chars, anchored at NEITHER end
+    folds = secret[:30] + "\n" + secret[30:60] + "\n" + secret[60:]
+    arms = [
+        (200, {"x-oauth-scopes": f"repo, {middle}"}, '{"default_branch":"main"}'),
+        (400, {}, '{"message":"blocked: ' + middle + '"}'),
+        (400, {}, '{"request":"' + folds + '"}'),
+        (200, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": secret[40:90]},
+         '{"default_branch":"main"}'),
+    ]
+    for read in arms:
+        with _Stub(read=read) as s:
+            env = _env(s.base, secret)
+            p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise", "--json"],
+                               capture_output=True, text=True, env=env, timeout=120)
+        blob = p.stdout + p.stderr
+        for start in (0, 10, 20, 30, 40, 50, 60):
+            if start + 8 > len(secret):      # ⛔ a slice past the end is '' and `'' in blob` is ALWAYS true
+                continue
+            frag = secret[start:start + 8]
+            assert frag not in blob, f"an INTERIOR fragment leaked from {read[0]} (offset {start}): {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
