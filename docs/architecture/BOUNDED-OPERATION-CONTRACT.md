@@ -129,8 +129,9 @@ on the wire — returning the `hasMore`/`total` dict when `total > len(results)`
 change and is deliberately NOT done here.
 
 ⚠️ **The `tag=` arm is a third surface on the same tool, and it is the one the bound never reached.**
-#10602 bounded the structural READ at the accessor; on `tag=` only the RESPONSE is bounded, in the
-handler, because `tortoise/sdk.py::query_points_by_tag` has no `skip`/`limit` to push the bound into.
+The structural READ is bounded at the accessor since **#10602**; on `tag=` only the RESPONSE is
+bounded, in the handler, because `tortoise/sdk.py::query_points_by_tag` has no `skip`/`limit` to push
+the bound into.
 The read volume that produced the outage is therefore unchanged on that arm: a large tagged population
 still costs the whole read and can still blow `mcp_auth._TRANSPORT_WAIT_BOUND_S` and return `-32009`,
 while the served description now says the *response* is bounded (which is true, and is why the served

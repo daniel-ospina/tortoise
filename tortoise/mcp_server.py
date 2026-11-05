@@ -3785,19 +3785,29 @@ def tortoise_query(kind: str | None = None,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
-    # #10602 review (F3): `skip`/`limit` are reserved filter keys
-    # (`security.validate_filter_key`) AND the names BOTH bounded arms below pass
-    # as explicit keywords, so a caller's `filters={"limit": 5}` would collide
-    # at those `_safe(...)` call sites — OUTSIDE its try — and escape as a bare
-    # TypeError instead of the structured "Reserved filter key" error the plain
-    # path used to return. Refused ONCE here, above BOTH arms: the F3 finding
-    # was that the plain arm was closed while the `offset=`/`page=` arm still
-    # raised (a pre-existing hole eight lines away), and one guard above the
+    # #10602 review (F3): `skip`/`limit`/`kind` are reserved filter keys
+    # (`tortoise/security.py::validate_filter_key` reserves exactly `kind`,
+    # `skip`, `limit` and `kind_<n>`) AND they are the names BOTH bounded arms
+    # below pass as explicit parameters, so a caller's `filters={"limit": 5}`
+    # would collide with the `_safe(...)` call sites. Pre-fix that collision did
+    # NOT escape as a bare TypeError: the call site is INSIDE `_safe`'s `try`
+    # (only the HANDLER's own scope is bypassed), and `_safe` catches the
+    # duplicate-argument TypeError along with everything else — so the caller got
+    # a `_SafeError` carrying `paginated_query() got multiple values for argument
+    # 'limit'` instead of the documented "Reserved filter key" refusal the plain
+    # path used to return. Refused ONCE here, above BOTH arms: the F3 finding was
+    # that the plain path kept the reserved-key message while the `offset=`/`page=`
+    # arm eight lines away returned the interpreter text, and one guard above the
     # branch is what closes the class rather than the one instance of it.
+    # `kind` is in the intersection because it is a POSITIONAL parameter of
+    # `paginated_query` (tortoise/sdk.py) and `_public_filters` does not drop it
+    # (its only drop list is PRIVATE_FILTER_KEYS), so `filters={"kind": ...}`
+    # produced the same duplicate-argument text — the round-6 review found the
+    # guard checking 2 of the 4 names its own refusal message advertises.
     # `tag`/`text` are not reached here: the `tag` arm ignores `filters` and the
     # `text` arm never forwards them, so neither can collide.
     _filters = _public_filters(filters)
-    _collide = sorted(set(_filters) & {"skip", "limit"})
+    _collide = sorted(set(_filters) & {"skip", "limit", "kind"})
     if _collide:
         return _SafeError({
             "error": f"Reserved filter key: {_collide[0]!r}. This name collides "
@@ -4009,7 +4019,11 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     """DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=...).
 
     Kept for one release with grace; will be removed in the next release.
-    Migrate to: tortoise_query(tag=tag)
+    Migrate to: tortoise_query(tag=tag, offset=0, limit=N), walking it while
+    `hasMore` is true. The bare `tortoise_query(tag=tag)` caps the RESPONSE at
+    the un-paginated default (100) and answers a plain list with no
+    `hasMore`/`total`, so a large read through it cannot be told from a complete
+    one — the loss this alias exists to avoid.
 
     Note: passes include_retracted=True to preserve this tool's pre-#888 behavior
     (raw tag results incl. tombstones); the new tortoise_query(tag=...) default
@@ -4019,9 +4033,12 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     RAW, complete tag result set. Without it the new bound in `tortoise_query`
     would silently truncate this tool to the un-paginated default (100), turning
     an answer this signature cannot page into an incomplete one that looks
-    complete. The value is `_TAG_ALIAS_LIMIT`, the same ceiling the SDK's own
-    `limit` validation accepts, so it restores the pre-bound behaviour exactly
-    rather than approximating it.
+    complete. The value is `_TAG_ALIAS_LIMIT` — a POPULATION-SIZED CAP, not a
+    validated ceiling: no SDK limit guard runs on this path (see that constant's
+    own comment), so it restores the pre-bound behaviour for any realistic tag
+    and TRUNCATES above 10,000 tagged rows. The SERVED description of this tool
+    says so out loud, because this signature offers no `offset`/`page` with which
+    to walk the truncation.
     """
     return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 

@@ -186,18 +186,21 @@ def test_a_real_failure_still_surfaces_through_the_bound(stub_factory):
 def test_a_reserved_filter_key_is_a_structured_error_not_a_typeerror(stub_factory):
     """#10602 review F3 — the bound must not turn a clean refusal into a crash.
 
-    `skip`/`limit` are reserved filter keys (`security.validate_filter_key`) AND
-    the names the bounded path passes as explicit keywords, so a caller's
-    `filters={"limit": 5}` collides at the `_safe(...)` call site — OUTSIDE its
-    `try` — and escaped as a bare TypeError. Before the bound, the same input
-    reached `validate_filter_key` inside `_safe` and came back as the structured
-    "Reserved filter key" error. Fails on the value `isinstance(result,
-    _SafeError)`; the fixture reaches it because 5 > 0 points and the filter dict
-    carries a colliding key.
+    `skip`/`limit`/`kind` are reserved filter keys
+    (`tortoise/security.py::validate_filter_key`) AND the names the bounded path
+    passes as explicit parameters, so a caller's `filters={"limit": 5}` collides
+    at the `_safe(...)` call site. That call site is INSIDE `_safe`'s `try` (only
+    the HANDLER's own scope is bypassed), so pre-fix the collision came back as a
+    structured `_SafeError` carrying the interpreter's `got multiple values for
+    argument 'limit'` text instead of the documented "Reserved filter key"
+    refusal. Before the bound, the same input reached `validate_filter_key`
+    inside `_safe` and came back with that message. Fails on the value
+    `"Reserved filter key" in result["error"]`; the fixture reaches it because
+    the stub holds 5 points and the filter dict carries a colliding key.
     """
     from tortoise.mcp_server import _SafeError, tortoise_query
     stub_factory(n_points=5)
-    for bad in ({"limit": 5}, {"skip": 3}):
+    for bad in ({"limit": 5}, {"skip": 3}, {"kind": "statement"}):
         result = tortoise_query(kind="statement", filters=bad)
         assert isinstance(result, _SafeError), (
             f"filters={bad} escaped as {type(result).__name__} instead of a "
@@ -209,20 +212,23 @@ def test_reserved_filter_key_is_refused_on_EVERY_bounded_arm(stub_factory):
     """F3's class, not just its instance — review round 2's finding 3.
 
     The collision was closed on the plain arm while the `offset=`/`page=` arm
-    eight lines away still raised a bare TypeError (pre-existing, but the F3
-    wording claimed the class was closed). One guard above BOTH arms is what
-    closes it, so this asserts every arm that forwards `filters`.
+    eight lines away still returned the interpreter text (pre-existing, but the
+    F3 wording claimed the class was closed). One guard above BOTH arms is what
+    closes it, so this asserts every arm that forwards `filters` — for every
+    reserved name the guard's own message advertises, `kind` included (review
+    round 6: the guard checked 2 of the 4 names it names).
     """
     from tortoise.mcp_server import _SafeError, tortoise_query
     stub_factory(n_points=5)
     for kwargs in ({"kind": "statement"},
                    {"kind": "statement", "offset": 0},
                    {"kind": "statement", "page": 1}):
-        result = tortoise_query(filters={"limit": 5}, **kwargs)
-        assert isinstance(result, _SafeError), (
-            f"{kwargs} escaped as {type(result).__name__} instead of a "
-            "structured refusal")
-        assert "Reserved filter key" in str(result.get("error", "")), result
+        for bad in ({"limit": 5}, {"kind": "statement"}):
+            result = tortoise_query(filters=bad, **kwargs)
+            assert isinstance(result, _SafeError), (
+                f"filters={bad} {kwargs} escaped as {type(result).__name__} "
+                "instead of a structured refusal")
+            assert "Reserved filter key" in str(result.get("error", "")), result
 
 
 def test_the_served_description_discloses_the_bound():
@@ -290,6 +296,47 @@ def test_the_tag_alias_is_not_silently_truncated_by_the_new_bound(stub_factory):
     result = tortoise_query_points_by_tag("pricing")
     assert len(result) == 250, (
         f"the alias truncated a 250-row tag to {len(result)} with no way to page")
+
+
+def test_the_retirement_docstring_agrees_with_the_constant_and_names_the_walk():
+    """Review round 6, finding 1 — the two sentences that ship with the deprecation.
+
+    On the retirement path the docstring IS the migration instruction, and it
+    said two things this same PR makes false: that `_TAG_ALIAS_LIMIT` is "the
+    same ceiling the SDK's own `limit` validation accepts" (it is not —
+    `paginated_query` checks only `limit >= 1`, so no ceiling exists and 10,000
+    is a number this file invented; the constant's own comment says the exact
+    opposite), and that it "restores the pre-bound behaviour exactly"
+    (it truncates above 10,000 — the SERVED description says so). Worse, its
+    `Migrate to:` line pointed at the bare `tortoise_query(tag=tag)`, whose
+    RESPONSE now caps at 100 with a plain list and no `hasMore`/`total`, so a
+    caller who followed the printed migration silently lost the population the
+    alias exists to return.
+
+    Fails on the pre-fix docstring: the false ceiling claim is present, the
+    "exactly" claim is present, and the `Migrate to:` line names neither the
+    walk (`offset=`) nor its terminating signal (`hasMore`).
+    """
+    from tortoise.mcp_server import tortoise_query_points_by_tag
+
+    doc = " ".join((tortoise_query_points_by_tag.__doc__ or "").split())
+    assert doc, "the retiring alias lost its docstring"
+    assert "the same ceiling the SDK's own" not in doc, (
+        "the docstring still claims an SDK-validated ceiling that does not "
+        "exist (`paginated_query` checks only limit >= 1): " + doc)
+    assert "restores the pre-bound behaviour exactly" not in doc, (
+        "the docstring still claims the cap is exact, while this PR's own "
+        "SERVED text says it truncates above 10000 tagged rows: " + doc)
+    assert "10,000" in doc or "10_000" in doc, (
+        "the docstring does not state where the population-sized cap bites: " + doc)
+    assert "Migrate to:" in doc, "the migration instruction is gone: " + doc
+    migrate = doc.split("Migrate to:", 1)[1]
+    assert "offset=" in migrate, (
+        "the migration path it prints does not name the walk, so following it "
+        "lands on a response capped at 100 with no way to see the rest: " + migrate)
+    assert "hasMore" in migrate, (
+        "the migration path names no terminating signal, so the truncation it "
+        "lands on cannot be noticed: " + migrate)
 
 
 def test_the_tag_arm_honours_a_lone_limit_like_the_structural_arm(stub_factory):
