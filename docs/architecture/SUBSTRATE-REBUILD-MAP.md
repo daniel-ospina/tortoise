@@ -256,13 +256,15 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **56** lines across **18**
-files under `tortoise/` (`git grep -n ':Document'` → 56 lines,
+and the reason is measured: `:Document` occurs on **57** lines across **18**
+files under `tortoise/` (`git grep -n ':Document'` → 57 lines,
 `git grep -l ':Document'` → 18 files — the file count is not the line count).
-It was **55** across **17** when this was first measured at `4f68a2aa7`; the
-line since added is `cache_eviction.py:620`, the census's own note on why node
-labels do not partition the node set — the #10976 deliverable is itself one more
-piece of prose naming the retired label, which is the point rather than an
+It was **55** across **17** when this was first measured at `4f68a2aa7`, and
+two independent lines have since been added, one per workstream: the #10976
+census's own note on why node labels do not partition the node set
+(`cache_eviction.py:620`, which is also the one that lifted the file count,
+being a new file), and #8447's ingest door (`tortoise/ingest.py`, the
+`REFUSED_NOT_FOUND` enum docstring). Both are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**

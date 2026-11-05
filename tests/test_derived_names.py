@@ -324,6 +324,19 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_probe_uri\)",
         r"from_uri\(\s*uri\s*\)",
     ],
+    # #8447 C3: the ingest door's live arms. Both `from_uri(uri)` sites are the
+    # file's OWN verification handles — the "did the door write it?" read-back —
+    # and every `uri` they receive comes from `_fresh_graph(...)`, which swaps the
+    # env URI's graph path for a per-run `test_8447_<stem>_<hex>`
+    # (`_graph_uri`, the same shape as `test_ingest.py::_live_uri`). SAFETY IS NOT
+    # "the handle is declared": `--upgrade-all` reads EVERY pending Source in the
+    # graph, and the sweep arm ends with `MATCH (s:Source {url: $id}) DETACH DELETE
+    # s` where `$id` is a SOURCE BASENAME, so on the shared `tortoise_test_matrix`
+    # path that delete could reach a peer file's `Source {url: "note.md"}`. The
+    # per-run graph is what makes both the sweep's verdict and the delete local to
+    # this test. The regex is deliberately narrow to the one shape that exists
+    # today so a second one reds instead.
+    "test_8447_c3_ingest_door.py": [r"from_uri\(\s*uri\s*\)"],
     # #10135 review (post-rebase): `test_5140_d10_relabel_migration.py` is
     # deliberately ABSENT here. Main's #10164 gave both of that file's
     # `from_uri(` sites an explicit `graph_name=` (`:50` the module probe,
