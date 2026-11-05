@@ -204,7 +204,8 @@ Behavioural, executable, each tracing to exactly one scope item.
 ## 5. Human Approval Gate — ✅ PASSED
 
 `epic-scope` requires human approval of the boundaries before planning. **Granted by the owner,
-2026-11-05:** *"i need you to have done proper research to not reinvent the wheel and then move forward."*
+2026-11-05:** *"i dont want quesitons [sic] for quesitons [sic] sake. i need you to have done proper
+reserach [sic] to not reinvent the wheel and then move forward"*
 Recorded here as the gate's own record, together with the two constraints that came with it:
 
 1. **Self-hosting FalkorDB is not now.** Removed from the option set (S-out-of-scope row 2; align §8.1).

@@ -265,7 +265,7 @@ so the next lane does not repeat it.
 
 | ruling | date | home | what it settles |
 |---|---|---|---|
-| **D11 — stay on hosted FalkorDB; the optimisation is DEFERRED** | 2026-09-24 | **#4333** decision record | No engine migration. Self-hosting, if ever, is **priced first** — same engine, SSPLv1, no rewrite. ⚠️ **Owner, 2026-11-05: *"we're not self-hosting FalkorDB now. we have a lot of work that needs doing first."*** ⇒ **self-hosting is OUT of the option set, not deferred-and-available.** |
+| **D11 — stay on hosted FalkorDB; the optimisation is DEFERRED** | 2026-09-24 | **#4333** decision record | No engine migration. Self-hosting, if ever, is **priced first** — same engine, SSPLv1, no rewrite. ⚠️ **Owner, 2026-11-05: *"we're not self-hosting flakorDB [sic] now. we have a lot of work that needs doing first"*** ⇒ **self-hosting is OUT of the option set, not deferred-and-available.** |
 | **The billing model** | 2026-10-08 | graph `1a11c902dac` | Tiers are **capped, priced per feature**, not sized by volume; over cap = **overage**, not upgrade. Two metered units: **storage per byte**, **compute per extraction**. ⇒ *"fix the billing unit"* is no longer a candidate. **Corollary: because we charge per stored byte, retained bytes are REVENUE — so "store less" is NOT a strategy.** |
 | **The unit** | 2026-10-25 | **#4333** | Cost is reported in exactly three things, all bytes/usage: **graph RAM bytes** (rows + indices + **the vector index**), **Postgres bytes**, **extraction usage**. *"we're moving away from nodes."* |
 | **The engine's ROLE** | 2026-10-08 | §14.2 | FalkorDB **stays and is DEMOTED** to a derived hot cache. **"Shall we migrate to Postgres?" is not an open question and a lane must not re-open it.** |

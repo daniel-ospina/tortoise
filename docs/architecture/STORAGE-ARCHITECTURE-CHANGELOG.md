@@ -2009,9 +2009,10 @@ place it stood.
 2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. **Every leg
 is a VECTOR COUNT × bytes-per-vector, not an attribute line** — `Object` 7,859 and `Event` 4,798 are the
 two counts the measurement found (§12.1b), and the third leg is the remainder the estimate attributed to
-`Point`, 20,923 of 33,580. At the exact `1,536 B` §12.1a uses, those are 12.1 / 7.4 / 32.1 MB — sum
-**≈51.6 MB**, the same `33,580 × 1,536 B` §12.1a states; the head-line **≈50 MB** is that same population
-at the rounded `1.5 KB = 1,500 B` the original estimate used, **not a second reading.** ⚠️ **Two things the
+`Point`, 20,923 of 33,580. At the exact `1,536 B` per vector (384 × float32 — §2.2 states that width), those are
+12.1 / 7.4 / 32.1 MB — sum **≈51.6 MB**, which is the `33,580 embeddings ≈ 51.6 MB` §12.1a reports; the
+head-line **≈50 MB** is that same population at the rounded `1.5 KB = 1,500 B` the original estimate used,
+**not a second reading.** ⚠️ **Two things the
 legs do not say.** (1) The ≈50 MB is not §12.1's `Point` **node-attributes** line of 50 MB — that line is
 ALL attributes of the label, no leg reads it, and the numerical agreement is a **coincidence**. (2) The
 three legs are the labels the 2026-09-24 count FOUND vectors on, **not the only labels that store them** —
@@ -2020,7 +2021,8 @@ a `:Source` writes an `embedding` too (§12.1's footnote), so the third leg is a
 labels store 7,859 and 4,798 embeddings respectively, and the
 whole defect this epic exists for is that they store them with **no vector index behind them** (`Object`
 and `Event` carry no vector DDL — only `Point` does). The part of the ≈50 MB that is *removable* is
-therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B = 19.4 MB, 38 % of every
+therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B = 19.4 MB** — **19.0 MB of
+the ≈50 MB frame above, 19.4 MB of the ≈51.6 MB one** — which is **38 % of every
 vector stored**, which is `#5090`'s 2026-10-08 SCOPE correction — not a re-measurement, and not a
 2026-11-04 figure. The 2026-11-04 reading of `live-v4` (`#10976`) is a **graph** reading:
 `indices_sz_mb` **93** on a **195 MB** graph, with per-label attribute bytes and no vector count; the
