@@ -543,7 +543,7 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
     out, signalled, no output), `internal-error` (the probe itself failed), `remote-unreachable` (the
     reachability read itself failed — transport, DNS, a wrong remote URL, or read-side auth; the
     tool's own suite calls a `remote-unreachable` on a credential that CAN write "a false block, the
-    one failure mode this tool must never add"), and `verify-mismatch` (the push claimed success but
+    one failure this tool must never add"), and `verify-mismatch` (the push claimed success but
     the confirming `ls-remote` did not show the ref **at our sha** — which also covers a read that
     could not be performed, since an unreadable target is not a proven one). Folding any of these
     into `push-refused` parks deliverable work on a slow, unreachable or OOM-killed push; the closed
