@@ -69,12 +69,19 @@ CREDENTIAL_VARS = (
 # ⛔ THE SAME SEAM, THE OTHER AXIS. Stripping only the credential set left three more inputs
 # the tool HONOURS ambiently, so a box that sets one is testing itself rather than the cache:
 #
-#   GH_REPO            the `--repo` DEFAULT (tools/gh_read_cache.py:1156, :1174). gh documents
-#                      it (`gh help environment`), and `<host>/<owner>/<repo>` is the fleet
-#                      pattern — so two usage cases stopped being usage. Measured:
+#   GH_REPO            the `--repo` DEFAULT (`build_parser`'s `--repo` argument, whose default
+#                      is gh's own variable). gh documents it (`gh help environment`), and
+#                      `<host>/<owner>/<repo>` is the fleet pattern — so two usage cases
+#                      stopped being usage. Measured:
 #                      `GH_REPO=o/n python3 tests/test_gh_read_cache.py` -> 2 failed.
-#   GH_READ_CACHE_DIR  the cache-dir default (tools/gh_read_cache.py:331).
-#   GH_READ_CACHE_GH   the `gh` binary default (tools/gh_read_cache.py:355).
+#   GH_READ_CACHE_DIR  the cache-dir default (`_cache_dir`).
+#   GH_READ_CACHE_GH   the `gh` binary default (`_gh_bin`).
+#
+# ⛔ CITED BY SYMBOL, NOT BY LINE. All four of these used to carry line numbers into the
+# tool, and they went stale the moment a later commit inserted lines above them: each then
+# pointed at unrelated code (a `_default_host` comment, `refuse_if_mutable`, the empty-`--argv`
+# refusal) — indistinguishable from a wrong claim, and the very drift the tool's own comment
+# records. Symbols do not drift, so no number is restated here, not even to explain the bug.
 #
 # Both lists feed ONE strip set; the separate tuples exist only so the coverage guard below
 # can say which axis a variable belongs to.
