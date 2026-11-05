@@ -3557,8 +3557,9 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # files hits the empty-shard branch at python-ci.yml:652 ('no selected files
     # for this shard - no manifest (guard skips)') and greys out green having run
     # nothing — honest only because a tier-2 selection cannot get that small
-    # (`tier1` is 31 files against `fast_shards: 9`), which is a margin, not a
-    # guarantee this comment should claim.
+    # (`tier1` is FAR larger than `fast_shards:` 9 — 73 rows at the commit that
+    # re-derived this, and re-derive it rather than trust that count), which is a
+    # margin, not a guarantee this comment should claim.
     #
     # Tier-2 ONLY: the `full` path returned above and keeps these files, because
     # a full leg HAS the URI.
