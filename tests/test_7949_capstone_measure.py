@@ -5383,15 +5383,18 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     """A document that routes a reader to E1/E2 must state the verdict the record gives.
 
     #10610 review issue 1 (P2): the change re-pointed both rows at
-    `docs/evidence/9889/e1-e2-scores.json` and moved E2 from BLOCKED to RED, and the two
-    documents a reader is routed to kept asserting the superseded reading IN THE PRESENT
-    TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
-    is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
-    `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
-    the frozen 14-unit denominator is carried by no committed artifact"), whose
-    `README.md:65` pointer now lands on a row reading `RED (8 of 14)`. Nothing read that
-    prose, so the suite stayed green while the bundle's own entry point told a reader the
-    opposite of the table beside it.
+    `docs/evidence/9889/e1-e2-scores.json`, and the two documents a reader is routed to kept
+    asserting the superseded reading IN THE PRESENT TENSE — `docs/00_index.md`'s `#9080` row
+    (`3 RED + 2 BLOCKED`, "E1 … its only artifact is 25 Objects … with no before arm", "E2 …
+    carried by no committed artifact") and `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's
+    README marks the row BLOCKED because the frozen 14-unit denominator is carried by no
+    committed artifact"), whose `README.md:69` pointer now lands on a row that NAMES the
+    re-run reading (`RED 8/14`) while its committed verdict cell still reads
+    `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
+    bundle's own entry point told a reader the opposite of the table beside it. The cite
+    itself is now held by `test_the_e2_routing_claim_cites_the_row_it_describes` below
+    (review at `7c03efc1d`: the previous revision had re-pointed it at `README.md:65`, a
+    table-header line, while quoting a reading that appears in neither bundle README).
 
     Every leg is DERIVED, and each document is held to the ARTIFACT IT DESCRIBES — which
     after the 2026-11-02 re-measure is two different artifacts, deliberately:
@@ -5769,6 +5772,63 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
                 f"{name} still asserts the frozen 14-unit denominator is {phrase!r}, which "
                 f"{e2a['artifact']} refutes — the row it describes reads "
                 f"{table['E2']} ({survived})")
+
+
+def test_the_e2_routing_claim_cites_the_row_it_describes():
+    """The leg's own `README.md:<line>` cite must land on the row it names.
+
+    ⛔ WHY (#10610 review at `7c03efc1d`, item 2). The docstring of
+    `test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict` cites the
+    bundle README by LINE NUMBER and quotes the reading that line carries. A merge
+    resolution carried this branch's older revision of that sentence over `main`'s
+    corrected one, so the cite went to `README.md:65` — a table-header line — while
+    quoting a reading (`RED (8 of 14)`) that appears in NEITHER bundle README
+    (`grep -c` = 0 in both), so the numbered claim resolved to nothing. Nothing
+    redded: `test_every_readme_line_cite_carries_the_sentence_it_quotes` resolves
+    only the cites inside `E1-E5-PROOFS.md`, which carries none at this head, and no
+    pin reads a test's own docstring.
+
+    Derivation, not duplication: the line NUMBER and the quoted readings are both
+    taken from the docstring, so this pin carries no count of its own — it holds the
+    prose to the artifact the prose points at, and moving either side alone reds.
+
+    Non-vacuity: at the pre-fix head this reds, because `README.md:65` carries
+    `| row | frozen bar | measured | verdict |` and neither reading the docstring
+    attributes to it.
+    """
+    docstring = (test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict
+                 .__doc__ or "")
+    lines = docstring.splitlines()
+    at = next((i for i, ln in enumerate(lines) if "README.md:" in ln), None)
+    assert at is not None, (
+        "the E2 routing leg no longer cites the bundle README by line — if that claim "
+        "moved, move this pin with it rather than leaving the cite unwatched")
+    cite = re.search(r"README\.md:(\d+)", lines[at])
+    assert cite is not None, f"unparseable README cite: {lines[at]!r}"
+    cited_line = int(cite.group(1))
+    # The window is the citing line plus the next three: the sentence wraps, and the
+    # readings it attributes to the row are quoted on the following line(s).
+    window = " ".join(lines[at:at + 4])
+    quoted = [re.sub(r"[*`]", "", tok).strip()
+              for tok in re.findall(r"`([^`]+)`", window)]
+    # A cite to a FILE, a symbol or an issue is not a reading quoted FROM the line.
+    cite_shaped = re.compile(r"[A-Za-z_][\w./-]*(?::[\d-]+)?")
+    readings = [tok for tok in quoted
+                if len(tok) >= 6 and not cite_shaped.fullmatch(tok)]
+    assert readings, (
+        f"the cite at {lines[at].strip()!r} quotes no reading, so it holds the row to "
+        "nothing — re-state the sentence it points at")
+    readme = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
+        encoding="utf-8").splitlines()
+    assert 1 <= cited_line <= len(readme), (
+        f"the docstring cites README.md:{cited_line}, past the end of the "
+        f"{len(readme)}-line README")
+    cited = re.sub(r"[*`]", "", readme[cited_line - 1])
+    names_something = [tok for tok in readings if tok in cited]
+    assert names_something, (
+        f"the docstring cites README.md:{cited_line} for {readings}, but that line reads "
+        f"{cited[:160]!r} — the cite and the row it describes have drifted apart, and "
+        "the numbered claim resolves to nothing")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────

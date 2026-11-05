@@ -7422,8 +7422,17 @@ def test_the_paren_guard_reads_only_a_rows_OWN_note():
 # provenance for a WEIGHT ("the module held **30** at the #9352 head, **31** after
 # #9358") — history that must NOT be re-derived, and a guard that read those would
 # red on correct notes.
+#
+# ⛔ THE CONNECTOR IS NOT PART OF THE CLAIM (#10610 review at `7c03efc1d`). The first
+# version read only `->`/`→`, and the `test_7949_capstone_measure.py` row cites the
+# SAME instrument with `=` — so measured at that head the row stated `191 cases` in its
+# leading clause and a 190 reading beside it, and this guard returned `[]` while the
+# row's leading-count pin read the first `N cases`, matched the file, and stayed green:
+# two halves of one sentence disagreeing with nothing red. A spelling the guard cannot
+# see is a FALSE PASS, not a wording preference — the row is told to be re-derived with
+# this instrument, so every connector it can be spelled with must be read.
 _CASE_COUNT_CLAIM_RE = re.compile(
-    r"`grep -c '\^def test_'`\s*(?:->|\u2192)\s*(?P<n>\d+)")
+    r"`grep -c '\^def test_'`\s*(?:->|\u2192|=)\s*(?P<n>\d+)")
 
 
 def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
@@ -7476,6 +7485,19 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` \u2192 2; pytest "
         "collects 2).\n"
         "surfaces: []\n")
+    # The SAME claim spelled with `=`, which the first version of this guard could not
+    # see — the spelling the `test_7949_capstone_measure.py` row actually uses (#10610
+    # review at `7c03efc1d`: the row stated 191 leading and 190 cited, green both ways).
+    stale_equals = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 3 cases (`grep -c '^def test_'` = 3; pytest "
+        "collects 3).\n"
+        "surfaces: []\n")
+    fresh_equals = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2; pytest "
+        "collects 2).\n"
+        "surfaces: []\n")
     historical = (
         "durations:\n"
         "  test_two.py: 3.0  # #9352: the module held 7 at the #9352 head and 9 after "
@@ -7486,6 +7508,11 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
     assert _durations_rows_with_a_stale_case_count(stale, tmp_path) == [
         ("test_two.py", 3, 2)]
     assert _durations_rows_with_a_stale_case_count(fresh, tmp_path) == []
+    assert _durations_rows_with_a_stale_case_count(stale_equals, tmp_path) == [
+        ("test_two.py", 3, 2)], (
+        "the `=` spelling states the same claim as `->` and must be judged the same "
+        "way — reading only the arrow form is a false pass over the row that uses `=`")
+    assert _durations_rows_with_a_stale_case_count(fresh_equals, tmp_path) == []
     assert _durations_rows_with_a_stale_case_count(historical, tmp_path) == []
     gone = (
         "durations:\n"
