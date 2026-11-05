@@ -3274,7 +3274,9 @@ def _duplicate_key_loader():
     tell them apart. The merge KEY is one of those own pairs, though: two ``<<:``
     in one mapping is a repeat and is refused (``merge_key_repeats``), because the
     flatten deletes the key nodes and the repeat would otherwise be the one
-    duplicate this loader could not see.
+    duplicate this loader could not see. That repeat is counted in
+    ``flatten_mapping`` for the same reason the pairs are classified there: after
+    the flatten, the merge keys no longer exist to be counted (#10790 review r4).
     """
     global _DUP_KEY_LOADER
     if _DUP_KEY_LOADER is not None:
@@ -3331,11 +3333,33 @@ def _duplicate_key_loader():
             (yaml.org/type/merge.html, "unless the key already exists in it",
             Example 1 `# Override`), and `yaml.safe_load` resolves it to the
             document's own value — which is exactly what this loader must keep
-            doing. A duplicate INSIDE an anchored mapping is still caught: that
-            MappingNode is constructed on its own, with no merge in play.
+            doing. A duplicate INSIDE an anchored mapping is still caught, and
+            the merge KEYS are counted here for the same timing reason: the
+            flatten DELETES them, and it RECURSES into an anchored mapping it
+            merges, so a repeat inside an anchor that a later sibling merges
+            first is gone by the time that anchor is constructed in its own
+            right. `before` still holds them, so reading the repeat from `before`
+            sees it — reading `node.value` at construction time did not, and
+            ACCEPTED that shape while the sibling node-graph gate refused it
+            (#10790 review r4 P3, measured). Every mapping passes through this
+            call — `construct_mapping` makes it, and so does a parent's merge of
+            the same node — so this is the one place the repeat is visible. A
+            second call on the same node records nothing: the keys it would
+            count were deleted by the first.
             """
             before = list(node.value)
             before_ids = {id(pair) for pair in before}
+            # The `<<` key is a key like any other, so TWO of them in one
+            # mapping is a duplicate (YAML 1.2.2 §3.2.1.3), and
+            # `tools/registry_integrity.py` — the sibling step of the same
+            # required job — refuses it from the raw node graph. Counted HERE,
+            # while the merge key nodes still exist (see the docstring above).
+            merge_key_lines = [
+                key_node.start_mark.line + 1 for key_node, _ in before
+                if key_node.tag == "tag:yaml.org,2002:merge"]
+            if len(merge_key_lines) > 1:
+                self.merge_key_repeats.append(
+                    (merge_key_lines[0], merge_key_lines[-1]))
             super().flatten_mapping(node)
             self.inherited_pairs.setdefault(id(node), []).extend(
                 pair for pair in node.value if id(pair) not in before_ids
@@ -3343,21 +3367,11 @@ def _duplicate_key_loader():
 
         def construct_mapping(self, node, deep=False):
             if isinstance(node, yaml.MappingNode):
-                # The `<<` key is a key like any other, so TWO of them in one
-                # mapping is a duplicate (YAML 1.2.2 §3.2.1.3) — and
-                # `tools/registry_integrity.py`, the sibling step of the same
-                # required job, refuses it from the raw node graph. The flatten
-                # DELETES the merge keys, so the repeat is invisible downstream:
-                # without this check the two required gates would report
-                # different verdicts on one document, which is the exact shape
-                # the guard-agreement pins exist to prevent. A document can
+                # A repeated `<<` key is recorded in `flatten_mapping`, called
+                # here and by any parent that merges this node: the merge keys
+                # have to be counted BEFORE the flatten deletes them, so there is
+                # exactly one place to do it (see that method). A document can
                 # still merge several mappings with `<<: [*a, *b]`.
-                merge_key_lines = [
-                    key_node.start_mark.line + 1 for key_node, _ in node.value
-                    if key_node.tag == "tag:yaml.org,2002:merge"]
-                if len(merge_key_lines) > 1:
-                    self.merge_key_repeats.append(
-                        (merge_key_lines[0], merge_key_lines[-1]))
                 self.flatten_mapping(node)
                 inherited = {
                     id(pair) for pair in self.inherited_pairs.get(id(node), ())}
