@@ -7,8 +7,9 @@
     from success — ``None``, ``[]``, or a ``200`` with an empty body — while
     recording the failure somewhere the caller does not read.
 
-The four doors that clause names are *record write*, *session read*, *capture*
-and *ingest*. The first two are pinned elsewhere; the **ingest** door is
+The four doors C3 covers are *record write*, *session read*, *capture*
+and *ingest* (the enumeration lives in `BOUNDED-OPERATION-CONTRACT.md` §6, which
+this PR adds; §1a itself names no doors). The first two are pinned elsewhere; the **ingest** door is
 ``tortoise-ingest`` / ``python -m tortoise.ingest`` (``tortoise/ingest.py``),
 whose only machine-readable
 output is the process exit status. Before this file, ``main`` returned ``None``

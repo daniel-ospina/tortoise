@@ -581,8 +581,12 @@ class IngestOutcome(StrEnum):
         not read.
 
     Before this vocabulary the door had exactly one output channel that a
-    non-human caller reads — the process exit status — and it was ``0`` on
-    EVERY arm, including the refusals. A script that ran
+    non-human caller reads — the process exit status — and ``main`` returned
+    ``None`` on EVERY arm that RETURNED at all, so the shell saw ``0`` for each
+    of them, the refusals included. (The argument guards are the exception and
+    always were: they raise ``SystemExit`` before an outcome exists, so they
+    reached the shell non-zero already — pinned, unchanged, by the test file's
+    entry-point arm.) A script that ran
     ``tortoise-ingest --upgrade <path>`` on a path that is not a Document
     Source printed ``not a Document: …`` to stdout and exited **0**; a
     re-run that was refused by the idempotency gate printed ``skip: …`` and
