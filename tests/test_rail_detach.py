@@ -1038,8 +1038,8 @@ def test_already_merged_does_not_invent_a_merge_sha(tmp_path):
 
 
 def test_merged_without_a_printed_sha_is_still_merged(tmp_path):
-    """admin-merge.sh:9033 prints the same success with NO sha when the merge
-    commit was unreadable. A crash after that line is still a merge."""
+    """admin-merge.sh's `✅ merged PR #N (state=` line prints the same success with NO sha
+    when the merge commit was unreadable. A crash after that line is still a merge."""
     body = textwrap.dedent(
         """#!/usr/bin/env bash
         echo "admin-merge: ✅ merged PR #$1 (state=MERGED confirmed via the API) — the merge commit was NOT readable"

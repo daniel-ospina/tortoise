@@ -240,7 +240,8 @@ FORBIDDEN_ENV = ("AGENT_ADMIN_MERGE_OVERRIDE",)
 
 RUN_ID_RE = re.compile(r"\brun (\d{5,})\b")
 MERGED_AT_RE = re.compile(r"✅ merged PR #(\d+) at ([0-9a-f]{7,40})")
-# admin-merge.sh:9033 — the SAME success with the merge commit deliberately not
+# admin-merge.sh's `✅ merged PR #N (state=…` success line — the SAME success with
+# the merge commit deliberately not
 # printed (it was unreadable). A merge with no sha is still a merge; the sha is
 # simply absent, and the artifact says so rather than substituting the head.
 MERGED_NO_SHA_RE = re.compile(r"✅ merged PR #(\d+) \(state=")
@@ -844,7 +845,10 @@ def _merge_evidence(log: str, pr: int, repo: str = "") -> tuple[str, str]:
     if m:
         # Already merged before this attempt: that merge commit belongs to the
         # earlier merge and is NOT this branch head (under a squash the head is
-        # never on main — admin-merge.sh:9033). Absent, never invented.
+        # never on main — admin-merge.sh's `✅ merged PR #N (state=` line). Absent,
+        # never invented. Cited by SYMBOL, not by line: a line cite re-stales every
+        # time that file grows, and this one had (it said :9033 while the line sat
+        # at :10696).
         return (MERGED, "") if _names_this_pr(m.group(1), pr) else ("", "")
     m = MERGED_NO_SHA_RE.search(log)
     if m:
