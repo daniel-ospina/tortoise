@@ -1156,7 +1156,7 @@ def main(argv=None) -> IngestOutcome:
         # Embedded mode: redislite creates the DB server at the given path on
         # first use (the file materializes on close — a fresh path NEVER
         # satisfies a pre-.exists() check). The .exists() gate + Docker
-        # fallback added in #26 made first-run `tortoise ingest --db <new>`
+        # fallback added in #26 made first-run `tortoise-ingest --db <new>`
         # silently no-op (sys.exit(0)) instead of creating the DB, breaking
         # the create-if-absent contract the CLI had before #26 and that
         # `tortoise init` still honors. Restored: unconditional construction.
