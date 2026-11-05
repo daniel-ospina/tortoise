@@ -16751,15 +16751,23 @@ class TortoiseSDK:
             "s.topics=CASE WHEN size($topics) > 0 THEN $topics "
             "ELSE coalesce(s.topics, []) END",
             # `coalesce` keeps the stored text ONLY when this capture derives
-            # none. It is not what makes an old node heal — the DERIVATION is:
-            # a pre-#10000 Source holds utterance prose, and the next capture's
-            # topic descriptor is non-NULL, so it replaces that text. An earlier
-            # cut rewrote this clause as an equivalent `CASE WHEN $st IS NOT
-            # NULL …` and claimed the healing; the two forms are the same
-            # function, so that change was a no-op and its claim was false
-            # (measured — see `_session_source_metadata`'s note). The two
-            # capture writes cannot collide with the indexer either way: this
-            # writer only touches `session:<id>` Sources.
+            # none — it is a KEEP arm, and it can never CLEAR a stale value, so
+            # it is not the healing mechanism. Neither is the derivation: a
+            # pre-#10000 node is NOT healed by a re-capture, because a capture
+            # of an ALREADY captured session id never reaches these SETs at all
+            # — the mint gate in `capture_session` (#2104/#1727) makes it the
+            # no-op REPLAY. This method's own docstring spells that mechanism
+            # out, and `tests/test_10000_source_prose.py::
+            # test_a_re_capture_does_not_heal_a_pre_fix_node` PINS the stale
+            # `summary`/`_searchText` pair surviving a replay. The routes that
+            # DO clear it: a capture under a NEW `session_id`, a retry of a
+            # prior FAILED capture, or a record-sourced re-projection for a
+            # node the projection CREATES. An earlier cut rewrote this clause
+            # as an equivalent `CASE WHEN $st IS NOT NULL …` and claimed the
+            # healing; the two forms are the same function, so that change was
+            # a no-op and its claim was false (measured in the #10852 review).
+            # The two capture writes cannot collide with the indexer either
+            # way: this writer only touches `session:<id>` Sources.
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
             # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
