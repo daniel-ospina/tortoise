@@ -116,6 +116,36 @@ def _run(argv: list[str]) -> tuple[object, str]:
     return outcome, buf.getvalue()
 
 
+@pytest.fixture(autouse=True)
+def _no_embedder(monkeypatch):
+    """No arm in this file loads the embedding model — file-wide, by measurement.
+
+    This file pins the DOOR's exit contract (which outcome for which input,
+    and what a refusal must not leave behind). No arm pins the dense leg, so
+    every full-ingest arm paid for a model load it never asserted on: the first
+    encode calls ``EmbeddingModel.get()``, which issues a huggingface.co HEAD
+    request, which the hermetic egress guard blocks and retries five times
+    (#4387) — ~113 s per ingest arm on a `core`-surface file.
+
+    MEASURED, and the measurement is why this is file-wide rather than a stub on
+    the one arm a review named: with a hand-placed stub on
+    ``test_a_second_ingest_skips_and_does_not_print_a_completion_summary``, that
+    arm dropped out of `--durations` and the NEXT full-ingest arm
+    (``test_a_skipped_ingest_does_not_write_a_resolution_point``) took its place
+    at 123.15 s. The cost is per-ingest, not per-arm. Independent proof it is the
+    blocked download and not modelling work: `HF_HUB_OFFLINE=1` takes the same
+    arm from 123.34 s to 11.57 s.
+
+    ``get() -> None`` is the codebase's OWN degrade path (what a host with no
+    encoder takes, keyword-only retrieval), not a bespoke shim, and it leaves
+    the door's behaviour under test untouched. A file that DID pin the dense leg
+    must not take this fixture.
+    """
+    monkeypatch.setattr(
+        "tortoise.embeddings.EmbeddingModel.get",
+        classmethod(lambda cls, load_timeout=None: None))
+
+
 # --------------------------------------------------------------------------
 # The exit contract itself — no DB, no model, runs on every lane.
 # --------------------------------------------------------------------------
@@ -325,15 +355,7 @@ class TestARefusalIsNotSuccess:
 @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
 class TestTheSkipArmWritesNothing:
     def test_a_second_ingest_skips_and_does_not_print_a_completion_summary(
-            self, tmp_path, monkeypatch):
-        # The S7 stage builds the REAL embedding model, which on a hermetic lane
-        # is a blocked https://huggingface.co request retried five times per file
-        # (#4387) — and this arm is on the `core` surface, so an unmocked ingest
-        # here is a flake in every PR's required lane, not a slow test. This
-        # arm's subject is what a SKIP writes, not entity extraction (review
-        # round 11, P3; the same stub the partial-extraction arm already uses).
-        monkeypatch.setattr("tortoise.ingest._s7_document_entities",
-                            lambda *_a, **_k: {})
+            self, tmp_path):
         doc = tmp_path / "note.md"
         doc.write_text(
             "---\ntitle: Repro Note\n---\n\n## Section one\n\nSomething true.\n",

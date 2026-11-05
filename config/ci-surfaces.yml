@@ -10525,23 +10525,23 @@ durations:
   test_8447_c3_ingest_door.py: 6.0  # new in #8447 (C3, the ingest door) — a file a PR ADDS can never carry a CI
   # junit reading yet (the refresher samples push-to-main runs only), so it takes a flat weight rather than
   # this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must
-  # EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ NOT hermetic,
-  # unlike most flat-weight rows: the DB-bearing arms drive a real graph through `main()` (a refused
-  # `--upgrade`, a skipped re-ingest, the already-extracted skip, the `--capture-metadata` refusal, the
-  # resolution-Point control, a sweep that leaves a document behind, and the partial-extraction arms on
-  # `--upgrade` and full ingest), so the
+  # EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ It needs a
+  # DATABASE but NOT a MODEL — the split that matters for this row: the DB-bearing arms drive a real graph
+  # through `main()` (a refused `--upgrade`, a skipped re-ingest, the already-extracted skip, the
+  # `--capture-metadata` refusal, the resolution-Point control, a sweep that leaves a document behind, and the
+  # partial-extraction arms on `--upgrade` and full ingest), so the
   # docker lane / carve-out split decides whether they run (the `skipif` on `TORTOISE_DB_URI`: class-level on
   # two of the classes, per-method on the rest — do not say "class-level" for the whole set).
-  # The ungated arms are pure enum/entry-point assertions and run everywhere. Context for a human, NOT the
-  # weight, and NOT a per-file reading this file consumes: ~2 min wall on ONE host in the private lane —
-  # measured 2026-11-05, 143.9 s and 133.9 s on two runs — and `--durations` puts essentially ALL of it in
-  # ONE arm, whose FIRST of its two runs is an UNMOCKED full ingest reaching S7 against the real embedding
-  # model (the #4387 retry path). Named so the next reader does not have to bisect a two-minute file:
-  #   TestTheSkipArmWritesNothing::test_a_second_ingest_skips_and_does_not_print_a_completion_summary
-  #   -> 123.1 s of a 128.8 s run. Every other arm is sub-second, so the enum assertions are not the cost.
-  # ⛔ NO CASE COUNT and NO past-count anecdote — a hand-written count re-stales on every case a round adds,
-  # and quoting one as history ("N against a quoted M") re-stales the same way one step removed. A VGATE
-  # caught exactly that in this lane's own doc row, and a round-8 review caught this row repeating it.
+  # The ungated arms are pure enum/entry-point assertions and run everywhere. ⛔ This row said "NOT hermetic"
+  # and carried a two-minute figure until the file gained a module-level autouse fixture that stubs
+  # `EmbeddingModel.get` to the codebase's OWN keyword-only degrade path: no arm here pins the dense leg, and
+  # an unmocked full ingest paid ~113 s of a blocked-and-retried huggingface.co request (#4387) PER INGEST ARM
+  # — measured, a stub on the one arm a review named simply moved the 123 s to the next ingest arm, and
+  # `HF_HUB_OFFLINE=1` took it to 11.6 s. With the fixture the whole file is single-digit seconds again.
+  # ⛔ NO WALL-CLOCK FIGURE and NO CASE COUNT — both re-stale (a count on every case a round adds, a figure on
+  # every host, and on every arm that gains a model call); this row is the human justification for a flat
+  # weight, not a reading this map consumes. An anecdote about a past count re-stales one step removed (a
+  # VGATE caught that in this lane's own doc row; a round-8 review caught this row repeating it).
   # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   test_8447_truncation_marker.py: 21.0
