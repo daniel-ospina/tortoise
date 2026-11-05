@@ -230,6 +230,15 @@ class TestARefusalIsNotSuccess:
             f"the door refused but returned {outcome!r}; the caller reads that "
             "as the ask having been performed")
         assert outcome.returncode == 1
+        # The refusal must not leave a COMPLETION artifact behind either: a
+        # caller that ignores `$?` reads the render, and an `--out` written by a
+        # run that did nothing is the same success-shaped lie one layer down.
+        # (Round-6 review: the record claimed this assertion and the tree did
+        # not have it — the docstring's "Measured before: `--out` written" is
+        # what this pins the absence of.)
+        assert not (tmp_path / "g.html").exists(), (
+            "a REFUSED --upgrade wrote the --out render, so the refusal is "
+            "success-shaped on disk as well as absent from the exit status")
 
 
 
@@ -296,6 +305,12 @@ class TestTheSkipArmWritesNothing:
         assert outcome.returncode == 1
 
         assert "refused" in out, out
+        # Same artifact half as the `--upgrade` arm above: the pre-fix run wrote
+        # `points : 0 statements` AND the render, so both are pinned absent.
+        assert "points :" not in out, (
+            "a REFUSED --capture-metadata printed the completion summary:\n" + out)
+        assert not (tmp_path / "g.html").exists(), (
+            "a REFUSED --capture-metadata wrote the --out render")
 
     def test_a_skipped_ingest_does_not_write_a_resolution_point(self, tmp_path):
         """`--resolution` after a skip wrote a Point for work that never ran.
@@ -458,6 +473,23 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             outcome = ingest_mod._do_upgrade_all(_Proj(), _API(), args)
         return outcome, buf.getvalue()
+
+    def test_an_empty_population_is_skipped_nothing_pending(
+            self, tmp_path, monkeypatch):
+        """The `SKIPPED_NOTHING_PENDING` return, DRIVEN (round-2 review, 2nd half).
+
+        Nothing pinned this arm: `test_an_empty_sweep_is_not_a_failure` asserts
+        `IngestOutcome.SKIPPED_NOTHING_PENDING.returncode == 0`, which is a
+        property of the ENUM. Delete the `return IngestOutcome.
+        SKIPPED_NOTHING_PENDING` above the loop and the sweep falls through to
+        the `DONE` tail while every enum assertion stays green.
+        """
+        outcome, out = self._sweep(tmp_path, monkeypatch, [], begin_skip=False)
+        assert "no document Sources are awaiting extraction" in out, out
+        assert outcome is IngestOutcome.SKIPPED_NOTHING_PENDING, (
+            f"an empty sweep returned {outcome!r} (exit "
+            f"{outcome.returncode}); 'nothing to do' is the ask's own answer and "
+            "must be distinguishable from both a completed run and a refusal")
 
     def test_only_the_already_claimed_bucket_is_green(self, tmp_path, monkeypatch):
         doc = tmp_path / "sweep-note.md"
