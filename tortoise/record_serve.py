@@ -1084,9 +1084,11 @@ def parity_difference(cache_props: Mapping[str, Any],
     function so the rule has ONE home: the tests call it, and an audit of a
     production pair can call it without re-deciding what "the same" means.
 
-    Four explanations, and every one of them comes from a declaration the other
-    halves of the epic already made — none is re-listed here. ⛔ It was THREE
-    before #10853, and the fourth arrived with the narrowing that made it
+    Three explanations, and every one of them comes from a declaration the other
+    halves of the epic already made — none is re-listed here. (The clause after
+    them — *"nothing else"* — is the ABSENCE rule that closes the list, not a
+    fourth explanation: it says what an UNEXPLAINED difference does.) ⛔ It was
+    TWO before #10853, and the third arrived with the narrowing that made it
     necessary (#10867 review ISSUE 1): an asymmetry absent from this list is not
     explained by omission, it is a RED, so a declared asymmetry that this rule
     did not know about turned a sanctioned decline into the same signal as a

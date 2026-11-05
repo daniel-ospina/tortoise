@@ -1422,8 +1422,8 @@ def _decoded_tail(raw: Any) -> Mapping[str, Any]:
     typecaster answers) hands the same column back as the Python `str` `'hello'`,
     which is not JSON text at all: `json.loads` raised `JSONDecodeError` out of
     the ROW PREDICATE, so `_is_episodic_source_row` — the function whose whole
-    contract is to ANSWER for every shape a row can hold — answered for the
-    decoded shape and raised on the JSON-text one. Unparseable non-objects answer
+    contract is to ANSWER for every shape a row can hold — raised on the DECODED
+    shape and answered on the JSON-TEXT one. Unparseable non-objects answer
     `{}` here (the DOCUMENT arm, which is
     this module's declared safe asymmetry: a missed legacy session keeps its
     prose, a false positive strips a document's metadata). The WRITER path is
@@ -1606,8 +1606,13 @@ def episodic_source_declined_properties() -> frozenset[str]:
     own prose as an unexplained projection gap — a sanctioned decline and a real
     defect as the same red.
 
-    Derived, cached, resolved at CALL time for the same reasons as
-    :func:`episodic_source_prose_properties`.
+    Derived, resolved at CALL time for the same reasons as
+    :func:`episodic_source_prose_properties`. ⛔ NOT `lru_cache`d like that
+    sibling, deliberately: this composes two frozensets, so a call is free, and a
+    cache would be state every consumer has to clear — the suite clears the two
+    REAL caches by calling `.cache_clear()`, and a decorator copied onto this one
+    to match the sentence that used to be here would only add an attribute to
+    remember.
     """
     return episodic_source_prose_properties() | _EPISODIC_SOURCE_PROSE_COLUMNS
 

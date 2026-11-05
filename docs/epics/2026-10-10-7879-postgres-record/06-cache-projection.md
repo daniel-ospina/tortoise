@@ -389,7 +389,8 @@ tail-carried kind alone does not strip a `corpus://` document); and the record r
 that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
 OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
 only the keys the tail added, so neither door subsumes the other), the tail read in
-the predicate (column-only reds 2 legs), WIDENING THE DROP SET (`+"title"` reds the
+the predicate (column-only reds **3** legs — the two identity-view legs and the
+`tail-only url decides the arm` leg that `916f32741` added), WIDENING THE DROP SET (`+"title"` reds the
 drop-set leg and only it), the column-wins seeding (writing the tail last again
 reds the `SELECT *`-order leg and the order-independence leg, and nothing else),
 the label gate,
