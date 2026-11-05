@@ -460,12 +460,20 @@ def test_reset_clears_every_piece_of_state(monkeypatch):
         oa._ATTEMPT[("K", "o")] = (0.0, 1.0)
         oa._INFLIGHT[("K", "o")] = 0.0
         oa._RESERVATIONS.add(99)
+        # Take a REAL reservation before the reset. The counter is advanced ONLY by
+        # an admission (`_reserve_locked`), so asserting it is non-zero WITHOUT one
+        # here records "some earlier test admitted something" — and reds the moment
+        # this arm is selected alone (`--lf`, `-k reset_clears`, a single nodeid),
+        # which is the false-red direction (#10706). Capturing the value also makes
+        # the assertion the property it claims: value_after == value_before.
+        oa._reserve_locked()
+        counter_before = oa._NEXT_RESERVATION
     oa.reset_operator_alert_state_for_tests()
     assert oa._RESERVED == 0
     assert not oa._RESERVATIONS, (
         "a stale token must not survive the reset: its late release has to be a "
         "no-op, not a decrement of the next admission")
-    assert oa._NEXT_RESERVATION > 0, (
+    assert oa._NEXT_RESERVATION == counter_before, (
         "the reservation counter is process-lifetime monotonic — resetting it would "
         "let a stale token alias a fresh one")
     assert oa._SINCE_SWEEP == 0
