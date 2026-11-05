@@ -137,6 +137,20 @@ Seams
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below (D9 shape). The
+# module-level imports are the reason this must come FIRST: a 3.11-only import
+# (or a syntax-level 3.12 feature used below) raises on an older interpreter
+# before any later guard could run, which is the unattributed failure #5128 was
+# filed for.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/gh_read_cache.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gh_read_cache.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -145,7 +159,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.parse
