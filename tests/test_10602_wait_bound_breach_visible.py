@@ -292,15 +292,83 @@ def test_the_mcp_module_has_exactly_one_breach_counting_site():
     `monitoring.record_wait_bound_breach("mcp")` to the `transport_refused`
     short-circuit fails here (and, at the time of writing, reddened no other
     test in the 232-test related population).
+
+    ⛔ COUNTED OVER THE AST, NOT THE RAW SOURCE (#11054 review P2). A substring
+    count also matches the string inside a docstring or a comment, so an
+    explanatory sentence naming the call would red this test for prose alone —
+    a false block on the very comment that documents the invariant. Counting
+    `ast.Call` nodes whose callee is `…record_wait_bound_breach` counts CALLS.
     """
+    import ast
     import pathlib
 
-    source = pathlib.Path(mcp_server.__file__).read_text(encoding="utf-8")
-    sites = source.count("record_wait_bound_breach(")
+    tree = ast.parse(
+        pathlib.Path(mcp_server.__file__).read_text(encoding="utf-8"))
+    sites = sum(
+        1 for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", None) == "record_wait_bound_breach")
     assert sites == 1, (
         f"tortoise/mcp_server.py has {sites} breach-counting call sites; the "
         "seam must have exactly one, on the main breach path. A second one on "
         "a `dispatched=False` return double-counts a refused request")
+
+
+@pytest.mark.asyncio
+async def test_a_breach_is_counted_once_whichever_detector_fires_first(
+        baseline, monkeypatch):
+    """ONE refused request is ONE count — in BOTH detector orders.
+
+    `_WAIT_BOUND_REFUSED_STATE` is one-directional: it suppresses the seam when
+    the MIDDLEWARE refused first. It says nothing about the reverse order, and
+    that order is reachable — on a transport that does not start its response
+    before dispatching (fastmcp's `json_response` mode) the seam's deadline has
+    not collapsed, so the SEAM can refuse and count first, and the middleware's
+    own bound then expires later in the SAME request.
+
+    Without the claim bit that is two counts for one refusal, in a counter that
+    drives a capacity decision. This drives the REAL seam counting helper and
+    the REAL middleware over one shared `scope["state"]` dict, then asserts the
+    delta is exactly 1 — the assertion the source-count test structurally
+    cannot make.
+
+    Mutation-verified: delete the `_claim_wait_bound_count()` guard and this is
+    the only test in the file that reds.
+    """
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.05)
+
+    # In production the seam resolves this dict from FastMCP's request
+    # ContextVar — set only inside a real MCP request — and Starlette's `Mount`
+    # forwards the SAME mapping the middleware wrote. Bind the helper to the
+    # scope's own dict so the seam and the middleware share state here exactly
+    # as they do behind a live transport; nothing else about the seam is stubbed.
+    shared_state: dict = {}
+    monkeypatch.setattr(mcp_server, "_wait_bound_state", lambda: shared_state)
+
+    async def seam_shaped_app(scope, receive, send):
+        # The seam refused first: it claims the count and records it, exactly as
+        # `_emit_mcp_wait_bound_breach_off_loop` does on the breach path.
+        mcp_server._emit_mcp_wait_bound_breach_off_loop("org-1", 1, "probe")
+        # …then it outlives the transport bound, so the MIDDLEWARE's own
+        # deadline expires for the same request.
+        await asyncio.sleep(5.0)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    mw = ha.WaitBoundMiddleware(seam_shaped_app)
+    scope = _scope("/mcp/", method="POST")
+    # Starlette supplies this dict on a real request; both detectors share it.
+    scope["state"] = shared_state
+
+    rec = await _drive(mw, scope)
+    assert rec.status == 504, "the middleware must still refuse the stalled /mcp request"
+
+    now = _counts()
+    assert now["total"] - baseline["total"] == 1, (
+        "one refused /mcp request must move the counter by exactly one even "
+        "when BOTH detectors observe it")
+    assert _by(now, "mcp") - _by(baseline, "mcp") == 1
+    assert _by(now, "rest") - _by(baseline, "rest") == 0
 
 
 # ── 9: the read is part of a "never 5xx" contract ───────────────────────

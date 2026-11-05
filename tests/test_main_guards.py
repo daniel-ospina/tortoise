@@ -8,6 +8,8 @@ import tempfile
 import subprocess
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -111,6 +113,24 @@ def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
         "raising the bound moves it (#3349)")
 
 
+#: The pytest per-item budget these guards must FIT INSIDE, stated once.
+#: ``pyproject.toml``'s ``timeout = 300`` is the per-item cap (the python-ci gate
+#: passes ``--timeout=300`` for the same reason). `_run_guard_subprocess` spends
+#: it PER ATTEMPT and retries once, so the item needs two full budgets plus
+#: interpreter/teardown overhead — otherwise pytest-timeout kills the item in
+#: the middle of an attempt, which is strictly worse than the failure the retry
+#: exists for: the report names neither attempt and the spawned redislite child
+#: is left orphaned.
+#:
+#: ⛔ The per-attempt figure is NOT 90 + 180 = 270 under pytest. The test lane
+#: raises the cold-load bound to 270 s (`tests/conftest.py:280`,
+#: `_EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 270.0`, #6960), so one attempt
+#: is 270 + 180 = **450 s** and the pair is 900 s. The pre-derivation fixed 120 s
+#: fitted twice inside 300 s; the derived budget does not fit even ONCE — which
+#: is why these two items carry an explicit marker above the global default.
+_GUARD_ITEM_TIMEOUT_S = 1200
+
+
 def _run_guard_subprocess(argv, cwd, timeout=None):
     """Run a __main__-guard subprocess; retry once on failure.
 
@@ -165,6 +185,28 @@ def _run_guard_subprocess(argv, cwd, timeout=None):
         f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
 
 
+def test_the_guard_retry_fits_inside_its_pytest_item_budget():
+    """#11054 review P2: the retry must be REACHABLE under pytest's own cap.
+
+    The budget is spent per ATTEMPT and the helper retries once, so an item that
+    only carries pytest's 300 s default can never take a second attempt — and
+    under the test lane's raised cold-load bound (270 s, `tests/conftest.py:280`)
+    it cannot take even ONE. A genuinely slow first try (the #3349 scenario)
+    then consumes the whole item, and pytest-timeout kills the item mid-attempt —
+    losing both attempts' detail and orphaning the spawned redislite child.
+    Pre-derivation 120 × 2 = 240 fitted inside 300; the derived 270 + 180 does
+    not, which is why the two guards carry an explicit ``@pytest.mark.timeout``.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    per_attempt = float(EmbeddingModel._LOAD_TIMEOUT_S) + _INGEST_WORK_ALLOWANCE_S
+    assert _GUARD_ITEM_TIMEOUT_S > 2 * per_attempt, (
+        f"a {_GUARD_ITEM_TIMEOUT_S}s item budget cannot carry two {per_attempt}s "
+        "attempts — the retry would be unreachable and pytest-timeout would kill "
+        "the item mid-attempt")
+
+
+@pytest.mark.timeout(_GUARD_ITEM_TIMEOUT_S)
 def test_m0_main_guard():
     """Hit the __main__ guard by running m0.py as a script."""
     d = tempfile.mkdtemp(prefix="tortoise_m0g_")
@@ -220,6 +262,7 @@ def test_ingest_main():
         shutil.rmtree(d, ignore_errors=True)
 
 
+@pytest.mark.timeout(_GUARD_ITEM_TIMEOUT_S)
 def test_ingest_main_guard():
     """Hit the __main__ guard by running ingest.py as a script."""
     d = tempfile.mkdtemp(prefix="tortoise_ig_")

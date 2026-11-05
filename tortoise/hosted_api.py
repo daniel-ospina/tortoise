@@ -4415,6 +4415,23 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 #     credit a DISCARDED response to the org's egress.
 _WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
 
+#: #10602 (exactly-once COUNT): a SEPARATE bit on the same shared
+#: ``scope["state"]`` dict, kept off ``_WAIT_BOUND_REFUSED_STATE`` on purpose.
+#: That flag is ONE-DIRECTIONAL — it lets ``mcp_server``'s dispatch seam suppress
+#: ITSELF when this middleware already refused, and says nothing about the
+#: reverse order. On a transport that does not start its response before
+#: dispatching (fastmcp's ``json_response`` mode — the case ``mcp_server``
+#: documents at its ``transport_refused`` read), the seam can see an unarisen
+#: deadline, count, and refuse FIRST; this middleware's own bound then expires
+#: later in the same request and counts a SECOND time for one refusal, because
+#: nothing above suppresses it. The count drives a capacity decision, so it must
+#: not depend on a transport option being set the helpful way.
+#:
+#: Whichever detector fires first WINS: it claims the bit, and the other's count
+#: becomes a no-op. Same literal as ``mcp_server._WAIT_BOUND_COUNTED_KEY`` — one
+#: string, two modules, kept in step by name (as the refused key is).
+_WAIT_BOUND_COUNTED_STATE = "_wait_bound_counted"
+
 #: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
 #: request under one is admitted on the ROUTE axis (see ``monitoring``'s
 #: two-axis note) rather than the request-derived one. That matters because a
@@ -5355,13 +5372,25 @@ class WaitBoundMiddleware:
         # `_send_wait_bound_refusal` and hand the client an opaque 500 with no
         # `Retry-After` and no `-32009` body: the illegible refusal #3834/#10602
         # exist to remove, produced by the observation meant to expose it.
-        try:
-            _monitoring.record_wait_bound_breach(
-                _monitoring.WAIT_BOUND_SURFACE_MCP
-                if _is_jsonrpc_surface(route_path)
-                else _monitoring.WAIT_BOUND_SURFACE_REST)
-        except Exception:
-            _logger.debug("wait-bound count failed", exc_info=True)
+        # ⛔ AT MOST ONCE PER REQUEST, whichever detector fired first. The
+        # dispatch seam (`mcp_server`) reaches the same refusal and counts on
+        # ITS thread; ``_WAIT_BOUND_REFUSED_STATE`` only suppresses the seam
+        # when THIS middleware went first, so without this bit the reverse order
+        # counts twice (see `_WAIT_BOUND_COUNTED_STATE`). Claim-and-check is
+        # one operation on the single-threaded loop, so two meters cannot both
+        # win; a request with no shared state dict (off-HTTP) counts, as before.
+        counted_now = True
+        if isinstance(state, dict):
+            counted_now = not state.get(_WAIT_BOUND_COUNTED_STATE)
+            state[_WAIT_BOUND_COUNTED_STATE] = True
+        if counted_now:
+            try:
+                _monitoring.record_wait_bound_breach(
+                    _monitoring.WAIT_BOUND_SURFACE_MCP
+                    if _is_jsonrpc_surface(route_path)
+                    else _monitoring.WAIT_BOUND_SURFACE_REST)
+            except Exception:
+                _logger.debug("wait-bound count failed", exc_info=True)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))
