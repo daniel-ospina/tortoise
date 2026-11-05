@@ -1661,13 +1661,14 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # restated here, so a move of that home reds in this pin instead of leaving two
 # paragraphs that agree with each other and with nothing else.
 #
-#   • PER-LINE (§9.4's DECIDING sentence, §12.1b's footnote): the anchor is
-#     resolved document-wide, and §9.4's is then ASSERTED TO LIE INSIDE §9.4 —
-#     without that binding, moving the sentence into §9.5 with a bare negation
-#     left behind satisfies the pointer and negation asserts while §9.4 no longer
-#     says what the vector reads (measured, and it stayed GREEN before the
-#     binding existed). Both anchors' UNIQUENESS is asserted too: a duplicate
-#     placed above the real sentence rebinds every assertion over it.
+#   • PER-LINE (§9.4's DECIDING sentence, §12.1b's footnote): each anchor is
+#     resolved document-wide and then ASSERTED TO LIE INSIDE ITS OWN SECTION —
+#     without that binding, moving §9.4's sentence into §9.5 with a bare negation
+#     left behind, or §12.1b's footnote into §12.2, satisfies the assertions over
+#     it while the named section no longer carries the instruction (both measured
+#     GREEN before the bindings existed). Both anchors' UNIQUENESS is asserted
+#     too: a duplicate placed above the real sentence rebinds every assertion
+#     over it.
 #   • PER-SECTION (§9.4 by heading slice): the `:Source.summary` COUNT. This is
 #     the one that catches an ADDITIVE wrong instruction on a different line of
 #     §9.4, which a per-line check cannot see at all.
@@ -1690,6 +1691,8 @@ _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
 _SOURCE_VECTOR_SECTION_94_ANCHOR = "it is one vector attached to the `:Source` node"
 _S94_HEADING = "### 9.4 "
 _S95_HEADING = "### 9.5 "
+_S121B_HEADING = "### 12.1b "
+_S121C_HEADING = "### 12.1c "
 
 
 def _storage_doc_text() -> str:
@@ -1954,6 +1957,19 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"exactness is deliberate and fails CLOSED: a future legitimate second "
         f"`:Source.summary` mention reds every docs-only PR, which is the "
         f"price of the trap, paid on purpose")
+    #: §9.4 carries its own `summary is a <section> :Source property` reference, and
+    #: that literal is what the count message above QUOTES. Nothing checked it, so
+    #: editing the document's literal (say §4.6 -> §4.9) left §9.4 and §12.1b
+    #: disagreeing about `summary`'s type with the pin green — and left the message
+    #: above quoting a section §9.4 does not carry. Deriving one value and then
+    #: checking it in only ONE of the two sections is how the other goes stale.
+    assert f"a {summary_section} `:Source` property" in deciding, (
+        f"§9.4's DECIDING sentence no longer files `summary` as {summary_section} "
+        f"metadata — `docs/ONTOLOGY.md` puts `summary`'s row under "
+        f"`{summary_section}`, and §12.1b's footnote is asserted against the same "
+        f"derived value, so a different number here is the two sections "
+        f"disagreeing about `summary`'s type — the exact cross-section conflict "
+        f"this pin exists to catch")
     # ⛔ NO section-wide negation assert here, and its absence is deliberate. It
     # WOULD have been unreachable: `deciding in s94` above plus
     # `"never from `:Source.summary`" in deciding` together imply it, so it could
@@ -1973,7 +1989,19 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
 
     # ── §12.1b: the section that decides WHERE vectors live may not order the
     #    design §9.4 forbids ──
+    # ⛔ THE §12.1b BINDING, the same one §9.4 gets above and for the same reason.
+    # `_anchored_line` resolves the anchor anywhere in 2,000+ lines, so without this
+    # the footnote can be relocated out of §12.1b — the section that decides WHERE
+    # vectors live — and every §12.1b message below would still be satisfied by a
+    # copy in, say, §12.2. Measured before this binding existed: moving the footnote
+    # into §12.2 left the whole pin GREEN.
     footnote = _source_vector_footnote(text)
+    assert footnote in _section(text, _S121B_HEADING, _S121C_HEADING), (
+        f"§12.1b's `:Source` footnote ({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) is NOT "
+        f"inside §12.1b — `_anchored_line` finds the anchor anywhere in the "
+        f"document, so a copy moved into another section satisfies every §12.1b "
+        f"assertion while the section that decides WHERE vectors live no longer "
+        f"carries the instruction; re-derive where §12.1b states it")
     assert _RETIRED_VECTOR_FOOTNOTE not in footnote, (
         f"§12.1b's `:Source` footnote is back to *\"§9.4's summary vector "
         f"{_RETIRED_VECTOR_FOOTNOTE}\"* — once `#10852` lands an episodic "
