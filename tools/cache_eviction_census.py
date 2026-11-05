@@ -293,7 +293,8 @@ def main(argv: list[str] | None = None) -> int:
                               "graph is REFUSED, so a CLEAN census of another graph "
                               "cannot be re-badged by repeating --graph here. "
                               "⚠️ The check is NAME-ONLY: a graph of the same name "
-                              "on a different INSTANCE is NOT detected here."))
+                              "on a different INSTANCE, or measured EARLIER, is "
+                              "NOT detected here."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "
@@ -344,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
         # comparison passes it, and the only staleness guard downstream is
         # `assess()`'s over-count check (`entry.nodes > resident_total`), which fires
         # only when the report's population EXCEEDS the resident node count
-        # (review P2 on #11097).
+        # (review P2 on #11097). Stated in `--parity-graph`'s help as well, where the
+        # operator reads it at the moment of choosing the flag.
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "

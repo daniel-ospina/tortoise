@@ -702,6 +702,11 @@ def test_the_parity_graph_help_states_the_rule_that_is_enforced(capsys):
     assert "emits no graph identity" not in block
     assert "ASSERTION" not in block
     assert "REFUSED" in block and "`graph`" in block
+    # Both residuals must survive on this surface too (review P2, cycle 7): the
+    # sibling tool stated the staleness clause and this one did not, so an operator
+    # re-using a CLEAN census taken before a re-capture read a warning about foreign
+    # instances only.
+    assert "EARLIER" in block
 
 
 def test_a_report_naming_NO_instrument_is_refused(tmp_path):

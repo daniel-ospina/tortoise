@@ -570,6 +570,40 @@ def test_report_problem_refuses_a_nameless_census():
     assert purge._report_problem(report) == ""
 
 
+def test_the_signed_plan_records_the_bindings_limit(monkeypatch, tmp_path):
+    """The artefact a human signs must record what the binding CANNOT see.
+
+    Review P2, cycle 7: the source claimed the name-only residual was "stated in
+    `--census-json`'s help and in the plan's `census` block", and the plan carried no
+    such field — so a signed plan for an IRREVERSIBLE delete presented a name-only
+    binding as if its limit needed no mention.
+    """
+    node = {"id": "s1_t0", "content": "[user] body of s1_t0", "speaker": "user",
+            "status": "draft", "createdAt": "2026-10-25T00:00:00+00:00",
+            "pointKind": "event", "embedding": None, "sessions": {"s1"}}
+    row = {"node_key": "s1_t0", "content": "[user] body of s1_t0",
+           "speaker": "user", "status": "draft",
+           "created_at": "2026-10-25T00:00:00+00:00", "point_kind": "event",
+           "is_episodic": True, "embedding": None}
+    monkeypatch.setattr(purge.census_mod, "read_graph_turns",
+                        lambda *a, **k: {"nodes": {"s1_t0": node}})
+    monkeypatch.setattr(purge.census_mod, "read_record_turns",
+                        lambda *a, **k: {"rows_by_key": {"s1_t0": row},
+                                         "non_turn_shaped": 0})
+
+    rc = purge.main(["--uri", "docker://:pw@127.0.0.1:1/team_x",
+                     "--record-dsn", _DSN, "--org-id", "org",
+                     "--graph-id", "graph", "--target-note", "unit test",
+                     "--plan-out", str(tmp_path / "plan.json")])
+
+    assert rc == 0
+    plan = json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))
+    assert plan["census"]["graph"] == "team_x"
+    binding = plan["census"]["graph_binding"]
+    assert "name-only" in binding
+    assert "another instance" in binding and "measured earlier" in binding
+
+
 def test_a_cached_census_of_ANOTHER_graph_cannot_license_this_one(tmp_path, capsys):
     """The plan's evidence must be about the target this run resolved.
 
@@ -2957,6 +2991,10 @@ def test_the_census_json_help_states_the_identity_rule_and_its_residual(capsys):
     assert "REFUSED" in block
     assert "another" in block and "graph" in block
     assert "Name-only" in block and "NOT" in block
+    # ⛔ BOTH residuals, not just one (review P2, cycle 7): deleting the staleness
+    # clause alone left the three assertions above green, so the disclosure could
+    # regress to the sibling's gap with the suite green.
+    assert "measured earlier" in block
 
 
 def test_an_unresolvable_uri_on_the_CACHED_route_is_exit_three_not_a_traceback(

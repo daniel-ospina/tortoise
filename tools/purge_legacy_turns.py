@@ -618,6 +618,13 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
             # dropped it, so two consumers of one dict disagreed about whether a
             # nameless census is evidence, and the lenient side was the signed one.
             "graph": report.get("graph"),
+            # ⛔ The BINDING'S OWN LIMIT, in the artefact a human signs. The rule this
+            # PR added is name-only, so a same-named graph on another instance, or
+            # one measured earlier, passes — a signed plan that presented that
+            # binding without its limit would read as a stronger claim than the code
+            # makes (review P2, cycle 7).
+            "graph_binding": ("name-only — a same-named graph on another "
+                              "instance, or measured earlier, is NOT detected"),
             "compared_fields": report.get("compared_fields") or [],
             "declared_absent": report.get("declared_absent") or [],
             "episodic_graph_nodes": pop.get("episodic_graph_nodes"),
@@ -1881,8 +1888,9 @@ def main(argv: list[str] | None = None) -> int:
     # `graph` against the graph this run resolved — so the two consumers cannot
     # disagree about it.
     # ⚠️ The check is NAME-ONLY: a census of the SAME graph measured on another
-    # instance, or earlier, passes (stated in `--census-json`'s help and in the plan's
-    # `census` block, never claimed closed).
+    # instance, or earlier, passes. That limit is STATED where the operator reads it
+    # (`--census-json`'s help) and RECORDED in the artefact a human signs
+    # (`plan["census"]["graph_binding"]`) — never claimed closed (review P2, cycle 7).
     # The resolution is GUARDED: the canonical resolver refuses a scheme it does not
     # know (`bolt://`, a typo), and an unguarded call here escaped `main()` as a raw
     # traceback at exit 1 — the documented USAGE code — while the LIVE route for the
