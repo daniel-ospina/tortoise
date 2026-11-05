@@ -797,6 +797,58 @@ def test_a_non_string_details_url_does_not_traceback(monkeypatch):
     assert result.verdict in {rfo.PASS, rfo.FAIL_MISSING, rfo.FAIL_UNREADABLE}
 
 
+def test_a_container_typed_injection_mode_is_a_verdict_not_a_traceback(tmp_path):
+    """A list mode is unhashable — the type check must fire BEFORE `modes.add`.
+
+    Uncaught, the TypeError escaped as a traceback and the process exited 1, which
+    reads to a caller as "a required check is red" rather than "unreadable".
+    """
+    bad = """\
+queue_rules:
+  - name: main
+    branch_protection_injection_mode: [merge]
+    queue_conditions:
+      - check-success=docs
+"""
+    result = rfo.condition_2(_write_tree(tmp_path, mergify=bad), "o/r", "deadbeef")
+    assert result.verdict == rfo.FAIL_UNREADABLE
+    assert "must be a string" in result.detail
+
+
+def test_mixed_type_injection_modes_are_unreadable_not_a_sorted_crash(tmp_path):
+    mixed = """\
+queue_rules:
+  - name: a
+    branch_protection_injection_mode: merge
+    queue_conditions:
+      - check-success=docs
+  - name: b
+    branch_protection_injection_mode: 3
+    queue_conditions:
+      - check-success=test-isolation
+"""
+    result = rfo.condition_2(_write_tree(tmp_path, mergify=mixed), "o/r", "deadbeef")
+    assert result.verdict == rfo.FAIL_UNREADABLE
+
+
+def test_required_set_json_is_parsable(capsys):
+    code = rfo.main(["--required-set", "--json", "--root", str(REPO_ROOT)])
+    doc = json.loads(capsys.readouterr().out)
+    assert code == rfo.EXIT_PASS
+    assert doc["injection_mode"] == "merge"
+    assert len(doc["names"]) == 7
+    assert doc["evaluable"] is True
+
+
+def test_required_set_json_on_a_snapshot_only_tree_is_parsable_and_unevaluable(tmp_path, capsys):
+    tree = _write_tree(tmp_path, snapshot=["docs"])
+    code = rfo.main(["--required-set", "--json", "--root", str(tree)])
+    doc = json.loads(capsys.readouterr().out)
+    assert code == rfo.EXIT_UNREADABLE
+    assert doc["evaluable"] is False
+    assert doc["injection_mode"] is None  # never claim a config read that did not happen
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 

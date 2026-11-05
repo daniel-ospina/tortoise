@@ -154,7 +154,9 @@ class RequiredSet:
     # deferred. A gate that hard-codes one mode disagrees with the guard about
     # what a legal config is; `.mergify.yml` itself says "Read the mode before
     # reasoning about the list".
-    mode: str = "merge"
+    # None on the snapshot-only path: a datum must not assert a config read that
+    # never happened, in a module whose own contract says the mode is never assumed.
+    mode: str | None = None
 
     @property
     def overlap(self) -> tuple[str, ...]:
@@ -193,7 +195,18 @@ def derive_from_config(root: Path) -> RequiredSet:
     for rule in rules:
         queue_names.extend(_success_names(rule.get("queue_conditions") or []))
         merge_names.extend(_success_names(rule.get("merge_conditions") or []))
-        modes.add(_effective_mode(rule))
+        rule_mode = _effective_mode(rule)
+        # Type-check BEFORE hashing: a container-typed mode is unhashable, so
+        # `modes.add(...)` would raise TypeError and escape every handler as a
+        # traceback — and the process then exits 1, which reads to a caller as
+        # "a required check is red" instead of "I could not read the config".
+        if not isinstance(rule_mode, str):
+            raise RequiredSetUnreadable(
+                f"{MERGIFY_REL}: queue rule {rule.get('name')!r} "
+                f"branch_protection_injection_mode must be a string, "
+                f"got {type(rule_mode).__name__}"
+            )
+        modes.add(rule_mode)
 
     # The injection mode decides what the entry gate IS, so it is READ, never
     # assumed. Two rules in one file with different modes cannot be reasoned
@@ -806,12 +819,31 @@ def main(argv: list[str] | None = None) -> int:
         except RequiredSetUnreadable as exc:
             print(f"{FAIL_UNREADABLE}: {exc}")
             return EXIT_UNREADABLE
+        if args.json:
+            # `--json` promises machine-readable stdout; a human report here
+            # breaks that for any consumer that adds the flag uniformly.
+            print(json.dumps({
+                "names": list(rs.names),
+                "source": rs.source,
+                "queue_names": list(rs.queue_names),
+                "merge_names": list(rs.merge_names),
+                "overlap": list(rs.overlap),
+                "injection_mode": rs.mode,
+                "snapshot_agrees": rs.snapshot_agrees,
+                "notes": list(rs.notes),
+                "entry_merge_split": rs.entry_merge_split,
+                "evaluable": rs.entry_merge_split,
+            }, indent=2))
+            return EXIT_PASS if rs.entry_merge_split else EXIT_UNREADABLE
         print(f"source: {rs.source}")
         print(f"queue_conditions: {', '.join(rs.queue_names) or '(none)'}")
         print(f"merge_conditions: {', '.join(rs.merge_names) or '(none)'}")
         print(f"OVERLAP: {', '.join(rs.overlap) or '(none — contract satisfied)'}")
         print(f"union ({len(rs.names)}): {', '.join(rs.names)}")
-        print(f"injection_mode: {rs.mode}")
+        print(
+            "injection_mode: " + (rs.mode if rs.mode is not None
+                                 else "(not read — config unreadable)")
+        )
         print(f"snapshot_agrees: {rs.snapshot_agrees}")
         for note in rs.notes:
             print(f"note: {note}")
