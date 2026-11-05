@@ -1725,7 +1725,9 @@ def test_an_always_on_legs_failure_is_scored_not_absolved(monkeypatch, capsys,
     were outside `current_rel` before — and `misses_for` called the failure
     `not_in_current`, i.e. it blamed the existing selector for a test the selector
     DID run and left the derivation unscored. Measured reachability:
-    `test_9555_narrative_carrier` is on `api` + `core` but NOT on `tier1`.
+    `test_9555_narrative_carrier` is on `api` + `core`, and since `#10980` it is
+    on `tier1` as well — before that row it was NOT, which is why on a docs-only
+    diff the always-on leg was the only thing that reached it.
 
     ⛔ The synthetic world here is the REAL manifest's shape — the file IS a
     `core` member WITH a closure of its own — because that is what made the first
