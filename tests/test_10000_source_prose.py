@@ -24,6 +24,7 @@ RED before the fix (measured on `816b37f1876`), GREEN after.
 """
 from __future__ import annotations
 
+import inspect
 import re
 
 import pytest
@@ -97,8 +98,135 @@ def _nodes_carrying(sdk, needle: str) -> list[tuple[list[str], dict, object]]:
     return hits
 
 
-def _capture(sdk, session_id: str) -> None:
-    sdk.capture_session(
+def _the_search_text_set_comment_block() -> str:
+    """The comment block IMMEDIATELY above the ``_searchText`` SET, verbatim.
+
+    The block is the ONLY prose at the write site, so it is the text a future
+    editor reads while deciding whether to touch the ``coalesce``. It is
+    extracted from the live source rather than restated here: a guard that
+    quotes the claim in its own body can go green while the claim returns to
+    ``sdk.py``.
+
+    ⛔ THE ANCHOR IS ASSERTED TO MATCH EXACTLY ONCE. A ``break``-on-first-hit
+    walk over a source with two candidate lines would silently inspect the
+    wrong one, and the whole guard would then be measuring a comment nobody
+    reads. An anchor that stops matching is a FAIL, never an empty block.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    src = inspect.getsource(TortoiseSDK._materialize_session_source)
+    lines = src.splitlines()
+    anchor = "SOURCE_SEARCH_TEXT_FIELD}=coalesce($st,"
+    found = [i for i, line in enumerate(lines) if anchor in line]
+    assert len(found) == 1, (
+        f"the `_searchText` SET ({anchor!r}) must appear EXACTLY ONCE in "
+        f"`_materialize_session_source`; found it at {found}. Re-point this "
+        "guard at the SET rather than deleting it — it is the only thing "
+        "tying this file to the comment that justifies the clause")
+    block: list[str] = []
+    for line in reversed(lines[:found[0]]):
+        if not line.lstrip().startswith("#"):
+            break
+        block.append(line)
+    return "\n".join(reversed(block))
+
+
+def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
+    """The comment above the `_searchText` SET must not assert the retraction.
+
+    THE DEFECT THIS PINS, and why it is not cosmetic. This PR measured that a
+    pre-#10000 node is **NOT** healed by a re-capture (the MINT GATE makes the
+    re-capture a #1727 no-op replay, so these SETs are never reached) and
+    corrected three artifacts that said otherwise — the method docstring, the
+    PR body, and a test that was RENAMED off the claim. A FOURTH artifact was
+    then written by the same PR, ten lines below the docstring's ``⛔``: the
+    inline block quoted the retracted mechanism back at the exact line a future
+    editor changes, and cross-referenced a note that does not exist.
+
+    That is not a typo class. The false premise had already cost this PR two
+    rounds: an earlier cut rewrote this ``coalesce`` as an equivalent
+    ``CASE WHEN $st IS NOT NULL …`` and claimed the rewrite WAS the healing
+    (it is the same function — a provable no-op), and a test was named for
+    healing while exercising a different state. Both were later falsified. A
+    comment that re-arms the premise at the write site is the cheapest possible
+    route back to a third round, and the docstring's ``⛔ Do NOT make the
+    healing true by re-SETting on the replay arm`` is exactly what it
+    undercuts — a reader who believes the population self-heals has no reason
+    to respect that guard, and re-SETting on the replay arm reverses
+    #2104/#1727.
+
+    WHAT IS ASSERTED is therefore the CORRECTION, in both directions: the
+    retracted claim is ABSENT, and the correcting mechanism (mint gate / replay
+    / #1727) is PRESENT. The second half is what stops the cheap green of
+    deleting the block: a write site whose ``coalesce`` has no comment at all
+    is how the claim got re-derived in the first place.
+
+    Citations are made EXECUTABLE rather than trusted (#7948's lesson — a
+    hand-maintained prose reference rots and nothing notices): every ``test_*``
+    name the block cites must exist in this module, and a reference to
+    ``_session_source_metadata``'s "note" must resolve to a note that is
+    actually there.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    block = _the_search_text_set_comment_block()
+    assert block.strip(), (
+        "no comment sits above the `_searchText` SET — the clause is a "
+        "keep-arm whose reasoning has been re-derived from scratch twice "
+        "already; restore the corrected comment rather than deleting it")
+
+    # (1) The retracted claim is ABSENT. These are the shapes a future lane
+    # re-introduces it in; the second is the pre-fix text verbatim, so this
+    # arm was RED against `4529894849`.
+    for retracted in ("makes an old node heal", "the DERIVATION is",
+                      "so it replaces that text"):
+        assert retracted not in block, (
+            f"the comment above the `_searchText` SET asserts the RETRACTED "
+            f"mechanism ({retracted!r}). A re-capture does not heal a "
+            f"pre-fix node — the mint gate makes it a replay, so these SETs "
+            f"are never reached (#10852 review P2). Cite the docstring "
+            f"above and the surviving-pair test instead.\n\n{block}")
+
+    # (2) The CORRECTION is PRESENT — the mint-gate mechanism the docstring
+    # states, in the block's own words. Deleting the block cannot pass this.
+    lowered = block.lower()
+    assert "replay" in lowered and "1727" in lowered, (
+        "the comment above the `_searchText` SET states neither the REPLAY "
+        "(the mechanism that makes a re-capture a no-op) nor #1727 — the "
+        "two things that make the clause correct. Without them the block is "
+        "readable as 're-capture repairs the old population', which is "
+        f"false:\n\n{block}")
+
+    # (3) Executable citations. A dangling reference is how the previous block
+    # sent a reader to `_session_source_metadata`'s "note" — a note that has
+    # never existed on that function.
+    #
+    # The pattern skips a FILE reference (`tests/this_file.py`, which is the
+    # path the block cites) and admits only the `::symbol` / bare-symbol use,
+    # so the guard resolves the thing that must exist rather than the filename
+    # it lives in — measured: matching the bare `\btest_…` shape red the guard
+    # on its own file path instead of on this arm.
+    for cited in set(re.findall(
+            r"(?<![/\w])(test_[a-z0-9_]+)(?!\.py)", block)):
+        assert cited in globals(), (
+            f"the comment above the `_searchText` SET cites `{cited}`, which "
+            "does not exist in this module — a prose reference to a test that "
+            "is not there reads as proof and pins nothing")
+
+    if "_session_source_metadata" in block:
+        announced = (block.split("_session_source_metadata", 1)[1][:60]
+                     .lower())
+        if "note" in announced:
+            assert "heal" in (_session_source_metadata.__doc__ or "").lower(), (
+                "the comment above the `_searchText` SET points at "
+                "`_session_source_metadata`'s note on healing, and that "
+                "function's docstring carries no such note (measured at "
+                "`4529894849`) — the note is in `_materialize_session_source`'s "
+                "own docstring. Point at the artifact that says it")
+
+
+def _capture(sdk, session_id: str) -> dict:
+    return sdk.capture_session(
         conversation=[
             {"role": "user",
              "content": f"{MARKER} the raw transcript text must not live on a "
@@ -161,8 +289,9 @@ def test_the_guard_reports_a_lower_casing_writer(sdk):
     the ``:Source`` carried the marker in ``summary``, ``topics`` and
     ``_searchText`` and the guard reported none of them (`#10852` review, P1).
 
-    The node is seeded rather than captured because the capture path heals it
-    (the recapture test proves that half); this one isolates the SCAN.
+    The node is seeded rather than captured so this test isolates the SCAN.
+    ⛔ Do not read it as evidence that a pre-fix node heals: it does not — see
+    `test_a_re_capture_does_not_heal_a_pre_fix_node`, which pins the replay.
     """
     prose = (f"{MARKER} the raw transcript text must not live on a node"
              .lower())
@@ -285,23 +414,30 @@ def test_the_guard_reds_on_the_pre_fix_derivation(sdk, monkeypatch):
     )
 
 
-def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
-    """A pre-fix node HEALS on re-capture — and the healing is the DERIVATION.
+def test_the_first_capture_replaces_the_prose_a_pre_seeded_stub_left_behind(
+        sdk):
+    """A node with NO `:Session` yet is replaced by its FIRST capture.
 
-    A Source captured before this change carries the utterance in ``summary``
-    and (because #3518 puts the summary in the searchable field) in
-    ``_searchText``. This seeds that exact pre-fix state and asserts the next
-    capture replaces it, so the fix does not merely stop new leaks.
+    This is a real shape and not the pre-fix one: `_link_source` MERGEs a
+    `session:<id>` Source STUB before any capture of that id has run, and the
+    first capture of the session is a genuine (non-replay) capture — so it DOES
+    reach `_materialize_session_source` and the derivation replaces whatever
+    the stub carried.
 
-    ⛔ WHAT THIS TEST DOES NOT PROVE, stated so nobody infers it: the ``_searchText``
-    SET is still ``coalesce($st, s._searchText)``, and THAT is not the healing
-    mechanism — ``coalesce`` already yields the new derivation whenever one
-    exists. An earlier cut of this PR rewrote the clause as an equivalent
-    ``CASE WHEN $st IS NOT NULL …`` and cited this test as its proof; it passes
-    under BOTH forms, so it is evidence for the metadata change and for nothing
-    about the clause (measured: 2 passed with the clause reverted).
+    ⛔ WHAT THIS TEST DOES *NOT* PROVE, stated so nobody infers it (the earlier
+    title/name claimed the opposite, `#10852` review P1). It does **not** show
+    that a PRE-FIX node heals on re-capture: a pre-fix node coexists with the
+    `:Session` node of the capture that wrote it, so re-capturing it is the
+    #1727 no-op REPLAY — `_materialize_session_source` is never called, and the
+    stale pair survives. `test_a_re_capture_does_not_heal_a_pre_fix_node` pins
+    that state. The `_searchText` SET is also still `coalesce($st,
+    s._searchText)`, and THAT is not the mechanism here either — `coalesce`
+    already yields the new derivation whenever one exists. An earlier cut of
+    this PR rewrote the clause as an equivalent `CASE WHEN $st IS NOT NULL …`
+    and cited this test as its proof; it passes under BOTH forms (measured: 2
+    passed with the clause reverted).
     """
-    session_id = "sess-source-prose-heal-10000"
+    session_id = "sess-source-prose-stub-10000"
     url = f"session:{session_id}"
     stale = f"{MARKER} stale prose from a pre-fix write"
     proj = sdk._get_proj()
@@ -310,6 +446,15 @@ def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
         params={"u": url, "sum": stale, "st": stale})
     assert _nodes_carrying(sdk, f"{MARKER} stale"), (
         "the seeded pre-fix state is missing")
+    assert not proj.g.query(
+        "MATCH (n:Session {id:$sid}) RETURN count(n) AS n",
+        params={"sid": session_id},
+    ).result_set[0][0], (
+        "this fixture must stay the STUB shape (no `:Session`). With one "
+        "present the capture is a replay and this test silently becomes a "
+        "second copy of `test_a_re_capture_does_not_heal_a_pre_fix_node`, "
+        "passing green while covering nothing — the exact fixture/claim "
+        "mismatch `#10852` review P1 found in this test's earlier form")
 
     _capture(sdk, session_id)
 
@@ -317,10 +462,78 @@ def test_a_recapture_replaces_the_prose_a_pre_fix_write_left_behind(sdk):
                  in _nodes_carrying(sdk, f"{MARKER} stale")
                  if not _is_turn_store(labels, node_id, session_id)]
     assert not offenders, (
-        "a re-capture left the pre-fix prose on the node — the capture's own "
-        "derivation (a topic lexicon, non-NULL for any transcript with content) "
-        "must replace it:\n"
+        "the FIRST capture left the pre-seeded stub's prose on the node — its "
+        "own derivation (a topic lexicon, non-NULL for any transcript with "
+        "content) must replace it:\n"
         + "\n".join(f"  {labels} {props}" for labels, props in offenders))
+
+
+def test_a_re_capture_does_not_heal_a_pre_fix_node(sdk):
+    """⛔ A pre-fix node is NOT healed by a re-capture — a replay never writes.
+
+    THE CLAIM THIS REPLACES. This file and two docstrings used to say the pre-fix
+    population repairs itself: *"a pre-fix node HEALS on re-capture, and the
+    reason is the DERIVATION"*. That is false, and the mechanism is the MINT
+    GATE: `_materialize_session_source`'s only production caller sits inside
+    `if not session_existed or (retry_failed_capture and not no_provider)`, so a
+    re-capture of an ALREADY CAPTURED session id is the #1727 no-op replay and
+    never reaches the `SET`s. A node holding the pre-fix pair was written by a
+    run of that same method — i.e. one where `session_existed` was False — so it
+    coexists with the `:Session` node of its own capture (`capture_ok` True),
+    and the pair survives every later capture of that id, in the graph AND in
+    the Source FTS index (the OR-union pollution #10000 measures). Measured:
+    `#10852` review P1.
+
+    ⛔ WHAT THIS TEST IS. A PIN ON A RECORDED DECISION, not an endorsement of a
+    leak. #2104/#1727 require a re-capture of an existing session to be a TRUE
+    no-op (it must not re-SET the first capture's `capturedAt`/`contentHash`
+    either), so the repair for a legacy node is a NEW `session_id`, a retry of a
+    prior FAILED capture, or a record-sourced re-projection — never a replay
+    that writes. It therefore REDS in the good direction too: if someone
+    "fixes" the healing by re-SETting on the replay arm, this fails, and the
+    replay invariant above is the argument to read first.
+    """
+    session_id = "sess-source-prose-noheal-10000"
+    url = f"session:{session_id}"
+    stale = f"{MARKER} stale prose from a pre-fix write"
+    proj = sdk._get_proj()
+    # The pre-fix state EXACTLY: the prose-carrying Source and the `:Session`
+    # node of the completed capture that wrote it. Seeding only the Source — as
+    # the stub test above does — is a DIFFERENT state (a first capture, not a
+    # replay), and that difference is the whole finding.
+    proj.g.query(
+        "MERGE (s:Source {url:$u}) SET s.summary=$sum, s._searchText=$st",
+        params={"u": url, "sum": stale, "st": stale})
+    proj.g.query(
+        "MERGE (n:Session {id:$sid}) SET n.capture_ok=true",
+        params={"sid": session_id})
+
+    receipt = _capture(sdk, session_id)
+    assert receipt["extraction_mode"] == "replayed", (
+        "the fixture is not the state under test: a re-capture of a captured "
+        f"session must REPLAY, got {receipt['extraction_mode']!r}")
+
+    survivors = [(labels, props) for labels, props, node_id
+                 in _nodes_carrying(sdk, f"{MARKER} stale")
+                 if not _is_turn_store(labels, node_id, session_id)]
+    assert survivors, (
+        "the replay HEALED the pre-fix prose. It cannot: "
+        "`_materialize_session_source` is only called behind the fresh-capture "
+        "gate, so a replay never re-derives the Source. If this arm now clears "
+        "it, the replay is WRITING — read #2104/#1727 before keeping that.")
+    assert any("summary" in props or "_searchText" in props
+               for _, props in survivors), survivors
+    # The two derived columns are one derivation and must keep together or
+    # replace together (`_source_search_text` ties them). A replay that moved
+    # only one would split the display column from the indexed column — the
+    # divergence `#10000` exists to remove, arriving by a different door.
+    stored = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.summary, s._searchText",
+        params={"u": url},
+    ).result_set[0]
+    assert list(stored) == [stale, stale], (
+        "the replay changed ONE of the two derived columns and not the other — "
+        f"they must move together or not at all: {stored!r}")
 
 
 # ── the derived metadata is still FINDABLE, and the display prefix is not ──

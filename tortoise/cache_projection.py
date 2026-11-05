@@ -109,12 +109,15 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      whole pair, remain CACHE-OWNED (:func:`episodic_source_prose_properties`,
      consumed by `record_reconcile.scan_cache_view`) and are counted under their
      own `graph_only` bucket — visible, and not a divergence against a record that
-     is correct. The repair for a legacy node is a re-capture of a transcript that
-     still derives a lexicon (the capture replaces the whole pair then — its own
-     `coalesce` keeps the stored value only when the derivation is empty) or a
-     record-sourced re-projection for a node the projection CREATES: the write is
+     is correct. ⛔ The repair for a legacy node is NOT a re-capture: re-capturing
+     an already-captured session id is the #1727 no-op replay, so
+     ``_materialize_session_source`` — whose only caller sits behind the fresh
+     capture gate — never runs and the stale pair survives (measured:
+     `#10852` review, P1). The routes that do clear it are a capture under a NEW
+     `session_id`, a retry of a prior FAILED capture, or a record-sourced
+     re-projection for a node the projection CREATES — but the write is
      additive (`MERGE … SET n += $props`, :func:`node_statement`), so a node that
-     ALREADY carries the old pair keeps it across a re-projection.
+     ALREADY carries the old pair keeps it across that re-projection too.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed

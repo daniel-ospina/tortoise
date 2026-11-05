@@ -4135,7 +4135,13 @@ def _session_source_lexicon(counts: Mapping[str, int]) -> list[str]:
     i.e. a (comma-separated) re-wording of the session's own opening instruction,
     and the reason the docstring's order-independence claim was false. Sorting
     the ties by the token makes the lexicon a function of the WORD MULTISET
-    alone: reordering the turns, or adding an identical turn, cannot change it.
+    alone: REORDERING the turns cannot change it, while changing that multiset
+    (adding or editing a turn) does — the multiset is the INPUT, not a
+    guarantee. An earlier wording claimed "adding an identical turn" could not
+    change it; it can, and the counter-example is one line long: on
+    ``alpha beta`` / ``gamma gamma`` the lexicon is ``[gamma, alpha, beta]``, and
+    appending a copy of the first turn makes all three count 2, i.e.
+    ``[alpha, beta, gamma]`` (#10852 review, P3).
     """
     return [w for w, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]]
 
@@ -16767,15 +16773,34 @@ class TortoiseSDK:
         that SAME guard, so the display column and the indexed column keep
         together or replace together and can never disagree.
 
-        ⛔ A pre-fix node HEALS on re-capture, and the reason is the DERIVATION,
-        not this clause: ``coalesce($st, <stored>)`` already yields the new
-        derivation whenever one exists, so once ``_session_source_metadata``
-        stopped returning the utterance, the next capture overwrote the stale
-        prose. It was measured, not reasoned: an earlier cut of #10000 changed
-        this clause to an equivalent ``CASE WHEN $st IS NOT NULL …`` and claimed
-        the healing, which is a no-op — the two forms are the same function.
-        Do not restore that claim, and do not "fix" the indexer's
-        ``coalesce($st, s._searchText, s.title)`` on its strength.
+        ⛔ A pre-fix node is NOT healed by a re-capture, and the reason is the
+        MINT GATE, not this clause: this method's only production caller sits
+        inside ``if not session_existed or (retry_failed_capture and not
+        no_provider)`` in ``capture_session``, so re-capturing an ALREADY
+        CAPTURED session id is the #1727 no-op replay and never reaches these
+        SETs. A node that holds the pre-fix pair was written by a run of this
+        same method — i.e. one where ``session_existed`` was False — so it
+        coexists with the ``:Session`` node of its own capture (``capture_ok``
+        True) and the stale ``summary``/``_searchText`` pair survives every
+        later capture of that id, in the graph and in the Source FTS index.
+        MEASURED, not reasoned (#10852 review, P1): capture, overwrite the node
+        with the pre-fix prose, re-capture the identical conversation and again
+        with an extra turn — the pair is unchanged, only the counts move.
+
+        The routes that DO clear it: a capture under a NEW ``session_id``; a
+        retry of a prior FAILED capture (``retry_failed_capture``, #2335 — the
+        gate admits that arm); or a record-sourced re-projection for a node the
+        projection CREATES (``cache_projection``, additive — so it cannot clear
+        a node that ALREADY carries the pair). Everything else is a replay.
+
+        ⛔ Do NOT make the healing true by re-SETting on the replay arm. A
+        replay that writes is not a replay: #2104/#1727 require a re-capture of
+        an existing session to be a TRUE no-op — it must not re-SET the first
+        capture's ``capturedAt``/``contentHash`` either — and an earlier cut of
+        #10000 changed the ``coalesce`` below to an equivalent ``CASE WHEN $st
+        IS NOT NULL …`` while claiming it healed, which the two identical
+        functions cannot do. Do not restore that claim, and do not "fix" the
+        indexer's ``coalesce($st, s._searchText, s.title)`` on its strength.
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -16868,16 +16893,24 @@ class TortoiseSDK:
             # is a view of.
             "s.topics=CASE WHEN size($topics) > 0 THEN $topics "
             "ELSE coalesce(s.topics, []) END",
-            # `coalesce` keeps the stored text ONLY when this capture derives
-            # none. It is not what makes an old node heal — the DERIVATION is:
-            # a pre-#10000 Source holds utterance prose, and the next capture's
-            # topic descriptor is non-NULL, so it replaces that text. An earlier
-            # cut rewrote this clause as an equivalent `CASE WHEN $st IS NOT
-            # NULL …` and claimed the healing; the two forms are the same
-            # function, so that change was a no-op and its claim was false
-            # (measured — see `_session_source_metadata`'s note). The two
-            # capture writes cannot collide with the indexer either way: this
-            # writer only touches `session:<id>` Sources.
+            # #10000: `coalesce` keeps the stored text ONLY when this capture
+            # derives none — the KEEP-ARM, which is all a keep-arm can be. It
+            # is NOT the healing mechanism, and neither is the DERIVATION: a
+            # PRE-FIX node (one that ALREADY carries the prose pair) is not
+            # healed by a re-capture at all, because the MINT GATE makes a
+            # re-capture of an already-captured session the #1727 no-op REPLAY,
+            # and a replay never reaches these SETs. The mechanism, and the
+            # routes that DO clear such a node, are in this method's docstring
+            # above; the survival is pinned by
+            # `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`.
+            # Load-bearing alongside it, and correct on its own: an earlier cut
+            # rewrote this clause as an equivalent `CASE WHEN $st IS NOT NULL
+            # …` and claimed THAT rewrite was the healing — the two forms are
+            # the same function, so the change was a no-op and its claim was
+            # false (measured — `#10852` review, P2). Do not restore either
+            # claim; the ⛔ in the docstring is the guard. The two capture
+            # writes cannot collide with the indexer either way: this writer
+            # only touches `session:<id>` Sources.
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
             # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
