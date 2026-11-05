@@ -114,9 +114,16 @@ workflow YAML per step to enforce that rather than trusting the string to appear
 ```bash
 uv run python tools/issue_process_lint.py --pr 11027            # one PR
 uv run python tools/issue_process_lint.py --issue 4282          # one issue
-uv run python tools/issue_process_lint.py --sweep --label P0-blocker
-uv run python tools/issue_process_lint.py --body-file /tmp/body.md --issue-body-file /tmp/i.md --wip
+uv run python tools/issue_process_lint.py --sweep               # every open PR
+uv run python tools/issue_process_lint.py --sweep-issues --label P0-blocker   # open issues, filtered
+uv run python tools/issue_process_lint.py --body-file /tmp/body.md            # a PR body, offline
+uv run python tools/issue_process_lint.py --issue-body-file /tmp/i.md --wip   # an issue, offline
 ```
+
+⚠️ `--label` filters the **issue** population (`--sweep-issues`); `--sweep` reads PRs and has no
+label filter, so the combination is refused rather than silently measuring an unfiltered
+population. `--body-file` and `--issue-body-file` are mutually exclusive for the same reason: a PR
+body and an issue body are different populations, and one run answers one of them.
 
 ⛔ **Never make this lint a required check.** It is a warning surface (the `closes-coherence`
 precedent: `continue-on-error: true`, never in `python-ci-gate.needs`, never in `.mergify.yml`). Two
