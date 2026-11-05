@@ -289,6 +289,22 @@ def consent_client_line(identity: ClientIdentity) -> str:
     review rounds deleting.
     """
     handle = identity.client_id or "unknown client"
+    if identity.backed_by == BACKED_BY_CIMD_ORIGIN:
+        # ⛔ #10482 — present the ORIGIN, never a NAME. A CIMD client owns its
+        # WHOLE host, including the leftmost labels, and readers anchor on those:
+        # `claude.ai.mcp-relay.example` is controlled by whoever owns
+        # `mcp-relay.example`, yet printed bare ("<host> (…) wants to access …")
+        # it reads as `claude.ai` vouching for the app — the phishing payload
+        # #8218 exists to withhold, through the one arm allowed to print a name.
+        # The sentence is the whole fix: "An app at <host>" states what was
+        # actually verified (an origin the client controls) and stops inviting
+        # the reader to take the leading labels as a brand. A denylist of brand
+        # tokens would be the "special-case one forbidden word" non-fix this
+        # file's attack-name population runs against, and trimming the host to
+        # an eTLD+1 needs a public-suffix list whose wrong answer is worse than
+        # a long host (#10482's options 2/3, both declined).
+        return (f"An app at {identity.display_name} ({handle}) wants to access "
+                "your Tortoise MCP surface.")
     if identity.backed:
         return (f"{identity.display_name} ({handle}) wants to access your "
                 "Tortoise MCP surface.")
