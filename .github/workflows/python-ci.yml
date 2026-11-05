@@ -765,10 +765,12 @@ jobs:
       #       that needs MORE than 4 waves is strictly new wall —
       #       `ceil(9/C) <= 4  =>  C >= 3`.
       #   (b) NO SINGLE PR MAY HOLD THE POOL. The three matrices all start after
-      #       `changes` and overlap, so a PR's maximum hold is
+      #       `changes` and overlap, so a PR's maximum MATRIX hold is
       #       `C_fast + C_slow + C_carve`. Reserving 3 of the 12 measured
       #       runners so three other PRs can always make progress:
-      #       `sum <= pool - 3 = 9`, i.e. with equal caps `C <= 3`.
+      #       `sum <= pool - 3 = 9`, i.e. with equal caps `C <= 3`. This bounds
+      #       MATRIX slots only; the concurrent non-matrix jobs are bounded by
+      #       the pool, not by this invariant (see WHAT THIS DOES NOT DO).
       # The interval simulation over those same 9 runs — each job keeps its own
       # observed start as an earliest bound, so the delta is an UPPER bound that
       # does NOT credit back the queue this PR no longer waits behind — gives
@@ -779,10 +781,13 @@ jobs:
       # ⛔ WHAT THIS DOES NOT DO, so it is never judged on the wrong clock:
       # `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`), so a cap
       # protects OTHER PRs from this one. It does not make a capped PR finish
-      # sooner; the target is "no single PR holds more than 9 MATRIX slots
-      # (<=12 total observed)" — 8 of this workflow's 12 non-matrix jobs are
-      # eligible concurrently with the matrices (3 carry no `needs:` at all,
-      # 5 need only `changes`), so the cap bounds the FAN-OUT, not the total.
+      # sooner; the target is "no single PR holds more than 9 MATRIX slots" —
+      # 8 of this workflow's 12 non-matrix jobs are eligible concurrently with
+      # the matrices (3 carry no `needs:`; the fourth `needs:`-less job is
+      # `changes`, which the matrices wait on and so cannot overlap them; 5 need
+      # only `changes`). A PR therefore requests up to 17 jobs, and only the
+      # POOL (12 concurrent) bounds the total: the cap bounds the FAN-OUT, not
+      # the total.
       # ⛔ AND WHAT IT CANNOT DO: `max-parallel` limits START order only. Every
       # bound in this job is measured from runner pickup (the in-step watchdog
       # is started INSIDE the job), so a start delayed by the cap can never

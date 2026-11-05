@@ -6404,8 +6404,10 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     ⛔ SCOPE: this bounds the matrix fan-out — the part that was unbounded and
     that made one PR own the pool. It is NOT a total-concurrency budget: this
     workflow's 12 non-matrix jobs include 8 that are eligible concurrently with
-    the matrices (3 with no `needs:` at all, 5 needing only `changes`), so a
-    PR's real maximum is <=12 concurrent jobs. The invariants below hold the
+    the matrices (3 with no `needs:`; the fourth `needs:`-less job is `changes`,
+    which the matrices wait on and so cannot overlap them; 5 need only
+    `changes`), so a PR requests up to 17 jobs and only the POOL bounds the
+    total at 12 concurrent. The invariants below hold the
     three CAPS, and must never be read as "a PR holds 9 jobs".
 
     This pins the INVARIANTS, not the chosen number, so a re-tune from a fresh
@@ -6419,8 +6421,10 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
        the pool already delivers these shards in 2–4 waves, so a cap needing
        more than 4 is strictly added wall;
     3. no monopolisation — the three matrices overlap (all start after
-       `changes`), so the per-PR maximum hold is their SUM and it must leave
-       the rest of the measured pool to other PRs: `sum <= 12 - 3`.
+       `changes`), so the per-PR maximum MATRIX hold is their SUM and it must
+       leave the rest of the measured pool to other PRs: `sum <= 12 - 3`. It
+       bounds MATRIX slots only: the eligible non-matrix jobs are bounded by
+       the pool, not by this invariant.
 
     ⛔ It deliberately says nothing about job ORDER or the matrix contents: the
     shard set is still the selector's, so `max-parallel` cannot skip a leg, and
@@ -6473,9 +6477,10 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
 
     hold = sum(caps.values())
     assert hold <= measured_pool - reserved_for_others, (
-        f"one PR can hold {hold} matrix jobs at once ({caps}) and still take "
-        f"the pool: the bound is {measured_pool} - {reserved_for_others} = "
-        f"{measured_pool - reserved_for_others} so other PRs keep a runner "
+        f"one PR would hold {hold} MATRIX jobs at once ({caps}), so fewer "
+        f"than {reserved_for_others} of the {measured_pool} measured runners "
+        f"are left for other PRs: the bound is {measured_pool} - "
+        f"{reserved_for_others} = {measured_pool - reserved_for_others} "
         "(#6744)")
 
 

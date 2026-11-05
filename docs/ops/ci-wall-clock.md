@@ -393,8 +393,10 @@ one run owns the pool, so every other PR waits for that run's shard set to drain
    stagger (4.0–23.9 m against a p50 10.5 m wall) says the pool already runs these shards in 2–4
    waves, so a cap needing more than 4 is strictly added wall. `C >= 3`.
 2. **No single PR may hold the pool.** The three matrices start after `changes` and overlap, so a
-   PR's maximum hold is `C_fast + C_slow + C_carve`; reserving 3 of the 12 runners so three other
-   PRs can always make progress gives `sum <= 12 - 3 = 9`, i.e. `C <= 3` with equal caps.
+   PR's maximum **matrix** hold is `C_fast + C_slow + C_carve`; reserving 3 of the 12 runners so
+   three other PRs can always make progress gives `sum <= 12 - 3 = 9`, i.e. `C <= 3` with equal
+   caps. This bounds MATRIX slots only — the non-matrix jobs below are bounded by the pool, not by
+   this invariant (see "What the cap does NOT bound: the total").
 
 Only `C = 3` satisfies both. An interval simulation over the same 9 runs — each job keeps its own
 observed start as an earliest bound, so the delta is an **upper** bound: it does not credit back
@@ -416,14 +418,17 @@ runners and fail invariant 2.
 ⛔ **The clock this is judged on.** `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`,
 §3), so a cap protects **other** PRs from this one. It does **not** make the capped PR finish
 sooner, and a later reading that judges it that way is reading the wrong clock: the target is
-"no single PR holds more than 9 **matrix** slots (≤12 total observed)", not "each PR is faster".
+"no single PR holds more than 9 **matrix** slots", not "each PR is faster".
 
 ⛔ **What the cap does NOT bound: the total.** `max-parallel` limits matrix legs only. This
 workflow also has 12 non-matrix jobs, and **8 of them are eligible to run concurrently with the
 matrices**: `manifest-integrity`, `surface-guard` and `workflow-lint` carry no `needs:` at all,
 and `test-concurrency-falkor`, `packs-compile`, `test-track-b`, `test-d14-hosted-api` and
-`test-record-postgres` need only `changes` — the same trigger the three matrices wait on. So a
-PR's observed maximum is **≤12 concurrent jobs**, not 9. The cap is a fairness bound on the
+`test-record-postgres` need only `changes` — the same trigger the three matrices wait on.
+(`changes` is itself a fourth `needs:`-less job and is excluded from the 8 deliberately: the
+matrices wait on it, so it cannot overlap them.) A PR therefore requests up to 17 jobs (9 matrix +
+8 non-matrix) and its total hold is bounded by **the pool — 12 concurrent**, not by this cap and
+not by 9. The cap is a fairness bound on the
 FAN-OUT (which is what was unbounded, and what made one PR own the pool); it is not a total
 concurrency budget, and reading 9 as one would understate the hold by up to a third.
 
