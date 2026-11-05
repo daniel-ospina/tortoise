@@ -199,6 +199,41 @@ def _install_fake_falkordb(monkeypatch, instances, exc=None):
     return _FakeFalkorDB
 
 
+def _snapshot_client(instances):
+    """The ONE constructed client that was actually asked to ``BGSAVE``.
+
+    ``instances`` is a RECORDER, not a scope: the fake replaces
+    ``falkordb.FalkorDB`` for every constructor in the process, so machinery
+    that outlives the test that started it (a live indexer/capture worker from
+    an earlier file in the same shard) can build a client INSIDE this test's
+    window and land in the list first. Selecting by INDEX therefore asserted
+    about the wrong client and reddened the lane order-dependently — measured
+    in CI shard ``test (h)`` (run 42046356881, job 127334541115, head
+    ``f24717b33``): ``manifest["bgsave"] == "ok"`` while
+    ``instances[0].connection.commands == []`` — a client was constructed
+    first that this test never asked to snapshot (its captured setup log shows
+    the previous file's ``test_auth_…`` projection still live).
+
+    Selecting by the RECORDED COMMAND is what these tests mean: the snapshot
+    was issued, exactly once, against the client under test. A foreign client
+    issuing commands is NOT tolerated — that would be a real signal, so it
+    still fails here — but a foreign client that sends nothing is simply not
+    this test's business.
+    """
+    recorded = [(i, list(i.connection.commands)) for i in instances]
+    snapshotted = [i for i, cmds in recorded if cmds == [("BGSAVE",)]]
+    assert len(snapshotted) == 1, (
+        "exactly one constructed client must be asked to BGSAVE; recorded "
+        f"{[(i.kwargs.get('host'), i.kwargs.get('port'), cmds) for i, cmds in recorded]}")
+    for inst, cmds in recorded:
+        if inst is snapshotted[0]:
+            continue
+        assert cmds == [], (
+            "a client constructed during this test received commands but was "
+            f"not the snapshot client: {cmds}")
+    return snapshotted[0]
+
+
 def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     """#2974: the endpoint is TORTOISE_DB_URI, never the embedded defaults."""
     instances: list = []
@@ -213,7 +248,7 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     status = _bgsave()
 
     assert status == "ok"
-    assert len(instances) == 1, "exactly one client must be constructed"
+    client = _snapshot_client(instances)
     # #3065: the socket pair comes from the product's shared resolver
     # (``projection._bounded_server_socket_kwargs``), not from literals — the
     # 5s/10s pair that used to be pinned here was the pre-#2850 hardcoded
@@ -232,7 +267,7 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     # == Retry(NoBackoff(), 0)` is True), but ``Retry.__eq__`` also spans the
     # ``supported_errors`` set, so folding it into the dict would couple this
     # pin to a vendor default that has nothing to do with #2969.
-    kwargs = dict(instances[0].kwargs)
+    kwargs = dict(client.kwargs)
     retry = kwargs.pop("retry")
     assert kwargs == {
         "host": "falkordb-cloud.example.com",
@@ -250,7 +285,7 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     assert retry._backoff.__class__.__name__ == "NoBackoff", (
         "the pin is the `Retry(NoBackoff(), 0)` idiom, not zero retries "
         "with some other backoff (#2969)")
-    assert instances[0].connection.commands == [("BGSAVE",)]
+    assert client.connection.commands == [("BGSAVE",)]
 
 
 def test_bgsave_explicit_uri_argument_wins_over_env(monkeypatch):
@@ -263,9 +298,10 @@ def test_bgsave_explicit_uri_argument_wins_over_env(monkeypatch):
     status = _bgsave("docker://:pw@cli-host:6379/tortoise")
 
     assert status == "ok"
-    assert instances[0].kwargs["host"] == "cli-host"
-    assert instances[0].kwargs["port"] == 6379
-    assert instances[0].kwargs["password"] == "pw"
+    client = _snapshot_client(instances)
+    assert client.kwargs["host"] == "cli-host"
+    assert client.kwargs["port"] == 6379
+    assert client.kwargs["password"] == "pw"
 
 
 def test_bgsave_connection_failure_is_loud(monkeypatch, caplog):
@@ -352,7 +388,10 @@ def test_backup_manifest_records_bgsave_ok(monkeypatch, tmp_path):
 
     manifest = json.loads((target / "manifest.json").read_text())
     assert manifest["bgsave"] == "ok"
-    assert instances[0].connection.commands == [("BGSAVE",)]
+    client = _snapshot_client(instances)
+    assert client.connection.commands == [("BGSAVE",)], (
+        "the manifest's 'ok' must be EVIDENCE: exactly one BGSAVE reached a "
+        "constructed client — never merely assumed")
 
 
 def test_resolve_db_endpoint_is_the_shared_canonical_resolver():
