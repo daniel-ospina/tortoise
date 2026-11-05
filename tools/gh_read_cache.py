@@ -278,6 +278,15 @@ def _project_required_set(docs: Sequence[Any]) -> Any:
         )
     contexts = rsc.get("contexts")
     checks = rsc.get("checks")
+    # ⛔ AN EXPLICIT `null` IS NOT AN ANSWER. Refusing ABSENT and WRONG-TYPED but letting
+    # `{"checks": null}` through read as "this branch requires no checks" — the same false PASS the
+    # absent check closes, one spelling along. GitHub sends `[]`, never `null`, so a null here means
+    # the body is unrecognised.
+    if ("contexts" in rsc and contexts is None) or ("checks" in rsc and checks is None):
+        raise Unreadable(
+            "repo.required_set: a null `contexts`/`checks` reads as an empty required set — "
+            "refusing to infer 'no required checks' from an explicit null"
+        )
     # ⛔ TYPE AND NULL-NESS, not presence. `{"contexts": "docs"}` used to project to
     # `["d","o","c","s"]` and `{"checks": {"docs": {"app_id": 1}}}` to `[]` — an empty required set
     # inferred from a shape the code did not understand, on the MERGE-GATING key.
@@ -334,10 +343,17 @@ def _project_runners_inventory(docs: Sequence[Any]) -> Any:
             # `[{}]` AND `[{"name": null}]` both used to project to an inventory entry naming no
             # runner, cached for 30 minutes.
             raise Unreadable("runners.inventory: entry has a non-null-string `name` — not a runner")
-        if r.get("labels") is not None and not isinstance(r.get("labels"), list):
+        if not isinstance(r.get("labels", []), list):
             raise Unreadable("runners.inventory: entry has a non-list `labels`")
-        labels = [lbl.get("name") for lbl in (r.get("labels") or []) if isinstance(lbl, dict)]
-        out.append({"name": r.get("name"), "labels": labels})
+        # ⛔ NO SILENT FILTER. `if isinstance(lbl, dict)` dropped every unrecognised label entry, so
+        # a lane asking "is there a runner with label X" got a cached "no" from a body the
+        # projection did not understand. `_project_labels` type-checks; so does this.
+        labels = []
+        for lbl in r.get("labels") or []:
+            if not isinstance(lbl, dict) or not isinstance(lbl.get("name"), str):
+                raise Unreadable(f"runners.inventory: label entry {lbl!r} is not a named label")
+            labels.append(lbl["name"])
+        out.append({"name": r["name"], "labels": labels})
     return out
 
 
@@ -731,8 +747,13 @@ def _filename(key: str, scope: str, projection: str | None = None, ttl_s: int | 
     # every access — measured 8 alternating accesses -> 8 live gh reads, never converging, because
     # the shared default cache dir is box-wide. With it here, each revision owns its file.
     src_digest = _projection_digest(projection, INVARIANTS[key].project)
+    # ⛔ THE ARGV IS PART OF THE IDENTITY. Without it, changing which ENDPOINT a key reads (same
+    # scope, same key, same projection) served the previous endpoint's answer as a provably-fresh
+    # hit — measured with 0 reader calls, for the whole 6-hour `repo.metadata` TTL. That is guard
+    # 1's own failure mode with the REQUEST as the subject.
+    argv_digest = hashlib.sha1("\x00".join(INVARIANTS[key].argv).encode()).hexdigest()[:12]
     payload_id = hashlib.sha1(
-        f"{scope}\x00{key}\x00{src_digest}\x00{int(ttl_s)}".encode()
+        f"{scope}\x00{key}\x00{src_digest}\x00{argv_digest}\x00{int(ttl_s)}".encode()
     ).hexdigest()[:12]
     return f"{_CACHE_PREFIX}{_slug(key)}-{_slug(scope)[:20]}-{payload_id}.json"
 
@@ -795,6 +816,7 @@ def _envelope(
             "key": key,
             "scope": scope,
             "projection": _projection_digest(projection, INVARIANTS[key].project),
+            "argv": list(INVARIANTS[key].argv),
             "stored_at": float(now),
             "ttl_s": int(ttl_s),
             "sha256": hashlib.sha256(payload).hexdigest(),
@@ -830,6 +852,8 @@ def _load(
         projection = INVARIANTS[key].projection
     if env.get("projection") != _projection_digest(projection, INVARIANTS[key].project):
         return None  # guard 4: an entry selected by a DIFFERENT projection is a stale SCHEMA
+    if env.get("argv") != list(INVARIANTS[key].argv):
+        return None  # an entry read from a DIFFERENT endpoint is a different question
     try:
         payload = base64.b64decode(env["payload"], validate=True)
         digest = env["sha256"]

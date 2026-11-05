@@ -12,8 +12,8 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 46 mutations of the module have now
-been run; **ALL 46 are KILLED** (M10 included — see below):
+fail for the bug they named — a green suite proving nothing. 50 mutations of the module have now
+been run; **49 are KILLED** and one survives ALONE (M49 — see below):
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -27,7 +27,17 @@ been run; **ALL 46 are KILLED** (M10 included — see below):
     M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Two further rounds added M23-M46 after review (all KILLED):
+Cycle-9 added M47-M50:
+
+  M47 explicit `null` required_set accepted .... KILLED   M49 argv dropped from the FILENAME .. SURVIVES
+  M48 runner labels silently filtered .......... KILLED   M50 argv dropped from the ENVELOPE .. KILLED
+
+M49 surviving is the documented layering in its established direction: for the projection AND the
+argv, the ENVELOPE is authoritative and the filename's copy only stops two different questions of
+one key thrashing one file. (M10 flipped from SURVIVES to KILLED once the source-bearing digest
+moved into the filename, because a thrash test now pins it.)
+
+Two earlier rounds added M23-M46 after review (all KILLED):
 
   cycle-8: M39a/M39b CLI live paths emitted the RAW body (one key, two schemas) — killed only
            after a test covered the GLOBAL exit separately | M40/M41 required_set `contexts` /
@@ -1638,3 +1648,86 @@ def test_moving_refs_and_editable_metadata_are_refused(key: str) -> None:
 def test_the_shipped_keys_survive_the_wider_vocabulary() -> None:
     for key in C.INVARIANTS:
         assert C.kind_of(key) == "invariant", f"{key!r} is shipped but now reads as mutable"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 14. CYCLE-9 FINDINGS — explicit null, silent label filters, and the REQUEST as identity
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize(
+    "rsc",
+    [
+        {"checks": None},
+        {"contexts": None},
+        {"contexts": None, "checks": None},
+        {"contexts": [], "checks": None},
+    ],
+)
+def test_an_explicit_NULL_required_set_is_not_an_empty_one(rsc) -> None:
+    """⛔ Absent and wrong-typed were refused; an explicit `null` was not, and it reads as "this
+    branch requires no checks" on the merge-gating key. GitHub sends `[]`, never `null`."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS["repo.required_set"].project([{"required_status_checks": rsc}])
+
+
+def test_empty_lists_are_still_the_legitimate_no_checks_answer() -> None:
+    assert C.INVARIANTS["repo.required_set"].project(
+        [{"required_status_checks": {"contexts": [], "checks": []}}]
+    ) == {"contexts": [], "checks": []}
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [[None], ["self-hosted"], [{}], [{"name": None}], [{"name": 5}], "x64"],
+)
+def test_a_runner_label_entry_the_projection_does_not_understand_is_refused(labels) -> None:
+    """⛔ `if isinstance(lbl, dict)` was a SILENT FILTER, so a lane asking "is there a runner with
+    label X" got a cached "no" (``labels: []``) from a body the projection did not understand, for
+    30 minutes. `_project_labels` type-checks; this now does too."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS["runners.inventory"].project([{"runners": [{"name": "r1", "labels": labels}]}])
+
+
+def test_a_runner_with_no_labels_still_projects() -> None:
+    assert C.INVARIANTS["runners.inventory"].project(
+        [{"runners": [{"name": "r1", "labels": []}]}]
+    ) == [{"name": "r1", "labels": []}]
+
+
+def test_changing_a_keys_endpoint_invalidates_the_cached_entry(tmp_path: Path) -> None:
+    """⛔ THE REQUEST IS PART OF THE IDENTITY.
+
+    Without the argv, pointing a key at a different endpoint (same scope, same key, same
+    projection) served the PREVIOUS endpoint's answer as a provably-fresh hit — measured with ZERO
+    reader calls, for the whole 6-hour `repo.metadata` TTL. That is guard 1's own failure mode with
+    the REQUEST as the subject.
+    """
+    import dataclasses
+
+    key = "repo.metadata"
+    r = Counter()
+    _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 1
+
+    monkeypatch_argv = ("api", "repos/{repo}/somewhere-else")
+    C.INVARIANTS[key] = dataclasses.replace(C.INVARIANTS[key], argv=monkeypatch_argv)
+    try:
+        r2 = Counter()
+        _read(key, now=1000.0 + 1.0, reader=r2, cache_dir=tmp_path)
+        assert r2.n == 1, (
+            "the previous ENDPOINT's answer was served as a fresh hit — the argv is not in the "
+            "cache identity"
+        )
+    finally:
+        C.INVARIANTS[key] = dataclasses.replace(C.INVARIANTS[key], argv=("api", "repos/{repo}"))
+
+
+def test_the_envelope_records_the_argv(tmp_path: Path) -> None:
+    """Defence in depth: a file at the right NAME is still rejected if its argv disagrees."""
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    p = _entry(tmp_path)
+    env = json.loads(p.read_text())
+    env["argv"] = ["api", "repos/{repo}/somewhere-else"]
+    p.write_text(json.dumps(env))
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2
