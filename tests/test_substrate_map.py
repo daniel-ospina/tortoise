@@ -1634,6 +1634,65 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
         )
 
 
+#: §5 introduces some of its evidence with the SYMBOL the line declares:
+#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:1974`) ``. Those pointers rot the
+#: same way the `:Document` ones did — and one already had: §5 cited
+#: `projection/entities.py:1584` for `_DOC_RETIRED_KEYS`, which was right when the
+#: map was cut at `438a8924d1` and is at **1974** at this head, so the citation
+#: pointed at an unrelated comment about `_ingestedAtStored`. No pin noticed, because
+#: the guard above reads only `cache_eviction.py` citations.
+_SYMBOL_POINTER = re.compile(r"`([A-Za-z_][\w.]*)`\s*\(\s*`([\w./-]+\.py):(\d+(?:,\d+)*)`")
+
+
+def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> None:
+    """Fails if a `` `SYMBOL` (`file:line`) `` citation in §5 points elsewhere.
+
+    Reachable — and it WAS the shipped state: §5's D10 evidence cited
+    `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration is at
+    1974 (it was 1584 when the map was cut; that module has grown since). The
+    citation therefore sent a reader re-examining the retirement mechanism to a
+    comment about `_ingestedAtStored` — the exact class of stale evidence pointer
+    the `:Document` pin next door closes for one file, still open for the rest.
+
+    The rule is the one the document states: a pointer introduced by a symbol must
+    land on a line that carries that symbol. Symbols rather than line numbers are
+    what the map's own `ENTRY RULE` tells a reader to re-derive, so this asserts the
+    locatable claim and leaves the line free to move — as long as the pointer moves
+    with it.
+    """
+    doc = _doc()
+    section = smc._section(doc, "### The one interface that must not be broken")
+    assert section, "§5's `one interface` subsection is gone — re-state the evidence"
+    citations = _SYMBOL_POINTER.findall(section)
+    assert len(citations) >= 2, (
+        f"§5's evidence now carries {len(citations)} `SYMBOL` (`file:line`) "
+        "citation(s); this pin was written against 2 (`_DOC_RETIRED_KEYS` and "
+        "`relabel_legacy_documents`) — dropping one is a decision to state, not a "
+        "silently narrower check"
+    )
+    for symbol, relpath, numbers in citations:
+        path = REPO / relpath
+        if not path.exists():
+            path = REPO / "tortoise" / relpath
+        assert path.exists(), (
+            f"§5 cites `{symbol}` at `{relpath}:{numbers}`, but no such file is in "
+            "this checkout"
+        )
+        source_lines = path.read_text(encoding="utf-8").splitlines()
+        for number in numbers.split(","):
+            line_no = int(number)
+            assert 1 <= line_no <= len(source_lines), (
+                f"§5 cites `{symbol}` at `{relpath}:{line_no}`, but {relpath} is "
+                f"{len(source_lines)} lines long"
+            )
+            cited = source_lines[line_no - 1]
+            assert symbol in cited, (
+                f"§5 cites `{symbol}` at `{relpath}:{line_no}`, but that line is "
+                f"{cited.strip()!r} — the pointer drifted when the file grew; "
+                "re-measure it (§5), never widen this assertion"
+            )
+
+
 def test_the_summary_line_agrees_with_the_named_holes_section() -> None:
     """Fails if §1's headline count contradicts §8's, as it did when shipped.
 
