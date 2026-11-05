@@ -83,9 +83,13 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 ⚠️ **`get_cross_lens_candidates` MARKS one of its three bounds.** The marker is
 `truncated = len(all_candidates) > limit` (`tortoise/sdk.py::get_cross_lens_candidates`), where `limit`
 derives from `max_candidates` inside that same method. Two further bounds on that same surface do not
-reach it at all: `top_k` (clamped to `tortoise/sdk.py::CROSS_LENS_ANN_TOP_K_MAX`) bounds the
-per-point ANN pull (`limit=top_k + 1`, also inside `get_cross_lens_candidates`), and
-`tortoise/sdk.py::CROSS_LENS_POOL_CAP` cuts the eligible pool (same method). A saturated ANN window
+reach it at all, and ⚠️ neither of those cuts is inside `get_cross_lens_candidates` — the per-point
+ANN pull is `_cross_lens_pairs` and the pool cut is `_cross_lens_pool`, so both are cited by symbol
+below rather than described as "same method": `top_k`, clamped to `CROSS_LENS_ANN_TOP_K_MAX`
+(`tortoise/sdk.py::CROSS_LENS_ANN_TOP_K_MAX`), bounds the per-point ANN pull (`limit=top_k + 1`,
+`tortoise/sdk.py::_cross_lens_pairs`), and `CROSS_LENS_POOL_CAP = 1000`
+(`tortoise/sdk.py::CROSS_LENS_POOL_CAP`) cuts the eligible pool (`tortoise/sdk.py::_cross_lens_pool`).
+A saturated ANN window
 over a point with more above-threshold neighbours than `top_k` is precisely the *"a downstream leg
 lost rows"* case §4 item 3 requires to flip the marker — and it stays `false`. Read
 `truncated: false` on this surface as *"the candidate cut did not fire"*, never as *"nothing was
@@ -116,8 +120,11 @@ failure mode this document exists to prevent is exactly "we audited the instance
 
 ### 2a. Why the remaining SILENT surfaces are parked, not fixed
 
-All six return a **bare list**, and each sits behind a published surface, so there is no
-non-breaking place to put an incompleteness marker:
+All six return a **bare list** *on the arm or the route the census measured* — the qualifier is
+load-bearing for one of the six: `tortoise_query` is censused here on its **`text=` arm**, which returns
+`tortoise_fts_query`'s bare list, while its *structural* arm (`text=None`) is a different surface that
+does not always return a list (see the ⚠️ above), so the parked set is the arm, not the whole tool. Each
+sits behind a published surface, so there is no non-breaking place to put an incompleteness marker:
 
 - adding a key to *each row* is not a marker (a caller counting rows cannot see it);
 - returning a wrapper object (`{"items": …, "truncated": …}`) changes the declared return type, and
