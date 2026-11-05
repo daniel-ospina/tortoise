@@ -3144,7 +3144,23 @@ async def run_control_plane_call(fn, *, op: str,
             future_exc = (future.exception()
                           if future.done() and not future.cancelled() else None)
             if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
-                raise
+                # The callable RAN and failed on its own: propagate ITS
+                # exception. ⛔ NOT a bare ``raise`` — that re-raises the
+                # ``TimeoutError`` THIS arm caught, i.e. ``wait_for``'s bound,
+                # and silently REWRITES the callable's failure into a
+                # seam-generated ``TimeoutError`` whenever the worker settles
+                # the future in the same tick the bound expires (the state is
+                # reachable because ``concurrent.futures.Future`` is settled by
+                # the WORKER thread, with no event-loop hand-off in between).
+                # Measured consequence: a ``_ProjectionOpenError`` from the
+                # graph CONSTRUCTION lane reached the route as a bare
+                # ``TimeoutError``, which is an `except` arm no hosted route
+                # maps — it escaped the ASGI app instead of the route's own
+                # 500 (CI run 41937419070, `test (g)`).
+                # ``from None``: the bound's expiry is a CONCURRENT event, not
+                # this failure's cause, so chaining it would mislabel the
+                # traceback in the same way the rewrite mislabelled the type.
+                raise future_exc from None
             reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                       else f"exceeded its {bound}s bound")
             if not future.done():
@@ -3235,7 +3251,13 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
                           if future.done() and not future.cancelled() else None)
             if future_exc is not None and not isinstance(
                     future_exc, _WorkerBacklogFull):
-                raise
+                # The callable RAN and failed on its own — propagate ITS
+                # exception, never the re-armed bound's ``TimeoutError`` this
+                # arm caught (see the sibling arm in
+                # ``run_control_plane_call`` for the measured rewrite this
+                # avoids: the worker settles the future without an event-loop
+                # hand-off, so it can land in the same tick the bound expires).
+                raise future_exc from None
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"
