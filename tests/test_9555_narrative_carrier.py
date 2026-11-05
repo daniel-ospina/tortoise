@@ -1754,8 +1754,10 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
     # `find` + `assert`, not a bare `index`: the failure carries its own diagnosis
     # instead of an anonymous ValueError naming a substring nobody chose. This is
     # a BACKSTOP — with the scoped count assert above at 1, `find` cannot fall at
-    # or before `start`, so the asserts above are what actually catch every case
-    # this line would otherwise report.
+    # or before `start`, because neither heading is a prefix of the other here
+    # (`### 9.4 ` and `### 9.5 ` differ at index 6); a PREFIX pair would make
+    # `end == start` reachable with the count still at 1, which is the one case
+    # this line alone catches.
     end = text.find(end_heading, start)
     assert end > start, (
         f"{end_heading!r} does not follow {start_heading!r} in "
