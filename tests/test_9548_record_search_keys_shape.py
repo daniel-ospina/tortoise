@@ -55,6 +55,7 @@ that red on the pre-fix code on the PR path.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -202,18 +203,28 @@ def test_the_encoder_still_JSON_quotes_a_bare_string_bound_to_a_jsonb_column():
     running this file plus `tests/test_record_projection.py` gave
     **171 passed, exit 0**.
 
-    `public.event.payload` is still declared `jsonb`, so the rule is exercised
-    where it still governs: a bare graph string bound there must come back as a
-    JSON DOCUMENT that `json.loads` returns to the graph's own flat `str`.
-    Pre-fix the same call returns the bare string, which `json.loads` refuses
-    with a `JSONDecodeError` — exactly the 22P02 the seam reports as a
+    `public.journal_event.payload` is still declared `jsonb`, so the rule is
+    exercised where it still governs: a bare graph string bound there must come
+    back as a JSON DOCUMENT that `json.loads` returns to the graph's own flat
+    `str`. Pre-fix the same call returns the bare string, which `json.loads`
+    refuses with a `JSONDecodeError` — exactly the 22P02 the seam reports as a
     `write_failed` row drop.
+
+    ⚠️ THE TABLE IS `journal_event`, NOT `event` (#10726 review P3, corrected).
+    `payload jsonb NOT NULL` is declared on `public.journal_event`
+    (`20261012000001_record_event_stream.sql:89`); `public.event` — opened at
+    `:217` of that file — has NO `payload` column at all, so the earlier
+    wordings above and in the assert message named a column on a table that
+    does not carry it and would have sent the next reader to the wrong file.
+    ⛔ The attribution is guarded rather than trusted:
+    `test_every_table_column_attribution_in_this_file_resolves_in_the_migrations`
+    reds if any `public.<table>.<column>` this file names is not a real column.
     """
     from tortoise import record_projection as rp
 
     assert "payload" in rp.jsonb_columns(), (
-        "`public.event.payload` is the column this pin uses because it is "
-        "STILL `jsonb`. If the schema narrowed it too, pick another live "
+        "`public.journal_event.payload` is the column this pin uses because it "
+        "is STILL `jsonb`. If the schema narrowed it too, pick another live "
         "`jsonb` column rather than deleting the pin — the encoder rule is "
         "this file's subject")
 
@@ -593,6 +604,77 @@ def test_no_jsonb_column_name_is_shared_with_a_non_jsonb_column():
         "key the rule by (table, column) before adding one")
 
 
+#: A `public.<table>.<column>` attribution in PROSE, i.e. the shape a note names
+#: a real column by. A two-segment `public.<table>` is a TABLE claim with no
+#: column to check, so it is deliberately not matched.
+_ATTRIBUTION_RE = re.compile(r"public\.([a-z_]+)\.([a-z_]+)")
+#: An `INSERT INTO public.<table> (<column>, …)` — the illustrative hand-built
+#: statements in this file. Their columns are checked against the same map.
+_INSERT_RE = re.compile(
+    r"INSERT\s+INTO\s+public\.([a-z_]+)\s*\(([^)]*)\)", re.IGNORECASE)
+
+
+def test_every_table_column_attribution_in_this_file_resolves_in_the_migrations():
+    """Every column this file NAMES is read back from the migrations.
+
+    ⛔ WHY (#10726 review P3). This file's prose attributed `payload` to a table
+    that does not carry it: `payload jsonb NOT NULL` is declared on
+    `public.journal_event`, and the table the earlier wording named is opened
+    fifteen tables later in the same migration with no such column. The pin
+    itself was never wrong — the column is real, the map really calls it
+    `jsonb` — so nothing reddened and nothing was vacuous. The defect is the
+    ATTRIBUTION, and it is the one sentence the next lane acts on: it would go
+    looking for the column on the wrong table and either "fix" the pin or move
+    a real narrowing past a claim the schema refutes.
+
+    That is an instance of the documented failure mode this file's own subject
+    is about (a second, hand-written declaration of the schema going stale), so
+    the remedy is the same one the module uses: DERIVE the claim instead of
+    restating it. Every `public.<table>.<column>` this file names, and every
+    column list on an `INSERT INTO public.<table>`, is resolved against
+    `table_columns()` — the parser over the record migrations. A hypothetical
+    example therefore has to be written WITHOUT the `public.` prefix; that is
+    the deliberate escape hatch, and it keeps this scan from needing an
+    allowlist that could hide a real defect.
+    """
+    text = Path(__file__).read_text(encoding="utf-8")
+    declared = record_projection.table_columns()
+    problems: list[str] = []
+
+    def _check(table: str, column: str, line: int, claim: str) -> None:
+        where = f"{Path(__file__).name}:{line} (`{claim}`)"
+        if table not in declared:
+            problems.append(
+                f"{where}: `{table}` is not a record table — the migrations "
+                f"declare {sorted(declared)}")
+        elif column not in declared[table]:
+            problems.append(
+                f"{where}: `{table}` has no `{column}` column — it has "
+                f"{sorted(declared[table])}")
+
+    def _line(offset: int) -> int:
+        return text.count("\n", 0, offset) + 1
+
+    for match in _ATTRIBUTION_RE.finditer(text):
+        _check(match.group(1), match.group(2), _line(match.start()),
+               match.group(0))
+    for match in _INSERT_RE.finditer(text):
+        for raw in match.group(2).split(","):
+            column = raw.strip().strip('"')
+            if column:
+                _check(match.group(1), column, _line(match.start()),
+                       f"INSERT INTO {match.group(1)}({column})")
+
+    assert not problems, (
+        "this file names a column the record migrations do not declare on that "
+        "table (#10726 review P3 — a note whose own schema refutes it): "
+        + "; ".join(problems)
+        + ". Read the table from the `CREATE TABLE` that declares the column "
+        "(and note that `public.event` and `public.journal_event` are two "
+        "different tables in the same migration) — do NOT widen this scan or "
+        "allowlist a name to get green.")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 3. Attribution — a failure names its column, its value type, its statement
 # ════════════════════════════════════════════════════════════════════════════
@@ -675,8 +757,12 @@ def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
 
     # ⚠️ `payload`, not `search_keys`: `search_keys` is `text` since #10620's
     # `20261102000002`, so it can no longer carry the `→jsonb` shapes this test
-    # exists to pin. `payload` is still declared `jsonb`, so all three shapes
-    # remain reachable through a hand-built statement.
+    # exists to pin. `payload` is still declared `jsonb` — on
+    # `public.journal_event`, which is the table this statement names — so all
+    # three shapes remain reachable through a hand-built statement. The table is
+    # illustrative only (`value_types()` resolves the column by NAME through
+    # `jsonb_columns()`), but a statement that names a table NOT carrying the
+    # column is the defect #10726's review found, so it names the real one.
     def _types(*, value: str, param_columns: tuple[str, ...] = ("payload",)):
         # ⚠️ `param_columns=`, BY KEYWORD. `Statement`'s fields are
         # `(sql, params, param_columns, columns)`, so passing this third
@@ -685,7 +771,7 @@ def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
         # the spelling would reproduce the exact mis-binding `_upsert_statement`
         # names as the #9956 defect.
         return Statement(
-            "INSERT INTO public.event (payload) VALUES (%s)",
+            "INSERT INTO public.journal_event (payload) VALUES (%s)",
             (value,), param_columns=param_columns).value_types()
 
     # 1. The GOOD binding: a `str` the map calls `jsonb` whose value IS a
