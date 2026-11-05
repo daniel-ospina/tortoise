@@ -693,7 +693,15 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     # The framing-only shape is the one that must stay silent now that the
     # `Speaker:` filter runs over a FLOORLESS pattern: it is the shape the old
     # `{2,}` floor used to drop by accident, so nothing else pins it.
-    for wordless in ("", "   ", "...", "?!", "user:\nassistant:"):
+    # ⛔ `system:` / `tool:` are the LOAD-BEARING pair of `_SESSION_SOURCE_FRAMING_TOKENS`:
+    # `user`/`assistant`/`speaker` are also stopwords, so a fixer could delete
+    # the framing filter and believe the stopword arm still covers it — it does
+    # not, the stopword arm does not reach the fallback, and `system`/`tool` are
+    # on no stopword list at all. This leg reds on that deletion alone (verified
+    # by patching the filter out: it derives `['system', 'tool']`, and so does
+    # every such transcript in the Source FTS index).
+    for wordless in ("", "   ", "...", "?!", "user:\nassistant:",
+                     "system:\ntool:"):
         assert _session_source_metadata(wordless) == ("", []), (
             f"a transcript with NO word tokens ({wordless!r}) derived a "
             "descriptor — the presence test was widened past 'tokens present' "

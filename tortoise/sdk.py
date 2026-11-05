@@ -4186,8 +4186,10 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     prefix, not words the session used, and indexing them put a constant
     ``user, assistant`` pair on every acknowledgement-only session.
 
-    ⛔ That fallback is reached by TWO transcript shapes, and the presence test
-    must not exclude either. The 3-character CONTENT floor is a RANKING
+    ⛔ That fallback is reached by THREE transcript shapes, and the presence test
+    must not exclude any of them: stopword-only ("ok" / "yes"), short-word-only
+    ("ok go"), and DIGIT-only ("42" — the SCRIPT/DIGIT notes below). The
+    3-character CONTENT floor is a RANKING
     preference (a two-letter token discriminates poorly), so it is applied only
     where the content counts are built — never to decide whether the transcript
     has word tokens at all. Running it inside the presence test made a
@@ -4203,10 +4205,11 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     a Cyrillic, Greek, Hebrew, Arabic, Devanagari, Thai or CJK transcript had NO
     word tokens as far as this function could see and took the ``("", [])``
     arm: ``summary=''`` and no ``_searchText`` — the #3518 unfindability, for a
-    whole class of languages (#10852 review, P2). The pattern is now
+    whole class of languages (#10852 review, P2). The letter class became
     ``[^\\W\\d_][\\w-]*`` (a Unicode LETTER, then word characters), which is the
     same shape as before for ASCII and correct for every script Python's ``re``
-    knows. The stopword and framing sets stay ASCII — that is only a PRECISION
+    knows — and it is what the CONTENT arm still uses. The stopword and framing
+    sets stay ASCII — that is only a PRECISION
     filter (``.lower()`` still folds Latin), never a presence decision.
 
     ⛔ DIGIT-ONLY is the third dimension of the same hole (#10852 review), and
