@@ -64,6 +64,29 @@ REQUIRED = (
     "test-isolation",
 )
 
+#: The ENTRY/MERGE split `.mergify.yml` clause 1 fixes: `queue_conditions` gate entry
+#: against the PR head, `merge_conditions` gate the merge and are re-evaluated by Mergify
+#: on `mergify/merge-queue/<sha>`. `tools/required_set` derives BOTH from the config, so
+#: the tool sees the split that a flat branch-protection payload cannot express.
+MERGE_TIME_REQUIRED: tuple[str, ...] = ("python-ci-gate",)
+ENTRY_REQUIRED: tuple[str, ...] = tuple(n for n in REQUIRED if n not in MERGE_TIME_REQUIRED)
+
+
+def _check_runs_for(jobs: tuple[str, ...] | list[str]) -> list[dict[str, Any]]:
+    """Completed-success check-runs for `jobs`, in the canonical payload shape."""
+    return [
+        {
+            "id": 1000 + i,
+            "name": job,
+            "status": "completed",
+            "conclusion": "success",
+            "app": {"slug": "github-actions"},
+            "details_url": f"https://github.com/{REPO}/actions/runs/5/job/{1000 + i}",
+            "started_at": "2026-11-04T11:40:00Z",
+        }
+        for i, job in enumerate(jobs)
+    ]
+
 
 # ── fixture builders ────────────────────────────────────────────────────────
 
@@ -2127,22 +2150,7 @@ def _gh_payloads(
     *, check_runs: list[dict[str, Any]] | None = None, body: str = ""
 ) -> dict[str, Any]:
     """Canned `gh` payloads, ordered SPECIFIC → GENERAL (first substring match wins)."""
-    crs = (
-        check_runs
-        if check_runs is not None
-        else [
-            {
-                "id": 1000 + i,
-                "name": job,
-                "status": "completed",
-                "conclusion": "success",
-                "app": {"slug": "github-actions"},
-                "details_url": f"https://github.com/{REPO}/actions/runs/5/job/{1000 + i}",
-                "started_at": "2026-11-04T11:40:00Z",
-            }
-            for i, job in enumerate(REQUIRED)
-        ]
-    )
+    crs = check_runs if check_runs is not None else _check_runs_for(REQUIRED)
     return {
         "/files?per_page": [
             {"filename": "tortoise/sdk.py"},
@@ -2190,11 +2198,59 @@ def test_collect_probe_wires_a_green_world_into_a_READY_verdict(
 ) -> None:
     """The read layer, end to end: a green world must produce READY-FOR-OWNER."""
     probe = _collect(monkeypatch, _gh_payloads())[0]
-    assert probe.required == tuple(sorted(REQUIRED))
+    # The required set is DERIVED from `.mergify.yml`, so it arrives SPLIT: its
+    # `queue_conditions` gate entry at the head, its `merge_conditions` are merge-time.
+    assert set(probe.required or ()) == set(REQUIRED) - set(MERGE_TIME_REQUIRED)
+    assert probe.required_deferred == MERGE_TIME_REQUIRED
     assert all(g.conclusion == "success" for g in probe.groups or ())
     verdict = rfo.evaluate(probe)
     assert verdict.ready is True, [(c.name, c.reason, c.raw) for c in verdict.checks]
     assert verdict.line() == f"READY-FOR-OWNER(10999, {HEAD})"
+
+
+def test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MEASURED 2026-11-04: **0 of 6** sampled open PR heads carried a `python-ci-gate` run.
+
+    Mergify evaluates `merge_conditions` on `mergify/merge-queue/<sha>`, so absence at
+    an author head is the queue working as designed. Against a FLAT required set (the
+    protection API's shape, which has no entry/merge split) that absence can only read
+    as `FAIL(missing)` — NOT-READY for every PR forever, which is the class of
+    disagreeing readiness verdict this instrument exists to end (#10962).
+
+    This is the discriminating case: revert the split and the gates check reds.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(check_runs=_check_runs_for(ENTRY_REQUIRED)),
+    )[0]
+    assert probe.required_deferred == MERGE_TIME_REQUIRED
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw
+    assert verdict.ready is True, [(c.name, c.reason, c.raw) for c in verdict.checks]
+
+
+def test_a_merge_time_check_that_ran_and_red_here_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deferral is about WHERE a check is authoritative, not a licence to ignore a red.
+
+    A `merge_conditions` name that DID run on this head is real evidence about the
+    tree: a measured red must fail the gate, exactly as it would for an entry check.
+    """
+    runs = _check_runs_for(REQUIRED)
+    for run in runs:
+        if run["name"] == "python-ci-gate":
+            run["conclusion"] = "failure"
+    probe = _collect(monkeypatch, _gh_payloads(check_runs=runs))[0]
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is False
+    assert "python-ci-gate" in gates.reason
+    assert verdict.ready is False
 
 
 def test_collect_probe_marks_an_unreadable_declared_union(

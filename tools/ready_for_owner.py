@@ -126,6 +126,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import ci_verdict  # noqa: E402  (path set up above)
+from tools.required_set import (  # noqa: E402  (path set up above)
+    RequiredSet,
+    RequiredSetConfigError,
+    RequiredSetUnreadable,
+    derive_from_config,
+)
+from tools.mergify_config_guard import GuardUnreadable  # noqa: E402
 
 # ── the contract's constants ────────────────────────────────────────────────
 
@@ -140,6 +147,13 @@ CONDITIONS: tuple[str, ...] = (
 
 #: The ONLY conclusion that passes a required context. See the module docstring.
 REQUIRED_CONCLUSION = "success"
+
+#: A ``merge_conditions`` name absent at a PR head is DEFERRED, not missing. Mergify
+#: runs those on ``mergify/merge-queue/<sha>``, so absence there is the queue working
+#: as designed — measured 2026-11-04, every sampled PR head carried ZERO
+#: ``python-ci-gate`` runs. Counting it as ``FAIL(missing)`` reports NOT-READY for
+#: every PR forever, which is a false verdict of exactly the kind this tool exists to end.
+DEFERRED = "DEFERRED(merge-time)"
 
 #: A head younger than this is still settling: CI may not have been scheduled, the
 #: review record may not have been minted, and the queue has not seen it. Opening the
@@ -1161,8 +1175,15 @@ class Probe:
     #: Newest attempt per ``(app, workflow, job)`` — ``None`` = the surface was unreadable.
     groups: tuple[ci_verdict.GroupVerdict, ...] | None = None
     groups_raw: str = ""
-    #: Required contexts from branch protection — ``None`` = unreadable.
+    #: Required ENTRY contexts — must be green at the PR head. ``None`` = unreadable.
+    #: Derived from ``.mergify.yml``'s ``queue_conditions`` (see `tools.required_set`).
     required: tuple[str, ...] | None = None
+    #: Required MERGE-TIME contexts (``merge_conditions``). Settled by Mergify on
+    #: ``mergify/merge-queue/<sha>``, so at a PR head they are DEFERRED, not missing —
+    #: measured 2026-11-04, every sampled PR head carried ZERO ``python-ci-gate`` runs.
+    #: ``None`` = unreadable, and it is kept SEPARATE from ``required`` because
+    #: conflating the two is the permanent false NOT-READY this split exists to end.
+    required_deferred: tuple[str, ...] | None = None
     required_raw: str = ""
     #: ``record-review.sh --check-carry`` verdict token and exit code.
     review_token: str | None = None
@@ -1323,13 +1344,45 @@ def check_gates(probe: Probe) -> Check:
             if token:
                 failed.append(f"{token}:{context}")
 
+    # ── MERGE-TIME contexts (`.mergify.yml` `merge_conditions`) ─────────────
+    # ABSENT at the head is the normal, correct state — DEFERRED, not FAIL(missing) —
+    # because Mergify evaluates them on the queue branch. But if one DID run on this
+    # head and is red (or still in flight), that is real evidence about the tree and
+    # it fails the gate: deferral is about WHERE the check is authoritative, not a
+    # licence to ignore a measured red.
+    for context in probe.required_deferred or ():
+        groups = by_job.get(context) or []
+        if not groups:
+            seen.append(f"{context}={DEFERRED}")
+            continue
+        for group in sorted(groups, key=lambda g: g.check_id or 0, reverse=True):
+            seen.append(
+                f"{context}={group.status}/{(group.conclusion or 'null')}#{group.check_id}"
+            )
+            token = _gate_token(group)
+            if token:
+                failed.append(f"{token}:{context}")
+
+    if not probe.required and not probe.required_deferred:
+        # Every required context is merge-time: nothing is decided at the head, so a
+        # PASS would be a claim about nothing. (`probe.required` empty alone is caught
+        # above; this arm is the both-empty case.)
+        return Check(
+            "gates",
+            False,
+            probe.required_raw or "required context set is empty",
+            "unreadable",
+            unreadable=True,
+        )
+
     raw = "; ".join(seen) if seen else "no check-runs on this head"
     if failed:
-        return Check("gates", False, f"required={len(probe.required)} {raw}", ",".join(failed))
+        return Check("gates", False, f"entry={len(probe.required)} {raw}", ",".join(failed))
     return Check(
         "gates",
         True,
-        f"required={len(probe.required)} all/{REQUIRED_CONCLUSION} {raw}",
+        f"entry={len(probe.required)} all/{REQUIRED_CONCLUSION} "
+        f"deferred={len(probe.required_deferred or ())} {raw}",
     )
 
 
@@ -2000,34 +2053,52 @@ def _read_head_commit_date(gh: Gh, head: str) -> str:
     raise ReadError(f"commits/{head}: no committer date")
 
 
-def _read_required_contexts(gh: Gh) -> tuple[tuple[str, ...], str]:
-    """Required status-check contexts from branch protection. Unreadable ⟹ ReadError.
+def _read_required_contexts(gh: Gh, workdir: Path) -> tuple[RequiredSet, str]:
+    """The required set, DERIVED from the repo — never read from the protection API.
 
-    ``checks[].context`` and the legacy ``contexts[]`` are unioned: a ruleset-era repo
-    populates one and a classic-protection repo the other, and reading only one would
-    silently drop a required check (a false PASS, the one failure this tool exists for).
+    ``gh api repos/<o>/<r>/branches/main/protection`` needs repository **Administration:
+    Read**. This repo's lane credential is a fine-grained PAT without it, so that read
+    returns ``HTTP 403 {"message":"Resource not accessible by personal access token"}``
+    — which reaches ``Gh.api`` as ``RateLimited`` and is RE-RAISED by ``_try``, aborting
+    the run. Condition 2 therefore could not even be attempted on the credential the
+    fleet actually uses, and lanes improvised differently (#10962).
+
+    ``.mergify.yml`` clause 1 already states the invariant it was being read for
+    (``live required contexts == queue_conditions union merge_conditions``), so the set
+    is a pure function of a tracked file and needs NO credential at all. Deriving it
+    also recovers the ENTRY/MERGE split that a flat protection payload cannot express —
+    and without that split, ``python-ci-gate`` (a ``merge_conditions`` name) is absent at
+    every PR head, which a flat set can only read as ``FAIL(missing)``: NOT-READY forever.
+
+    ``docs/ci/required-contexts.json`` remains the committed witness of the LIVE
+    protection read (clause 2), and ``tools.required_set`` refuses on disagreement with
+    it. The API is deliberately not called here: it IS the credential dependency this
+    removes, and its recorded answer is already in the tree.
+
+    ⛔ A set that cannot be SPLIT is not evaluated: guessing which names are merge-time
+    re-creates the false NOT-READY, so it is a refusal rather than a verdict.
     """
-    raw = gh.api(f"branches/{PROTECTED_BRANCH}/protection")
-    if not isinstance(raw, Mapping):
-        raise ReadError(f"branches/{PROTECTED_BRANCH}/protection: unexpected payload")
-    block = raw.get("required_status_checks")
-    if not isinstance(block, Mapping):
+    try:
+        required = derive_from_config(workdir)
+    except (GuardUnreadable, RequiredSetUnreadable, RequiredSetConfigError) as exc:
+        # A config error is a VERDICT about the repo's contract, and an unreadable
+        # config is "I could not read it". Both REFUSE; neither may fall back to a
+        # guessed set.
+        raise ReadError(str(exc)) from None
+    if not required.entry_merge_split:
         raise ReadError(
-            f"branches/{PROTECTED_BRANCH}/protection carries no required_status_checks "
-            "(no protection configured, or a token without admin read) — the required "
-            "set is UNKNOWN, so no gate can be certified"
+            f"required set came from {required.source}, which is a flat list with no "
+            "entry/merge split — refusing to guess which checks are merge-time (a wrong "
+            f"guess re-creates the false FAIL(missing) on merge_conditions names); "
+            "restore `.mergify.yml` so the split can be derived"
         )
-    contexts: list[str] = []
-    for entry in block.get("checks") or []:
-        if isinstance(entry, Mapping) and entry.get("context"):
-            contexts.append(str(entry["context"]))
-    for entry in block.get("contexts") or []:
-        if isinstance(entry, str) and entry:
-            contexts.append(entry)
-    if not contexts:
-        raise ReadError(f"branches/{PROTECTED_BRANCH}/protection declares no required context")
-    deduped = tuple(sorted(dict.fromkeys(contexts)))
-    return deduped, f"required={len(deduped)} {list(deduped)}"
+    raw = (
+        f"source={required.source} entry={len(required.queue_names)} "
+        f"merge-time={len(required.merge_names)} mode={required.mode} "
+        f"snapshot_agrees={required.snapshot_agrees}"
+        + (f" {' '.join(required.notes)}" if required.notes else "")
+    )
+    return required, raw
 
 
 def _read_check_groups(
@@ -2471,7 +2542,21 @@ def collect_probe(
         # NOT evidence about the tree, so it must not be written into `tree_raw`.
         probe.head_committed_at = ""
 
-    probe.required, probe.required_raw = _try(gh, _read_required_contexts)
+    try:
+        required, probe.required_raw = _read_required_contexts(gh, workdir)
+    except RateLimited:
+        # A 403/429 is surfaced as RateLimited and `_try` RE-RAISES it, but the required
+        # set no longer touches the network: reaching here means an unrelated surface
+        # already rate-limited this run. Keep the re-raise so the caller still prints
+        # GH-RATE-LIMITED rather than a verdict built on a throttled read.
+        raise
+    except ReadError as exc:
+        probe.required = None
+        probe.required_deferred = None
+        probe.required_raw = f"required-set: {exc}"
+    else:
+        probe.required = required.queue_names
+        probe.required_deferred = required.merge_names
     probe.groups, probe.groups_raw = _try(
         gh, lambda g: _read_check_groups(g, head, repo), surface="check-runs"
     )
@@ -2585,14 +2670,51 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="evaluate a Probe JSON fixture instead of reading the live world (tests)",
     )
+    parser.add_argument(
+        "--required-set",
+        action="store_true",
+        help=(
+            "print the REQUIRED status-check set as `.mergify.yml` declares it "
+            "(queue=ENTRY, merge=merge-time) and exit; no PR number and no credential"
+        ),
+    )
     return parser
+
+
+def report_required_set(workdir: Path) -> int:
+    """Print the derived required set. Exit 0 PASS · 2 FAIL(unreadable).
+
+    A REPORTING verb, and it is deliberately a separate output shape from the
+    READY/NOT-READY contract: it answers "what is required here?", not "is this PR
+    ready?". Exit ``2`` on an unusable set so "I could not read it" is never mistaken
+    for "nothing is required", which is the fail-open this whole module refuses.
+    """
+    try:
+        required = derive_from_config(workdir)
+    except (GuardUnreadable, RequiredSetUnreadable, RequiredSetConfigError) as exc:
+        print(f"REQUIRED-SET-UNREADABLE({exc})")
+        return 2
+    print(f"source: {required.source}")
+    print(f"mode: {required.mode}")
+    print(f"queue_conditions (ENTRY, at the PR head): {', '.join(required.queue_names)}")
+    print(f"merge_conditions (MERGE-time, deferred here): {', '.join(required.merge_names)}")
+    print(f"OVERLAP: {', '.join(required.overlap) if required.overlap else '(none)'}")
+    print(f"union ({len(required.names)}): {', '.join(required.names)}")
+    print(f"snapshot_agrees: {required.snapshot_agrees}")
+    for note in required.notes:
+        print(f"note: {note}")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.required_set:
+        return report_required_set(Path(args.workdir).resolve())
     if args.fixture is None and args.pr is None:
-        parser.error("a pull request number is required unless --fixture is used")
+        parser.error(
+            "a pull request number is required unless --fixture or --required-set is used"
+        )
     workdir = Path(args.workdir).resolve()
     try:
         if args.fixture:
@@ -2711,6 +2833,11 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         groups=parsed_groups,
         groups_raw=str(data.get("groups_raw", "")),
         required=None if data.get("required") is None else tuple(data["required"]),
+        required_deferred=(
+            None
+            if data.get("required_deferred") is None
+            else tuple(data["required_deferred"])
+        ),
         required_raw=str(data.get("required_raw", "")),
         review_token=data.get("review_token"),
         review_exit=data.get("review_exit"),
