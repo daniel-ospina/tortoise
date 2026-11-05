@@ -219,7 +219,14 @@ CLEAR_VERDICT_RE = re.compile(
     r"(?im)(?:^[ \t>*_]*CLEAN\b"
     r"|^[ \t>*_]*NO ISSUES FOUND\b"
     r"|\b(?:verdict|outcome|result|conclusion|review|reviewed|re-?review|final)\b"
-    r"[\s:*_\u2014\u2013]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
+    # ⛔ THE CUE ARM ACCEPTS A BACKTICK SEPARATOR; the two LINE-START arms above do NOT.
+    # A code-formatted verdict is how the fleet actually posts them — `## Fresh-context review
+    # — `NO ISSUES FOUND` at `ab60fa6a3`` and `### Verdict\n\n`CLEAN` — at `d6f5d3f3c`` — and
+    # 2 of the 6 real clean reviews on PR #10975 are in that shape, so they read NEUTRAL and
+    # could never close a finding. It is deliberately NOT added to `^[ \t>*_]*`: the cited
+    # form pinned by `test_a_quoted_verdict_is_not_a_verdict` starts a line with `**`NO ISSUES
+    # FOUND`**` and MUST stay a citation, which that arm is the only thing refusing.
+    r"[\s:*_\u2014\u2013`]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
 )
 #: ⛔ THE SUFFIX THAT FOLLOWS THE VERDICT DECIDES WHETHER IT WAS ASSERTED OR REPORTED — and
 #: it must be read as a WINDOW, not as the next byte. `.match(text, m.end())` anchors at the
@@ -245,13 +252,33 @@ CLEAR_VERDICT_RE = re.compile(
 _RETRACTION_RULES_1_TO_3 = (
     # (1) no longer the case
     r"no\s+longer\b"
+    # ⛔ THE COPULA STAYS BARE — FAIL-CLOSED IS THE DEFAULT (review #10975, twice).
+    # An earlier attempt in this lane REPLACED this with a whitelist of "disposition"
+    # predicates (fixed|resolved|…), which inverted the polarity: anything NOT in the list
+    # stopped retracting, so `The P1 was fixed, but the fix is not correct.` became a CLEAR
+    # over an open P1 — a FAIL-OPEN, measured as 9 such bodies, the one class this file
+    # treats as P0. A whitelist of English is fail-open by construction; a blacklist is not.
+    # So the negation is EXEMPTED, not enumerated: `is not <badness>` is good news
+    # (`the pin is not vacuous`, `this is not a blocking problem`) and those are the only
+    # shapes carved out. Everything else — including `not correct`, `not safe`, `not tested`,
+    # `not covered`, `not settled` — still retracts, and an omission costs an over-block (the
+    # acceptable direction), never a false PASS.
     r"|(?:is|was|are|were)\s+(?:now\s+)?not\b"
+    r"(?!\s+(?:yet\s+)?(?:vacuous|a\s+blocking|a\s+blocker|a\s+problem|a\s+finding"
+    r"|a\s+result|a\s+defect|a\s+concern|a\s+regression|a\s+surprise|an\s+issue|an\s+error"
+    r"|a\s+showstopper)\b)"
     r"|(?:is|was|are|were)\s+(?:now\s+)?(?:superseded|stale|outdated|obsolete|invalid|wrong|moot)\b"
     r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
     r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
     # (1b) the finding is said to be ABSENT, not fixed — `no evidence the P1 was resolved`
     # otherwise reads as a COMPLETION (`was resolved`) and the severity arm stands down.
-    r"|\bno\s+(?:evidence|proof|test|sign|indication|mention|attempt)\b"
+    r"|\bno\s+(?:evidence|proof|sign|indication|mention|attempt)\b"
+    # ⛔ `no test` IS ALSO FAIL-CLOSED, AND THE EXEMPTION IS THE INSTRUMENT, NOT THE FINDING.
+    # `no test for the P1` is a LIVE finding (the severity arm's own comment says so) and must
+    # keep retracting; what must not is prose about the REVIEW ITSELF — `no test suite was
+    # executed`, `no test was run here` — which retracted 6 real clean reviews on this PR.
+    r"|\bno\s+test\b(?!\s+(?:suite|run|execution)\b)"
+    r"(?!\s+(?:was|were|is|are|has|have|had|could|can|should|would|might)\b)"
     r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
     # (2) attributed to another artifact / a former state of this one
     r"|(?:previous|earlier|prior|old)\s+(?:head|record|round|assessment|verdict|review)\b"
@@ -269,11 +296,18 @@ _RETRACTION_RULES_1_TO_3 = (
 #: regex that must agree is exactly how one of them rots unnoticed.
 _R1_NO_LONGER = (
     r"no\s+longer\b"
+    # Same blacklist (not whitelist) as `_RETRACTION_RULES_1_TO_3`, which must stay
+    # byte-identical — see the comment there for why the enumeration polarity matters.
     r"|(?:is|was|are|were)\s+(?:now\s+)?not\b"
+    r"(?!\s+(?:yet\s+)?(?:vacuous|a\s+blocking|a\s+blocker|a\s+problem|a\s+finding"
+    r"|a\s+result|a\s+defect|a\s+concern|a\s+regression|a\s+surprise|an\s+issue|an\s+error"
+    r"|a\s+showstopper)\b)"
     r"|(?:is|was|are|were)\s+(?:now\s+)?(?:superseded|stale|outdated|obsolete|invalid|wrong|moot)\b"
     r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
     r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
-    r"|\bno\s+(?:evidence|proof|test|sign|indication|mention|attempt)\b"
+    r"|\bno\s+(?:evidence|proof|sign|indication|mention|attempt)\b"
+    r"|\bno\s+test\b(?!\s+(?:suite|run|execution)\b)"
+    r"(?!\s+(?:was|were|is|are|has|have|had|could|can|should|would|might)\b)"
     r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
 )
 _R2_ATTRIBUTED = (
@@ -309,12 +343,20 @@ _BLANK_LINE_RE = re.compile(r"\n[ \t\r\x0b\x0c\xa0]*\n")
 #: paragraph (rules (1)–(4) in full — rule (3)'s exception words are anchored to the verdict
 #: THERE, and only there; see `_NEXT_PARA_RETRACTION_RE`).
 _RETRACTION_NO_SEVERITY_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + r")")
-#: ⛔ THE REST OF THE BODY IS GRADED NARROWER, NOT WIDER, AND IT IS GRADED TO THE END. Every
-#: one of rules (1)–(4) except rule (3) is about the VERDICT's own state (`no longer holds`,
-#: `still open`, `previous head`), which reads the same many paragraphs down; rule (3)'s
-#: exception words do not (see `_R3_EXCEPTION`). "To the end" matters: an earlier revision
-#: stopped at exactly ONE paragraph, so `CLEAN.\n\nFine.\n\nI count one P1` blocked while
-#: `CLEAN.\n\nFine.\n\n\nI count one P1` did not — a cliff at the fourth newline.
+#: ⛔ THE PARAGRAPH AFTER THE VERDICT IS GRADED NARROWER THAN THE VERDICT'S OWN, AND IT IS
+#: GRADED FOR ONE PARAGRAPH — NOT TO THE END OF THE BODY (review #10975, P1).
+#: Rules (1)–(4) except (3) are about the VERDICT's own state (`no longer holds`, `still open`,
+#: `previous head`), so they belong beside it. Graded to the END, they are matched by any later
+#: mention of `stale` / `superseded` / `not` ANYWHERE in a 180-line review — which retracted the
+#: verdict of the review that wrote it. MEASURED on this PR: 11 of the 14 real clean review
+#: comments graded `last-clear=-`, the trigger thousands of characters downstream. Bounded to
+#: the next paragraph, 7 of those 11 clear — with NO new fail-open.
+#: ⛔ THE CLIFF THIS ONCE GUARDED AGAINST IS COVERED BY A DIFFERENT LAYER. An older revision
+#: stopped at exactly one paragraph and left `CLEAN.\n\nFine.\n\nI count one P1` clearing while
+#: the fourth-newline spelling blocked. That body NAMES a severity token, and the per-token
+#: severity arm below is graded over the WHOLE suffix (never windowed), so both spellings still
+#: block, for the reason that actually applies. A window never has to carry the severity arm: a
+#: token is a token wherever it sits.
 _NEXT_PARA_RETRACTION_RE = re.compile(
     r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + _R4_WORDS + r")"
 )
@@ -448,10 +490,14 @@ def _retracted_from(text: str, end: int) -> bool:
       • THE VERDICT'S OWN PARAGRAPH — rules (1)–(4) in FULL, including rule (3)'s exception
         words. `except` / `apart from` / `besides` / `unless` describe the verdict when they
         sit beside it; `**Verdict: CLEAN.** No blocking findings; the P1 remains open.`
-      • THE REST OF THE BODY, TO ITS END — rules (1), (2) and (4)'s WORD arm, plus the
-        per-token severity arm. Rule (3) is deliberately NOT carried here: detached, those
-        words describe ordinary prose (`no other files changed except the fixture`) and
-        carrying them across refused real clears (#10962).
+      • THE PARAGRAPH AFTER IT — rules (1), (2) and (4)'s WORD arm. Rule (3) is deliberately NOT
+        carried here: detached, those words describe ordinary prose (`no other files changed
+        except the fixture`) and carrying them across refused real clears (#10962). This layer
+        stops at the END OF THAT PARAGRAPH, not at the end of the body — see
+        `_NEXT_PARA_RETRACTION_RE`.
+      • THE WHOLE SUFFIX — the per-token severity arm (P0–P2 / blocker), and ONLY it. Windowed,
+        that arm would be the cliff older revisions kept rebuilding; unbounded, it cannot be
+        missed, because a reviewer who means to leave a finding open names it.
 
     A "paragraph" boundary is a whitespace-only line, not merely `\n\n` — see `_BLANK_LINE_RE`.
     """
@@ -460,8 +506,12 @@ def _retracted_from(text: str, end: int) -> bool:
     own_para = text[end : blank.start() + 1 if blank else len(text)]
     if _RETRACTION_NO_SEVERITY_RE.search(own_para):
         return True
-    if blank and _NEXT_PARA_RETRACTION_RE.search(text[blank.end() :]):
-        return True
+    if blank:
+        after = blank.end()
+        nxt = _BLANK_LINE_RE.search(text, after)
+        next_para = text[after : nxt.start() + 1 if nxt else len(text)]
+        if _NEXT_PARA_RETRACTION_RE.search(next_para):
+            return True
     # The severity arm is graded over the WHOLE suffix, so where the token sits makes no
     # difference: on the verdict's line, on the next line, one paragraph down, or four.
     # ⛔ THE CLEAR EXEMPTIONS ARE ANCHORED TO THE TOKEN, not searched in a character window.
