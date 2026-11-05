@@ -1669,14 +1669,17 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 #     GREEN before the bindings existed). Both anchors' UNIQUENESS is asserted
 #     too: a duplicate placed above the real sentence rebinds every assertion
 #     over it.
-#   • PER-SECTION (§9.4 by heading slice): the `:Source.summary` COUNT. This is
-#     the one that catches an ADDITIVE occurrence of THAT SPELLING on a different
-#     line of §9.4, which a per-line check cannot see at all. ⚠️ It is spelling-
-#     exact and does NOT cover an additive line naming bare `summary` — that
-#     spelling legitimately appears in §9.4 and in §12.1b's footnote, so a
-#     bare-`summary` instruction added beside the correct pointer is caught by
-#     nothing in this file (the count's own message says so; this bullet used to
-#     claim the broader guard).
+#   • PER-SECTION (§9.4 and §12.1b, each by its own heading slice): the
+#     `:Source.summary` COUNTS — §9.4 exactly ONE, §12.1b ZERO. This is the
+#     check that catches an ADDITIVE occurrence of THAT SPELLING on a different
+#     line of the section, which a per-line check cannot see at all: a mention
+#     added to §12.1b's BODY rather than its footnote line left the line-scoped
+#     version GREEN (measured). ⚠️ Both counts are spelling-exact and do NOT
+#     cover an additive line naming bare `summary` — that spelling legitimately
+#     appears in §9.4 and in §12.1b's footnote, so a bare-`summary` instruction
+#     added beside the correct pointer is caught by nothing in this file (each
+#     count's own message says so; the §9.4 bullet used to claim the broader
+#     guard, and §12.1b's count was not stated here at all).
 #   • WHOLE-DOCUMENT: BOTH retired phrasings' ABSENCE — the §9.4 blur and the
 #     §12.1b footnote's *"indexing an existing field"* — deliberately, because
 #     each is a claim about what the vector reads wherever it appears: scoping
@@ -1805,23 +1808,41 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
 
 
 def _negates_the_home(line: str, home: str) -> bool:
-    """Does a negation cue apply to the READ of `home` — the claim, not the line?
+    r"""Does a negation cue apply to the READ of `home` — the claim, not the line?
 
     ⛔ THE NEGATION'S TARGET IS THE WHOLE QUESTION. A line-wide `"not read "
     "from" in line` refuses *every* negation, including the one §9.4 requires
     (*"…that text is not read from `:Source.summary`"*), and then reports that
     the sentence negates `home` — the inverse of what it says. So the cue is
-    bound to the object by three anchored parts, in order: a cue, at most two
-    filler words, a READ/EMBED/INDEX verb, then at most 30 characters with NO
-    backtick in them, then the backticked home. The no-backtick span is what
-    keeps a negation of a DIFFERENT backticked object from reaching `home`: in
-    *"never from `:Source.summary`"* the next backtick opens another name, so
-    the match cannot continue on to `public.session_narrative`.
+    bound to the object by three anchored parts, in order: a negation CUE, a
+    span that carries no other claim, a READ/EMBED/INDEX verb, then at most 30
+    characters with NO backtick in them, then the backticked home.
+
+    ⛔ BOTH SPANS CARRY A STOP SET, and each stop closes a different hole:
+
+      • **NO BACKTICK** keeps a negation of a DIFFERENT backticked object from
+        reaching `home`: in *"never from `:Source.summary`"* the next backtick
+        opens another name, so the match cannot continue on to
+        `public.session_narrative`;
+      • **NO CLAUSE BOUNDARY** (`. , ; : ( — –`) keeps a negation belonging to
+        ANOTHER CLAUSE from binding to this one — *"it is not stored on the
+        node; the text is read from `public.session_narrative`"* says the
+        vector is not stored there, and it must not red as *"NEGATES the
+        pointer"*. Those two lines are CONTROL cases in `_VECTOR_REWORDINGS`.
+
+    ⚠️ The cue→verb span is `{0,40}` characters and not "two filler words":
+    the earlier `(?:\w+\s+){0,2}` refused *"it is not read from `home`"* but
+    ACCEPTED *"the vector's text is never the S1 narrative read from `home`"*
+    (the cue reaches the verb through three content words), which is the same
+    inverted claim in different prose — measured, and the case is in
+    `_VECTOR_INVERSIONS`. The span is bounded, and its stop set is what keeps it
+    from reaching across a clause boundary or another backticked name.
     """
     return re.search(
-        rf"\b(?:not|never|no longer)\s+(?:\w+\s+){{0,2}}"
+        rf"(?:\b(?:not|never|no longer)\b|\w+n['’]t\b)"
+        rf"[^`;:,.—–(]{{0,40}}"
         rf"(?:read|reads|reading|embed|embeds|embedding|index|indexes|"
-        rf"indexing|come|comes)\b[^`]{{0,30}}`{re.escape(home)}`",
+        rf"indexing|come|comes)\b[^`;]{{0,30}}`{re.escape(home)}`",
         line, re.IGNORECASE) is not None
 
 
@@ -1987,6 +2008,17 @@ _VECTOR_REWORDINGS: list[tuple[str, str]] = [
     ("the head document's own wording (control: green before AND after the fix)",
      "whose embedded text is the S1 narrative read from `{home}` — ⛔ never "
      "from `:Source.summary`"),
+    #: CONTROLS for the NEGATION guard's clause stop set: each carries a cue that
+    #: belongs to a different clause, so binding the cue across the clause
+    #: boundary would refuse a correct sentence. They are here because widening
+    #: the cue→verb span (to catch the three-content-word inversion above) is
+    #: what could make a line-wide reading bite again.
+    ("a negation of ANOTHER clause (semicolon stop)",
+     "the text is not stored on the node; it is the S1 narrative read from "
+     "`{home}`"),
+    ("a negation of ANOTHER clause (em-dash stop)",
+     "the text is not stored on the node — it is the S1 narrative read from "
+     "`{home}`"),
 ]
 
 #: Lines that carry the correct PHRASE and still invert or re-specify the claim
@@ -1997,6 +2029,12 @@ _VECTOR_INVERSIONS: list[tuple[str, str]] = [
     ("the pointer's own negation, beside the correct phrase",
      "the S1 narrative read from `{home}` was the earlier claim; it is not read "
      "from `{home}`"),
+    # ⚠️ The same inversion reached through THREE content words. The first cut of
+    # the bound cue allowed `(?:(?:\w+)\s+){0,2}` between cue and verb, so this
+    # line was ACCEPTED — the pin certified exactly the negation it advertises
+    # refusing (measured against the pre-widening guard).
+    ("the pointer's own negation, reached through three content words",
+     "the vector's text is never the S1 narrative read from `{home}`"),
     ("the home namespacing its own column (dot form)",
      "the S1 narrative read from `{home}`.`summary` is what the vector embeds"),
     ("the home namespacing its own column (possessive form)",
@@ -2007,7 +2045,8 @@ _VECTOR_INVERSIONS: list[tuple[str, str]] = [
 @pytest.mark.parametrize(
     "why,line", _VECTOR_REWORDINGS,
     ids=["negation-of-the-summary", "ends-on-the-backticked-home",
-         "head-document-wording"])
+         "head-document-wording", "other-clause-semicolon",
+         "other-clause-em-dash"])
 def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
     """*What value makes this test fail?* The pre-fix guards, on cases 1 and 2.
 
@@ -2039,7 +2078,8 @@ def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
 
 @pytest.mark.parametrize(
     "why,line", _VECTOR_INVERSIONS,
-    ids=["negated-pointer", "column-dot-form", "column-possessive-form"])
+    ids=["negated-pointer", "negated-pointer-three-content-words",
+         "column-dot-form", "column-possessive-form"])
 def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
     """*What value makes this test fail?* A fix that DROPS the two guards.
 
