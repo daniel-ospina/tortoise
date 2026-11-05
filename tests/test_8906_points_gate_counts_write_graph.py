@@ -448,6 +448,21 @@ def test_capture_sessions_gate_is_handed_the_capture_handle(env, monkeypatch):
     """
     import tortoise.hosted_api as ha_mod
 
+    # ⛔ The transport wait bound is pinned OUT of this arm, deliberately.
+    # `/v1/sessions` is a BOUNDED route under the #3834 ruling (10 s of a
+    # user's patience), and on these self-hosted shards that budget decides
+    # the assertion: measured 2026-11-05 on run 42076633842, this test redded
+    # with `assert 504 in (200, 201)` — the handler was still working when the
+    # middleware refused legibly, on a host ~7-23x slower per test than a
+    # GitHub-hosted one (#10296/#10289). The SUBJECT here is WHICH sdk handle
+    # the gate receives, not how fast the capture lane finishes, so a latency
+    # invariant must not be able to decide it. The bound itself is still
+    # pinned where it belongs — `test_transport_wait_bound.py` asserts
+    # `_TRANSPORT_WAIT_BOUND_S == 10.0` and drives the refusal at 0.05 s — so
+    # widening it for THIS test weakens nothing: a gate called without
+    # `sdk=sdk` still fails the two assertions below.
+    monkeypatch.setattr(ha_mod._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 300.0)
+
     e = env(max_points=100)
     seen: dict[str, object] = {}
 

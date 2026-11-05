@@ -37,7 +37,65 @@ def test_m0_main():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _run_guard_subprocess(argv, cwd, timeout=120):
+def _guard_subprocess_budget() -> float:
+    """The subprocess budget: the embedder's OWN declared cold-load bound + work.
+
+    #3349: a fixed 120 s was SMALLER than the bound the product itself declares
+    for a cold load (``EmbeddingModel._LOAD_TIMEOUT_S`` = 90 s) plus the ingest
+    work that follows it, so on a loaded self-hosted runner the subprocess
+    redded the shard with a bare ``TimeoutExpired`` while the code under test
+    was fine — the test's own title says it hits the ``__main__`` guard, not a
+    performance target. Deriving the budget instead of picking a second number
+    means it cannot drift back below the bound it has to clear: raise
+    ``_LOAD_TIMEOUT_S`` and this moves with it.
+
+    ⛔ It is a CLASS attribute of ``EmbeddingModel``, NOT a module global of
+    ``tortoise.embeddings`` (``tortoise/embeddings.py:552``; the loader reads
+    ``self._LOAD_TIMEOUT_S``). A ``getattr(module, "_LOAD_TIMEOUT_S", 90.0)``
+    derivation misses it and silently pins a SECOND hard-coded number — the
+    defect #3349 names, restored. Pinned by
+    ``test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound``.
+    """
+    load_bound = 90.0  # the documented bound, used only if it cannot be read
+    try:
+        from tortoise.embeddings import EmbeddingModel
+        load_bound = float(EmbeddingModel._LOAD_TIMEOUT_S)
+    except Exception:  # pragma: no cover — a missing bound must not SHRINK it
+        pass
+    # The work allowance: the ingest itself, on a host slow enough that the
+    # cold load alone approached its bound.
+    return load_bound + 180.0
+
+
+def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
+    """#3349: the budget must be DERIVED from the product's cold-load bound.
+
+    Two independent ways to re-open #3349, both pinned here: the budget falling
+    back under the declared ``EmbeddingModel._LOAD_TIMEOUT_S`` (a second
+    hard-coded number), or the derivation reading a module that does not carry
+    the attribute at all — which silently yields the fallback and makes the
+    "derives from" claim in the docstring false. The second is why the source of
+    the constant is asserted and not just the sum.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    declared = float(EmbeddingModel._LOAD_TIMEOUT_S)
+    budget = _guard_subprocess_budget()
+    assert budget > declared, (
+        f"a {budget}s subprocess budget cannot absorb a {declared}s cold load "
+        "plus the ingest work (#3349)")
+    assert budget > 120.0, (
+        "the pre-fix 120 s budget is what redded the shard (#3349) — a "
+        "derivation that lands at or below it is the same defect")
+    assert hasattr(EmbeddingModel, "_LOAD_TIMEOUT_S"), (
+        "the cold-load bound moved; re-point the derivation before the "
+        "fallback silently pins a second number (#3349)")
+    assert budget == declared + 180.0, (
+        "the budget must BE the declared bound plus the work allowance, so "
+        "raising the bound moves it (#3349)")
+
+
+def _run_guard_subprocess(argv, cwd, timeout=None):
     """Run a __main__-guard subprocess; retry once on failure.
 
     The subprocess spawns a fresh redislite server for --db paths; under a
@@ -78,6 +136,8 @@ def _run_guard_subprocess(argv, cwd, timeout=120):
     )
     full_argv = [sys.executable, "-c", code]
     last = None
+    if timeout is None:
+        timeout = _guard_subprocess_budget()
     for _ in range(2):
         proc = subprocess.run(full_argv, cwd=cwd, capture_output=True,
                               text=True, timeout=timeout, env=env)
