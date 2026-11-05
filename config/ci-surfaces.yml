@@ -10534,8 +10534,11 @@ durations:
   # two of the classes, per-method on the rest — do not say "class-level" for the whole set).
   # The ungated arms are pure enum/entry-point assertions and run everywhere. Context for a human, NOT the
   # weight, and NOT a per-file reading this file consumes: ~2 min wall on ONE host in the private lane —
-  # measured 2026-11-05, 143.9 s and 133.9 s on two runs — dominated by the full-ingest arms that reach
-  # S7 against the real embedding model (the #4387 retry path), not by the enum assertions.
+  # measured 2026-11-05, 143.9 s and 133.9 s on two runs — and `--durations` puts essentially ALL of it in
+  # ONE arm, whose FIRST of its two runs is an UNMOCKED full ingest reaching S7 against the real embedding
+  # model (the #4387 retry path). Named so the next reader does not have to bisect a two-minute file:
+  #   TestTheSkipArmWritesNothing::test_a_second_ingest_skips_and_does_not_print_a_completion_summary
+  #   -> 123.1 s of a 128.8 s run. Every other arm is sub-second, so the enum assertions are not the cost.
   # ⛔ NO CASE COUNT and NO past-count anecdote — a hand-written count re-stales on every case a round adds,
   # and quoting one as history ("N against a quoted M") re-stales the same way one step removed. A VGATE
   # caught exactly that in this lane's own doc row, and a round-8 review caught this row repeating it.
