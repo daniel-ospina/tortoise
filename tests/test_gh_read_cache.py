@@ -328,7 +328,7 @@ class CacheTest(unittest.TestCase):
         `_format_argv` substitutes TWICE, so `--repo 'o/{repo}'` sent `repos/o/{repo}` to gh
         with the placeholder intact, and `--repo 'o/{base}'` silently fetched `o/main`.
         """
-        for slug in ("o/n?per_page=1", "o/n#frag", "o /n", "o/{repo}", "o/{base}", "o/n/x/y"):
+        for slug in ("o/n?per_page=1", "o/n#frag", "o /n", "o/{repo}", "o/{base}", "o/n/x/y", "o/n,x", "o/.."):
             r = self.run_tool("get", "repo", "--repo", slug, "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
             self.assertEqual(r.returncode, 2, f"--repo {slug!r} must be usage (rc=2): {r.stderr}")
         self.assertEqual(self.calls(), 0, "a malformed request must not spend a call")
@@ -660,11 +660,81 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(g.returncode, 0, g.stderr)
         st = self.run_tool("status", "repo", "--repo", "o/n", "--cache-dir", str(self.cachedir))
         self.assertEqual(st.returncode, 0, st.stderr)
-        self.assertTrue(json.loads(st.stdout)["present"], "status must find the entry get wrote")
+        report = json.loads(st.stdout)
+        self.assertTrue(report["present"], "status must find the entry get wrote")
+        # ⛔ THE OPERATOR-FACING REPORT MUST NAME THE INSTANCE. Without it `status` re-creates
+        # the ambiguity the cache just closed: a hit cannot be attributed to a server.
+        self.assertEqual(report["host"], "github.com", "status must name which instance the hit belongs to")
         again = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(self.calls(), 1, "the unspelled spelling must be a HIT, not a second call")
         self.assertEqual(len(list(self.cachedir.glob("repo*.json"))), 1, "one repository, one entry")
+
+    def test_host_spelling_variants_collapse_to_one_entry(self) -> None:
+        """`GH_HOST=GHE.example.com` and `ghe.example.com` are one instance, so one entry.
+
+        Canonicalisation stopped at the blank case, so a host differing only in CASE or a
+        scheme produced two entries and two calls, and `status` for the other spelling
+        reported `present:false` — the exact fragmentation the canonicalisation exists to
+        prevent, one variant over.
+        """
+        variants = ("GHE.example.com", "https://ghe.example.com", "ghe.example.com/")
+        for i, spelling in enumerate(variants):
+            env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_HOST=spelling)
+            r = subprocess.run(
+                [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r.returncode, 0, f"GH_HOST={spelling!r}: {r.stderr}")
+            self.assertEqual(self.calls(), 1, f"GH_HOST={spelling!r} must collapse onto the same entry")
+        self.assertEqual(len(list(self.cachedir.glob("repo*.json"))), 1, "one instance, one entry")
+
+    def test_a_host_prefixed_repo_actually_requests_that_host(self) -> None:
+        """⛔ THE HOST WAS IN THE KEY BUT NEVER IN THE REQUEST.
+
+        `_format_argv` substitutes the SLUG into `repos/owner/name`, so
+        `--repo ghe.example.com/o/n` asked the DEFAULT instance for `o/n` and then filed the
+        answer under `host: ghe.example.com` — minting an entry that certifies the wrong
+        server for a full hour, and spending two calls for one answer because both hosts sent
+        byte-identical argv. A GHES tenant's `default_branch`/`visibility` was silently
+        answered by github.com whenever `owner/name` existed on both — the exact case the host
+        dimension exists for.
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv_log = (self.stubdir / "argv.log").read_text()
+        self.assertIn("--hostname ghe.example.com", argv_log, f"the resolved host must reach gh: {argv_log!r}")
+
+        # …and the default host adds no flag (it would be noise on every ordinary call).
+        (self.stubdir / "argv.log").write_text("")
+        d = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(d.returncode, 0, d.stderr)
+        self.assertNotIn("--hostname", (self.stubdir / "argv.log").read_text())
+
+    def test_two_accounts_do_not_share_a_rate_limit_entry(self) -> None:
+        """`/rate_limit` is per CREDENTIAL, not only per instance.
+
+        Two tokens on one box shared one entry, so the second was handed the FIRST's
+        remaining quota with rc=0 and `fresh: true` — the input to a spending decision.
+        """
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        a = self.run_tool("get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertIn("4990", a.stdout)
+
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 12}}}')
+        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_TOKEN="account-B-token")
+        b = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertEqual(self.calls(), 2, "a different credential must be a MISS")
+        self.assertIn("12", b.stdout)
+        self.assertNotIn("4990", b.stdout)
+        # The token itself must never reach disk.
+        for f in self.cachedir.glob("*.json"):
+            self.assertNotIn("account-B-token", f.read_text(), "a credential must never be written to the cache")
 
     def test_non_utf8_gh_output_fails_closed_not_crash(self) -> None:
         """UnicodeDecodeError escaped as an undocumented rc=1 traceback."""
@@ -723,8 +793,8 @@ class CacheTest(unittest.TestCase):
         filter, not a projection, and must stay allowed.
         """
         refused = (
-            ('.["state"]',), ('.[ "state" ]',), ('$x["mergeStateStatus"]',),
-            ('.["conclusion"]',), ('.["merged"]',), ('.["state"] // empty',),
+            ('.["state"]',), ('.[ "state" ]',), (".['state']",), ('.[("state")]',),
+            ('$x["mergeStateStatus"]',), ('.["conclusion"]',), ('.["merged"]',), ('.["state"] // empty',),
         )
         for (expr,) in refused:
             r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir),

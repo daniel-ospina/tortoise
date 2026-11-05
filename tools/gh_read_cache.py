@@ -41,8 +41,8 @@ allowed to be wrong. Concretely:
   - Only DECLARED INVARIANT keys are stored (see `INVARIANTS`). An undeclared key
     is refused (rc=2), not cached with a default TTL.
   - Mutable state reads are refused OUTRIGHT (rc=3), by key AND by command:
-    `pr view`, `pr checks`, `pr list`, `run view`, `run list`, the Actions REST
-    routes, and the fields `state`/`mergeStateStatus`/`status`/`conclusion`/
+    `pr view`, `pr checks`, `pr list`, `run view`, `run list`, the
+    `repos/{repo}/actions` family, and the fields `state`/`mergeStateStatus`/`status`/`conclusion`/
     `merged`/`mergeable` — in every spelling, including `--json`, `--jq`/`-q`,
     `--template`/`-t`, the `=`-attached forms, and jq's bracket index `.["state"]`.
     The denylist is a REFUSAL CONTRACT, not the safety property: `--argv` stores
@@ -86,7 +86,11 @@ Deliberately NOT declared:
   - the Actions runner list (autoscale changes it), every PR/run/check read (all mutable),
     and `.mergify.yml` (a file read, not an API read — no quota to save).
 
-Cache identity is (key, host, repo, base, effective argv). `repo`/`base` participate ONLY
+Cache identity is (key, host, account, repo, base, effective argv). `host` and `account`
+are which SERVER and which CREDENTIAL answered — load-bearing for `/rate_limit` (whose
+buckets are per instance and per token) and threaded into the request itself as
+`--hostname`, so a host-prefixed `--repo` cannot fetch the default instance and file the
+answer under another. `repo`/`base` participate ONLY
 when the declared route actually references `{repo}`/`{base}`: keying them unconditionally
 fragmented the cache per branch/per repo for routes that do not vary by either, spending
 two calls for one answer; and omitting `base` when it IS used once served `main`'s policy
@@ -142,7 +146,7 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA = 2
+SCHEMA = 3
 
 # Provenance tolerance. A stamp further into the future than this cannot have its
 # age computed, so it cannot be proven fresh.
@@ -275,7 +279,7 @@ def _repo_slug(repo: str) -> tuple[str, str]:
         # `_format_argv`, so the placeholder survived into `api repos/o/{repo}` and the
         # identity named a question the fetch never asked (falsifying the premise of
         # `test_no_unresolved_placeholder_ever_reaches_gh`). No real slug carries braces.
-        if not piece or any(ch in piece for ch in " \t\n?#{}"):
+        if not piece or piece in (".", "..") or any(ch in piece for ch in " \t\n?#{},"):
             raise Usage(f"--repo segment {piece!r} is not a valid repository component")
     return host, "/".join(parts)
 
@@ -288,7 +292,11 @@ def _default_host() -> str:
     for the other and reported `present: false`, and the next `get` spent a call to fetch
     what was already on disk. That is the same fragmentation the `base` gate was fixed for.
     """
-    return os.environ.get("GH_HOST", "") or "github.com"
+    raw = (os.environ.get("GH_HOST", "") or "").strip().lower()
+    for scheme in ("https://", "http://"):
+        if raw.startswith(scheme):
+            raw = raw[len(scheme):]
+    return (raw.rstrip("/") or "github.com")
 
 
 def _resolve_repo(repo: str) -> tuple[str, str]:
@@ -308,7 +316,38 @@ def _gh_bin(override: str | None = None) -> str:
     return override or os.environ.get("GH_READ_CACHE_GH", "gh")
 
 
-def _identity(key: str, repo: str, base: str, argv: list[str], template: tuple[str, ...], host: str = "") -> dict:
+def _account_fingerprint() -> str:
+    """A short digest of WHICH CREDENTIAL will answer.
+
+    ⛔ `/rate_limit` IS ACCOUNT-SCOPED, NOT JUST INSTANCE-SCOPED. The host dimension was
+    added in one cycle and the account was then the same bug one axis over: two tokens on
+    one box shared one entry, so `GH_TOKEN=B` was handed `GH_TOKEN=A`'s remaining quota with
+    rc=0 and `fresh: true`. That number is an INPUT TO A SPENDING DECISION, and the
+    docstring's own `--ttl 1` advice cannot help — a one-second-old other account's number
+    is still the wrong question's answer.
+
+    Only a DIGEST is stored and logged: the token never reaches the cache file, the
+    filename, or stderr. An absent token is a legal, distinct value (it is the anonymous
+    bucket).
+
+    ⛔ THE CREDENTIAL ONLY — NOT the `gh` binary path. Quota is held per TOKEN, so two
+    binaries reading one token share one bucket; folding `--gh` in would make
+    `get --gh /p/gh` and a later `status` (which defaults to `gh`) two different accounts
+    and break the ordinary "write with get, read with status" pair.
+    """
+    tokens = "\x00".join(os.environ.get(k, "") for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"))
+    return hashlib.sha256(tokens.encode()).hexdigest()[:16]
+
+
+def _identity(
+    key: str,
+    repo: str,
+    base: str,
+    argv: list[str],
+    template: tuple[str, ...],
+    host: str = "",
+    account: str = "",
+) -> dict:
     """Everything that makes two cached answers DIFFERENT questions.
 
     `repo`/`host`/`base` participate ONLY when the declared route references them. Keying
@@ -331,6 +370,10 @@ def _identity(key: str, repo: str, base: str, argv: list[str], template: tuple[s
         # `/rate_limit`, whose buckets are per instance. Gating it on `uses_repo` blanked
         # it for `rate_limit` and served one GHES instance's counters as another's, fresh.
         "host": host,
+        # ⛔ THE CREDENTIAL DECIDES WHOSE QUOTA `/rate_limit` REPORTS (see
+        # `_account_fingerprint`). Unconditional for the same reason as `host`: the account
+        # is which ANSWERING AUTHORITY replied, not a property of the route.
+        "account": account,
         "base": base if uses_base else "",
         "argv": list(argv),
     }
@@ -356,7 +399,7 @@ def entry_freshness(entry: object, now: float, ttl: int, expect: dict | None = N
         return False, "bad_ttl"
     if expect is not None:
         # An entry that answers a DIFFERENT question is not a hit, however fresh.
-        for field in ("key", "repo", "host", "base", "argv"):
+        for field in ("key", "repo", "host", "account", "base", "argv"):
             if entry.get(field) != expect.get(field):
                 return False, f"identity_mismatch:{field}"
     fetched_at = entry.get("fetched_at")
@@ -538,7 +581,7 @@ def _verdict_field_names(tokens: tuple[str, ...]) -> set[str]:
         # `.field` regex, so five real verdict reads slipped past a guard that refused
         # `.state`. Only QUOTED bracket keys are read — a quoted STRING COMPARISON
         # (`map(select(.name=="state"))`) is a filter, not a projection, and stays allowed.
-        for bracket in re.findall(r"\[\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\s*\]", val):
+        for bracket in re.findall(r"\[\s*[\s\"'()]*([A-Za-z_][A-Za-z0-9_]*)[\s\"'()]*\]", val):
             names.add(bracket.lower())
     names.discard("")
     return names
@@ -589,15 +632,28 @@ def _format_argv(argv: tuple[str, ...], repo: str, base: str) -> list[str]:
 
 
 # ── fetch ────────────────────────────────────────────────────────────────────
-def fetch(argv: list[str], gh: str | None = None) -> tuple[str, bool]:
+def fetch(argv: list[str], gh: str | None = None, host: str = "") -> tuple[str, bool]:
     """Run gh; return (stdout, ok). Stderr is captured, never merged into stdout.
 
     A successful call's stderr is deliberately NOT replayed — the harness layers
     above parse stdout as JSON, and a banner on a good answer turns `--json` into
     a decode error (the rule `gh-shim` states and enforces).
+
+    ⛔ THE RESOLVED HOST IS PART OF THE REQUEST, NOT ONLY OF THE KEY. `_format_argv`
+    substitutes the SLUG into `repos/owner/name`, so `--repo ghe.example.com/o/n` asked
+    github.com for `o/n` and then filed the answer under `host: ghe.example.com` — minting
+    an entry that certifies the wrong server for a full hour, and spending two calls for one
+    answer because both hosts send byte-identical argv. `--hostname` is gh's documented
+    spelling, and it sits on the `api` command where a global flag is already accepted.
     """
+    child_env = dict(os.environ)
+    run_argv = [*argv]
+    if host and host != _default_host() and "--hostname" not in argv:
+        # `api <route> --hostname <host>` — the flag is global, so appending is safe, and
+        # the argv stored in the identity already carries `host` separately.
+        run_argv = [*argv, "--hostname", host]
     try:
-        proc = subprocess.run([_gh_bin(gh), *argv], capture_output=True, text=True, timeout=120)
+        proc = subprocess.run([_gh_bin(gh), *run_argv], capture_output=True, text=True, timeout=120, env=child_env)
     except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
         # ⛔ UnicodeDecodeError TOO: `text=True` decodes inside `subprocess.run`, and a
         # binary route (`.../actions/runs/<id>/logs`, an octet-stream asset) used to escape
@@ -667,14 +723,14 @@ def cmd_get(args: argparse.Namespace) -> int:
         if not args.argv:
             sys.stderr.write("gh_read_cache: --argv given with no command tokens\n")
             return 2
-        body, ok = fetch(argv, args.gh)
+        body, ok = fetch(argv, args.gh, host)
         if not ok:
             sys.stderr.write("gh_read_cache: --argv pass-through fetch failed — no value emitted\n")
             return 4
         sys.stdout.write(body)
         return 0
 
-    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host)
+    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host, _account_fingerprint())
     try:
         cache_dir = _cache_dir(args.cache_dir)
     except OSError as exc:
@@ -695,7 +751,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         sys.stdout.write(entry["body"])
         return 0
 
-    body, ok = fetch(argv, args.gh)
+    body, ok = fetch(argv, args.gh, host)
     if not ok:
         # ⛔ NO FALLBACK. The stale body may be sitting in `entry`; emitting it
         # here is precisely the "stale as fresh" defect this tool forbids.
@@ -752,7 +808,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 2
 
     argv = _format_argv(decl.argv, repo, args.base)
-    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host)
+    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host, _account_fingerprint())
     try:
         cache_dir: Path | None = _cache_dir(args.cache_dir)
     except OSError as exc:
