@@ -49,7 +49,7 @@ claim and not an assertion:
 | `#8419` | OPEN, parented by neither | **not re-filed.** Root is the D10 fold (`#5088`); named in §4, not claimed. |
 | `#5096` | CLOSED COMPLETED | **not re-filed.** Its **query** leg is exercised by D13 (`scan_fallback`); **no** D-case issues a traversal-leg query, and the epic adds no new leg. |
 | `#5407` | CLOSED COMPLETED | **not re-filed.** The three label sets now agree — the premise D8 asserts (*one declaration, not a second*). |
-| `#10465` | CLOSED | **not re-filed.** Its instrument is re-runnable and is cited in C6. |
+| `#10465` | CLOSED | **not re-filed.** Its instrument is re-runnable and is reached through E2E-7's closing-head probe run (`03-scope.md` §4), which C6 carries. |
 | `#10541` | CLOSED COMPLETED 2026-11-04 | **not re-filed.** Delivered the census; **C2** is the narrower, different residual — the exemption authority has no production home. |
 | *"state the rule for what earns an embedding"* | **deliberately not filed 2026-10-31** | **still not filed.** Duplicates `#5008` (CLOSED). This lane reaches the same conclusion independently. |
 
@@ -92,8 +92,10 @@ claim and not an assertion:
   the rate delta is in the issue with its command; both directions pinned (an identifier row gets no vector, a
   prose row does).
 - **Complexity:** standard · **Blocked by:** **C2** · **Blocks:** none.
-- ⚠️ **This is `#5008`'s own ordering**, not a new judgement: *"the rate effect is measurable before it is
-  trusted."*
+- ⚠️ **This is `#5008`'s own ordering**, not a new judgement: *"how many vectors the gate
+  would remove on our data … draft-and-run on tens of rows first"* (the source opens that line with a
+  warning marker). The *"rate effect is measurable before it is trusted"* line is **`#4899`'s**, about the
+  `value_gate` flag — a different gate — and is not quoted here.
 
 ### C4 — **#11087** `report the vector contract positively — the serves/indexes pair for every label`
 

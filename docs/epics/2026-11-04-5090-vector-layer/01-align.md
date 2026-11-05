@@ -239,9 +239,11 @@ labels; *4 surfaces exist / 6 walked*.
 ### 7.1 Why REPOINT rather than PROCEED
 
 PROCEED would have implied the epic's existing acceptance still describes its work. It does not: one of
-four DoD rows is MET, two are PARTIAL **by the measuring instrument's own design**
-(`tools/dod_5090_probe.py:1264`: *"the census CLASSIFIES the unresolved set; it does not license moving
-this verdict"*), and one is an owner decision. **REPOINT** is option **C** from `#7879`'s own
+four DoD rows is MET, one is an owner decision, and **the two PARTIAL rows are partial for DIFFERENT
+reasons** — **row 1** on its own product arms (the gate is `set ON in: none` on the shipped default, and
+one write path embeds outside it), which is what S1 exists to close; **row 2** by the measuring
+instrument's own design (`tools/dod_5090_probe.py:1264`: *"the census CLASSIFIES the unresolved set; it
+does not license moving this verdict"*), which holds while a writer is unresolved. **REPOINT** is option **C** from `#7879`'s own
 re-measurement comments — retire completed scope from the acceptance, keep the epic open on exactly what
 remains, and let the owner close it when the decision lands. It is neither discharge (§1.2 A1) nor
 re-scoping upward (inventing children the neighbours already own).
