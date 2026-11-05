@@ -1,8 +1,10 @@
 """Self-host REST surface (#525).
 
-Single-tenant REST API for the self-host daemon, aligned with the registry
-RestSpec paths (tortoise/tool_registry.py — single source of truth for both
-MCP and REST surfaces). Auth follows selfhost auth_mode: `static` (Bearer
+Single-tenant REST API for the self-host daemon. Routes are DECLARED BY HAND in
+this module — it imports neither `TOOL_REGISTRY` nor `RestSpec`, so the registry
+is NOT the source of truth here. The hosted twin of each route lives in
+`tortoise/hosted_api.py` (also hand-written); that module is where a route's
+contract is recorded. Auth follows selfhost auth_mode: `static` (Bearer
 TORTOISE_API_KEY, hmac compare) or `none` (loopback-bound eval — the startup
 guard in selfhost.py refuses non-loopback none-mode).
 
@@ -550,9 +552,12 @@ async def volunteer_context(body: VolunteerContextRequest):
 
 
 # ── Onboarding (self-hosted leg of #2001 W5 / #1999 W3 — #2007 W12) ──────
-# The SAME registry RestSpec paths the hosted surface serves, so an agent
+# Hand-declared routes, matching the hosted `hosted_api.py` contract, so an agent
 # pointed at a self-hosted daemon needs no new client contract: `GET
-# /v1/onboarding/state` + `POST /v1/onboarding/seed`. No Supabase, no hosted
+# /v1/onboarding/state` + `POST /v1/onboarding/seed`. These two are the ONLY
+# onboarding legs a deployment serves — the hosted surface also has
+# `POST /v1/demo` and the two `github_*` routes, which #4282 Phase 3.2 left
+# hosted-only. No Supabase, no hosted
 # control plane — the FLOW state is the graph node and the anchors are the
 # two Subjects from the two prompts (see tortoise/onboarding/selfhost.py).
 
@@ -570,8 +575,10 @@ class SelfhostSeedRequest(BaseModel):
 
 @router.get("/onboarding/state", dependencies=[Depends(_require_key)])
 async def selfhost_onboarding_state():
-    """Self-hosted onboarding FLOW projection (registry: GET
-    /v1/onboarding/state).
+    """Self-hosted onboarding FLOW projection (GET /v1/onboarding/state).
+
+    Declared by hand here; the registry does not carry this route (#4282
+    Phase 3.2).
 
     Graph-DOWN → 200 with the ``'unavailable'`` markers (never fabricated
     defaults, never a false "N of M complete") — the same contract the
@@ -588,7 +595,10 @@ async def selfhost_onboarding_state():
 async def selfhost_onboarding_seed(body: SelfhostSeedRequest):
     """File the two onboarding anchor Subjects (Organization/organization +
     User/naturalPerson linked memberOf) from the self-hosted user's two
-    answers (registry: POST /v1/onboarding/seed).
+    answers (POST /v1/onboarding/seed).
+
+    Declared by hand here; the registry does not carry this route (#4282
+    Phase 3.2).
 
     Idempotent (replay reuses the anchors); a same-name Subject that is not
     this deployment's anchor returns ``status='collision'`` with ZERO writes
