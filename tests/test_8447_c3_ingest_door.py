@@ -239,6 +239,13 @@ class TestARefusalIsNotSuccess:
         assert not (tmp_path / "g.html").exists(), (
             "a REFUSED --upgrade wrote the --out render, so the refusal is "
             "success-shaped on disk as well as absent from the exit status")
+        # The summary line is the OTHER half of the same tail (`render` + `points :`
+        # are written together), and the census row claims BOTH are pinned absent
+        # here, so pin both: a future refusal that returns after printing the
+        # summary but before the render write would otherwise be unguarded.
+        assert "points :" not in out, (
+            "a REFUSED --upgrade printed the completion summary, so its stdout "
+            "is byte-indistinguishable from a completed run's:\n" + out)
 
 
 
@@ -563,9 +570,21 @@ def _stub_partial_extractor(monkeypatch) -> None:
     `warning: N sections failed extraction` and returned `DONE` → exit 0), and
     a comment claiming a behaviour nothing can falsify is exactly what this file
     exists to prevent. The stub is the falsifier.
+
+    ⚠️ It must patch BOTH bindings. `main`'s full-ingest arm calls the
+    MODULE-LEVEL name (`tortoise/ingest.py`: `from .extractor import …
+    extract_from_document`), while `_do_upgrade` / `_do_upgrade_all` re-import it
+    inside the function body — so a patch on `tortoise.extractor` alone is INERT
+    for the full-ingest arm. MEASURED before this was fixed: that arm ran the
+    real extractor, printed `extracted 0 Points, 0 operators from 0 sections`,
+    and reded on `"failed extraction" not in out` — the stub was asserting
+    nothing there, which is the vacuous-control shape this class exists for.
     """
-    monkeypatch.setattr("tortoise.extractor.extract_from_document",
-                        lambda *_a, **_k: dict(_PARTIAL_STATS))
+    def _partial(*_a, **_k):
+        return dict(_PARTIAL_STATS)
+
+    monkeypatch.setattr("tortoise.extractor.extract_from_document", _partial)
+    monkeypatch.setattr("tortoise.ingest.extract_from_document", _partial)
 
 
 class TestAPartialExtractionIsNotDone:
@@ -634,6 +653,13 @@ class TestAPartialExtractionIsNotDone:
         doc.write_text("---\ntitle: Full\n---\n\n## Section one\n\nSomething "
                        "true.\n", encoding="utf-8")
         _stub_partial_extractor(monkeypatch)
+        # The S7 stage is stubbed too: it builds the REAL embedding model, which
+        # on a hermetic lane is a blocked https://huggingface.co request (#4387)
+        # retried five times per file before failing open. This arm's subject is
+        # the exit contract, not entity extraction, so the network dependency is
+        # removed rather than tolerated.
+        monkeypatch.setattr("tortoise.ingest._s7_document_entities",
+                            lambda *_a, **_k: {})
         outcome, out = _run([
             str(doc), "--db", _fresh_graph("full_partial"),
             "--log", str(tmp_path / "e.jsonl"), "--out", str(tmp_path / "g.html"),
