@@ -1121,23 +1121,35 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
             rd.launch(88, cwd=co, state_dir=sd3, repo="o/r")
         assert "ALREADY LIVE" in str(exc.value), str(exc.value)
 
-        # ── TWO REPOS, ONE SLUG: the canonical path is admitted by `REPO=`, too
+        # ── TWO REPOS, ONE SLUG: `_repo_key` identity on the READ **and the WRITE**
         # ⛔ `_slug` folds `/` to `-`, so `a/b-c` and `a-b/c` share
-        # `rail-a-b-c-9.md`. Trusting the path alone served `a-b/c#9` the MERGED
-        # record of `a/b-c#9`, and `--assert-merged` exited 0 for a repo that never
-        # merged (pre-existing on main; closed here because the module's identity is
-        # `_repo_key` and this was the one candidate that skipped it).
+        # `rail-a-b-c-9.md` (and its `.log`). The occupying record is MERGED on
+        # purpose: that is the shape `--assert-merged` can certify, so the pre-fix
+        # reading is the FALSE PASS — exit 0 for a repo that never merged — that
+        # this arm is named after. A non-merged record only pins 1→3 and would
+        # leave the false 0 uncovered while looking covered.
         sd4 = tmp_path / "state4"
         sd4.mkdir()
         colliding = sd4 / "rail-a-b-c-9.md"
-        colliding.write_text(f"PR=9\nREPO=a/b-c\nSTARTED_AT={rd._iso_now()}\n"
-                            f"PID={dead_pid}\n", encoding="utf-8")
+        logp9 = colliding.with_suffix(".log")
+        colliding.write_text(
+            f"PR=9\nREPO=a/b-c\nSTARTED_AT={rd._iso_now()}\nATTEMPT_ID=xyz\n"
+            f"EXIT_ATTEMPT=xyz\nEXIT=0\nLOG={logp9}\n", encoding="utf-8")
+        logp9.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=xyz (detached) =====\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
         assert rd.collect(sd4, "a-b/c", 9) is None, \
             "another repo's record was served to this repo"
+        # ⛔ PRE-FIX THIS WAS 0 — a machine gate certifying a merge that never happened.
         assert rd.main(["collect", "9", "--repo", "a-b/c", "--state-dir", str(sd4),
                         "--assert-merged"]) == 3
-        # …while the repo the record NAMES is still answered.
-        assert rd.collect(sd4, "a/b-c", 9) is not None
+        # …while the repo the record NAMES is still answered, merge and all.
+        st = rd.collect(sd4, "a/b-c", 9)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+        assert st.merge_sha == "deadbeefcafe1234"
+        assert rd.main(["collect", "9", "--repo", "a/b-c", "--state-dir", str(sd4),
+                        "--assert-merged"]) == 0
 
         # ⛔ AND `launch` MUST REFUSE THAT SHARED PATH, NOT CLOBBER IT. Declining to
         # serve the record is only half the fix: the write below is unconditional
@@ -1145,7 +1157,6 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         # the guard passed and the launch rewrote the other repo's `REPO=`, destroyed
         # its log — including a real `✅ merged` line — and ran a second rail
         # appending into the same two files. Measured before this arm existed.
-        logp9 = colliding.with_suffix(".log")
         logp9.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=z (detached) =====\n"
                          "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 "
                          "(state=MERGED confirmed via the API)\n", encoding="utf-8")
