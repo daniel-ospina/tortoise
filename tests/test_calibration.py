@@ -1313,17 +1313,29 @@ def test_compute_confidence_survives_an_unaddressable_id(sdk):
         params={"id": real["id"]}).result_set[0][0] == "inherited-from-source"
 
 
-def test_mitigate_operator_survives_an_idless_mitigation(sdk):
-    """#9262: the refusal must not reach ``mitigate_operator`` either.
+def test_mitigate_operator_refuses_an_idless_mitigation(sdk):
+    """#9262 → #9754: the refusal DOES reach ``mitigate_operator``, and is pinned.
+
+    (The name and the first line of this docstring used to say the opposite —
+    ``…survives_an_idless_mitigation`` / "the refusal must not reach
+    ``mitigate_operator`` either" — which is #9262's contract verbatim, i.e. the
+    defect #9754 replaced. A docstring that asserts a consequence the code does
+    not produce is worse than none, so it is restated here rather than left for
+    a skimmer to read 180° wrong.)
 
     The re-mitigation branch reads the existing mitigation's id from the graph
     (``… RETURN m.id``), so a hand-written id-less mitigation Point yields
     ``mid=None`` and every write in the branch is id-keyed. Measured on
-    ``origin/main``: the call returns ``{}`` (a pre-existing false PASS, filed
-    as #9754) and the run continues; with #9262's refusal alone it
-    RAISED ``no node with id None`` — aborting a call whose caller named the
-    OPERATOR, and mid-loop for ``commit_ops``. The guard keeps the historical
-    outcome instead of turning a broken path into an abort.
+    ``origin/main``: the call returned ``{}`` — a false PASS, filed as #9754.
+
+    #9262 shipped a silent guard here (``return self.get_point(mid)``) to keep
+    that historical outcome rather than abort mid-loop for ``commit_ops``.
+    #9754 is the actual repair and this test pins the CONTRACT it chose: the
+    call REFUSES with ``UnaddressableClaimError`` naming the mitigation, and
+    ``apply_payload_operators`` classifies the refusal per item so a commit's
+    write loop still survives it (see
+    ``tests/test_9754_remitigation_unaddressable.py``). Nothing is written and
+    no false ``{}`` success is returned.
     """
     g = sdk._get_proj().g
     op = sdk.create_point("statement", "operator claim", status="live",
@@ -1335,8 +1347,24 @@ def test_mitigate_operator_survives_an_idless_mitigation(sdk):
         "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) RETURN m.id",
         params={"id": op["id"]}).result_set == [[None]]
 
-    assert not sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
+    with pytest.raises(UnaddressableClaimError,
+                       match=r"mitigation Point with no id"):
+        sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
+    # ⛔ THE PIN IS THE ``pytest.raises`` ABOVE, AND SPECIFICALLY ITS CLASS —
+    # not the two assertions below. Both of them are UNCHANGED since #9262 and
+    # both held BEFORE this fix too: the old ``{}`` success wrote no
+    # ``_evidence`` row and no mitigation content either, so neither can
+    # demonstrate anything about #9754. A correction of an earlier version of
+    # this comment, which credited them with showing "the false success is
+    # gone" — a comment that overstates a test's power is worse than none.
+    # What they do pin is the OTHER wrong repair, a refusal that still writes a
+    # row keyed on the ``None`` id (``_evidence[None] = ...``, the measured
+    # ``origin/main`` residue) or partially updates a node it cannot address.
     assert None not in sdk._evidence
+    assert g.query(
+        "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) "
+        "RETURN collect(m.content)",
+        params={"id": op["id"]}).result_set == [[["[MITIGATION] legacy"]]]
 
 
 def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
