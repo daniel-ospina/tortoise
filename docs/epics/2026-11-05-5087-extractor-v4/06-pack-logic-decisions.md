@@ -60,7 +60,7 @@ All four are declared in the legacy `from`/`to` shape, so they carry **no `mecha
 
 ---
 
-## Class B — four packs declare a meaning core has RETIRED (ONTOLOGY §8, #7852)
+## Class B — two packs declare a meaning core has RETIRED (four declarations, ONTOLOGY §8, #7852)
 
 Warn-not-block, which is why they survived. **The mechanical replacement is safe for only one of the four** — the other three are direction-inverted or contradict their own declared mechanism. This is the granular set the owner asked to rule on.
 
@@ -138,9 +138,9 @@ So **the movement of funds has a home**; what is missing is the *durable provisi
 - **Granular choice:** name the meaning **`funds`** — **DECIDED 2026-11-05: `funds`.**
 - **What does *not* follow:** no new relation for *movement*. A movement is an event; adding a durable `movedFunds` edge would duplicate `disbursement` and drift from the pack's own state/event split.
 
-## SEM-2 · `competesWith` → `mutuallyExclusive` — **approved as-is.**
+### SEM-2 · `competesWith` → `mutuallyExclusive` — **approved as-is.**
 
-## SEM-3 · "not sure production and causation are similar enough" — **you are right, and they are not**
+### SEM-3 · "not sure production and causation are similar enough" — **you are right, and they are not**
 
 **Research:** W3C PROV defines generation as *"the completion of production of a new entity by an activity"* — `prov:wasGeneratedBy` links **an entity to an activity**, and the spec is explicit that it does **not** assert a general causal relation. The BFO/RO mapping goes further: `prov:wasGeneratedBy` maps to *participation in a process*, while `prov:wasDerivedFrom` is what maps to a **causal-influence** relation between entities. A survey of causation in ontologies notes that *"produces" is often used as causal vocabulary* but **should not automatically be treated as equivalent to causation**.
 
@@ -162,7 +162,7 @@ So **the movement of funds has a home**; what is missing is the *durable provisi
 - ⚠️ **One value, one direction.** Because direction is recorded per *value*, the predicate spelling must follow: `producedBy` (`asset → program`) is consistent with `produces`/`<-`. A pack wanting `program --produces--> asset` would need direction `->` and therefore a **different** (or the existing structural) spelling. §3.8's structural `produces` predicate (Event → Object, `schema:result`) is a different layer and does not conflict.
 - ⚠️ **What this accepts:** `producedBy` and the `Program → Asset` `hasPart` path will both be written where both are true. That is now intentional rather than drift, and the census will show two edges where an earlier reading expected one — the census must not treat that as a duplicate.
 
-## SEM-4 · "`ownedBy` is the right one, we just need the proper direction"
+### SEM-4 · "`ownedBy` is the right one, we just need the proper direction"
 
 **Agreed — and that is exactly the problem.** §3.6 defines `ownedBy` as **Entity → Subject**, *"Accountability, data boundary"*, RACI Accountable. The declaration is `investment → Subject`, which under that definition says **the investment is owned by the subject**. Whether that is right depends on **which** subject, and the manifest does not say:
 
@@ -174,7 +174,7 @@ So **the movement of funds has a home**; what is missing is the *durable provisi
 - **DECIDED 2026-11-05 — left deliberately OPEN:** *"ownedBy Subject or Object, we leave it open because it can be quite varied (a person can own something, or a person can own a company that owns something)."* So the **target may be a Subject or an Object**, and the pack does not have to pick one.
 - **What that requires of the canonical document (ONTOLOGY §3.6/§3.7):** `ownedBy` today is defined as **Entity → Subject** only. The ruling widens it to **Entity → (Subject | Object)**, which is a topology change and therefore needs exactly the approval just given.
 - **How the ambiguity is resolved mechanically — the edge's own `direction`, not the predicate:** `->` means the **target** owns the source (`investment --ownedBy--> fund` = the fund owns the investment); `<-` means the **source** owns the target (`investment --ownedBy--> company` with `<-` reads *the investment has an ownership stake in the company*). The value `ownedBy` therefore stays single-direction-agnostic at the table level and the per-edge direction carries the meaning.
-- ⚠️ **The risk this accepts, stated so it is not discovered later:** with an open target and a per-edge direction, `ownedBy` no longer distinguishes *"A owns B"* from *"A is a stake in B"* by its predicate alone — a reader must read the direction field. `venture:holds` therefore maps onto `ownedBy` **with the direction inverted** (`<-`, the investment has an ownership stake in the company) rather than staying a separate word — the direction carries the sense. ⚠️ **Round 2 had said "keep `holds` as its own predicate"; the owner's ruling supersedes that** ("ownedBy is the right one, we just need the proper direction"), so it is recorded here rather than left as two answers. The census reports direction per row so a mis-signed edge is visible rather than plausible.
+- ⚠️ **The risk this accepts, stated so it is not discovered later:** with an open target and a per-edge direction, `ownedBy` no longer distinguishes *"A owns B"* from *"A is a stake in B"* by its predicate alone — a reader must read the direction field. `venture:holds` therefore resolves to `ownedBy` **with the direction inverted** (`<-`, the investment has an ownership stake in the company) — the direction carries the sense. **Polarity check, because these are two different claims and the record is easy to misread:** the owner's ruling **keeps the word** — *"`venture:holds` stays as its own predicate for the ownership-interest sense (FIBO draws the same distinction)"* (`#11083` comment `6667121779`, ruling 3) — and what changes is its **meaning**, which the registry resolves to `ownedBy` with `<-`. Round 2's "keep `holds` as its own predicate" therefore **stands**; it was never superseded, and **no `OVERRIDES:` entry is owed for it** — `#7848`'s marker states that `holds` is *unchanged by this ruling* and keeps its entry. The census reports direction per row so a mis-signed edge is visible rather than plausible.
 
 ### KIN-1 · "is theme bigger than epic?" — **yes, and the level in between is what is missing**
 

@@ -6,7 +6,7 @@ doc_status: draft
 created: 2026-11-05
 subjects.team: epistemic-team
 aboutSubjects: epistemic-team
-aboutObjects: "#5087, #10994, #10995-#11002, #11021, #7949"
+aboutObjects: "#5087, #10994, #10995-#11002, #11021, #11083, #7949"
 ---
 
 # 04 · Integration surface map — #5087
@@ -55,6 +55,7 @@ Doors: **D1** hosted `POST /v1/sessions` · **D2** SDK `capture_session` · **D3
 | S5 Job 1 + entity↔entity channel | #10999 | **SF6**, SF2, SF14 |
 | `subclassOf` widening | #11000 | SF4 (vocabulary), SF13 |
 | business hierarchy | #11001 | **SF13**, SF6, SF14 |
+| pack-logic fidelity (declared → writable → written) | #11083 | **SF15**, SF13 |
 | eight steps / re-narrate | #11002 | SF1, SF3, SF6 |
 | per-door census | #10995 | **SF12**, SF14 |
 | this map | #10994 | all |

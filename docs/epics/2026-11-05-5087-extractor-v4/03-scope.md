@@ -99,7 +99,7 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 **When:** the second capture resolves the **exact** name
 **Then:** the second capture attaches to the existing node
 **And:** no second node is created
-⚠️ **This case passes on today's code and is kept deliberately as a control** — it proves the fix does not break the attach path. Its discriminating sibling is E2E-8 (the partial prior set), and E2E-5 (the unresolved lookup).
+⚠️ **This case passes on today's code and is kept deliberately as a control** — it proves the fix does not break the attach path. Its discriminating siblings are E2E-5 (the unresolved lookup, including the partial-prior-set form) and E2E-8 (an against-graph check that did not complete).
 
 ### E2E-3: one session's claims argue with each other
 

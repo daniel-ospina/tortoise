@@ -43,7 +43,7 @@ aboutObjects: "#5087, #7949, EXTRACTOR-V4-ARCHITECTURE.md"
 
 ### Key assumptions
 
-- *The capture door is the fleet's arrow, and it is `extractor_v2`.* Confidence: **high** — measured (`hosted_api.capture_session` → `sdk.capture_session` → `_extract_session_v2`); the only alternative is the `TORTOISE_SESSION_EXTRACTOR=m2` branch (`sdk.py:14656`), which is test-only. The brief's "legacy rule extractor" claim was **false** and is corrected in the decomposition.
+- *The capture door is the fleet's arrow, and it is `extractor_v2`.* Confidence: **high** — measured (`hosted_api.capture_session` → `sdk.capture_session` → `_extract_session_v2`); the only alternative is the `TORTOISE_SESSION_EXTRACTOR=m2` branch (`sdk.py:14797`), which is test-only. The brief's "legacy rule extractor" claim was **false** and is corrected in the decomposition.
 - *A non-referential noun phrase can be told apart from a referent well enough to act on.* Confidence: **medium** — the field converges on the treatment, but **our arbiter has never been scored**; the 25-row owner-labelled set is the first measurement, and it is all-negative (specificity only). **This is the epic's top risk.**
 - *`#1026` does not forbid an arbiter-judged mention record.* Confidence: **medium** — the ruling's subject is manifest filters that discard artefacts; the departure is marked with `OVERRIDES:` on `#1026` (comment 6648049935) and needs one owner read.
 - *The existing Object population is out of reach without an owner ruling.* Confidence: **high** — `#5333`: a pass may add, no committed row is removed. This epic therefore improves new captures and touches no committed row.
