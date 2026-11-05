@@ -443,13 +443,23 @@ def _oserror_remedy(exc: OSError) -> str:
     wrong in a different direction: errno-only told an unreadable WORKING DIRECTORY
     to `chmod +x` a `gh` that was fine, and blaming on `filename` alone blamed the
     CWD for a `PATH` entry that is a regular file (`ENOTDIR`, `filename='gh'`).
+
+    ⛔ `ENOENT` IS DELIBERATELY ABSENT FROM THE CWD-SIDE ERRNOS (review, `#10777`).
+    Python maps `OSError(ENOENT)` onto `FileNotFoundError`, which `_gh` catches
+    BEFORE `except OSError` — so a `chdir` into a directory that is GONE never
+    reaches this helper, and an `errno.ENOENT` arm here could not fire from any
+    production path (measured: deleting it left the suite green, which is how it
+    was found). Its remedy lives on that earlier arm instead. The errnos this
+    helper answers for are the ones a `chdir` really delivers, and NONE of them is
+    a `FileNotFoundError`: `EACCES`/`EPERM` arrive as `PermissionError`, and
+    `ENOTDIR` (its own arm, above) as `NotADirectoryError`.
     """
     target = getattr(exc, "filename", None)
     cwd_side = target not in (None, "", "gh")
     if cwd_side and exc.errno == errno.ENOTDIR:
         return ("the working directory is not a directory — run from a live "
                 "checkout, or pass --repo")
-    if cwd_side and exc.errno in (errno.ENOENT, errno.EACCES, errno.EPERM):
+    if cwd_side and exc.errno in (errno.EACCES, errno.EPERM):
         return ("the working directory could not be used — run from a live "
                 "checkout, or pass --repo")
     if exc.errno in (errno.EACCES, errno.EPERM):
@@ -530,6 +540,7 @@ def _gh(argv: list[str], cwd: Path) -> _GhRun:
         return _GhRun(126, cause=f"could not run `gh`: {exc}",
                       remedy=_oserror_remedy(exc))
     return _GhRun(out.returncode, out.stdout or "", stderr=out.stderr or "")
+
 
 def _resolve_repo(cwd: Path) -> str:
     env_repo = os.environ.get("GH_REPO", "")
@@ -620,9 +631,23 @@ def _resolve_repo(cwd: Path) -> str:
 
 
 def _head_sha(cwd: Path, repo: str, pr: int) -> str:
+    """The PR's head, or the literal `unreadable` — NEVER an empty string.
+
+    ⛔ THE EMPTY-STRING HOLE IS THE SIBLING OF `_resolve_repo`'S (review,
+    `#10777`). A `gh` that exits 0 and prints nothing passes a bare
+    `returncode == 0` guard, so this function answered `""` — which is not a
+    named degraded state, it is silence: `launch()` then stamps `HEAD=` (blank)
+    into the artifact and `collect` reports nothing for it, so a reader cannot
+    tell "the head could not be read" from "the field was never written". The
+    sibling call site refuses by name for the same condition, so the two halves
+    of one seam disagreed about what the same silence means. Measured with a
+    stub `gh` that exits 0 silently: this returned `""` while `_resolve_repo`
+    raised `Refused` ("exited 0 but printed no repository").
+    """
     out = _gh(["pr", "view", str(pr), "--repo", repo, "--json", "headRefOid",
                "-q", ".headRefOid"], cwd)
-    return out.stdout.strip() if out.returncode == 0 else "unreadable"
+    return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() \
+        else "unreadable"
 
 
 def _shquote(value: object) -> str:

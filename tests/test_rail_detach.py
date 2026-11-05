@@ -713,6 +713,15 @@ def test_a_gh_that_exits_zero_with_no_repo_is_not_an_install_problem(tmp_path, m
     assert out.returncode == 0, (out.returncode, getattr(out, "cause", ""))
     assert out.stdout == "", repr(out.stdout)
 
+    # ⛔ THE OTHER HALF OF THE SAME SEAM (review, `#10777`): `_resolve_repo` refuses
+    # by name here, but `_head_sha`'s bare `returncode == 0` guard let the same
+    # silent `gh` through as `""` — which `launch()` stamps as `HEAD=` (blank), a
+    # value indistinguishable from a field never written. Both call sites read the
+    # same surface, so both must answer a NAMED state. This assertion fails on
+    # `return ... if out.returncode == 0 else "unreadable"`.
+    assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable", (
+        "an empty head must read as `unreadable`, not as an empty string")
+
     with pytest.raises(rd.Refused) as exc:
         rd._resolve_repo(tmp_path)
     msg = str(exc.value)
@@ -869,9 +878,15 @@ def test_the_ghless_path_helper_is_reusable_on_one_tmp_path(tmp_path):
     Non-vacuity, measured on each half SEPARATELY (this arm, `-k
     is_reusable_on_one_tmp_path`, one mutation at a time):
 
-      bare `mkdir()`                         -> 1 failed  (FileExistsError, :1313)
-      `mkdir(exist_ok=True)`, no `is_symlink` -> 1 failed  (FileExistsError, :1388)
+      bare `mkdir()`                         -> 1 failed  (FileExistsError at `bin_dir.mkdir()`)
+      `mkdir(exist_ok=True)`, no `is_symlink` -> 1 failed  (FileExistsError at `dst.symlink_to(src)`)
       both in place                           -> 1 passed
+
+    ⛔ THE CALL SITES, NOT `pathlib.py` LINE NUMBERS (review, `#10777`). These cited
+    `:1313` / `:1388`, which resolve in NO commit of this file (1051 lines at its
+    longest) and are `pathlib`'s own positions besides — version-dependent, so they
+    would rot at the next CPython. Naming the raising call makes the measurement
+    re-runnable against any interpreter.
     """
     first = _path_without_gh(tmp_path)
     second = _path_without_gh(tmp_path, "cat")
