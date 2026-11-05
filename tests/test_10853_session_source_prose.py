@@ -1031,3 +1031,62 @@ def test_the_identity_view_NEVER_aliases_the_record_row():
     assert view is not row
     view["source_kind"] = "MUTATED"
     assert dict(row) == before, "the tail branch aliased the record row"
+
+
+def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
+    """The quote the whole `#10852` obligation rests on must be VERBATIM.
+
+    The obligation is the only thing keeping this narrowing from outliving the
+    capture change it was written for, and its authority is a quoted ruling in
+    `docs/architecture/STORAGE-ARCHITECTURE.md:527`. That line was REWRITTEN
+    under us: `#10978` (`b748df7d`) changed it from "§4.4 metadata, not the
+    prose" to "§4.6 metadata, not the S1 narrative", so the merge landed four
+    citations asserting a sentence the document no longer contains — including
+    the wrong section number — with nothing policing it (#10962 review P2).
+
+    So the pin is the property that actually failed: the quoted span, EXTRACTED
+    from the code, must still appear in the authority's own text. It is a
+    CITATION-ROT pin, not a proof of correctness — if the ruling is legitimately
+    restated, update the quotation in the same change (the `#10978` precedent)
+    and this leg goes green again without weakening anything.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    from tortoise import cache_projection as cp
+
+    root = Path(inspect.getfile(cp)).resolve().parent.parent
+    authority = (root / "docs/architecture/STORAGE-ARCHITECTURE.md").read_text(
+        encoding="utf-8")
+
+    match = re.search(
+        r'STORAGE-ARCHITECTURE\.md:527`: \*"(?P<quote>[^"]+)"\*',
+        inspect.getsource(cp),
+    )
+    assert match, (
+        "the `#10852` obligation no longer quotes `STORAGE-ARCHITECTURE.md:527`, "
+        "so the authority it rests on is unstated — restore the quotation")
+    # The quotation wraps across lines in the docstring; the document states it
+    # as one sentence, so compare on normalised whitespace.
+    quote = " ".join(match.group("quote").split())
+    assert quote in authority, (
+        "the `#10852` obligation quotes a sentence `STORAGE-ARCHITECTURE.md:527` "
+        f"no longer contains: {quote!r}. The ruling was restated (#10978 is the "
+        "precedent) — re-quote the authority as it now reads rather than leaving "
+        "the obligation resting on a sentence that is gone.")
+
+    # The other three sites cite the same ruling by its section number rather
+    # than by quotation, so hold them to that number in the same leg: a stale
+    # §4.4 in any of them re-introduces the rot the quotation check just fixed.
+    for rel in (
+        "docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md",
+        "tortoise/cache_projection.py",
+        "MEMORY.md",
+    ):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert "§4.4 metadata" not in text, (
+            f"{rel} still calls the pair \u00a74.4 metadata; the authority "
+            "(#10978) now says \u00a74.6 — the section number is part of the citation")
+        assert "§4.6 metadata" in text, (
+            f"{rel} no longer cites the authority's section number at all")

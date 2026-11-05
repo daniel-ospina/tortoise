@@ -125,9 +125,9 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
 
    ⛔ **OBLIGATION `#10852` OWES — named, not assumed (#10867 review, P1).**
    `#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
-   derives `_searchText` from `topics` — a §4.4 METADATA value
+   derives `_searchText` from `topics` — a §4.6 METADATA value
    (`STORAGE-ARCHITECTURE.md:527`: *"`summary`/`title` stay on the node — they
-   are §4.4 metadata, not the prose"*), not §9.1/D1 prose. This narrowing is
+   are §4.6 metadata, not the S1 narrative"*), not §9.1/D1 prose. This narrowing is
    keyed on the ROW IDENTITY, never on the value's provenance, so it would
    strip that descriptor too — on the record→cache door only, while the live
    journal fold keeps it — and the reconciler is told not to judge the pair, so
@@ -1282,7 +1282,7 @@ def _scalar(value: Any) -> Any:
 #:
 #: ⛔ **THIS TABLE MUST BE DELETED BY `#10852`, and that is a contract term, not a
 #: hope (#10867 review, P1).** `#10852` makes the capture's `summary` a TOPIC
-#: LEXICON descriptor (§4.4 metadata, per `STORAGE-ARCHITECTURE.md:527`) and
+#: LEXICON descriptor (§4.6 metadata, per `STORAGE-ARCHITECTURE.md:527`) and
 #: derives `_searchText` from `topics`. The predicate here is the ROW's IDENTITY,
 #: so it cannot tell that provenance from the prose — it would decline both, on
 #: the record→cache door only (the live fold keeps them), and the

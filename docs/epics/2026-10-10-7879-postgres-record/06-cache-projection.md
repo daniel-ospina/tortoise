@@ -325,7 +325,8 @@ bounds, both deliberate:
 ### Obligation: `#10852` DELETES this rule, it does not converge with it
 
 `#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
-derives `_searchText` from `topics` — §4.4 metadata, not §9.1/D1 prose, which is
+derives `_searchText` from `topics` — §4.6 metadata, not the S1 narrative (§9.1/D1
+prose), which is
 what `docs/architecture/STORAGE-ARCHITECTURE.md:527` rules (*"`summary`/`title`
 stay on the node"*). The narrowing above is keyed on the ROW's IDENTITY, so it
 cannot tell that provenance from the prose: it would decline both, on the
