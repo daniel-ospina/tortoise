@@ -1,33 +1,48 @@
 """Tests for tools/gh_read_cache.py — the invariant-read cache for `gh` (#1910 class).
 
-WHY THESE TESTS EXIST, AND WHAT THEY PIN
-----------------------------------------
+WHY THESE TESTS EXIST
+---------------------
 The 5,000-call/hour pool emptied FOUR times in one night. The gated shim (`gh-gate`) paces,
 serialises, honours `retry-after` and shares a cooldown — and it has NO CACHE, so every poll is a
 live call. GitHub's own best practice is explicit: *"Make authenticated conditional requests, so
-that unchanged data does not count against your primary rate limit"* and *"keep responses stable, so
-that more of your polls return 304 Not Modified"*
-(docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api).
+that unchanged data does not count against your primary rate limit"*.
 
-So a cache is the fix — but a cache that can serve a STALE (or WRONG-SUBJECT) answer as if it were
-fresh is worse than no cache at all: it turns "I could not read" into "I read X", which is the
-false-PASS class this repo treats as a defect. These tests are therefore about the FAILURE
-directions, not the happy path.
+A cache that can serve a STALE (or WRONG-SUBJECT) answer as if it were fresh is worse than no cache:
+it turns "I could not read" into "I read X", which is this repo's false-PASS class. These tests are
+therefore about the FAILURE directions, not the happy path.
 
-⛔ EVERY TEST IN SECTION 8 IS HERE BECAUSE A REVIEW OF THE FIRST DRAFT FOUND THE BUG. They are the
-regression fence for that review, and each one fails against the draft's code:
+⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
+fail for the bug they named — a green suite proving nothing. 22 mutations of the module have now
+been run; **21 are KILLED** and one survives ALONE, on purpose:
 
-  8a scope        — no scope ⇒ repo A's branch-protection answer served as repo B's   (was P0)
-  8b projection   — runners.inventory cached `status`/`busy` beside name/labels         (was P1)
-  8c camelCase    — `pr.mergeable` was ACCEPTED by declare_invariant                    (was P1)
-  8d whole body   — repo.metadata cached `pushed_at`/`open_issues_count` for 6h          (was P2)
-  8e NaN clock    — a NaN `now` made `age < 0` AND `age >= ttl` both false ⇒ served      (was P2)
-  8f widening     — declare_invariant could RAISE an existing ceiling                    (was P2)
-  8g --slurp      — `--paginate` alone emits one document per page, unparseable          (was P2)
-  8h atomicity    — no test failed if `_store` became non-atomic                         (was P2)
+    M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
+    M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
+    M3  generic reader handler fails open .............. KILLED   M14 TTL dropped from FILENAME ..... KILLED
+    M4  global-scope check removed from read() ......... KILLED   M15 import-time call unbound ...... KILLED
+    M5  forbidden argv flags no longer refused ......... KILLED   M16 CLI live fallback dead-ends ... KILLED
+    M6  declare_invariant skips spec validation ........ KILLED   M17 read() skips spec validation .. KILLED
+    M7  import-time registry guard is a no-op .......... KILLED   M18 OverflowError escapes _load ... KILLED
+    M8  _store is not atomic ........................... KILLED   M19 digest ignores projection SRC . KILLED
+    M9  cache-write failure fails the read ............. KILLED   M20 shape check is a no-op ........ KILLED
+    M10 projection dropped from the FILENAME only ...... SURVIVES  M21 non-dict page accepted ....... KILLED
+    M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
+
+A further 8 mutations were run after the cycle-6 review, all KILLED:
+
+    M23 required_set treats ABSENT as empty .. KILLED    M27 all-null projection accepted ..... KILLED
+    M24 _pick_last `required` check removed .. KILLED    M28 non-dict envelope check removed . KILLED
+    M25 workflow entry-field check removed ... KILLED    M29 reader-returns-bytes check gone  KILLED
+    M26 runner `name` check removed .......... KILLED    M30 _load catches only the denylist  KILLED
+
+M10 surviving is the documented layering, not a hole: for the PROJECTION the envelope stamp is
+authoritative and the filename digest only stops two projections from thrashing one file. (For the
+TTL it is the other way round — the FILENAME is authoritative and the envelope's `ttl_s` check is
+redundant.) Dropping both projection layers IS killed. Do not delete either layer believing the
+other covers the same direction.
 
 Hermetic: no network, no `gh`, no DB. The reader and the clock are injected.
 """
+
 from __future__ import annotations
 
 import base64
@@ -65,8 +80,9 @@ class Counter:
         return len(self.calls)
 
 
-def _read(key: str, *, now: float, reader, ttl_s: int | None = None, cache_dir: Path,
-          scope: str = SCOPE):
+def _read(
+    key: str, *, now: float, reader, ttl_s: int | None = None, cache_dir: Path, scope: str = SCOPE
+):
     return C.read(key, scope=scope, cache_dir=cache_dir, now=now, reader=reader, ttl_s=ttl_s)
 
 
@@ -74,7 +90,9 @@ def _entry(cache_dir: Path, key: str = "repo.metadata", scope: str = SCOPE) -> P
     return cache_dir / C._cache_path(key, scope).name
 
 
-# ── 1. a cache HIT does not touch the reader ───────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 1. THE CACHE ACTUALLY SAVES A CALL
+# ══════════════════════════════════════════════════════════════════════════════════════════════
 def test_cached_hit_does_not_call_reader(tmp_path: Path) -> None:
     r = Counter()
     first = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
@@ -88,250 +106,76 @@ def test_cached_hit_does_not_call_reader(tmp_path: Path) -> None:
     )
 
 
-# ── 2. TTL expiry re-reads (no silent widening) ────────────────────────────────────────────────
 def test_ttl_expiry_calls_reader_again(tmp_path: Path) -> None:
     r = Counter()
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    ttl = C.ttl_for("repo.metadata")
-    out = _read("repo.metadata", now=1000.0 + ttl + 1.0, reader=r, cache_dir=tmp_path)
-
-    assert r.n == 2, "a value at or past its TTL is not fresh and must be re-read"
+    out = _read(
+        "repo.metadata", now=1000.0 + C.ttl_for("repo.metadata") + 1.0, reader=r, cache_dir=tmp_path
+    )
+    assert r.n == 2
     assert out == b"payload-2"
 
 
 def test_exact_ttl_boundary_is_a_miss(tmp_path: Path) -> None:
-    """The boundary is exclusive on fresh: age == ttl is EXPIRED.
-
-    A one-sided comparison (`<=`) is how a TTL silently becomes ttl+one-poll, and each poll is a
-    real call at 15 lanes.
-    """
+    """`age == ttl` is EXPIRED. A `<=` silently makes every TTL `ttl + one poll`."""
     r = Counter()
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    ttl = C.ttl_for("repo.metadata")
-    _read("repo.metadata", now=1000.0 + ttl, reader=r, cache_dir=tmp_path)
+    _read("repo.metadata", now=1000.0 + C.ttl_for("repo.metadata"), reader=r, cache_dir=tmp_path)
     assert r.n == 2
 
 
-# ── 3. a MUTABLE key is refused, never silently passed through ─────────────────────────────────
-@pytest.mark.parametrize("key", ["pr.state", "pr.mergeStateStatus", "pr.checks", "run.status",
-                                 "runner.status", "rate_limit.buckets", "issue.state",
-                                 "pr.mergeable", "pr.reviewDecision"])
-def test_mutable_key_is_refused(key: str, tmp_path: Path) -> None:
-    r = Counter()
-    with pytest.raises(C.MutableReadRefused):
-        _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
-    assert r.n == 0, (
-        "a refused key must not reach the network — a refusal that still issues the call is a "
-        "labelled pass-through, not a guard"
-    )
+def test_different_ttls_do_not_evict_each_others_entries(tmp_path: Path) -> None:
+    """Two callers at different TTLs must each keep their entry.
 
-
-def test_mutable_key_is_refused_on_cached_lookup_too(tmp_path: Path) -> None:
-    """Even with a populated entry under that key, the refusal comes FIRST.
-
-    Otherwise a poached cache file would serve mutable state as invariant.
+    The filename had no TTL component while `_load` rejects a mismatched stamped ttl, so alternating
+    TTLs produced 12 live reads where a working cache does 2 — silently disabling the cache for that
+    key, i.e. exactly the burn this module exists to stop.
     """
-    # `pr.state` is deliberately NOT in the registry, so its identity needs an explicit projection.
-    blob = C._envelope("pr.state", SCOPE, b"stale-merge-state", now=1000.0, ttl_s=600,
-                       projection="{id}")
-    (tmp_path / C._cache_path("pr.state", SCOPE, projection="{id}", ttl_s=600).name).write_bytes(blob)
+    tight = 900
     r = Counter()
-    with pytest.raises(C.MutableReadRefused):
-        _read("pr.state", now=1000.0, reader=r, cache_dir=tmp_path)
-    assert r.n == 0
-
-
-# ── 4. fail closed when freshness cannot be PROVEN ────────────────────────────────────────────
-def test_corrupt_envelope_is_a_miss(tmp_path: Path) -> None:
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    _entry(tmp_path).write_bytes(b"{not json")
-    out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    assert r.n == 2, "an unparseable entry proves nothing; it must re-read rather than raise or serve"
-    assert out == b"payload-2"
-
-
-def test_tampered_payload_is_a_miss(tmp_path: Path) -> None:
-    """The digest is what makes "fresh" a claim about the BYTES, not the file's mtime."""
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    p = _entry(tmp_path)
-    env = json.loads(p.read_text())
-    env["payload"] = base64.b64encode(b"payload-99").decode()
-    p.write_text(json.dumps(env))
-    out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    assert r.n == 2
-    assert out == b"payload-2"
-
-
-def test_clock_ahead_of_stored_at_is_a_miss(tmp_path: Path) -> None:
-    """A future `stored_at` would make the age negative and satisfy `age < ttl` forever."""
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    p = _entry(tmp_path)
-    env = json.loads(p.read_text())
-    env["stored_at"] = 9999.0
-    p.write_text(json.dumps(env))
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    assert r.n == 2, "a future stamp is unprovable freshness, not infinite freshness"
-
-
-def test_stale_entry_is_never_a_fallback_for_a_failed_read(tmp_path: Path) -> None:
-    """⛔ THE LOAD-BEARING TEST. Fail closed, never stale-as-fresh.
-
-    A reader that fails on a MISS must RAISE. Serving the expired entry would report a
-    measurement that was never taken — the exact false-PASS the pool running dry produces.
-    """
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    ttl = C.ttl_for("repo.metadata")
-    r.fail = C.Unreadable("gh api failed: HTTP 403")
-    with pytest.raises(C.Unreadable):
-        _read("repo.metadata", now=1000.0 + ttl + 1.0, reader=r, cache_dir=tmp_path)
-
-
-@pytest.mark.parametrize(
-    "boom",
-    [
-        RuntimeError("gh api failed"),
-        OSError("disk/network fault"),
-        TimeoutError("reader timed out"),
-        ValueError("unparseable body"),
-    ],
-)
-def test_ANY_reader_failure_is_fail_closed_not_just_unreadable(boom: Exception,
-                                                               tmp_path: Path) -> None:
-    """⛔ THE GENERIC HANDLER NEEDED ITS OWN FENCE (cycle-3 finding 1).
-
-    `test_stale_entry_is_never_a_fallback_for_a_failed_read` sets `r.fail = Unreadable(...)`, which
-    is re-raised by `except Unreadable: raise` and NEVER reaches the generic `except Exception →
-    raise Unreadable`. So replacing that generic branch with `return b""`, or with a real stale
-    fallback, kept all 76 tests green — the fence could not fail for the false PASS it names.
-    """
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    ttl = C.ttl_for("repo.metadata")
-    r.fail = boom
-    with pytest.raises(C.Unreadable):
-        _read("repo.metadata", now=1000.0 + ttl + 1.0, reader=r, cache_dir=tmp_path)
-
-
-def test_missing_cache_dir_is_a_miss_not_a_crash(tmp_path: Path) -> None:
-    r = Counter()
-    out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path / "nope" / "deeper")
-    assert out == b"payload-1"
-    assert r.n == 1
-
-
-# ── 5. a TTL may not be widened ───────────────────────────────────────────────────────────────
-def test_ttl_may_not_exceed_the_key_ceiling(tmp_path: Path) -> None:
-    r = Counter()
-    ceiling = C.ttl_for("repo.metadata")
-    with pytest.raises(C.TtlNotPermitted):
-        _read("repo.metadata", now=1000.0, reader=r, ttl_s=ceiling + 1, cache_dir=tmp_path)
-    assert r.n == 0
-
-
-def test_requested_ttl_mismatch_invalidates_the_entry(tmp_path: Path) -> None:
-    """An entry stamped under a LONGER ttl must not satisfy a SHORTER ask.
-
-    Without this, one caller's generous TTL silently becomes every caller's.
-    """
-    r = Counter()
-    ceiling = C.ttl_for("repo.metadata")
-    _read("repo.metadata", now=1000.0, reader=r, ttl_s=ceiling, cache_dir=tmp_path)
-    _read("repo.metadata", now=1000.0 + 1.0, reader=r, ttl_s=max(60, ceiling // 2), cache_dir=tmp_path)
-    assert r.n == 2
-
-
-def test_shorter_ttl_is_allowed(tmp_path: Path) -> None:
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, ttl_s=60, cache_dir=tmp_path)
-    _read("repo.metadata", now=1000.0 + 1.0, reader=r, ttl_s=60, cache_dir=tmp_path)
-    assert r.n == 1
-
-
-# ── 6. the invariant registry is an explicit allow-list ───────────────────────────────────────
-def test_registry_is_an_allowlist_of_declared_invariants() -> None:
-    assert C.INVARIANTS, "an empty registry must not silently accept everything"
-    for key in C.INVARIANTS:
-        assert C.kind_of(key) == "invariant"
-
-
-def test_undeclared_key_is_refused(tmp_path: Path) -> None:
-    r = Counter()
-    with pytest.raises(C.MutableReadRefused):
-        _read("something.nobody.declared", now=1000.0, reader=r, cache_dir=tmp_path)
-    assert r.n == 0, "an UNDECLARED key is not provably invariant — refuse, do not assume"
-
-
-def test_registry_cannot_admit_a_mutable_name() -> None:
-    """The registry is the gate; a mutable name must not be addable to it."""
-    with pytest.raises(C.MutableReadRefused):
-        C.declare_invariant("pr.mergeStateStatus", ttl_s=600, argv=("api", "x", "--jq", "."))
-
-
-def test_runner_inventory_is_cached_but_runner_status_is_not() -> None:
-    """The runner pool read is the measured burn; only its INVARIANT half is cacheable."""
-    assert C.kind_of("runners.inventory") == "invariant"
-    assert C.kind_of("runner.status") == "mutable"
-
-
-# ── 7. atomic write ───────────────────────────────────────────────────────────────────────────
-def test_partial_entry_from_a_killed_writer_is_a_miss(tmp_path: Path) -> None:
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    p = _entry(tmp_path)
-    p.write_bytes(p.read_bytes()[:10])
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    assert r.n == 2
-
-
-def test_envelope_digest_is_over_the_payload_only(tmp_path: Path) -> None:
-    """Documenting the digest's scope: it proves the BYTES, not the metadata around them.
-
-    Metadata freshness is decided by `stored_at` + `ttl_s` (tested above); the digest decides
-    "are these the bytes that were stored". Conflating them is how a rewritten `stored_at`
-    would look intact.
-    """
-    env = json.loads(C._envelope("repo.metadata", SCOPE, b"abc", now=1.0, ttl_s=2).decode())
-    assert env["sha256"] == hashlib.sha256(b"abc").hexdigest()
+    for i in range(6):
+        _read("repo.metadata", now=1000.0 + i, reader=r, cache_dir=tmp_path)
+        _read("repo.metadata", now=1000.0 + i, reader=r, cache_dir=tmp_path, ttl_s=tight)
+    assert r.n == 2, f"alternating TTLs thrashed one file: {r.n} live reads, expected 2"
+    assert len(list(tmp_path.iterdir())) == 2, "each TTL must own its own entry"
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
-# 8. REGRESSION FENCE FOR THE FIRST-DRAFT REVIEW. Each test fails against the draft.
+# 2. SCOPE IS CACHE IDENTITY (guard 1)
 # ══════════════════════════════════════════════════════════════════════════════════════════════
-
-# ── 8a (was P0): the cache had no repo/branch identity ────────────────────────────────────────
 def test_a_different_scope_is_a_different_entry(tmp_path: Path) -> None:
-    """⛔ THE P0. One repo's branch-protection answer must never be served as another's.
-
-    Against the draft, `read()` had no scope at all, so the second call returned repo A's payload
-    with reader B never invoked — a valid envelope, a valid digest, a fresh age, and the wrong
-    SUBJECT. Nothing in the freshness checks could see it.
-    """
-    calls: list[tuple[str, bytes]] = []
+    """⛔ THE P0 of the first review. One repo's answer must never be served as another's."""
+    calls: list[str] = []
 
     def reader_a(key: str) -> bytes:
-        calls.append(("A", key))
+        calls.append("A")
         return b'{"checks":["tortoise-only"]}'
 
     def reader_b(key: str) -> bytes:
-        calls.append(("B", key))
+        calls.append("B")
         return b'{"checks":["agent-infra-only"]}'
 
-    a = _read("repo.required_set", now=1000.0, reader=reader_a, cache_dir=tmp_path,
-              scope="daniel-ospina/tortoise@main")
-    b = _read("repo.required_set", now=1000.0, reader=reader_b, cache_dir=tmp_path,
-              scope="daniel-ospina/agent-infra@main")
+    a = _read(
+        "repo.required_set",
+        now=1000.0,
+        reader=reader_a,
+        cache_dir=tmp_path,
+        scope="daniel-ospina/tortoise@main",
+    )
+    b = _read(
+        "repo.required_set",
+        now=1000.0,
+        reader=reader_b,
+        cache_dir=tmp_path,
+        scope="daniel-ospina/agent-infra@main",
+    )
 
     assert a != b, "a cross-scope hit served repo A's required set as repo B's"
     assert b == b'{"checks":["agent-infra-only"]}'
-    assert [c[0] for c in calls] == ["A", "B"], "reader B must actually be called"
+    assert calls == ["A", "B"], "reader B must actually be called"
 
 
 def test_a_different_branch_is_a_different_entry(tmp_path: Path) -> None:
-    """`repo.required_set` interpolates {branch}; two branches are two answers."""
     r = Counter()
     _read("repo.required_set", now=1000.0, reader=r, cache_dir=tmp_path, scope="o/r@main")
     _read("repo.required_set", now=1000.0, reader=r, cache_dir=tmp_path, scope="o/r@release")
@@ -355,7 +199,7 @@ def test_empty_scope_is_refused(bad: str, tmp_path: Path) -> None:
 
 
 def test_envelope_scope_must_match(tmp_path: Path) -> None:
-    """Defence in depth: even a file placed at the right NAME is rejected if its scope disagrees."""
+    """Defence in depth: a file placed at the right NAME is still rejected if its scope disagrees."""
     r = Counter()
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     p = _entry(tmp_path)
@@ -366,65 +210,170 @@ def test_envelope_scope_must_match(tmp_path: Path) -> None:
     assert r.n == 2
 
 
-# ── 8b/8d (was P1/P2): no key may cache a WHOLE response body ─────────────────────────────────
-def test_every_registry_key_declares_a_REAL_jq_projection() -> None:
-    """⛔ Guard 2 — about the EXPRESSION, not the flag.
-
-    ⛔ THIS TEST WAS NON-DISCRIMINATING UNTIL CYCLE 2. It asserted `"--jq" in spec.argv`, which is
-    True for `("api", "repos/{repo}", "--jq", ".")` — an identity projection that caches the WHOLE
-    body. So changing `repo.metadata`'s projection to `.` kept the fence green, i.e. the fence could
-    not fail for the bug it was written for. Every key must now project something that is not the
-    identity, and the validation must REFUSE `.`.
-    """
-    for key, spec in C.INVARIANTS.items():
-        expr = C._projection_of(spec.argv)
-        assert expr, f"{key!r} declares an empty projection"
-        assert expr.strip() != ".", (
-            f"{key!r} declares an IDENTITY projection (`--jq .`), which caches the whole response "
-            f"body including every mutable field beside the invariant ones"
-        )
-
-
-def test_runner_inventory_projects_away_status_and_busy() -> None:
-    """The specific P1: the projection must select name+labels and NOT status/busy."""
-    jq = C.INVARIANTS["runners.inventory"].argv[C.INVARIANTS["runners.inventory"].argv.index("--jq") + 1]
-    assert "name" in jq and "labels" in jq
-    assert "status" not in jq, "caching `status` replays a 30-minute-old 'online' as current"
-    assert "busy" not in jq, "caching `busy` replays a 30-minute-old 'idle' and dispatches onto a busy runner"
-
-
-def test_repo_metadata_projects_away_volatile_counts() -> None:
-    """The specific P2, with POSITIVE assertions so an identity projection cannot pass.
-
-    ⛔ Negative-only assertions were the cycle-2 finding: `jq == "."` satisfies every
-    `assert volatile not in jq`, so the test passed on exactly the payload it exists to forbid.
-    """
-    jq = C._projection_of(C.INVARIANTS["repo.metadata"].argv)
-    for volatile in ("pushed_at", "updated_at", "open_issues_count", "stargazers_count"):
-        assert volatile not in jq, f"{volatile} changes every push; a 6h TTL over it is a stale read"
-    # ...and it must actually NAME the invariant fields it selects.
-    for wanted in ("default_branch", "full_name", "visibility"):
-        assert wanted in jq, f"the projection does not select {wanted}, so it is not the identity read"
-
-
-def test_declare_invariant_requires_a_projection() -> None:
+# ── global keys are scoped by CREDENTIAL ──────────────────────────────────────────────────────
+def test_read_refuses_a_non_credential_scope_for_a_global_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "tok-a")
     r = Counter()
     with pytest.raises(C.TtlNotPermitted):
-        C.declare_invariant("repo.note", ttl_s=600, argv=("api", "repos/{repo}"))
+        _read("user.identity", now=1000.0, reader=r, cache_dir=tmp_path, scope=SCOPE)
     assert r.n == 0
 
 
-# ── 8c (was P1): camelCase-aware mutable vocabulary ───────────────────────────────────────────
-@pytest.mark.parametrize("key", ["pr.mergeable", "pr.reviewDecision", "pr.draft", "branch.head_sha",
-                                 "repo.open_prs", "pr.merged_at"])
-def test_camel_case_mutable_names_are_refused(key: str) -> None:
-    """The draft's tokenizer only split on non-alphanumerics, so `mergeable` (not
-    `mergeStateStatus`) slipped through — the most obvious spelling of the name the guard names."""
+def test_read_recomputes_the_credential_scope_rather_than_trusting_a_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ A PREFIX TEST WAS NOT ENOUGH (cycle-4 finding 3).
+
+    Any literal `"global@…"` satisfied `scope.startswith("global@")`, so two lanes with different
+    tokens could both pass `"global@"` and share one entry. `read()` now recomputes the expected
+    scope and requires exact equality.
+    """
+    monkeypatch.setenv("GH_TOKEN", "tok-a")
+    r = Counter()
+    # The literal `"global@"` is exactly what the OLD prefix test accepted as a valid scope.
+    with pytest.raises(C.TtlNotPermitted):
+        _read("user.identity", now=1000.0, reader=r, cache_dir=tmp_path, scope="global@")
+    assert r.n == 0, "a bare 'global@' prefix was accepted as a credential scope"
+
+    # The computed scope is accepted, and a DIFFERENT credential's computed scope is not the same
+    # entry even though both are `global@…`.
+    real = C.scope_for("user.identity", "o/r", "main")
+    _read("user.identity", now=1000.0, reader=r, cache_dir=tmp_path, scope=real)
+    assert r.n == 1
+    monkeypatch.setenv("GH_TOKEN", "tok-b")
+    other = C.scope_for("user.identity", "o/r", "main")
+    assert other != real, "two credentials derived the same scope"
+    _read("user.identity", now=1000.0 + 1.0, reader=r, cache_dir=tmp_path, scope=other)
+    assert r.n == 2
+
+
+def test_two_credentials_never_share_an_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def reader(key: str) -> bytes:
+        calls.append("x")
+        return b'{"login":"%s"}' % (b"alice" if len(calls) == 1 else b"bob")
+
+    monkeypatch.setenv("GH_TOKEN", "tok-alice")
+    a = _read(
+        "user.identity",
+        now=1000.0,
+        reader=reader,
+        cache_dir=tmp_path,
+        scope=C.scope_for("user.identity", "o/r", "main"),
+    )
+    monkeypatch.setenv("GH_TOKEN", "tok-bob")
+    b = _read(
+        "user.identity",
+        now=1000.0,
+        reader=reader,
+        cache_dir=tmp_path,
+        scope=C.scope_for("user.identity", "o/r", "main"),
+    )
+
+    assert a != b, "two credentials shared one identity entry — wrong subject, valid envelope"
+    assert len(calls) == 2
+
+
+def test_global_scope_never_contains_the_raw_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "super-secret-token-value")
+    scope = C.scope_for("user.identity", "o/r", "main")
+    assert "super-secret-token-value" not in scope
+
+
+def test_no_identifiable_credential_refuses_to_cache_a_global_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown identity FAILS CLOSED — a global key is simply not cacheable."""
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert C._credential_fingerprint() is None
+    with pytest.raises(C.TtlNotPermitted):
+        C.scope_for("user.identity", "o/r", "main")
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 3. A MUTABLE KEY IS REFUSED, NEVER PASSED THROUGH (guard R4)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize(
+    "key",
+    [
+        "pr.state",
+        "pr.mergeStateStatus",
+        "pr.checks",
+        "run.status",
+        "runner.status",
+        "rate_limit.buckets",
+        "issue.state",
+        "pr.mergeable",
+        "pr.reviewDecision",
+        "repo.branches",
+        "repo.tags",
+        "repo.assignees",
+        "repo.releases",
+        "pr.approved",
+        "pr.approvals",
+        "repo.headsha",
+        "repo.headoid",
+        "repo.forks",
+        "repo.stargazers",
+        "repo.size",
+        "repo.archived",
+        "pr.files",
+        "pr.additions",
+        "pr.rebaseable",
+    ],
+)
+def test_mutable_key_is_refused(key: str, tmp_path: Path) -> None:
+    r = Counter()
     with pytest.raises(C.MutableReadRefused):
-        C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "."))
-    assert C.kind_of(key) == "mutable"
+        _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 0, (
+        "a refused key must not reach the network — a refusal that still issues the call is a "
+        "labelled pass-through, not a guard"
+    )
 
 
+def test_a_mutable_key_has_no_addressable_cache_entry(tmp_path: Path) -> None:
+    """There is no path at which a mutable entry could even be PLANTED.
+
+    `_cache_path` resolves the key through the registry, so a key outside it has no filename, no
+    directory and no lookup: the refusal is structural rather than a check that could be reordered
+    behind an `if path.exists()`.
+    """
+    with pytest.raises(KeyError):
+        C._cache_path("pr.state", SCOPE)
+    r = Counter()
+    with pytest.raises(C.MutableReadRefused):
+        _read("pr.state", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 0
+    assert not list(tmp_path.iterdir()), "a refused key must not have created an entry"
+
+
+def test_undeclared_key_is_refused(tmp_path: Path) -> None:
+    r = Counter()
+    with pytest.raises(C.MutableReadRefused):
+        _read("something.nobody.declared", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 0, "an UNDECLARED key is not provably invariant — refuse, do not assume"
+
+
+def test_registry_cannot_admit_a_mutable_name() -> None:
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(
+            "pr.mergeStateStatus", ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d
+        )
+
+
+def test_runner_inventory_is_cached_but_runner_status_is_not() -> None:
+    assert C.kind_of("runners.inventory") == "invariant"
+    assert C.kind_of("runner.status") == "mutable"
+
+
+# ── vocabulary shape ─────────────────────────────────────────────────────────────────────────
 def test_tokenizer_splits_camel_case() -> None:
     assert C._tokens("pr.reviewDecision") == ["pr", "review", "decision"]
     assert C._tokens("mergeStateStatus") == ["merge", "state", "status"]
@@ -436,85 +385,606 @@ def test_tokenizer_does_not_over_match() -> None:
     assert not C._is_mutable_name("runners.inventory")
 
 
-# ── 8e (was P2): a non-finite clock must not prove freshness ──────────────────────────────────
+@pytest.mark.parametrize("key", ["x.accurateLimit", "repo.generateLimit", "corporate.limits"])
+def test_glued_phrase_does_not_match_across_a_word_boundary(key: str) -> None:
+    """Scanning the WHOLE glued key refused `accurate`+`limit` — the `"run" in "runners"` class,
+    in the other direction. The phrase table matches ADJACENT TOKEN PAIRS only."""
+    assert not C._is_mutable_name(key), f"{key!r} is legitimate but was refused as mutable"
+
+
+def test_rate_limit_still_refused_after_pair_matching() -> None:
+    assert C._is_mutable_name("rate_limit.buckets")
+    assert C._is_mutable_name("ratelimit")
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 4. FAIL CLOSED WHEN FRESHNESS CANNOT BE PROVEN (guards R3, R5)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_corrupt_envelope_is_a_miss(tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    _entry(tmp_path).write_bytes(b"{not json")
+    out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2
+    assert out == b"payload-2"
+
+
+def test_tampered_payload_is_a_miss(tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    p = _entry(tmp_path)
+    env = json.loads(p.read_text())
+    env["payload"] = base64.b64encode(b"payload-99").decode()
+    p.write_text(json.dumps(env))
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2
+
+
+def test_clock_ahead_of_stored_at_is_a_miss(tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    p = _entry(tmp_path)
+    env = json.loads(p.read_text())
+    env["stored_at"] = 9999.0
+    p.write_text(json.dumps(env))
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2, "a future stamp is unprovable freshness, not infinite freshness"
+
+
+def test_stale_entry_is_never_a_fallback_for_a_failed_read(tmp_path: Path) -> None:
+    """⛔ THE LOAD-BEARING TEST. A reader that fails on a MISS must RAISE."""
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    r.fail = C.Unreadable("gh api failed: HTTP 403")
+    with pytest.raises(C.Unreadable):
+        _read(
+            "repo.metadata",
+            now=1000.0 + C.ttl_for("repo.metadata") + 1.0,
+            reader=r,
+            cache_dir=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        RuntimeError("gh api failed"),
+        OSError("disk/network fault"),
+        TimeoutError("reader timed out"),
+        ValueError("unparseable body"),
+    ],
+)
+def test_ANY_reader_failure_is_fail_closed_not_just_unreadable(
+    boom: Exception, tmp_path: Path
+) -> None:
+    """⛔ THE GENERIC HANDLER NEEDS ITS OWN FENCE (cycle-3 finding 1).
+
+    The `Unreadable` case above is re-raised by `except Unreadable: raise` and NEVER reaches the
+    generic `except Exception -> raise Unreadable`. Replacing that generic branch with `return b""`,
+    or with a real stale fallback, kept the earlier suite fully green.
+    """
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    r.fail = boom
+    with pytest.raises(C.Unreadable):
+        _read(
+            "repo.metadata",
+            now=1000.0 + C.ttl_for("repo.metadata") + 1.0,
+            reader=r,
+            cache_dir=tmp_path,
+        )
+
+
+def test_missing_cache_dir_is_a_miss_not_a_crash(tmp_path: Path) -> None:
+    r = Counter()
+    out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path / "nope" / "deeper")
+    assert out == b"payload-1"
+    assert r.n == 1
+
+
 @pytest.mark.parametrize("bad_now", [float("nan"), float("inf"), float("-inf")])
 def test_non_finite_now_never_serves_a_hit(bad_now: float, tmp_path: Path) -> None:
-    """⛔ The draft wrote `age < 0` and `age >= ttl` as two returns, so a NaN `now` made BOTH
-    false and an arbitrarily old entry was returned as provably fresh."""
+    """A NaN `now` made `age < 0` AND `age >= ttl` both false, serving an arbitrary old entry."""
     r = Counter()
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     _read("repo.metadata", now=bad_now, reader=r, cache_dir=tmp_path)
     assert r.n == 2, "a non-finite clock cannot prove freshness"
 
 
-def test_non_finite_stored_at_is_a_miss(tmp_path: Path) -> None:
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 5. NO WIDENING (guard R6)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_ttl_may_not_exceed_the_key_ceiling(tmp_path: Path) -> None:
     r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    p = _entry(tmp_path)
-    p.write_text(p.read_text().replace('"stored_at": 1000.0', '"stored_at": Infinity'))
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    with pytest.raises(C.TtlNotPermitted):
+        _read(
+            "repo.metadata",
+            now=1000.0,
+            reader=r,
+            ttl_s=C.ttl_for("repo.metadata") + 1,
+            cache_dir=tmp_path,
+        )
+    assert r.n == 0
+
+
+def test_requested_ttl_mismatch_invalidates_the_entry(tmp_path: Path) -> None:
+    r = Counter()
+    ceiling = C.ttl_for("repo.metadata")
+    _read("repo.metadata", now=1000.0, reader=r, ttl_s=ceiling, cache_dir=tmp_path)
+    _read(
+        "repo.metadata", now=1000.0 + 1.0, reader=r, ttl_s=max(60, ceiling // 2), cache_dir=tmp_path
+    )
     assert r.n == 2
 
 
-# ── 8f (was P2): declare_invariant must not WIDEN an existing ceiling ────────────────────────
+def test_shorter_ttl_is_allowed(tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, ttl_s=60, cache_dir=tmp_path)
+    _read("repo.metadata", now=1000.0 + 1.0, reader=r, ttl_s=60, cache_dir=tmp_path)
+    assert r.n == 1
+
+
 def test_declare_invariant_cannot_widen_an_existing_ceiling() -> None:
-    """That function is the documented way to add a key — so without this check the ceiling that
-    `read()` defends could be raised by a one-line call, making the constraint advisory."""
+    """⛔ The refusal must come from the CEILING guard, not from a different one.
+
+    The earlier version passed `--jq "."`, so the projection guard fired first and
+    `pytest.raises(TtlNotPermitted)` was satisfied by the wrong guard — deleting the ceiling check
+    outright left the suite green.
+    """
     before = C.ttl_for("repo.metadata")
-    # ⛔ `--jq "{id}"`, NOT `--jq "."`. With `.` the PROJECTION guard fires first and
-    # `pytest.raises(TtlNotPermitted)` is satisfied by the wrong guard — deleting the ceiling check
-    # entirely then left all 76 tests green (cycle-3 finding 2).
     with pytest.raises(C.TtlNotPermitted) as excinfo:
-        C.declare_invariant("repo.metadata", ttl_s=before * 4, argv=("api", "x", "--jq", "{id}"))
-    assert "ceiling" in str(excinfo.value), (
-        f"the refusal came from a different guard: {excinfo.value}"
-    )
-    assert C.ttl_for("repo.metadata") == before, "the ceiling was widened by a rejected call"
+        C.declare_invariant(
+            "repo.metadata",
+            ttl_s=before * 4,
+            argv=("api", "x"),
+            projection="p",
+            project=lambda d: d,
+        )
+    assert "ceiling" in str(excinfo.value), f"refused by a different guard: {excinfo.value}"
+    assert C.ttl_for("repo.metadata") == before
 
 
 def test_declare_invariant_may_tighten() -> None:
     key = "repo.tightenable"
-    C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
-    C.declare_invariant(key, ttl_s=60, argv=("api", "x", "--jq", "{id}"))
+    C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="p1", project=lambda d: d)
+    C.declare_invariant(key, ttl_s=60, argv=("api", "x"), projection="p1", project=lambda d: d)
     assert C.ttl_for(key) == 60
     C.INVARIANTS.pop(key, None)
 
 
-# ── 8g (was P2): paginated reads must emit ONE JSON document ─────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 6. GUARD 2 — NO KEY CACHES A WHOLE BODY. BEHAVIOURAL, not flag-string inspection.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_registry_keys_all_declare_a_projection_and_a_callable() -> None:
+    for key, spec in C.INVARIANTS.items():
+        assert callable(spec.project), f"{key!r} has no projection callable"
+        assert spec.projection and spec.projection.strip() != ".", f"{key!r} has no projection id"
+
+
+VOLATILE = {
+    "status": "online",
+    "busy": True,
+    "pushed_at": "2020-01-01T00:00:00Z",
+    "updated_at": "2020-01-01T00:00:00Z",
+    "created_at": "2020-01-01T00:00:00Z",
+    "open_issues_count": 7,
+    "stargazers_count": 9,
+    "forks_count": 3,
+    "size": 12345,
+    "archived": False,
+    "ephemeral": True,
+    "total_count": 99,
+    "enforcement_level": "everyone",
+    "topics": ["a"],
+    "plan": {"name": "free"},
+}
+
+#: A REALISTIC body per endpoint, carrying volatile fields beside the invariant ones.
+SHAPED = {
+    "repo.metadata": [
+        {
+            **VOLATILE,
+            "id": 1,
+            "node_id": "N1",
+            "full_name": "o/r",
+            "default_branch": "main",
+            "visibility": "private",
+        }
+    ],
+    "repo.required_set": [
+        {
+            **VOLATILE,
+            "required_status_checks": {"contexts": ["docs"], "checks": [{"context": "docs"}]},
+        }
+    ],
+    "repo.labels": [[{**VOLATILE, "name": "bug", "color": "fff"}]],
+    "repo.workflows": [
+        {
+            **VOLATILE,
+            "workflows": [
+                {**VOLATILE, "id": 3, "path": ".github/workflows/ci.yml", "state": "active"}
+            ],
+        }
+    ],
+    "runners.inventory": [
+        {
+            **VOLATILE,
+            "runners": [
+                {**VOLATILE, "name": "cmux", "labels": [{"name": "self-hosted", "color": "fff"}]}
+            ],
+        }
+    ],
+    "user.identity": [{**VOLATILE, "login": "someone", "id": 42}],
+}
+
+
+@pytest.mark.parametrize("key", sorted(C.INVARIANTS))
+def test_shipped_projections_drop_volatile_fields(key: str) -> None:
+    """⛔ BEHAVIOURAL GUARD 2. Feed a REAL body stuffed with volatile fields; none may survive.
+
+    Strictly stronger than inspecting a `--jq` string: it tests what the code DOES to a realistic
+    payload, so it keeps working if the projection is rewritten, and it cannot be satisfied by an
+    argv that merely mentions a flag.
+    """
+    out = C.INVARIANTS[key].project(SHAPED[key])
+    dumped = json.dumps(out)
+    for field in (
+        "pushed_at",
+        "updated_at",
+        "created_at",
+        "open_issues_count",
+        "stargazers_count",
+        "forks_count",
+        "archived",
+        "ephemeral",
+        "total_count",
+        "enforcement_level",
+        "topics",
+        "plan",
+        "busy",
+        "status",
+        "color",
+    ):
+        assert field not in dumped, f"{key!r} leaked volatile field {field!r}: {dumped}"
+
+
+@pytest.mark.parametrize("key", sorted(C.INVARIANTS))
+def test_shipped_projections_keep_their_invariant_fields(key: str) -> None:
+    """The other half: a projection that dropped EVERYTHING would pass the test above."""
+    out = C.INVARIANTS[key].project(SHAPED[key])
+    assert out, f"{key!r} projected to an empty answer from a well-formed body"
+    dumped = json.dumps(out)
+    for expected in {
+        "repo.metadata": ("o/r", "main"),
+        "repo.required_set": ("docs",),
+        "repo.labels": ("bug",),
+        "repo.workflows": (".github/workflows/ci.yml",),
+        "runners.inventory": ("cmux", "self-hosted"),
+        "user.identity": ("someone",),
+    }[key]:
+        assert expected in dumped, f"{key!r} DROPPED invariant value {expected!r}: {dumped}"
+
+
+# ── D3: a body the projection does not recognise must RAISE, never project nothing ────────────
+@pytest.mark.parametrize(
+    ("key", "body"),
+    [
+        # An error document projected to a complete-looking all-None identity, cached 6 h fresh.
+        ("repo.metadata", [{"message": "Server Error"}]),
+        ("repo.metadata", [{"whatever": 1}]),
+        ("user.identity", [{"message": "Bad credentials"}]),
+        # A wrong-shaped PAGE was silently dropped, so page 1 looked like the whole answer.
+        ("repo.labels", [[{"name": "a"}], {"message": "oops"}]),
+        ("repo.labels", [{"message": "oops"}]),
+        ("repo.workflows", [[{"id": 1}]]),
+        ("repo.workflows", [{"message": "oops"}]),
+        ("runners.inventory", [[{"name": "r"}]]),
+        ("runners.inventory", [{"message": "oops"}]),
+        # A missing collection is not an empty collection.
+        ("runners.inventory", [{"total_count": 0}]),
+        ("repo.workflows", [{"total_count": 3}]),
+        # An error body that ALSO carries the collection key: only the `message` marker catches
+        # this one, so without it an error projects to a cached "empty answer".
+        ("repo.workflows", [{"message": "oops", "workflows": []}]),
+        ("runners.inventory", [{"message": "oops", "runners": []}]),
+        # GitHub's REAL error shape (message + documentation_url + status).
+        (
+            "repo.metadata",
+            [{"message": "Not Found", "documentation_url": "https://x", "status": "404"}],
+        ),
+        # No page at all.
+        ("repo.metadata", []),
+    ],
+)
+def test_a_wrong_shaped_body_is_Unreadable_not_an_empty_answer(key: str, body) -> None:
+    """⛔ D3. `{"message": "Server Error"}` used to cache `{"id": None, …}` as fresh for six hours,
+    and a wrong-shaped page 2 used to be dropped so page 1 looked like the whole answer.
+
+    A fresh entry built from a body the code did not understand is a LIE, not a saving.
+    """
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS[key].project(body)
+
+
+def test_an_explicitly_empty_collection_is_a_valid_answer() -> None:
+    """An EMPTY list is a real answer — `{"total_count": 0, "runners": []}`. A MISSING list is not."""
+    assert C.INVARIANTS["runners.inventory"].project([{"total_count": 0, "runners": []}]) == []
+    assert C.INVARIANTS["repo.workflows"].project([{"total_count": 0, "workflows": []}]) == []
+
+
+def test_an_empty_label_PAGE_is_a_valid_answer() -> None:
+    """A page that is an empty array is a real answer; a MISSING page is not (`no page to project`)."""
+    assert C.INVARIANTS["repo.labels"].project([[]]) == []
+
+
+def test_runner_inventory_projection_drops_status_and_busy() -> None:
+    spec = C.INVARIANTS["runners.inventory"]
+    page = {
+        "runners": [
+            {
+                "name": "r1",
+                "status": "online",
+                "busy": True,
+                "labels": [{"name": "self-hosted", "type": "read-only"}],
+            },
+        ]
+    }
+    out = spec.project([page])
+    assert out == [{"name": "r1", "labels": ["self-hosted"]}], out
+    assert "status" not in json.dumps(out) and "busy" not in json.dumps(out)
+
+
+def test_repo_metadata_projection_keeps_only_identity_fields() -> None:
+    spec = C.INVARIANTS["repo.metadata"]
+    out = spec.project(
+        [
+            {
+                "id": 1,
+                "full_name": "o/r",
+                "default_branch": "main",
+                "visibility": "private",
+                "node_id": "N",
+                "pushed_at": "x",
+                "open_issues_count": 5,
+            }
+        ]
+    )
+    assert set(out) == {"id", "node_id", "full_name", "default_branch", "visibility"}
+
+
+def test_declare_invariant_requires_a_projection_callable() -> None:
+    with pytest.raises(C.TtlNotPermitted):
+        C.declare_invariant(
+            "repo.noproj", ttl_s=600, argv=("api", "x"), projection="p", project=None
+        )  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("proj", ["", "   ", "."])
+def test_declare_invariant_requires_a_real_projection_id(proj: str) -> None:
+    with pytest.raises(C.TtlNotPermitted):
+        C.declare_invariant(
+            "repo.badproj", ttl_s=600, argv=("api", "x"), projection=proj, project=lambda d: d
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 7. THE `--slurp`/`--jq` STRUCTURAL FIX (cycle-4 blockers 1 and 2)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize(
+    "flag", ["--jq", "-q", "--slurp", "--template", "-t", "--jq=.", "--template=x"]
+)
+def test_argv_may_not_carry_gh_projection_flags(flag: str) -> None:
+    """⛔ MEASURED: `gh api --paginate --slurp --jq '…'` → exit 1, 'the `--slurp` option is not
+    supported with `--jq` or `--template'`.
+
+    So requiring BOTH made every paginated key dead — and pflag takes the LAST `--jq` while a
+    validator sees the FIRST, so `--jq '{id}' --jq '.'` passed validation and cached the whole
+    body. Projection is this module's job; the argv may not carry these at all.
+    """
+    with pytest.raises(C.TtlNotPermitted):
+        C.declare_invariant(
+            "repo.flagged", ttl_s=600, argv=("api", "x", flag), projection="p", project=lambda d: d
+        )
+
+
+def test_no_shipped_key_carries_a_projection_flag() -> None:
+    for key, spec in C.INVARIANTS.items():
+        for a in spec.argv:
+            assert a not in C._FORBIDDEN_ARGV_FLAGS, f"{key!r} carries {a!r}"
+
+
 @pytest.mark.parametrize("key", ["repo.labels", "repo.workflows", "runners.inventory"])
-def test_paginated_keys_use_slurp(key: str) -> None:
-    """`gh api --paginate` without `--slurp` emits one document PER PAGE (`[..][..]`), which
-    `json.loads` cannot parse — cached, unreadable, for an hour, on the large repos."""
-    argv = C.INVARIANTS[key].argv
-    assert "--paginate" in argv
-    assert "--slurp" in argv, f"{key!r} paginates without --slurp, so its payload is not one document"
+def test_paginated_keys_still_paginate(key: str) -> None:
+    assert "--paginate" in C.INVARIANTS[key].argv, f"{key!r} must still fetch every page"
 
 
-# ── 8h (was P2): the atomicity claim must be PINNED, not asserted ────────────────────────────
+# ── decode_pages: what replaces `--slurp` ────────────────────────────────────────────────────
+def test_decode_pages_handles_several_concatenated_documents() -> None:
+    """`gh api --paginate` without `--slurp` emits one document PER PAGE."""
+    raw = b'[{"name":"a"}]\n[{"name":"b"}]'
+    assert C.decode_pages(raw) == [[{"name": "a"}], [{"name": "b"}]]
+
+
+def test_decode_pages_handles_a_single_document() -> None:
+    assert C.decode_pages(b'{"id": 1}') == [{"id": 1}]
+
+
+def test_decode_pages_handles_object_pages() -> None:
+    raw = b'{"workflows":[{"id":1}]}{"workflows":[{"id":2}]}'
+    assert C.decode_pages(raw) == [{"workflows": [{"id": 1}]}, {"workflows": [{"id": 2}]}]
+
+
+@pytest.mark.parametrize("raw", [b"", b"   \n\t ", b"not json at all", b"<html>504</html>"])
+def test_decode_pages_refuses_a_non_json_body(raw: bytes) -> None:
+    with pytest.raises(C.Unreadable):
+        C.decode_pages(raw)
+
+
+def test_projection_over_multiple_pages_concatenates() -> None:
+    spec = C.INVARIANTS["repo.labels"]
+    assert spec.project([[{"name": "a"}], [{"name": "b"}, {"name": "c"}]]) == ["a", "b", "c"]
+
+
+def test_gh_reader_APPLIES_the_projection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⛔ GUARD 2'S HOLE, CLOSED. Every other projection test calls `spec.project` DIRECTLY, so a
+    `_gh_reader` that returned `proc.stdout` unprojected would cache the whole body and stay green.
+
+    This drives the real reader with a stubbed `subprocess.run` (no network) and asserts the stored
+    bytes are the PROJECTION, and that the argv `gh` would receive carries no `--jq`/`--slurp`.
+    """
+    seen: list[list[str]] = []
+
+    class Proc:
+        returncode = 0
+        stderr = b""
+        # gh's real shape for this endpoint is one OBJECT per page, not an array of objects.
+        stdout = json.dumps(
+            {
+                "total_count": 1,
+                "runners": [
+                    {
+                        "name": "r1",
+                        "status": "online",
+                        "busy": True,
+                        "labels": [{"name": "self-hosted"}],
+                    }
+                ],
+            }
+        ).encode()
+
+    def fake_run(cmd, **kw):
+        seen.append(list(cmd))
+        return Proc()
+
+    monkeypatch.setattr(C.subprocess, "run", fake_run)
+    out = C._gh_reader("o/r", "main")("runners.inventory")
+
+    assert json.loads(out) == [{"name": "r1", "labels": ["self-hosted"]}], (
+        f"the reader stored an unprojected body: {out!r}"
+    )
+    assert b"online" not in out and b"busy" not in out
+    assert seen and "--paginate" in seen[0]
+    for flag in C._FORBIDDEN_ARGV_FLAGS:
+        assert flag not in seen[0], f"the argv handed to gh carries {flag!r}"
+
+
+def test_gh_reader_surfaces_a_nonzero_exit_as_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Proc:
+        returncode = 1
+        stdout = b""
+        stderr = b"gh: HTTP 403"
+
+    monkeypatch.setattr(C.subprocess, "run", lambda cmd, **kw: Proc())
+    with pytest.raises(C.Unreadable) as excinfo:
+        C._gh_reader("o/r", "main")("repo.metadata")
+    assert "403" in str(excinfo.value)
+
+
+def test_gh_reader_surfaces_a_projection_failure_as_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A projection that cannot run must not yield a cached answer."""
+    key = "repo.boom_projection"
+
+    def boom(docs):
+        raise KeyError("missing field")
+
+    C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="boom", project=boom)
+    try:
+
+        class Proc:
+            returncode = 0
+            stderr = b""
+            stdout = b'{"ok": true}'
+
+        monkeypatch.setattr(C.subprocess, "run", lambda cmd, **kw: Proc())
+        with pytest.raises(C.Unreadable):
+            C._gh_reader("o/r", "main")(key)
+    finally:
+        C.INVARIANTS.pop(key, None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 8. PROJECTION IS PART OF THE CACHE IDENTITY (guard 4)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_changing_a_projection_invalidates_the_cached_entry(tmp_path: Path) -> None:
+    """A maintenance edit to a shipped projection must not serve OLD-schema entries as fresh.
+
+    `repo.metadata` holds 6 h, so otherwise a newly-added field would be missing for six hours.
+    """
+    key = "repo.projection_probe"
+    C.declare_invariant(
+        key, ttl_s=600, argv=("api", "x"), projection="v1", project=lambda d: {"id": 1}
+    )
+    try:
+        r1 = Counter()
+        _read(key, now=1000.0, reader=r1, cache_dir=tmp_path)
+        assert r1.n == 1
+
+        C.INVARIANTS[key] = C.Invariant(
+            ttl_s=600,
+            argv=("api", "x"),
+            projection="v2",
+            project=lambda d: {"id": 1, "default_branch": "main"},
+        )
+        r2 = Counter()
+        _read(key, now=1000.0 + 1.0, reader=r2, cache_dir=tmp_path)
+        assert r2.n == 1, "an entry selected by the OLD projection was served as a fresh hit"
+    finally:
+        C.INVARIANTS.pop(key, None)
+
+
+def test_envelope_projection_must_match(tmp_path: Path) -> None:
+    """The second layer: a file at the right NAME is still rejected if its projection disagrees."""
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    p = _entry(tmp_path)
+    env = json.loads(p.read_text())
+    env["projection"] = C._projection_digest("a-different-projection")
+    p.write_text(json.dumps(env))
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2
+
+
+def test_envelope_digest_is_over_the_payload_only() -> None:
+    env = json.loads(C._envelope("repo.metadata", SCOPE, b"abc", now=1.0, ttl_s=2).decode())
+    assert env["sha256"] == hashlib.sha256(b"abc").hexdigest()
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 9. ATOMICITY (guard R8)
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_partial_entry_from_a_killed_writer_is_a_miss(tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    p = _entry(tmp_path)
+    p.write_bytes(p.read_bytes()[:10])
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2
+
+
 def test_store_is_atomic_a_failed_replace_leaves_the_old_entry_intact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """⛔ Discriminating, unlike a truncate-the-final-file test.
-    A regression to `path.write_bytes(blob)` (no temp file, no os.replace) would still pass every
-    other test in this file. This one fails if the write is not staged.
-    """
+    """⛔ Discriminating: a regression to `path.write_bytes(blob)` would pass every other test."""
     r = Counter()
     _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     good = _entry(tmp_path).read_bytes()
 
-    # Make the atomic swap fail: a staged writer leaves the previous entry untouched.
     def boom(src, dst):
         raise OSError("simulated crash during replace")
 
     monkeypatch.setattr(C.os, "replace", boom)
-    # Force a MISS (past TTL) so _store runs; the reader succeeds, so the CALLER must still get
-    # its fresh answer — a failed cache WRITE is a lost optimisation, never a failed read.
+
     def reader_then_crash(key: str) -> bytes:
         return b"payload-NEW"
 
-    got = _read("repo.metadata", now=1000.0 + C.ttl_for("repo.metadata") + 1,
-                reader=reader_then_crash, cache_dir=tmp_path)
-
+    got = _read(
+        "repo.metadata",
+        now=1000.0 + C.ttl_for("repo.metadata") + 1,
+        reader=reader_then_crash,
+        cache_dir=tmp_path,
+    )
     assert got == b"payload-NEW", "a failed cache WRITE must not fail a read that just succeeded"
     assert _entry(tmp_path).read_bytes() == good, (
         "a crashed swap must not have touched the existing entry — the write was not staged"
@@ -522,210 +992,345 @@ def test_store_is_atomic_a_failed_replace_leaves_the_old_entry_intact(
     assert not [p for p in tmp_path.iterdir() if ".tmp." in p.name], "staged temp file leaked"
 
 
-def test_store_leaves_no_temp_file_behind(tmp_path: Path) -> None:
-    r = Counter()
-    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
-    leftovers = [p.name for p in tmp_path.iterdir() if ".tmp." in p.name]
-    assert leftovers == [], f"staged temp files were not cleaned up: {leftovers}"
-    assert len(list(tmp_path.iterdir())) == 1
-
-
-# ══════════════════════════════════════════════════════════════════════════════════════════════
-# 9. REGRESSION FENCE FOR THE SECOND-DRAFT (CYCLE 2) REVIEW. Each fails against the second draft.
-# ══════════════════════════════════════════════════════════════════════════════════════════════
-
-# ── 9a (was P1): `--jq .` passed guard 2, since only the FLAG's presence was checked ─────────
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ("api", "repos/{repo}", "--jq", "."),
-        ("api", "repos/{repo}", "--jq", "   "),
-        ("api", "repos/{repo}", "--jq"),                                  # dangling, no expression
-        ("api", "repos/{repo}", "--jq=."),
-        ("api", "repos/{repo}"),                                          # no projection at all
-    ],
-)
-def test_identity_or_missing_projection_is_refused(argv: tuple[str, ...]) -> None:
-    """⛔ Guard 2 is about the EXPRESSION. `--jq .` caches the whole body; a dangling `--jq`
-    projects nothing. Both were ACCEPTED by the second draft."""
-    with pytest.raises(C.TtlNotPermitted):
-        C.declare_invariant("repo.smuggled", ttl_s=600, argv=argv)
-
-
-def test_identity_projection_cannot_replace_a_shipped_keys_projection() -> None:
-    """The sharpest form: re-declare an EXISTING key with `--jq .` and the same ceiling.
-
-    The second draft's ceiling check compared only `ttl_s`, so a shipped key's projection could be
-    silently widened to the whole body while keeping its TTL.
-    """
-    before = C._projection_of(C.INVARIANTS["repo.metadata"].argv)
-    with pytest.raises(C.TtlNotPermitted):
-        C.declare_invariant("repo.metadata", ttl_s=C.ttl_for("repo.metadata"),
-                            argv=("api", "repos/{repo}", "--jq", "."))
-    assert C._projection_of(C.INVARIANTS["repo.metadata"].argv) == before
-
-
-def test_guard2_boundary_the_module_cannot_police_projection_CONTENTS() -> None:
-    """⛔ AN HONEST BOUNDARY, stated as a test rather than left as an implied guarantee.
-
-    Guard 2 mechanically refuses an IDENTITY or EMPTY projection (that is the whole-body class).
-    It CANNOT refuse a projection that explicitly names a mutable field, because the same word
-    means different things per endpoint: `{id, path, state}` over `actions/workflows` is INVARIANT
-    (a workflow definition's enabled/disabled state), while `state` on a PR is not. A mechanical
-    scan for "state" would refuse the registry's own `repo.workflows`.
-
-    So: a projection naming a mutable field is a CODE-REVIEW matter, not a mechanical one, and this
-    test pins that the boundary is where we say it is — rather than pretending the module catches it.
-    """
-    C.declare_invariant(
-        "runner.pool", ttl_s=600,
-        argv=("api", "repos/{repo}/actions/runners", "--paginate", "--slurp",
-              "--jq", "[.[].runners[] | {name, status, busy}]"),
-    )
-    C.INVARIANTS.pop("runner.pool", None)
-
-
-def test_the_shipped_registry_does_not_name_mutable_runner_fields() -> None:
-    """What GUARANTEES the runners read is safe: the shipped projection, which a test pins."""
-    jq = C._projection_of(C.INVARIANTS["runners.inventory"].argv)
-    assert "status" not in jq and "busy" not in jq
-
-
-# ── 9b (was P2): the projection was not part of the cache identity ───────────────────────────
-def test_changing_a_projection_invalidates_the_cached_entry(tmp_path: Path) -> None:
-    """⛔ A maintenance edit to a shipped `--jq` must not serve OLD-schema entries as fresh hits.
-
-    `repo.metadata` holds for 6 h; without this, adding a field to its projection would leave every
-    caller seeing `payload["default_branch"]` as missing for six hours.
-    """
-    key = "repo.projection_probe"
-    C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
+def test_import_time_guard_rejects_a_hand_registered_whole_body_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ MUTATION 9's FENCE. `INVARIANTS[k] = …` bypasses `declare_invariant`, so the import-time
+    guard has to be re-run — and its behaviour must be pinned, not just its presence."""
+    key = "repo.hand_registered"
+    C.INVARIANTS[key] = C.Invariant(ttl_s=600, argv=("api", "x"), projection=".", project=None)  # type: ignore[arg-type]
     try:
-        r1 = Counter()
-        _read(key, now=1000.0, reader=r1, cache_dir=tmp_path)
-        assert r1.n == 1
-
-        # A second, still-valid entry under the SAME key/scope but a DIFFERENT projection.
-        C.INVARIANTS[key] = C.Invariant(ttl_s=600, argv=("api", "x", "--jq", "{id, default_branch}"))
-        r2 = Counter()
-        got = _read(key, now=1000.0 + 1.0, reader=r2, cache_dir=tmp_path)
-        assert r2.n == 1, "an entry selected by the OLD projection was served as a fresh hit"
-        assert got == b"payload-1" != b"" and got is not None
+        with pytest.raises(C.TtlNotPermitted):
+            C._assert_every_key_projects()
     finally:
         C.INVARIANTS.pop(key, None)
 
 
-# ── 9c (was P2): `--paginate` without `--slurp` was accepted for any NEW key ─────────────────
-def test_new_paginated_key_without_slurp_is_refused() -> None:
-    """R7 was pinned only for the three shipped keys; the guard itself must refuse."""
-    # ⛔ `repo.license`, NOT `repo.branches`: a branch list is MUTABLE (it changes on every push),
-    # so using it as the example of a legitimate new key was itself the cycle-3 finding 7 defect.
-    with pytest.raises(C.TtlNotPermitted):
-        C.declare_invariant("repo.license", ttl_s=600,
-                            argv=("api", "repos/{repo}/license", "--paginate", "--jq", ".[] | .name"))
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 10. CYCLE-5 FINDINGS — the paths that were described but NOT pinned
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_the_import_time_registry_guard_actually_RAN() -> None:
+    """⛔ The call was bare, so it could be deleted with all 107 earlier tests still green
+    (every test called `_assert_every_key_projects` DIRECTLY). It is now bound to `_IMPORT_CHECK`,
+    so deleting the call site raises AttributeError here."""
+    assert C._IMPORT_CHECK is True
 
 
-# ── 9d (was P2): mutable false NEGATIVES in the vocabulary ───────────────────────────────────
-@pytest.mark.parametrize("key", ["repo.lastPush", "repo.headRefOid", "repo.issueTotal", "repo.prstate"])
-def test_more_mutable_spellings_are_refused(key: str) -> None:
-    """`push`/`oid`/`total` were absent, and `prstate` (one glued token) had no token match."""
-    assert C._is_mutable_name(key), f"{key!r} is mutable state but was labelled invariant"
-    with pytest.raises(C.MutableReadRefused):
-        C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
+def test_read_validates_the_spec_on_every_call(tmp_path: Path) -> None:
+    """Defence in depth for guard 2: even a key inserted straight into INVARIANTS (bypassing
+    `declare_invariant`) cannot be read if it declares no projection."""
+    key = "repo.injected"
+    C.INVARIANTS[key] = C.Invariant(ttl_s=600, argv=("api", "x"), projection=".", project=None)  # type: ignore[arg-type]
+    try:
+        r = Counter()
+        with pytest.raises(C.TtlNotPermitted):
+            _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
+        assert r.n == 0
+    finally:
+        C.INVARIANTS.pop(key, None)
 
 
-# ── 9e (was P2): glued-phrase matching over-matched ACROSS word boundaries ───────────────────
-@pytest.mark.parametrize("key", ["x.accurateLimit", "repo.generateLimit", "corporate.limits"])
-def test_glued_phrase_does_not_match_across_a_word_boundary(key: str) -> None:
-    """⛔ The second draft scanned the WHOLE glued key for `ratelimit`, so `accurate`+`limit`
-    matched — the same over-match class as `"run" in "runners"`, in the other direction.
-
-    The phrase table is now matched against ADJACENT TOKEN PAIRS only.
-    """
-    assert not C._is_mutable_name(key), f"{key!r} is legitimate but was refused as mutable"
-
-
-def test_rate_limit_still_refused_after_pair_matching() -> None:
-    """The pair rule must not lose the case it was built for."""
-    assert C._is_mutable_name("rate_limit.buckets")
-    assert C._is_mutable_name("ratelimit")
+def test_a_non_numeric_clock_is_refused_not_a_crash(tmp_path: Path) -> None:
+    """`read(now="1000")` reached `math.isfinite` and raised TypeError — unhandled, where the
+    contract promises "any doubt → MISS"."""
+    r = Counter()
+    # A NUMERIC STRING is accepted (it converts cleanly); a non-number is REFUSED, where the old
+    # code crashed with an unhandled TypeError from inside the freshness test.
+    for bad in ("not-a-number", None, object()):
+        with pytest.raises(C.TtlNotPermitted):
+            _read("repo.metadata", now=bad, reader=r, cache_dir=tmp_path)  # type: ignore[arg-type]
+    assert r.n == 0
+    assert _read("repo.metadata", now="1000", reader=r, cache_dir=tmp_path) == b"payload-1"
 
 
-# ── 9f (was P2): a global key's scope ignored the CREDENTIAL that answers it ─────────────────
-def test_global_scope_is_scoped_by_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    """⛔ `api user` answers "which account is this?" — decided by GH_TOKEN, which the filename
-    digest could not see. Two credentials sharing a cache dir got each other's identity for 12 h."""
-    monkeypatch.setenv("GH_TOKEN", "token-alice")
-    a = C.scope_for("user.identity", "o/r", "main")
-    monkeypatch.setenv("GH_TOKEN", "token-bob")
-    b = C.scope_for("user.identity", "o/r", "main")
-    assert a != b, "two credentials share one identity entry — wrong subject, valid envelope"
-    assert "token-alice" not in a and "token-bob" not in b, "the raw token must never reach a filename"
+def test_an_Infinity_stamped_envelope_is_a_MISS_not_a_latched_crash(tmp_path: Path) -> None:
+    """⛔ D2. `json.loads` ACCEPTS the bare `Infinity` literal and `int(inf)` raises OverflowError,
+    which is NOT a ValueError — so it escaped `_load`, escaped `read()`'s contract, escaped
+    `main()`'s handlers, and LATCHED: the read never reached the reader, so the bad entry was never
+    rewritten and every later read of that key raised too, until `--purge`."""
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    p = _entry(tmp_path)
+    env = json.loads(p.read_text())
+    env["ttl_s"] = float("inf")
+    p.write_text(json.dumps(env))  # written as the bare Infinity literal, which json accepts
+
+    out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)  # must NOT raise
+    assert r.n == 2, "the malformed entry must be a MISS, and the MISS must rewrite it"
+    assert out == b"payload-2"
+    # ...and it must be HEALED: the next read is a normal hit, not another failure.
+    _read("repo.metadata", now=1000.0 + 1.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2, "the bad entry was not healed by the re-read"
 
 
-def test_credential_fingerprint_is_stable_and_not_the_raw_token(
-    monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("field", ["stored_at", "ttl_s"])
+def test_a_non_finite_envelope_field_is_a_miss(field: str, tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    p = _entry(tmp_path)
+    env = json.loads(p.read_text())
+    env[field] = float("nan") if field == "stored_at" else float("-inf")
+    p.write_text(json.dumps(env))
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2
+
+
+# ── D4: the digest tracks the SOURCE, not the hand-written id ──────────────────────────────
+def test_projection_digest_changes_when_the_source_changes() -> None:
+    """⛔ An id is a RENAME-detector. Editing the projection BODY while leaving `…-v1` in place used
+    to serve the old-schema entry as a fresh hit for the whole TTL."""
+
+    def v_one(docs):
+        return {"id": 1}
+
+    def v_two(docs):
+        return {"id": 1, "full_name": "o/r"}
+
+    assert C._projection_digest("same-id", v_one) != C._projection_digest("same-id", v_two)
+    assert C._projection_digest("same-id", v_one) == C._projection_digest("same-id", v_one)
+    assert C._projection_digest("a", v_one) != C._projection_digest("b", v_one)
+
+
+def test_shipped_projections_are_identified_by_source_not_only_by_id() -> None:
+    for key, spec in C.INVARIANTS.items():
+        with_source = C._projection_digest(spec.projection, spec.project)
+        id_only = C._projection_digest(spec.projection)
+        assert with_source != id_only, (
+            f"{key!r}: the source contributes nothing to the identity, so an edit to the "
+            f"projection body would not invalidate the cached entry"
+        )
+
+
+def test_a_cached_entry_stops_matching_when_the_shipped_projection_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("GH_TOKEN", "same-token-value")
-    one = C._credential_fingerprint()
-    two = C._credential_fingerprint()
-    assert one == two
-    assert "same-token-value" not in one
+    key = "repo.metadata"
+    r = Counter()
+    _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 1
+
+    def widened(docs):
+        return {**C.INVARIANTS[key].project(docs), "new_field": True}
+
+    import dataclasses
+
+    monkeypatch.setitem(  # same declared id — only the BODY changed
+        C.INVARIANTS, key, dataclasses.replace(C.INVARIANTS[key], project=widened)
+    )
+    r2 = Counter()
+    _read(key, now=1000.0 + 1.0, reader=r2, cache_dir=tmp_path)
+    assert r2.n == 1, "an entry built from the OLD projection was served after the body changed"
+
+
+# ── the CLI, which was entirely untested ──────────────────────────────────────────────────
+class _Out:
+    """Stands in for sys.stdout so `main()`'s `sys.stdout.buffer.write` works under pytest."""
+
+    def __init__(self) -> None:
+        self.buffer = __import__("io").BytesIO()
+        self.text: list[str] = []
+
+    def write(self, s: str) -> int:
+        self.text.append(s)
+        return len(s)
+
+    def flush(self) -> None:
+        return None
+
+
+def test_cli_list_prints_the_registry() -> None:
+    out = _Out()
+    import io
+    import sys as _sys
+
+    buf = io.StringIO()
+    old = _sys.stdout
+    _sys.stdout = buf
+    try:
+        rc = C.main(["--list"])
+    finally:
+        _sys.stdout = old
+    assert rc == 0
+    for key in C.INVARIANTS:
+        assert key in buf.getvalue()
+    assert out is not None
+
+
+def test_cli_purge_removes_entries(tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert list(tmp_path.iterdir())
+    rc = C.main(["--purge", "--cache-dir", str(tmp_path)])
+    assert rc == 0
+    assert not list(tmp_path.iterdir()), "--purge left entries behind"
+
+
+def test_cli_requires_a_key(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        C.main(["--cache-dir", str(tmp_path)])
+
+
+def test_cli_refuses_a_mutable_key(tmp_path: Path) -> None:
+    assert C.main(["--key", "pr.state", "--repo", "o/r", "--cache-dir", str(tmp_path)]) == 1
+
+
+def test_cli_no_cache_reads_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_reader(repo: str, branch: str):
+        def _r(key: str) -> bytes:
+            calls.append(key)
+            return b'{"live": true}'
+
+        return _r
+
+    monkeypatch.setattr(C, "_gh_reader", fake_reader)
+    out = _Out()
+    monkeypatch.setattr(C.sys, "stdout", out)
+    rc = C.main(
+        ["--key", "repo.metadata", "--repo", "o/r", "--cache-dir", str(tmp_path), "--no-cache"]
+    )
+    assert rc == 0
+    assert out.buffer.getvalue() == b'{"live": true}'
+    assert calls == ["repo.metadata"]
+    assert not list(tmp_path.iterdir()), "--no-cache must not write an entry"
+
+
+def test_cli_global_key_without_a_token_still_reads_LIVE(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ D5. `scope_for` correctly refuses to guess an account, but the CLI must NOT dead-end
+    there: the promise is a live read, and that branch had ZERO coverage — deleting it silently
+    turned a live read into `REFUSED exit 1`."""
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    # ⛔ None, NOT a constant: an unidentifiable account must not share one entry (cycle-3 finding 5).
-    assert C._credential_fingerprint() is None
-    with pytest.raises(C.TtlNotPermitted):
-        C.scope_for("user.identity", "o/r", "main")
+    calls: list[str] = []
+
+    def fake_reader(repo: str, branch: str):
+        def _r(key: str) -> bytes:
+            calls.append(key)
+            return b'{"login": "someone"}'
+
+        return _r
+
+    monkeypatch.setattr(C, "_gh_reader", fake_reader)
+    out = _Out()
+    monkeypatch.setattr(C.sys, "stdout", out)
+    rc = C.main(["--key", "user.identity", "--cache-dir", str(tmp_path)])
+    assert rc == 0, "a global key with no identifiable credential must be read LIVE, not refused"
+    assert out.buffer.getvalue() == b'{"login": "someone"}'
+    assert calls == ["user.identity"]
+    assert not list(tmp_path.iterdir()), "an unidentifiable-credential read must not be cached"
 
 
-# ── 9g (was P1): read() itself must enforce the GLOBAL key's credential scope ─────────────────
-def test_read_refuses_a_non_credential_scope_for_a_global_key(tmp_path: Path) -> None:
-    """⛔ R1's global half lived ONLY in `scope_for`, which `read()` never consults.
+def test_cli_honours_a_tightened_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
 
-    `read("user.identity", scope="owner/name@main")` — the exact spelling the USAGE block shows —
-    was ACCEPTED and served: two lanes with different tokens shared one identity entry.
+    def fake_reader(repo: str, branch: str):
+        def _r(key: str) -> bytes:
+            calls.append(key)
+            return b"{}"
+
+        return _r
+
+    monkeypatch.setattr(C, "_gh_reader", fake_reader)
+    out = _Out()
+    monkeypatch.setattr(C.sys, "stdout", out)
+    assert (
+        C.main(
+            ["--key", "repo.metadata", "--repo", "o/r", "--cache-dir", str(tmp_path), "--ttl", "60"]
+        )
+        == 0
+    )
+    assert (
+        C.main(
+            ["--key", "repo.metadata", "--repo", "o/r", "--cache-dir", str(tmp_path), "--ttl", "60"]
+        )
+        == 0
+    )
+    assert len(calls) == 1, "--ttl 60 should have produced one live read and one hit"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 11. CYCLE-6 FINDINGS — "an identity with nulls" is not an answer
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_required_set_ABSENT_is_not_the_same_as_NULL() -> None:
+    """⛔ THE MERGE-GATING KEY. An empty required set reads as "this branch requires no checks".
+
+    Measured before this check: `[{}]` — and a BRANCH OBJECT (`{"id":1,"name":"main",
+    "protection":{}}`) — both projected to `{"contexts": [], "checks": []}` and were cached for 30
+    minutes. `required_status_checks: null` is the legitimate answer; an ABSENT key is not.
     """
-    r = Counter()
-    with pytest.raises(C.TtlNotPermitted):
-        _read("user.identity", now=1000.0, reader=r, cache_dir=tmp_path,
-              scope="daniel-ospina/tortoise@main")
-    assert r.n == 0
+    for body in ([{}], [{"id": 1, "name": "main", "protection": {}}]):
+        with pytest.raises(C.Unreadable):
+            C.INVARIANTS["repo.required_set"].project(body)
 
 
-def test_read_accepts_the_credential_scope_for_a_global_key(tmp_path: Path,
-                                                            monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GH_TOKEN", "tok-xyz")
-    r = Counter()
-    scope = C.scope_for("user.identity", "o/r", "main")
-    first = _read("user.identity", now=1000.0, reader=r, cache_dir=tmp_path, scope=scope)
-    second = _read("user.identity", now=1000.0 + 1.0, reader=r, cache_dir=tmp_path, scope=scope)
-    assert first == second and r.n == 1
+def test_required_set_null_is_the_legitimate_no_checks_answer() -> None:
+    assert C.INVARIANTS["repo.required_set"].project([{"required_status_checks": None}]) == {
+        "contexts": [],
+        "checks": [],
+    }
 
 
-# ── 9h (was P2): two callers at different TTLs thrashed ONE file ─────────────────────────────
-def test_different_ttls_do_not_evict_each_others_entries(tmp_path: Path) -> None:
-    """The filename had no TTL component while `_load` rejects a mismatched stamped ttl, so
-    alternating TTLs produced 12 live reads where a working cache does 2 — silently disabling the
-    cache for that key, i.e. exactly the burn this module exists to stop."""
-    # ceiling TTL is the default (ttl_s=None); `tight` is the tightened one.
-    tight = 900
-    r = Counter()
-    for i in range(6):
-        _read("repo.metadata", now=1000.0 + i, reader=r, cache_dir=tmp_path)                 # ceiling
-        _read("repo.metadata", now=1000.0 + i, reader=r, cache_dir=tmp_path, ttl_s=tight)   # tight
-    assert r.n == 2, f"alternating TTLs thrashed one file: {r.n} live reads, expected 2"
-    assert len(list(tmp_path.iterdir())) == 2, "each TTL must own its own entry"
-
-
-# ── 9i (was P2, fails OPEN): whole mutable CLASSES were admitted ─────────────────────────────
 @pytest.mark.parametrize(
-    "key",
-    ["repo.branches", "repo.branchList", "repo.tags", "repo.assignees", "repo.releases",
-     "pr.approved", "pr.approvals", "pr.approvedAt", "repo.headsha", "repo.headoid"],
+    ("key", "body"),
+    [
+        # A body that names no identity: `login` absent used to yield {"login": None, "id": 1}.
+        ("user.identity", [{"id": 1}]),
+        ("repo.metadata", [{"id": 1}]),
+        # An inventory/workflow entry that names nothing.
+        ("repo.workflows", [{"workflows": [{}]}]),
+        ("repo.workflows", [{"workflows": [{"id": 1, "path": "a"}]}]),
+        ("runners.inventory", [{"runners": [{}]}]),
+        # Everything projected is null.
+        ("user.identity", [{"login": None, "id": None}]),
+    ],
 )
-def test_inventory_class_mutable_names_are_refused(key: str) -> None:
-    """A branch/tag/approval SET changes on every push or review. All of these were ACCEPTED."""
-    assert C._is_mutable_name(key), f"{key!r} is mutable inventory state but was labelled invariant"
-    with pytest.raises(C.MutableReadRefused):
-        C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
+def test_an_identity_with_nulls_is_not_an_answer(key: str, body) -> None:
+    """⛔ `[{"id": 1}]` used to project `user.identity` to `{"login": None, "id": 1}`: an identity
+    naming no account, cached for 12 hours. Same for `[{}]` inside a collections response."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS[key].project(body)
+
+
+def test_a_well_formed_identity_still_projects() -> None:
+    """The other direction — the added strictness must not refuse a real body."""
+    assert C.INVARIANTS["user.identity"].project([{"login": "a", "id": 7}]) == {
+        "login": "a",
+        "id": 7,
+    }
+
+
+def test_a_non_dict_envelope_is_a_miss_not_an_AttributeError(tmp_path: Path) -> None:
+    """A JSON ARRAY envelope raises AttributeError out of `_load` on the `env.get(...)` path — the
+    same uncaught-exception/latch class as the OverflowError defect."""
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    _entry(tmp_path).write_text("[1, 2, 3]")
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)  # must not raise
+    assert r.n == 2
+
+
+@pytest.mark.parametrize("raw", [b"[1,2,3]", b'"a string"', b"null", b"0", b"{}"])
+def test_odd_envelopes_never_escape_load(raw: bytes, tmp_path: Path) -> None:
+    r = Counter()
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    _entry(tmp_path).write_bytes(raw)
+    _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 2
+
+
+@pytest.mark.parametrize("payload", ["a string", None, 42, {"a": 1}])
+def test_a_reader_returning_non_bytes_is_Unreadable(payload, tmp_path: Path) -> None:
+    """`bytes("str")` raises TypeError out of `read()` — uncaught, where the contract promises
+    `Unreadable`."""
+    r = Counter()
+    r.fail = None
+
+    def bad_reader(key: str):
+        return payload
+
+    with pytest.raises(C.Unreadable):
+        _read("repo.metadata", now=1000.0, reader=bad_reader, cache_dir=tmp_path)
+    assert r.n == 0

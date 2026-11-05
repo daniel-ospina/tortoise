@@ -11,57 +11,90 @@ read. It is a good gate — and it has **no cache**, so every poll is a live cal
 GitHub's own best practice says, under *Avoid polling*:
 
     "Make authenticated conditional requests, so that unchanged data does not count against your
-     primary rate limit." … "Request only the data that you need, and keep responses stable, so
-     that more of your polls return 304 Not Modified."
+     primary rate limit." … "keep responses stable, so that more of your polls return 304 Not
+     Modified."
     — docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api
 
 The pool did not empty because the gate refused. It emptied because the FLEET ASKED 5,000 TIMES an
-hour for answers that had not changed.
+hour for answers that had not changed: a repo's identity, its required-check set, its runner
+INVENTORY, its label set.
 
 WHAT THIS IS NOT
 ----------------
-* **It is not a general `gh` cache.** A key not in :data:`INVARIANTS` is REFUSED
+* **Not a general `gh` cache.** A key outside :data:`INVARIANTS` is REFUSED
   (:class:`MutableReadRefused`); there is no pass-through.
-* **It is not `gh-gate`.** The gate decides WHEN a call may happen; this decides WHETHER it needs
-  to. A hit never reaches the gate at all.
-* **It is not a stale-serving cache.** See FAIL-CLOSED.
+* **Not `gh-gate`.** The gate decides WHEN a call may happen; this decides WHETHER it needs to.
+  A hit never reaches the gate at all.
+* **Not a stale-serving cache.** See FAIL-CLOSED.
 
-THE THREE STRUCTURAL GUARDS
----------------------------
-Each of these is enforced in code AND pinned by a test, because each one, when it was absent, was a
-real false-PASS in a review of the first draft:
+⛔ WHY THE PROJECTION LIVES IN PYTHON AND NOT IN `--jq`
+------------------------------------------------------
+Cycle 4 of review measured, against the installed `gh 2.103.3`:
 
-1. **SCOPE IS PART OF THE CACHE IDENTITY.** ``read()`` requires a ``scope`` (e.g. ``owner/repo@main``)
-   and it is folded into the entry's filename digest *and* re-verified inside the envelope. Without
-   this, one repo's branch-protection answer was served verbatim as another repo's — a valid
-   envelope, a valid digest, a fresh age, and the wrong subject. A caller cannot forget it: it is a
-   required keyword.
-2. **NO KEY CACHES A WHOLE RESPONSE BODY.** Every registry entry carries a ``--jq`` PROJECTION
-   selecting only invariant fields, and the module refuses to start if one does not (an
-   import-time assertion, plus a test). `repos/{repo}/actions/runners` returns ``status`` and
-   ``busy`` — second-to-second — beside the invariant ``name``/``labels``; caching the body would
-   replay a 30-minute-old "idle" pool. A key-name check can never see that, because the mutability
-   is in the PAYLOAD, not the name.
-3. **FRESHNESS ARITHMETIC CANNOT BE BYPASSED BY A NON-FINITE CLOCK.** ``now`` and ``stored_at`` must
-   both be finite, and the test is a single ``0 <= age < ttl``. The first draft wrote ``age < 0`` and
-   ``age >= ttl`` as two separate returns, so a NaN ``now`` made BOTH false and the entry was
-   returned as provably fresh.
+    $ gh api repos/o/r --paginate --slurp --jq '.[].name'
+    the `--slurp` option is not supported with `--jq` or `--template`
 
-FAIL-CLOSED — the rule the whole design hangs on
-------------------------------------------------
-A cached value is served ONLY when its freshness is *provable*, and freshness requires ALL of:
+So "assemble one document" (`--slurp`) and "project the invariant fields" (`--jq`) are **jointly
+unsatisfiable** — every paginated key was dead, and the test that "pinned" `--slurp` was pinning an
+argv `gh` rejects. A second defect rode on the same flag: `pflag` takes the LAST `--jq`, while the
+guard validated the FIRST, so `--jq '{id}' --jq '.'` passed validation and cached the whole body.
 
-1. the entry parses as an envelope with the expected fields;
-2. the envelope's ``key`` and ``scope`` equal the ones asked for (no cross-key, no cross-scope poaching);
-3. ``sha256(payload)`` equals the recorded digest (the bytes are the bytes that were stored);
-4. ``stored_at`` and ``now`` are finite and ``0 <= now - stored_at < ttl`` — so a future stamp is a
-   MISS, not infinite freshness, and ``age == ttl`` is EXPIRED, not "approximately fresh";
-5. the entry was stamped under the SAME ttl being asked for.
+Both are structural, so the fix is structural: **the registry owns the projection as a Python
+callable, and the argv carries no `--jq`/`--slurp`/`--template` at all.** The reader decodes the
+(possibly multi-document) paginated stream and applies the projection itself. Guard 2 is then a
+property of OUR code, checked by a BEHAVIOURAL test (feed a body with volatile fields; assert they
+do not survive), not by inspecting a vendor flag string.
 
-Anything else is a MISS. And on a MISS the reader is called: **a stale entry is NEVER a fallback for
-a failed read.** If the re-read fails, this raises :class:`Unreadable` rather than answering from the
-expired entry — because "I could not read" must stay distinguishable from "I read X", and collapsing
-those two is exactly how a drained pool produced artifacts that looked like measurements.
+THE FOUR STRUCTURAL GUARDS
+--------------------------
+Each is enforced in code. Where a guard can be removed with the suite still green, that is stated
+HERE rather than claimed away — cycle 5 of review measured exactly which ones are inert, and the
+earlier blanket claim ("each is pinned by a test that fails when the guard is removed") was false.
+
+1. **SCOPE IS CACHE IDENTITY.** ``read()`` requires ``scope`` and it is folded into the filename
+   digest AND re-verified in the envelope. Without it one repo's branch-protection answer was
+   served as another's — valid envelope, valid digest, fresh age, wrong subject. Global keys
+   (``api user``) are scoped by a **credential fingerprint**, and ``read()`` recomputes it rather
+   than trusting a caller-supplied string.
+2. **NO KEY CACHES A WHOLE RESPONSE BODY.** Every key declares a ``project`` callable over the
+   decoded pages. Enforced on EVERY ``read()`` and at import; argv may not carry
+   ``--jq``/``--slurp``. Stated honestly: this pins the SIX SHIPPED KEYS, not the concept — a
+   ``project=lambda d: d`` passes every guard, so a future key still needs a reviewer. What IS
+   mechanical is that a projection cannot silently return an empty or all-``None`` answer from a
+   body it does not recognise (see :func:`_require_shape`).
+3. **FRESHNESS ARITHMETIC CANNOT BE BYPASSED.** ``now`` and ``stored_at`` must be finite and the
+   test is a single ``0 <= age < ttl``. Two separate returns let a NaN ``now`` make both false and
+   an arbitrarily old entry was served as provably fresh.
+4. **THE PROJECTION + TTL ARE PART OF THE IDENTITY.** A maintenance edit to a shipped projection
+   would otherwise serve old-SCHEMA entries as fresh hits for the whole TTL. The projection digest
+   is taken over the projection's **SOURCE**, not over a hand-written id: an id is only a
+   rename-detector, and editing ``_project_repo_metadata``'s body while leaving ``“…-v1”`` in place
+   served the old-schema entry as a fresh hit.
+   Two layers carry it — the filename digest and the envelope stamp — and they are **deliberately
+   redundant, in DIFFERENT directions**: for the PROJECTION the envelope is authoritative (removing
+   the filename's projection alone leaves the suite green; removing the envelope's alone is killed);
+   for the TTL the FILENAME is (removing the envelope's ``ttl_s`` check alone leaves the suite
+   green). A later reader must not "simplify" either layer away believing the other covers the same
+   direction.
+
+FAIL-CLOSED ON SHAPE, NOT ONLY ON TIME
+--------------------------------------
+A fresh entry can still be a LIE if the body it was built from was not the body we expected. An
+error document cached at a 6-hour TTL is a complete-looking identity whose every field is ``None``.
+So each projection goes through :func:`_require_shape` and RAISES ``Unreadable`` rather than
+projecting nothing from a body it does not recognise — "I could not read" must never become
+"I read an empty answer".
+
+FAIL-CLOSED
+-----------
+A cached value is served ONLY when freshness is *provable*: the envelope parses; its ``key``,
+``scope``, ``projection`` and ``ttl_s`` equal the ones asked for; ``sha256(payload)`` matches;
+``now`` and ``stored_at`` are finite; and ``0 <= now - stored_at < ttl`` (so ``age == ttl`` is
+EXPIRED, and a future stamp is a MISS). Anything else is a MISS — and on a MISS the reader runs.
+
+**A stale entry is NEVER a fallback for a failed read.** Any reader failure raises
+:class:`Unreadable`. "I could not read" must stay distinguishable from "I read X": collapsing those
+two is exactly how a drained pool produced artifacts that looked like measurements.
 
 USAGE
     import gh_read_cache as C
@@ -69,29 +102,44 @@ USAGE
     body = C.read("repo.required_set", scope="owner/name@main",
                   cache_dir=PATH, now=time.time(), reader=my_reader)
 
-    # CLI — the real `gh`, one key
-    python3 tools/gh_read_cache.py --list
-    python3 tools/gh_read_cache.py --key repo.required_set --repo owner/name --branch main
-    python3 tools/gh_read_cache.py --key repo.labels --repo owner/name --ttl 900   # tighten only
-    python3 tools/gh_read_cache.py --purge
+    uv run python tools/gh_read_cache.py --list
+    uv run python tools/gh_read_cache.py --key repo.required_set --repo owner/name --branch main
+    uv run python tools/gh_read_cache.py --key repo.labels --repo owner/name --ttl 900   # tighten only
+    uv run python tools/gh_read_cache.py --purge
 
 Stdlib only. No network beyond the reader the caller supplies.
 """
+
 from __future__ import annotations
+
+import sys
+
+# ⛔ #5128 / D9: the interpreter guard goes BEFORE every other import. The documented invocation is
+# `uv run python tools/…`, but a bare/ambient interpreter can be older than the repo's 3.12 floor,
+# and a 3.11+ stdlib name then dies with an UNATTRIBUTED error that reads as "this tool is broken".
+# `tools/longmem_eval/run.py` is the canonical shape. Pinned by
+# tests/test_entry_point_python_guard.py.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/gh_read_cache.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gh_read_cache.py`"
+    )
 
 import argparse
 import base64
 import contextlib
 import hashlib
+import inspect
 import itertools
 import json
-import math
 import os
 import re
 import subprocess
-import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 __all__ = [
     "GLOBAL_KEYS",
@@ -102,103 +150,255 @@ __all__ = [
     "declare_invariant",
     "kind_of",
     "read",
+    "scope_for",
     "ttl_for",
 ]
 
 
+# PROJECTIONS — pure functions over the DECODED PAGES. Each must drop every volatile field, and
+# each must REFUSE a body it does not recognise.
+#
+# ⛔ WHY THE SHAPE CHECK EXISTS. Without it, a wrong-shaped page projected to a plausible-looking
+# answer: an error document (`{"message": "Server Error"}`) became
+# `{"id": None, "node_id": None, "full_name": None, …}` — a complete-looking identity, cached as
+# provably fresh for SIX HOURS — and a page `{"message": "oops"}` inside a `repo.labels` response was
+# silently DROPPED (`['a']` from a two-page reply). Both are the "I could not read became I read X"
+# class this module exists to prevent, and `last.get(f)` cannot tell an absent field from a JSON
+# `null`.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+def _require_shape(docs: Sequence[Any], key: str, *, want: str) -> None:
+    """Raise ``Unreadable`` when a page is not the shape this endpoint returns.
+
+    ``want`` is ``"dict"`` (an object page) or ``"list"`` (an array page). An error document IS a
+    dict, so the type check alone is not enough — that is why the ``message`` test is here too.
+    """
+    if not docs:
+        raise Unreadable(f"{key}: no page to project")
+    for i, page in enumerate(docs):
+        ok = isinstance(page, dict) if want == "dict" else isinstance(page, list)
+        if not ok:
+            raise Unreadable(
+                f"{key}: page {i} is {type(page).__name__}, expected {want} — refusing to project "
+                f"an unrecognised body (an error document must never be cached as an answer)"
+            )
+        # ⛔ An error document IS a dict, and GitHub's is 3 keys
+        # (`message` + `documentation_url` + `status`), so a `len <= 2` test missed the real one.
+        # None of these six endpoints ever returns a top-level string `message` on success, so its
+        # presence is an error marker — and this is the ONLY guard that catches an error body which
+        # also happens to carry the collection key (`{"message": …, "workflows": []}`), which would
+        # otherwise project to a cached "empty answer". Pinned by M22.
+        if want == "dict" and isinstance(page.get("message"), str):
+            raise Unreadable(f"{key}: page {i} looks like an error document: {page['message']!r}")
+
+
+def _pick_last(
+    docs: Sequence[Any], fields: Sequence[str], *, key: str, required: Sequence[str] = ()
+) -> dict[str, Any]:
+    """The identity projection: a named subset of the last document, never the whole body.
+
+    Refuses TWO ways, both of which used to yield a complete-looking answer with ``null``s:
+    * a body carrying NONE of ``fields`` (an error document), and
+    * a body missing any field in ``required`` — the identity-bearing ones. ``fields`` still
+      decides what is KEPT/emitted; ``required`` decides what must be THERE. ``[{"id": 1}]`` used
+      to project ``user.identity`` to ``{"login": None, "id": 1}``: an identity with no account.
+    """
+    _require_shape(docs, key, want="dict")
+    last = docs[-1]
+    if not any(f in last for f in fields):
+        raise Unreadable(
+            f"{key}: the body carries none of {list(fields)} — it is not this endpoint's answer"
+        )
+    missing = [f for f in required if f not in last]
+    if missing:
+        raise Unreadable(
+            f"{key}: the body is missing {missing} — refusing to project an identity with nulls"
+        )
+    out = {f: last.get(f) for f in fields}
+    if all(v is None for v in out.values()):
+        raise Unreadable(f"{key}: every projected field is null — the body was not an answer")
+    return out
+
+
+def _expand(docs: Sequence[Any], key: str, container: str) -> list[Any]:
+    """Flatten a paginated object page's ``container`` list across every page.
+
+    A page without the container is REFUSED rather than skipped: skipping is what silently dropped
+    page 2 of a two-page response. This is strict on purpose — the real endpoint ALWAYS sends the
+    list (an empty collection is ``{"total_count": 0, "runners": []}``), so an absent list means the
+    body is not this endpoint's answer, and treating it as empty is the false-PASS direction.
+    """
+    _require_shape(docs, key, want="dict")
+    rows: list[Any] = []
+    for i, page in enumerate(docs):
+        inner = page.get(container)
+        if not isinstance(inner, list):
+            raise Unreadable(
+                f"{key}: page {i} has no {container!r} list — refusing to read a missing collection "
+                f"as an empty one"
+            )
+        rows.extend(inner)
+    return rows
+
+
+def _project_repo_metadata(docs: Sequence[Any]) -> Any:
+    return _pick_last(
+        docs,
+        ("id", "node_id", "full_name", "default_branch", "visibility"),
+        key="repo.metadata",
+        required=("id", "full_name", "default_branch"),
+    )
+
+
+def _project_required_set(docs: Sequence[Any]) -> Any:
+    _require_shape(docs, "repo.required_set", want="dict")
+    # ⛔ ABSENT IS NOT NULL, and this is the MERGE-GATING key: an empty required set reads as "this
+    # branch requires no checks". Measured before this check — `[{}]` and a BRANCH OBJECT
+    # (`{"id":1,"name":"main","protection":{}}`) both projected to `{"contexts": [], "checks": []}`
+    # and were cached for 30 minutes. `required_status_checks: null` IS the legitimate "no required
+    # checks configured" answer, so only the ABSENT key is refused.
+    if "required_status_checks" not in docs[-1]:
+        raise Unreadable(
+            "repo.required_set: the body has no `required_status_checks` key — it is not a branch "
+            "protection answer, and an empty required set must never be inferred from its absence"
+        )
+    rsc = docs[-1]["required_status_checks"]
+    if rsc is None:
+        # No required checks configured. That IS an answer, and it is invariant.
+        return {"contexts": [], "checks": []}
+    if not isinstance(rsc, dict):
+        raise Unreadable("repo.required_set: required_status_checks is not an object")
+    return {
+        "contexts": list(rsc.get("contexts") or []),
+        "checks": [c.get("context") for c in (rsc.get("checks") or []) if isinstance(c, dict)],
+    }
+
+
+def _project_labels(docs: Sequence[Any]) -> Any:
+    _require_shape(docs, "repo.labels", want="list")
+    out = []
+    for page in docs:
+        for item in page:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise Unreadable(f"repo.labels: entry {item!r} is not a label")
+            out.append(item["name"])
+    return out
+
+
+def _project_workflows(docs: Sequence[Any]) -> Any:
+    out = []
+    for w in _expand(docs, "repo.workflows", "workflows"):
+        if not isinstance(w, dict):
+            raise Unreadable(f"repo.workflows: entry {w!r} is not a workflow")
+        missing = [f for f in ("id", "path", "state") if f not in w]
+        if missing:
+            # `[{}]` used to project to `[{"id": null, "path": null, "state": null}]` — a workflow
+            # list that names no workflow, cached for an hour.
+            raise Unreadable(f"repo.workflows: entry is missing {missing} — not a workflow")
+        # `state` here is the DEFINITION's enabled/disabled state on the default branch —
+        # invariant on this timescale. It is not a run's state.
+        out.append({k: w.get(k) for k in ("id", "path", "state")})
+    return out
+
+
+def _project_runners_inventory(docs: Sequence[Any]) -> Any:
+    """⛔ name + LABEL NAMES only. The body also carries `status` and `busy`, which move
+    second-to-second; a caller needing liveness must read live.
+    """
+    out = []
+    for r in _expand(docs, "runners.inventory", "runners"):
+        if not isinstance(r, dict):
+            raise Unreadable(f"runners.inventory: entry {r!r} is not a runner")
+        if "name" not in r:
+            # `[{}]` used to project to `[{"name": null, "labels": []}]` — an inventory entry that
+            # names no runner, cached for 30 minutes.
+            raise Unreadable("runners.inventory: entry has no `name` — not a runner")
+        labels = [lbl.get("name") for lbl in (r.get("labels") or []) if isinstance(lbl, dict)]
+        out.append({"name": r.get("name"), "labels": labels})
+    return out
+
+
+def _project_user_identity(docs: Sequence[Any]) -> Any:
+    return _pick_last(docs, ("login", "id"), key="user.identity", required=("login", "id"))
+
+
 @dataclass(frozen=True)
 class Invariant:
-    """One cacheable read: how long, and an argv that projects to invariant fields only."""
+    """One cacheable read.
+
+    ``projection`` is a STABLE ID used in the cache identity (change it when the projection's shape
+    changes, and every old entry stops matching). ``project`` is the pure callable that does the
+    work. ``argv`` must NOT carry ``--jq``/``--slurp``/``--template`` — see the module docstring.
+    """
 
     ttl_s: int
     argv: tuple[str, ...]
+    projection: str
+    project: Callable[[Sequence[Any]], Any]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
-# THE REGISTRY — an EXPLICIT allow-list.
-#
-# ⛔ EVERY ENTRY CARRIES A `--jq` PROJECTION. That is not a style choice; it is guard (2) above.
-#    The endpoint is usually a MIXED response (invariant fields beside mutable ones), so the only
-#    safe unit to cache is the projection. `_assert_every_key_projects()` enforces it at import.
-#
-# ⛔ PAGINATED READS USE `--slurp`. `gh api --paginate` without `--slurp` emits one JSON document
-#    PER PAGE (`[..][..]`), which is not parseable by `json.loads` — so a repo with >30 labels would
-#    cache a payload no consumer could read, for a full hour, on exactly the large repos where the
-#    quota burn is highest.
+# THE REGISTRY — an EXPLICIT allow-list. Every entry projects to invariant fields only.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 INVARIANTS: dict[str, Invariant] = {
-    # `gh api repos/<repo>` — ONLY the identity/branch fields. ⛔ `pushed_at`, `updated_at`,
-    # `open_issues_count` and `stargazers_count` are in this body and change every push; a 6-hour
-    # TTL over them would let a lane answer "has anything landed since my base?" from six hours ago.
+    # ONLY the identity/branch fields. ⛔ `pushed_at`, `updated_at`, `open_issues_count` and
+    # `stargazers_count` are in this body and change every push; a 6-hour TTL over them would let a
+    # lane answer "has anything landed since my base?" from six hours ago.
     "repo.metadata": Invariant(
         ttl_s=6 * 3600,
-        argv=(
-            "api",
-            "repos/{repo}",
-            "--jq",
-            "{id, node_id, full_name, default_branch, visibility, owner: .owner.login}",
-        ),
+        argv=("api", "repos/{repo}"),
+        projection="repo-identity-v1",
+        project=_project_repo_metadata,
     ),
-    # `gh api repos/<repo>/branches/<branch>/protection` — the REQUIRED SET only. Changes when a
-    # protection rule is edited: a PR in the repo's settings surface, human-paced.
+    # The REQUIRED SET only. Changes when a protection rule is edited: human-paced.
     "repo.required_set": Invariant(
         ttl_s=30 * 60,
-        argv=(
-            "api",
-            "repos/{repo}/branches/{branch}/protection",
-            "--jq",
-            "{contexts: (.required_status_checks.contexts // []), "
-            "checks: [(.required_status_checks.checks // [])[].context]}",
-        ),
+        argv=("api", "repos/{repo}/branches/{branch}/protection"),
+        projection="required-set-v1",
+        project=_project_required_set,
     ),
-    # `gh api repos/<repo>/labels` — the label NAMES. Human-paced.
+    # The label NAMES. Human-paced.
     "repo.labels": Invariant(
         ttl_s=60 * 60,
-        argv=("api", "repos/{repo}/labels", "--paginate", "--slurp", "--jq", "[.[][] | .name]"),
+        argv=("api", "repos/{repo}/labels", "--paginate"),
+        projection="label-names-v1",
+        project=_project_labels,
     ),
-    # `gh api repos/<repo>/actions/workflows` — workflow definitions (id/path/state). A new workflow
-    # file on the default branch changes it; a merge-paced event.
+    # Workflow DEFINITIONS (id/path/state). A new workflow file on the default branch changes it.
     "repo.workflows": Invariant(
         ttl_s=60 * 60,
-        argv=(
-            "api",
-            "repos/{repo}/actions/workflows",
-            "--paginate",
-            "--slurp",
-            "--jq",
-            "[.[].workflows[] | {id, path, state}]",
-        ),
+        argv=("api", "repos/{repo}/actions/workflows", "--paginate"),
+        projection="workflow-defs-v1",
+        project=_project_workflows,
     ),
-    # `gh api repos/<repo>/actions/runners` — the runner INVENTORY: name + LABEL NAMES only.
-    # ⛔ The body also carries `status` and `busy`, which move second-to-second; the projection is
-    #    what makes this cacheable at all. A caller needing liveness must read live — `runner.status`
-    #    is mutable vocabulary below and cannot be registered.
+    # The runner INVENTORY: name + LABEL NAMES only.
     "runners.inventory": Invariant(
         ttl_s=30 * 60,
-        argv=(
-            "api",
-            "repos/{repo}/actions/runners",
-            "--paginate",
-            "--slurp",
-            "--jq",
-            "[.[].runners[] | {name, labels: [.labels[].name]}]",
-        ),
+        argv=("api", "repos/{repo}/actions/runners", "--paginate"),
+        projection="runner-inventory-v1",
+        project=_project_runners_inventory,
     ),
-    # `gh api user` — the authenticated identity. Changes on token rotation.
+    # The authenticated identity. Changes on token rotation — which is why a global key is scoped
+    # by a credential fingerprint rather than by repo/branch.
     "user.identity": Invariant(
         ttl_s=12 * 3600,
-        argv=("api", "user", "--jq", "{login, id}"),
+        argv=("api", "user"),
+        projection="user-identity-v1",
+        project=_project_user_identity,
     ),
 }
 
 # Keys whose answer does not depend on a repo/branch. Everything else must be scoped.
 GLOBAL_KEYS: frozenset[str] = frozenset({"user.identity"})
 
+# Flags the registry may not use: they are gh's job only if gh could do it, and it cannot (the
+# `--slurp`/`--jq` incompatibility measured above). Projection is THIS module's job.
+_FORBIDDEN_ARGV_FLAGS = ("--jq", "-q", "--slurp", "--template", "-t")
+
 # ⛔ THE MUTABLE VOCABULARY. Token-matched after a camelCase split, NEVER substring-matched.
 #    A substring test on `"run"` matches `"runners"`; on `"check"` matches `"checked"`. A guard that
-#    does both would refuse the reads it exists to allow AND admit a novel spelling — failing in
-#    both directions, which is why this is spelled the way it is (and why the first green run of the
-#    suite was 23 passed / 2 failed).
+#    did both would refuse the reads it exists to allow AND admit a novel spelling — failing in both
+#    directions, which is why this is spelled the way it is (the first green run of the suite was
+#    23 passed / 2 failed, because `"run" in "runners.inventory"`).
 _MUTABLE_TOKENS: frozenset[str] = frozenset(
     {
         "state",
@@ -242,8 +442,8 @@ _MUTABLE_TOKENS: frozenset[str] = frozenset(
         "pushes",
         "oid",
         "total",
-        # whole mutable CLASSES an inventory belongs to (cycle-3 finding 7): a branch/tag set
-        # changes on every push, and an approval set changes on every review.
+        # whole mutable CLASSES an inventory belongs to: a branch/tag set changes on every push,
+        # and an approval set changes on every review.
         "branch",
         "branches",
         "branchlist",
@@ -256,26 +456,48 @@ _MUTABLE_TOKENS: frozenset[str] = frozenset(
         "approved",
         "approvals",
         "approvedat",
-        # glued spellings a single camelCase token produces (`headSha` splits to head/sha, but
-        # `headsha` is ONE token and the 4-char floor cannot use `sha`).
         "headsha",
         "headoid",
+        # counters/flags that ride the repo body (`repo.forks`, `repo.stargazers`, `repo.size`,
+        # `repo.archived`, `pr.files`, `pr.additions`, `pr.rebaseable`, …).
+        "forks",
+        "stargazers",
+        "watchers",
+        "subscribers",
+        "size",
+        "files",
+        "additions",
+        "deletions",
+        "changedfiles",
+        "rebaseable",
+        "conflicting",
+        "archived",
+        "disabled",
+        "protected",
+        "pending",
+        "resetat",
+        "remaining",
+        "quota",
+        "latency",
     }
 )
 
 # Glued phrases formed by an ADJACENT TOKEN PAIR (`rate_limit` → `ratelimit`).
-# ⛔ PAIRS, NOT A SUBSTRING SCAN. Scanning the whole glued key for these refused
+# ⛔ PAIRS, NOT A SUBSTRING SCAN OVER THE WHOLE KEY. Scanning the whole glued key refused
 # `x.accurateLimit` and `repo.generateLimit` as mutable, because "rate"+"limit" happens to appear
 # across a word boundary — the same failure mode as `"run" in "runners"`, in the other direction.
-# Comparing each adjacent PAIR against the set admits `accurateLimit` and still refuses `rate_limit`.
 _MUTABLE_PAIRS: tuple[str, ...] = (
     "ratelimit",
     "mergestatestatus",
     "statuscheckrollup",
 )
 
-# A single token that merely ENDS with a mutable word (`prstate` → `state`) is mutable too.
+# A single token that glues a mutable word on an edge (`prstate` → `state`) is mutable too.
 # Only words of 4+ characters participate, so `run`/`tag`/`sha`/`job` cannot over-match (`runners`).
+# ⛔ This OVER-refuses some legitimate names (`repo.checksum` via `check`, `repo.bodyTemplate`
+#    via `body`). That is a DELIBERATE, fail-closed trade-off: over-refusal costs a rename and a
+#    dispatch cycle; under-refusal caches mutable state and reports it as invariant. The rule errs
+#    safe and this comment is here so a later reader does not "fix" it by loosening the guard.
 _MIN_GLUED_WORD = 4
 
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -290,45 +512,37 @@ class MutableReadRefused(Exception):
 
 
 class TtlNotPermitted(Exception):
-    """A caller asked to hold an entry longer than the key's declared ceiling, or to widen it."""
+    """A caller asked to hold an entry longer than the key's ceiling, or to widen it."""
 
 
 class Unreadable(Exception):
     """The re-read failed and no provably-fresh value exists. Never answered from a stale entry."""
 
 
-# ── the registry readers ───────────────────────────────────────────────────────────────────────
+# ── the mutable vocabulary ───────────────────────────────────────────────────────────────────
 def _tokens(key: str) -> list[str]:
     """camelCase-aware tokens: `pr.reviewDecision` → ['pr', 'review', 'decision']."""
-    spaced = _CAMEL.sub("-", key)
-    return [t.lower() for t in _TOKEN_SPLIT.split(spaced) if t]
+    return [t.lower() for t in _TOKEN_SPLIT.split(_CAMEL.sub("-", key)) if t]
 
 
 def _is_mutable_name(key: str) -> bool:
-    """Token-exact match, plus adjacent-PAIR phrases, plus a glued suffix/prefix test.
-
-    Never a bare substring scan over the whole key: that is what refused `accurateLimit`.
-    """
+    """Token-exact match, plus adjacent-PAIR phrases, plus a glued suffix/prefix test."""
     tokens = _tokens(key)
     if any(t in _MUTABLE_TOKENS for t in tokens):
         return True
-    # Adjacent-pair phrases (`rate` + `limit`).
     if any((a + b) in _MUTABLE_PAIRS for a, b in itertools.pairwise(tokens)):
         return True
-    # A token gluing a mutable word on either edge (`prstate`), for words long enough to be
-    # unambiguous — this is why `run` (3) can never over-match `runners`.
     long_words = [w for w in _MUTABLE_TOKENS if len(w) >= _MIN_GLUED_WORD]
     for t in tokens:
         if t in _MUTABLE_TOKENS:
             continue
-        # A single token that IS a glued phrase (`ratelimit`, `mergestatestatus`).
-        # ⛔ Per-TOKEN, never across the whole key: `accurate`+`limit` glue to the same string from
-        # two tokens, and a whole-key scan refused it. One token can only glue what it actually is.
+        # A single token that IS a glued phrase (`ratelimit`). Per-TOKEN, never across the whole
+        # key: `accurate`+`limit` glue to the same string from two tokens, and a whole-key scan
+        # refused that.
         if any(phrase in t for phrase in _MUTABLE_PAIRS):
             return True
-        for w in long_words:
-            if t.endswith(w) or t.startswith(w):
-                return True
+        if any(t.endswith(w) or t.startswith(w) for w in long_words):
+            return True
     return False
 
 
@@ -372,13 +586,41 @@ def ttl_for(key: str) -> int:
     return INVARIANTS[key].ttl_s
 
 
-def declare_invariant(key: str, *, ttl_s: int, argv: tuple[str, ...]) -> None:
+def _validate_spec(key: str, argv: Sequence[str], projection: str, project: Any) -> None:
+    """Guard 2, at whichever door the spec came through."""
+    if not callable(project):
+        raise TtlNotPermitted(
+            f"{key!r} declares no `project` callable. Caching a WHOLE response body replays "
+            f"whatever mutable fields sit beside the invariant ones — project them explicitly."
+        )
+    if not isinstance(projection, str) or not projection.strip() or projection.strip() == ".":
+        raise TtlNotPermitted(
+            f"{key!r} declares no usable projection id ({projection!r}). It is the cache-identity "
+            f"stamp, so it must name the projection's SHAPE."
+        )
+    for a in argv:
+        if a in _FORBIDDEN_ARGV_FLAGS or a.startswith(("--jq=", "--template=", "-q=")):
+            raise TtlNotPermitted(
+                f"{key!r} carries {a!r} in its argv. Projection is this module's job: `gh api "
+                f"--paginate --slurp --jq` is REFUSED by gh 2.103.3 ('--slurp is not supported with "
+                f"--jq'), and pflag takes the LAST --jq while a validator sees the FIRST."
+            )
+
+
+def declare_invariant(
+    key: str,
+    *,
+    ttl_s: int,
+    argv: Sequence[str],
+    projection: str,
+    project: Callable[[Sequence[Any]], Any],
+) -> None:
     """Add a key to the registry.
 
-    Refuses: a mutable name, a non-positive TTL, an argv with no ``--jq`` projection, and any
-    attempt to WIDEN an existing key's ceiling. That last one matters because this function is the
-    documented way to add a key — so without the check, the ceiling that ``read()`` defends could be
-    raised by a one-line call, making the whole constraint advisory against its own owner.
+    Refuses: a mutable name, a non-positive TTL, a missing/non-callable ``project``, an argv
+    carrying gh's projection flags, and any attempt to WIDEN an existing key's ceiling. That last
+    one matters because this function is the documented way to add a key — so without the check the
+    ceiling that ``read()`` defends could be raised by a one-line call.
     """
     if _is_mutable_name(key):
         raise MutableReadRefused(
@@ -388,69 +630,29 @@ def declare_invariant(key: str, *, ttl_s: int, argv: tuple[str, ...]) -> None:
         )
     if not isinstance(ttl_s, int) or isinstance(ttl_s, bool) or ttl_s <= 0:
         raise TtlNotPermitted(f"ttl_s must be a positive int, got {ttl_s!r}")
-    # Guard 2 — the EXPRESSION, not the flag. And R7: pagination requires --slurp, so a payload is
-    # always exactly one JSON document.
-    _projection_of(argv)
-    if "--paginate" in argv and "--slurp" not in argv:
-        raise TtlNotPermitted(
-            f"{key!r} paginates without `--slurp`. `gh api --paginate` then emits one JSON document "
-            f"PER PAGE, which json.loads cannot read — so the cache would hold an unparseable blob "
-            f"for the whole TTL, on exactly the large repos where the burn is worst."
-        )
+    _validate_spec(key, argv, projection, project)
     existing = INVARIANTS.get(key)
     if existing is not None and ttl_s > existing.ttl_s:
         raise TtlNotPermitted(
             f"{key!r} already declares a {existing.ttl_s}s ceiling; refusing to widen it to "
             f"{ttl_s}s. Tightening is allowed; widening is how a TTL quietly becomes a stale read."
         )
-    INVARIANTS[key] = Invariant(ttl_s=ttl_s, argv=tuple(argv))
+    INVARIANTS[key] = Invariant(
+        ttl_s=ttl_s, argv=tuple(argv), projection=projection, project=project
+    )
 
 
-def _projection_of(argv: tuple[str, ...]) -> str:
-    """Extract and VALIDATE the `--jq` projection (guard 2).
-
-    ⛔ GUARD 2 IS ABOUT THE EXPRESSION, NOT THE FLAG. The second review found that
-    `if "--jq" not in argv` accepted `--jq .` — an identity projection, which caches the whole
-    response body including every mutable field beside the invariant ones. So the flag's PRESENCE
-    was being checked while its MEANING was what the guard needed. A dangling `--jq` (no expression)
-    was accepted too.
-    """
-    expr = None
-    for i, a in enumerate(argv):
-        if a == "--jq":
-            if i + 1 >= len(argv):
-                raise TtlNotPermitted("a dangling `--jq` has no expression, so nothing is projected")
-            expr = argv[i + 1]
-            break
-        if a.startswith("--jq="):
-            expr = a[len("--jq="):]
-            break
-    if expr is None:
-        raise TtlNotPermitted("no `--jq` projection: a whole response body would be cached")
-    expr = expr.strip()
-    if not expr:
-        raise TtlNotPermitted("an empty `--jq` expression projects nothing")
-    if expr == ".":
-        raise TtlNotPermitted(
-            "`--jq .` is an IDENTITY projection: it caches the whole response body, including every "
-            "mutable field beside the invariant ones (status/busy on the runners endpoint, "
-            "pushed_at/open_issues_count on repos/<r>). Project the invariant fields explicitly."
-        )
-    return expr
-
-
-def _assert_every_key_projects() -> None:
-    """Import-time guard (2): no key may cache a whole body, and pagination must be slupred."""
+def _assert_every_key_projects() -> bool:
+    """Import-time guard (2): no key may cache a whole body. Returns True when it ran."""
     for key, spec in INVARIANTS.items():
-        _projection_of(spec.argv)
-        if "--paginate" in spec.argv and "--slurp" not in spec.argv:
-            raise TtlNotPermitted(
-                f"registry invariant {key!r} paginates without `--slurp`, so its payload is one "
-                f"JSON document PER PAGE rather than one document — unparseable by json.loads."
-            )
+        _validate_spec(key, spec.argv, spec.projection, spec.project)
+    return True
 
 
-_assert_every_key_projects()
+# ⛔ BOUND TO A NAME, not called bare. A bare `_assert_every_key_projects()` could be DELETED with
+# the whole suite still green (measured — every test called the function directly). Deleting this
+# line now removes `_IMPORT_CHECK` and the guard test reds on AttributeError.
+_IMPORT_CHECK: bool = _assert_every_key_projects()
 
 
 # ── the on-disk format ────────────────────────────────────────────────────────────────────────
@@ -461,28 +663,22 @@ def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "-" for c in text)
 
 
-def _projection_digest(projection: str) -> str:
-    return hashlib.sha1(projection.encode()).hexdigest()[:12]
-
-
 def _filename(key: str, scope: str, projection: str | None = None, ttl_s: int | None = None) -> str:
-    """Deterministic, collision-resistant, readable — SCOPED (guard 1) and PROJECTION-KEYED (F3).
+    """Deterministic, collision-resistant, readable — SCOPED, and keyed by projection + TTL.
 
-    ⛔ THE PROJECTION IS PART OF THE IDENTITY. The second review found that a routine maintenance
-    edit — adding a field to a shipped `--jq` — served entries selected by the OLD projection as
-    fresh hits: envelope valid, digest valid, age fresh, SCHEMA stale. `repo.metadata`'s TTL is 6 h,
-    so a caller would see `payload["default_branch"]` as missing for six hours after the edit. An
-    entry is therefore keyed by the projection that produced it, at the filename AND in the envelope.
+    ⛔ THE PROJECTION AND THE EFFECTIVE TTL ARE PART OF THE IDENTITY.
+    * Projection: a maintenance edit to a shipped projection would otherwise serve old-SCHEMA
+      entries as fresh hits (`repo.metadata` holds 6 h, so a newly-added field would be missing
+      for six hours).
+    * TTL: `_load` rejects an entry stamped under a different ttl, so without this two callers at
+      different TTLs thrashed ONE file — measured 12 live reads for 12 accesses where a working
+      cache does 2, i.e. the cache silently disabled for that key.
     """
+    spec = INVARIANTS[key]
     if projection is None:
-        projection = _projection_of(INVARIANTS[key].argv)
+        projection = spec.projection
     if ttl_s is None:
-        ttl_s = INVARIANTS[key].ttl_s
-    # ⛔ THE EFFECTIVE TTL IS PART OF THE IDENTITY TOO (cycle-3 finding 4). `_load` rejects an entry
-    # whose stamped ttl differs from the one asked for, so without this two callers using different
-    # TTLs thrashed ONE file: measured 12 live reads for 12 accesses where a working cache does 2.
-    # That fails in the "extra calls" direction rather than staleness, but it silently disables the
-    # cache for a key — i.e. exactly the quota burn this module exists to stop.
+        ttl_s = spec.ttl_s
     payload_id = hashlib.sha1(
         f"{scope}\x00{key}\x00{projection}\x00{int(ttl_s)}".encode()
     ).hexdigest()[:12]
@@ -494,6 +690,35 @@ def _cache_path(
 ) -> Path:
     """The entry's NAME (not joined to a directory — the caller supplies cache_dir)."""
     return Path(_filename(key, scope, projection, ttl_s))
+
+
+def _projection_digest(projection: str, project: Any = None) -> str:
+    """A stable identity for a projection: its declared id AND its SOURCE.
+
+    ⛔ The id alone is a RENAME-DETECTOR, not a schema-detector. Measured: adding a field to
+    ``_project_repo_metadata`` while leaving ``projection="repo-identity-v1"`` in place served the
+    old-schema entry as a fresh hit, because nothing about the stored stamp had changed. Hashing the
+    source means the SAME edit changes the identity and the stale entry can no longer match.
+
+    TWO DECLARED RESIDUALS — neither is a wrong answer, both should be known before trusting this:
+
+    (a) A callable whose source cannot be recovered (a C-level or ``exec``-built function) falls back
+        to the id alone.
+    (b) ⛔ THE DIGEST COVERS THE PROJECTION FUNCTION ONLY, NOT THE HELPERS IT CALLS. Measured: a
+        semantic change to :func:`_expand` (e.g. reversing the flattened rows) leaves this digest
+        BYTE-IDENTICAL, so old-schema entries keep matching. Closing that would mean hashing the
+        module's own source, which changes on every unrelated edit and would discard the whole
+        cache each time — a worse trade. The consequence is bounded: a helper edit must be paired
+        with a ``-v2`` id bump, exactly like a body edit. If you change a projection HELPER, bump
+        the affected keys' ``projection`` strings.
+    """
+    src = ""
+    if project is not None:
+        try:
+            src = inspect.getsource(project)
+        except (OSError, TypeError):  # builtins, lambdas from exec, C extension callables
+            src = ""
+    return hashlib.sha1(f"{projection}\x00{src}".encode()).hexdigest()[:12]
 
 
 def _envelope(
@@ -512,19 +737,19 @@ def _envelope(
     make a rewritten ``stored_at`` look intact, which is the failure :func:`_load` exists to catch.
     """
     if projection is None:
-        projection = _projection_of(INVARIANTS[key].argv)
+        projection = INVARIANTS[key].projection
     return json.dumps(
         {
             "key": key,
             "scope": scope,
-            "projection": _projection_digest(projection),
+            "projection": _projection_digest(projection, INVARIANTS[key].project),
             "stored_at": float(now),
             "ttl_s": int(ttl_s),
             "sha256": hashlib.sha256(payload).hexdigest(),
             "payload": base64.b64encode(payload).decode("ascii"),
         },
         sort_keys=True,
-    ).encode("utf-8")
+    ).encode()
 
 
 def _load(
@@ -537,41 +762,41 @@ def _load(
     projection: str | None = None,
 ) -> bytes | None:
     """Return the payload IFF freshness is provable. Any doubt → ``None`` (a MISS)."""
-    # ⛔ GUARD 3. A non-finite clock makes every comparison below meaningless, and the first draft
-    # let a NaN `now` satisfy `age < ttl` AND `age >= 0` by making both false. Refuse up front.
-    if not math.isfinite(now):
-        return None
+    # ⛔ GUARD 3. A non-finite clock must never prove freshness. The single `0 <= age < ttl`
+    # comparison below already rejects NaN and ±inf (each comparison is False), so there is
+    # deliberately NO separate `math.isfinite` pre-check: it was dead code that implied protection
+    # it did not provide. `test_non_finite_now_never_serves_a_hit` holds this line's behaviour.
     try:
-        raw = path.read_bytes()
-    except OSError:
-        return None
-    try:
-        env = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+        env = json.loads(path.read_bytes())
+    except (OSError, ValueError, UnicodeDecodeError):
         return None  # a killed writer's half entry, or corruption. It proves nothing.
     if not isinstance(env, dict):
         return None
     if env.get("key") != key or env.get("scope") != scope:
         return None  # guard 1: no cross-key, no cross-scope poaching
     if projection is None:
-        projection = _projection_of(INVARIANTS[key].argv)
-    if env.get("projection") != _projection_digest(projection):
-        return None  # F3: an entry selected by a DIFFERENT projection is a stale SCHEMA
+        projection = INVARIANTS[key].projection
+    if env.get("projection") != _projection_digest(projection, INVARIANTS[key].project):
+        return None  # guard 4: an entry selected by a DIFFERENT projection is a stale SCHEMA
     try:
         payload = base64.b64decode(env["payload"], validate=True)
         digest = env["sha256"]
         stored_at = float(env["stored_at"])
         stored_ttl = int(env["ttl_s"])
-    except (KeyError, TypeError, ValueError):
+    # ⛔ CATCH BROADLY, ON PURPOSE. This block only decodes and coerces OUR OWN stored fields, so
+    # there is no user code to hide from — and a DENYLIST here is how the latch happened:
+    # `int(inf)` raises OverflowError, which is NOT a ValueError, so a tampered envelope crashed out
+    # of `_load`, past `read()`'s contract and past `main()`'s handlers. Because the read never
+    # reached the reader, the bad entry was never rewritten: every later read of that key raised
+    # too, until `--purge`. A malformed entry must be a MISS, which is self-healing.
+    except Exception:
         return None
     if not isinstance(digest, str) or hashlib.sha256(payload).hexdigest() != digest:
         return None
     if stored_ttl != int(ttl_s):
         return None  # a longer-stamped entry must not satisfy a tighter ask
-    if not math.isfinite(stored_at):
-        return None
     age = now - stored_at
-    # One comparison, not two: `0 <= age < ttl`. Two separate returns is how NaN slipped through.
+    # ONE comparison, not two: `0 <= age < ttl`. Two separate returns is how NaN slipped through.
     if not (0 <= age < ttl_s):
         return None
     return payload
@@ -590,6 +815,36 @@ def _store(path: Path, blob: bytes) -> None:
 
 
 # ── the read ─────────────────────────────────────────────────────────────────────────────────
+def _credential_fingerprint() -> str | None:
+    """A NON-REVERSIBLE fingerprint of the token that will answer a global read.
+
+    Only a truncated SHA-256 is used: it separates two credentials, and it goes into the filename
+    AND the plaintext envelope — so the raw token must never be there. A cache directory is a
+    world-readable place to leak a secret.
+
+    ⛔ NO TOKEN VISIBLE IS NOT "ONE ACCOUNT". `gh` may authenticate from ~/.config/gh/hosts.yml, so
+    a constant here would make every account on the box share one identity entry. Unknown identity
+    FAILS CLOSED: the global key is simply not cacheable and the caller reads live.
+    """
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    if not token:
+        return None
+    return "tok:" + hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
+def scope_for(key: str, repo: str, branch: str) -> str:
+    """Global keys are scoped by CREDENTIAL (not branch); everything else by repo AND branch."""
+    if key in GLOBAL_KEYS:
+        cred = _credential_fingerprint()
+        if cred is None:
+            raise TtlNotPermitted(
+                f"{key!r} is global and no GH_TOKEN/GITHUB_TOKEN is set, so the answering account "
+                f"cannot be identified — refusing to cache it. Set a token, or read it live."
+            )
+        return f"global@{cred}"
+    return f"{repo}@{branch}"
+
+
 def read(
     key: str,
     *,
@@ -601,34 +856,46 @@ def read(
 ) -> bytes:
     """Serve a provably-fresh cached value, else call ``reader(key)`` once and store it.
 
-    ``scope`` is REQUIRED and is part of the cache identity (guard 1): the same key asked for a
-    different repo or branch is a different entry, so one repo's answer can never be served as
-    another's.
+    ``scope`` is REQUIRED and is part of the cache identity. For a global key it must be exactly
+    the credential-derived scope ``scope_for()`` produces — ``read()`` RE-COMPUTES it rather than
+    trusting the caller, because a caller-supplied ``"global@"`` would let two accounts share one
+    identity entry.
 
     ``reader`` is injected on purpose: correctness is testable without a network, and the CLI is
     the only place that knows about `gh`.
 
     Raises:
         MutableReadRefused: the key is mutable or undeclared — before the reader is touched.
-        TtlNotPermitted: ``ttl_s`` exceeds the key's declared ceiling, or no ``scope`` was given.
+        TtlNotPermitted: bad/absent scope, or ``ttl_s`` above the ceiling.
         Unreadable: propagated from ``reader`` on a MISS. A stale entry is NEVER served instead.
     """
     ceiling = ttl_for(key)  # raises MutableReadRefused for a mutable/undeclared key
+    # A clock is a NUMBER. `read(now="1000")` used to reach `math.isfinite` and raise TypeError from
+    # inside the freshness test — an unhandled crash where the contract promises "any doubt → MISS".
+    try:
+        now = float(now)
+    except (TypeError, ValueError) as exc:
+        raise TtlNotPermitted(f"now must be a number of seconds, got {now!r}") from exc
+    # Defence in depth for guard 2: the IMPORT-TIME check runs once, so a spec inserted straight
+    # into INVARIANTS afterwards (bypassing declare_invariant) would otherwise be read and cached
+    # with no projection at all. Cheap, and it makes guard 2 hold on the path that actually runs.
+    _spec = INVARIANTS[key]
+    _validate_spec(key, _spec.argv, _spec.projection, _spec.project)
     if not isinstance(scope, str) or not scope.strip():
         raise TtlNotPermitted(
             f"{key!r} requires a non-empty scope (e.g. 'owner/repo@main'); without one, one repo's "
             f"answer is served as another's."
         )
-    # ⛔ R1's GLOBAL HALF, ENFORCED IN read() ITSELF (cycle-3 finding 3). Relying on callers to use
-    # `scope_for()` — as the USAGE block shows — left `read("user.identity", scope="o/r@main")`
-    # ACCEPTED: two lanes with different tokens then shared ONE identity entry. A global key's scope
-    # must be credential-derived, and read() is where that is checkable.
-    if key in GLOBAL_KEYS and not scope.startswith("global@"):
-        raise TtlNotPermitted(
-            f"{key!r} is a GLOBAL key: its answer depends on the TOKEN, not on a repo. Pass a "
-            f"credential-derived scope from scope_for(), not {scope!r} — otherwise one account's "
-            f"identity is served as another's."
-        )
+    # ⛔ R1's GLOBAL HALF, RECOMPUTED — NOT A PREFIX TEST. A prefix test accepted any `global@…`
+    # string, so two lanes with different tokens could both pass `"global@"` and share one entry.
+    if key in GLOBAL_KEYS:
+        expected = scope_for(key, "", "")  # raises when no credential is identifiable
+        if scope != expected:
+            raise TtlNotPermitted(
+                f"{key!r} is global: its answer depends on the TOKEN, not on a repo. Pass exactly "
+                f"scope_for({key!r}, …) — got {scope!r}, expected {expected!r}. Otherwise one "
+                f"account's identity is served as another's."
+            )
     effective = ceiling if ttl_s is None else int(ttl_s)
     if effective <= 0:
         raise TtlNotPermitted(f"ttl_s must be positive, got {ttl_s!r}")
@@ -655,10 +922,10 @@ def read(
     if not isinstance(payload, (bytes, bytearray)):
         raise Unreadable(f"reader for {key!r} returned {type(payload).__name__}, not bytes")
     payload = bytes(payload)
-    # ⛔ A CACHE-WRITE FAILURE MUST NOT FAIL A SUCCESSFUL READ. The value in hand was just read
-    # from GitHub and is as fresh as anything can be; failing to STORE it is a lost optimisation,
-    # not a lost answer. Fail-closed governs what may be SERVED from disk, never what may be
-    # RETURNED after a live read — conflating them would turn a full disk into a total gh outage.
+    # ⛔ A CACHE-WRITE FAILURE MUST NOT FAIL A SUCCESSFUL READ. The value in hand was just read from
+    # GitHub and is as fresh as anything can be; failing to STORE it is a lost optimisation, not a
+    # lost answer. Fail-closed governs what may be SERVED from disk, never what may be RETURNED
+    # after a live read — conflating them would turn a full disk into a total gh outage.
     with contextlib.suppress(OSError):
         _store(path, _envelope(key, scope, payload, now=now, ttl_s=effective))
     return payload
@@ -674,41 +941,32 @@ def default_cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "gh-read-cache"
 
 
-def _credential_fingerprint() -> str | None:
-    """A NON-REVERSIBLE fingerprint of the token that will answer a global read.
+def decode_pages(raw: bytes) -> list[Any]:
+    """Decode a `gh api` stream that may hold SEVERAL concatenated JSON documents.
 
-    ⛔ THE CREDENTIAL IS PART OF A GLOBAL KEY'S IDENTITY (F7). `api user` answers "which account is
-    this?", and that is decided by `GH_TOKEN`/`GITHUB_TOKEN` — which the filename digest cannot see.
-    The second review showed a bot lane and a human sharing `GH_READ_CACHE_DIR` would get EACH
-    OTHER'S identity for up to 12 h, and on this module's own topic a caller asking "which account's
-    5,000-call pool am I spending?" would get the other account's answer.
-
-    Only a truncated SHA-256 is used: it is enough to separate two credentials, and it goes into the
-    filename AND the plaintext envelope, so the raw token must never be there — a cache directory is
-    a world-readable place to leak a secret.
+    `gh api --paginate` without `--slurp` emits one document per page (`[…] [… ]`), which
+    `json.loads` cannot read as a whole. This is the decode step that replaces `--slurp` — which gh
+    refuses to combine with `--jq`.
     """
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-    if not token:
-        # ⛔ NO TOKEN VISIBLE IS NOT "ONE ACCOUNT" (cycle-3 finding 5). `gh` may be authenticating
-        # from ~/.config/gh/hosts.yml, so returning a constant here made every account on the box
-        # share ONE identity entry. Unknown identity FAILS CLOSED: a global key is then simply not
-        # cacheable and the caller reads live. Refusing to cache is cheap; serving another account's
-        # identity as your own is not.
-        return None
-    return "tok:" + hashlib.sha256(token.encode()).hexdigest()[:12]
-
-
-def scope_for(key: str, repo: str, branch: str) -> str:
-    """Global keys are scoped by CREDENTIAL (not branch); everything else by repo AND branch."""
-    if key in GLOBAL_KEYS:
-        cred = _credential_fingerprint()
-        if cred is None:
-            raise TtlNotPermitted(
-                f"{key!r} is global and no GH_TOKEN/GITHUB_TOKEN is set, so the answering account "
-                f"cannot be identified — refusing to cache it. Set a token, or read it live."
-            )
-        return f"global@{cred}"
-    return f"{repo}@{branch}"
+    text = raw.decode("utf-8", "replace").strip()
+    if not text:
+        raise Unreadable("empty response body")
+    dec = json.JSONDecoder()
+    docs: list[Any] = []
+    i = 0
+    while i < len(text):
+        while i < len(text) and text[i] in " \t\r\n":
+            i += 1
+        if i >= len(text):
+            break
+        try:
+            doc, i = dec.raw_decode(text, i)
+        except ValueError as exc:
+            raise Unreadable(f"response is not JSON: {exc}") from exc
+        docs.append(doc)
+    if not docs:
+        raise Unreadable("response held no JSON document")
+    return docs
 
 
 def _gh_reader(repo: str, branch: str):
@@ -726,7 +984,12 @@ def _gh_reader(repo: str, branch: str):
                 f"{' '.join(cmd)} exited {proc.returncode}: "
                 f"{(proc.stderr or b'').decode('utf-8', 'replace').strip()[:300]}"
             )
-        return proc.stdout
+        docs = decode_pages(proc.stdout)
+        try:
+            projected = spec.project(docs)
+        except Exception as exc:  # a projection that cannot run must not yield a cached answer
+            raise Unreadable(f"projection for {key!r} failed: {exc}") from exc
+        return json.dumps(projected, sort_keys=True).encode()
 
     return _read
 
@@ -740,6 +1003,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo", default=os.environ.get("GH_REPO", ""), help="owner/name for {repo}")
     ap.add_argument("--branch", default=os.environ.get("GH_BRANCH", "main"))
     ap.add_argument("--cache-dir", default=None)
+    ap.add_argument("--no-cache", action="store_true", help="read live; bypass the cache entirely")
     ap.add_argument("--list", action="store_true", help="print the registry and exit")
     ap.add_argument("--purge", action="store_true", help="remove every entry and exit")
     a = ap.parse_args(argv)
@@ -748,7 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.list:
         for key in sorted(INVARIANTS):
-            print(f"{key}\t{INVARIANTS[key].ttl_s}s")
+            print(f"{key}\t{INVARIANTS[key].ttl_s}s\t{INVARIANTS[key].projection}")
         return 0
 
     if a.purge:
@@ -765,13 +1029,42 @@ def main(argv: list[str] | None = None) -> int:
 
     if not a.key:
         ap.error("--key is required (or --list / --purge)")
+
+    reader = _gh_reader(a.repo, a.branch)
+
+    # ⛔ A GLOBAL KEY WITH NO IDENTIFIABLE CREDENTIAL STILL HAS A LIVE ANSWER. `scope_for` refuses
+    # (correctly — it must not guess an account), so this tool must NOT dead-end there: it reads
+    # live and says so, which is exactly what the docstring promises. `--no-cache` is the explicit
+    # spelling of the same path.
+    try:
+        scope = scope_for(a.key, a.repo, a.branch)
+    except TtlNotPermitted as exc:
+        if a.key in GLOBAL_KEYS:
+            print(f"gh_read_cache: live read (not cached) — {exc}", file=sys.stderr)
+            try:
+                sys.stdout.buffer.write(reader(a.key))
+            except Unreadable as r_exc:
+                print(f"gh_read_cache: REFUSED — {r_exc}", file=sys.stderr)
+                return 1
+            return 0
+        print(f"gh_read_cache: REFUSED — {exc}", file=sys.stderr)
+        return 1
+
+    if a.no_cache:
+        try:
+            sys.stdout.buffer.write(reader(a.key))
+        except Unreadable as exc:
+            print(f"gh_read_cache: REFUSED — {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     try:
         body = read(
             a.key,
-            scope=scope_for(a.key, a.repo, a.branch),
+            scope=scope,
             cache_dir=cache_dir,
             now=time.time(),
-            reader=_gh_reader(a.repo, a.branch),
+            reader=reader,
             ttl_s=a.ttl,
         )
     except (MutableReadRefused, TtlNotPermitted, Unreadable) as exc:
