@@ -37,18 +37,45 @@
 >
 > The deployed-surface grader is **agent-infra's**, not this repo's — `scripts/check-farm-drift.sh` in
 > an agent-infra checkout (it is not itself farmed, so no copy under `~/.pi/agent/scripts` exists).
-> Two things make its verdict easy to miss. First, **the installer's exit is not the verdict, and only
+> Four things make its verdict easy to miss. First, **the installer's exit is not the verdict, and only
 > one installer grades the farm at all**: `pi-bootstrap/setup.sh` runs the checker as its last leg and
 > fails the install on the checker's `1` alone — on `2` (cannot verify) or `3` (no deploy can fix it)
-> it prints `this is NOT a pass` and still ends with `Done!` — while `cell-install.sh` has no farm leg,
-> its own `verify_layer` comparing only against the tree it just installed from. Second, **the grader
-> reads the farm the installer's base names, which need not be the one this box executes**: a
-> `$HOME`-rooted run on a `CELL_HOME`-rooted box grades `$HOME/.pi/agent/scripts`, so neither its `OK`
-> nor its `COULD NOT VERIFY` says anything about the executed farm. That farm is materialised only by
-> the installer, so run it from a checkout **at the pin**: from a tree at any other commit it re-farms
-> bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Direct invocation
-> from a pi session may be refused as `script-indirection`, with a message that never mentions drift
-> (agent-infra#3173, the #709 false positive) — so **a refusal is not a clean result**. Do **not** add
+> it prints `this is NOT a pass` and still ends with `Done!` — so on `2` the farm verdict is MISSING
+> rather than negative, on `3` the named rows ARE the verdict and the install still reports success,
+> and with the checker **absent** the only trace is one `farm drift NOT verified` warning, after which
+> the install still ends with `Done!` — while `cell-install.sh` has no farm-**drift**
+> leg: it does install and verify the farm (`install_farms`, then `verify_layer` `cmp`-ing each
+> declared file against `$INFRA_ROOT`), but that comparison is against whatever checkout it RESOLVED,
+> never against the PIN — so a farm that matches an OLDER checkout reads as verified while the pin has
+> moved on. Second, **a `--dest` the INSTALLER passes can name a farm this box does not execute**:
+> the checker derives its own destination from the box — `CELL_HOME="${CELL_HOME:-$HOME}"`,
+> `DEST="$CELL_HOME/.pi/agent/scripts"` — so invoked bare it grades exactly the farm this box runs;
+> it is `pi-bootstrap/setup.sh` that passes a `$HOME`-rooted `--dest`, so on a `CELL_HOME`-rooted box
+> that run grades `$HOME/.pi/agent/scripts`, and neither its `OK` nor its `UNKNOWN — <reason>`
+> says anything about the executed farm (`pi-bootstrap/setup.sh` re-labels that second one
+> `farm: COULD NOT VERIFY`). Grading a farm is not deploying one: it is materialised only by the
+> installer, so run the installer from a checkout **at the pin** — from a tree at any other commit it
+> re-farms bytes that are not the pin's, and advancing the pin alone leaves the farm stale. Third,
+> **the clock grades the farm only if the pass it executes carries the leg — read the record before
+> you trust it**: `agent-infra/scripts/harness-apply-pass.sh` PREDICATE 4 — *"the directory this box
+> EXECUTES, which no other leg looks at"*, written for tortoise#10114 — runs that same checker against
+> `$CELL_HOME/.pi/agent/scripts` on the `eldato-harness-apply` timer (10 min), on by default
+> (`HARNESS_APPLY_FARM_CHECK=1`). ⛔ **BUT THE PASS IS ITSELF A FARMED COPY**, so on a box whose farm
+> is stale the copy the timer executes predates the leg and the clock runs GREEN over an ungraded
+> farm — measured 2026-11-04 on the `cmux` cell: the farmed `harness-apply-pass.sh` was dated
+> 2026-10-27 and held **zero** `PREDICATE 4`, and
+> `${HARNESS_APPLY_STATE_DIR:-$HOME/.pi/agent/state}/harness-apply.log` held 17 records with **no
+> `farm` field at all**. And the record is ONE-SIDED: the drift arm sets `action=farm-drift` and
+> puts `farm: DRIFT — …` in the record's `detail=`, while the CLEAN arm is a `log_line "farm: ok"` to
+> stdout/journald that leaves `action=none` — indistinguishable from a disarmed or absent leg.
+> So **absence of `action=farm-drift` falsifies nothing**: it means ungraded as readily as it means
+> clean. Use the record to establish DRIFT, never coverage; if the executing pass carries no
+> PREDICATE 4, the clock is not grading at all. Fourth, **the instrument may refuse to run at all**:
+> direct invocation from a pi session may be refused as
+> `script-indirection`, with a message that never mentions drift
+> (agent-infra#3173, the agent-infra#709 false positive) — so **a refusal is not a clean result**,
+> and the paragraphs above say the clock does not automatically answer it either: confirm the pass
+> that actually runs carries the leg, or grade the farm directly. Do **not** add
 > a tortoise-side mirror — a second owner of that predicate was refused (tortoise#10722, closed
 > superseded); the farm arrays and `is_declared_local` live in agent-infra.
 
@@ -367,6 +394,7 @@ Public repository that houses:
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
 | Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `uv run python tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Starting a lane that must **land** work — run it **before the first hour**, not at the push step (by then the work is already undeliverable) | `uv run python tools/gh_write_preflight.py` — must exit 0 | The 17-lanes/0-landings shape: a read-only token exported **as** `GH_TOKEN` shadowed the write-capable credential in `hosts.yml` (`GH_TOKEN` takes precedence over stored credentials), so every lane resolved the read-only one, did the work, could not deliver, and honestly reported "built, parked". The probe pushes a throwaway ref, confirms it with `ls-remote` and deletes it, so a PASS is evidence about **`origin`'s push URL** and the credential a push there uses — not about `remote.pushDefault` / `branch.<b>.pushRemote`, which the probe does not resolve (#11053 item 1), so in a triangular workflow a PASS is about a destination the lane's own `git push` may not use. **Read the reason, not just the exit code** — `REASONS` is a CLOSED set and its members name different classes: `push-unknown` and `internal-error` are **NO VERDICT** (the push did not complete / the probe itself failed) — re-run, never read either as a read-only credential; `delete-failed` is **litter** on a shared remote, not incapability, because the push already succeeded. Exit **2** is argparse's own usage error, never a verdict. ⚠️ It measures ONE thing — that the credential can write repository **contents** here: it does not measure `pull requests: write`, and a token missing the `workflow` scope is classified `push-refused` (git's own message is the only signal, so it is indistinguishable from branch protection) — hence a lane whose HEAD touches `.github/workflows/*` must read git's text itself (#9141, #9589). Its stated residuals (a `SIGTERM`-killed probe can leave the ref behind; a branch-creation ruleset can invert the verdict) are in the tool's docstring, not hidden here. ⛔ **And a push target that consults NO credential is UNMEASURED, not a PASS**: for a checkout whose push target is a local path, a `file://` remote or a `url.<local>.insteadOf` mirror, the probe writes over the filesystem with no credential in the loop and still prints `GH-WRITE-OK` (measured — `/tmp/lp-probe` reproduction in #11053 item 5), so on that shape it proves nothing about delivery; do not read it as a credential verdict, and do not run this gate as evidence there until #11053 item 5 lands. |
 
 ### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
 
