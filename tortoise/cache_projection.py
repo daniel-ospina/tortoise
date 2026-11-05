@@ -1253,13 +1253,13 @@ def _scalar(value: Any) -> Any:
 #: layering inversion this module refuses). Cost, named: a record-restored (or
 #: served) session `:Source` carries no `summary` while a live one does.
 #:
-#: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word
-#: lexicon (its most frequent content words), not a transcript slice, and it
-#: survives; every non-episodic Source keeps both columns untouched — a
-#: document's `summary` is its own metadata and its `_searchText` is the shared
-#: title+summary+topics rule, so a guard that fired on every Source would
-#: un-index every document in the cache. The drop is a **projection** decision:
-#: the row is not mutated, so the record stays the authority for the value.
+#: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word lexicon (its most frequent content
+#: words) — in a word-delimited script not a CHOSEN transcript slice, though a space-less (CJK) run arrives
+#: as ONE member verbatim (the residual in `sdk._session_source_metadata`) — and it survives; every
+#: non-episodic Source keeps both columns untouched — a document's `summary` is its own metadata and its
+#: `_searchText` is the shared title+summary+topics rule, so a guard that fired on every Source would
+#: un-index every document in the cache. The drop is a **projection** decision: the row is not mutated, so
+#: the record stays the authority for the value.
 #:
 #: ⚠️ THE THIRD COST, and it is an OBSERVATION instrument, where a permanent
 #: non-clean reads as noise: `python -m tortoise record-reconcile` builds its

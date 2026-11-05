@@ -4184,10 +4184,10 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     passthrough onto a node"*. Redaction (#4911) does not close that: a scrubbed
     sentence is still the session's sentence.
 
-    So the derived metadata is the session's TOPIC LEXICON — never a sentence and
-    never a quote: the six most frequent content words of the (already redacted)
-    transcript, rendered as one stable descriptor. Those words are vocabulary the
-    capture already derives, and they keep a captured session findable through
+    So the derived metadata is the session's TOPIC LEXICON — never a CHOSEN sentence and
+    never a quote: the six most frequent content words of the (already redacted) transcript,
+    words the capture already derives, as one stable descriptor (⚠️ a space-less CJK run is
+    ONE token and can BE that sentence — see the residual below), keeping a captured session findable through
     ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
     and the reason this function must return SOMETHING for a non-empty
     transcript. ``("", [])`` only when the transcript has no token of its OWN
@@ -4201,10 +4201,10 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     left it unfindable — reintroducing the very #3518 regression the lexicon
     exists to prevent, as a side effect of a filter that is a precision
     preference and not part of the §9.1/D1 rule. It is still a LEXICON, so it
-    puts no sentence on the node — but it drops the transcript's FRAMING labels
-    (``_SESSION_SOURCE_TURN_LABEL_RE``): those are the generator's ``Speaker:``
-    prefix, not words the session used, and indexing them put a constant
-    ``user, assistant`` pair on every acknowledgement-only session.
+    puts no CHOSEN sentence on the node (a whole space-less run can be one) — but it
+    drops the transcript's FRAMING labels (``_SESSION_SOURCE_TURN_LABEL_RE``): those
+    are the generator's ``Speaker:`` prefix, not words the session used, and indexing
+    them put a constant ``user, assistant`` pair on every acknowledgement-only session.
 
     ⛔ THE LABEL IS DROPPED BY POSITION, NOT BY SPELLING (#10852 review, P2).
     The strip happens per LINE, BEFORE tokenising, so it removes the speaker and
@@ -4280,7 +4280,7 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     shape exists to remove. ``tests/test_10000_source_prose.py`` scans every
     node's string properties for the capture's own TEXT and reds if it reaches
     anything but the episodic turn store; a bag of the session's words is §4.4
-    metadata and is deliberately allowed, a fragment of its prose is not.
+    metadata and is deliberately allowed in a word-delimited script; a fragment of its prose is not (a whole space-less run is the named exception).
 
     ⛔ The DISPLAY value carries ``_SESSION_SOURCE_SUMMARY_PREFIX`` and the
     INDEXED value does not — the two are deliberately different strings, and
