@@ -1671,10 +1671,22 @@ def test_probe_ref_and_json_payload(tmp_path: Path) -> None:
     assert "lane-branch" in payload["ref"], payload
     # EXACT, not "contains a slash": the pre-fix assertion could not tell a probed target from a label
     assert payload["repo"] == str(tmp_path / "origin.git"), payload
-    assert "<REDACTED>" in payload["credential"] or payload["credential"] in {
-        "absent",
-        "store:unreadable",
-    }, payload
+    # ⛔ THE LOCAL-TARGET MARKER IS PART OF THE CONTRACT (added in `fa7b21717`), but this assertion
+    # predates it and pinned `credential` as a BARE source, so it REDDED on the tool it exists to
+    # describe — measured at this head: `NOT-EXERCISED(local-target) absent`. Pin BOTH halves, which
+    # is what makes it non-vacuous in each direction: (a) the marker, because a reachability pass
+    # against a local path must never read as a measured credential verdict; (b) a SOURCE + a
+    # FINGERPRINT tail, never a value — `_credential_fingerprint` is `prefix<REDACTED> len=N` or
+    # `<REDACTED> len=N` for a value short enough to be its own secret.
+    assert payload["credential"].startswith("NOT-EXERCISED(local-target) "), payload
+    source = payload["credential"].removeprefix("NOT-EXERCISED(local-target) ")
+    assert source in {"absent", "store:unreadable"} or source.startswith(
+        ("env:GH_TOKEN=", "env:GITHUB_TOKEN=", "store:")
+    ), payload
+    if source not in {"absent", "store:unreadable"}:
+        # a fingerprint, not a value: a prefix and a length, and nothing else
+        assert "<REDACTED>" in source, payload
+        assert "len=" in source, payload
 
 
 def test_ls_remote_mismatch_is_cannot_verify_not_a_refusal(tmp_path: Path) -> None:
