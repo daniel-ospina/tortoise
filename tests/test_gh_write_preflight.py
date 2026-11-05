@@ -153,12 +153,13 @@ def _env(stub_base: str, token: str | None, **overrides: str) -> dict:
     # probe can be routed off the box and the stub then records NOTHING.
     # MEASURED for the `http://` stub bases this file uses: `http_proxy` (any case) → the probe goes to
     # the proxy and `seen` stays empty on a probe-everything mutant, i.e. an inert arm again, silently.
-    # `https_proxy` is not a vector for an `http://` base (it DOES reroute an `https://` one: measured,
-    # the proxy answered `CONNECT 127.0.0.1:1`), and `all_proxy` is read by `getproxies()` but never
-    # CONSULTED — `OpenerDirector` looks the `*_proxy` key up per URL scheme and nothing looks up `all`
-    # (measured: `ALL_PROXY` set → direct, stub recorded the request). Both are stripped defensively:
-    # it costs nothing, it covers an `https://` base a future test might bind, and the claim above
-    # stays true without needing an edit — but neither is a measured vector FOR THIS FILE's bases.
+    # `https_proxy` is not a vector for an `http://` base, and it IS one for an `https://` base
+    # (measured: the proxy answered `CONNECT 127.0.0.1:1`), so stripping it also covers a future test
+    # that binds one. `all_proxy` is a different case: `getproxies_environment` files it under the key
+    # `all`, `ProxyHandler` mints `all_open` from it, and nothing ever dispatches to that name — URL
+    # dispatch is `<scheme>_open`, i.e. `http`/`https` — so it is read and never CONSULTED (measured:
+    # `ALL_PROXY` set → direct, stub recorded the request). It is stripped because a reader expects it
+    # to matter and the strip is free, NOT because it covers any base.
     for key in [k for k in env if k.lower() in ("http_proxy", "https_proxy", "all_proxy")]:
         env.pop(key, None)
     env["HOME"] = "/tmp/gh-preflight-no-home"          # keeps hosts.yml out of the picture
@@ -564,21 +565,72 @@ def test_the_child_env_carries_no_proxy():
     assert not [k for k in env_override if k.lower() in ("http_proxy", "https_proxy", "all_proxy")], \
         env_override
 
-    # ⛔ ONE CONSTRUCTION SITE, structurally — in every shape a child env can be built in this file, not
-    # just one spelling. The strip lives in `_env`, so a test that assembles its own child environment
-    # from the host env opts out of it silently; that is exactly how the review found this twice (four
-    # `os.environ`+`.items()` comprehension sites, then an `os.environ` SPREAD left behind them). The
-    # needles are assembled so the assertions cannot count themselves, and no comment in this file
-    # spells them literally for the same reason.
-    src = Path(__file__).read_text(encoding="utf-8")
-    items_builders = src.count("os.environ" + ".items()")
-    assert items_builders == 1, (
-        f"{items_builders} places build a child environment from `os.environ`+`.items()` — route them "
-        "through `_env`, or they silently opt out of the proxy/config-dir rules")
-    for spelling in ("{**" + "os.environ", "os.environ" + ".copy()"):
-        assert src.count(spelling) == 0, (
-            f"a child environment is built with `{spelling}` — route it through `_env(…, **overrides)` "
-            "(the override leg exists for exactly this), or it silently opts out of the strip")
+    # ⛔ ONE CONSTRUCTION SITE — enforced on the AST, not on a list of spellings (review F1 at
+    # `231bae2d7`). The strip lives in `_env`, so a test that assembles its own child environment from
+    # the host env opts out of it silently; the review found this twice (four `os.environ`+`.items()`
+    # comprehensions, then an `os.environ` spread behind them) and then showed the spelling list missed
+    # `dict(os.environ)`, `{** os.environ}`, `os.environ | {…}` and an omitted `env=`. `_child_env_
+    # violations` asks the question structurally, so a new spelling cannot sneak past it.
+    violations = _child_env_violations(Path(__file__))
+    assert violations == [], (
+        "a child environment is not built through `_env(…, **overrides)`, so it silently opts out of "
+        f"the proxy/config-dir/token rules: {violations}")
+
+
+def _child_env_violations(path: Path) -> list[str]:
+    """Every `subprocess` call in this file must pass `env=` derived from `_env(…)` (review F1/F2).
+
+    A SPELLING LIST IS NOT A PIN. Counting `os.environ`+`.items()` (then `{**os.environ`, then
+    `.copy()`) missed `dict(os.environ)`, `{** os.environ}` and `os.environ | {…}` — all measured GREEN
+    until this replaced the counting — and it could never see the worst shape, a `subprocess` call that
+    omits `env=` and silently inherits the host. So this reads the AST instead: for every
+    `subprocess.<call>`, `env=` must be present, and every name in that expression must be assigned
+    from a `_env(…)` call somewhere in the file. A literal spread has no such name, so it fails.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    # `_env`'s OWN body assigns the host-env comprehension to a local called `env`, and that is the one
+    # legitimate non-`_env(...)` assignment in the file — skip its line range rather than special-case a
+    # name.
+    builder_ranges = [(n.lineno, getattr(n, "end_lineno", n.lineno)) for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef) and n.name == "_env"]
+
+    def inside_builder(lineno: int) -> bool:
+        return any(lo <= lineno <= hi for lo, hi in builder_ranges)
+
+    from_env_call: dict[str, list[ast.expr]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or inside_builder(node.lineno):
+            continue
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            from_env_call.setdefault(node.targets[0].id, []).append(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            from_env_call.setdefault(node.target.id, []).append(node.value)
+
+    def is_env_call(expr: ast.expr) -> bool:
+        return (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
+                and expr.func.id == "_env")
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"):
+            continue
+        env_kw = next((kw for kw in node.keywords if kw.arg == "env"), None)
+        if env_kw is None:
+            violations.append(f"line {node.lineno}: no `env=` — the child inherits the host environment")
+            continue
+        if is_env_call(env_kw.value):
+            continue
+        names = {n.id for n in ast.walk(env_kw.value) if isinstance(n, ast.Name)}
+        # ⛔ AN UNASSIGNED NAME IS NOT DERIVED (measured: `env={**os.environ}` passed this check because
+        # `os` has no assignments, so "every assignment is a `_env` call" was vacuously true). Each name
+        # must have at least one assignment AND all of them must be `_env(...)` calls.
+        if names and all(from_env_call.get(n) and all(is_env_call(v) for v in from_env_call[n]) for n in names):
+            continue                                    # `env = _env(…)`, then `env=env`
+        violations.append(f"line {node.lineno}: `env=` is not derived from `_env(…)`")
+    return violations
 
 
 def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
