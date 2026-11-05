@@ -7924,12 +7924,15 @@ def _durations_rows_whose_chain_disagrees_with_its_citation(text: str):
 # unguarded. What it does not reach, and this pin adds: the `0 cases` spelling
 # (`_ZERO_CASE_COUNT_RE` matches only `0 tests`), a key that resolves to no
 # readable file under `TESTS_DIR` (that guard short-circuits on `defined == 0`),
-# and a zero that is not the phrase at all but any `0 <noun>` in the same
-# sentence as a passing reading. This pin is therefore NARROWER (one sentence,
-# so the map's legitimate history — `"33 passed" … (31 tests / 2.77 s BEFORE this
-# review)`, and `at 35 tests on an [earlier] idle host` — is not judged) and
-# WIDER in spelling. Keep both: neither subsumes the other. A same-sentence
-# `0 … N>0` needs no history exemption: no correct note can say it.
+# and a zero claim ANYWHERE in a sentence that also quotes a passing reading.
+# ⛔ The vocabulary is still exactly two nouns (`0 tests` / `0 cases`, see
+# `_ZERO_CASE_CLAIM_RE` below) — it is NOT any `0 <noun>`; a `0 points` beside a
+# passing reading is invisible to this pin too (#10726 review round 3, P3). This
+# pin is therefore NARROWER (one sentence, so the map's legitimate history —
+# `"33 passed" … (31 tests / 2.77 s BEFORE this review)`, and `at 35 tests on an
+# [earlier] idle host` — is not judged) and WIDER in spelling. Keep both: neither
+# subsumes the other. A same-sentence `0 … N>0` needs no history exemption: no
+# correct note can say it.
 _ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
 _PASSED_READING_RE = re.compile(r'"(\d+)\s+passed')
 # ⛔ `:` is deliberately NOT a boundary (#10726 review round 2, P2).
