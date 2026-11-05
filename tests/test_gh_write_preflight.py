@@ -440,16 +440,94 @@ def test_option_shaped_prefix_is_refused_before_any_push(tmp_path: Path, capsys)
     assert _remote_refs(remote) == before, "a refused prefix must not push anything"
 
 
+def test_unrenderable_prefix_is_refused_by_git_not_reported_as_push_refused(tmp_path: Path):
+    """Refname rules the hand-written belt cannot enumerate must still be a USAGE error.
+
+    Measured before this: prefixes `.`, `.hidden`, `a/.hidden`, `foo.lock` and a tab rendered refs
+    git rejects, and the tool returned `GH-WRITE-UNAVAILABLE(push-refused)` on a fully writable
+    remote — a usage mistake reported as "your credential cannot write", the inversion the guard
+    exists to prevent.
+    """
+    work, remote = _make_pair(tmp_path)
+    before = _remote_refs(remote)
+
+    for bad in (".", ".hidden", "a/.hidden", "foo.lock", "a\tb"):
+        with pytest.raises(SystemExit) as exc:
+            main(["--repo", str(work), f"--probe-ref-prefix={bad}"])
+        assert exc.value.code == 2, f"{bad!r} must be a usage error (exit 2)"
+
+    assert _remote_refs(remote) == before
+
+
+def test_legal_prefixes_are_still_accepted(tmp_path: Path):
+    """The guard must not over-block ordinary namespaces."""
+    work, _remote = _make_pair(tmp_path)
+
+    for good in ("fix/gh-probe", "gh-probe", "lane/probe"):
+        verdict = check_writable(work, probe_ref_prefix=good)
+        assert verdict.writable is True, f"{good!r} should be a legal prefix"
+        assert verdict.probe_ref.startswith(good + "/")
+
+
+def test_confirmation_reads_the_PUSH_url_not_the_fetch_url(tmp_path: Path):
+    """A fork-style `pushurl` must be the remote we confirm against.
+
+    Measured before: with `url=…/fetch.git` writable and `pushurl=…/push.git` READ-ONLY, the push
+    was refused but the tool then read the FETCH url — a different repository. And in the mirror
+    case (fetch read-only, push writable) it reported `verify-mismatch` for a credential that can
+    write.
+    """
+    work, fetch_remote = _make_pair(tmp_path, read_only=True)      # fetch side: read-only
+    push_remote = tmp_path / "push.git"
+    _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
+    _git("remote", "set-url", "origin", str(fetch_remote), cwd=work)
+    _git("remote", "set-url", "--push", "origin", str(push_remote), cwd=work)
+
+    verdict = check_writable(work)
+
+    # The PUSH target is writable, so the credential CAN deliver — a PASS, not verify-mismatch.
+    assert verdict.writable is True, f"got {verdict.reason!r} — confirmed the wrong remote"
+    assert verdict.push_url and "push.git" in verdict.push_url
+    assert "gh-write-preflight/" not in _remote_refs(push_remote), "probe ref must be cleaned up"
+
+
+def test_read_only_pushurl_is_refused_even_when_fetch_url_is_writable(tmp_path: Path):
+    """The mirror case: a writable fetch url must not mask a read-only push target."""
+    work, _fetch_remote = _make_pair(tmp_path)                      # fetch side: writable
+    push_remote = tmp_path / "push.git"
+    _git("init", "--bare", "-q", str(push_remote), cwd=tmp_path)
+    hook = push_remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'remote: denied' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    _git("remote", "set-url", "--push", "origin", str(push_remote), cwd=work)
+
+    verdict = check_writable(work)
+
+    assert verdict.writable is False
+    assert verdict.reason == "push-refused"
+
+
 def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
     """Cleanup is confirmed by ls-remote, NOT by the delete's own exit code.
 
-    A delete that reports success while the ref survives must not be recorded as cleaned.
+    Isolated deliberately: the verify read returns the CORRECT head (so `writable` is True and
+    `reason` is None), and only the cleanup read-back disagrees — so a `writable is False` result
+    can only come from the leftover flip, not from an unrelated `verify-mismatch`.
     """
+    head = {"sha": None}
+
     class LyingDelete(Runner):
         def run(self, argv, cwd=None, timeout=120):
             joined = " ".join(argv)
             if argv[1] == "ls-remote" and _PROBE in joined:
-                return Proc(0, out=f"deadbeef\t{joined.split()[-1]}\n")   # always present
+                ref = joined.split()[-1]
+                # present on BOTH the verify and the cleanup read
+                return Proc(0, out=f"{head['sha']}\t{ref}\n")
+            if argv[1] == "rev-parse":
+                p = super().run(argv, cwd=cwd, timeout=timeout)
+                if p.rc == 0 and p.out.strip():
+                    head["sha"] = p.out.strip().splitlines()[-1]
+                return p
             if argv[1] == "ls-remote":
                 return Proc(0, out="deadbeef\trefs/heads/main\n")
             if argv[1] == "push" and "--delete" in argv:

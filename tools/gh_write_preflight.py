@@ -190,10 +190,15 @@ class Verdict:
     repo_root: str | None = None
     remote: str | None = None
     remote_url: str | None = None
+    # The URL git actually PUSHES to (`remote.<name>.pushurl` when set). All confirmation reads use
+    # this, never `remote_url`, or a fork-style config confirms against the wrong repository.
+    push_url: str | None = None
     probe_ref: str | None = None
     head_sha: str | None = None
     steps: list[dict] = field(default_factory=list)
     # None = cleanup could not be CONFIRMED (the confirming read failed) — never "clean".
+    # On an early return no read was attempted, so this also means "nothing to clean"; `steps`
+    # shows whether a push was ever made, which is what distinguishes the two cases.
     cleaned_up: bool | None = None
     kept_ref: bool = False
     # A probe ref that SURVIVED on the remote, reported ALONGSIDE `reason` so a leftover does not
@@ -210,6 +215,7 @@ class Verdict:
                 "repo_root": self.repo_root,
                 "remote": self.remote,
                 "remote_url": redact(self.remote_url or ""),
+                "push_url": redact(self.push_url or ""),
                 "probe_ref": self.probe_ref,
                 "head_sha": self.head_sha,
                 "cleaned_up": self.cleaned_up,
@@ -307,7 +313,10 @@ def _probe_ref(prefix: str = "gh-write-preflight") -> str:
 
 
 # A prefix that cannot form a valid refname, or that starts with `-`, must be refused at the CLI
-# boundary rather than handed to git as an option-looking argv element.
+# boundary rather than handed to git as an option-looking argv element. This belt stops the
+# OBVIOUS shapes; `git check-ref-format` is the authoritative gate (see `_prefix_ok`) because
+# refname rules (no component starting `.`, none ending `.lock`, no control chars, …) cannot be
+# enumerated safely by hand.
 _BAD_PREFIX_CHARS = set(" ~^:?*[\\")
 
 
@@ -316,7 +325,28 @@ def _valid_prefix(prefix: str) -> bool:
         return False
     if ".." in prefix or "//" in prefix or "@{" in prefix:
         return False
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in prefix):
+        return False
+    for comp in prefix.split("/"):
+        if comp.startswith(".") or comp.endswith(".lock"):
+            return False
     return not (_BAD_PREFIX_CHARS & set(prefix))
+
+
+def _prefix_ok(prefix: str, runner: "Runner") -> bool:
+    """Authoritative prefix check: ask git whether `<prefix>/probe` is a legal refname.
+
+    The hand-written rules above are a fast belt; this is the verdict. Without it, an impossible
+    refname (`.`, `foo.lock`, a component starting with `.`) renders a ref git rejects, and the
+    tool reports `GH-WRITE-UNAVAILABLE(push-refused)` on a fully writable remote — a usage
+    mistake reported as "your credential cannot write".
+    """
+    if not _valid_prefix(prefix):
+        return False
+    proc = runner.run(["git", "check-ref-format", f"refs/heads/{prefix}/probe"])
+    if proc.rc == 127:          # git absent: fall back to the belt (the verdict path will fail on
+        return True             # its own `git --version` check and say `git-absent`).
+    return proc.rc == 0
 
 
 def _ref_state(runner: Runner, root: str, remote: str, ref: str) -> str:
@@ -388,6 +418,15 @@ def _check_writable(
         return Verdict(False, "no-remote", detail=redact(p.detail), repo_root=root, remote=remote)
     url = redact(url_lines[0])  # stored redacted at ingestion
 
+    # (3b) THE PUSH URL, NOT THE FETCH URL. git pushes to `remote.<name>.pushurl` when it is set,
+    # so a fork-style config (`url=…/fetch.git`, `pushurl=…/push.git`) means every confirmation
+    # read below would ask a DIFFERENT remote than the one we wrote to — reporting
+    # `verify-mismatch` for a credential that can write, and (worse) `cleaned_up=True` from the
+    # wrong repository while the probe ref survives on the push target.
+    pp = runner.run(["git", "remote", "get-url", "--push", remote], cwd=root)
+    push_lines = [ln.strip() for ln in pp.out.splitlines() if ln.strip()]
+    push_url = redact(push_lines[0]) if pp.rc == 0 and push_lines else url
+
     # (4) HEAD must resolve — we push an EXISTING commit, never a new one.
     p = runner.run(["git", "rev-parse", "HEAD"], cwd=root)
     head_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
@@ -407,6 +446,7 @@ def _check_writable(
         repo_root=root,
         remote=remote,
         remote_url=url,
+        push_url=push_url,
         head_sha=head,
         probe_ref=_probe_ref(probe_ref_prefix or "gh-write-preflight"),
     )
@@ -434,8 +474,10 @@ def _check_writable(
     )
 
     if push_ok:
-        # (7) Confirm on the REMOTE, not from push's own word. stdout only.
-        vp = runner.run(["git", "ls-remote", remote, f"refs/heads/{verdict.probe_ref}"], cwd=root)
+        # (7) Confirm on the REMOTE WE PUSHED TO, not from push's own word. stdout only.
+        vp = runner.run(
+            ["git", "ls-remote", push_url, f"refs/heads/{verdict.probe_ref}"], cwd=root
+        )
         verified = step("ls-remote-verify", vp)
         seen = vp.out.split()[0] if verified and vp.out.strip() else ""
         if verified and seen == head:
@@ -469,10 +511,10 @@ def _check_writable(
     )
     step("delete", dp)
 
-    # CONFIRM ON THE REMOTE, not from the delete's own exit code — the same rule the push path
-    # follows. `cleaned_up=True` only on a positive "ref absent" read; an unreadable answer is
-    # `None` (unconfirmed), never "clean".
-    state = _ref_state(runner, root, remote, verdict.probe_ref)
+    # CONFIRM ON THE REMOTE WE PUSHED TO, not from the delete's own exit code — the same rule the
+    # push path follows. `cleaned_up=True` only on a positive "ref absent" read; an unreadable
+    # answer is `None` (unconfirmed), never "clean".
+    state = _ref_state(runner, root, push_url, verdict.probe_ref)
     if state == "absent":
         verdict.cleaned_up = True
     elif state == "present":
@@ -491,8 +533,11 @@ def _check_writable(
     else:
         verdict.cleaned_up = None
         verdict.leftover_ref = False
+        # Do NOT assert that the delete failed — it may have SUCCEEDED and only the confirming
+        # read failed (a rate limit, a transient error). Report what is actually known.
         note = (
-            f"cleanup UNCONFIRMED — the delete failed and ls-remote could not be read for "
+            f"cleanup UNCONFIRMED — the delete's outcome could not be confirmed "
+            f"(delete rc={dp.rc}) and ls-remote could not be read for "
             f"refs/heads/{verdict.probe_ref}; check the remote before assuming it is clean"
         )
         verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
@@ -534,7 +579,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.probe_ref_prefix is not None and not _valid_prefix(args.probe_ref_prefix):
         parser.error(
             f"invalid --probe-ref-prefix {args.probe_ref_prefix!r}: it must be a ref-shaped path "
-            f"(no leading '-' or '/', no whitespace, no ': ? * [ \\ ~ ^', no '..' or '@{{')"
+            f"(no leading '-' or '/', no whitespace or control characters, no component starting "
+            f"with '.' or ending '.lock', no ': ? * [ \\ ~ ^', no '..' or '@{{')"
+        )
+    if args.probe_ref_prefix is not None and not _prefix_ok(args.probe_ref_prefix, Runner()):
+        parser.error(
+            f"invalid --probe-ref-prefix {args.probe_ref_prefix!r}: git check-ref-format rejects "
+            f"refs/heads/{args.probe_ref_prefix}/probe as a refname"
         )
 
     verdict = check_writable(
