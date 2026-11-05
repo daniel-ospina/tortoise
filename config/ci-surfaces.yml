@@ -4474,8 +4474,9 @@ surfaces:
   # full=False, 150 files` (re-derived at `#10980`). The `131` this comment
   # carried is 19 files short, and its history is NOT all `tier1`: 60 -> 73
   # `tier1` rows account for **13** of the 19, and six more came from the
-  # `onboarding` surface itself growing (91 -> 97 members). ⚠️ Re-derive that figure
-  # after any `tier1` addition,
+  # `onboarding` surface itself growing (91 -> 97 members; measured through
+  # `select()` on both manifest blobs, so "19 `tier1` rows" is wrong).
+  # ⚠️ Re-derive that figure after any `tier1` addition,
   # and do not attribute its whole history to one row: #5064's row accounts for
   # exactly ONE of those files (measured: 130 at the commit before it, 131
   # after), so the `121` this comment used to carry was already 9 short before

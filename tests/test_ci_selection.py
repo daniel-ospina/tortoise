@@ -229,17 +229,23 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured at this head: 150 files for the STORAGE diff (`onboarding` ∪
-    `tier1`), 73 for the EXTRACTOR diff (empty surfaces, the early return); the
-    gate is in the selected set in both, and dropping the `tier1` row removes it
-    from both. ⚠️ BOTH are measurements, not constants, and they move for
-    DIFFERENT reasons: the 150 moves with every `tier1` addition (`#10980`'s own
-    row moved it from 149), while the 73 is the whole `full`-less fast pool — the
-    `60` this sentence carried was that same pool **13 rows ago** (measured:
-    `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it, and 73 here),
-    i.e. the very "a past state quoted as a current one" defect the line below
-    warns about. Re-derive both (`ci_selection.py` reports `len(test_files)`)
-    rather than trusting either — the assertions below are the pin, this
+    Measured at this head: 150 files for the STORAGE diff, 73 for the EXTRACTOR
+    diff (empty surfaces, the early return); the gate is in the selected set in
+    both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
+    measurements, not constants, and they move for DIFFERENT reasons:
+
+    * the **150** is `onboarding` ∪ `tier1` **minus 14** — the union is 164 at
+      this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
+      `uri_requiring` files, so it is the union minus those, never the union;
+    * the **73** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool", which is 1094 here.
+      The `60` this sentence carried was that same `tier1` set **13 rows ago**
+      (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
+      and 73 here), i.e. the very "a past state quoted as a current one"
+      defect the line below warns about.
+
+    Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
+    trusting either — the assertions below are the pin, this
     sentence is a note.
     """
     storage = _sel(["docs/architecture/STORAGE-ARCHITECTURE.md"])
