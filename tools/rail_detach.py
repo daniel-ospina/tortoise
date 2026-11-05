@@ -873,7 +873,7 @@ def _names_this_pr(found: str, pr: int) -> bool:
 
 
 def _repo_key(value: str) -> str:
-    """`owner/name`, lower-cased, with any host prefix dropped.
+    """`owner/name`, lower-cased, with any transport prefix and `.git` dropped.
 
     ⛔ BOTH SIDES OF THE REPO COMPARISON MUST BE IN THE SAME FORM. The rail
     NORMALISES its target before printing it (`rail_normalize_slug` drops an
@@ -881,9 +881,31 @@ def _repo_key(value: str) -> str:
     writes `REPO=` exactly as it was given. Comparing those raw made a REAL merge
     read `refused`, with a reason ("the rail did not merge (e.g. --dry-run)") that
     says the opposite of what happened. Same two fields, one form.
+
+    ⛔ `.git` IS PART OF A CLONE URL'S SPELLING, NOT OF THE REPO'S NAME, and a clone
+    URL is what an operator pastes. Keeping the suffix made `_slug` produce
+    `rail-o-r.git-7.md` beside `rail-o-r-7.md` — a SECOND record and a SECOND
+    `flock`, i.e. TWO LIVE RAILS ON ONE PR, the #3061 collision this module's lock
+    exists to refuse. The same paste produces the SCP form
+    (`git@github.com:o/r.git`), whose colon glues the host to the owner inside one
+    `/`-segment, so that prefix is stripped here too — this function is the ONE
+    canonicaliser, and a spelling it cannot fold is a spelling the lock cannot see.
     """
-    parts = [p for p in value.strip().split("/") if p]
-    return "/".join(parts[-2:]).lower() if parts else ""
+    raw = value.strip()
+    # SCP-style clone URL (`git@github.com:o/r[.git]`): no `://`, and the colon is a
+    # path separator rather than part of the slug. A `://` form needs nothing — its
+    # scheme segment is dropped by the `[-2:]` slice below.
+    if "://" not in raw and ":" in raw:
+        raw = raw.rsplit(":", 1)[-1]
+    parts = [p for p in raw.split("/") if p]
+    if not parts:
+        return ""
+    name = parts[-1]
+    if name.lower().endswith(".git"):
+        name = name[:-4]
+    if len(parts) < 2:
+        return name.lower()
+    return f"{parts[-2]}/{name}".lower()
 
 
 def _names_this_repo(log: str, repo: str) -> bool:

@@ -887,6 +887,13 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
 
     Non-vacuity: put `_slug` back to `repo.replace("/", "-")` and the second launch
     spawns a second rail and RETURNS a `Launch` instead of raising.
+
+    ⛔ EVERY SPELLING A CLONE URL CAN PRODUCE, because each one is a paste: `.git` is
+    the suffix a clone URL always ends in and the SCP form glues the host to the owner
+    (`git@github.com:o/r.git`). Both used to key a DIFFERENT artifact — measured
+    `rail-o-r.git-7.md` and `rail-git@github.com:o-r.git-7.md` — so a `--repo`/cord
+    value pasted from `git remote -v` started a second live rail on the same PR while
+    this guard reported the PR free.
     """
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
@@ -894,7 +901,9 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
     ln = rd.launch(7, cwd=co, state_dir=sd, repo="o/r")
     try:
         assert wait_state(sd, 7, rd.WAITING).state == rd.WAITING
-        for spelling in ("github.com/o/r", "GitHub.com/O/R", "o/r"):
+        for spelling in ("github.com/o/r", "GitHub.com/O/R", "o/r",
+                         "o/r.git", "https://github.com/o/r.git",
+                         "git@github.com:o/r.git"):
             with pytest.raises(rd.Refused) as exc:
                 rd.launch(7, cwd=co, state_dir=sd, repo=spelling)
             assert "ALREADY LIVE" in str(exc.value), spelling
@@ -917,6 +926,11 @@ def test_one_record_is_readable_under_any_spelling_of_its_repo(tmp_path, monkeyp
     try:
         assert (rd.artifact_path(sd, "github.com/o/r", 76)
                 == rd.artifact_path(sd, "o/r", 76))
+        # A clone URL's own spellings resolve to the SAME file, both directions.
+        for spelling in ("o/r.git", "https://github.com/o/r.git",
+                         "git@github.com:o/r.git"):
+            assert (rd.artifact_path(sd, spelling, 76)
+                    == rd.artifact_path(sd, "o/r", 76)), spelling
         st = rd.collect(sd, "github.com/o/r", 76)
         assert st is not None, "collect lost a record that launch just wrote"
         assert st.pr == 76
