@@ -273,12 +273,18 @@ _RETRACTION_RULES_1_TO_3 = (
     # (1b) the finding is said to be ABSENT, not fixed — `no evidence the P1 was resolved`
     # otherwise reads as a COMPLETION (`was resolved`) and the severity arm stands down.
     r"|\bno\s+(?:evidence|proof|sign|indication|mention|attempt)\b"
-    # ⛔ `no test` IS ALSO FAIL-CLOSED, AND THE EXEMPTION IS THE INSTRUMENT, NOT THE FINDING.
+    # ⛔ `no test` IS ALSO FAIL-CLOSED, AND THE EXEMPTION IS THE INSTRUMENT *DOING* SOMETHING.
     # `no test for the P1` is a LIVE finding (the severity arm's own comment says so) and must
     # keep retracting; what must not is prose about the REVIEW ITSELF — `no test suite was
     # executed`, `no test was run here` — which retracted 6 real clean reviews on this PR.
-    r"|\bno\s+test\b(?!\s+(?:suite|run|execution)\b)"
-    r"(?!\s+(?:was|were|is|are|has|have|had|could|can|should|would|might)\b)"
+    # ⛔ THE NOUN ALONE IS NOT THE EXEMPTION (review #10975, cycle 3): keying on `suite|run`
+    # cleared `No test suite covers the guard path.` and `No test has been written for the
+    # guard.` — the same noun with the OPPOSITE subject, i.e. a coverage gap about the diff.
+    # What makes it the reviewer's instrument is an EXECUTION predicate after it
+    # (was/were/is/are/has been/had been + executed/run/possible/attempted/available/here), so
+    # the exemption grades the phrase, not the vocabulary.
+    r"|\bno\s+test\b(?!\s+(?:suite\s+|run\s+)?(?:was|were|is|are|has\s+been|had\s+been)\s+"
+    r"(?:actually\s+|ever\s+|here\b|possible\b|executed\b|run\b|attempted\b|available\b))"
     r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
     # (2) attributed to another artifact / a former state of this one
     r"|(?:previous|earlier|prior|old)\s+(?:head|record|round|assessment|verdict|review)\b"
@@ -306,8 +312,8 @@ _R1_NO_LONGER = (
     r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
     r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
     r"|\bno\s+(?:evidence|proof|sign|indication|mention|attempt)\b"
-    r"|\bno\s+test\b(?!\s+(?:suite|run|execution)\b)"
-    r"(?!\s+(?:was|were|is|are|has|have|had|could|can|should|would|might)\b)"
+    r"|\bno\s+test\b(?!\s+(?:suite\s+|run\s+)?(?:was|were|is|are|has\s+been|had\s+been)\s+"
+    r"(?:actually\s+|ever\s+|here\b|possible\b|executed\b|run\b|attempted\b|available\b))"
     r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
 )
 _R2_ATTRIBUTED = (
@@ -343,22 +349,47 @@ _BLANK_LINE_RE = re.compile(r"\n[ \t\r\x0b\x0c\xa0]*\n")
 #: paragraph (rules (1)–(4) in full — rule (3)'s exception words are anchored to the verdict
 #: THERE, and only there; see `_NEXT_PARA_RETRACTION_RE`).
 _RETRACTION_NO_SEVERITY_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + r")")
+#: ⛔ RULE (4)'s WORD ARM IS **NEVER WINDOWED** (review #10975, cycle 3 — a P0 I introduced).
+#: It is a CLOSED vocabulary of finding-STATE words (`unfixed`, `unaddressed`, `still open`,
+#: `remains open`, `not fixed`). A window cannot know whose subject a phrase has, so bounding it
+#: let `**Verdict: CLEAN.**\n\nGood.\n\nAlso good.\n\nThat path is unfixed.` — and the sharper
+#: `Fixed the P1 at 4f450ae81 — but the regression is back and that path is unfixed.`, where the
+#: `Fixed the …` completion stands the severity arm down — CLOSE a live P1. Measured cost of
+#: grading it over the whole suffix again, on this PR's 54 real comments: exactly ONE body
+#: re-blocks (a fix-lane status comment that CITES `review CLEAN (nothing to apply)` while
+#: quoting a prior "not fixed in the fold" disposition — a body that correctly should not
+#: close anything), and ZERO genuine clean reviews are lost.
+#: ⛔ ...AND THE FINDING-STATE PHRASES ARE GRADED OVER THE WHOLE SUFFIX TOO. Bare `no longer`
+#: has to stay windowed because real reviews use it as code prose ("`lane_key` can no longer
+#: raise"); the PHRASE `no longer holds` has no such reading, so it is graded everywhere. Without
+#: this arm, `**Verdict: CLEAN.**\n\nRead the diff.\n\nI fixed the P1 in 4f450ae81.\n\nOn
+#: re-read, my verdict no longer holds.` closed a live P1 (measured, review #10975 cycle 3).
+_SUFFIX_RETRACTION_RE = re.compile(
+    r"(?i)(?:"
+    + _R4_WORDS.lstrip("|")
+    + r"|no\s+longer\s+(?:the\s+case|holds|valid|accurate|true|applies|stands)\b)"
+)
+
 #: ⛔ THE PARAGRAPH AFTER THE VERDICT IS GRADED NARROWER THAN THE VERDICT'S OWN, AND IT IS
 #: GRADED FOR ONE PARAGRAPH — NOT TO THE END OF THE BODY (review #10975, P1).
 #: Rules (1)–(4) except (3) are about the VERDICT's own state (`no longer holds`, `still open`,
 #: `previous head`), so they belong beside it. Graded to the END, they are matched by any later
-#: mention of `stale` / `superseded` / `not` ANYWHERE in a 180-line review — which retracted the
-#: verdict of the review that wrote it. MEASURED on this PR: 11 of the 14 real clean review
-#: comments graded `last-clear=-`, the trigger thousands of characters downstream. Bounded to
-#: the next paragraph, 7 of those 11 clear — with NO new fail-open.
+#: mention of `stale` / `superseded` / `no longer` ANYWHERE in a 150-line review — which
+#: retracted the verdict of the review that wrote it. MEASURED on this PR: 11 of the 14 real
+#: clean review comments graded `last-clear=-`, with triggers thousands of characters downstream
+#: (`is not exercised` about the reviewer's own External rung, `no test suite was executed`
+#: about the box, `the previous record is stale`).
+#: ⛔ WHAT MAY BE WINDOWED IS ONLY THE SUBJECT-AMBIGUOUS HALF — `no longer` (real code prose:
+#: "`lane_key` can no longer raise"), the bare `stale|superseded|…` words, and rule (2)'s
+#: attribution (`previous head`, `prior review`). Rule (4)'s closed state vocabulary is NOT,
+#: per `_R4_WORDS_SUFFIX_RE` above.
 #: ⛔ THE CLIFF THIS ONCE GUARDED AGAINST IS COVERED BY A DIFFERENT LAYER. An older revision
 #: stopped at exactly one paragraph and left `CLEAN.\n\nFine.\n\nI count one P1` clearing while
 #: the fourth-newline spelling blocked. That body NAMES a severity token, and the per-token
 #: severity arm below is graded over the WHOLE suffix (never windowed), so both spellings still
-#: block, for the reason that actually applies. A window never has to carry the severity arm: a
-#: token is a token wherever it sits.
+#: block, for the reason that actually applies. A token is a token wherever it sits.
 _NEXT_PARA_RETRACTION_RE = re.compile(
-    r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + _R4_WORDS + r")"
+    r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + r")"
 )
 #: ⛔ IT MAY NOT CROSS A CONTRASTIVE, A CLAUSE BREAK, OR A COMMA (review cycle 8). A plain
 #: character window reached from `fixed` in `the earlier P2 was fixed, but the P1 is still
@@ -468,14 +499,16 @@ def _retracted_from(text: str, end: int) -> bool:
       • THE VERDICT'S OWN PARAGRAPH — rules (1)–(4) in FULL, including rule (3)'s exception
         words. `except` / `apart from` / `besides` / `unless` describe the verdict when they
         sit beside it; `**Verdict: CLEAN.** No blocking findings; the P1 remains open.`
-      • THE PARAGRAPH AFTER IT — rules (1), (2) and (4)'s WORD arm. Rule (3) is deliberately NOT
-        carried here: detached, those words describe ordinary prose (`no other files changed
-        except the fixture`) and carrying them across refused real clears (#10962). This layer
-        stops at the END OF THAT PARAGRAPH, not at the end of the body — see
-        `_NEXT_PARA_RETRACTION_RE`.
-      • THE WHOLE SUFFIX — the per-token severity arm (P0–P2 / blocker), and ONLY it. Windowed,
-        that arm would be the cliff older revisions kept rebuilding; unbounded, it cannot be
-        missed, because a reviewer who means to leave a finding open names it.
+      • THE PARAGRAPH AFTER IT — rules (1) and (2). Rule (3) is deliberately NOT carried here:
+        detached, those words describe ordinary prose (`no other files changed except the
+        fixture`) and carrying them across refused real clears (#10962). Rule (4)'s WORD arm is
+        also not carried here — it is graded over the whole suffix instead, because it is a
+        closed state vocabulary and windowing it was a measured fail-open.
+      • THE WHOLE SUFFIX — rule (4)'s WORD arm (`unfixed`, `still open`, `remains open`, …), the
+        finding-state PHRASES (`no longer holds` / `no longer the case`), and the per-token
+        severity arm (P0–P2 / blocker) — and NOTHING else. Windowed, the severity arm would be
+        the cliff older revisions kept rebuilding; unbounded, it cannot be missed, because a
+        reviewer who means to leave a finding open names it.
 
     A "paragraph" boundary is a whitespace-only line, not merely `\n\n` — see `_BLANK_LINE_RE`.
     """
@@ -483,6 +516,8 @@ def _retracted_from(text: str, end: int) -> bool:
     blank = _BLANK_LINE_RE.search(text, end)
     own_para = text[end : blank.start() + 1 if blank else len(text)]
     if _RETRACTION_NO_SEVERITY_RE.search(own_para):
+        return True
+    if _SUFFIX_RETRACTION_RE.search(suffix):
         return True
     if blank:
         after = blank.end()

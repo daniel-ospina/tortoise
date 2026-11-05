@@ -1100,6 +1100,56 @@ def _finding_then(body: str) -> list[dict]:
     ]
 
 
+def test_rule4_word_arm_is_never_windowed() -> None:
+    """REVIEW #10975 CYCLE 3 (P0 I introduced): bounding the window dropped rule (4)'s closed
+    finding-state vocabulary, so a body that opens with a clear verdict and then says
+    `that path is unfixed` CLOSED a live P1.
+
+    This was a NEW fail-open, not a pre-existing gap. The sharpest form NAMES a severity: the
+    completion `Fixed the …` stands the per-token arm down (correctly — a completion governs
+    the token), leaving rule (4)'s word as the only arm that could see the regression, and the
+    window had moved it out of reach.
+
+    `unfixed` / `unaddressed` / `still open` / `remains open` / `not fixed` is a CLOSED
+    vocabulary of finding-state words, so it is graded over the WHOLE suffix. What may be
+    windowed is only the subject-ambiguous half — bare `no longer` (real code prose:
+    "`lane_key` can no longer raise"), the bare `stale|superseded|…` words, and rule (2)'s
+    attribution.
+    """
+    for body in (
+        "**Verdict: CLEAN.**\n\nGood.\n\nAlso good.\n\nThat path is unfixed.",
+        "**Verdict: CLEAN.**\n\nGood.\n\nAlso good.\n\nThe guard is still open.",
+        "**Verdict: CLEAN.**\n\nRead the diff.\n\nFixed the P1 at 4f450ae81 — but the "
+        "regression is back and that path is unfixed.",
+        "**Verdict: CLEAN.**\n\nRead the diff.\n\nI fixed the P1 in 4f450ae81.\n\nOn "
+        "re-read, my verdict no longer holds.",
+    ):
+        _assert_fails("blocking-finding", "open-blocking-finding", comments=_finding_then(body))
+    # …and the SUBJECT-AMBIGUOUS half really is still windowed, or the fix would just be the
+    # old over-block back again: real code prose mentioning `no longer` deep in a clean review
+    # must not retract that review's verdict.
+    body = (
+        "**Verdict: CLEAN.** No blocking finding.\n\n"
+        "### Verified clean\n\nThe stored direction is a string, so `lane_key` can no longer "
+        "raise on the scalar branch.\n"
+    )
+    check = _check("blocking-finding", comments=_finding_then(body))
+    assert check.passed is True, f"code prose retracted a clean review: {check.raw}"
+
+
+def test_the_no_test_exemption_grades_the_phrase_not_the_noun() -> None:
+    """REVIEW #10975 CYCLE 3 (P2): keying the `no test` exemption on the noun `suite|run`
+    exempted statements about the CODE, which is the opposite subject — `No test suite covers
+    the guard path.` cleared. The exemption now needs an EXECUTION predicate after the noun."""
+    for body in (
+        "**Verdict: CLEAN.**\n\nNo test suite covers the guard path.",
+        "**Verdict: CLEAN.**\n\nNo test has been written for the guard.",
+        "**Verdict: CLEAN.**\n\nNo test could catch this path.",
+        "**Verdict: CLEAN.**\n\nNo test run covers the guard.",
+    ):
+        _assert_fails("blocking-finding", "open-blocking-finding", comments=_finding_then(body))
+
+
 def test_the_retraction_layer_stops_at_the_next_paragraph_not_the_whole_body() -> None:
     """REVIEW #10975 (P1, the measured one): the non-severity layer was graded TO THE END of
     the body, so any later `stale` / `superseded` / `not` anywhere in a 180-line review
@@ -2771,19 +2821,30 @@ def test_each_mutation_is_killed(mutant_name: str, label: str, fixture_fn) -> No
 def test_the_retraction_rule_source_is_the_same_text_in_both_forms() -> None:
     """The split named fragments must BE the combined source — not a second copy of it.
 
-    `_retracted_from` grades two windows that must agree about what a retraction is: the
-    verdict's own paragraph uses the combined `_RETRACTION_RULES_1_TO_3`, and the paragraph
-    after uses the same rules MINUS rule (3) (`_NEXT_PARA_RETRACTION_RE`). They are therefore
+    `_retracted_from` grades three windows that must agree about what a retraction is: the
+    verdict's own paragraph uses the combined `_RETRACTION_RULES_1_TO_3`; the paragraph after
+    uses rules (1) and (2) only (`_NEXT_PARA_RETRACTION_RE`); and the whole suffix uses rule
+    (4)'s WORD arm plus the finding-state PHRASES (`_SUFFIX_RETRACTION_RE`). They are therefore
     rebuilt from one set of named fragments. Two independently-typed copies of a regex that
     have to agree is exactly how one of them rots unnoticed — the next rule added to one form
     and not the other would silently reopen a hole. This pin is the tripwire.
+
+    ⛔ THE LAYERS ARE NOT THE SAME SUBSET, AND THE DIFFERENCE IS LOAD-BEARING (review #10975,
+    cycle 3): rule (3)'s exception words do not survive detachment, and rule (4)'s CLOSED state
+    vocabulary may never be windowed at all. So every fragment must be graded SOMEWHERE, and the
+    two exclusions must be exactly those two.
     """
     assert (rfo._R1_NO_LONGER + rfo._R2_ATTRIBUTED + rfo._R3_EXCEPTION + rfo._R4_WORDS) == \
         rfo._RETRACTION_RULES_1_TO_3
-    # …and the detached form is exactly that minus rule (3), not some other subset
+    # …and the detached form is exactly that minus rule (3) and minus rule (4), not some other
+    # subset…
     assert rfo._R3_EXCEPTION not in rfo._NEXT_PARA_RETRACTION_RE.pattern
-    for fragment in (rfo._R1_NO_LONGER, rfo._R2_ATTRIBUTED, rfo._R4_WORDS):
+    assert rfo._R4_WORDS not in rfo._NEXT_PARA_RETRACTION_RE.pattern
+    for fragment in (rfo._R1_NO_LONGER, rfo._R2_ATTRIBUTED):
         assert fragment in rfo._NEXT_PARA_RETRACTION_RE.pattern
+    # …and rule (4) is not LOST by that exclusion — it is graded over the whole suffix, which is
+    # the fail-closed direction (an omission over-blocks; windowing it was a measured fail-open).
+    assert rfo._R4_WORDS.lstrip("|") in rfo._SUFFIX_RETRACTION_RE.pattern
 
 
 def test_the_severity_arm_reads_the_PLURAL() -> None:
