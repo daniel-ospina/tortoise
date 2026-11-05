@@ -692,6 +692,20 @@ def test_an_unread_applied_counter_publishes_none_never_a_zero(monkeypatch):
         "deployment that has never written"
     )
     assert "applied counter unreadable" in record["counters_error"]
+    # ALL-OR-NOTHING (#9548 review cycle 3): the three failure counters are read
+    # BEFORE the pair, so a half-published block would hand a consumer a stale
+    # `record_write_failures` beside `counters_error` and no way to tell it was
+    # not a complete snapshot. Every counter key must be `None` together.
+    for key in (
+        "record_write_failures",
+        "record_non_journal_skips",
+        "record_position_unproven",
+        "record_last_write_at",
+    ):
+        assert record[key] is None, (
+            f"`{key}` published a value from a snapshot that FAILED half-way — "
+            "a consumer reads a partial block as a complete one"
+        )
 
 
 def test_a_commit_that_RAISES_does_not_count_as_applied(monkeypatch):

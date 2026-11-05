@@ -6470,22 +6470,31 @@ def _record_health() -> dict:
         "fetched_at": datetime.now(UTC).isoformat(),
     }
     try:
-        block["record_write_failures"] = record_write_failure_counts()
+        # Read EVERY counter into a local FIRST, then publish the whole set at
+        # once: a snapshot that fails half-way must not leave the earlier keys
+        # holding values while the later ones read ``None`` — a consumer that
+        # treats a partially-read block as a complete one reads a stale number
+        # as a current fact (#9548 review cycles 3-4). The published shape is
+        # therefore all-read or all-``None``, and ``counters_error`` names which.
+        failures = record_write_failure_counts()
         # The sibling keys, not folded into the counter above: a
         # `no_durable_journal` decline is the HEALTHY M2 lane and a
         # `position_unproven` append is healed by a replay, so neither may
         # move the zero that means "no record row was lost" (#9231/#9307).
-        block["record_non_journal_skips"] = record_non_journal_skip_counts()
-        block["record_position_unproven"] = record_position_unproven_count()
-        # The POSITIVE pair rides the SAME try: a snapshot that cannot be read
-        # must publish ``None`` + ``counters_error`` for the whole block, so a
-        # reader never mixes a read counter with an unread one (#9548 review P2's
-        # rule — an unread counter is not a zero — applied to the new fields).
-        block["record_writes_applied"] = record_write_applied_count()
-        block["record_last_write_at"] = record_last_write_at()
+        skips = record_non_journal_skip_counts()
+        unproven = record_position_unproven_count()
+        # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
+        applied = record_write_applied_count()
+        last_write_at = record_last_write_at()
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
+    else:
+        block["record_write_failures"] = failures
+        block["record_non_journal_skips"] = skips
+        block["record_position_unproven"] = unproven
+        block["record_writes_applied"] = applied
+        block["record_last_write_at"] = last_write_at
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
     # this counter carries — SIX values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
