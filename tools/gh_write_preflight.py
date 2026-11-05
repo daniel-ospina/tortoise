@@ -177,8 +177,11 @@ class Proc:
 class Verdict:
     """The answer. `writable` is the only field a caller should branch on.
 
-    Every string field is stored ALREADY REDACTED, so a caller that logs, reprs, or prints this
-    object cannot leak a credential.
+    `remote_url`, `detail` and each `steps[].detail` are stored ALREADY REDACTED, so a caller that
+    logs, reprs, or prints this object cannot leak a credential through them. (`repo_root`,
+    `remote`, `probe_ref` and `head_sha` are not passed through `redact()`: they are filesystem
+    paths, a remote NAME, and commit ids — no credential can reach them.) A passing verdict carries
+    `reason=None`; only a refusal carries a `REASONS` token.
     """
 
     writable: bool
@@ -301,6 +304,19 @@ def _probe_ref(prefix: str = "gh-write-preflight") -> str:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     return f"{prefix.strip('/')}/{stamp}-{os.getpid()}-{rand}"
+
+
+# A prefix that cannot form a valid refname, or that starts with `-`, must be refused at the CLI
+# boundary rather than handed to git as an option-looking argv element.
+_BAD_PREFIX_CHARS = set(" ~^:?*[\\")
+
+
+def _valid_prefix(prefix: str) -> bool:
+    if not prefix or prefix.startswith("-") or prefix.strip("/") != prefix:
+        return False
+    if ".." in prefix or "//" in prefix or "@{" in prefix:
+        return False
+    return not (_BAD_PREFIX_CHARS & set(prefix))
 
 
 def _ref_state(runner: Runner, root: str, remote: str, ref: str) -> str:
@@ -445,15 +461,17 @@ def _check_writable(
         return verdict
 
     dp = runner.run(
-        ["git", "push", "--no-verify", remote, "--delete", verdict.probe_ref], cwd=root
+        # `--` so a ref that begins with `-` can never be parsed as an option by `git push`
+        # (a `--probe-ref-prefix=-f` renders `-f/<stamp>`, which without this makes the delete
+        # exit 129 and leaves the ref behind while reporting the credential unwritable).
+        ["git", "push", "--no-verify", remote, "--delete", "--", verdict.probe_ref],
+        cwd=root,
     )
     step("delete", dp)
-    if dp.rc == 0:
-        verdict.cleaned_up = True
-        return verdict
 
-    # The delete failed. It "failed" harmlessly when there was no ref to delete (a refused push),
-    # so ask the remote rather than assume — and treat an unreadable answer as UNCONFIRMED.
+    # CONFIRM ON THE REMOTE, not from the delete's own exit code — the same rule the push path
+    # follows. `cleaned_up=True` only on a positive "ref absent" read; an unreadable answer is
+    # `None` (unconfirmed), never "clean".
     state = _ref_state(runner, root, remote, verdict.probe_ref)
     if state == "absent":
         verdict.cleaned_up = True
@@ -513,13 +531,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.probe_ref_prefix is not None and not _valid_prefix(args.probe_ref_prefix):
+        parser.error(
+            f"invalid --probe-ref-prefix {args.probe_ref_prefix!r}: it must be a ref-shaped path "
+            f"(no leading '-' or '/', no whitespace, no ': ? * [ \\ ~ ^', no '..' or '@{{')"
+        )
+
     verdict = check_writable(
         args.repo, args.remote, keep_ref=args.keep_ref, probe_ref_prefix=args.probe_ref_prefix
     )
-    # Belt: the type promises a REASONS token; never emit a bare `(None)` — and apply it to the
-    # PAYLOAD as well as the marker, since the --json document is the branchable artifact.
+    # Belt: the type promises a REASONS token; never emit a bare `(None)`.
     reason = verdict.reason if verdict.reason in REASONS else "internal-error"
-    verdict.reason = reason
+    # Apply it to the PAYLOAD as well as the marker — but ONLY on a refusal. A passing verdict
+    # legitimately carries `reason=None`, and stamping `internal-error` on it would report "no
+    # verdict is available" about a credential that just proved it can write.
+    if not verdict.writable:
+        verdict.reason = reason
 
     # The marker ALWAYS goes to stderr, in both modes, so a caller that greps for it works with
     # --json too (stdout stays pure JSON there).

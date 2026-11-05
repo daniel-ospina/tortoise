@@ -405,6 +405,84 @@ def test_probe_ref_prefix_is_honoured(tmp_path: Path):
     assert verdict.writable is True
 
 
+def test_success_verdict_keeps_reason_none(tmp_path: Path, capsys):
+    """A PASS must not carry a REASONS token.
+
+    Regression: the belay that protects the `--json` payload from `reason=None` on a REFUSAL was
+    applied unconditionally, so every successful run reported `internal-error` — "no verdict is
+    available" about a credential that had just proved it can write.
+    """
+    work, _remote = _make_pair(tmp_path)
+
+    rc = main(["--repo", str(work), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == EXIT_WRITABLE
+    assert payload["writable"] is True
+    assert payload["reason"] is None, "a passing verdict must not be stamped internal-error"
+
+
+def test_option_shaped_prefix_is_refused_before_any_push(tmp_path: Path, capsys):
+    """A leading-dash prefix must be a usage error, not a ref that `git push` reads as a flag.
+
+    Measured before the guard: `--probe-ref-prefix=-f` created the ref (the push refspec is
+    `HEAD:refs/heads/...`, so it is not option-parsed) but the DELETE exited 129, leaving the ref
+    behind AND reporting the credential unwritable — litter plus a false block.
+    """
+    work, remote = _make_pair(tmp_path)
+    before = _remote_refs(remote)
+
+    for bad in ("-f", "--force", "/abs", "a b", "a..b", "a:b", "*", ""):
+        with pytest.raises(SystemExit) as exc:
+            main(["--repo", str(work), f"--probe-ref-prefix={bad}"])
+        assert exc.value.code == 2, f"{bad!r} must be a usage error (exit 2)"
+
+    assert _remote_refs(remote) == before, "a refused prefix must not push anything"
+
+
+def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
+    """Cleanup is confirmed by ls-remote, NOT by the delete's own exit code.
+
+    A delete that reports success while the ref survives must not be recorded as cleaned.
+    """
+    class LyingDelete(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            joined = " ".join(argv)
+            if argv[1] == "ls-remote" and _PROBE in joined:
+                return Proc(0, out=f"deadbeef\t{joined.split()[-1]}\n")   # always present
+            if argv[1] == "ls-remote":
+                return Proc(0, out="deadbeef\trefs/heads/main\n")
+            if argv[1] == "push" and "--delete" in argv:
+                return Proc(0, out="deleted")        # LIES: ref is still there
+            if argv[1] == "push":
+                return Proc(0, out="pushed")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    work, _remote = _make_pair(tmp_path)
+    verdict = check_writable(work, runner=LyingDelete())
+
+    assert verdict.cleaned_up is False
+    assert verdict.leftover_ref is True
+    assert verdict.writable is False, "a surviving ref must not be reported as a pass"
+
+
+def test_delete_uses_a_double_dash_guard(tmp_path: Path):
+    """The delete argv must separate options from the ref."""
+    seen = []
+
+    class Recording(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            seen.append(list(argv))
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    work, _remote = _make_pair(tmp_path)
+    check_writable(work, runner=Recording())
+
+    deletes = [a for a in seen if a[1] == "push" and "--delete" in a]
+    assert deletes, "a delete must have been attempted"
+    assert "--" in deletes[0], f"delete argv needs a `--` guard: {deletes[0]}"
+
+
 def test_oserror_is_mapped_not_raised():
     """`Runner.run`'s exception arms must return a Proc, never raise — a raised OSError exits 1
     with NO GH-WRITE-UNAVAILABLE marker, which breaks the contract.
