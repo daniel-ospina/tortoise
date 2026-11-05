@@ -319,8 +319,8 @@ That set is not a classification: `classify_test_file()` resolves a file only ag
 `manifest-integrity` leg — a carve-out-only entry therefore leaves the new file reading as drift. It is also
 **exclusive, not additive**: `select()` does `files -= carve` and carve-out files are excluded from every
 docker leg, so an entry there would *remove* the pin from those legs rather than add the carve-out lane "as
-well". Every one of the manifest's 57 carve-out files is also in a surface (`carve_only: 0`), which is why the
-precedent above is a surface registration and `tests/test_record_searchkeys_10620.py` is registered as
+well". Every one of the manifest's 57 carve-out files is also in a surface (**0** carve-out-only files), which is
+why the precedent above is a surface registration and `tests/test_record_searchkeys_10620.py` is registered as
 `api` + `core` with a `durations:` row — not as a carve-out.
 ⚠️ **`#11075`'s body still orders the opposite** ("must be registered in `config/ci-surfaces.yml`'s
 `carve_out:` list or it never rides the URI-unset leg (#10648 needed the same registration)") — on a
