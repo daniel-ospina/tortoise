@@ -449,7 +449,14 @@ def resolve_credential() -> tuple[str, str]:
                 return tok, f"env:{var}"
     tok, login = _token_from_hosts()
     if tok:
-        return tok, f"hosts.yml:{(login or 'active')}"
+        # ⛔ THE LABEL MUST NOT CARRY FILE CONTENT (review cycle 15). `login` is the depth-1 `user:` line —
+        # arbitrary text in the file — so a prefix-less legacy value there survived both the value scrub
+        # (it is not the resolved token) and the shape regex (no documented prefix) and was printed.
+        # The depth-1 rule already guarantees WHICH account was read, so `active` loses no diagnostic
+        # value; a real GitHub login is kept because it is useful and cannot be a credential.
+        if login and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login):
+            return tok, f"hosts.yml:{login}"
+        return tok, "hosts.yml:active"
     return "", "none"
 
 

@@ -1138,6 +1138,31 @@ def test_the_credential_source_label_is_scrubbed_because_it_carries_hosts_yml_te
             f"credential_source leaked the credential at offset {off}: {blob!r}"
 
 
+def test_a_login_shaped_value_is_kept_but_file_content_never_becomes_the_label():
+    """`hosts.yml:{login}` printed arbitrary `user:` content (review cycle 15).
+
+    The depth-1 `user:` line is file content. A prefix-less legacy value there survived the value scrub
+    (it is not the resolved token) and the shape regex (no documented prefix), so it was printed. A real
+    GitHub login is kept; anything else collapses to `active`, which loses no diagnostic value because
+    the depth-1 rule already says which account was read.
+    """
+    token = "0123456789abcdef0123456789abcdef01234567"          # the credential actually used
+    not_a_login = "fedcba9876543210fedcba9876543210fedcba98"     # a DIFFERENT prefix-less secret
+    import tempfile, os as _os
+    with tempfile.TemporaryDirectory() as d:
+        with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
+            fh.write(f"github.com:\n    user: {not_a_login}\n    oauth_token: {token}\n    git_protocol: https\n")
+        env = {k: v for k, v in _os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
+        env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
+                    "HOME": "/tmp/gh-preflight-no-home"})
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    assert not_a_login not in blob, f"the hosts.yml user: line was echoed: {blob!r}"
+    res = json.loads(p.stdout)
+    assert res["credential_source"] == "hosts.yml:active", res["credential_source"]
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0
