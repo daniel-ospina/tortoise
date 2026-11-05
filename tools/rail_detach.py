@@ -1159,22 +1159,96 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
     already carries the repo it rails, and `_repo_key` is the module's ONE way to
     decide two spellings are one repo. A candidate whose `REPO=` cannot be read,
     or names a different repo, is not this PR's record and is skipped.
+
+    ⛔ TWO RECORDS CAN COEXIST DURING THE ROLLOUT, SO THE CHOICE IS BY LIVENESS,
+    NOT BY NAMING. Once an old copy of this tool has written its legacy-named
+    record beside the canonical one, "prefer the canonical path and return" reads
+    a DEAD canonical record `lost` while the legacy record names the rail that is
+    still merging — the module's own P1 (a live rail reported `lost`), and the
+    state `launch`'s guard accepts, i.e. a SECOND rail on one PR. So when there
+    is more than one candidate, the first one whose pid/child still answers wins.
+    Nothing dead answering: canonical if there is one, else the newest
+    `STARTED_AT` (the last attempt), else the first.
+
+    ⛔ THE COMPATIBILITY IS ONE-DIRECTIONAL — this is the residual, stated so no
+    reader mistakes "spelling-INSENSITIVE" for "the collision is closed both
+    ways". An OLD copy of this tool reads only `artifact_path()` with the RAW-repo
+    slug, so the canonical record this code writes is invisible to it: during the
+    rollout an old-copy `launch` can still start a second rail on a PR the new
+    code is already railing, and an old-copy `collect --assert-merged` can answer
+    3 about a new rail that is live. The lock does not close that either — a
+    `flock` is keyed on the file, and the legacy and canonical locks are different
+    files. Dual-writing the legacy alias was rejected: it would resurrect the
+    second lock this change exists to remove, and a compatibility artefact that
+    the pre-fix reader WRITES to is not something the new code can keep correct.
+    The direction that can be closed without re-introducing the collision is
+    closed here, and the other one ends when the fleet is past this commit.
     """
     art = artifact_path(state_dir, repo, pr)
-    if art.exists():
-        return art
     key = _repo_key(repo or "")
     sd = Path(state_dir)
-    if not key or not sd.exists():
+    cands = [art] if art.exists() else []
+    if key and sd.exists():
+        for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
+            if cand == art:
+                continue
+            try:
+                text = cand.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _repo_key(read_field(text, "REPO") or "") == key:
+                cands.append(cand)
+    if not cands:
         return None
-    for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
-        try:
-            text = cand.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if _repo_key(read_field(text, "REPO") or "") == key:
+    if len(cands) == 1:
+        return cands[0]
+    # ⛔ MEASURED BEFORE THIS LINE EXISTED: a dead canonical record beside a LIVE
+    # legacy one read `lost`, and read alone the legacy record read `waiting` — so
+    # `launch`'s `prior.state == WAITING` guard was False and it started a second
+    # rail on one PR. Liveness is the decision; naming is only the tie-break.
+    for cand in cands:
+        if _record_is_live(cand):
             return cand
-    return None
+    if art in cands:
+        return art
+    # Nothing answers: the newest attempt is the one to report, and `STARTED_AT`
+    # orders attempts. An unreadable/garbled timestamp sorts last rather than
+    # crashing the read-only verb (`_int_or_none`'s contract).
+    def _started(p: Path) -> str:
+        try:
+            return read_field(p.read_text(encoding="utf-8", errors="replace"),
+                              "STARTED_AT") or ""
+        except OSError:
+            return ""
+
+    return sorted(cands, key=_started, reverse=True)[0]
+
+
+def _record_is_live(art: Path) -> bool:
+    """Does this record name a process that is still running?
+
+    A THIN probe on one record — deliberately not `collect`: the resolver is called
+    BY `collect`, and a resolver that ran a full two-pass verdict would recurse.
+    `EXIT=` is honoured: a record whose writer has exited is finished, whatever its
+    (possibly recycled) pid answers, so this never resurrects a completed attempt.
+    """
+    try:
+        text = art.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if _attempt_exits(text):
+        return False
+    leader = _int_or_none(read_field(text, "PID")) or 0
+    child = _int_or_none(read_field(text, "CHILD_PID")) or 0
+    age = _age_seconds(read_field(text, "STARTED_AT"))
+    if leader <= 0 and child <= 0:
+        # A bare `SPAWNING=1` sentinel: the launch is mid-fork, so it IS live until
+        # its own TTL expires — the same bound `_collect_read` applies, and for the
+        # same reason (an unexpired sentinel would refuse every later `start`
+        # forever). A record with neither a pid nor the sentinel names nothing.
+        return bool(read_field(text, "SPAWNING")) and age is not None \
+            and age <= SPAWNING_TTL_S
+    return _rail_alive(leader, child, str(art), age=age)
 
 
 def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
@@ -1835,10 +1909,32 @@ def main(argv: list[str] | None = None) -> int:
         # ⛔ `collect` is the verb that must work WHEN THE NETWORK DOES NOT — the
         # artifact already names its repo, so resolve from disk first and only
         # fall back to `gh`. A status read must not depend on an API call.
+        #
+        # ⛔ AND THE COUNT IS OF REPOS, NOT OF FILES. Two records for one PR and
+        # one repo is now the NORMAL shape while the fleet is part way through the
+        # spelling change: an old copy of this tool wrote `rail-github.com-o-r-7.md`
+        # beside the canonical `rail-o-r-7.md`. Counting FILES read that
+        # compatibility state as ambiguity and fell through to `gh` — so the verb
+        # that exists to work without the network exited 2 ("gh cannot resolve this
+        # repo") about a record that names its repo on disk. Grouping by
+        # `_repo_key` keeps "two REPOS for one PR number" as the only ambiguity, and
+        # that is the case the `>1` arm is actually for.
         cands = sorted(Path(sd).glob(f"rail-*-{a.pr}.md")) if Path(sd).exists() else []
-        if len(cands) == 1:
-            repo = read_field(cands[0].read_text(encoding="utf-8", errors="replace"),
-                              "REPO") or None
+        by_repo: dict[str, str] = {}
+        for cand in cands:
+            try:
+                text = cand.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            raw = read_field(text, "REPO") or ""
+            key = _repo_key(raw)
+            # The RAW value is kept as the repo to resolve, so the `REPO=` line the
+            # record already carries is what `collect` is asked about — `_repo_key`
+            # decides identity here, it does not rewrite the target.
+            if key and key not in by_repo:
+                by_repo[key] = raw
+        if len(by_repo) == 1:
+            repo = next(iter(by_repo.values()))
         elif not cands:
             # ⛔ ZERO CANDIDATES IS AN ANSWER, NOT A REASON TO ASK GITHUB. The
             # artifact filename is `<repo slug>-<pr>`, so an artifact this glob does
@@ -1846,7 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
             # here, and that is `absent` (3) whatever `gh` would have said. Asking
             # `gh` first made the answer depend on the network: with `gh` failing,
             # an empty state dir exited 2 (environment error) instead of 3. The
-            # `>1` case still resolves, because two repos' artifacts for one PR
+            # `>1 REPO` case still resolves, because two repos' artifacts for one PR
             # number genuinely does not name a target.
             print(f"RAIL(#{a.pr}, absent, -, -)")
             return 3

@@ -1004,6 +1004,43 @@ def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
         assert rd.collect(sd, "o/r", 772) is None
         other = rd.collect(sd, "someone/else", 772)
         assert other is not None and other.artifact == str(legacy_other)
+
+        # ── COEXISTENCE: canonical + legacy for ONE PR, and the choice is LIVENESS
+        # ⛔ MEASURED PRE-FIX: a DEAD canonical record beside a LIVE legacy one read
+        # `lost` (the record alone read `waiting`), so `launch`'s guard accepted the
+        # PR and started a SECOND rail — the module's own P1. Both orders are pinned,
+        # because "prefer the canonical path" fails in exactly one of them.
+        canonical = rd.artifact_path(sd, "o/r", 771)
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID=999999\n", encoding="utf-8")            # DEAD
+        canonical.write_text(f"PR=771\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                             f"PID={live.pid}\n", encoding="utf-8")     # LIVE
+        st = rd.collect(sd, "o/r", 771)
+        assert st is not None and st.state == rd.WAITING, (st and st.as_dict())
+        assert st.artifact == str(canonical), "the live record must win"
+
+        canonical.write_text(f"PR=771\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                             f"PID=999999\n", encoding="utf-8")         # DEAD
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID={live.pid}\n", encoding="utf-8")        # LIVE
+        st = rd.collect(sd, "o/r", 771)
+        assert st is not None and st.state == rd.WAITING, (st and st.as_dict())
+        assert st.artifact == str(legacy), "a dead canonical record must not shadow a live one"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(771, cwd=co, state_dir=sd, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value), str(exc.value)
+
+        # …and the CLI's disk-first resolution counts REPOS, not FILES: one repo, two
+        # spellings, no `gh` — the answer is on disk, so `collect` must not ask (and
+        # must not exit 2 for an ambiguity that is not one).
+        assert rd.main(["collect", "771", "--state-dir", str(sd)]) == 0
+
+        # Both dead: the record is still reported (never "absent") — the guard reads
+        # it as finished, which is what lets the next `start` through.
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID=999999\n", encoding="utf-8")
+        st = rd.collect(sd, "o/r", 771)
+        assert st is not None and st.state == rd.LOST, (st and st.as_dict())
     finally:
         live.kill()
         live.wait()
