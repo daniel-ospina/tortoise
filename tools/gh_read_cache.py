@@ -391,7 +391,19 @@ def _env_token(host: str) -> str:
     the command targets a GH Enterprise SERVER host — and when the variable for the OTHER
     family is the only one set, gh ignores it and falls back to `hosts.yml`.
     """
-    dotcom = host in ("", "github.com") or host.endswith(".ghe.com")
+    # ⛔ MIRROR gh'S NORMALISATION, DO NOT HAND-LIST. go-gh's rule is not "github.com plus
+    # `*.ghe.com`": it folds `*.github.com` -> `github.com` and `*.github.localhost` ->
+    # `github.localhost`, and `github.localhost` (gh's local-API / Codespaces host) belongs to
+    # the GH_TOKEN family too. Omitting it made gh send `GH_TOKEN` while the digest fell through
+    # to the enterprise family — two genuinely different GH_TOKENs hashed the same value and
+    # `rate_limit` was served across them as fresh.
+    h = host.lower()
+    dotcom = (
+        h in ("", "github.com", "github.localhost")
+        or h.endswith(".ghe.com")
+        or h.endswith(".github.com")
+        or h.endswith(".github.localhost")
+    )
     keys = ("GH_TOKEN", "GITHUB_TOKEN") if dotcom else ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
     for key in keys:
         value = os.environ.get(key, "").strip()
@@ -862,9 +874,14 @@ def cmd_get(args: argparse.Namespace) -> int:
         # positional parsing accept).
         pass_argv = argv
         named_host = bool(host) and host != _default_host()
+        # ⛔ THE CALLER MAY HAVE ALREADY EXPRESSED THE HOST THEMSELVES — as a literal
+        # `host/owner/name` token, or via `-R host/owner/name`. Refusing on "no `{repo}`" alone
+        # rejected working invocations (`--argv repo view ghe.example.com/o/n`), and it fired
+        # for any lane exporting `GH_REPO=<host>/<owner>/<repo>` without typing `--repo`.
+        host_expressed = any(t == host or t.startswith(f"{host}/") for t in template)
         if named_host and not _accepts_hostname(template) and repo:
             pass_argv = _format_argv(template, f"{host}/{repo}", args.base)
-        elif named_host and not _accepts_hostname(template):
+        elif named_host and not _accepts_hostname(template) and not host_expressed:
             # ⛔ NOWHERE TO PUT IT. A porcelain verb has no `--hostname`, and a template with
             # no `{repo}` has no argument to carry `host/owner/repo` — so the pass-through used
             # to ask the DEFAULT instance while the caller had named another, silently. Refuse
@@ -983,7 +1000,13 @@ def cmd_status(args: argparse.Namespace) -> int:
             raise Usage(f"{args.key!r} is not a declared invariant")
         ttl = _effective_ttl(args.ttl, decl.ttl)
         uses_repo = any("{repo}" in a for a in decl.argv)
-        host, repo = _resolve_repo(args.repo) if uses_repo else (_default_host(), "")
+        # ⛔ THE SAME RESOLUTION AS `cmd_get`, DELIBERATELY. `status` still tied the host to
+        # `{repo}`, so on a route without one it reported `host: github.com` and `present:
+        # false` for an entry the very next `get --repo ghe.example.com/...` served: a hit
+        # could not be attributed to a server, which is exactly what this report exists for.
+        host, repo = _resolve_repo(args.repo) if args.repo else (_default_host(), "")
+        if not uses_repo:
+            repo = ""
     except Refused as exc:
         sys.stderr.write(f"gh_read_cache: REFUSED — {exc}\n")
         return 3
