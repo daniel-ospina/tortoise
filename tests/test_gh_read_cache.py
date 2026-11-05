@@ -310,8 +310,25 @@ class CacheTest(unittest.TestCase):
             ("api", "graphql"),
             ("api", "--paginate", "graphql"),
             ("api", "-X", "GET", "graphql"),
+            ("api", "--method", "GET", "graphql"),
             ("api", "--hostname", "github.com", "graphql"),
+            ("api", "-H", "Accept: application/vnd.github+json", "graphql"),
             ("api", "graphql", "-f", "query={viewer{login}}"),
+            ("api", "-f", "query={viewer{login}}", "graphql"),
+            ("api", "graphql?query={viewer{login}}"),
+            # the normalisations gh performs for us, each measured as a SERVED read first.
+            ("api", "/graphql"),
+            ("api", "//graphql"),
+            ("api", "graph%71l"),
+            ("api", "GRAPHQL"),
+            # ⛔ AN ABSOLUTE URL IS A ROUTE gh FORWARDS VERBATIM. Every declared mutable
+            # route was served when spelled this way: `_route_candidates` only ever built
+            # `api <path>` from `repos/`-shaped tokens, so a full URL matched nothing.
+            ("api", "https://api.github.com/repos/o/n/actions/runs"),
+            ("api", "http://api.github.com/repos/o/n/commits"),
+            ("api", "HTTPS://api.github.com/repos/o/n/pulls/42"),
+            ("api", "https://api.github.com/graphql", "-f", "query={x}"),
+            ("api", "//repos/o/n/pulls/42"),
         ):
             r = self.run_tool(
                 "get", "repo", "--repo", "o/n",
@@ -346,16 +363,28 @@ class CacheTest(unittest.TestCase):
             ("api", "repos/o/n"),
             ("api", "repos/o/n/labels"),
             ("api", "user"),
+            ("api", "repos/graphql/graphql-js"),
             ("api", "--paginate", "repos/o/n/branches"),
             ("api", "-X", "GET", "repos/o/n/topics"),
             ("api", "repos/o/n/releases", "--jq", ".[].state_name"),
-            # the collisions: a route WORD as a porcelain argument, never as a route.
+            # ⛔ A FLAG'S VALUE IS NOT A ROUTE. `--hostname graphql` refused a live read on
+            # a single-label host literally named `graphql`, including the declared
+            # `rate_limit` key.
+            ("api", "--hostname", "graphql", "repos/o/n"),
+            ("api", "--hostname", "graphql", "rate_limit"),
+            # ⛔ A ROUTE WORD AS A PORCELAIN ARGUMENT, never as a route.
             ("repo", "list", "graphql"),
             ("search", "repos", "graphql"),
             ("repo", "view", "graphql/graphql-js"),
             ("issue", "list", "-R", "graphql/graphql-js"),
             ("label", "list", "-R", "graphql/graphql-js"),
+            ("label", "create", "api", "--description", "graphql"),
             ("search", "issues", "graphql", "--repo", "graphql/graphql-js"),
+            # ⛔ AND A `repos/`-SHAPED SEARCH QUERY IS A QUERY. Matching `repos/…` tokens
+            # wherever they sit refused these as "command 'api repos/{repo}/actions/runs'".
+            ("search", "code", "repos/o/n/actions/runs"),
+            ("search", "code", "repos/o/n/pulls"),
+            ("search", "issues", "repos/o/n/actions/workflows/x.yml"),
         ):
             r = self.run_tool(
                 "get", "repo", "--repo", "o/n",

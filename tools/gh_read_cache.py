@@ -656,53 +656,98 @@ def _prefix_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
     return re.compile(" ".join(parts) + r"(?:[ /?#]|$)", re.IGNORECASE)
 
 
+# The `gh api` flags whose value is a SEPARATE token. The route positional is the first
+# non-flag token that is NOT one of these values — otherwise `api --hostname graphql
+# repos/o/n` offered `api graphql` as a candidate and refused a live read on a host
+# literally named `graphql` (`--hostname=graphql` needs no entry: the `=` form is one
+# token and is skipped as flag-shaped).
+_API_VALUE_FLAGS = frozenset(
+    {
+        "-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field",
+        "--input", "-q", "--jq", "-t", "--template", "--hostname", "-p", "--preview",
+        "--cache",
+    }
+)
+_ABSOLUTE_URL = re.compile(r"^https?://[^/]+(/.*)?$", re.IGNORECASE)
+
+
+def _api_route(argv: tuple[str, ...]) -> str | None:
+    """The ROUTE positional of an `api` command, or None when this is not one.
+
+    `gh api` takes ONE endpoint argument, and global flags sit between the verb and it
+    (`api --paginate repos/…`, `api -X GET repos/…`). This walks past the flags and their
+    separate values and returns that single token, which is the only thing that can be a
+    route.
+
+    ⛔ NOT "every non-flag token", and not "any token shaped like a route". Both were tried
+    and both refused live reads whose ARGUMENT happened to collide with a route word:
+    `api --hostname graphql repos/o/n` (a flag VALUE), `repo list graphql`, `repo view
+    graphql/graphql-js` and `search code repos/o/n/actions/runs` (porcelain owner/query
+    positionals) all came back rc=3. The route is a POSITION, not a shape.
+    """
+    if not argv or argv[0] != "api":
+        return None
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _API_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok
+    return None
+
+
 def _route_candidates(argv: tuple[str, ...]) -> list[str]:
-    """The strings a mutable-route pattern is allowed to match.
+    """The strings a mutable-route pattern are allowed to match.
 
-    ⛔ NOT just `" ".join(argv)`, because global `gh` flags sit BETWEEN `api` and the
-    route (`api --paginate repos/…`, `api -X GET repos/…`), so a position-0 prefix match
-    is defeated by an ordinary flag. A `repos/...` token is therefore also offered with the
-    `api` verb in front, which is the shape the patterns are written in.
+    ⛔ NOT just `" ".join(argv)`. Global `gh` flags sit BETWEEN `api` and the route
+    (`api --paginate repos/…`, `api -X GET repos/…`), so a position-0 prefix match is
+    defeated by an ordinary flag; the route POSITIONAL is therefore offered with the `api`
+    verb in front, which is the shape the patterns are written in.
 
-    ⛔ AND THE SYNTHESISED CANDIDATE IS NOT `repos/`-ONLY. Widening it to `repos/`-prefixed
-    tokens alone left the ONE pattern whose route is not under `repos/` unprotected:
-    `api graphql` was refused, but `api --paginate graphql` (and `-X GET`, and any other
-    leading global flag) matched no candidate and was served as rc=0 — the very spelling
-    this function exists to survive, defeating the one entry whose docstring says an
-    under-match here "spends a real call".
+    ⛔ AND THE VERB IS `argv[0]`. The first cut of this fix synthesised the candidate for
+    every non-flag token, which refused legitimate reads whose argument collided with a
+    route word — `repo list graphql`, `search repos graphql`, `repo view
+    graphql/graphql-js` — the same false refusal `_prefix_pattern` and
+    `test_repo_slug_that_looks_like_a_verdict_is_still_served` already fixed for a repo
+    legitimately named `foo/pulls`, reopened on a porcelain positional.
 
-    ⛔ BUT IT IS ANCHORED TO THE `api` VERB, NOT WIDENED TO "EVERY TOKEN". Offering the
-    candidate for every non-flag token refused legitimate reads whose ARGUMENT happens to
-    collide with a route word — `repo list graphql`, `search repos graphql`,
-    `repo view graphql/graphql-js` all came back rc=3, which is the same false refusal
-    `_prefix_pattern` and `test_repo_slug_that_looks_like_a_verdict_is_still_served` already
-    fixed for a repo literally named `foo/pulls`, reopened on the one pattern without a
-    `repos/` prefix. So the non-`repos/` route words are synthesised only when the `api`
-    verb is the command's FIRST token — the same definition `_accepts_hostname` uses for
-    "this is an `api` command" — and a porcelain verb's owner/query positional is never a
-    route. The `repos/` half stays position-independent on purpose: it must still catch a
-    caller that put a global flag before the verb.
+    ⛔ AND `repos/`-SHAPED TOKENS ARE NOT MATCHED WHEREVER THEY SIT. A previous cut did
+    that to catch "a caller who put a global flag before the verb" — but `gh`'s root
+    accepts only `--help` and `--version`, so `gh -R o/n api …` is not an invocation gh
+    will run (measured: rc=1, `unknown shorthand flag: 'R'`). It defended an impossible
+    spelling while refusing a real one: `search code repos/o/n/actions/runs` — a SEARCH
+    QUERY — was refused as "command 'api repos/{repo}/actions/runs'".
 
-    Both directions are pinned by `test_mutable_graphql_is_refused_with_a_leading_global_flag`
-    and `test_a_legitimate_read_survives_the_widened_route_candidates`.
+    ⛔ AND THE ROUTE IS NORMALISED THE WAY `gh` RESOLVES IT. Three spellings used to slip
+    past: a leading slash (`api /repos/…`), a percent-encoded segment (`p%75lls` decodes
+    to `pulls` inside gh), and — measured — an ABSOLUTE URL (`api
+    https://api.github.com/repos/o/n/actions/runs`), which gh forwards verbatim and which
+    matched no candidate at all. `//path` is normalised too, rather than stripping exactly
+    one slash.
 
-    ⛔ AND A LEADING SLASH IS A THIRD SPELLING. `gh api /repos/o/n/pulls/42` is a real
-    invocation (gh normalises it), so the route passed through — falsifying this file's own
-    "however the caller spelled it" claim. A **PERCENT-ENCODED** segment is a fourth
-    (`p%75lls` decodes to `pulls` inside gh): both are normalised before matching, because
-    an unquoted spelling that gh resolves must not slip past the guard.
+    Pinned in both directions by
+    `test_mutable_graphql_is_refused_with_a_leading_global_flag` and
+    `test_a_legitimate_read_survives_the_widened_route_candidates`.
     """
     raw = list(argv)
-    norm = [tok[1:] if tok.startswith("/") else tok for tok in raw]
+    # ⛔ `lstrip`, not a single-slash strip: `api //graphql` is a second spelling of the
+    # same route and used to be served.
+    norm = [tok.lstrip("/") for tok in raw]
     unq = [urllib.parse.unquote(tok) for tok in norm]
     candidates = [" ".join(raw), " ".join(norm), " ".join(unq)]
-    # Position-INDEPENDENT: a caller may put a global flag before the verb
-    # (`-R o/n api repos/…`), so a `repos/` route token is matched wherever it sits.
-    candidates.extend(f"api {tok}" for tok in unq if tok.lower().startswith("repos/"))
-    # Verb-ANCHORED: the non-`repos/` route words (`graphql`) are only a route when the
-    # command IS `api`; in `repo list graphql` that token is the owner argument.
-    if raw and raw[0] == "api":
-        candidates.extend(f"api {tok}" for tok in unq[1:] if not tok.startswith("-"))
+    route = _api_route(raw)
+    if route is not None:
+        route = urllib.parse.unquote(route)
+        url = _ABSOLUTE_URL.match(route)
+        if url:
+            route = url.group(1) or "/"
+        route = route.lstrip("/")
+        if route:
+            candidates.append(f"api {route}")
     return candidates
 
 
