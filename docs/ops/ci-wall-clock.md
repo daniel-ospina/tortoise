@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-wall-clock, ci-headroom-guards
 aboutObjects: tortoise, .github/workflows/python-ci.yml, .github/workflows/ci.yml, .github/workflows/ai-review-gate.yml, .github/workflows/drift-guard.yml
 created: 2026-10-27
-updated: 2026-10-31
+updated: 2026-11-05
 ---
 
 # CI wall-clock bounds on the merge path
@@ -357,12 +357,15 @@ same step with the same tail is the investigation.
 
 ## 7. Matrix fan-out: how many slots one run may hold (`max-parallel`)
 
-No matrix in this repo declared `strategy.max-parallel` before #6744, so a single PR enqueued
-`python-ci`'s whole shard set — up to 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — at the same
-instant, on top of the **8** non-matrix jobs that are co-eligible with them. (It is 8 and not 11
-because four of the 12 non-matrix jobs cannot be enqueued alongside the matrices: `changes` is
-their own prerequisite, `canary-streak` needs `test` and is `push`-only, and
-`ci-introduced-failure` / `python-ci-gate` both `need:` the matrices.)
+No matrix in this repo declared `strategy.max-parallel` before #6744, so a single PR's whole shard
+set — up to 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — was free to **start** at the same
+instant, on top of the **8** non-matrix jobs that are co-eligible with them. The fan-out was in
+simultaneous RUNNING slots, not in enqueueing: GitHub creates every matrix cell either way (see
+"The re-derivation cannot use per-job queue wait", below), so the cap changes only how many of
+those already-created cells may run at once — and that is precisely what let one run hold the
+pool. (It is 8 and not 11 because four of the 12 non-matrix jobs cannot run alongside the
+matrices: `changes` is their own prerequisite, `canary-streak` needs `test` and is `push`-only,
+and `ci-introduced-failure` / `python-ci-gate` both `need:` the matrices.)
 
 ⛔ **Scope of that claim: `python-ci`'s three shard matrices.** It is not a repo-wide audit, and
 reading it as one would be wrong — `.github/workflows/mirror-images.yml` still declares a
@@ -501,11 +504,25 @@ constant.
 ⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** This section's
 own measurement table records a per-job queue wait (`created_at → started_at`, p50 5.4 m / p95
 21.3 m) — note that §2 does NOT: §2 measures EXECUTED WALL (`first step start → last step end`),
-a different clock, and it never reads `created_at`. But a job held back by `max-parallel` is
-**not created until a slot frees**: its `created_at` lands at the moment it is allowed to start,
-so its queue wait reads ~0 and the cap looks like pure relief. The clock for this change is the
+a different clock, and it never reads `created_at`. **GitHub creates every cell of a direct matrix
+when the run starts**, all sharing one `created_at`, and `max-parallel` gates which of those
+already-created cells may **start** — so on a capped matrix this interval now counts cap-induced
+queueing **and** runner-availability wait together, and it can attribute neither. A capped PR's
+per-job wait will therefore **rise**, not fall: a leg held for a slot is queued for the whole
+wave ahead of it. (Lazy cell creation is a property of a matrix job that calls a reusable
+workflow via a job-level `uses:` — it changes nothing here, because all three of these jobs
+declare `runs-on` and `steps` and are the DIRECT shape.) The clock for this change is the
 **matrix band** — the first leg's `started_at` to the last leg's `completed_at` within one matrix
 job — compared against the same band on an uncapped run. That is the quantity the simulation's
 `matrix-band end delta` column is expressing (+17.9 m p50 / +23.2 m max at cap 3), and the only
-number a later reading should judge the regression against. Judging the cap by per-job wait will
-always report an improvement, because the wait it removes was never visible to the job.
+number a later reading should judge the regression against.
+
+The read that confirms the shape on this repo's first capped run — one shared `created_at` across
+all 9 fast legs, with `started_at` spread over ~3 waves, is this text; distinct `created_at`
+values that track `started_at` would mean these cells are created lazily and this paragraph is
+wrong for this workflow:
+
+```bash
+gh api "repos/daniel-ospina/tortoise/actions/runs/<capped_run_id>/jobs?per_page=100&filter=all" \
+  --jq '.jobs[] | select(.name|startswith("test ")) | {name, created_at, started_at, completed_at}'
+```
