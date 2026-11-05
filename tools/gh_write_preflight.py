@@ -80,13 +80,28 @@ Safety
 
 from __future__ import annotations
 
+import sys
+
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. The documented
+# invocation is a bare `uv run python tools/gh_write_preflight.py`, and the module-level
+# imports reach into a 3.12-era tree, so on an older interpreter the tool would otherwise
+# die with an unattributed ImportError before any of its own messaging ran. The gate that
+# enforces this shape is tests/test_entry_point_python_guard.py.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/gh_write_preflight.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/gh_write_preflight.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import os
 import re
 import secrets
 import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 

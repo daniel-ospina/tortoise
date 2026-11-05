@@ -2776,7 +2776,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # is where it is registered. Pinned by
              # tests/test_ci_selection.py::
              # test_ready_for_owner_tool_change_selects_core_not_tier1.
-             "tools/ready_for_owner.py")
+             "tools/ready_for_owner.py",
+             # #1377 fold: the write-capability preflight's own suite. `tests/
+             # test_gh_write_preflight.py` (registered `core`) pins the probe that
+             # proves a lane's credential can WRITE before it starts work — the
+             # `GH-WRITE-UNAVAILABLE` reason-token set, the `ls-remote` confirmation
+             # (never trusting push's own exit code), and the secret redaction.
+             # Same silent-drop class as the entry above and for the same reason:
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry, the tool matches no
+             # SOURCE_PATTERNS row, so a TOOL-ONLY change was filtered to
+             # `changed == []` BEFORE the "not matched -> core" fallback and took
+             # the docs-only early return — 73 files, `surfaces=[]`, the pin ABSENT
+             # (measured). CORE_ALSO (not TOOL_CARVEOUTS) because the suite is
+             # hermetic (real `git` plus PATH stubs; no network, no DB). Pinned by
+             # tests/test_ci_selection.py::
+             # test_gh_write_preflight_tool_change_selects_core_not_tier1.
+             "tools/gh_write_preflight.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

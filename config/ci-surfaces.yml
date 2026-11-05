@@ -3921,6 +3921,17 @@ surfaces:
   # Hermetic: no DB, no network (every `gh` surface is injected; measured ~5s), so it runs
   # clean in the docker fast lane.
   - test_ready_for_owner.py
+  # #1377 fold: the write-capability preflight (`tools/gh_write_preflight.py`) — the probe
+  # that answers "can this credential WRITE repository contents here?" by DOING it: push the
+  # commit already at HEAD onto a namespaced throwaway ref, confirm it with `git ls-remote`
+  # (never trusting push's own exit code), then delete the ref. A read-only `GH_TOKEN`
+  # exported on a cell used to fail every lane at the push, after an hour of work.
+  # `core` is where the file is CLASSIFIED beside the other instrument pins
+  # (`test_ready_for_owner.py`, `test_required_set_sync.py`); `--integrity` (the REQUIRED
+  # `manifest-integrity` job) reds on any unregistered `tests/**/test_*.py`, which is how
+  # this row came to exist. Hermetic: real `git` against a tmp repo plus PATH stubs, so no
+  # DB and no network.
+  - test_gh_write_preflight.py
   - test_drift_guard.py  # #4174: the branch-drift gate must FETCH before it measures (a stale `origin/main` is not a pass) and must fail on a conflict-free revert, reporting paths + line counts
   # #4503: dual-registered -- the file also pins the EP edge-flush /
   # rebuild behaviour of `tortoise/ep.py` + the projection replay

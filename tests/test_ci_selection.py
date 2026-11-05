@@ -14169,6 +14169,24 @@ def test_ready_for_owner_tool_change_selects_core_not_tier1():
     assert "test_ready_for_owner.py" in r["test_files"], r
 
 
+def test_gh_write_preflight_tool_change_selects_core_not_tier1():
+    # #1377 fold: `tests/test_gh_write_preflight.py` (registered `core`) pins the probe
+    # that proves a lane's credential can WRITE before it starts work — the
+    # `GH-WRITE-UNAVAILABLE` reason-token set, the `ls-remote` confirmation (never
+    # trusting push's own exit code), and the secret redaction. Same silent-drop class
+    # as `test_ready_for_owner_tool_change_selects_core_not_tier1` above: `tools/` is a
+    # flat NON_PYTHON_PREFIXES entry and the tool matches no SOURCE_PATTERNS row, so a
+    # TOOL-ONLY diff was filtered out BEFORE the "not matched -> core" fallback and took
+    # the docs-only early return. MEASURED before the CORE_ALSO entry:
+    # `select(["tools/gh_write_preflight.py"], "pull_request", load_manifest())` ->
+    # surfaces=[], full=False, 73 files, the pin ABSENT. Mutation check: removing the
+    # CORE_ALSO entry fails every arm below.
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
