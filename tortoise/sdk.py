@@ -20317,7 +20317,8 @@ class TortoiseSDK:
                 # a SET KEY there, and an unhashable list/map aborted the whole
                 # pre-flight (#10559). Its ``<->`` stand-in yields the same verdict
                 # as this door's reading; what it does NOT do is name the stored
-                # value in its refusal — that residue is unrecorded (it is NOT
+                # value in its refusal, publishing ``'<->'`` for a value the graph
+                # does not carry — that residue is tracked as **#11072** (it is NOT
                 # #11033, which is the ID axis of the same pre-flight), not this
                 # door's.
                 _raw_dir = _rdict.get("direction")
@@ -24474,7 +24475,8 @@ class TortoiseSDK:
                 # can act on. ⛔ Scope: this closes the class for ``direction``
                 # ONLY. The sibling ``operator`` and ``relation`` keys are still
                 # raw frozenset membership tests, and a non-scalar there still
-                # raises ``TypeError`` — pre-existing, tracked by #11031, and
+                # raises ``TypeError`` — pre-existing, tracked as **#11071** (NOT
+                # #11031, whose three items are all direction surfaces), and
                 # deliberately not widened here.
                 violations.append({
                     "section": "connections", "index": index,

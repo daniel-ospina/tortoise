@@ -463,4 +463,12 @@ def test_ingest_reports_a_non_scalar_direction_as_a_SHAPE_violation(sdk):
             ],
         }
         _viols = sdk._validate_bundle(_b, promotion_policy="gated")
-        assert any("direction" in v["message"] for v in _viols), (_b, _viols)
+        # ⛔ The SHAPE wording, not merely the word "direction": the pre-fix
+        # vocabulary refusal ("must be one of …, got 7") also says "direction",
+        # so a bare substring test is satisfied by the behaviour this pin
+        # exists to replace, and the hashable arms would silently stop
+        # discriminating if the screen were narrowed back to unhashables.
+        _shape = [v for v in _viols if "must be a string token" in v["message"]]
+        assert _shape, (_b, _viols)
+        assert any(f"got {type(junk).__name__}" in v["message"]
+                   for v in _shape), (_b, _viols)
