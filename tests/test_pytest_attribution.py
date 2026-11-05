@@ -1756,3 +1756,268 @@ def test_a_failing_pytest_still_reds_the_step(
     # ...and the reporter ran FIRST, naming what was in flight when the leg died.
     assert INCOMPLETE_MARKER in result.stdout, result.stdout
     assert "tests/e2e/hosted/test_boot.py::test_serves_health" in result.stdout, result.stdout
+
+
+# ── 5. the kill banner states WHEN the leg died, not only how long its budget was ──
+#
+# #3719 (open) carries three measured instances of the SAME misreading, two of them
+# on this PR's own required legs:
+#
+#   * #10917 `test (f)`, run 41843678044 — `rc=137` at **1215 s** of a **1620 s**
+#     budget, reported as "killed after 27m".
+#   * #10914 `test (a)`, run 41952788142 — `rc=137` at **346 s** of a **1560 s**
+#     budget, with `##[error]The runner has received a shutdown signal` right after;
+#     reported as "killed after 26m", and that sentence is the line the dispatch
+#     brief for this very lane quoted as its reason to exist.
+#   * #10914 `test-carve-out (b)`, same run — a COMPLETE `505 passed in 518.25s`,
+#     step still `rc=137`, reported as "killed after 19m".
+#
+# `timeout`'s own manual is why the exit code cannot answer it: 124 means "the
+# deadline was reached", 137 is 128+SIGKILL and is produced BOTH by `timeout -k`'s
+# follow-up kill AND by an unrelated OOM or a runner shutdown. The ELAPSED time
+# separates them — a watchdog kill cannot land before the deadline it implements —
+# and the step already has it (`$SECONDS` stamped just before the `timeout` call).
+#
+# Two layers, matching the ones above: the script is EXECUTED against the measured
+# instances (so the sentence is tested, not the string), and the workflow is checked
+# STRUCTURALLY for the call + its start stamp at every banner site (so a newly added
+# leg cannot quietly restore the bare budget-as-elapsed sentence).
+
+KILL_SCRIPT = REPO / ".github" / "scripts" / "pytest-kill-attribution.sh"
+
+#: (rc, elapsed, budget_minutes, the arm the measured instance belongs to)
+#: Each elapsed/budget pair is a MEASURED run, not an invented one — see above.
+MEASURED_KILLS = [
+    (137, 1215, 27, "outside"),   # #10917 test (f)
+    (137, 346, 26, "outside"),    # #10914 test (a)   — runner shutdown
+    (137, 518, 19, "outside"),    # #10914 test-carve-out (b) — after a full summary
+    (124, 1561, 26, "deadline"),  # a real watchdog expiry (SIGINT at the deadline)
+    (137, 1562, 26, "deadline"),  # timeout's -k 10 follow-up on an ignored SIGINT
+    (2, 1560, 26, "deadline"),    # pytest's own SIGINT summary at the deadline
+]
+
+
+def run_kill_attribution(*argv: str) -> subprocess.CompletedProcess[str]:
+    """Run the attribution reporter the way the workflow does."""
+    return subprocess.run(
+        ["bash", str(KILL_SCRIPT), *argv],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize(
+    ("rc", "elapsed", "budget_min", "arm"),
+    MEASURED_KILLS,
+    ids=[f"{rc}-{elapsed}s-of-{b}m-{arm}" for rc, elapsed, b, arm in MEASURED_KILLS],
+)
+def test_a_measured_kill_is_attributed_to_the_right_cause(
+    rc: int, elapsed: int, budget_min: int, arm: str
+) -> None:
+    """The measured instances are classified by ELAPSED vs BUDGET, not by rc.
+
+    This is the whole point: `rc` alone cannot separate them (124/137/2 all reach
+    this banner through different histories), so the test asserts the two arms
+    disagree on the SAME rc and agree across different ones.
+    """
+    result = run_kill_attribution(
+        "--rc", str(rc), "--elapsed", str(elapsed), "--budget-min", str(budget_min)
+    )
+    assert result.returncode == 0, result.stderr
+    budget_s = budget_min * 60
+    if arm == "outside":
+        assert "BEFORE the watchdog could fire" in result.stdout, result.stdout
+        assert f"{budget_s - elapsed}s BEFORE" in result.stdout, result.stdout
+        assert "is NOT the cause" in result.stdout, result.stdout
+        # The actionable sentence: raising the budget is the WRONG lever here.
+        assert "Do not raise watchdog_minutes" in result.stdout, result.stdout
+    else:
+        assert "the watchdog's own deadline was reached" in result.stdout, result.stdout
+        assert "is the lever" in result.stdout, result.stdout
+        assert "BEFORE the watchdog could fire" not in result.stdout, result.stdout
+
+
+def test_rc_137_before_the_budget_is_never_read_as_a_budget_exhaustion() -> None:
+    """The regression that cost two triage cycles: 137 at 346 s of 1560 s.
+
+    Asserted separately from the parametrized table because this is the exact
+    shape that reddened BOTH of this PR's failing required legs, and because a
+    single-line edit to the comparison (`-lt` → `-ge`) would still satisfy the
+    table's `outside` arm on one row while inverting this one.
+    """
+    result = run_kill_attribution("--rc", "137", "--elapsed", "346", "--budget-min", "26")
+    assert result.returncode == 0, result.stderr
+    assert "died 346s into a 1560s budget" in result.stdout, result.stdout
+    assert "1214s BEFORE" in result.stdout, result.stdout
+    assert "runner shutdown/cancel" in result.stdout, result.stdout
+    assert "#3719" in result.stdout, result.stdout
+
+
+def test_a_missing_start_stamp_fails_closed() -> None:
+    """No elapsed must NOT default to 0 — that would assert an external kill on nothing.
+
+    The workflow passes `--elapsed "${PYTEST_T0:+…}"`, which expands to the EMPTY
+    string when the stamp is missing (a step body edited to drop it, a shell that
+    resets `SECONDS`). `0` would land squarely in the "outside the budget" arm and
+    print a confident wrong cause; UNKNOWN is the honest report.
+    """
+    for absent in (["--elapsed", ""], []):
+        result = run_kill_attribution("--rc", "137", "--budget-min", "26", *absent)
+        assert result.returncode == 0, result.stderr
+        assert "elapsed UNKNOWN" in result.stdout, (absent, result.stdout)
+        assert "BEFORE the watchdog could fire" not in result.stdout, result.stdout
+        assert "deadline was reached" not in result.stdout, result.stdout
+    # ...and a non-numeric stamp is the same unknown, not a crash.
+    junk = run_kill_attribution("--rc", "137", "--elapsed", "12s", "--budget-min", "26")
+    assert junk.returncode == 0, junk.stderr
+    assert "elapsed UNKNOWN" in junk.stdout, junk.stdout
+
+
+def test_a_leg_that_exited_normally_gets_no_attribution() -> None:
+    """Only a kill owes a sentence: rc=0/1 must print nothing at all.
+
+    The banner's own guard is `rc ∈ {124,137,2}`, and a second opinion printed on a
+    normal failure would put a budget-shaped sentence on a leg whose nodeids are the
+    answer — the same false attribution, in the other direction.
+    """
+    for rc in (0, 1, 5):
+        result = run_kill_attribution("--rc", str(rc), "--elapsed", "10", "--budget-min", "26")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "", result.stdout
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["--rc", "137"],
+        ["--budget-min", "26"],
+        ["--rc", "abc", "--elapsed", "1", "--budget-min", "26"],
+        ["--rc", "137", "--elapsed", "1", "--budget-min", "twenty-six"],
+        ["--rc", "137", "--elapsed", "1", "--budget-min", "26", "--nope"],
+    ],
+    ids=["no-args", "no-budget", "no-rc", "junk-rc", "junk-budget", "unknown-flag"],
+)
+def test_bad_invocation_is_exit_2(argv: list[str]) -> None:
+    assert run_kill_attribution(*argv).returncode == 2, argv
+
+
+def test_the_reporter_is_never_the_verdict() -> None:
+    """Every REPORTING arm exits 0, so the step's status stays pytest's own.
+
+    `_run_step_body`'s "a failing pytest still reds the step" case above is the
+    other half of this contract: the reporter runs before `exit $rc`, and a non-zero
+    reporter would mask the leg's real status.
+    """
+    for argv in (
+        ["--rc", "137", "--elapsed", "346", "--budget-min", "26"],
+        ["--rc", "124", "--elapsed", "1561", "--budget-min", "26"],
+        ["--rc", "137", "--budget-min", "26"],
+        ["--rc", "0", "--elapsed", "1", "--budget-min", "26"],
+    ):
+        assert run_kill_attribution(*argv).returncode == 0, argv
+
+
+#: `timeout -s INT -k 10 <budget>m stdbuf -oL python -m pytest …` — the ONE line per
+#: leg whose expiry the banner is about. Matched on the `pytest` invocation so a
+#: comment that merely quotes the shape cannot be counted as a site.
+_TIMEOUT_PYTEST_RE = re.compile(r"^timeout\s+.*\bpython\s+-m\s+pytest\b")
+_START_STAMP = "PYTEST_T0=$SECONDS"
+
+
+def _kill_banner_sites(lines: list[str]) -> list[int]:
+    """Indices of the lines that print `WATCHDOG: … killed after <budget>m`."""
+    return [
+        i
+        for i, line in enumerate(lines)
+        if "WATCHDOG:" in line and "killed after" in line and not line.strip().startswith("#")
+    ]
+
+
+def test_every_kill_banner_is_followed_by_the_measured_attribution() -> None:
+    """EVERY `killed after <budget>m` banner is followed by the measured sentence.
+
+    The defect is per-leg, so a newly added leg that prints the banner without the
+    attribution silently restores the false sentence at that site — which is exactly
+    how #10914 lost two triage cycles. The assertion is a FLOOR over the three sites
+    `python-ci.yml` actually has — the 40m `test-slow` leg included, whose own header
+    cites the 39.6-min-against-40m instance — plus the pairing each site must carry:
+
+    * a `PYTEST_T0=$SECONDS` stamp BETWEEN that leg's `timeout … python -m pytest`
+      line and its banner (a stamp placed at step start, or dropped, either counts
+      the last-failed pre-phase as pytest time or reports nothing); and
+    * the reporter call in the banner's own arm, so the numbers handed to it are
+      this leg's.
+
+    ⛔ NAMED OMISSION, not a silent gap: `post-merge-validation.yml` has the same
+    banner (`WATCHDOG: pytest killed after 50m`) with a LITERAL budget and no start
+    stamp. It is a post-merge leg, not one of the required PR contexts this lane
+    reddened, so it is deliberately out of scope here — wiring it is the same
+    three-line change at its site (recorded on #3719).
+    """
+    lines = WORKFLOW.read_text().splitlines()
+    sites = _kill_banner_sites(lines)
+    assert len(sites) == 3, (
+        "the kill-banner inventory moved — re-derive it from the workflow and update "
+        f"this floor deliberately, found {len(sites)} site(s) at "
+        + ", ".join(str(i + 1) for i in sites)
+    )
+    for site in sites:
+        # The report is emitted as prose, so the call is separated from the banner by
+        # the rationale comment block. Walk the non-comment lines instead of a fixed
+        # line window: a window that is too narrow silently checks nothing, and one
+        # that is too wide could pair a site with its NEIGHBOUR's call.
+        following = [
+            ln for ln in lines[site + 1 : site + 25] if not ln.strip().startswith("#")
+        ]
+        assert following, f"python-ci.yml:{site + 1}: nothing follows the kill banner"
+        first = next(
+            (i for i, ln in enumerate(following) if "pytest-kill-attribution.sh" in ln),
+            None,
+        )
+        assert first is not None, (
+            f"python-ci.yml:{site + 1}: the kill banner prints the BUDGET as if it were "
+            "the elapsed time and nothing follows it — a triager reads 'killed after "
+            "Nm' as the cause (#3719, #10914)"
+        )
+        # The call is a `\`-continued bash command; its own lines carry the flags.
+        call = [following[first]]
+        for ln in following[first + 1 :]:
+            if not call[-1].rstrip().endswith("\\"):
+                break
+            call.append(ln)
+        arm = "\n".join(call)
+        assert "--elapsed" in arm, (
+            f"python-ci.yml:{site + 1}: the call passes no elapsed:\n{arm}"
+        )
+        assert "PYTEST_T0" in arm, (
+            f"python-ci.yml:{site + 1}: the elapsed is not derived from a pytest start "
+            f"stamp — a step-start `$SECONDS` counts the last-failed pre-phase:\n{arm}"
+        )
+        assert "--budget-min" in arm, (
+            f"python-ci.yml:{site + 1}: the call passes no budget:\n{arm}"
+        )
+        # ...and the stamp sits between THIS leg's pytest invocation and its banner.
+        # `timeout -s INT -k 10 …` and the stamp are adjacent, so the search starts at
+        # the PREVIOUS leg's invocation (or the top of the file) — a stamp counted from
+        # the top could be another leg's, and one placed at step start would count the
+        # last-failed pre-phase as pytest time.
+        timeouts = [
+            i for i in range(site) if _TIMEOUT_PYTEST_RE.match(lines[i].strip())
+        ]
+        assert timeouts, (
+            f"python-ci.yml:{site + 1}: no `timeout … python -m pytest` line above this "
+            "banner — the site moved and this guard no longer knows what it is checking"
+        )
+        timeout_at = timeouts[-1]
+        start_at = timeouts[-2] + 1 if len(timeouts) > 1 else 0
+        stamps = [
+            i for i in range(start_at, site) if lines[i].strip() == _START_STAMP
+        ]
+        assert stamps, (
+            f"python-ci.yml:{timeout_at + 1}: pytest's start is not stamped before the "
+            f"`timeout` call that the banner at line {site + 1} reports on"
+        )

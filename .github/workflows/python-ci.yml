@@ -1485,6 +1485,7 @@ jobs:
               echo "==================== WATCHDOG: last-failed pre-phase interrupted/killed (rc=$LF_RC; $passed passed, $failed failed, $errored errored) — inconclusive, falling through to the FULL half ===================="
             fi
           fi
+          PYTEST_T0=$SECONDS
           timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -n "$XDIST_WORKERS" --dist loadscope -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
@@ -1535,8 +1536,10 @@ jobs:
             failed=$(grep -c ' FAILED' "$PYTEST_LOG")
             errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) on runner class '$RUNNER_CLASS' ($RUNNER_IDENTITY) — last test lines above ===================="
+            # #3719: the budget is not the elapsed time — the script derives it.
+            bash .github/scripts/pytest-kill-attribution.sh --rc "$rc" --elapsed "${PYTEST_T0:+$((SECONDS - PYTEST_T0))}" --budget-min "${{ matrix.watchdog_minutes }}" || true
             if [ "$RUNNER_CLASS" = "self-hosted" ]; then
-              echo "(killed by its own budget on the self-hosted pool — uninformative about the diff, and NOT a pass: a hosted re-run of this same commit is what decides it, and a kill that reproduces THERE is about the diff)"
+              echo "(a kill on the self-hosted pool is uninformative about the diff, and NOT a pass: a hosted re-run of this same commit is what decides it, and a kill that reproduces THERE is about the diff)"
             fi
           fi
           echo "==================== pytest exit code: $rc ===================="
@@ -2374,6 +2377,8 @@ jobs:
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
+          # #3719: pytest's own start stamp — see the fast-shard site above.
+          PYTEST_T0=$SECONDS
           timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
@@ -2407,6 +2412,13 @@ jobs:
             failed=$(grep -c ' FAILED' "$PYTEST_LOG")
             errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: pytest killed after 40m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            # #3719: 40m is the BUDGET, not the elapsed time — and the measured
+            # instance this leg's own header cites (run 39309984832: 39.6 min of
+            # test time against this 40m budget) is precisely the one a triager
+            # must be able to tell apart from a kill that landed early.
+            bash .github/scripts/pytest-kill-attribution.sh --rc "$rc" \
+              --elapsed "${PYTEST_T0:+$((SECONDS - PYTEST_T0))}" \
+              --budget-min 40 || true
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
@@ -3316,6 +3328,8 @@ jobs:
           # to remove. The outer `timeout-minutes` stays a literal and must
           # clear this value — `test_every_bounded_pytest_job_caps_above_its_
           # watchdog` re-derives that from the emitted matrix.
+          # #3719: pytest's own start stamp — see the fast-shard site above.
+          PYTEST_T0=$SECONDS
           timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
@@ -3345,6 +3359,13 @@ jobs:
             failed=$(grep -c ' FAILED' "$PYTEST_LOG")
             errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: carve-out shard pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) ===================="
+            # #3719: the budget above is not the elapsed time. This leg is the
+            # sharpest case measured: #10914 `test-carve-out (b)` printed a
+            # COMPLETE `505 passed in 518.25s`, still ended rc=137, and the
+            # banner reported "killed after 19m".
+            bash .github/scripts/pytest-kill-attribution.sh --rc "$rc" \
+              --elapsed "${PYTEST_T0:+$((SECONDS - PYTEST_T0))}" \
+              --budget-min "${{ matrix.watchdog_minutes }}" || true
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
