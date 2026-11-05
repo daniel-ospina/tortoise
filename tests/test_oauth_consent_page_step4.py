@@ -1379,6 +1379,69 @@ def test_the_FIRST_value_predicate_and_the_AS_multidict_REALLY_do_disagree() -> 
         "the predicate stopped being a first-value read, or the library changed")
 
 
+def test_the_predicates_docstring_does_not_claim_the_EMITTER_calls_it() -> None:
+    """#10790 review (P3): the ⚠️ Scope paragraph promised ONE predicate at both ends.
+
+    It said "the AS applies it at BOTH ends of this hop — branch selection, and the emission in
+    `consent_bounce_url`". The predicate has exactly ONE call site —
+    `hosted_api.oauth_authorize`'s page-vs-bounce test — and `consent_bounce_url` never calls it:
+    the emitter applies a WIDER first-NON-BLANK rule, so an existing binding is ADOPTED rather
+    than minted away. Measured here on the one shape where the two disagree (blank FIRST, a real
+    key after): the predicate answers `""` so the hop BOUNCES, and the emitter still carries
+    `attempt_key=K2` into the returned URL for `start` to adopt.
+
+    Why a prose claim is a defect here and not a nit: the obvious "de-duplication" a later lane
+    takes from "one predicate at both ends" is making the emitter CALL this predicate, which
+    turns the adoption of `K2` into a MINT and puts the page and `start.ts` on a key the attempt
+    row does not hold — `403 flow_not_yours` after sign-in, the dead end these docstrings exist to
+    prevent. Same failure mode as the `<<:` count-based carve-out: a rule stated in prose that a
+    reasonable repair implements differently.
+
+    BICONDITIONAL, so the pin cannot rot into a tautology in either direction: while the two rules
+    DISAGREE the docstring must state them separately and must not claim one covers both; if they
+    are ever genuinely unified, it must say THAT instead — so the next reader is told which rule
+    it can implement, and the trap does not come back.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM, consent_bounce_url
+    from tortoise.oauth import presented_consent_attempt_key
+
+    blank_first = (
+        f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}="
+        f"&{CONSENT_ATTEMPT_KEY_PARAM}=K2")
+    predicate_value = presented_consent_attempt_key(blank_first)
+    emitted_key = parse_qs(
+        urlsplit(parse_qs(urlsplit(consent_bounce_url(APP_ORIGIN, blank_first)).query)["next"][0]).query,
+        keep_blank_values=True,
+    )[CONSENT_ATTEMPT_KEY_PARAM]
+
+    assert (predicate_value, emitted_key) == ("", ["K2"]), (
+        "the two ends of this hop no longer disagree on a blank-first duplicate pair — either the "
+        f"predicate stopped reading the first value ({predicate_value!r}) or the emitter stopped "
+        f"adopting the first non-blank one ({emitted_key!r}). Re-derive the ⚠️ Scope paragraph "
+        "before touching this pin: it is what makes the docstring assertion below load-bearing")
+    two_rules_measured = predicate_value != emitted_key[0]
+
+    source = OAUTH.read_text(encoding="utf-8")
+    start = source.index("def presented_consent_attempt_key")
+    end = source.find("\ndef ", start + 1)
+    docstring = source[start:end if end != -1 else len(source)]
+    claims_one_predicate = "BOTH ends" in docstring
+    states_the_wider_rule = "first NON-BLANK" in docstring
+    docstring_states_two_rules = states_the_wider_rule and not claims_one_predicate
+
+    assert two_rules_measured == docstring_states_two_rules, (
+        "`presented_consent_attempt_key`'s ⚠️ Scope paragraph and the code disagree about how many "
+        f"rules this hop applies: measured_two_rules={two_rules_measured} "
+        f"(predicate={predicate_value!r}, emitter={emitted_key!r}), "
+        f"docstring_states_two_rules={docstring_states_two_rules} "
+        f"(states_the_wider_rule={states_the_wider_rule}, "
+        f"claims_one_predicate={claims_one_predicate}). While the two rules still differ, state "
+        "them separately AND say the emitter must NOT call this predicate — collapsing them mints "
+        "away a binding the attempt row already holds. If you genuinely unified them, say that.")
+
+
 @pytest.mark.parametrize("blankish", ["", "%20", "+"])
 def test_the_AS_bounces_on_the_SAME_blank_predicate_the_readers_use(api_client, blankish):
     """Blank and whitespace-only are ONE state at the AS too, and it is "absent" (#10487 review).

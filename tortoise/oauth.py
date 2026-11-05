@@ -2710,12 +2710,35 @@ def presented_consent_attempt_key(query: str) -> str:
     ownerless-window takeover the insert-only key exists to close (#10208).
     Blank and whitespace-only are ONE state: absent.
 
-    ⚠️ Scope: the AS applies it at BOTH ends of this hop — branch selection, and
-    the emission in `consent_bounce_url` — so what the page and `start.ts`
-    receive is one non-blank token and they never need to strip. Neither of them
-    strips on its own, so a whitespace `attempt_key` presented STRAIGHT to
-    `/api/consent/start`, bypassing the AS, is still adopted verbatim there; that
-    predates this hop and is recorded in #10487 rather than fixed silently here.
+    ⚠️ Scope — TWO rules on this hop, not one, and this function is only the
+    first of them. **Branch selection** uses this predicate; it has exactly one
+    call site, `hosted_api.oauth_authorize`'s page-vs-bounce test. **The emission
+    in `consent_bounce_url` does NOT call it** and applies a WIDER rule of its
+    own: the first NON-BLANK `attempt_key` segment survives, because a key
+    already on the URL must be ADOPTED and never minted away (its own docstring
+    states that rule; the duplicate-pair arms beside it pin ADOPTION over a
+    mint). The width is not cosmetic — it is the one shape where the two rules
+    answer differently: on ``attempt_key=&attempt_key=K2`` (blank FIRST, a real
+    key after) this predicate says ``""``, so the hop BOUNCES, while the
+    emitter carries `K2` into the returned URL and `start` adopts it. Neither
+    answer is a defect: the AS bounces on the reading its own consumers use, and
+    the emitter still hands `start` the real key, so the visitor lands on the key
+    the attempt row holds.
+    ⛔ So do NOT "de-duplicate" the two by making the emitter call this
+    predicate. That swaps ADOPTION for a MINT on that input, putting the page
+    and `start.ts` on a key the attempt row does not hold — the
+    `403 flow_not_yours` dead end these docstrings exist to prevent. RFC 6749
+    §3.1 forbids sending a parameter twice, so no spec fixes a reader precedence
+    here; each end states its own rule rather than one pretending to cover both.
+    **OVERRIDES:** one shared predicate at both ends of the hop — the emitter
+    must ADOPT a first-non-blank key rather than mint one, so it cannot borrow
+    this first-value rule.
+    What the page and `start.ts` DO receive is one non-blank token, because the
+    emission is single-keyed whatever rule chose it — so they never need to
+    strip. Neither of them strips ON ITS OWN, though, so a whitespace
+    `attempt_key` presented STRAIGHT to `/api/consent/start`, bypassing the AS,
+    is still adopted verbatim there; that predates this hop and is recorded in
+    #10487 rather than fixed silently here.
     ⛔ #10487 is RETIRED by the fold that lands this hop, so the live home for
     that residual is #10884, which is filed OPEN. Point a reader at the open
     issue, not at a closed thread and not at this docstring.
@@ -2834,8 +2857,12 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     #     single-key emit below is what makes the two kinds of reader agree, and it is not a promise
     #     any consumer makes.) The whitespace form was worse than dead: `%20` is
     #     TRUTHY upstream, so the PAGE rendered, and `start.ts` adopted the one-character key `" "`.
-    # So ONE pass decides AND emits, by the readers' own predicate (`presented_consent_attempt_key`):
-    # the first non-blank value survives, every blank/whitespace/duplicate `attempt_key` segment is
+    # So ONE pass decides AND emits, by the readers' own rule — and WIDER than the AS gate's
+    # predicate: `presented_consent_attempt_key` takes the FIRST value and strips it, so a blank
+    # first segment is ABSENT and the hop BOUNCES; here the first NON-BLANK value survives, so a
+    # real key behind a blank one is ADOPTED rather than minted away. That width is deliberate —
+    # read the predicate's ⚠️ Scope paragraph before collapsing the two into one call. So: the
+    # first non-blank value survives, every blank/whitespace/duplicate `attempt_key` segment is
     # DROPPED, and a minted key is emitted only where nothing survives. A surviving value is
     # re-emitted from its STRIPPED form so all three readers see the same single bytes.
     # Every OTHER segment is passed through verbatim and in order — see the `+`/`%20` note above;
