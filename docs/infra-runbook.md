@@ -3265,7 +3265,7 @@ part of this section, and its status is stated rather than implied:
 | drill step | status |
 |---|---|
 | verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (the file's whole collected set — 42 pins / 43 collected cases when this row was written; `--collect-only` is the authority, and this numeral is a measurement, not a promise, live cache graph included) |
-| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — and the blocker is **not** the arming any more: the record has reported `armed: true` since at least 2026-10-26 (see the Secrets Matrix row for `TORTOISE_RECORD_DSN`). What is missing is a **captured session that actually wrote a `journal_event` + `point` row** — an empty `record_write_failures` cannot stand in for one (this section's own rule: it is *NOT* evidence a row was written) — plus `#9551` CI's `TEST_RECORD_DB_URI`. No number is claimed here for a run that has not happened |
+| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — and the blocker is **not** the arming any more: the record has reported `armed: true` since at least 2026-10-26 (see the Secrets Matrix row for `TORTOISE_RECORD_DSN`), and CI's `TEST_RECORD_DB_URI` is **already armed** (`#9551`, closed 2026-10-23; the `test-record-postgres` job provisions it via `.github/actions/postgres-provision`). What is missing is a **captured session that actually wrote a `journal_event` + `point` row** — an empty `record_write_failures` cannot stand in for one (this section's own rule: it is *NOT* evidence a row was written) — and, for the record leg, a backup-capable **direct** DSN. No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 
 When the record is armed, the drill is: capture into the record (scenario A of
@@ -3412,15 +3412,19 @@ operator who read the line above as "CI defends this" would never run it.
 > on the running deployment plus indicator (a) — a captured session writes `journal_event` + `point`
 > rows; *(4)* only then close `#9548`, with the measurement posted there.
 > ⚠️ **Step (1) is the live blocker, and it is a missing CREDENTIAL, not a ruling:**
-> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and the two credentials
-> we DO hold are each refused for a *different* documented reason — `TORTOISE_RECORD_DSN` names the
-> RLS-bound app role, refused by `record_backup.require_bypassing_role`; `TORTOISE_AUDIT_DSN` is
-> deployed and its user is `postgres` (the table owner, which *does* bypass RLS), but it is a
-> **pooler** string and is refused by `record_backup.require_direct_dsn` (`tortoise/record_backup.py:409`).
-> ⚠️ **So do not go hunting for a brand-new role:** what is missing is a **DIRECT** connection string for
-> a role that bypasses RLS — exactly what `TORTOISE_RECORD_BACKUP_DSN` is for (`record_backup.py:205`).
-> Until one exists no backup can be taken and no migration may run — measured 2026-11-03 by lane
-> `hosted-arm-9548`, recorded on `#9548`.
+> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and **both** credentials
+> we DO hold fail the backup's checks — on two independent gates, which
+> `create_record_backup` applies in this order (`tortoise/record_backup.py:1295` then `:1316`):
+>
+> | held value | gate 1 — `require_direct_dsn` | gate 2 — `require_bypassing_role` |
+> |---|---|---|
+> | `TORTOISE_RECORD_DSN` | ⛔ **refused** — it is the project's **pooler** DSN (that is what §"The value" prescribes for the app) | not reached; it also names the RLS-bound app role |
+> | `TORTOISE_AUDIT_DSN` | ⛔ **refused** — also a pooler string | not reached; its user is a *bypassing* role (`postgres` per `.env.example`'s shape; `audit_writer` per `#9548`) |
+>
+> ⚠️ **So do not go hunting for a brand-new ROLE** — a bypassing role already exists. What is missing is a
+> **DIRECT** connection string (`db.<ref>.supabase.co:5432`, never the pooler) for one, which is exactly
+> what `TORTOISE_RECORD_BACKUP_DSN` resolves (`record_backup.py:205`). Until it exists no backup can be
+> taken and no migration may run — measured 2026-11-03 by lane `hosted-arm-9548`, recorded on `#9548`.
 > **So the accurate state is AUTHORISED-BUT-BLOCKED-CRED, not postponed.** A lane reading this section
 > must not re-derive "postponed"; it must report the missing backup credential.
 >
