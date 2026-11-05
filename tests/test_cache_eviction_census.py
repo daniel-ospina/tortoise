@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,28 @@ from tortoise.cache_eviction import (
 #: this list is what "by construction" is asserted against.
 MUTATING = ("DELETE", "DETACH", "DROP", "CREATE", "MERGE", "SET ", "REMOVE",
             "FLUSHALL", "GRAPH.DELETE", "UNLINK")
+
+
+def _report(*, measured_nodes=None, total_nodes=None, verdict="CLEAN",
+            graph_name="tortoise", instrument="tools/turn_parity_census.py",
+            measured_at: float | None = None) -> ParityReport:
+    """A :class:`ParityReport` that is FRESH unless the test is about staleness.
+
+    ⛔ ``measurement_time`` is not optional decoration: :func:`assess` demotes an
+    undateable report to ``cannot-answer``, because a count over a PREDICATE population
+    says nothing about which nodes it measured (see `PARITY_MAX_AGE_ENV`). Every test
+    that is NOT about age therefore says "just now" — otherwise it would silently be
+    a test about age, which is the trap `measured_at=None` would set.
+    """
+    return ParityReport(
+        instrument=instrument,
+        verdict=verdict,
+        measured_nodes=measured_nodes,
+        total_nodes=total_nodes,
+        graph_name=graph_name,
+        measurement_time=time.time() if measured_at is None else measured_at,
+        measurement_time_source="test",
+    )
 
 
 class _FakeGraph:
@@ -225,9 +248,7 @@ def test_the_truth_labels_are_never_silently_treated_as_evictable():
     g = _FakeGraph({"Source": 50, "GraphEvent": 5_000, "Point": 10_000, "Object": 900})
     c = _FakeClient(used=900, maxmemory=1_000)
     # A CLEAN turn census — which must license the TURN population and NOTHING else.
-    report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=2_000, total_nodes=2_000,
-                          graph_name="tortoise")
+    report = _report(measured_nodes=2_000, total_nodes=2_000)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -246,8 +267,7 @@ def test_a_clean_verdict_over_a_partial_population_does_not_prove_anything():
     """A CLEAN verdict is not a licence when the instrument measured part of the class."""
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
-    partial = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                           measured_nodes=40, total_nodes=100, graph_name="tortoise")
+    partial = _report(measured_nodes=40, total_nodes=100)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": partial})
@@ -260,8 +280,7 @@ def test_a_clean_verdict_over_a_partial_population_does_not_prove_anything():
 def test_a_verdict_with_no_population_is_not_evidence_about_a_population():
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
-    no_population = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                                 graph_name="tortoise")
+    no_population = _report()
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": no_population})
@@ -273,8 +292,7 @@ def test_a_verdict_with_no_population_is_not_evidence_about_a_population():
 def test_a_non_clean_verdict_never_proves(verdict):
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
-    report = ParityReport(instrument="tools/turn_parity_census.py", verdict=verdict,
-                          measured_nodes=100, total_nodes=100, graph_name="tortoise")
+    report = _report(verdict=verdict, measured_nodes=100, total_nodes=100)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -325,8 +343,10 @@ def test_the_state_carries_the_eviction_unit_evidence_ttl_and_key_count():
     assert state.maxmemory_policy == "noeviction"
     assert state.graph_key_ttl_seconds == -1
     assert state.keys_per_graph == 2, (
-        "a graph is a graphdata key plus a telemetry stream; the key count IS the "
-        "evidence that a server-side policy can only evict the whole graph"
+        "the probe counts BOTH candidate names (the graph's `graphdata` key and a "
+        "`telemetry{<graph>}` stream). ⛔ This is a FIXTURE, not the engine's shape: "
+        "the pinned build materialises the graph key alone, so the assertion is about "
+        "what the probe COUNTS, never about how many keys a graph has."
     )
 
 
@@ -518,9 +538,7 @@ def test_a_benign_label_is_not_needlessly_quoted():
     (0, 100, False),    # a clean verdict over nothing still proves nothing
 ])
 def test_proves_requires_equality_over_a_non_empty_population(measured, total, expected):
-    report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=measured, total_nodes=total,
-                          graph_name="tortoise")
+    report = _report(measured_nodes=measured, total_nodes=total)
 
     assert report.proves() is expected
 
@@ -529,8 +547,7 @@ def test_a_zero_population_report_cannot_flip_the_gate_open():
     """0/0 CLEAN would flip REFUSED→PLAN (exit 3→2) with nothing behind it."""
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
-    empty = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                         measured_nodes=0, total_nodes=0, graph_name="tortoise")
+    empty = _report(measured_nodes=0, total_nodes=0)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": empty})
@@ -685,8 +702,9 @@ def test_an_unbound_report_is_not_eligible_at_the_library_surface():
     """
     g = _FakeGraph({"Point": 9_000, "GraphEvent": 1_000})
     c = _FakeClient(used=900, maxmemory=1_000)
-    unbound = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
-                           measured_nodes=1_000, total_nodes=1_000)
+    unbound = _report(instrument=PARITY_INSTRUMENTS["turn"],
+                      measured_nodes=1_000, total_nodes=1_000,
+                      graph_name=None)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: unbound})
@@ -867,8 +885,7 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     """
     g = _FakeGraph({"Point": 5})
     c = _FakeClient(used=900, maxmemory=1_000)
-    stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                         measured_nodes=120, total_nodes=120, graph_name="tortoise")
+    stale = _report(measured_nodes=120, total_nodes=120)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": stale})
@@ -914,9 +931,7 @@ def test_exit_two_licenses_only_the_listed_populations():
     """The plan must name what may NOT go, so exit 2 cannot read as a blanket licence."""
     g = _FakeGraph({"Point": 10_000, "Object": 900})
     c = _FakeClient(used=900, maxmemory=1_000)
-    report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=2_000, total_nodes=2_000,
-                          graph_name="tortoise")
+    report = _report(measured_nodes=2_000, total_nodes=2_000)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -934,9 +949,8 @@ def test_a_report_bound_to_another_graph_is_demoted_by_the_library_too():
     """The CLI's flag check is not enough — a future sweeper consumes THIS API."""
     g = _FakeGraph({"Point": 10_000})
     c = _FakeClient(used=900, maxmemory=1_000)
-    elsewhere = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                             measured_nodes=2_000, total_nodes=2_000,
-                             graph_name="some_other_graph")
+    elsewhere = _report(measured_nodes=2_000, total_nodes=2_000,
+                        graph_name="some_other_graph")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": elsewhere})
@@ -1001,9 +1015,7 @@ def test_the_size_cross_check_uses_the_true_total_not_the_label_sum():
     g = _FakeGraph({"Point": 10_000, "Object": 2_000})
     g.true_total = 10_000
     c = _FakeClient(used=900, maxmemory=1_000)
-    inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                            measured_nodes=11_000, total_nodes=11_000,
-                            graph_name="tortoise")
+    inflated = _report(measured_nodes=11_000, total_nodes=11_000)
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": inflated})
@@ -1063,9 +1075,7 @@ def test_refused_covers_unbounded_and_an_unbounded_plan_offers_nothing():
     """`if not census.refused: execute(plan['evictable'])` must not sweep an unbounded cache."""
     g = _FakeGraph({"Point": 20_000})
     c = _FakeClient(used=8_000_000, maxmemory=0)
-    report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                          measured_nodes=20_000, total_nodes=20_000,
-                          graph_name="tortoise")
+    report = _report(measured_nodes=20_000, total_nodes=20_000)
 
     result = assess(c, g, "tortoise",
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -1661,3 +1671,241 @@ def test_an_unwritable_out_path_is_a_usage_error_not_a_traceback(tmp_path, capsy
     assert code == 1, err
     assert "--out" in err, err
     assert "Traceback" not in err, err
+
+
+# --------------------------------------------------------------------------- #
+# Round-6 findings: a COUNT about a PREDICATE population needs a time, and
+# "not a delete list" must be in the artefact rather than in a comment.
+# --------------------------------------------------------------------------- #
+
+def test_a_report_older_than_the_bound_proves_nothing():
+    """⛔ The hole a count-based licence leaves: a STALE report under-claims.
+
+    `assess` already refuses a report claiming MORE nodes than the graph holds. The
+    dangerous direction is FEWER — which is exactly what an old report does as the
+    population grows, because turns are `:Point` nodes with `is_episodic = true` and the
+    report carries a count, not ids. Measured before the fix: a 120/120 report taken
+    from an older state produced `PLAN` on a graph holding 500 turns, offering
+    `{"nodes": 120}`, so a sweeper deleted 120 nodes of which nothing said which were
+    the measured ones.
+    """
+    g = _FakeGraph({"Point": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    old = _report(measured_nodes=120, total_nodes=120,
+                  measured_at=time.time() - 10 * 24 * 3600)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": old})
+
+    assert result.verdict == "REFUSED", result.plan
+    assert result.eligible_classes == ()
+    assert result.plan == {}
+    assert "beyond the" in " ".join(result.problems), result.problems
+    assert "re-run the instrument" in " ".join(result.problems)
+
+
+def test_a_report_inside_the_bound_still_proves():
+    """The bound must not be a gate that can never open — a fresh report still plans."""
+    g = _FakeGraph({"Point": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    recent = _report(measured_nodes=120, total_nodes=120,
+                     measured_at=time.time() - 60)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": recent})
+
+    assert result.verdict == "PLAN", result.problems
+    assert [e["nodes"] for e in result.plan["evictable"]] == [120]
+
+
+def test_a_report_that_cannot_be_dated_proves_nothing():
+    """`None` is not "fresh". An undateable report is demoted, not assumed current."""
+    g = _FakeGraph({"Point": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    undated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                           measured_nodes=120, total_nodes=120, graph_name="tortoise",
+                           measurement_time=None)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": undated})
+
+    assert result.verdict == "REFUSED"
+    assert "no readable measurement time" in " ".join(result.problems), result.problems
+
+
+def test_the_max_age_argument_overrides_the_default_bound():
+    """The bound is per-run: an operator may demand newer evidence than the default."""
+    g = _FakeGraph({"Point": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    one_hour_old = _report(measured_nodes=120, total_nodes=120,
+                           measured_at=time.time() - 3600)
+
+    tolerant = assess(c, g, "tortoise", ceiling_bytes=100, max_parity_age_s=7200,
+                      parity_reports={"tools/turn_parity_census.py": one_hour_old})
+    strict = assess(c, g, "tortoise", ceiling_bytes=100, max_parity_age_s=60,
+                    parity_reports={"tools/turn_parity_census.py": one_hour_old})
+
+    assert tolerant.verdict == "PLAN", tolerant.problems
+    assert strict.verdict == "REFUSED"
+    assert [e["nodes"] for e in tolerant.plan["evictable"]] == [120]
+
+
+def test_a_non_positive_or_unreadable_age_bound_is_refused_not_defaulted(
+        monkeypatch):
+    """⛔ `0` must not silently mean "unbounded age", and garbage must not mean default.
+
+    Both would report a freshness guarantee nobody declared — the same provenance
+    mistake `ceiling_source` exists to avoid, one field over.
+    """
+    g = _FakeGraph({"Point": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    report = _report(measured_nodes=120, total_nodes=120)
+
+    for declared in ("0", "-1", "not-a-number", "nan", "inf"):
+        monkeypatch.setenv("TORTOISE_PARITY_MAX_AGE_SECONDS", declared)
+        with pytest.raises(CacheReadError):
+            assess(c, g, "tortoise", ceiling_bytes=100,
+                   parity_reports={"tools/turn_parity_census.py": report})
+    monkeypatch.delenv("TORTOISE_PARITY_MAX_AGE_SECONDS")
+
+    with pytest.raises(CacheReadError):
+        assess(c, g, "tortoise", ceiling_bytes=100, max_parity_age_s=0,
+               parity_reports={"tools/turn_parity_census.py": report})
+
+
+def test_the_plan_says_in_the_artefact_that_a_count_is_not_a_delete_list():
+    """`licence_scope` is the machine-readable half of the docstring's warning.
+
+    ⛔ The plan used to assert safety "by construction" while offering a COUNT the
+    instrument cannot bind to nodes. A sweeper that read the count as the delete set
+    deleted rows nothing proved — so the limit travels WITH the plan, where a sweeper
+    actually looks.
+    """
+    g = _FakeGraph({"Point": 10_000, "Object": 900})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    report = _report(measured_nodes=2_000, total_nodes=2_000, measured_at=1_700_000_000.0)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100, now=1_700_000_060.0,
+                    parity_reports={"tools/turn_parity_census.py": report})
+
+    assert result.verdict == "PLAN"
+    scope = result.plan["licence_scope"]
+    assert scope["identity_bound"] is False
+    assert "a count is not a delete list" in " ".join(scope).replace(
+        "⚠️ ", ""), scope
+    assert "re-run the instrument" in scope["⚠️ a count is not a delete list"]
+    assert scope["as_of_min"] == "2023-11-14T22:13:20Z"
+    entry = result.plan["evictable"][0]
+    assert entry["as_of"] == "2023-11-14T22:13:20Z"
+    assert entry["as_of_epoch"] == 1_700_000_000.0
+    assert entry["measurement_time_source"] == "test"
+
+
+def test_load_parity_report_records_the_file_mtime_as_the_named_fallback(tmp_path):
+    """The instrument emits no timestamp today, so the fallback must be NAMED."""
+    import json
+    import os
+
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(_real_shape_report()), encoding="utf-8")
+    os.utime(path, (1_700_000_000.0, 1_700_000_000.0))
+
+    report = load_parity_report(str(path), graph_name="tortoise")
+
+    assert report.measurement_time == pytest.approx(1_700_000_000.0, abs=1)
+    assert report.measurement_time_source == "report file mtime"
+
+
+def test_load_parity_report_prefers_a_declared_timestamp(tmp_path):
+    import json
+
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(_real_shape_report(measured_at="2023-11-14T22:13:20Z")),
+                    encoding="utf-8")
+
+    report = load_parity_report(str(path), graph_name="tortoise")
+
+    assert report.measurement_time == pytest.approx(1_700_000_000.0, abs=1)
+    assert report.measurement_time_source == "report field 'measured_at'"
+
+
+def test_a_declared_but_unreadable_timestamp_is_refused_not_replaced_by_mtime(
+        tmp_path):
+    """⛔ Substituting the mtime would upgrade a broken claim into a readable one.
+
+    The operator would then never learn the instrument's own field is wrong, and the
+    census would report a freshness figure the report never contained.
+    """
+    import json
+
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(_real_shape_report(measured_at="last tuesday")),
+                    encoding="utf-8")
+
+    with pytest.raises(CacheReadError) as exc:
+        load_parity_report(str(path), graph_name="tortoise")
+
+    assert "not a readable timestamp" in str(exc.value)
+
+
+def test_a_non_finite_timestamp_reads_as_undateable_not_as_fresh(tmp_path):
+    """JSON accepts `Infinity`; an infinite age compares False against every bound."""
+    path = tmp_path / "turns.json"
+    path.write_text('{"instrument": "tools/turn_parity_census.py", "verdict": "CLEAN",'
+                    ' "graph": "tortoise", "measured_at": Infinity,'
+                    ' "population": {"episodic_graph_nodes": 10},'
+                    ' "dry_run": {"would_delete_turn_nodes": 10}}', encoding="utf-8")
+
+    with pytest.raises(CacheReadError):
+        load_parity_report(str(path), graph_name="tortoise")
+
+
+def test_a_non_finite_count_is_a_REFUSAL_not_an_exit_one_traceback(tmp_path, capsys,
+                                                                  monkeypatch):
+    """⛔ `int(float("inf"))` raises OverflowError — neither TypeError nor ValueError.
+
+    It escaped `load_parity_report` as a traceback and left `main()` exiting 1, the
+    USAGE code ("retry your flags"), for a report the tool must REFUSE. `json.load`
+    accepts the `Infinity`/`1e400` literals, so this is a reachable input, not a
+    hypothetical one.
+    """
+    import json
+
+    cli = _cli()
+    graph = _FakeGraph({"Point": 100})
+    monkeypatch.setattr(
+        cli, "_connection",
+        lambda endpoint: (_FakeClient(used=900, maxmemory=1_000), graph),
+    )
+    path = tmp_path / "turns.json"
+    body = json.loads(json.dumps(_real_shape_report()))
+    path.write_text(json.dumps(body).replace('"would_delete_turn_nodes": 120',
+                                             '"would_delete_turn_nodes": 1e400'),
+                    encoding="utf-8")
+
+    code = cli.main(["--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise",
+                     "--parity-report", str(path), "--parity-graph", "tortoise",
+                     "--ceiling-bytes", "100"])
+    err = capsys.readouterr().err
+
+    assert code == 3, (code, err)
+    assert "Traceback" not in err, err
+    assert graph.mutated == []
+
+
+def test_the_key_count_is_a_probe_result_not_an_engine_constant():
+    """⛔ The comment said MEASURED 2 and the test asserted 2; the pinned engine has 1.
+
+    An independent re-measurement of `falkordb-server:v4.20.6` after 100 queries found
+    the graph's `graphdata` key ALONE — `telemetry{<graph>}` is not created on every
+    build. The field is a probe (1 is *stronger* evidence: fewer keys to take away), but
+    a comment and an assertion message that both claim 2 as the engine's shape tell the
+    next reader — and the owner deciding on eviction — something the engine does not say.
+    """
+    c = _FakeClient(used=500, maxmemory=10_000, policy="noeviction",
+                    keys=("tortoise",), ttl=-1)
+
+    state = measure_state(c, "tortoise")
+
+    assert state.keys_per_graph == 1
+    assert state.graph_key_ttl_seconds == -1

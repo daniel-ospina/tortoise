@@ -87,10 +87,13 @@ nothing — so a typo'd graph name is a REFUSAL here, never a store mutation.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 __all__ = [
@@ -102,6 +105,7 @@ __all__ = [
     "CACHE_EVICTION_EXIT_USAGE",
     "DERIVED_LABELS",
     "PARITY_INSTRUMENTS",
+    "PARITY_MAX_AGE_ENV",
     "TRUTH_LABELS",
     "Assessment",
     "CacheReadError",
@@ -124,22 +128,53 @@ __all__ = [
 #: bytes bounded by a declared ceiling"* — nothing declares one today).
 CACHE_CEILING_ENV = "TORTOISE_CACHE_CEILING_BYTES"
 
+#: How old a parity report may be before it stops proving the population it measured.
+#: ⛔ WHY A REPORT NEEDS AN AGE AT ALL. A population is a *predicate* (`turns` are
+#: `:Point` nodes with `is_episodic = true`), and a report carries a COUNT, never node
+#: identity. So the only thing standing between a stale CLEAN report and a sweep over
+#: nodes it never measured is TIME: the census can verify that the report claims no
+#: MORE nodes than the graph holds (``cannot-answer`` above), but a report claiming
+#: FEWER — which is exactly what an old report does as the population grows — would
+#: otherwise pass every guard. A licences-on-a-count design has no other freshness
+#: signal, so the bound is not optional and an unreadable age is REFUSED rather than
+#: assumed fresh.
+#: The default is deliberately generous (parity is a slow census, and a sweeper is an
+#: operator action): it bounds the window, it does not make eviction convenient.
+PARITY_MAX_AGE_ENV = "TORTOISE_PARITY_MAX_AGE_SECONDS"
+PARITY_MAX_AGE_DEFAULT_S = 24 * 3600.0
+
+#: Payload fields a parity instrument may declare its measurement time in, in the
+#: order they are honoured. `turn_parity_census.py` emits none of them today, which is
+#: why :func:`load_parity_report` falls back to the report FILE's mtime and NAMES that
+#: source in the payload — a fallback that is stated is provenance, a fallback that is
+#: assumed is a guess.
+PARITY_TIMESTAMP_FIELDS: tuple[str, ...] = ("measured_at", "generated_at", "timestamp")
+
 # Exit codes, aligned with the two census instruments this composes
 # (`tools/graph_census.py`, `tools/turn_parity_census.py`): a caller must be able
 # to tell "I passed the wrong flags" from "this cache may not be evicted".
 CACHE_EVICTION_EXIT_CLEAN = 0     # measured; within the bound — nothing to evict
 CACHE_EVICTION_EXIT_PLAN = 2      # over the bound; `plan["evictable"]` is the LICENCE
+                                  # — scoped to a FRESH instrument run; see `licence_scope`
 CACHE_EVICTION_EXIT_REFUSED = 3   # over the bound, and NOTHING is proven — nothing may go
 CACHE_EVICTION_EXIT_UNBOUNDED = 4  # there is no bound anywhere (see `CacheState`)
 CACHE_EVICTION_EXIT_USAGE = 1     # flag/IO mistake
 
 # ⛔ EXIT 2 IS NOT "the whole cache may go" AND MUST NEVER BE READ AS IT.
 # It means: *the populations listed in `plan["evictable"]` are proven record-served and
-# may be evicted; every other class is listed in `problems` and may NOT be touched.* A
-# partial plan is safe by construction (evicting exactly the proven populations still
-# satisfies #10976's "0 evictions of a node the record cannot serve"), but a sweeper
-# that reads exit 2 as a blanket licence would sweep the unproven classes too. A
-# caller MUST read `plan["evictable"]`; `plan["not_evictable"]` carries the rest.
+# may be evicted; every other class is listed in `problems` and may NOT be touched.*
+# Every unproven class is listed in `plan["not_evictable"]`, so a sweeper that reads
+# exit 2 as a blanket licence would sweep those too. A caller MUST read
+# `plan["evictable"]`.
+#
+# ⛔ AND `plan["evictable"]` IS NOT A DELETE LIST EITHER — the second half of the same
+# warning, and the one this file used to get wrong. An entry carries a COUNT and an
+# `as_of`, not node identity: the parity instruments emit no ids, so no arithmetic on
+# this plan can say WHICH nodes were measured. A sweeper must therefore re-run the
+# instrument and scope its delete to that run's ids; the entry tells it which
+# population is provably servable and how fresh the evidence was, and nothing more.
+# `plan["licence_scope"]` states this in the machine-readable artefact instead of
+# leaving it to a reader of this comment.
 
 #: §3's split, as the labels it names. **Authority, not location** — §3 is explicit:
 #: *"READ THE AUTHORITY COLUMN AS AUTHORITY, NOT AS LOCATION"*, and Postgres is the
@@ -218,6 +253,13 @@ class ParityReport:
     measured_nodes: int | None = None
     total_nodes: int | None = None
     graph_name: str | None = None
+    #: Epoch seconds at which the instrument measured, and where that figure came from
+    #: (`"report field 'measured_at'"` or `"report file mtime"`). ⛔ ``None`` is NOT
+    #: "fresh": this module cannot date the evidence, so :func:`assess` demotes it to
+    #: ``cannot-answer``. See :data:`PARITY_MAX_AGE_ENV` for why age is load-bearing
+    #: when the artefact carries a count instead of node identity.
+    measurement_time: float | None = None
+    measurement_time_source: str | None = None
 
     def proves(self) -> bool:
         """True only when the instrument RAN, was CLEAN, and covered EVERYTHING.
@@ -378,15 +420,98 @@ class CacheReadError(RuntimeError):
 def _int_or_none(value: Any) -> int | None:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # ⛔ OverflowError is NOT hypothetical: `json.load` accepts the `Infinity` and
+        # `1e400` literals, and `int(float("inf"))` raises OverflowError — which is
+        # neither TypeError nor ValueError, so it escaped as a traceback and left the
+        # CLI exiting 1 (USAGE, "retry your flags") for a report the tool must REFUSE.
         return None
 
 
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _iso_utc(moment: float | None) -> str | None:
+    """Render an epoch as an ISO-8601 UTC stamp for the payload, or ``None``."""
+    if moment is None:
+        return None
+    return (datetime.fromtimestamp(float(moment), tz=UTC)
+            .isoformat().replace("+00:00", "Z"))
+
+
+def _epoch_or_none(value: Any) -> float | None:
+    """Read a report's timestamp as epoch seconds, or ``None`` when unusable.
+
+    Accepts an epoch number (or a numeric string) and an ISO-8601 string, because both
+    shapes exist in this repo's artefacts. ⛔ A NON-FINITE value is rejected rather than
+    parsed: `json.load` accepts `Infinity`, and an infinite timestamp would compare
+    False against every age bound — reading as FRESH, which is the one direction that
+    must never fail open. ``bool`` is rejected even though Python treats it as an int:
+    a flag is not a date.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            number = None
+        if number is not None:
+            return number if math.isfinite(number) else None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.timestamp()
+    return None
+
+
+def _declared_parity_max_age(declared: float | None = None) -> float:
+    """The freshness bound: explicit argument, else the env var, else the default.
+
+    ⛔ A declared-but-INVALID bound is refused, never silently replaced by the default.
+    "No bound" and "a bound nobody could read" are different states, and folding the
+    second into the default would report a freshness guarantee the operator never
+    asked for — the same provenance mistake `ceiling_source` exists to avoid.
+    """
+    if declared is not None:
+        return _validate_parity_max_age(declared, "max_parity_age_s")
+    raw = os.environ.get(PARITY_MAX_AGE_ENV)
+    if raw is None or raw.strip() == "":
+        return PARITY_MAX_AGE_DEFAULT_S
+    try:
+        parsed = float(raw.strip())
+    except ValueError as exc:
+        raise CacheReadError(
+            f"{PARITY_MAX_AGE_ENV}={raw!r} is not a number of seconds — a declared "
+            f"freshness bound this census cannot read would be replaced by a default "
+            f"the operator did not ask for"
+        ) from exc
+    return _validate_parity_max_age(parsed, PARITY_MAX_AGE_ENV)
+
+
+def _validate_parity_max_age(value: float, label: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
+        raise CacheReadError(f"{label}={value!r} is not a finite number of seconds")
+    if float(value) <= 0:
+        raise CacheReadError(
+            f"{label}={value!r} must be positive: a zero or negative freshness bound "
+            f"would make every report stale, and 'unbounded age' is not a state this "
+            f"census can licence"
+        )
+    return float(value)
 
 
 def measure_state(
@@ -415,10 +540,14 @@ def measure_state(
         )
     policy = str(info.get("maxmemory_policy") or "")
 
-    # The graph's OWN keys. MEASURED: a graph is one `graphdata` key plus a
-    # `telemetry{<graph>}` stream — so `keys_per_graph` is the number of Redis keys a
-    # server-side eviction policy could take away to reclaim ONE graph, and it is the
-    # evidence that the eviction unit is the graph.
+    # The graph's OWN keys. MEASURED: on the build this module was developed against a
+    # graph was one `graphdata` key plus a `telemetry{<graph>}` stream, while an
+    # independent re-measurement of `falkordb-server:v4.20.6` after 100 queries found
+    # the graph key ALONE (`telemetry{}` is not created on every build/config). So this
+    # is a PROBE RESULT, not an engine constant: `keys_per_graph` is the number of
+    # Redis keys a server-side eviction policy could take away to reclaim ONE graph,
+    # and the evidence that the eviction unit is the graph — whichever of the two
+    # candidate names this engine actually materialises.
     #
     # ⛔ PROBED BY NAME, never `KEYS *`. `KEYS` is an O(N) full-keyspace scan on a
     # single-threaded server, so using it here would stall the very cache this census
@@ -671,6 +800,8 @@ def assess(
     *,
     ceiling_bytes: int | None = None,
     parity_reports: dict[str, ParityReport] | None = None,
+    max_parity_age_s: float | None = None,
+    now: float | None = None,
 ) -> Assessment:
     """Answer #10976's one gated question, and refuse when it cannot be answered.
 
@@ -680,13 +811,31 @@ def assess(
     instrument that did not run, was not CLEAN, or covered part of the population
     leaves the class ``cannot-answer``.
 
+    *max_parity_age_s* bounds how old a report may be (default: the
+    :data:`PARITY_MAX_AGE_ENV` value, else :data:`PARITY_MAX_AGE_DEFAULT_S`). A report
+    that cannot be DATED is demoted exactly like a stale one — see
+    :data:`PARITY_MAX_AGE_ENV` for why a count-based licence cannot exist without it.
+    *now* is injectable so a test can age a report without travelling in time.
+
     The verdict is computed from the WRONG direction on purpose: **an unproven class
     is never evicted.** ``PLAN`` licenses ONLY the populations named in
     ``plan["evictable"]`` — each one proved by its own instrument's report. Every other
     class is listed in ``problems`` and ``plan["not_evictable"]`` and may not be
-    touched, so a partial plan is safe **by construction**: evicting exactly the
-    proven populations still satisfies #10976's "0 evictions of a node the record
-    cannot serve".
+    touched.
+
+    ⚠️ WHAT THAT IS WORTH — the precise claim, because the imprecise one was wrong.
+    An earlier revision said evicting the proven populations "is safe **by
+    construction**" because it "still satisfies #10976's 0 evictions of a node the
+    record cannot serve". That is not what the code proves. An entry carries a
+    **count measured at an `as_of` time**, and the instruments emit no node identity, so
+    between the measurement and the sweep the population can change and a report can
+    age: the census can bound BOTH (``measured_nodes <= resident_total`` and
+    ``age <= max_parity_age_s``) and can do no more. The guarantee it actually delivers
+    is: *the named population was fully proven record-served by a fresh instrument run,
+    and nothing else may be touched.* Closing the remaining gap is what node identity
+    in the instrument's report would buy; until then a sweeper MUST re-run the
+    instrument and scope its delete to that run's ids, which
+    ``plan["licence_scope"]`` states in the artefact.
 
     ⛔ DO NOT READ ``PLAN`` AS "EVERYTHING WAS PROVEN". It is not a statement about the
     classes it omits — it is a licence scoped to the list it prints. An earlier
@@ -697,6 +846,8 @@ def assess(
     exists to prevent, reached by trusting prose over the artefact. The artefact is
     ``plan["evictable"]``, and it is the only thing a licence covers.
     """
+    age_bound = _declared_parity_max_age(max_parity_age_s)
+    moment = time.time() if now is None else float(now)
     state = measure_state(client, graph_name, ceiling_bytes=ceiling_bytes)
     counts = resident_counts(graph)
     total_nodes = node_total(graph)
@@ -777,10 +928,37 @@ def assess(
             measured = report.measured_nodes
             proven = False
         else:
-            reason = (f"proven: {instrument} reported {report.verdict!r} over "
-                      f"{report.measured_nodes}/{report.total_nodes} node(s)")
-            measured = report.measured_nodes
-            proven = True
+            # ⛔ FRESHNESS IS PART OF THE PROOF, not a nicety beside it. `proves()`
+            # says the instrument was CLEAN over the whole population IT SAW; it cannot
+            # say the graph still holds that population, because the population is a
+            # predicate and the report carries a count. A report that cannot be dated,
+            # or is older than the bound, licenses nothing.
+            age = (None if report.measurement_time is None
+                   else moment - report.measurement_time)
+            if age is None:
+                reason = (f"cannot-answer: {instrument}'s report carries no readable "
+                          f"measurement time, so this census cannot tell a current "
+                          f"proof from a stale one — and a stale CLEAN report over a "
+                          f"PREDICATE population (turns are `:Point` nodes with "
+                          f"`is_episodic = true`) licenses sweeping nodes it never "
+                          f"measured")
+                measured = report.measured_nodes
+                proven = False
+            elif age > age_bound:
+                reason = (f"cannot-answer: {instrument}'s report is {age / 3600.0:.1f} h "
+                          f"old (measured at {_iso_utc(report.measurement_time)}, from "
+                          f"{report.measurement_time_source}), beyond the "
+                          f"{age_bound / 3600.0:.1f} h bound — re-run the instrument; a "
+                          f"stale CLEAN report licenses sweeping nodes it never measured")
+                measured = report.measured_nodes
+                proven = False
+            else:
+                reason = (f"proven: {instrument} reported {report.verdict!r} over "
+                          f"{report.measured_nodes}/{report.total_nodes} node(s), "
+                          f"measured {age / 60.0:.1f} min ago "
+                          f"({report.measurement_time_source})")
+                measured = report.measured_nodes
+                proven = True
         entry = ClassReading(
             label=f"{population} (population)",
             nodes=int(measured or 0),
@@ -841,15 +1019,46 @@ def assess(
         # cannot serve, and a sweep would destroy the only copy of a node.
         verdict = "REFUSED"
     else:
-        # A partial plan is safe: it lists ONLY the proven populations, so evicting
-        # exactly them still satisfies "0 evictions of a node the record cannot
-        # serve". The unproven classes stay listed in `problems` with their reason.
+        # A partial plan lists ONLY the proven populations, so a sweeper that reads
+        # `plan["evictable"]` cannot touch the unproven classes. ⛔ But "only the
+        # proven populations" is not the same as "only proven NODES": each entry is a
+        # count with an `as_of`, not an identity list, so `licence_scope` states in the
+        # artefact what the counts cannot say. The unproven classes stay listed in
+        # `problems` with their reason.
         verdict = "PLAN"
         plan = {
             "evictable": [
-                {"population": c.label, "nodes": c.nodes, "instrument": c.instrument}
+                {
+                    "population": c.label,
+                    "nodes": c.nodes,
+                    "instrument": c.instrument,
+                    # ⛔ The count without the time it was taken is what let a stale
+                    # report read as a licence. `as_of` is the evidence's own date, and
+                    # `measurement_time_source` says whether that date is the
+                    # instrument's or the report file's.
+                    "as_of": _iso_utc(reports[c.instrument].measurement_time),
+                    "as_of_epoch": reports[c.instrument].measurement_time,
+                    "measurement_time_source": reports[c.instrument].measurement_time_source,
+                }
                 for c in eligible
             ],
+            "licence_scope": {
+                "identity_bound": False,
+                "max_age_seconds": age_bound,
+                "as_of_min": _iso_utc(min(
+                    (r.measurement_time for r in reports.values()
+                     if r is not None and r.measurement_time is not None),
+                    default=None,
+                )),
+                "⚠️ a count is not a delete list": (
+                    "each entry names a POPULATION that a fresh instrument run proved "
+                    "fully record-served, and the number of nodes that run measured. "
+                    "No parity instrument emits node identity, so this plan cannot say "
+                    "WHICH nodes were measured — a sweeper MUST re-run the instrument "
+                    "and scope its delete to that run's ids. Deleting `nodes` rows by "
+                    "any other rule deletes rows nothing proved."
+                ),
+            },
             "resident_bytes": state.resident_bytes,
             "bound_bytes": state.bound_bytes,
             "over_by_bytes": max(0, state.resident_bytes - (state.bound_bytes or 0)),
@@ -973,10 +1182,46 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
             f"license evicting another"
         )
 
+    # ⛔ THE MEASUREMENT TIME, WITH ITS PROVENANCE. The report is a COUNT about a
+    # PREDICATE population, so its age is the only thing standing between a stale CLEAN
+    # result and a sweep over nodes it never measured (see `PARITY_MAX_AGE_ENV`).
+    #
+    # 1. A timestamp the report DECLARES wins, and is honoured as declared. A declared
+    #    value that cannot be read is REFUSED rather than replaced by the file mtime:
+    #    substituting a different figure would silently upgrade a broken freshness
+    #    claim into a readable one, and the operator would never learn the instrument's
+    #    own field is wrong.
+    # 2. Otherwise the report FILE's mtime, NAMED as the source. The instrument emits
+    #    no timestamp today, so this is the honest fallback — and `cache_eviction_census`
+    #    prints `measurement_time_source` so nobody has to guess which they got.
+    measurement_time: float | None = None
+    measurement_time_source: str | None = None
+    for stamp_field in PARITY_TIMESTAMP_FIELDS:
+        if stamp_field not in payload:
+            continue
+        measurement_time = _epoch_or_none(payload.get(stamp_field))
+        measurement_time_source = f"report field {stamp_field!r}"
+        if measurement_time is None:
+            raise CacheReadError(
+                f"parity report {path} declares {stamp_field}={payload.get(stamp_field)!r}, which "
+                f"is not a readable timestamp — a freshness claim this census cannot "
+                f"read is REFUSED, never replaced by the file's mtime"
+            )
+        break
+    if measurement_time is None:
+        try:
+            measurement_time = os.path.getmtime(path)
+        except OSError:
+            measurement_time = None
+        else:
+            measurement_time_source = "report file mtime"
+
     return ParityReport(
         instrument=instrument,
         verdict=str(payload.get("verdict") or ""),
         measured_nodes=_int_or_none(measured),
         total_nodes=_int_or_none(total),
         graph_name=str(reported_graph) if reported_graph is not None else graph_name,
+        measurement_time=measurement_time,
+        measurement_time_source=measurement_time_source,
     )
