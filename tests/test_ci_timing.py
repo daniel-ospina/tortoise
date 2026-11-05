@@ -2560,7 +2560,22 @@ def test_the_artifact_and_the_map_cite_the_same_run() -> None:
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
     stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
     assert stamp, "durations_captured_at is missing or unparseable"
-    notes = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
+    # BOTH sample-label shapes, via the writer's OWN pattern — not the legacy one.
+    # `ci-timing top-15 …` is the pre-2026-10 label; the writer emits
+    # `ci-timing junit-census+top-15 …` (the same pair `_SAMPLE_LABEL_RE` spells in
+    # `tools/ci_timing.py`). Reading only the legacy spelling makes the arm that
+    # #9134's P1 exists for UNREACHABLE: the newest legacy note is 2026-10-20, so
+    # `newest == sampled_date` can never hold (the artifact samples 2026-11-02) and
+    # the guard always falls to its `else` (date-vs-stamp only) — so a pair sampling
+    # run A while the map cites run B ON THE SAME DAY passes, which is the exact
+    # mismatch this test is named for. Measured on the shipped pair at this head:
+    # the legacy pattern finds 5 notes, newest 2026-10-20; the both-shapes pattern
+    # finds 1117, newest 2026-11-02 = the sampled date, citing 41375596528. Two
+    # labels, two behaviours, so the pattern is pinned to the writer's rather than
+    # restated (#10575 review, P3).
+    notes = re.findall(
+        rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)",
+        text)
     assert notes, "the map carries no capture-dated note, so this guard is vacuous"
     newest = max(date for date, _ in notes)
     newest_runs = {run for date, run in notes if date == newest}
