@@ -168,6 +168,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import secrets
 import urllib.error
 import urllib.parse
@@ -245,7 +246,15 @@ def _validate_api_base(api_base: str) -> str:
                 f"{_printable_base(api_base)!r}) — it would forge a verdict line or crash the request")
     if "?" in api_base or "#" in api_base:
         return f"--api-base must not carry a query or fragment (got {_printable_base(api_base)!r})"
-    parts = urllib.parse.urlsplit(api_base)
+    parts = None
+    try:
+        parts = urllib.parse.urlsplit(api_base)
+    except ValueError:
+        # ⛔ `urlsplit` RAISES on a malformed IPv6 host — `http://[::1` → `ValueError: Invalid IPv6 URL` —
+        # and that escaped `main` as a TRACEBACK with EMPTY stdout, breaking the
+        # `GH-WRITE-UNAVAILABLE(<reason>)` / `--json` contract on a plausible typo of the documented
+        # loopback seam (`::1`). `_printable_base` one function down already guards the same call.
+        return f"--api-base is not a parseable URL (got {_printable_base(api_base)!r})"
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return f"--api-base must be an absolute http(s) URL with a host (got {_printable_base(api_base)!r})"
     # ⛔ NEVER ECHO THESE CREDENTIALS BACK. The refused base's userinfo is NOT repeated in this message
@@ -295,6 +304,19 @@ def _printable_base(api_base: str) -> str:
     if "@" in api_base:
         return "[redacted userinfo]@" + api_base.rsplit("@", 1)[-1]
     return api_base
+
+
+def _scrub(text: str) -> str:
+    """Remove anything token-shaped from UNTRUSTED text before it is echoed into a verdict.
+
+    ⛔ THE RESPONSE BODY IS THE CALLER'S OPPONENT (review cycle 4). Every `detail` is printed on the
+    verdict line, and a responder that echoes the request headers puts `<TOKEN>` in its own body — the
+    module's absolute guarantee ("the credential is NEVER printed … in any output") is only true if the
+    echoed text is scrubbed, because `!r` escaping alone only removes newlines. The pattern set is the
+    documented token prefixes; an unparseable-but-token-shaped string is still redacted, which is the
+    safe direction for a value we are only trying to be read `as-is` never.
+    """
+    return re.sub(r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+", "<redacted-token>", text or "")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -434,8 +456,12 @@ def _classify_403(headers: dict, body: str) -> tuple[str, str]:
     if "rate limit" in low or "abuse detection" in low or "secondary rate" in low:
         return "rate-limited", "the API named a rate limit in the refusal body"
     if remaining == "0" or retry_after:
-        return "rate-limited", (f"no quota left (x-ratelimit-remaining={remaining or '?'}, "
-                                f"retry-after={retry_after or '?'})")
+        # ⛔ HEADER VALUES ARE UNTRUSTED TEXT TOO, AND THEY LAND ON THE VERDICT LINE. `retry-after` is not
+        # validated numerically, so a responder could put a newline + `GH-WRITE-OK(...)` in it (measured
+        # against a stub: stdout then carried a line beginning with the pass string). Scrubbed and
+        # `!r`-escaped like the bodies, and bounded so a hostile header cannot flood the line either.
+        return "rate-limited", (f"no quota left (x-ratelimit-remaining={_scrub(remaining or '?')[:32]!r}, "
+                                f"retry-after={_scrub(retry_after or '?')[:32]!r})")
     if "saml" in low or "sso" in low:
         return "sso-unauthorized", "the refusal names SAML/SSO — the token is not authorised for the org"
     # The exact wording GitHub uses when a FINE-GRAINED token lacks a resource permission.
@@ -448,7 +474,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
     """Run one write-surface probe. Returns {'ok': bool, 'reason': str, 'detail': str, 'status': int}."""
     status, headers, payload = _request(url, token, method="POST", body=body)
     if status == 0:
-        return {"ok": False, "reason": "transport", "detail": f"could not reach {url!r}: {payload[:160]}",
+        return {"ok": False, "reason": "transport", "detail": f"could not reach {url!r}: {_scrub(payload)[:160]!r}",
                 "status": 0}
     if status in _WRITE_OK:
         return {"ok": True, "reason": "permitted",
@@ -484,7 +510,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
         return {"ok": False, "reason": "server-error",
                 "detail": f"HTTP {status} from GitHub — a service fault, not a verdict about the token",
                 "status": status}
-    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {payload[:200]}",
+    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {_scrub(payload)[:200]!r}",
             "status": status}
 
 
@@ -541,7 +567,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # ── 1. READ: the disambiguator for any 404 that follows, and the source of default_branch.
     status, headers, body = _request(f"{api_base}/repos/{repo}", token)
     if status == 0:
-        result.update(reason="transport", detail=f"could not reach {_printable_base(api_base)!r}: {body[:160]}")
+        result.update(reason="transport", detail=f"could not reach {_printable_base(api_base)!r}: {_scrub(body)[:160]!r}")
         return result
     if status == 401:
         result.update(reason="bad-credentials", detail="the API returned 401 — expired, revoked, or mistyped")
@@ -570,7 +596,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
                       detail=f"HTTP {status} on the READ probe — a GitHub service fault, not a verdict about the token")
         return result
     if status != 200:
-        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {body[:160]}")
+        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {_scrub(body)[:160]!r}")
         return result
 
     result["read_ok"] = True
@@ -687,8 +713,17 @@ def main(argv: list[str]) -> int:
     # caught by `_request`), escaping as a traceback with EMPTY stdout — breaking the
     # `GH-WRITE-UNAVAILABLE(<reason>)` and `--json` contracts exactly as the newline token did.
     if not args.repo.isascii() or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in args.repo):
-        print("GH-WRITE-UNAVAILABLE(usage) — --repo must be `owner/name` with no whitespace, control "
-              "character or non-ASCII byte (the value is not echoed)")
+        if args.json:
+            # ⛔ A `--json` CALLER PARSES STDOUT — a human line here is `json.loads` raising on the
+            # consumer side, so the usage refusal must serialise like every other refusal does.
+            print(json.dumps({"repo": args.repo, "api_base": _printable_base(args.api_base),
+                              "ok": False, "reason": "usage",
+                              "detail": "--repo must be `owner/name` with no whitespace, control "
+                                        "character or non-ASCII byte (the value is not echoed)"},
+                             indent=2, sort_keys=True))
+        else:
+            print("GH-WRITE-UNAVAILABLE(usage) — --repo must be `owner/name` with no whitespace, control "
+                  "character or non-ASCII byte (the value is not echoed)")
         return 1
 
     token, source = resolve_credential()

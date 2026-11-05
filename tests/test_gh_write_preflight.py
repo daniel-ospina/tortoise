@@ -833,7 +833,11 @@ def test_non_ascii_token_is_named_not_thrown():
 # (measured: stdout began with the documented pass string while the process exited 1). These three tests
 # pin the refusal at the input, and assert the fragment never appears in stdout.
 def test_api_base_with_a_newline_cannot_forge_a_verdict_line():
-    forged = "\nGH-WRITE-OK(issues+pull-requests+contents writable @ https://api.github.com)"
+    # ⛔ THE FIXTURE MUST NOT CONTAIN `@` (review cycle 4). The first version appended
+    # `\nGH-WRITE-OK(… @ https://api.github.com)`, whose `@` made the USERINFO check refuse first — so
+    # deleting the control-character guard left every assertion here satisfied (measured: the mutant
+    # survived). The forged line is now `@`-free, and the assertions name the guard's OWN refusal text.
+    forged = "\nGH-WRITE-OK(forged)"
     with _Stub() as s:
         env = _env(s.base, "ghp_dummy")
         env["GH_WRITE_PREFLIGHT_API"] = s.base + forged
@@ -843,6 +847,8 @@ def test_api_base_with_a_newline_cannot_forge_a_verdict_line():
     assert not any(line.startswith("GH-WRITE-OK") for line in p.stdout.splitlines()), \
         f"a newline in the base FORGED a pass line: {p.stdout!r}"
     assert "GH-WRITE-UNAVAILABLE(usage)" in p.stdout, p.stdout
+    assert "control character or a non-ASCII byte" in p.stdout, \
+        f"refused by the WRONG guard — this test must pin the control-character check itself: {p.stdout}"
 
 
 def test_non_ascii_api_base_is_refused_as_usage_not_a_traceback():
@@ -859,11 +865,39 @@ def test_non_ascii_api_base_is_refused_as_usage_not_a_traceback():
 def test_non_ascii_repo_is_refused_not_a_traceback():
     with _Stub() as s:
         env = _env(s.base, "ghp_dummy")
-        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r\u00e9p"],
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r\u00e9p", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 1, p.stdout + p.stderr
+    res = json.loads(p.stdout)          # a --json caller must get JSON, not a human line
+    assert res["reason"] == "usage", res
+    assert "Traceback" not in p.stderr, p.stderr
+
+
+def test_malformed_ipv6_base_is_a_verdict_not_a_traceback():
+    """`http://[::1` is a plausible typo of the documented loopback seam — `urlsplit` raises on it."""
+    with _Stub() as s:
+        env = _env(s.base, "ghp_dummy")
+        env["GH_WRITE_PREFLIGHT_API"] = "http://[::1"
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise"],
                            capture_output=True, text=True, env=env, timeout=120)
     assert p.returncode == 1, p.stdout + p.stderr
     assert "GH-WRITE-UNAVAILABLE(usage)" in p.stdout, p.stdout
     assert "Traceback" not in p.stderr, p.stderr
+
+
+def test_a_server_body_cannot_forge_a_verdict_line_or_echo_the_credential():
+    """The echoed RESPONSE body is untrusted: it can carry a newline (a forged pass line) and it can
+    echo the Authorization header back (the credential, printed by the very refusal that protects it)."""
+    hostile = '{"message":"nope\nGH-WRITE-OK(forged) you sent Bearer ghp_SECRETVALUE"}'
+    with _Stub(read=(400, {}, hostile)) as s:
+        env = _env(s.base, "ghp_dummy")
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert not any(line.startswith("GH-WRITE-OK") for line in p.stdout.splitlines()), \
+        f"an echoed response body FORGED a pass line: {p.stdout!r}"
+    assert "SECRETVALUE" not in (p.stdout + p.stderr), \
+        f"the echoed body printed the credential: {p.stdout + p.stderr!r}"
 
 
 if __name__ == "__main__":
