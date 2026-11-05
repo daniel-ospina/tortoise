@@ -1040,10 +1040,13 @@ def _wait_bound_refusal_result(name: str | None = None,
     non-write-set tools DO mutate: ``tortoise_compute_confidence`` /
     ``tortoise_get_confidence`` are ``maintenance``-tier and re-store a
     re-derived score on a repeat (why the tier refuses ``writes=True`` for them),
-    and ``tortoise_onboarding_state`` is ``read``-tier but its registry leg
-    ``_get_onboarding_state`` runs ``_cas_write_onboarding_state(org_id, state,
-    0)`` when the state is missing — the same CAS that got the
-    ``tortoise_manage_sources(action="list")`` read-only arm removed below. So the
+    and ``tortoise_onboarding_state`` was ``read``-tier but its registry leg
+    ``_get_onboarding_state`` ran ``_cas_write_onboarding_state(org_id, state,
+    0)`` when the state was missing — the same CAS that got the
+    ``tortoise_manage_sources(action="list")`` read-only arm removed below. (That
+    name left the surface in #4282 Phase 3.2 and is in neither registry, so it is
+    history here, not a live example — the two ``maintenance``-tier names above
+    carry the point.) So the
     non-write-set arm makes NO mutation claim either way; it only declines to add
     the write-ambiguity payload. For a
     WRITE it may not — the seam ABANDONS the dispatch rather than cancelling it
@@ -2269,12 +2272,15 @@ def _excluded_writer_writes_the_default_graph(
     argument?" — NOT "does it touch a graph". The seam used to read the second
     answer out of the first, and that is false for
     `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_pack_install`,
-    `tortoise_onboarding_demo_create`, `tortoise_onboarding_seed`,
     `tortoise_onboarding_github_index` and `tortoise_manage_sources` each write
     graph data into the org's DEFAULT graph, and each REJECTS a graph-bound key
     (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
     arm they can be on. Leaving them undisclosed left the #10084 defect in place
     on every tool except the one the issue measured (review P2).
+
+    (#4282 Phase 3.2 removed `tortoise_onboarding_demo_create` and
+    `tortoise_onboarding_seed` from that frozenset along with the tools
+    themselves, so they are no longer members here.)
 
     `tortoise_manage_sources` is CONDITIONAL on its own ARGUMENTS, because only
     one branch writes graph data; see
@@ -2349,8 +2355,8 @@ def _disclose_graph_resolution(result: Any, name: str,
     graph":
 
     * **writes NO graph** (`tortoise_org_create` provisions the workspace,
-      `tortoise_onboarding_session_recording` flips a control-plane flag,
-      `tortoise_onboarding_github_connect` stores OAuth CSRF state): SKIPPED.
+      `tortoise_onboarding_session_recording` flips a control-plane flag):
+      SKIPPED.
       Naming the credential's graph on them would assert a target the call never
       had — the wrong-graph claim this issue exists to remove, emitted by us.
     * **writes the workspace DEFAULT graph**
@@ -2878,8 +2884,6 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_retract_point",
     # epic #888 W2 consolidated write surface
     "tortoise_create_entity", "tortoise_update", "tortoise_operator_action",
-    # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
-    "tortoise_onboarding_demo_create",
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
@@ -5997,13 +6001,18 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
 
-# Epic #888 no-regret: once an org's onboarding completes, the seven
-# tortoise_onboarding_* tools retire from that org's steady-state MCP
-# surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
-# web onboarding flow. Function bodies are untouched; only the listing hides
-# them. #2210: no @mcp.tool decorators here — the module-bottom register_all
-# registers each from its registry entry (annotations are registry-canonical).
+# Epic #888 no-regret (HISTORICAL — read the frozenset below before trusting
+# this paragraph): once an org's onboarding completed, the onboarding tools
+# retired from that org's steady-state MCP surface (tools/list) while the REST
+# /v1/onboarding/* endpoints stayed for the web onboarding flow. Function bodies
+# were untouched; only the listing hid them. #2210: no @mcp.tool decorators
+# here — the module-bottom register_all registers each from its registry entry
+# (annotations are registry-canonical).
 # See _HTTPToolFilter.list_tools.
+# ⛔ SINCE #4282 Phase 3.2 THIS GATE HAS NO POPULATION: the set below is EMPTY,
+# and five of the seven tools are UNREGISTERED, so they can never be listed in
+# ANY team state — the hiding is not what keeps them off the surface. Do not read
+# a served-name regression as "already covered by hiding".
 # #3540: `tortoise_onboarding_session_recording` and
 # `tortoise_onboarding_github_index` were RETIRED into
 # `tortoise_manage_sources` (#3883), so they are no longer advertised and must
@@ -6012,10 +6021,18 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # it is the STEADY-STATE management surface, and the whole point of the set is
 # that its members disappear once onboarding completes.
 _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
-    "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
-    "tortoise_onboarding_github_connect",
-    "tortoise_onboarding_github_status",
-    "tortoise_onboarding_seed",  # #1999 (W3)
+    # EMPTY after #4282 Phase 3.2 — all five members were the `run_onboarding`
+    # set and every one of them left the served surface: `demo_create`, `state`,
+    # `seed` (moved off the MCP, owner ruling 2026-09-22) and `github_connect` /
+    # `github_status`. See `tortoise/tool_registry.py` for the recorded reasons
+    # and the REST routes that preserve each capability.
+    #
+    # ⚠️ CONSERVED, NOT REMOVED: the set is now INERT — `_HTTPToolFilter` hides
+    # these names once onboarding completes, and with no members it hides
+    # nothing. That is cosmetic (this gate fails OPEN by design and no permission
+    # depends on it), so dismantling the filter + its 60s state cache is a
+    # follow-up, not part of a surface-removal batch. Remove the seam, not just
+    # this set, if a later lane picks it up.
 })
 
 # 60s per-org TTL cache for the tools/list gate — the onboarding-state read
@@ -6141,9 +6158,11 @@ def _onboarding_state() -> dict:
     from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
-        # #9084: `_SafeError`, so `tortoise_onboarding_state`,
-        # `tortoise_manage_sources` and `_sources_view` — which all return this
-        # payload verbatim — record the dispatch as a refusal instead of `ok`.
+        # #9084: `_SafeError`, so a caller that returns this payload verbatim
+        # records the dispatch as a refusal instead of `ok`. `_sources_view`
+        # does exactly that; `tortoise_manage_sources` does NOT reach this
+        # branch — it answers its own `_SafeError` when `org_id` is None
+        # (its first guard) and never calls in here.
         return _SafeError({"error": "No team context (HTTP mode required)"})
     if org_id == SELFHOST_ORG_ID:
         from tortoise.mcp_auth import _get_org_sdk
@@ -6372,11 +6391,12 @@ def _sources_view() -> dict:
 
         The two GitHub sources share a key set on purpose: a caller iterating
         `sources` must not need to know which of them happens to carry the
-        index state. Both onboarding tools are off the TARGET list yet STILL
-        SERVED today: `tortoise_onboarding_state` returns the raw projection and
-        is therefore a second reader of this state, while
-        `tortoise_onboarding_github_status` is served but reads no index state.
-        "Removed" here is a target-list status, never the served surface. The
+        index state. Both onboarding tools that used to read this state are gone
+        from the surface (#4282 Phase 3.2: `tortoise_onboarding_state`,
+        `tortoise_onboarding_github_status`), so `tortoise_manage_sources` is the
+        only SERVED reader of the projection — `onboarding` below carries the raw
+        state `tortoise_onboarding_state` used to return. (That handler's BODY is
+        retained and still reads it; nothing dispatches to it any more.) The
         issues walk stamps `github_indexed`, the docs walk `github_docs_indexed`.
         """
         raw = _state_get(state, f"{prefix}_at")
@@ -6623,7 +6643,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
                 "error": (
                     "Could not read the stored GitHub credential (control "
                     "plane unavailable). NOTHING was changed — retry, or "
-                    "re-authorise with tortoise_onboarding_github_connect."
+                    "re-authorise GitHub from the dashboard "
+                    "(`POST /v1/onboarding/github/connect`)."
                 )
             })
         if not encrypted:
@@ -6631,9 +6652,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
                                "refused_not_connected")
             return _SafeError({
                 "error": (
-                    "GitHub not connected. Authorise it first with "
-                    "tortoise_onboarding_github_connect — this tool never "
-                    "accepts credentials."
+                    "GitHub not connected. Authorise it first from the "
+                    "dashboard (`POST /v1/onboarding/github/connect`) — this "
+                    "tool never accepts credentials."
                 )
             })
         # #1845: HEAL before walking, exactly as both REST twins do. The two
@@ -6665,8 +6686,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
                 "error": (
                     "GitHub org unknown for this team's stored credential and "
                     "it could not be derived from the stored token. Nothing "
-                    "was started. Re-connect with "
-                    "tortoise_onboarding_github_connect."
+                    "was started. Re-connect GitHub from the dashboard "
+                    "(`POST /v1/onboarding/github/connect`)."
                 )
             })
         kind = "docs" if source == "github_documents" else "github"
@@ -6791,8 +6812,10 @@ def tortoise_manage_sources(action: str,
     server-side reads it yet) that residual cannot be closed from here; the
     honest statement is that a `disable` records intent and does not cancel an
     index run, whether it arrives through this tool or an old name.
-    `tortoise_onboarding_github_connect` is deliberately NOT folded in — it is
-    the OAuth handshake, and credentials must never pass through the model.
+    `tortoise_onboarding_github_connect` was deliberately never folded in — it was
+    the OAuth handshake, and credentials must never pass through the model. That
+    tool has since left the MCP surface (#4282 Phase 3.2), so the handshake's only
+    door is `POST /v1/onboarding/github/connect`.
     """
     # C5 #2114 parity: this writes ORG-level state, so a graph-bound key is
     # rejected rather than allowed to reconfigure the org from inside a graph.
@@ -7350,7 +7373,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         plane = "Supabase control plane" if is_supabase_enabled() else "registry"
         return _SafeError({"error": f"{plane} unavailable"})
     if not encrypted:
-        return _SafeError({"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."})
+        return _SafeError({"error": "GitHub not connected. Authorise it from the dashboard (`POST /v1/onboarding/github/connect`) first."})
     # #1725 + P1-1 (PR #1792): single-flight — an in-flight started job for
     # the org is reused AND the run is spawned ONLY when the job was
     # freshly minted (never two concurrent walks on one job).
@@ -7740,9 +7763,11 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             _by_name = get_tool_by_name()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
-            # filter below already excludes the onboarding tools.
+            # filter below already excludes the onboarding tools — and since
+            # #4282 Phase 3.2 the hide-list is EMPTY, so there is no population
+            # left for this read to gate.
             onboarding_done = False
-            if not (group and group != "onboarding"):
+            if _ONBOARDING_TOOL_NAMES and not (group and group != "onboarding"):
                 # #2924: awaited — the gate read is off the event loop (the
                 # read is synchronous end to end; see _org_onboarding_complete).
                 onboarding_done = await _org_onboarding_complete()
@@ -7758,9 +7783,13 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this org's onboarding is complete (fail-open
                 # — state read errors keep them visible).
-                if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:  # noqa: SIM103
-                    return False
-                return True
+                #
+                # #4282 Phase 3.2: the set is EMPTY (all five members left the
+                # surface), so it is tested FIRST — without the short-circuit
+                # every `tools/list` would still pay an `_org_onboarding_complete()`
+                # control-plane read to gate a population that cannot exist.
+                return not (_ONBOARDING_TOOL_NAMES and onboarding_done
+                            and t.name in _ONBOARDING_TOOL_NAMES)
 
             return [t for t in tools if _visible(t)]
 

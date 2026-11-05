@@ -104,14 +104,32 @@ family_rank:
 # in this move: `tools/bridge_table.py`'s authored Phase-0.1 map sends them to the
 # tenancy block and to `list_knowledge` / `search_knowledge`, so they retire in the batch
 # that lands those containers.
+#
+# #4282 Phase 3.2 (landed on main while this branch was open): FIVE of the seven
+# `onboarding_*` tools left the ADVERTISED set, 81 -> 76 (`tortoise_onboarding_state`,
+# `_seed`, `_demo_create`, `_github_connect`, `_github_status`) — owner ruling 2026-09-22,
+# `run_onboarding` dropped for `check_connection`. They are DELETED rather than retired
+# into nothing, so no shim exists to keep serving them (SERVED 99 -> 94); every one of
+# their REST routes survives in `tortoise/hosted_api.py`. Moved on ITS base: create
+# 17->15, check 8->7, operate 6->5; `list`/`find`/`fetch`/`link`/`update`/`delete`/`trace`
+# unmoved.
+#
+# ⚠️ THE MERGE COMPOSES THE TWO MOVES — NEITHER SIDE'S OWN TABLE IS THE ANSWER. The name
+# sets are disjoint, so the merged distribution is both applied to the 81-tool base:
+# 72 live (81 − 4 from the container − 5 from Phase 3.2), with create 15 (Phase 3.2's),
+# list 8 and find 5 (the container's), check 5 (8 − 2 absorbed by the container − 1 from
+# Phase 3.2), operate 5 (Phase 3.2's), and fetch 14 / update 8 / delete 6 / link 4 /
+# trace 2 unmoved. Every number below is re-derived from the merged registry by
+# `tools/surface_manifest.py check`, which reds on any disagreement — and it is the
+# authority here, not this prose.
 baseline_counts:
   fetch: 14
-  create: 17
+  create: 15
   list: 8
-  check: 6
-  operate: 6
+  check: 5
+  operate: 5
   update: 8
   find: 5
   delete: 6
-  link: 5
+  link: 4
   trace: 2

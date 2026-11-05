@@ -16,7 +16,9 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server exposes **100 tools** and the SDK **150 methods**, with five
+Today they cannot: the MCP server serves **95 tools** (72 of them advertised — the `graph_overview`
+container retired five names into one, and #4282 Phase 3.2 deleted five `run_onboarding` tools) and
+the SDK **150 methods**, with five
 overlapping ways to search, four ways to revise, seven ways to create a node, and a
 lifecycle nobody owns. The target is a surface small enough to hold in your head, where every
 name says what it does, every operation says what it will do to your data, and
@@ -42,8 +44,7 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
-| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 150, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
-| `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions, grouped into 32 groups. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
+| `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions, plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.
 
@@ -60,7 +61,12 @@ The freeze is on **tools and endpoints** — nothing is added, removed, renamed 
 either surface without explicit human approval. A **response field** that is off by default and
 leaves the response unchanged is **not** a gate failure, but must be recorded.
 
-## The reconciliation — MCP 100 → 27
+## The reconciliation — MCP 95 → 27
+
+> Every figure below is the MERGED surface (72 live + 23 retired shims), not either branch's own
+> measurement: the vision started at **99**, the `graph_overview` container added one served name
+> while retiring four (#4282, 81 → 77 advertised), and the five `run_onboarding` deletions removed
+> five more (#4282 Phase 3.2, 77 → 72 advertised). 99 + 1 − 5 = **95**. The target remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -75,15 +81,28 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 
 | | |
 |---|---|
-| Registry tools | **100** |
+| Registry tools | **95** |
 | Absorbed into the 27 MCP targets | **88** |
 | Absorbed into a builder-only SDK method (not on the MCP) | **1** |
 | Tenancy (SDK/REST only) | **2** |
-| Retired | **9** |
+| Retired | **4** |
 | MCP target tools | **27** |
 
-**The four bucket rows sum to 100.** (The last row is the target *surface*, not a bucket —
+**The four bucket rows sum to 95.** (The last row is the target *surface*, not a bucket —
 27 targets received those 88 absorbed tools many-to-one, so it is not part of the sum.)
+
+The **Retired** row fell **9 → 4** in #4282 **Phase 3.2** (2026-11-04): five of the nine were
+DELETED from the served registry rather than retired into nothing, because the owner's
+2026-09-22 ruling drops the whole `run_onboarding` container (`tortoise_onboarding_state`,
+`tortoise_onboarding_seed`, `tortoise_onboarding_demo_create`,
+`tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`). The registry fell
+**99 → 94** with them (81 live + 18 retired shims → 76 live + 18 retired shims), the first
+movement of the advertised surface since #3540. This branch's `graph_overview` container then
+moved the same population to **72 live + 23 retired shims = 95 served**, which is the figure
+the table above records. Every capability those five carried survives
+on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible
+reads are rehomed to the tenancy block. Their recorded reasons live in
+`tools/bridge_table.py::REMOVED_IN_PHASE_3_2`.
 
 The three journal names (`checkpoint`, `diary_write`, `diary_read`) moved from the *Retired*
 bucket to the *Absorbed* bucket on the owner's 2026-10-09 ruling: the two owner-approved docs
@@ -112,6 +131,10 @@ absorbed into the 27 targets. Many current tools map onto one target, so the two
 not complements.
 
 ## The reconciliation — SDK 150 → 40
+
+The starting figure in this heading is **historical**, the same way the MCP heading's is: the public
+SDK surface measures **150** at this writing (the 149 sketch predates one method; see the
+`canonical-sdk-methods.md` row above). The target — 40 — is unchanged.
 
 The ledger of the departing names — grouped, with the rationale for each group — is the
 **"Discarded — and why"** section of `docs/product/beta-sdk-surface.md`.
@@ -219,7 +242,7 @@ mechanism — see 2.5.
 | | Deliverable | Depends on |
 |---|---|---|
 | **3.1** | The 27 tools implemented **on the frozen SDK** | Phase 2 |
-| **3.2** | The **9 retired** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **88 are absorbed** into the 27 targets — many-to-one. Writing "100 − 27 = 73 retired" conflates the two and is wrong. | 3.1 |
+| **3.2** | The **4** tools removed. **2** are tenancy-only and **1** is absorbed into a builder-only SDK method that is not on the MCP, so **88 are absorbed** into the 27 targets — many-to-one. Writing "95 − 27 = 68 retired" conflates the two and is wrong. ⚠️ **The `run_onboarding` slice of this row LANDED 2026-11-04** (`#4282 Phase 3.2`, five tools deleted): after it, and after this branch's `graph_overview` container, the registry is **95** tools (**72** advertised + **23** retired shims), **4** of them remain `RETIRED_USE_INSTEAD`, and the absorbed names still wait on 3.1. | 3.1 |
 | **3.3** | The `co_firstlineno` guard defect fixed — see *Coordination* | — |
 
 ### Phase 4 — verification

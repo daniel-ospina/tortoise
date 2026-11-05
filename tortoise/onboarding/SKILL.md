@@ -50,8 +50,12 @@ resume where the flow left off — onboarding is stateful and idempotent.
 (**Self-hosted only:** your daemon must already be up, because it is what
 serves the read — install first, see the self-hosted bullet below.)
 
-- **Hosted, MCP-connected agents:** call `tortoise_onboarding_state` (the MCP
-  read tool) when it is listed. It returns the FLOW projection: `fork`
+- **Hosted, MCP-connected agents:** call `tortoise_manage_sources(action="list")`
+  — its `onboarding` key returns the FLOW projection verbatim, the same payload
+  `GET /v1/onboarding/state` serves. ⏺ **A read-only (`graphs:read`) key is
+  REFUSED here:** the scope gate is per-TOOL, and this one is admin-tier
+  (`risk="admin"`, `writes=True`) even for `action="list"` — such a key must
+  use the REST read `GET /v1/onboarding/state` instead. It returns the FLOW projection: `fork`
   (`'self' | 'build' | null`), `status` (`'active' | 'complete'`), `compact`,
   `completed_steps[]` (canonical ids: `team-named`, `connection-written`,
   `harness-connected`, `first-points-filed`, `decide-completed`,
@@ -788,15 +792,15 @@ change it any time from `Settings → Memory sources`.
 > **Self-hosted caveat:** the question is asked the same way, and the FIRST tile
 > (`session_recording`, section 5) is a **real, observable switch** on a
 > self-hosted install — the write lands, and the state read reports the stored
-> operational keys under `operational` (`tortoise_onboarding_state` /
-> `GET /v1/onboarding/state`), so reversibility **may** be promised for that
+> operational keys under `operational` (`GET /v1/onboarding/state`), so reversibility **may** be promised for that
 > tile (#8686). Self-hosted, the two GitHub tiles are writable through
 > `tortoise_manage_sources` as well (the flag write lands on the deployment's
 > own `:OnboardingState` node via the self-host branch of
 > `_update_onboarding_state`) — both directions, but only the OFF one is
 > unconditionally writable: `disable` writes the flag with no credential read,
 > while `enable` needs a CONNECTED GitHub credential that a deployment may not
-> have, and `tortoise_onboarding_github_connect` has no self-hosted team context
+> have, and the GitHub OAuth handshake (`POST /v1/onboarding/github/connect`,
+> dashboard-side) has no self-hosted route at all
 > — so never promise a GitHub ENABLE on a deployment that has never connected
 > one.
 
@@ -864,12 +868,16 @@ state-readable from that surface — **with ONE exception: the daemon serves no
 onboarding *enable/connect* write route at all, so none of the connect legs
 below works self-hosted** (agent-session recording does, because it writes
 through the owned onboarding-state node, not a connect route — #8686). (It does
-serve the onboarding FLOW: read it with `tortoise_onboarding_state`, and file
+serve the onboarding FLOW: read it with `tortoise_manage_sources(action="list")`
+(its `onboarding` key, the same payload as `GET /v1/onboarding/state`), and file
 the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
 
-- **GitHub issues** — `tortoise_onboarding_github_connect` (OAuth) then
-  `tortoise_manage_sources(action="enable", source="github_issues")`; read `tortoise_onboarding_github_status`
-  (or `tortoise_onboarding_state`). ⏺ **No per-repo scope:** the call takes no
+- **GitHub issues** — authorise from the **dashboard**: `POST /v1/onboarding/github/connect`
+  (the OAuth handshake is deliberately NOT an agent-callable MCP tool — it never
+  accepted credentials through the model, and since #4282 Phase 3.2 it is off the
+  MCP surface entirely), then
+  `tortoise_manage_sources(action="enable", source="github_issues")`; read state with
+  `tortoise_manage_sources(action="list")` (`sources.github_issues`). ⏺ **No per-repo scope:** the call takes no
   `repo` argument, so it indexes EVERY connected repo. Never tell a user it
   indexed one named repository — for a scoped walk use the REST twin
   `POST /v1/index/github` with `repo`. ⏺ **`disable` here is INTENT, not custody:**
@@ -878,9 +886,10 @@ the two seed anchors with `POST /v1/onboarding/seed` — section 1.)
   source) stays. The tool's own payload reports `enforcement: "intent-only"` —
   repeat that rather than telling a user the source has stopped.
 - **Agent-session recording** — `tortoise_manage_sources(action="enable"|"disable", source="agent_sessions")`
-  (`enabled` in the tool's `list` payload, `session_recording` in
-  `tortoise_onboarding_state`); read it back from `tortoise_onboarding_state`, which reports the
-  stored operational keys under `operational` (#8686). **Self-hosted this is the
+  (read it back as `sources.agent_sessions.enabled` in the tool's `list` payload;
+  the raw flag is `session_recording` at the TOP level of the hosted projection's
+  `onboarding` key, and under `onboarding.operational` only on a self-hosted
+  deployment — `read_selfhost_state` is what nests it, #8686). **Self-hosted this is the
   ONE connect-style leg that works** — both the write and the read-back land on
   the deployment's own node. Both were fixed by #8686; before it, the write
   no-opped and reported success anyway.

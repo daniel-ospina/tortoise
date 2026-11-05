@@ -1108,9 +1108,10 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     """
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
-    # under test is "growth past the pin reds", not any particular number.
-    # (#3540 moved the live count 82 -> 81, so the pin moves with it.)
-    doc["high_water_counts"] = {"tools": 76, "sdk_public_methods": 150}
+    # under test is "growth past the pin reds", not any particular number. The live count
+    # moved twice again in the merge — #4282's container (81 -> 77) and #4282 Phase 3.2's
+    # `run_onboarding` retirement (77 -> 72) — so the pin follows to 72 - 1.
+    doc["high_water_counts"] = {"tools": 71, "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -3608,10 +3609,13 @@ def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monke
     tool_rows = [r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")]
     committed_never = sum(1 for r in tool_rows if sm.observed_usage(r) == "never called")
     victim = next(r for r in tool_rows if sm.observed_usage(r) == "never called")
-    # ⛔ Pick the dropped row BEFORE the perturbation, not after. The flip below makes
-    # `victim` an `in use` row, so selecting afterwards could pick `victim` itself and the
-    # "they must differ" assertion below would compare a row with itself — which is what
-    # happened when a surface change (an inserted row) reordered the list (#4282).
+    # ⛔ SELECT BOTH ROWS BEFORE the perturbation, never after — the same fix arrived from
+    # two directions in the merge and both reasons hold. Flipping `victim` to `agents` makes
+    # it an `in use` row, so a search performed afterwards can return `victim` ITSELF, and
+    # whether it does depends purely on where the first `in use` row sits relative to the
+    # first `never called` row — which made the fixture data-order dependent and broke the
+    # moment a surface change reordered the list (#4282, and again in #4282 Phase 3.2).
+    # Selecting both first makes the two rows provably distinct.
     dropped = next(r for r in tool_rows if sm.observed_usage(r) == "in use")
     assert dropped is not victim, "the flipped row and the dropped row must differ"
     rest = [p.strip() for p in (victim.get("used_by") or "").split(",") if p.strip()]
@@ -3769,8 +3773,10 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #4282: 81 -> 77 — the `graph_overview` container absorbs FIVE advertised names
     # and adds itself (`check_structure` is absorbed as a section while its door stays
     # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
-    # landed container batch until the approved 27 is reached.
-    assert live["mcp"] == manifest["counts"]["tools"] == 77
+    # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
+    # removes the five `run_onboarding` tools — a disjoint name set — so the merged
+    # surface is 72, not either side's own figure.
+    assert live["mcp"] == manifest["counts"]["tools"] == 72
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

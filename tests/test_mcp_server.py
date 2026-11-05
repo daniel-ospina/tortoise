@@ -510,17 +510,28 @@ class TestToolFunctions:
 
 
 class TestGraphBoundTeamSurfaceReject:
-    """#2300 completeness sweep: EVERY MCP tool that touches team-level
-    state (the seven onboarding tools + pack install) must reject a
+    """#2300 completeness sweep: EVERY team-surface tool must reject a
     graph-bound resolution outright — no tool left asymmetric vs the REST
     team-surface reject set (C5 #2114). Direct function-body probe with the
     resolution ContextVars set (the same context the HTTP middleware
     attaches to a deleg=0 per-graph key after #2300's registry-lane fix).
+
+    ⚠️ Scope after #4282 Phase 3.2: the five dropped `run_onboarding` tools are
+    NO LONGER on the MCP surface, but their function bodies are retained (the
+    self-host REST suite drives two of them, and the others stay for this
+    sweep's body-level probe because the reject is identical code). So this
+    class measures the *bodies*, served and unserved alike — "every MCP tool"
+    would now overstate it. The served set is: `_session_recording`,
+    `_github_index`, `tortoise_pack_install`, `tortoise_manage_sources`.
     """
 
     # tool name → call kwargs the function body needs BEFORE its reject
     # fires (required params only — the reject is the first gate in every
     # body; only demo_create checks org_id first, so the probe sets it).
+    # The five `run_onboarding` entries are UNSERVED since #4282 Phase 3.2 and
+    # are kept deliberately: the reject code is identical, so probing them still
+    # pins it (see the class docstring for what this class does and does not
+    # claim).
     TOOL_ARGS = {  # noqa: RUF012
         "tortoise_onboarding_demo_create": {},
         "tortoise_onboarding_state": {},
@@ -1171,20 +1182,20 @@ class TestStdioEntrypointToolRegistration:
             assert "tortoise_graph_overview" in names
             assert "tortoise_overview" not in names
             assert "tortoise_health" not in names
-            onboarding = {
-                "tortoise_onboarding_demo_create",
-                "tortoise_onboarding_state",
-                "tortoise_onboarding_github_connect",
-                "tortoise_onboarding_github_status",
-                "tortoise_onboarding_seed",  # #1999 (W3)
-            }
             # #3540: the two retired switches are no longer advertised; the
             # consolidated replacement is steady-state and stays listed.
             assert "tortoise_manage_sources" in names
             assert "tortoise_onboarding_session_recording" not in names
             assert "tortoise_onboarding_github_index" not in names
-            missing = onboarding - set(names)
-            assert not missing, f"missing onboarding tools: {sorted(missing)}"
+            # #4282 Phase 3.2: the five dropped `run_onboarding` members are no
+            # longer advertised either (owner ruling 2026-09-22). Their REST
+            # routes survive, so this asserts the MCP surface only.
+            for gone in ("tortoise_onboarding_demo_create",
+                         "tortoise_onboarding_state",
+                         "tortoise_onboarding_github_connect",
+                         "tortoise_onboarding_github_status",
+                         "tortoise_onboarding_seed"):
+                assert gone not in names, gone
         finally:
             proc.terminate()
             try:

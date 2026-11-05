@@ -186,12 +186,19 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     # The floor guards against SILENT shrinkage, so it moves only with a recorded
     # reason: #3540 consolidated two per-source switches (github_index,
     # session_recording) into `tortoise_manage_sources`, which is a net -1 on
-    # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 now.
-    # #4282 (the first container): `graph_overview` absorbs five LISTED names
-    # (`tortoise_overview`, `tortoise_audit`, `tortoise_validate_domain`,
-    # `tortoise_dream_health`, `tortoise_summarize_structure`) and adds itself —
-    # a net -4 on the LISTED surface, 75 listed before, 71 now.
-    assert len(names) >= 71, f"default surface shrank to {len(names)}"
+    # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 then.
+    # TWO recorded moves land on this floor together, and 66 is the only figure both
+    # imply:
+    #   #4282 (this change) — `graph_overview` absorbs five LISTED names
+    #   (`tortoise_overview`, `tortoise_audit`, `tortoise_validate_domain`,
+    #   `tortoise_dream_health`, `tortoise_summarize_structure`) and adds itself, a net -4.
+    #   #4282 Phase 3.2 (main) — the five `run_onboarding` tools the owner ruled OFF the MCP
+    #   (`docs/product/canonical-mcp-tools.md`, settled 2026-09-22, amendment (b) waiving the
+    #   replacement warning) were all `http_policy=True`, so every one was in this listing:
+    #   74 - 5 = 69 measured there, and 69 - 3 = 66 here.
+    # Anything BELOW 66 is still unexplained shrinkage and this arm still reds on it;
+    # lowering the floor again needs the same kind of recorded reason, never a green run.
+    assert len(names) >= 66, f"default surface shrank to {len(names)}"
     # The floor is a proxy for the real invariant, and a proxy cannot tell a
     # recorded consolidation from a silent drop. Pin the invariant itself: the
     # default HTTP listing serves EXACTLY the registry's `http_policy` population

@@ -42,6 +42,17 @@
 # YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep
 # rationale here or in the docs, never in an ad-hoc comment in the body.
 #
+# LOWERED 82 → 76 on 2026-11-04 by PR #10906 (#4282 Phase 3.2, the first tool batch:
+# the five `run_onboarding` tools deleted), then 76 → 72 by #10914 (the `graph_overview`
+# container, five advertised names retired into one). The pin is lowered for the same
+# reason it is raised elsewhere — it is only meaningful at the live surface: left at 82
+# it would carry ten slots of slack, and left at 76 four, so re-adding any of the retired
+# names (the regression `tests/test_tool_registry.py` pins) would pass
+# `tools/surface-guard.py` green. ⛔ 72 IS DELIBERATE, NOT AN ANOMALY: if you are reading
+# `tools: 72` next to a live 72 and wondering whether to "restore" 82 or 76, do not — that
+# re-opens the slack. The two lowerings compose because the retired name sets are disjoint
+# (77 − 5 = 72 advertised at this head).
+#
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in
 # docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance
@@ -49,7 +60,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 8ef98393a9a19a0c04b2fbc37cb40afaf867da3e
+cut_at_commit: a7d1e05b23a4d88478acf133628ccf4357db9554
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -691,22 +702,22 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 77
+  tools: 72
   sdk_public_methods: 150
   retired: 23
   keyword_distribution:
     fetch: 14
-    create: 17
+    create: 15
     update: 8
     delete: 6
     list: 8
     find: 5
     trace: 2
-    check: 6
-    link: 5
-    operate: 6
+    check: 5
+    link: 4
+    operate: 5
 high_water_counts:
-  tools: 82
+  tools: 72
   sdk_public_methods: 150
 retired:
 - name: tortoise_audit
@@ -2490,87 +2501,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_onboarding_demo_create
-  served_from: tortoise/mcp_server.py:151ec8a9d8b34531
-  served_attributes: 734ca6ea44c83df3
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'Create the demo epistemic graph (4 layers) for this team. The SEED is sentinel-gated (a repeat files no
-    new nodes), but the call is NOT idempotent: the handler then writes its onboarding receipt, whose CAS leg re-stores
-    the state and advances state_version on every repeat.'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_seed
-  served_from: tortoise/mcp_server.py:cbd4174af9f85381
-  served_attributes: d36e38d2db6e5d71
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'File the two onboarding anchor Subjects (Organization/organization + User/naturalPerson linked memberOf)
-    — interactive, ontology-precise (#1999 W3): call without names to discover gaps/collisions, with user-confirmed
-    names to file.'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_github_status
-  served_from: tortoise/mcp_server.py:632fee943d809478
-  served_attributes: 734ca6ea44c83df3
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: Return GitHub connection status for this team (Q1 verify).
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_manage_sources
-  served_from: tortoise/mcp_server.py:aef7217e61a2d4ef
+  served_from: tortoise/mcp_server.py:a7e74a57ecd0efb5
   served_attributes: c535c2fe97bf2889
   family: onboarding
   family_rank: 6
@@ -2585,62 +2517,12 @@ rows:
     source: github_issues|github_documents|agent_sessions. list returns EVERY source with its current state and
     its default, in one call. enable/disable act only within the caller''s own permission for this team — a key
     without graphs:write is REFUSED, never self-granted — and no action accepts, returns or echoes a credential:
-    authorising GitHub stays a host/user-side step (use tortoise_onboarding_github_connect for that). source is
-    required for enable/disable and ignored by list. The two GitHub sources share ONE connection but have SEPARATE
-    enable intent (#1924), so disable switches off only the named source and leaves the connection and the sibling
-    source intact; that flag is intent-only today and the payload says so. agent_sessions is ON by default (an optional
-    off-switch, #1927): disable stops recording; enable there reports already-on rather than changing a recorded
-    default.'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_github_connect
-  served_from: tortoise/mcp_server.py:44609227501e5ee9
-  served_attributes: 57e846f8c03eb41e
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: link
-  keyword_rank: 9
-  cluster: null
-  canonical: null
-  job: Initiate GitHub OAuth — returns authorize URL + CSRF state (Q1).
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_state
-  served_from: tortoise/mcp_server.py:700ed9a50405ecdf
-  served_attributes: 734ca6ea44c83df3
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: Return this team's onboarding progress (Q6 verification).
+    authorising GitHub stays a host/user-side step — the OAuth handshake is deliberately not an agent-callable operation
+    (it runs from the dashboard, `POST /v1/onboarding/github/connect`). source is required for enable/disable and
+    ignored by list. The two GitHub sources share ONE connection but have SEPARATE enable intent (#1924), so disable
+    switches off only the named source and leaves the connection and the sibling source intact; that flag is intent-only
+    today and the payload says so. agent_sessions is ON by default (an optional off-switch, #1927): disable stops
+    recording; enable there reports already-on rather than changing a recorded default.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
@@ -2977,7 +2859,7 @@ rows:
   job: Public SDK method TortoiseSDK.annotate_operator.
   dependency: 'reached by 1 registered tool(s): tortoise_annotate_operator'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3138,7 +3020,7 @@ rows:
   job: Public SDK method TortoiseSDK.audit.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_audit (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -3253,7 +3135,7 @@ rows:
   job: Public SDK method TortoiseSDK.belief_timeline.
   dependency: 'reached by 1 registered tool(s): tortoise_belief_timeline'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3345,7 +3227,7 @@ rows:
   job: Public SDK method TortoiseSDK.check_structure.
   dependency: 'reached by 1 registered tool(s): tortoise_check_structure'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3368,7 +3250,7 @@ rows:
   job: Public SDK method TortoiseSDK.checkpoint.
   dependency: 'reached by 1 registered tool(s): tortoise_checkpoint'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3415,7 +3297,7 @@ rows:
   dependency: 'reached by no registered MCP tool; caller categories: cli, documentation, engine, eval-harness, other-tooling,
     tenant-rest'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: cli, documentation, engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
@@ -3484,7 +3366,7 @@ rows:
   job: Public SDK method TortoiseSDK.compute_confidence.
   dependency: 'reached by 1 registered tool(s): tortoise_compute_confidence'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3553,7 +3435,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_direct_edge.
   dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, other-tooling'
   recommended_family: null
@@ -3599,7 +3481,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_edge.
   dependency: 'reached by 1 registered tool(s): tortoise_create_edge'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3691,7 +3573,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_operator.
   dependency: 'reached by 1 registered tool(s): tortoise_create_operator'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3737,7 +3619,7 @@ rows:
   job: Public SDK method TortoiseSDK.create_point.
   dependency: 'reached by 1 registered tool(s): tortoise_create_point'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3806,7 +3688,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete.
   dependency: 'reached by 1 registered tool(s): tortoise_delete'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3829,7 +3711,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_entity.
   dependency: 'reached by 1 registered tool(s): tortoise_delete_entity'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3875,7 +3757,7 @@ rows:
   job: Public SDK method TortoiseSDK.delete_point.
   dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
   recommended_family: null
@@ -3921,7 +3803,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_read.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_read'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3944,7 +3826,7 @@ rows:
   job: Public SDK method TortoiseSDK.diary_write.
   dependency: 'reached by 1 registered tool(s): tortoise_diary_write'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -3967,7 +3849,7 @@ rows:
   job: Public SDK method TortoiseSDK.dream.
   dependency: 'reached by 1 registered tool(s): tortoise_dream'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4313,7 +4195,7 @@ rows:
   job: Public SDK method TortoiseSDK.get_session.
   dependency: 'reached by 1 registered tool(s): tortoise_get_session'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4497,7 +4379,7 @@ rows:
   job: Public SDK method TortoiseSDK.ingest.
   dependency: 'reached by 1 registered tool(s): tortoise_ingest'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4543,7 +4425,7 @@ rows:
   job: Public SDK method TortoiseSDK.invalidate_point.
   dependency: 'reached by 1 registered tool(s): tortoise_invalidate'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4773,7 +4655,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_batch.
   dependency: 'reached by 1 registered tool(s): tortoise_list_batch'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -4934,7 +4816,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_pointkinds.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_pointkinds (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -4957,7 +4839,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_relations.
   dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
@@ -4980,7 +4862,7 @@ rows:
   job: Public SDK method TortoiseSDK.list_sources.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_list_sources (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5210,7 +5092,7 @@ rows:
   job: Public SDK method TortoiseSDK.mitigate_operator.
   dependency: 'reached by 1 registered tool(s): tortoise_mitigate_operator'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5233,7 +5115,7 @@ rows:
   job: Public SDK method TortoiseSDK.operator_action.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -5417,7 +5299,7 @@ rows:
   job: Public SDK method TortoiseSDK.provenance.
   dependency: 'reached by 1 registered tool(s): tortoise_provenance'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5463,7 +5345,7 @@ rows:
   job: Public SDK method TortoiseSDK.query.
   dependency: 'reached by 1 registered tool(s): tortoise_query'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5555,7 +5437,7 @@ rows:
   job: Public SDK method TortoiseSDK.recall_subgraph.
   dependency: 'reached by no registered MCP tool; caller categories: mcp-handler'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: mcp-handler'
   recommended_family: null
@@ -5808,7 +5690,7 @@ rows:
   job: Public SDK method TortoiseSDK.set_point_baseline.
   dependency: 'reached by 1 registered tool(s): tortoise_set_point_baseline'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5946,7 +5828,7 @@ rows:
   job: Public SDK method TortoiseSDK.status.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_status (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -5969,7 +5851,7 @@ rows:
   job: Public SDK method TortoiseSDK.suggest_entry_points.
   dependency: 'reached by 1 registered tool(s): tortoise_suggest_entry_points'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -5992,7 +5874,7 @@ rows:
   job: Public SDK method TortoiseSDK.summarize_structure.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_summarize_structure (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -6015,7 +5897,7 @@ rows:
   job: Public SDK method TortoiseSDK.supersede.
   dependency: 'reached by 1 registered tool(s): tortoise_supersede'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -6038,7 +5920,7 @@ rows:
   job: Public SDK method TortoiseSDK.supersede_point.
   dependency: 'reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling, tenant-rest'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
@@ -6084,7 +5966,7 @@ rows:
   job: Public SDK method TortoiseSDK.taxonomy.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_taxonomy (retired)'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
@@ -6153,7 +6035,7 @@ rows:
   job: Public SDK method TortoiseSDK.tortoise_fts_query.
   dependency: 'reached by 1 registered tool(s): tortoise_search'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -6199,7 +6081,7 @@ rows:
   job: Public SDK method TortoiseSDK.traverse.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: review
   reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
@@ -6245,7 +6127,7 @@ rows:
   job: Public SDK method TortoiseSDK.update.
   dependency: 'reached by 1 registered tool(s): tortoise_update'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -6337,7 +6219,7 @@ rows:
   job: Public SDK method TortoiseSDK.update_point.
   dependency: 'reached by 1 registered tool(s): tortoise_update_point'
   lifecycle: active
-  used_by: eval-harness, tooling, docs
+  used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 1 registered tool(s)
   recommended_family: null
@@ -6360,7 +6242,7 @@ rows:
   job: Public SDK method TortoiseSDK.validate_domain.
   dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_validate_domain (retired)'
   lifecycle: active
-  used_by: tooling, docs
+  used_by: tooling, skill-docs, docs
   recommendation: keep
   reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
