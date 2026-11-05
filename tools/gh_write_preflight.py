@@ -71,8 +71,15 @@ Safety and soundness
 * A branch push does not trigger CI in this repo (no workflow has an unfiltered ``on: push``;
   ``publish-pypi`` is ``tags: v*`` only). That is a property of THIS repo: the tool is generic via
   ``--repo``, so probing another checkout inherits that repo's triggers.
-* The probe pushes with ``--no-verify``, so a PASS says the CREDENTIAL can write; it does not claim
-  a lane's own pre-push hook would cooperate.
+* The probe pushes with ``--no-verify``, so a PASS says the CREDENTIAL can write; it does not
+  claim a lane's own pre-push hook would cooperate.
+* **STATED RESIDUAL — a ruleset that restricts branch *creation* to a pattern.** If the repository
+  only permits `main`/`fix/*` and refuses `refs/heads/gh-write-preflight/…`, this tool reports
+  `push-refused` for a credential that CAN write — the tool's purpose inverted (work parked that
+  could have landed). It is not silent: git's own refusal text ("protected branch" / "policy
+  prohibits") lands in the failing step's detail on stderr, next to an explicit `--repo`, so it is
+  diagnosable rather than mysterious. No read-only credential can pass through this residual in the
+  other direction. `--probe-ref-prefix` aims the probe at a namespace a constrained repo allows.
 
 Usage
 -----
@@ -269,6 +276,12 @@ class Runner:
                 # `replace` so a non-UTF-8 byte in git's error text cannot raise out of the
                 # verdict path and exit 1 with no marker.
                 errors="replace",
+                # No controlling terminal on stdin. `GIT_TERMINAL_PROMPT=0` suppresses GIT's own
+                # prompt only; an ssh passphrase prompt (`GIT_SSH_COMMAND`, kept so a box can
+                # inject its key), a gpg pinentry for a signed push, or a credential helper that
+                # reads stdin would all inherit the lane's terminal — a 120 s stall plus possible
+                # keystroke theft.
+                stdin=subprocess.DEVNULL,
                 env=_child_env(),
             )
         except FileNotFoundError:
@@ -284,10 +297,10 @@ class Runner:
         return Proc(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
-def _probe_ref() -> str:
+def _probe_ref(prefix: str = "gh-write-preflight") -> str:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    return f"gh-write-preflight/{stamp}-{os.getpid()}-{rand}"
+    return f"{prefix.strip('/')}/{stamp}-{os.getpid()}-{rand}"
 
 
 def _ref_state(runner: Runner, root: str, remote: str, ref: str) -> str:
@@ -306,6 +319,7 @@ def check_writable(
     remote: str = "origin",
     runner: Runner | None = None,
     keep_ref: bool = False,
+    probe_ref_prefix: str | None = None,
 ) -> Verdict:
     """Answer "can this credential write repository contents here?".
 
@@ -314,7 +328,7 @@ def check_writable(
     """
     runner = runner or Runner()
     try:
-        return _check_writable(repo, remote, runner, keep_ref)
+        return _check_writable(repo, remote, runner, keep_ref, probe_ref_prefix)
     except Exception as exc:  # noqa: BLE001 — the contract is "no exit 1 without a marker"
         return Verdict(
             False,
@@ -331,6 +345,7 @@ def _check_writable(
     remote: str,
     runner: Runner,
     keep_ref: bool,
+    probe_ref_prefix: str | None = None,
 ) -> Verdict:
     repo_path = Path(repo).expanduser()
 
@@ -377,7 +392,7 @@ def _check_writable(
         remote=remote,
         remote_url=url,
         head_sha=head,
-        probe_ref=_probe_ref(),
+        probe_ref=_probe_ref(probe_ref_prefix or "gh-write-preflight"),
     )
 
     def step(name: str, proc: Proc) -> bool:
@@ -483,15 +498,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--remote", default="origin", help="remote name (default: origin)")
     parser.add_argument("--json", action="store_true", help="machine-readable verdict on stdout")
     parser.add_argument(
+        "--probe-ref-prefix",
+        default=None,
+        help=(
+            "namespace for the throwaway probe ref (default: gh-write-preflight). Use this on a "
+            "repo whose ruleset only permits certain branch patterns, or the probe is refused "
+            "for a credential that can write."
+        ),
+    )
+    parser.add_argument(
         "--keep-ref",
         action="store_true",
         help="do NOT delete the probe ref (debugging only — leaves a ref on the remote)",
     )
     args = parser.parse_args(argv)
 
-    verdict = check_writable(args.repo, args.remote, keep_ref=args.keep_ref)
-    # Belt: the type promises a REASONS token; never emit a bare `(None)`.
+    verdict = check_writable(
+        args.repo, args.remote, keep_ref=args.keep_ref, probe_ref_prefix=args.probe_ref_prefix
+    )
+    # Belt: the type promises a REASONS token; never emit a bare `(None)` — and apply it to the
+    # PAYLOAD as well as the marker, since the --json document is the branchable artifact.
     reason = verdict.reason if verdict.reason in REASONS else "internal-error"
+    verdict.reason = reason
 
     # The marker ALWAYS goes to stderr, in both modes, so a caller that greps for it works with
     # --json too (stdout stays pure JSON there).
@@ -508,11 +536,18 @@ def main(argv: list[str] | None = None) -> int:
         for s in verdict.steps:
             print(f"  [{'ok' if s['rc'] == 0 else 'FAIL'}] {s['step']} (rc={s['rc']})")
         if verdict.writable:
-            cleanup = (
-                f"probe ref {verdict.probe_ref} KEPT (--keep-ref)"
-                if verdict.kept_ref
-                else f"probe ref {verdict.probe_ref} deleted"
-            )
+            # Key the wording on the TRI-STATE, never on `kept_ref` alone: claiming "deleted" when
+            # cleanup could not be confirmed is the same verified-clean-from-absence-of-evidence
+            # error the field itself was fixed to avoid — and this is the line lanes parse.
+            if verdict.kept_ref:
+                cleanup = f"probe ref {verdict.probe_ref} KEPT (--keep-ref)"
+            elif verdict.cleaned_up is True:
+                cleanup = f"probe ref {verdict.probe_ref} deleted"
+            else:
+                cleanup = (
+                    f"probe ref {verdict.probe_ref} deletion UNCONFIRMED — check the remote "
+                    f"(see stderr)"
+                )
             print(f"GH-WRITE-OK({verdict.remote}) — push confirmed by ls-remote; {cleanup}")
         if verdict.detail:
             print(verdict.detail.strip()[-600:], file=sys.stderr)

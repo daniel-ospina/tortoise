@@ -364,22 +364,111 @@ def test_cli_never_prints_a_none_reason(tmp_path: Path, capsys, monkeypatch):
     assert rc == EXIT_UNAVAILABLE
     assert "GH-WRITE-UNAVAILABLE(None)" not in cap.err
     assert "GH-WRITE-UNAVAILABLE(internal-error)" in cap.err
+    # The JSON document is the branchable artifact — the belay must reach it too, not just stderr.
+    payload = json.loads(cap.out)
+    assert payload["reason"] == "internal-error"
+    assert payload["reason_meaning"]  # non-empty
 
 
-def test_oserror_is_mapped_not_raised(tmp_path: Path):
-    """EMFILE/ENOMEM-class OSError must not escape as an unmarked traceback."""
+def test_cleanup_unconfirmed_never_claims_deleted(tmp_path: Path, capsys, monkeypatch):
+    """A `cleaned_up=None` verdict must not render "deleted".
+
+    The tri-state was computed correctly but the render keyed only on `kept_ref`, so stdout claimed
+    "deleted" while stderr said UNCONFIRMED — a verified-clean claim from unverified cleanup, in
+    the line lanes actually parse.
+    """
+    import tools.gh_write_preflight as gwp
+
+    monkeypatch.setattr(
+        gwp,
+        "check_writable",
+        lambda *a, **k: gwp.Verdict(
+            True, None, probe_ref="gh-write-preflight/x", cleaned_up=None, remote="origin"
+        ),
+    )
+
+    rc = main(["--repo", str(tmp_path)])
+    cap = capsys.readouterr()
+
+    assert rc == EXIT_WRITABLE
+    assert "UNCONFIRMED" in cap.out
+    assert "deleted" not in cap.out, "stdout must not claim a deletion it could not confirm"
+
+
+def test_probe_ref_prefix_is_honoured(tmp_path: Path):
+    """A repo whose ruleset permits only certain branch patterns can aim the probe."""
     work, _remote = _make_pair(tmp_path)
 
-    class OSFail(Runner):
-        def run(self, argv, cwd=None, timeout=120):
-            if argv[1] == "rev-parse":
-                return Proc(126, err=f"{argv[0]}: [Errno 24] Too many open files")
-            return super().run(argv, cwd=cwd, timeout=timeout)
+    verdict = check_writable(work, probe_ref_prefix="fix/gh-probe")
 
-    verdict = check_writable(work, runner=OSFail())
+    assert verdict.probe_ref.startswith("fix/gh-probe/")
+    assert verdict.writable is True
 
-    assert verdict.writable is False
-    assert verdict.reason == "not-a-repo"  # rev-parse failed → clean, named refusal
+
+def test_oserror_is_mapped_not_raised():
+    """`Runner.run`'s exception arms must return a Proc, never raise — a raised OSError exits 1
+    with NO GH-WRITE-UNAVAILABLE marker, which breaks the contract.
+
+    This patches `subprocess.run` so the REAL `Runner.run` handler is entered. Stubbing
+    `Runner.run` itself (as an earlier version did) never executes the handler, so it proved
+    nothing.
+    """
+    def raiser(*a, **k):
+        raise OSError(24, "Too many open files")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", raiser)
+        proc = Runner().run(["git", "--version"])
+
+    assert isinstance(proc, Proc)
+    assert proc.rc == 126
+    assert "Too many open files" in proc.err
+
+
+def test_missing_binary_is_mapped_to_127():
+    """The 127 (missing binary) arm is a different reason from 126 — pin it."""
+    def raiser(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", raiser)
+        proc = Runner().run(["git", "--version"])
+
+    assert proc.rc == 127
+
+
+def test_timeout_is_mapped_to_124():
+    """A probe that times out must become a verdict, not a hang."""
+    def raiser(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", raiser)
+        proc = Runner().run(["git", "--version"], timeout=1)
+
+    assert proc.rc == 124
+    assert "timed out" in proc.err
+
+
+def test_stdin_is_not_inherited():
+    """A child that reads the terminal (ssh passphrase, gpg pinentry) must get no stdin."""
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return FakeProc()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", fake_run)
+        Runner().run(["git", "--version"])
+
+    assert captured.get("stdin") == subprocess.DEVNULL, "stdin must be DEVNULL, not inherited"
+    assert captured.get("errors") == "replace"
 
 
 # ══ (7) a surviving probe ref must be reported WITHOUT erasing the primary reason ══════════════
