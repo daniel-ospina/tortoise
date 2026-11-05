@@ -6,13 +6,18 @@ SIGKILL mid-sweep, lock release on SIGKILL).
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
+import queue
+import re
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -56,6 +61,33 @@ _WRITER_THREAD_ENV = {
     "MKL_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
 }
+
+
+# How long a writer may go SILENT before it is a hang. This is a PROGRESS
+# bound, not a wall-clock budget for the child (see `_WriterProgress`):
+# `_spawn_writer`'s child prints `WROTE <i>` only AFTER each write is applied
+# server-side (#819), so "a line every N seconds" is a slow host and "no line
+# for N seconds" is a hang.
+#
+# MEASURED, and the reason this constant exists: the writer-death test used a
+# flat `w.wait(timeout=60)` on a spawn that first imports torch, boots a
+# redislite daemon and loads the embedding model. On an 8-core box at
+# `a8e75c45e` the whole test costs **57.38 s** against that 60 s bound —
+# **1.05x**, i.e. the bound sat ON the measured cost, so it was measuring how
+# loaded the host was. It reddened the REQUIRED `test-carve-out (c)` leg on a
+# head that changed nothing in the write path (`subprocess.TimeoutExpired ...
+# timed out after 60 seconds`, run 42021088549, job 127259234037), and #10045
+# recorded the same test at 232 s on a starved runner. This module already
+# carries the identical lesson for the concurrent writers (#10333: "the bound
+# was measuring thread thrash, not a lost write or a hang").
+#
+# 120 s is ~2x the measured cost of the slowest single line (the first one,
+# which pays the cold import + model load) and stays strictly BELOW the
+# suite's per-test `--timeout=300`, so a real hang is attributed HERE instead
+# of vanishing into pytest-timeout — the thing that made #10045's leg
+# unattributable. Pinned by
+# `test_the_writer_progress_bound_stays_under_the_suite_per_test_timeout`.
+_WRITER_PROGRESS_BOUND_S = 120.0
 
 
 def _writer_env():
@@ -115,6 +147,83 @@ finally:
     # killpg's the writer. The redis-server child is daemonized (fork +
     # setsid, own session) and SURVIVES the killpg — that's exactly the
     # contract the writer-death test documents (see #879).
+
+
+class _WriterProgress:
+    """Read a `_spawn_writer` child's progress, bounded by SILENCE not by the clock.
+
+    The pre-fix shape was a flat `subprocess.Popen.wait(timeout=60)`, which
+    answers "did this host run the child in 60 s" and calls a starved runner a
+    deadlock (see `_WRITER_PROGRESS_BOUND_S` for the measurement). Here the
+    deadline is reset by every line the child emits, so a slow-but-progressing
+    writer passes and a genuinely wedged one fails in `bound_s` seconds,
+    naming the label, the bound, the lines seen so far and the child's stderr
+    — the pre-fix failure named none of them.
+
+    Every terminal path KILLS a child that is still alive, so a timed-out
+    writer can never outlive the failure and trip the tests' own
+    "orphans remain" teardown assertion.
+    """
+
+    def __init__(self, proc, label, bound_s=None):
+        self.proc = proc
+        self.label = label
+        self.bound_s = _WRITER_PROGRESS_BOUND_S if bound_s is None else bound_s
+        self._lines: list[str] = []
+        self._q: queue.Queue[str | None] = queue.Queue()
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self):
+        try:
+            for line in self.proc.stdout:
+                self._q.put(line)
+        finally:
+            self._q.put(None)  # EOF sentinel
+
+    def _fail(self, why):
+        self.kill()
+        err = ""
+        with contextlib.suppress(OSError, ValueError):
+            err = (self.proc.stderr.read() or "").strip()
+        seen = "".join(self._lines).strip() or "<none>"
+        raise AssertionError(
+            f"{self.label}: {why} (bound {self.bound_s:g}s per line). "
+            f"lines seen: {seen!r}. stderr: {err or '<empty>'!r}"
+        )
+
+    def next_line(self):
+        """The child's next stdout line; fails if it stays silent too long."""
+        try:
+            line = self._q.get(timeout=self.bound_s)
+        except queue.Empty:
+            self._fail(f"no progress for {self.bound_s:g}s — a hang, not slowness")
+        if line is None:
+            self._fail("stdout closed with no further progress")
+        self._lines.append(line)
+        return line
+
+    def drain(self):
+        """All remaining lines up to EOF, then require a clean exit."""
+        while True:
+            try:
+                line = self._q.get(timeout=self.bound_s)
+            except queue.Empty:
+                self._fail(f"no progress for {self.bound_s:g}s — a hang, not slowness")
+            if line is None:
+                break
+            self._lines.append(line)
+        rc = self.proc.wait(timeout=self.bound_s)
+        if rc != 0:
+            self._fail(f"writer exited rc={rc}")
+        return self._lines
+
+    def kill(self):
+        """Kill the child's process group if it is still alive (idempotent)."""
+        if self.proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.proc.wait(timeout=10)
 
 
 def _count_redis_servers(path=None):
@@ -305,6 +414,127 @@ def test_every_writer_spawner_passes_the_bounded_env():
             assert env.get(var) == "1", (
                 f"a writer spawner handed its child {var}={env.get(var)!r}; "
                 "every writer must be bounded to one intra-op thread (#10333)")
+
+
+def _fake_writer(lines=6, gap=0.3, tail_sleep=0):
+    """Spawn a stand-in writer that prints `lines` WROTE lines `gap` apart.
+
+    Cheaper than the real writer by three orders of magnitude (no torch, no
+    redislite, no graph) — it exists to exercise the BOUND, not the write path.
+    """
+    code = (
+        "import time\n"
+        f"for i in range({lines}):\n"
+        "    print('WROTE', i, flush=True)\n"
+        f"    time.sleep({gap})\n"
+        f"time.sleep({tail_sleep})\n"
+        "print('DONE', flush=True)\n"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", code], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, start_new_session=True)
+
+
+def test_the_writer_wait_is_a_progress_bound_not_a_wall_clock():
+    """#10045: the survivor wait must bound SILENCE, not the host's speed.
+
+    The pre-fix shape was `w.wait(timeout=60)` — a total elapsed budget on a
+    spawn that imports torch and loads an embedding model. Measured at
+    `a8e75c45e`: 57.38 s against that 60 s bound (1.05x), and on a starved
+    runner it exceeded it, reddening the required `test-carve-out (c)` leg on
+    a head that touches nothing in the write path.
+
+    Both halves are measured on the SAME child shape so the discriminating
+    power is shown, not asserted: a flat 0.6 s `wait()` on a ~1.8 s child
+    raises `TimeoutExpired` (the pre-fix semantics), while `_WriterProgress`
+    with a 0.6 s per-line bound reads it to completion because the child never
+    goes silent for 0.6 s.
+    """
+    bound = 0.6
+
+    flat = _fake_writer()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            flat.wait(timeout=bound)
+    finally:
+        os.killpg(flat.pid, signal.SIGKILL)
+        flat.wait()
+
+    progressing = _fake_writer()
+    seen = _WriterProgress(progressing, "progressing writer", bound_s=bound).drain()
+    assert [ln for ln in seen if ln.startswith("WROTE")] == [
+        f"WROTE {i}\n" for i in range(6)], seen
+    assert seen[-1].startswith("DONE"), seen
+
+
+def test_a_silent_writer_is_a_named_hang_not_a_blank_timeout():
+    """#10045: a wedged child must fail FAST, BY NAME, and leave no orphan.
+
+    The pre-fix failure was a bare `subprocess.TimeoutExpired` naming neither
+    the writer, the bound, the lines seen, nor the child's stderr — which is
+    why #10045's leg was unattributable. This child prints one line then stalls
+    30 s; under a 0.5 s per-line bound the helper must raise inside ~5 s with
+    the label and the bound in the message, and the child must be dead by the
+    time it raises (an un-reaped writer would trip the tests' own
+    `orphans remain` teardown assertion instead).
+    """
+    proc = _fake_writer(lines=1, gap=0.0, tail_sleep=30)
+    prog = _WriterProgress(proc, "stalled writer w9", bound_s=0.5)
+    assert prog.next_line() == "WROTE 0\n"
+    start = time.monotonic()
+    with pytest.raises(AssertionError) as exc:
+        prog.next_line()
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"the silence bound did not trip promptly ({elapsed:.1f}s)"
+    msg = str(exc.value)
+    assert "stalled writer w9" in msg, msg
+    assert "no progress for 0.5s" in msg, msg
+    assert "WROTE 0" in msg, f"the failure does not show what the child did emit: {msg}"
+    assert proc.poll() is not None, "the stalled writer was left alive to orphan"
+
+
+def test_the_writer_progress_bound_stays_under_the_suite_per_test_timeout():
+    """#10045: our bound must fire BEFORE pytest's, or the leg is unattributable.
+
+    The whole point of bounding the writer here is that a hang is reported as
+    `test_writer_death_keys_survive_reconnect`, not as a bare pytest-timeout
+    that `--maxfail` then turns into a shard-level kill. That only holds while
+    every `--timeout=` the workflow passes to pytest is above our bound.
+    Derived from the workflow, never from a remembered number.
+    """
+    workflow = (Path(__file__).resolve().parent.parent
+                / ".github" / "workflows" / "python-ci.yml")
+    assert workflow.exists(), f"missing {workflow}"
+    # Comment-stripped: the workflow header narrates the HISTORY ("--timeout=300
+    # (was 90)"), and a remembered/retired value is not a declaration.
+    declared = "\n".join(line.split("#", 1)[0] for line in workflow.read_text().splitlines())
+    per_test = {int(n) for n in re.findall(r"--timeout=(\d+)", declared)}
+    assert per_test, "the workflow declares no per-test --timeout= at all"
+    assert min(per_test) > _WRITER_PROGRESS_BOUND_S, (
+        f"_WRITER_PROGRESS_BOUND_S={_WRITER_PROGRESS_BOUND_S:g}s is not below "
+        f"every per-test --timeout= in python-ci.yml ({sorted(per_test)}) — a "
+        "hang would land as a pytest-timeout and kill the shard (#10045)")
+
+
+def test_the_writer_death_test_bounds_every_wait():
+    """#10045: the SITES, not just the helper.
+
+    `_WriterProgress` is worthless if the writer-death test keeps calling
+    `w.wait(timeout=60)` or blocking on `for line in k.stdout` — both are the
+    pre-fix shapes and both reddened (or stalled) a required leg. Pinned by
+    reading the test's own source, the same way
+    `test_every_writer_spawner_passes_the_bounded_env` pins the spawners.
+    """
+    src = inspect.getsource(test_writer_death_keys_survive_reconnect)
+    assert "wait(timeout=" not in src, (
+        "the writer-death test still bounds a writer by total wall clock; that "
+        "bound measures host load, not a hang (#10045)")
+    assert not re.search(r"for\s+\w+\s+in\s+\w+\.stdout", src), (
+        "the writer-death test still blocks on the child's stdout with no "
+        "bound; a starved child stalls the shard's whole watchdog (#10045)")
+    assert src.count("_WriterProgress(") >= 2, (
+        "both the survivor waits and the pre-kill wait must go through "
+        "_WriterProgress; found " + str(src.count("_WriterProgress(")))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -615,10 +845,15 @@ def test_writer_death_keys_survive_reconnect(monkeypatch):
     #915 — do not add SAVE-per-write or RDB assertions to this test."""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
-    # Staggered survivors (safe embedded pattern): each writes 10, closes
+    # Staggered survivors (safe embedded pattern): each writes 10, closes.
+    # Bounded by PROGRESS, not wall clock — every survivor must actually print
+    # its 10 `WROTE` lines and `DONE`, or the run is a hang. See
+    # `_WRITER_PROGRESS_BOUND_S` for the boundary measurement (#10045).
     for i in (0, 1, 3, 4):
         w = _spawn_writer(canonical, i, writes=10)
-        w.wait(timeout=60)
+        seen = _WriterProgress(w, f"survivor w{i}").drain()
+        wrote = [ln for ln in seen if ln.startswith("WROTE")]
+        assert len(wrote) == 10, f"survivor w{i} reported {len(wrote)} writes: {seen!r}"
         time.sleep(1)  # stagger so each persists before the next
 
     # SIGKILL writer 2's process group mid-run (writer-death): the python
@@ -627,12 +862,16 @@ def test_writer_death_keys_survive_reconnect(monkeypatch):
     # reuse, not RDB reload. Wait for the first WROTE line so >=1 write
     # completed before the kill — killing on a blind sleep raced server
     # boot and made this test flaky (#819).
+    # The read that waits for it is bounded too: the pre-fix `for line in
+    # k.stdout` had NO bound at all, so a starved writer stalled this test
+    # until pytest's own 300 s timeout and left the leg unattributable
+    # (#10045).
     k = _spawn_writer(canonical, 2, writes=10)
-    for line in k.stdout:
-        if line.startswith("WROTE"):
-            break
+    prog = _WriterProgress(k, "killed writer w2")
+    first = prog.next_line()
+    assert first.startswith("WROTE"), f"expected a completed write before the kill, got {first!r}"
     os.killpg(k.pid, signal.SIGKILL)
-    k.wait()
+    prog.kill()  # idempotent: killpg already fired, this reaps the child
     time.sleep(2)  # let the daemon settle before reconnecting
 
     os.environ["TORTOISE_DB_PATH"] = canonical
