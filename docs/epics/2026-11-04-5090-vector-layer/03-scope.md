@@ -229,7 +229,7 @@ Ontology low · Accessibility low · Library-deps none.
 | 2 | **E1** = filtered-ANN recall measurement | **removed** — parked with V1 | It is evidence *for a move*. No move is planned, so it has no consumer; measuring it now is work for a decision that is not being taken. |
 | 3 | Architecture **high on branch 2** | **low** | The branch is gone from scope. Flagged explicitly so `low` is not misread. |
 | 4 | Profit chain: "removable bytes ⇒ $1.32/tenant/month" | **deleted** | **Wrong model twice**: retained bytes are revenue (billing ruling), and the bill is provisioned RAM (§16.1). |
-| 5 | 6 items + 9 exclusions | **5 items + 13 exclusions** | Self-hosting, quantization, the recall measurement and V1 itself are now explicitly out, each with its home. |
+| 5 | 6 items + 9 exclusions | **5 items + 12 exclusions** | Self-hosting, quantization, the recall measurement and V1 itself are now explicitly out, each with its home. |
 
 ---
 
@@ -256,5 +256,6 @@ Rewritten after the prior-answer audit (`01-align.md` §8). Changes: V1 removed 
 
 ### 7.5 Stages 4–5 and the PR review
 
-`04-plan.md` carries its gate log in **§8** and its coherence review with it; `05-decompose.md` carries its
-verification plan in **§6** (it has no separate gate log). The PR review at head `9f5a419` returned **2 P1 + 8 P2** — all incorporated in this revision: acceptance item 3 restated (it still read "V1 decided and implemented", the reversal the rewrite exists to prevent); **this gate log, which the rewrite had dropped**; the **384-dim** correction; **S4's premise corrected** (the attribute is assigned unconditionally; only the warning is gated; the served set is never retained); the withdrawn profit chain removed from §3/§5; the dangling `§3.2` pointer; the plan's false J2↔D6 claim and the dropped `scan_fallback` case; **C2's target replaced** ("zero unclassified" is already true at HEAD, so it could not distinguish completion from a no-op); and the **reconciliation against the 2026-10-31 child set**.
+`04-plan.md` carries the **coherence review and the risk table** in §8 (it records no separate gate log);
+`05-decompose.md` carries its verification plan in §6. The plan's review outcome is recorded here (§7.5) and
+in the PR cycle. The PR review at head `9f5a419` returned **2 P1 + 8 P2** — all incorporated in this revision: acceptance item 3 restated (it still read "V1 decided and implemented", the reversal the rewrite exists to prevent); **this gate log, which the rewrite had dropped**; the **384-dim** correction; **S4's premise corrected** (the attribute is assigned unconditionally; only the warning is gated; the served set is never retained); the withdrawn profit chain removed from §3/§5; the dangling `§3.2` pointer; the plan's false J2↔D6 claim and the dropped `scan_fallback` case; **C2's target replaced** ("zero unclassified" is already true at HEAD, so it could not distinguish completion from a no-op); and the **reconciliation against the 2026-10-31 child set**.
