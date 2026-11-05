@@ -1319,9 +1319,14 @@ def artifact_names_for_job(job_name: str) -> list[str]:
 # `pytest-log-*` artifact. A failure from such a leg therefore used to land in
 # `not_in_current` — the one branch that ABSOLVES the derivation — so it was never
 # counted as a miss and never made the window PARTIAL. Measured reachability:
-# `tests/test_9555_narrative_carrier.py` is on `api` + `core` but not `tier1`, and
-# `test-record-postgres` runs it on every PR, so a docs-only or `tools/`-only diff
-# took the tier-1 early return and the file fell outside `current_rel`.
+# `tests/test_9555_narrative_carrier.py` is on `api` + `core`, and since
+# `#10980` it is on `tier1` as well — before that row it was NOT, and
+# `test-record-postgres` runs it on every PR, so a docs-only or `tools/`-only
+# diff took the tier-1 early return and the file fell outside `current_rel`.
+# ⚠️ The membership half above is the one that moved; the consequence is past
+# tense on purpose (`test-record-postgres` still reaches it on every PR, so
+# `ALWAYS_ON_LEG_FILES` still needs the file — all five entries are `core`
+# members).
 #
 # `derived` is `((current - core) | derived_core) | <this set>`, so a file listed
 # here stays selected by BOTH sides: modelling the leg is what keeps the comparison
