@@ -185,7 +185,7 @@ idempotent, total, and stores no EP scalar`.
 
 | thing that looks live | its actual state | evidence |
 |---|---|---|
-| **the record, in the hosted deployment** | ⛔ **NOT ARMED** *at the census point below* — **superseded on the live deployment, 2026-11-02** ⛔ **and superseded as a task by the owner ruling: DO NOT PROVISION IT** (quoted at R1 below). ⚠️ **Other live-state statements in this file — `:193`, `:589`, `:593`, `:596`, `:718`, `:1016`, and `09-record-tenancy-decision.md` — were written at the census point below and read as `NOT_ARMED`; they describe the tree that was, not the deployment now.** The live app reports `armed: true` with `record_write_failures: {"write_failed": 32}` (measured 2026-11-02, recorded on `#9548`) — so *"the remaining half is the secret itself"* is **no longer outstanding**: the secret is set and the app is armed, which is a state to report, not a step to finish. `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh` or `.github/workflows/deploy-hosted.yml`; the runbook **documented** it (its Secrets Matrix row and the "connecting role" example, #9600) and never provisioned it — documented, not provisioned. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — so the record path **was** inert at the census point and its behaviour **was** unchanged then. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — at the census tree the remaining half was the secret itself; it is now set and the app is armed (see the opening of this cell), so that clause is history, not the live state. ⚠️ A future arming (only after the ruling lifts) must name R6's application role (`tortoise_record_app`, `NOBYPASSRLS`) — never `postgres`/`service_role`, which bypass RLS and would make the tenancy boundary false for the only path that writes customer data ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md)). | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → **5 lines at `ff6379eb2`** — the `origin/main` this branch merges, i.e. what "immediately before #9548" means — not empty and not one: `docs/infra-runbook.md:382` and `:528` (#9557/R9's `record-backup` documentation), `:2774` (#9556/R8's §9 `record-restore` operator example — an **invocation**), and `:2971`/`:3004` (#9600's Secrets Matrix row and its §"The record's connecting role" example — the name **documented**, not provisioned). ⚠️ **The count is per tree:** **0** at this branch's start point `d5c71a470`, **1** at `473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), **5** at `ff6379eb2` — see the supersession note under the census commands, which is the one place the series is maintained. Line numbers are `ff6379eb2`'s and drift as the runbook grows. No hit in `fly.toml`, `entrypoint.sh` or `.github/workflows/`. |
+| **the record, in the hosted deployment** | ✅ **ARMED — AND THE ACT IS AUTHORISED (owner, 2026-11-03).** *At the census point below* it was `NOT_ARMED`, and the 2026-11-01 ruling that then forbade provisioning is **SUPERSEDED** (quoted at R1 below, relabelled — kept as the record of what was overridden, not as an instruction). ⚠️ **The census-point statements in §§A1–A7 of this file, and the live-state sentences in `09-record-tenancy-decision.md`, describe the tree that was, not the deployment now.** `GET /health` re-measured **2026-11-05T13:11:13Z** reports `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0}` on build `fc6a8a64b` / `migrations_head: 20261030000001_oauth_consent_tickets` — so *"the remaining half is the secret itself"* is **no longer outstanding**. ⚠️ **Read that emptiness for exactly what it is:** it falsifies *"writes are failing"* (the `write_failed: 32` this cell used to quote is a 2026-11-02 reading) but it **cannot establish that a row was written** — the runbook's own rule, *"`record_write_failures: {}` is NOT evidence that a row was written"* — and it does **not** attribute the drop's fix: this build **predates `#10648` / `fafb8fdcc` and does not carry it**, and the dropped rows recorded on `#9548` (302 at 2026-11-02, 331 in the 2026-11-03 decision) remain unreaped. `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh` or `.github/workflows/deploy-hosted.yml`; the runbook **documented** it (its Secrets Matrix row and the "connecting role" example, #9600) and never provisioned it — documented, not provisioned. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — so the record path **was** inert at the census point and its behaviour **was** unchanged then. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — at the census tree the remaining half was the secret itself; it is now set and the app is armed (see the opening of this cell), so that clause is history, not the live state. ⚠️ Any re-arming (authorised since 2026-11-03, and already done — see the opening of this cell) must name R6's application role (`tortoise_record_app`, `NOBYPASSRLS`) — never `postgres`/`service_role`, which bypass RLS and would make the tenancy boundary false for the only path that writes customer data ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md)). | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → **5 lines at `ff6379eb2`** — the `origin/main` this branch merges, i.e. what "immediately before #9548" means — not empty and not one: `docs/infra-runbook.md:382` and `:528` (#9557/R9's `record-backup` documentation), `:2774` (#9556/R8's §9 `record-restore` operator example — an **invocation**), and `:2971`/`:3004` (#9600's Secrets Matrix row and its §"The record's connecting role" example — the name **documented**, not provisioned). ⚠️ **The count is per tree:** **0** at this branch's start point `d5c71a470`, **1** at `473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), **5** at `ff6379eb2` — see the supersession note under the census commands, which is the one place the series is maintained. Line numbers are `ff6379eb2`'s and drift as the runbook grows. No hit in `fly.toml`, `entrypoint.sh` or `.github/workflows/`. |
 | **the end-to-end proof, in CI** | ✅ **ARMED by #9551** (PR #9772). The dedicated `test-record-postgres` job provisions a throwaway `postgres:16` on an ephemeral loopback port (`.github/actions/postgres-provision`), sets `TEST_RECORD_DB_URI`, installs the `[postgres]` extra and asserts **zero** skips from the junit XML — so the two Postgres legs run instead of skipping, and an armed-but-skipping job cannot read as green. It is a REQUIRED leg of `python-ci-gate`. | measured on the arming tree (the collection is **70** — 61 record legs + the 9 CI-leg tests this change adds): unarmed → `68 passed, 2 skipped`; armed → **`70 passed, 0 skipped`**, the record migrations applied inside that run |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert` (`record_projection`)), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — and #10620 narrowed `point.search_keys` to `text` — the `_SCHEMA_DISAGREEMENTS` vocabulary AND its detector were DELETED in #10620, so no allowance remains (both halves of R4 fixed). | migrations `20261022000001`, `20261102000002`; `tests/test_9078_record_written_by_production_path.py` (the vocabulary and its detector are DELETED, #10620) |
@@ -202,17 +202,41 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 
 ### R1 — Arm the record in the hosted deployment · **S** · ops + decision · **BLOCKER**
 
-> ⛔ **POSTPONED BY OWNER RULING (2026-11-01) — do not execute this item.** `#9548`'s
-> `Owner decision` comment ([verbatim](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515),
-> quoted (its headline and operational point 3) in the runbook's
-> [Arming the Postgres record](../../infra-runbook.md#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548))
-> says, in the owner's words: "**Do not arm, provision, or point anything at the hosted store.**" — and
-> names this item explicitly as **not** work to pick up. The **BLOCKER** graded below is a statement
-> about the first hosted customer, not a dispatch signal: the secret is **already set** on both the
-> GitHub and Fly surfaces (the app reports `armed: true` with `write_failed: 32`, measured 2026-11-02
-> and recorded on `#9548`), so **R1 has no provisioning step left to do** — that live state is evidence
-> to report on `#9548`, never a step to finish. The bar for lifting the ruling, and where the reopen is
-> argued, are in that runbook note.
+> ✅ **AUTHORISED (owner, 2026-11-03) — AND THE ARMING HALF IS ALREADY DONE. READ THIS BOX BEFORE THE
+> SUPERSEDED QUOTE UNDER IT.** On **2026-11-03T19:06:10Z** the owner **superseded** the 2026-11-01
+> postponement **for this issue**, in a comment on `#9548` headed
+> `## DECISION (owner, 2026-11-03) — no customers on the hosted deployment; arming it is authorised`
+> ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6612968196)), which
+> carries its own marker:
+>
+> > **OVERRIDES:** the standing "hosted postponed" ruling — superseded for this issue by the owner's
+> > explicit clarification that no customer is on the service and that the beta is blocked on P0/P1 closure.
+>
+> So R1 **is** work to pick up, and the runbook's
+> [Arming the Postgres record](../../infra-runbook.md#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
+> — its AUTHORISED box and its provisioning block — is the live procedure.
+> **What is left is not the arming.** The secret is set on both the GitHub and Fly surfaces and the app
+> has reported `armed: true` since at least **2026-10-26** (measured on `#9548`, comment `6407834085`);
+> `GET /health` re-measured **2026-11-05T13:11:13Z** reports `armed: true` with
+> `record_write_failures` **EMPTY**. ⚠️ That emptiness **falsifies "writes are failing"** (the
+> `write_failed: 32` this item used to quote is a 2026-11-02 reading) and **cannot establish that a row
+> was written** — see the runbook's own rule, *"`record_write_failures: {}` is NOT evidence that a row
+> was written"*, and its capture-verification step. ⚠️ **The live blocker is a missing CREDENTIAL, not a
+> ruling:** the 2026-11-03 decision's non-negotiable **first** step is a verified backup, and
+> `TORTOISE_RECORD_BACKUP_DSN` / `TORTOISE_RECORD_SCRATCH_DSN` are absent — the two credentials we hold
+> are each refused by `record_backup.py` for a different documented reason (`require_bypassing_role`,
+> `require_direct_dsn`). The accurate state is **`AUTHORISED-BUT-BLOCKED-CRED`, not postponed**; a lane
+> reading this item must report the missing backup credential on `#9548`, never re-derive "postponed".
+>
+> ---
+>
+> ⛔ **SUPERSEDED — kept as the record of the ruling that was overridden, not as an instruction.**
+> What follows is the 2026-11-01 postponement **as it stood**: `#9548`'s `Owner decision` comment
+> ([verbatim](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515), quoted
+> with its headline and operational point 3 in the runbook note above) says, in the owner's words:
+> "**Do not arm, provision, or point anything at the hosted store.**" — and names this item explicitly
+> as **not** work to pick up. Its `OVERRIDES:` target was epic #7879 **R1**, this item, and it **was
+> superseded on 2026-11-03** (AUTHORISED box above).
 
 **What:** set `TORTOISE_RECORD_DSN` on `tortoise-y4mjjq` to the project's **pooler** DSN
 (`postgresql://tortoise_record_app.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres`, `?sslmode=require`
@@ -244,11 +268,16 @@ Matrix carries a row plus an "Arming the Postgres record" section (DSN shape, th
 never-do-this rules, the verify recipe); `fly.toml`'s `[env]` block documents that it is a SECRET and
 must never be an `[env]` key. What then remained was **the provisioning act itself**, which no lane
 could perform — the value is a credential in the operator's Supabase console. That act **has since
-been performed**: the app reports `armed: true` with `write_failed: 32` (measured 2026-11-02, recorded
-on `#9548`) — and it is ⛔ **postponed by the owner ruling quoted at the head of this item**: it must
-not be repeated or resumed. A value hand-set on Fly instead of staged from the GitHub secret is
-reported `UNSOURCED` and **blocks the deploy** — that ordering rule governs a *future*, un-postponed
-arming only. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere and a test pins that
+been performed**: the app reports `armed: true` (the `write_failed: 32` once quoted here is a
+2026-11-02 reading; `/health` re-measured 2026-11-05T13:11:13Z reports `record_write_failures` EMPTY,
+which falsifies "writes are failing" but does not establish that a row was written) — and it is
+✅ **authorised, not postponed**: the 2026-11-03 owner decision superseded the 2026-11-01 ruling
+quoted at the head of this item. ⚠️ **Re-running it is not neutral and is not the remaining step:**
+`\password`-style re-minting rotates the credential the deployed DSN names, so the GitHub **and** Fly
+secrets must be re-set in the same change or the record stops authenticating; the remaining step the
+decision names is its backup-first precondition. A value hand-set on Fly instead of staged from the
+GitHub secret is reported `UNSOURCED` and **blocks the deploy** — that ordering rule still governs
+any re-arming. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere and a test pins that
 (`tests/test_deploy_workflow.py::test_the_record_is_not_armed_single_tenant_on_the_hosted_app`).
 
 ### R2 — Land the schema on the hosted project, and keep the name gate honest · **S** · ops · **BLOCKER**
