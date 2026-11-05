@@ -326,11 +326,15 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     ],
     # #8447 C3: the ingest door's live arms. EVERY `from_uri(uri)` site is the
     # file's OWN handle on a per-test graph — either a "did the door write it?"
-    # read-back (`:441` the resolution-Point control, `:520` the sweep teardown)
-    # or the SEED an arm needs before the door can be asked anything (`:367`,
-    # which creates the already-extracted `:Source` the `--upgrade` arm expects
-    # to skip). The seed is the opposite of a read-back, so the gloss names both
-    # shapes rather than calling every site a read-back.
+    # read-back (`_resolution_points` in the resolution-Point control, and the
+    # sweep teardown in `TestTheSweepReportsOutstandingWork`) or the SEED an arm
+    # needs before the door can be asked anything
+    # (`test_an_already_extracted_document_answers_the_named_skip`, which creates
+    # the already-extracted `:Source` the `--upgrade` arm expects to skip). The
+    # seed is the opposite of a read-back, so the gloss names both shapes rather
+    # than calling every site a read-back. ⛔ SYMBOLS, not line numbers: the
+    # coordinates this comment carried drifted twice (round 12 measured them all
+    # +21), and nothing re-measures a comment in a different file.
     #
     # Every `uri` those sites receive comes from `_fresh_graph(...)`, which swaps
     # the env URI's graph path for a per-run `test_8447_<stem>_<hex>`

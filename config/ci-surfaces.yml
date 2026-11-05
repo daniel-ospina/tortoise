@@ -10542,6 +10542,17 @@ durations:
   # every host, and on every arm that gains a model call); this row is the human justification for a flat
   # weight, not a reading this map consumes. An anecdote about a past count re-stales one step removed (a
   # VGATE caught that in this lane's own doc row; a round-8 review caught this row repeating it).
+  # The ungated arms are pure enum/entry-point assertions and run everywhere. Context for a human, NOT the
+  # weight, and NOT a per-file reading this file consumes: ~2 min wall on ONE host in the private lane —
+  # measured 2026-11-05, 143.9 s and 133.9 s on two runs — and `--durations` puts essentially ALL of it in
+  # ONE arm: `TestTheSkipArmWritesNothing::test_a_second_ingest_skips_and_does_not_print_a_completion_summary`
+  # (123.1 s of a 128.8 s run). The cost was the DOCUMENT UPSERT constructing the real embedding model
+  # (`add_document` → `entities.encode_for_row` → `EmbeddingModel.get()`), not the S7 stage — round 12
+  # measured the stack. The arm now requests `force_sparse_tfidf` (#2573/#2772), which pins that seam to
+  # None; every other arm is sub-second.
+  # ⛔ NO CASE COUNT and NO past-count anecdote — a hand-written count re-stales on every case a round adds,
+  # and quoting one as history ("N against a quoted M") re-stales the same way one step removed. A VGATE
+  # caught exactly that in this lane's own doc row, and a round-8 review caught this row repeating it.
   # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   test_8447_truncation_marker.py: 21.0

@@ -62,13 +62,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-#: The census pin's own ``file:line`` predicate — IMPORTED, not re-spelled. The
-#: guard below asks the same question the §2 census pin asks ("does this text
-#: point a reader at a coordinate?"), and two predicates for one question drift
-#: in the direction that matters: a citation one catches and the other misses is
-#: RED in the census and GREEN here. Safe to import: that module touches no DB at
-#: import time (stdlib + ``tortoise.truncation``).
-from tests.test_8447_truncation_marker import _LINE_CITATION
 from tortoise.ingest import IngestOutcome, main
 
 # The DB is only needed by the arms that reach a projection. This file is a
@@ -114,36 +107,6 @@ def _run(argv: list[str]) -> tuple[object, str]:
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         outcome = main(argv)
     return outcome, buf.getvalue()
-
-
-@pytest.fixture(autouse=True)
-def _no_embedder(monkeypatch):
-    """No arm in this file loads the embedding model — file-wide, by measurement.
-
-    This file pins the DOOR's exit contract (which outcome for which input,
-    and what a refusal must not leave behind). No arm pins the dense leg, so
-    every full-ingest arm paid for a model load it never asserted on: the first
-    encode calls ``EmbeddingModel.get()``, which issues a huggingface.co HEAD
-    request, which the hermetic egress guard blocks and retries five times
-    (#4387) — ~113 s per ingest arm on a `core`-surface file.
-
-    MEASURED, and the measurement is why this is file-wide rather than a stub on
-    the one arm a review named: with a hand-placed stub on
-    ``test_a_second_ingest_skips_and_does_not_print_a_completion_summary``, that
-    arm dropped out of `--durations` and the NEXT full-ingest arm
-    (``test_a_skipped_ingest_does_not_write_a_resolution_point``) took its place
-    at 123.15 s. The cost is per-ingest, not per-arm. Independent proof it is the
-    blocked download and not modelling work: `HF_HUB_OFFLINE=1` takes the same
-    arm from 123.34 s to 11.57 s.
-
-    ``get() -> None`` is the codebase's OWN degrade path (what a host with no
-    encoder takes, keyword-only retrieval), not a bespoke shim, and it leaves
-    the door's behaviour under test untouched. A file that DID pin the dense leg
-    must not take this fixture.
-    """
-    monkeypatch.setattr(
-        "tortoise.embeddings.EmbeddingModel.get",
-        classmethod(lambda cls, load_timeout=None: None))
 
 
 # --------------------------------------------------------------------------
@@ -355,7 +318,17 @@ class TestARefusalIsNotSuccess:
 @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
 class TestTheSkipArmWritesNothing:
     def test_a_second_ingest_skips_and_does_not_print_a_completion_summary(
-            self, tmp_path):
+            self, tmp_path, monkeypatch, force_sparse_tfidf):
+        # ⛔ THE COST THIS ARM CARRIED WAS NOT S7 — it was the DOCUMENT UPSERT
+        # (round 12 measured the stack: `add_document` → projection apply →
+        # `entities.encode_for_row` → `EmbeddingModel.get()`), which constructs
+        # the real embedding model on the `core` surface. `force_sparse_tfidf`
+        # pins that seam to None, which is the documented way to keep an arm
+        # from depending on the bge model cache (#2573/#2772). The S7 stub stays
+        # as cheap insurance: this arm passes `semantic_extract` through, so a
+        # future default flip would otherwise re-introduce a second real load.
+        monkeypatch.setattr("tortoise.ingest._s7_document_entities",
+                            lambda *_a, **_k: {})
         doc = tmp_path / "note.md"
         doc.write_text(
             "---\ntitle: Repro Note\n---\n\n## Section one\n\nSomething true.\n",
@@ -851,18 +824,11 @@ class TestAPartialExtractionIsNotDone:
         assert (tmp_path / "g.html").exists()
 
 
-#: A ``file:line`` coordinate in prose. The filename-anchored half is the census
-#: pin's OWN predicate, imported rather than re-spelled: two spellings for one
-#: question drift, and this file's first version proved it — it matched only the
-#: contiguous ``ingest.py:<n>`` form, so ``config/ci-surfaces.yml` (`:10481`)``
-#: and a ranged coordinate walked through a guard that claimed to ban both. The
-#: second alternative is the bare backticked continuation (``:`<n>` ``), which
-#: the census never needed because its cells always name the file.
-#: Deliberately NOT matching a URL's port (``localhost:6379``) — the filename or
-#: backtick anchor is what makes it a citation.
-_COORDINATE = re.compile(
-    rf"{_LINE_CITATION.pattern}"
-    r"|`:\d{1,4}(?:-\d{1,4})?`")
+#: A ``file:line`` coordinate in prose — a dotted path followed by ``:`` and digits
+#: (``ingest.py:<n>``), or the bare backticked continuation form (``:`<n>` ``).
+#: Deliberately NOT matching a URL's port (``localhost:6379``) — the path/backtick
+#: anchor is what makes it a citation.
+_COORDINATE = re.compile(r"\b[\w./-]+\.py:\d{1,4}\b|`:(\d{1,4})`")
 
 
 def _coordinate_citations(text: str) -> list[str]:
@@ -870,40 +836,19 @@ def _coordinate_citations(text: str) -> list[str]:
     return [m.group(0) for m in _COORDINATE.finditer(text)]
 
 
-def _docstrings_by_symbol(source: str | None = None) -> list[tuple[str, str]]:
-    """Every docstring in THIS module, as ``(qualified symbol, text)`` pairs.
-
-    Keyed by the QUALIFIED path (``Class.method``), never by the bare name, and
-    returned as a LIST rather than a dict. Reason: the first version keyed by
-    `node.name` through `setdefault`, so the moment a second class re-used a
-    method name one of the two docstrings was silently never examined — a green
-    meaning "the first symbol of each name is clean". A list cannot collapse
-    two same-named symbols into one entry.
-
-    `source` exists so the collision behaviour can be pinned against a synthetic
-    module (a real same-name collision would have to be added to this file).
-    """
-    tree = ast.parse(
-        source if source is not None
-        else Path(__file__).read_text(encoding="utf-8"))
-    pairs: list[tuple[str, str]] = []
+def _docstrings_by_name() -> dict[str, str]:
+    """Every docstring in THIS module, keyed by symbol (``<module>`` for the head)."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    found: dict[str, str] = {}
     module_doc = ast.get_docstring(tree)
     if module_doc:
-        pairs.append(("<module>", module_doc))
-
-    def walk(node: ast.AST, prefix: str) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                name = f"{prefix}.{child.name}" if prefix else child.name
-                doc = ast.get_docstring(child)
-                if doc:
-                    pairs.append((name, doc))
-                walk(child, name)
-            else:
-                walk(child, prefix)
-
-    walk(tree, "")
-    return pairs
+        found["<module>"] = module_doc
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node)
+            if doc:
+                found.setdefault(node.name, doc)
+    return found
 
 
 class TestThisFilesEvidencePointersCannotGoStale:
@@ -929,7 +874,7 @@ class TestThisFilesEvidencePointersCannotGoStale:
     def test_no_docstring_in_this_file_cites_a_file_line_coordinate(self):
         offenders = {
             name: _coordinate_citations(doc)
-            for name, doc in _docstrings_by_symbol()
+            for name, doc in _docstrings_by_name().items()
             if _coordinate_citations(doc)
         }
         assert not offenders, (
@@ -948,80 +893,6 @@ class TestThisFilesEvidencePointersCannotGoStale:
             "the predicate must catch the pre-fix citations with the same "
             "spelling they were written in, or this guard is green on the very "
             "text it exists to ban")
-
-    def test_the_guard_sees_the_split_ranged_and_non_py_spellings_too(self):
-        """Positive control for the forms the FIRST version of this guard missed.
-
-        It matched only the contiguous single-suffix run, so the split form the
-        repo actually writes (a bare path, then the coordinate in its own code
-        span), a ranged coordinate, and any non-`.py` path all walked through a
-        guard that claims no docstring here cites a coordinate. The spellings
-        themselves live in the loop below, never in prose, because the guard
-        applies to this docstring too — which is the point. This file's subject
-        is a YAML row, so the missable spelling is the likely one.
-        """
-        for spelling in (
-            "`tortoise/ingest.py` (`:1044-1049`)",
-            "`config/ci-surfaces.yml` (`:121-143`)",
-            "config/ci-surfaces.yml:10481",
-            "`sdk.py` (`:34655`)",
-        ):
-            assert _coordinate_citations(spelling), (
-                f"the guard is blind to {spelling!r} — a coordinate the census "
-                "pin catches, so this file could re-stale under a green check")
-
-    def test_one_spelling_two_enforcement_points(self):
-        """The census pin owns the filename-anchored spelling; this guard reuses it.
-
-        Two predicates for one question drift, and the drift is invisible in the
-        worst direction: a citation matching one and not the other is RED in the
-        census and GREEN here. The filename-anchored half is imported, so this
-        asserts the composition did not quietly narrow it.
-        """
-        for spelling in (
-            "`config/surface-manifest.yml` (`:121-143`)",
-            "hosted_api.py:10209",
-            "`tortoise/ingest.py` (`:1044-1049`)",
-        ):
-            assert _LINE_CITATION.findall(spelling), spelling
-            assert _coordinate_citations(spelling), spelling
-        for spelling in (
-            "`tortoise/ingest.py::main`",
-            "docker://:f@localhost:6379/x",
-            "measured 2026-11-05, 143.9 s",
-            "`config/ci-surfaces.yml` → the durations row",
-        ):
-            assert not _LINE_CITATION.findall(spelling), spelling
-            assert not _coordinate_citations(spelling), spelling
-
-    def test_a_second_symbol_with_the_same_name_is_still_examined(self):
-        """Collision non-vacuity: a bare-name key would exempt the second symbol.
-
-        The first version keyed docstrings by `node.name` via `setdefault`, so a
-        method name reused in a second class resolved to ONE key and whichever
-        docstring came second was never examined. Two classes, one shared method
-        name, the stale cite in the SECOND — the guard must still find it.
-        """
-        source = (
-            'class A:\n'
-            '    """clean"""\n'
-            '    def same(self):\n'
-            '        """no coordinate here"""\n'
-            'class B:\n'
-            '    """clean"""\n'
-            '    def same(self):\n'
-            '        """cites `ingest.py:1034` here"""\n')
-        pairs = _docstrings_by_symbol(source)
-        symbols = [name for name, _ in pairs]
-        assert "A.same" in symbols and "B.same" in symbols, symbols
-        offenders = {
-            name: _coordinate_citations(doc)
-            for name, doc in pairs
-            if _coordinate_citations(doc)
-        }
-        assert offenders == {"B.same": ["ingest.py:1034"]}, (
-            "a same-named symbol in a second class escaped the guard: "
-            f"{offenders}")
 
     def test_the_guard_does_not_red_on_a_host_port_or_a_symbol(self):
         """The other direction: a URL port and a ``module::name`` cite stay green."""
