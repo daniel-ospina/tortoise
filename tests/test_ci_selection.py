@@ -2953,7 +2953,7 @@ def test_gh_write_preflight_tool_change_selects_core_not_tier1():
     ⛔ This case does NOT pin the entry's SHAPE: it exercises the exact path, which matches a prefix
     and an exact entry alike, so it stays green if the prefix is narrowed back to
     `"tools/gh_write_preflight.py"`. That half is owned by the NEXT case
-    (`::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped`), which is the
+    (`tests/test_ci_selection.py::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped`), which is the
     falsifier for it — one case per property, because a single case reported as pinning both is how
     the second property went unpinned in the first place.
     """
@@ -2967,9 +2967,15 @@ def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped(
     """The carve-out entry must be a PREFIX, not the exact path (#11027).
 
     `_selection_relevant` claims a changed path with `path.startswith(CORE_ALSO)` — this entry's
-    tuple, NOT `TOOL_CARVEOUTS` (whose members force the FULL matrix; this one yields `core` only) —
-    so an entry naming `tools/gh_write_preflight.py` exactly claims ONLY that spelling. One ordinary
-    refactor then re-opens the silent drop the entry exists to close, with no test noticing:
+    tuple, NOT `TOOL_CARVEOUTS` — and `CORE_ALSO` membership is what forces `core` into the
+    selection (`tools/ci_selection.py:3510`). What decides full-vs-`core` is not which tuple holds
+    the path but whether a `SOURCE_PATTERNS` row matches it: a carved-out path that no row matches
+    fails closed to the FULL matrix (`tools/work_claim.py`), while one a row DOES match selects just
+    that surface (`tools/longmem_eval/x.py` -> `eval`, `full=False`). This entry yields `core` only.
+
+    Because the matcher is `startswith`, an entry naming `tools/gh_write_preflight.py` EXACTLY
+    claims only that spelling. One ordinary refactor then re-opens the silent drop the entry exists
+    to close, with no test noticing:
 
       * a split-out sibling (`tools/gh_write_preflight_urls.py`) — nothing claims it, so a diff to
         the gate runs none of the gate's own arms. This is the realistic shape, because the tool's
@@ -2982,7 +2988,7 @@ def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped(
     rename (in the diff that performs it), not here.
 
     The test immediately above cannot catch this: it exercises the exact path, which matches a
-    prefix AND an exact entry, so it stays green under the regression. The case below is the
+    prefix AND an exact entry, so it stays green under the regression. **This** case is the
     falsifier that distinguishes them — reverting the entry to `"tools/gh_write_preflight.py"`
     fails its FIRST assert and leaves that test green, which is the whole reason both exist.
 

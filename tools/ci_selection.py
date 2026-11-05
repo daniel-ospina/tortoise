@@ -1658,9 +1658,14 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # rename or deletion of the very case that pins this line.
              # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
              # NOTE THE TUPLE: this entry is in `CORE_ALSO` (matched by `_selection_relevant`'s
-             # `path.startswith(CORE_ALSO)`), not in `TOOL_CARVEOUTS` — a `TOOL_CARVEOUTS` member
-             # forces the FULL matrix, and this one deliberately yields `core` only. The mechanism
-             # is the same `startswith`, so an EXACT path claims only the spelling that exists
+             # `path.startswith(CORE_ALSO)`), not in `TOOL_CARVEOUTS`. What decides the matrix is
+             # NOT membership in either tuple — it is whether a `SOURCE_PATTERNS` row matches the
+             # kept path. A carved-out path that no row matches fails closed to the FULL matrix
+             # (`tools/work_claim.py` -> all eight surfaces, full=True); one that a row DOES match
+             # selects just that surface (`tools/longmem_eval/x.py` -> `eval`, full=False). This
+             # one deliberately yields `core` only, and it is `CORE_ALSO` membership that forces
+             # `core` to be present. The mechanism here is the same `startswith`, so an EXACT path
+             # claims only the spelling that exists
              # today and silently re-opens this very drop for a split-out sibling
              # (`gh_write_preflight_<something>.py`): the gate would again be a diff that runs none
              # of its own arms. Over-matching costs extra CI on a file that is not the tool;
