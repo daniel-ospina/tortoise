@@ -1882,8 +1882,12 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     Commit `a7436214f` ("cite the floor's calibration as it is written") ships three
     coordinates for the 5400 s floor — and two of them had already drifted by this
     head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
-    one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6 "lines 326-332"
-    is §5's `timeout-minutes` kill table (the quoted derivation is at `390-392`). The
+    one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6's earlier citation
+    pointed at a `timeout-minutes` kill table rather than at the derivation sentence
+    it quotes (which is at `390-392`). The illustrative span for that second drift is
+    deliberately NOT restated here: this PR grew the document by 48 lines, which moved
+    every one of those numbers, and a coordinate that is only true on `origin/main`
+    tells the next reader a checkable fact that is false at this head (round 12, P3).
     docstring names the reader who will follow these numbers and warns that whoever
     mis-locates the derivation "discards the one section that supports this floor" —
     so a stale coordinate sends the next lane to exactly the misreading the paragraph
@@ -1920,20 +1924,29 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
         "derived from this" in quoted), (
         "the cited span must open on the sentence the docstring quotes")
 
-    # 3. THIS test's own docstring carries the third citation of the same span, and
+    # 3. THIS test's own docstrings carry the third citation of the same span, and
     #    it is exactly what drifted when this PR grew `ci-wall-clock.md` by 48 lines:
-    #    the other two citations were re-cut to 390-392 and this one was left on
-    #    342-344 (which now holds §4's "superseded main run" prose). "Pinned
-    #    MECHANICALLY instead of corrected by hand a third time" has to include it,
-    #    or the next insert re-arms the same silent drift (#10962 round 11, P3).
+    #    the other two citations were re-cut to 390-392 and this one was left behind
+    #    (on a span that had become other prose entirely). "Pinned MECHANICALLY
+    #    instead of corrected by hand a third time" has to include it, or the next
+    #    insert re-arms the same silent drift (#10962 round 11, P3).
+    #    EVERY occurrence and BOTH phrasings, deliberately: the first version of this
+    #    pin checked only the first `quoted derivation is at` match, so a hand-re-cut
+    #    of the sibling docstring 20 lines above ("§6 lines A-B records the same
+    #    derivation") — or a second copy of the parenthetical — stayed GREEN while
+    #    stale, which is the same false PASS this pin exists to prevent (round 12, P2).
     own_src = Path(__file__).read_text()
-    own = re.findall(r"the quoted derivation is at `([0-9]{1,4})-([0-9]{1,4})`", own_src)
-    assert own, "this docstring no longer cites the derivation span at all"
-    assert own[0] == (str(first), str(last)), (
-        f"this docstring cites the derivation at {own[0][0]}-{own[0][1]} while the "
-        f"file's own citation (and the pinned span above) says {first}-{last} — a "
-        "stale coordinate sends the next lane to the misreading the paragraph "
-        "exists to prevent")
+    found_spans = re.findall(
+        r"quoted derivation is at `([0-9]{1,4})-([0-9]{1,4})`", own_src)
+    found_spans += re.findall(
+        r"§6 lines ([0-9]{1,4})-([0-9]{1,4}) records the same derivation", own_src)
+    assert found_spans, "this file no longer cites the derivation span at all"
+    for found in found_spans:
+        assert found == (str(first), str(last)), (
+            f"a docstring in this file cites the derivation at {found[0]}-{found[1]} "
+            f"while the file's own citation (and the pinned span above) says "
+            f"{first}-{last} — a stale coordinate sends the next lane to the "
+            "misreading the paragraph exists to prevent")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
