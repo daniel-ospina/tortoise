@@ -1286,6 +1286,49 @@ def test_undeletable_probe_ref_is_reported(tmp_path: Path):
     assert verdict.cleaned_up is False
 
 
+def test_known_survivor_exits_nonzero_with_delete_failed_marker(tmp_path: Path, capsys):
+    """A KNOWN survivor must exit 1 with `delete-failed` — and must not read as "cannot write".
+
+    The published Contract used to say a known survivor "does not change the exit code", while
+    forcing `writable=False`, which the CLI turns into exit 1. A lane whose preamble keyed on that
+    sentence would park deliverable work on a `delete-failed` — a false block produced by the
+    documentation, the one failure this module says it must never add. The BEHAVIOUR (exit 1) is
+    the safe side and is not changed here; this case pins it so the sentence cannot drift back,
+    and pins the marker's wording as litter rather than capability.
+
+    Red-first: a revision that "fixes" the contradiction by making the code exit 0 on a known
+    survivor (the false-PASS direction) fails the first assertion.
+    """
+    work, remote = _make_pair(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "while read -r old new ref; do\n"
+        '  case "$new" in 0000000000000000000000000000000000000000) '
+        '    echo "remote: deletion denied" >&2; exit 1;; esac\n'
+        "done\n"
+        "exit 0\n"
+    )
+    hook.chmod(0o755)
+
+    rc = main(["--repo", str(work)])
+
+    cap = capsys.readouterr()          # captured ONCE — readouterr() clears on read
+    assert rc == EXIT_UNAVAILABLE == 1, (
+        "a known survivor is not a pass, so it must not exit 0"
+    )
+    assert "GH-WRITE-UNAVAILABLE(delete-failed)" in cap.err
+    assert "GH-WRITE-OK" not in cap.out, "a refusal must never print the OK marker"
+    # The refusal is about LITTER, not capability: the push already succeeded. Wording a lane's
+    # preamble would classify as "this credential is read-only" is the false block.
+    assert "cannot write" not in cap.err
+    assert "read-only" not in cap.err
+    assert "push already succeeded" in REASONS["delete-failed"], (
+        "the REASONS gloss must clear the credential: the write already happened"
+    )
+    assert "cannot write" not in REASONS["delete-failed"]
+
+
 def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_cause(tmp_path: Path):
     """Push may report failure AFTER the remote applied the update — cleanup must still run.
 

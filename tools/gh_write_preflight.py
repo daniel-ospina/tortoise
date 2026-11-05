@@ -40,9 +40,16 @@ Contract
   "ref absent" read, ``False`` on a proven survivor, ``None`` when the confirming read failed (the
   ref may or may not be gone). An unconfirmed cleanup is NOT a failed write — the credential still
   wrote — so it does not change the exit code; it is reported loudly on the ``cleanup UNCONFIRMED``
-  line and in ``--json``. A KNOWN survivor does not change the exit code either, but it is not a
-  pass: ``writable`` is forced ``False`` and ``reason`` becomes ``delete-failed``, because a tool
-  must not call a credential usable while leaving garbage on a shared remote.
+  line and in ``--json``. An UNREQUESTED known survivor is the one cleanup outcome that DOES change
+  the exit code: it exits **1** with ``GH-WRITE-UNAVAILABLE(delete-failed)``, because a tool must
+  not call a credential usable while leaving garbage on a shared remote. (``--keep-ref`` requests a
+  survivor deliberately — that one keeps ``cleaned_up=False`` and still exits 0; its litter was
+  asked for.) **Read the unrequested-survivor refusal as litter, not as capability** — the probe ref
+  was created, so this credential demonstrably CAN write; the 1 means "re-run and clean up", never
+  "your lanes cannot deliver". (An exit of 0 is reserved for a fully successful run;
+  ``sysexits(3)``: "The successful exit is always indicated by a status of 0" — so an unrequested
+  survivor MUST NOT exit 0. Pinned by
+  ``test_known_survivor_exits_nonzero_with_delete_failed_marker``.)
 * Exit **1** — ``GH-WRITE-UNAVAILABLE(<reason>)`` on stderr (emitted in ``--json`` mode too; stdout
   stays pure JSON). Reasons are stable tokens from ``REASONS`` (top-level, non-nested), so a caller
   can branch on them without parsing prose. **No path returns 1 without a token from that set** —
@@ -142,7 +149,11 @@ REASONS = {
         "capability is UNKNOWN — this is NOT evidence the credential is read-only"
     ),
     "verify-mismatch": "the push reported success but `ls-remote` does not show the ref",
-    "delete-failed": "the probe ref could not be deleted; it is left on the remote",
+    "delete-failed": (
+        "the probe ref is left on the remote because it could not be deleted. The push already "
+        "succeeded, so this refusal is about LITTER on a shared remote — not about whether the "
+        "credential can deliver"
+    ),
     "internal-error": "the probe itself failed unexpectedly (no verdict is available)",
 }
 
@@ -706,8 +717,11 @@ def _push_verify_cleanup(
 ) -> None:
     """Push the probe ref, verify it, delete it, verify the delete.
 
-    Mutates `verdict`; returns nothing (a value would invite a `return` inside the `finally`
-    that guards it, which would swallow an in-flight exception).
+    Mutates `verdict`; returns nothing. The real invariant is that this helper must not RAISE on
+    an ordinary path: the caller wraps it in a `try/finally` and gates its retry on
+    `sys.exc_info()[0] is not None`, so a swallowed exception here would make that guard fire a
+    second delete it must not issue. (The `finally` lives in the CALLER, not here, so a bare
+    `return` in this body is not the hazard that sentence used to describe.)
     """
     push_proc = runner.run(
         [
@@ -802,10 +816,14 @@ def _push_verify_cleanup(
                 "UNKNOWN, not refused; re-run before concluding the credential is read-only"
             )
 
-    # (8) CLEANUP — one place, no `return` (a `return` inside `finally` would swallow an in-flight
-    # exception and emit `GH-WRITE-UNAVAILABLE(None)`).
+    # (8) CLEANUP — one place. The `--keep-ref` arm returns EARLY (a bare `return`: this helper
+    # returns nothing), and that is safe because the `try/finally` that could swallow an exception
+    # is in the CALLER, not in this body — there is no `finally` here to return through.
     if keep_ref:
         verdict.kept_ref = True
+        # A REQUESTED survivor: the litter was asked for, so unlike the unrequested survivor below
+        # it does NOT change the exit code (`writable` stays True, the run exits 0) — see
+        # `test_keep_ref_is_explicit_and_the_message_does_not_lie`, which pins that exit 0.
         # `cleaned_up=False` is documented as "a PROVEN SURVIVOR". On a `--keep-ref` run where the
         # push was refused nothing was ever created, so claiming a survivor overloads the field a
         # consumer branches on; `None` (not applicable / unknown) is the honest value.
@@ -813,7 +831,7 @@ def _push_verify_cleanup(
         # created nothing, and calling that a PROVEN SURVIVOR invents litter while `leftover_ref`
         # stays False beside it.
         verdict.cleaned_up = False if (push_ok and wrote) else None
-        return verdict
+        return
 
     dp = runner.run(
         # `--` so a ref that begins with `-` can never be parsed as an option by `git push`
