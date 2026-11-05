@@ -35305,10 +35305,11 @@ _REGISTRY_PROBE_PATH: str | None = None
 #: can still race the close — that residue needs refcounting and is not load-
 #: bearing: reset is a teardown/isolation hook, not a request path).
 #: The three scalars are kept as MIRRORS so nothing that introspects them breaks.
-#: They are written under the lock; the fast path never reads them, and the only
-#: lock-free reads of them are the reset's gate and the retire target, where they
-#: can never SERVE a handle — a stale read there only decides whether there is
-#: something to close, so it falls through to a close, never to a wrong handle.
+#: They are written under the lock. The fast path never reads them. The in-lock
+#: retire target reads them UNDER the lock, where they cannot be stale and agree
+#: with this tuple. The ONE lock-free read of them is the reset's gate, which
+#: decides only whether there is something to close: a stale read there widens
+#: the gate and can never SERVE a handle.
 _REGISTRY_PROBE_CACHE: tuple[tuple[str, str], TortoiseSDK] | None = None
 
 #: How many times `_registry_probe_sdk` will rebuild a handle whose identity did
