@@ -167,7 +167,7 @@ the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.t
 matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
 exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
 everything the restore just put there. This job — p50 1.62 m, the fastest of them — is the likely
-payer: its own `.[test,postgres]` downloads (`python-ci.yml:4254`; `[embeddings]`/torch
+payer: its own `.[test,postgres]` downloads (`python-ci.yml:4258`; `[embeddings]`/torch
 deliberately absent) are a rounding error beside the shared archive it restores and re-saves.
 
 **Re-derived by the arm-2 rule from THIS run, not from the estimate this note used to carry.** It
@@ -175,18 +175,26 @@ pre-computed `20 → 40` from an assumed ~9 m save; the measured save is **15.9 
 still in flight at the kill** — a CENSORED lower bound, since GitHub reported 79.8% sent — so the
 input, not the rule, was the thing that was wrong: **12 m in-step watchdog + ~1 m setup/provision +
 15.9 m save = 28.9 m × 1.5 = 43.4 → 50**. The censoring makes even that an underestimate, and the
-second reading agrees: at this runner's ~3.7 MB/s a completed 3.6 GB save step (tar + transfer) is
-~20 m, which puts the SUM at ~33 m and 33 × 1.5 = 49.5 — still 50. The `~1 m setup` constant is
-understated too (this run's setup was 131 s: 07:40:25 → 07:42:36), making the SUM ~30.1 m and 45.2
-after the 1.5 — the same 50. Arm 2 rather than arm 1 for the reason it always
+second reading agrees: a completed 3.6 GB save step (tar + transfer) is ~20 m — the transfer alone
+is 977 s at the observed ~3.7 MB/s, and the step also tars — which puts the SUM at ~33 m and
+33 × 1.5 = 49.5. The `~1 m setup` constant is understated too (this run's setup was 131 s:
+07:40:25 → 07:42:36), making the SUM ~30.1 m and 45.2 after the 1.5.
+
+**50 is therefore not the literal output of every reading, and that is deliberate.** Apply BOTH
+corrections at once and the SUM is 34.2 m; the rule's `× 1.5, round up` then gives 51.3 → 60. The
+rule exists to make the cap CLEAR the SUM, and 50 clears 34.2 m by 15.8 m; going to 60 would buy
+headroom nothing needs while widening the exposure the cap IS (§4's stale-head term). Read 50 as
+the exposure-bounded choice that satisfies the rule's purpose, not as 60 rounded down. Arm 2 rather
+than arm 1 for the reason it always
 was: the save this row pays on a key change is the SHARED archive, not its own downloads — so
 `2 × 15.43 = 30` is not the number.
 
 ⚠ **What this measurement does NOT settle: the `~9 m` save term the other rows use.** That figure
 comes from the `test-d14-hosted-api` incident (#10182) and is not re-measured here; 15.9 m is a
 different runner on a different day, so it does not by itself falsify it — but it does show a
-3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, and the
-`test-carve-out` / `test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below) are
+3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, `test`'s
+53 m — which clears its 90 m by 30 m either way — and the `test-carve-out` /
+`test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below) are
 optimistic by up to ~7 m if the measured figure is the normal one. Re-deriving them is owed and is
 deliberately NOT done here: nothing has measured any of the four being cancelled, and this
 document's rule is to move a cap from a measurement, not from a comparison of two samples.
@@ -267,7 +275,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:4240-4248`) and is therefore NOT an arm-1 row — on a key
+  writable shared key (`python-ci.yml:4244-4252`) and is therefore NOT an arm-1 row — on a key
   change its save IS the archive, measured at 3.6 GB / 15.9 m on 2026-11-05 (see the note under the
   table, and the cap it moved to). Arm 1 applies to a job whose save is
   small because nothing restores an archive into its cache path, not because its `pip install`
