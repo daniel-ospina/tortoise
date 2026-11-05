@@ -2656,6 +2656,68 @@ def test_the_zero_count_and_the_noun_qualifier_clear_spellings_still_clear() -> 
 
 
 
+def test_a_negation_that_reaches_a_completion_verb_does_not_clear_the_finding() -> None:
+    """A negation before the token is a clear ONLY when it governs the token as a noun.
+
+    Fold review, P1. `_SEVERITY_NEGATED_BEFORE_RE` exempted any token whose left neighbour was
+    `no|without|zero|none of` — sound for an ABSENCE (`No P1 remains.`) and unsound for a
+    NEGATED COMPLETION (`without the P1 being fixed`), where the same word negates the verb and
+    the token therefore names a LIVE finding. Measured at the pre-fix head: every body below
+    returned `asserts_a_clear=True` / `_grades_as_blocking=False`, and `evaluate()` printed
+    `READY-FOR-OWNER` over an open P1 — a full false PASS in the one tool whose contract is
+    that a defect may never reach the owner's merge, because he does not review.
+    """
+    for body in (
+        "**Verdict: CLEAN** — without the P1 being fixed.",
+        "**Verdict: CLEAN.** None of the P1 findings were addressed.",
+        "Verdict: CLEAN. None of the P1 items were addressed.",
+        "Verdict: CLEAN — zero of the P1 findings were closed.",
+        "**Verdict: CLEAN.** No P1 changes were made.",
+        "**Verdict: CLEAN.** No P1 fix landed.",
+        "**Verdict: CLEAN.** No P2 was fixed, and no P1 either.",
+    ):
+        assert rfo.asserts_a_clear(body) is False, body
+
+
+#: The clears this arm must NOT refuse — the other half of the trade, and the reason the new
+#: predicate accepts only COMPLETION verbs: after a `no`, a LIVENESS word is itself negated.
+_NEGATED_LIVENESS_CLEARS = (
+    "**Verdict: CLEAN.** No P1 remains.",
+    "**Verdict: CLEAN.** No P1 is open.",
+    "**Verdict: CLEAN.** No P1 needs work.",
+    "**Verdict: CLEAN.** No P1 outstanding.",
+    "**Verdict: CLEAN.** No P1 issues are outstanding.",
+    "**Verdict: CLEAN.** No P1 blockers are left open.",
+    "**Verdict: CLEAN.** No P0/P1/P2 findings remain.",
+    "**Verdict: CLEAN.** No P1 was left unresolved.",
+)
+
+
+def test_the_negated_completion_arm_does_not_refuse_real_negated_clears() -> None:
+    """The tightening above must not become a blanket ban on `no P<n>`.
+
+    Widening the completion predicate to the liveness words would reintroduce the #10962
+    false NOT-READY from the other direction — a real clear refused on a spelling. This arm is
+    what makes that a trade instead of an over-block.
+    """
+    for body in _NEGATED_LIVENESS_CLEARS:
+        assert rfo.asserts_a_clear(body) is True, body
+
+
+def test_the_negated_completion_arms_name_a_completion_and_nothing_else() -> None:
+    """`_SEVERITY_COMPLETION_NEGATED_AFTER_RE` must not be quietly widened to liveness words.
+
+    Pinned on the compiled pattern itself: the arm is reachable only from the negated branch,
+    so a later edit that adds `remains`/`open`/`needs` here would silently undo the previous
+    test's clear list while leaving every body in it still written down.
+    """
+    pat = rfo._SEVERITY_COMPLETION_NEGATED_AFTER_RE.pattern
+    for verb in ("closed", "fixed", "resolved", "addressed", "landed", "gone", "made"):
+        assert verb in pat, verb
+    for liveness in ("remains", "outstanding", "needs", "unfixed"):
+        assert liveness not in pat, liveness
+
+
 def test_the_word_arm_declares_its_own_gap_rather_than_carrying_it_silently() -> None:
     """⛔ A RECORDED GAP, NOT DESIRED BEHAVIOUR — #11048. Read this before editing.
 

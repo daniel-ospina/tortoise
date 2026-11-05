@@ -663,6 +663,38 @@ def test_top_flag_actually_summarises_rows():
     assert text5.count("\n  1. ") == 1 and text5.count("\n  3. ") == 1
     assert text5.count("\n  ") > text3.count("\n  ")
 
+def test_the_footer_prints_the_whole_command_never_a_truncated_branch():
+    """A truncated command is runnable, plausible and WRONG (fold review, P2).
+
+    The footer row used `cmd[:96]`, which cut a live-shaped branch MID-TOKEN with no marker:
+    `merge-one.sh . daniel-ospina/tortoise 1001 fix/10955-queue-con` — a branch that does not
+    exist. An earlier fix moved only the `NEXT ACTION` `COMMAND` line to the whole string and
+    left this site behind, so a review recorded the defect as closed while it was live here.
+    """
+    from tools.next_work import next_command
+
+    ref = "fix/10955-queue-consumer-and-gate-renamed-into-a-long-branch"
+    s = snap(
+        issues=[issue(101)],
+        pulls=[{**pull(1011, closes=[101], head="2" * 40), "head_ref": ref}],
+        check_runs={"2" * 40: all_green()},
+        attestation={"1011": {"verdict": "head"}},
+        merge_tree={"1011": {"clean": True}},
+    )
+    units = build_units(s, CFG)
+    (row,) = units
+    full = next_command(row, REPO)
+    assert full and ref in full, full
+    # The command must be long enough that the old 96-char window cut inside the branch name;
+    # otherwise this arm would pass on the broken code and pin nothing.
+    assert full.index(ref) + len(ref) > 96, full
+    text, _ = render(units, CFG, s, repo=REPO, top=5)
+    assert full in text, text
+    rows = [ln for ln in text.splitlines() if ln.lstrip().startswith("1. ")]
+    assert rows, text
+    assert ref in rows[0], rows[0]
+
+
 # ── the gate is part of the SNAPSHOT, not of the process cwd ───────────────
 def test_replay_never_reads_the_queue_config(tmp_path: Path, monkeypatch):
     """A replay must not touch `.mergify.yml` — not even to "confirm" it.
@@ -3160,3 +3192,220 @@ def test_a_malformed_pace_knob_is_caught_in_a_FRESH_PROCESS() -> None:
     assert proc.stdout.strip() == "0.2", proc.stdout
     assert "NEXT_WORK_PACE" in proc.stderr and "0.2s" in proc.stderr, proc.stderr
 
+
+# ── a gate-refused row never reaches a rail, whatever the position (r25 #1) ─
+@pytest.mark.parametrize(
+    ("runs", "merge", "label"),
+    [
+        ("needs_fix", {"clean": True}, "structural × red check"),
+        ("green", {"clean": False, "why": "conflict: a.py"}, "structural × conflict"),
+        ("green", {"clean": True}, "structural alone"),
+    ],
+)
+def test_a_gate_refused_row_is_never_handed_a_rail(runs, merge, label):
+    """A structural refusal can be out-voted on POSITION by a red check or a conflict.
+
+    `other_fails` wins at the bucket, and the merge block downgrades unconditionally,
+    so the row was NEEDS-FIX and got `fix-one.sh` — while `next_action` printed
+    "nothing is dispatched" beside it, and `--json` carried BOTH a command and an
+    action for one unit (this file's own `command XOR action` invariant).
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x",
+                "base": {"ref": "release/1.x"}}],
+        check_runs={"a" * 40: _runs_for_position("NEEDS-FIX") if runs == "needs_fix" else all_green()},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": merge},
+    )
+    (row,) = units_for(s)
+    assert next_command(row, REPO) is None, f"a rail was emitted for a gate refusal ({label})"
+    action = next_action(row, REPO) or ""
+    assert "gate refusal" in action, action
+
+
+def test_command_and_action_are_mutually_exclusive_for_every_shape():
+    """The invariant, over a population that includes the gate-refusal combinations."""
+    from tools.next_work import next_action
+
+    shapes = []
+    for base in ("main", "release/1.x"):
+        for draft in (False, True):
+            for runs in ("green", "needs_fix", "needs_test"):
+                for merge in ({"clean": True}, {"clean": False}, {"clean": None}):
+                    for verdict in ("head", "norecord", "unavailable"):
+                        shapes.append((base, draft, runs, merge, verdict))
+    for base, draft, runs, merge, verdict in shapes:
+        s = snap(
+            issues=[issue(100)],
+            pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x",
+                    "base": {"ref": base}, "draft": draft}],
+            check_runs={"a" * 40: {
+                "green": all_green,
+                "needs_fix": lambda: _runs_for_position("NEEDS-FIX"),
+                "needs_test": lambda: _runs_for_position("NEEDS-TEST"),
+            }[runs]()},
+            attestation={"1001": {"verdict": verdict}},
+            merge_tree={"1001": merge},
+        )
+        (row,) = units_for(s)
+        cmd, act = next_command(row, REPO), next_action(row, REPO)
+        assert (cmd is None) != (act is None), (
+            f"{base=} {draft=} {runs=} {merge=} {verdict=} → cmd={cmd!r} act={act!r}"
+        )
+
+
+def test_a_missing_check_run_is_not_a_runner_wait():
+    """A required check that never REPORTED is a harness defect, not a wait."""
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: []},  # nothing ever reported
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-TEST"
+    action = next_action(row, REPO) or ""
+    assert "NEVER REPORTED" in action, action
+    assert "runner queue" not in action
+
+
+def test_executable_agrees_with_next_command_across_the_shape_space():
+    """`executable` and `next_command` must classify identically for a real repo.
+
+    (With an EMPTY slug `next_command` also returns None — no addressable command —
+    while `executable` takes no repo; that case is unreachable from the CLI because
+    a missing repo is INCOMPLETE, so the predicate is compared over real slugs.)
+
+    The gate-refusal guard went into the emitter and not into this predicate, so
+    `executable=True` sat beside `next_command is None` and `render` chose the
+    RUNNABLE slot by `executable` — printing a literal `None` where the command
+    belongs, under "the first unit a lane can act on NOW".
+    """
+    for base in ("main", "release/1.x"):
+        for draft in (False, True):
+            for runs in ("green", "needs_fix", "needs_test"):
+                for merge in ({"clean": True}, {"clean": False}, {"clean": None}, {}):
+                    for verdict in ("head", "norecord", "unavailable"):
+                        s = snap(
+                            issues=[issue(100)],
+                            pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x",
+                                    "base": {"ref": base}, "draft": draft}],
+                            check_runs={"a" * 40: {
+                                "green": all_green,
+                                "needs_fix": lambda: _runs_for_position("NEEDS-FIX"),
+                                "needs_test": lambda: _runs_for_position("NEEDS-TEST"),
+                            }[runs]()},
+                            attestation={"1001": {"verdict": verdict}},
+                            merge_tree={"1001": merge},
+                        )
+                        (row,) = units_for(s)
+                        assert row.executable == (next_command(row, REPO) is not None), (
+                            f"{base=} {draft=} {runs=} {merge=} {verdict=}"
+                        )
+
+
+def test_a_gate_refused_second_row_does_not_take_the_runnable_slot():
+    """Two rows, both gate-refused: the RUNNABLE slot must not print a `None`."""
+    s = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[
+            {**pull(1001, closes=[100]), "head_ref": "a", "base": {"ref": "release/1.x"}},
+            {**pull(2002, closes=[200], head="b" * 40), "head_ref": "b",
+             "base": {"ref": "release/1.x"}},
+        ],
+        check_runs={"a" * 40: all_green(), "b" * 40: _runs_for_position("NEEDS-FIX")},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+    )
+    text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert "RUNNABLE  #200" not in text, text
+    assert "RUNNABLE  none" in text or "RUNNABLE" not in text
+
+
+def test_every_place_that_lists_the_needs_test_causes_lists_all_three():
+    """Every place that enumerates the NEEDS-TEST causes must name all three.
+
+    Each cause was added to one place at a time and three of the four ended up one
+    short. What this pins: the SOURCE as a whole, the `--help` output, and the
+    `executable` docstring each name all three. It is a floor, not a per-region
+    check — a cause removed from ONE docstring still passes if a literal survives
+    elsewhere, so the prose is also reviewed by reading it.
+    """
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "tools" / "next_work.py").read_text(encoding="utf-8")
+    help_text = subprocess.run(
+        [sys.executable, str(root / "tools" / "next_work.py"), "--help"],
+        capture_output=True, text=True, timeout=60,
+    ).stdout
+    for label, text in (("source", src), ("--help", help_text)):
+        low = text.lower()
+        assert "runner" in low, label
+        assert "unmeasured merge tree" in low, label
+        assert "never reported" in low, label
+    from tools.next_work import Unit
+
+    doc = (Unit.executable.__doc__ or "").lower()
+    for phrase in ("runner", "measured", "reported"):
+        assert phrase in doc, (phrase, doc)
+
+
+def test_an_absent_local_holder_map_is_incomplete(tmp_path: Path):
+    """Absent is not empty — for `local_holders` too.
+
+    `claims` already refused an absent map; `local_holders` fell back to `{}`, which
+    `_claim_of` reads as "nothing local holds it" — measured: a snapshot that simply
+    OMITS the field, with a local branch holding the unit, exited 0 WITH a merge
+    command. The local half has no registry entry, so no rail catches it later.
+    """
+    raw = _rich_snapshot().to_json()
+    raw.pop("local_holders")
+    path = tmp_path / "no-holders.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", REPO]) == 2
+
+
+def test_a_bad_pace_env_var_does_not_decide_an_exit_code():
+    """`float(os.environ[...])` at import raised before `main`'s frame: exit 1.
+
+    Exit 1 is documented as "the queue was read and NO unit is pickable" — a typo'd
+    env var must not read as an exhausted queue.
+    """
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, NEXT_WORK_PACE="abc")
+    proc = subprocess.run(
+        [sys.executable, str(root / "tools" / "next_work.py"), "--help"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (proc.returncode, proc.stderr[-300:])
+    assert "ignoring NEXT_WORK_PACE" in proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["abc", "inf", "-inf", "1e400", "-3", "nan"])
+def test_an_unusable_pace_value_never_decides_an_exit_code(bad):
+    """`inf` parsed fine and `time.sleep(inf)` raised OverflowError (an ArithmeticError,
+    which `main`'s frame does not catch) → exit 1, the "queue exhausted" code."""
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, NEXT_WORK_PACE=bad)
+    proc = subprocess.run(
+        [sys.executable, str(root / "tools" / "next_work.py"), "--help"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (bad, proc.returncode, proc.stderr[-300:])
+
+
+def test_a_huge_finite_pace_value_is_capped():
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, NEXT_WORK_PACE="1e9")
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {str(root)!r}); "
+         "from tools.next_work import PACE_SECONDS; print(PACE_SECONDS)"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert float(proc.stdout.strip()) <= 5.0, proc.stdout
