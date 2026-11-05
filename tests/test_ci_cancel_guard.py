@@ -514,6 +514,33 @@ def test_a_negative_total_count_is_fail_closed(fixture):
     assert fixture.cancelled() == []
 
 
+def test_a_partial_job_list_is_fail_closed(fixture):
+    """Round-10 F1 (P2): `total > len(jobs)` — the truncated-page half of the arm — was
+    exercised by NOTHING, and deleting it is not cosmetic.
+
+    The job list is read with `per_page=100` (docs.github.com caps it there, "List jobs
+    for a workflow run"), so a run with more than 100 jobs returns ONE capped page while
+    `total_count` reports the true total. Without the arm, a run whose returned rows are
+    all `queued` reads as "no job started" and reaches PERMIT + POST — cancelling a run
+    that has started jobs beyond the page. That is exactly the destruction clause 2
+    protects against (32 of the 42 cancels in the incident window had started jobs), and
+    it would be silent: no exception, no red case, a green suite.
+
+    Non-vacuous by construction: with `or total > len(jobs)` deleted this case reaches
+    PERMIT + POST (rc 0, `cancelled() == ["41840910128"]`), so the assertion below fails
+    on the arm-deleted tool.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 101, "jobs": [
+        {"name": "shard-1", "status": "queued", "started_at": None}]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 2, r.stdout + r.stderr
+    # The refusal names the surface it could not read COMPLETELY, not just an exit code.
+    assert "partial" in r.stderr, r.stderr
+    assert fixture.cancelled() == []
+
+
 def test_an_undocumented_job_status_reads_as_started(fixture):
     """Review round 2, finding 5: the started-job predicate was a DENY-list, so an
     unknown status with no started_at read as 'no work to destroy'."""
@@ -600,9 +627,13 @@ def test_an_ambient_environment_value_cannot_reach_the_seam(fixture):
     assert fixture.cancelled() == ["41840910128"]
 
 
-def test_a_landed_cancel_is_attested_as_applied(fixture):
-    """Round-3 finding 3b: nothing asserted `applied is True` on a landed POST, so
-    hard-coding `"applied": False` survived the suite."""
+def test_an_accepted_cancel_post_is_attested_as_applied(fixture):
+    """Round-3 finding 3b: nothing asserted `applied is True` on a POST the endpoint
+    accepted, so hard-coding `"applied": False` survived the suite.
+
+    Round-10 N1: named for what is actually measured — `act()` returns 0 on
+    `POST …/cancel` → `202 Accepted`, not on the run being `cancelled` (#10760).
+    """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
@@ -854,3 +885,41 @@ def test_the_docstring_rule_names_every_cancellable_status():
         f"allowed-but-not-named={sorted(code - named)}")
     # A guard against the assertion going vacuous if the declaration shape changes.
     assert "in_progress" not in code, "in_progress is never cancellable"
+
+
+def test_the_success_attestation_says_the_post_was_accepted_not_that_the_run_is_cancelled():
+    """Round-10 N1 (P3): both MACHINE-facing lines attested more than the tool measures.
+
+    `act()` returns 0 on `POST …/actions/runs/<id>/cancel`, whose documented success
+    answer is **`202 Accepted`** (`409 Conflict` is the other; docs.github.com, "Cancel a
+    workflow run"), and 202 is not `cancelled` — this PR's own body records exactly that
+    (#10760). A caller that reads exit 0 / `applied: true` as "the run is cancelled"
+    counts a run it has not settled, and a cancelled run can never produce a completed
+    verdict (the `BLOCKED-CI-UNTESTED` outage #10753). The human report at ``render`` was
+    already precise ("POST /cancel accepted; observe the run to `completed`"); the exit
+    table and the `--json` comment were the inconsistent pair.
+
+    Read from the SOURCE TEXT, never imported, so it also holds through the
+    `CI_CANCEL_GUARD_TOOL` seam (a pre-fix blob, a foil). It fails on the pre-fix text in
+    BOTH places: the exit row said "the cancel landed" and the comment said "the cancel
+    LANDED".
+    """
+    lines = TOOL.read_text().splitlines()
+
+    exit_idx = next((i for i, ln in enumerate(lines)
+                     if ln.lstrip().startswith("Exit: 0 =")), None)
+    assert exit_idx is not None, f"the exit table's `0` row is missing from {TOOL}"
+    applied_idx = next((i for i, ln in enumerate(lines) if "`applied` means" in ln), None)
+    assert applied_idx is not None, f"the `applied` comment is missing from {TOOL}"
+
+    # The rows WRAP in the source, so read the whole entry, not its first line.
+    for block, name in ((lines[exit_idx:exit_idx + 5], "the exit table's `0` row"),
+                        (lines[applied_idx:applied_idx + 4], "the `applied` comment")):
+        text = "\n".join(block)
+        assert "202" in text and "#10760" in text, (
+            f"{name} must say the POST was ACCEPTED (202) and point at #10760 — the "
+            f"endpoint answering 202 is not the run being `cancelled`:\n{text}")
+        # The exact pre-fix over-claim, in the casing it was written in.
+        assert "cancel landed" not in text and "cancel LANDED" not in text, (
+            f"{name} claims a LANDED cancel, which `act()` cannot measure (202 accepted "
+            f"is not the run reaching `cancelled`, #10760):\n{text}")

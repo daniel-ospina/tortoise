@@ -78,7 +78,9 @@ Usage:
                  https://clig.dev/#output verbatim: machine readable output goes to
                  stdout, "log messages, errors, and so on" go to stderr.
 
-Exit: 0 = permitted (and, with --apply, the cancel landed)
+Exit: 0 = permitted (and, with --apply, the `POST /cancel` was ACCEPTED — the
+           endpoint's documented answer is `202 Accepted`, which is NOT the run being
+           `cancelled`: observe the run to `completed` before counting it settled, #10760)
       3 = REFUSED (the run may not be cancelled; the reason names which clause)
       2 = FAIL-CLOSED (a surface could not be read; nothing was cancelled)
       1 = the cancel POST failed (nothing is claimed about the run's state)
@@ -627,7 +629,9 @@ def main(argv: list[str] | None = None) -> int:
         # the docstring above (review round 8, F1).
         print(text, file=sys.stderr)
         print(json.dumps({"run": run_id, "verdict": verdict,
-                          # `applied` means the cancel LANDED, not that --apply was passed.
+                          # `applied` means the `POST /cancel` was ACCEPTED (`202 Accepted`,
+                          # #10760 — that is not the run being `cancelled`, which only
+                          # observation shows), and not that --apply was passed.
                           "applied": post_rc == 0,
                           "post_rc": post_rc,
                           # never attest an age the tool did not measure
