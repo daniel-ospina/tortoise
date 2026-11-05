@@ -2424,6 +2424,61 @@ def test_the_8447_census_pins_run_on_a_census_doc_only_diff():
         )
 
 
+def test_the_10602_bound_pins_run_on_every_subject_they_read():
+    """#11057 review round 7 (P1, measured): register the guard where its DIFFS land.
+
+    `tests/test_10602_query_limit_bound.py` pins four subjects and was registered
+    on `api` alone — which selects it on ONE of them. The other three fell to a
+    surface the file was not on, so a diff that could break a pin ran no pin:
+
+    * `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` -> `core`. `docs/` is in
+      `NON_PYTHON_PREFIXES` and the doc is a `CORE_ALSO` entry (`tools/
+      ci_selection.py`), so a census-only edit is `core`; deleting the
+      `tortoise_query(tag=…)` row — the row whose whole purpose is that a lane
+      auditing #8447 can find the residue — would have reddened nothing.
+    * `config/served-skills-upstream.yml` -> `core` (a `config/` path, no
+      SOURCE_PATTERN).
+    * a served `SKILL.md` -> `onboarding`, and a named-surface match REPLACES the
+      `core` fallback, so this is the one diff that can strip a skill's
+      `offset=`/`hasMore` disclosure — the arm's entire failure mode.
+
+    Measured pre-fix at `c6717da29`, same helper, `8447`'s pin as the control:
+    `_sel([<census doc>])` -> `surfaces=['core']`, 10602 ABSENT, 8447 present
+    (8447 is dual-registered); `_sel([<served skill>])` -> `['onboarding']`, 10602
+    ABSENT. Non-vacuity: deleting the `core` or the `onboarding` entry above
+    fails the corresponding arm below.
+    """
+    root = Path(__file__).resolve().parents[1]
+    subjects = {
+        "docs/architecture/BOUNDED-OPERATION-CONTRACT.md": ["core"],
+        "config/served-skills-upstream.yml": ["core"],
+        "website/apps/dashboard/public/skills/analyse-for-contradictions/SKILL.md":
+            ["onboarding"],
+    }
+    for changed, expected in subjects.items():
+        assert (root / changed).exists(), f"the pinned subject is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == expected, (
+            f"{changed} selects {r['surfaces']}, expected {expected} — this pin "
+            "is only meaningful against the surface the diff actually takes"
+        )
+        assert "test_10602_query_limit_bound.py" in r["test_files"], (
+            f"a change to {changed} does not run "
+            "tests/test_10602_query_limit_bound.py, so the arm that pins it "
+            "cannot fire on the change it guards (review round 7 P1)"
+        )
+
+    # The fourth subject is a SHARED_MODULE, so its diff takes the FULL matrix —
+    # a superset of the guard. Pinned so a demotion out of `SHARED_MODULES` cannot
+    # leave both the bound and its pins asleep on the handler they bound.
+    r = _sel(["tortoise/mcp_server.py"])
+    assert r["full"] is True, (
+        "tortoise/mcp_server.py no longer selects the full matrix, so the #10602 "
+        "bound's own regression arms would not run on a handler edit"
+    )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 

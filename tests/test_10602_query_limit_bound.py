@@ -283,6 +283,20 @@ def test_the_served_description_discloses_the_bound():
         f"the description still claims one arm is uncapped: {desc}")
     assert "still scans the whole tagged population" in low, (
         f"the tag= arm's unbounded READ is not disclosed: {desc}")
+    # …and the walk it recommends is QUALIFIED on the arm where it is not lossless
+    # (review round 7, P2). `query_points_by_tag` orders by `createdAt` with no
+    # `id(n)` tiebreak, so consecutive `offset=` windows are not adjacent ranges of
+    # ONE order (#5346) and a walked tag drops and repeats rows while `hasMore`
+    # still says complete. The pre-fix text recommended "walk … until hasMore is
+    # false when you need every row" on that arm too, which is the #8447 §1 harm
+    # recommended by the disclosure rather than merely left unmentioned. Each
+    # assertion below fails if the caveat is negated or removed.
+    assert "not lossless" in low, (
+        f"the tag= arm's walk is advertised as lossless: {desc}")
+    assert "approximate" in low, (
+        f"the description does not say what a walked tag IS: {desc}")
+    assert "#11062" in desc, (
+        f"the caveat names no owner for the missing total order: {desc}")
 
 
 def test_the_tag_alias_is_not_silently_truncated_by_the_new_bound(stub_factory):
