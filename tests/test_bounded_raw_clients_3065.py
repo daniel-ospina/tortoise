@@ -750,6 +750,7 @@ _EXPECTED_TOOL_SITES = {
     "graph-scripts/smoke_test.py": 1,            # the server-mode liveness client
     "tools/ask_shape_rate.py": 1,                # the scratch-graph GRAPH.DELETE
     "tools/backfill_graph_turns.py": 1,          # #10017's read-only pre-delete census
+    "tools/cache_eviction_census.py": 2,         # #10976's INFO client + the measurement handle
     "tools/dod_5090_probe.py": 1,                # #10465's GRAPH.LIST on the census handle
     "tools/edge_census.py": 2,                   # GRAPH.LIST + the measurement handle
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
