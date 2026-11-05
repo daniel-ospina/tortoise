@@ -7408,8 +7408,59 @@ def _process_cwd(pid: int, timeout: float) -> tuple[str | None, str]:
                   + (f": {_one_line(err)}" if err.strip() else ""))
 
 
+def _lane_queue_candidates() -> list[str]:
+    """Every root the FLEET could have written the queue to, in writer order.
+
+    ⛔ A LITERAL PATH IS A FALSE MEASUREMENT (cycle-6 review, HIGH). Every writer
+    of this queue derives the root from the environment —
+    `nonblocking-dispatch.sh:35,100` does `O="${O:-$HOME/orchestrator}";
+    D="$O/bg"`, `pr-doctor.py` uses `O or $HOME/orchestrator`, and the harness
+    scripts use `$CELL_HOME/orchestrator` — while this module used the literal
+    `/home/cmux/orchestrator/bg`. On a cell (`HOME` is `/tmp/cell-home`) that
+    literal does not exist, so the arm reported a "measured absence — this host
+    runs no background lane queue" claim about a queue that WAS being written
+    one directory away: a `pr-doctor` lane whose only trace is its queue entry
+    was invisible, and the verdict could be CLEAN while it held the work.
+
+    ⛔ ONE GUESSED ROOT IS NOT ENOUGH EITHER (cycle-7 review, MEDIUM). `O` is
+    exported into every worker `pr-doctor` spawns but not into every shell, and
+    `ORCHESTRATOR` is set by nobody in the fleet — so picking a single root from
+    THIS process's environment and calling a missing one "absent" still produced
+    a false CLEAN while the entry sat under another candidate. The arm
+    therefore scans EVERY candidate that exists and unions the results: an
+    unreadable directory is INCOMPLETE, and only "none of the candidates
+    exists" is a measured absence (named, with the list that was checked).
+    """
+    explicit = os.environ.get(LANE_QUEUE_ENV)
+    if explicit:
+        return [explicit]
+    candidates: list[str] = []
+    o_root = os.environ.get("O")
+    if o_root:
+        candidates.append(os.path.join(o_root, "bg"))
+    candidates.append(os.path.join(os.path.expanduser("~"), "orchestrator", "bg"))
+    cell_home = os.environ.get("CELL_HOME")
+    if cell_home:
+        candidates.append(os.path.join(cell_home, "orchestrator", "bg"))
+    candidates.append(DEFAULT_LANE_QUEUE)
+    ordered: list[str] = []
+    for cand in candidates:
+        if cand not in ordered:
+            ordered.append(cand)
+    return ordered
+
+
 def _lane_queue_root() -> str:
-    return os.environ.get(LANE_QUEUE_ENV) or DEFAULT_LANE_QUEUE
+    """The root to NAME in a report: the first candidate that exists.
+
+    Reporting only — the scan reads every existing candidate, so this can never
+    narrow what is actually checked.
+    """
+    candidates = _lane_queue_candidates()
+    for cand in candidates:
+        if os.path.isdir(cand):
+            return cand
+    return candidates[0]
 
 
 def _lane_queue_entries(slug: str | None
@@ -7421,21 +7472,32 @@ def _lane_queue_entries(slug: str | None
     (a mac has no `/home/cmux/orchestrator`). A root that exists but cannot be
     listed is `(None, False, why)` — INCOMPLETE, never CLEAN.
 
+    ⛔ EVERY EXISTING CANDIDATE IS SCANNED (cycle-7 review, MEDIUM): a single
+    guessed root let an env divergence read CLEAN while the entry sat under
+    another candidate. `absent` is True ONLY when NONE of the candidates
+    exists — and then `why` NAMES every path that was checked, because "queried
+    and absent" is only a measurement when the report says WHERE.
+
     Entry shape: `prd-<owner>-<repo>-<N>.{pid,started,log,end,rc}`. Only the
     `-<N>.pid` file starts an entry; `<N>` is the PR the lane was dispatched for.
     """
-    root = _lane_queue_root()
-    if not os.path.isdir(root):
-        if os.path.exists(root):
-            return None, False, f"{root} exists but is not a directory"
-        return [], True, ""
-    try:
-        names = os.listdir(root)
-    except OSError as exc:
-        return None, False, f"{root} could not be listed ({exc})"
+    candidates = _lane_queue_candidates()
+    existing_roots = [c for c in candidates if os.path.isdir(c)]
+    if not existing_roots:
+        not_dirs = [c for c in candidates if os.path.exists(c)]
+        if not_dirs:
+            return None, False, f"{not_dirs[0]} exists but is not a directory"
+        return [], True, "checked " + ", ".join(candidates)
+    pairs: list[tuple[str, str]] = []
+    for root in existing_roots:
+        try:
+            names = os.listdir(root)
+        except OSError as exc:
+            return None, False, f"{root} could not be listed ({exc})"
+        pairs.extend((root, name) for name in names)
     prefix = f"prd-{slug.replace('/', '-')}-" if slug else "prd-"
     entries: list[dict] = []
-    for name in names:
+    for root, name in pairs:
         if not name.startswith(prefix) or not name.endswith(".pid"):
             continue
         stem = name[:-len(".pid")]
@@ -7542,6 +7604,15 @@ def _parent_attribution(parents: dict[int, tuple[int, str]], pid: int,
     same boundary-exact predicate every other arm uses, so a DIFFERENT issue
     number (`argv-30610`) or one beyond the bounded walk never attributes. The
     returned sentence NAMES the ancestor so a reader can check the evidence.
+
+    ⛔ READ THE ANCESTOR'S COMMAND LINE, NOT THE FILE IT NAMES. `fix-one.sh`
+    CONSUMES its `argv-<N>` file, so by the time anyone measures it does not
+    exist (measured 2026-11-05 22:00Z: five live fixer lanes — `--argv
+    argv-11067`, `argv-10852`, `argv-11105`, `argv-11078`, `argv-10914` — and
+    NOT ONE `argv-*` file on disk, nor a `prd-*` queue entry, nor a
+    number-bearing cwd: the path fragment in the launcher's argv is the only
+    surviving trace). An implementation that opened the file would have found
+    every one of them invisible.
     """
     prs = sorted(pr for pr in (attributed_prs or frozenset()) if pr != issue)
     cur = pid
@@ -7591,15 +7662,25 @@ def scan_process_surface(
 
     TWO sources, both LIVE rather than recorded:
 
-      * `pi` PROCESSES and their cwd/command line. This is the arm that sees a
-        lane that never opted into anything: it needs no lock, no registry and no
-        consent. A candidate is attributed when its cwd or its command line
-        carries the issue number boundary-exactly.
+      * `pi` PROCESSES. This is the arm that sees a lane that never opted into
+        anything: it needs no lock, no registry and no consent. A candidate is
+        attributed when the issue number appears boundary-exactly in ANY of:
+        the process's own cwd, its own command line, or — walking up to
+        `MAX_PARENT_ATTRIBUTION_DEPTH` (3) `ppid` links — an ANCESTOR's command
+        line, because `pi` rewrites its own argv to `pi` (see
+        `_parent_attribution`). Attribution also accepts an ATTRIBUTED PR
+        number (`attributed_prs`) rather than only the issue number: a lane
+        dispatched by PR number names the PR, never the issue it closes.
       * the HARNESS QUEUE (`prd-<owner>-<repo>-<N>.pid`). A `pr-doctor` lane is
         launched BY a PR number, so it may never name the issue in argv; the
         queue is what makes it visible. `N` counts when it is this issue OR when
         it is a PR the OPEN-PR surface already attributed to this issue — so the
         arm costs no extra API call and cannot fire for an unrelated lane.
+
+    ⛔ A COUNT IS NOT A VERDICT: an entry whose `.pid` cannot be read, or is not
+    a live-process pid at all (`0`, a negative group selector, a value above the
+    C `int` range), is UNDECIDABLE and makes this surface INCOMPLETE — never
+    CLEAN, and never a crash. `_pid_is_alive` carries the tri-state.
 
     Self (`identity.self_pids`) is excluded from BOTH: a lane re-checking its own
     issue is the case #10684 measured, and it must not collide with itself.
@@ -7707,9 +7788,12 @@ def scan_process_surface(
             surface.incomplete(tail)
         return
     if absent:
+        # `qwhy` names EVERY candidate that was checked (cycle-7 review): with a
+        # single path the claim "queried and absent" hid which path it meant.
+        where = qwhy or root
         surface.note = (surface.note + "; " if surface.note else "") + (
-            f"lane queue: NOT PRESENT at {root} — queried and absent, which is a "
-            "measuring host's own statement that it runs no background lane "
+            f"lane queue: NOT PRESENT — {where} — queried and absent, which is "
+            "a measuring host's own statement that it runs no background lane "
             "queue (a macOS box has no /home/cmux); this sub-surface has nothing "
             "to read here, not an unread one"
         )
@@ -7760,15 +7844,25 @@ def scan_process_surface(
         f"lane queue: {len(entries)} entr(ies) for this repo, {live_entries} "
         f"live, {attributed} for this issue"
         + (f", {own_entries} your own" if own_entries else "")
-        + (f", {undecidable} with an unreadable pid" if undecidable else "")
+        + (f", {undecidable} with an unreadable or not-a-live-process pid"
+           if undecidable else "")
         + f" ({root})"
     )
     if undecidable:
-        surface.incomplete(
+        # ⛔ `incomplete()` REPLACES the note, so a reason the process arm
+        # recorded moments earlier was silently DROPPED (cycle-5 review, LOW):
+        # a dead `pi` row plus an empty `.pid` reported only
+        # `lane-queue-pid-unreadable`, and the operator fixed one cause to
+        # re-run into the other. Mirrors the sibling `lane-queue-unreadable`
+        # branch above, which appends for exactly this reason.
+        tail = (
             f"lane-queue-pid-unreadable: {undecidable} queue entr(ies) for this "
-            "repo carry a `.pid` that could not be read, so whether those lanes "
-            "are RUNNING cannot be decided — NOT a clean scan (NOT clean)"
+            "repo carry a `.pid` that could not be read or is not a "
+            "live-process pid, so whether those lanes are RUNNING cannot be "
+            "decided — NOT a clean scan (NOT clean)"
         )
+        prior = surface.note or ""
+        surface.incomplete(f"{prior}; ALSO: {tail}" if prior else tail)
 
 
 def run_preflight(
@@ -8816,7 +8910,21 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
         s for s in incomplete
         if s.name == SURFACE_PROCESSES
         and ("process-table-unreadable:" in (s.note or "")
-             or "lane-queue-unreadable:" in (s.note or ""))
+             or "lane-queue-unreadable:" in (s.note or "")
+             # ⛔ THE OTHER TWO LIVE-LANE CAUSES (cycle-5 review, MEDIUM).
+             # `process-cwd-unreadable:` is the NORMAL shape of the cwd
+             # failure (`lsof` absent / another uid) and
+             # `lane-queue-pid-unreadable:` is a corrupt `.pid`; both fell
+             # through to the generic sentence and sent the operator to
+             # "fix gh auth/network (or rebuild the fleet board)" — a cause
+             # this same report contradicts. Neither is a GitHub read, so
+             # neither can be fixed by re-authenticating (#9402's own class).
+             or "process-cwd-unreadable:" in (s.note or "")
+             or "lane-queue-pid-unreadable:" in (s.note or "")
+             # ⛔ AND THE FOURTH MARKER THIS SURFACE EMITS (cycle-6 LOW): a
+             # repo root this git could not resolve narrows the cwd arm, which
+             # is not a GitHub read either.
+             or "repo-root-unresolved:" in (s.note or ""))
     ]
     if live_unread and len(live_unread) == len(incomplete):
         return (
@@ -8825,7 +8933,7 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
             "running lanes, so re-authenticating or rebuilding the fleet board "
             "cannot change this. Check the `ps` binary (--ps / "
             f"{PS_ENV}) and the lane queue directory ({LANE_QUEUE_ENV} or "
-            f"{DEFAULT_LANE_QUEUE}): a lane that cannot be ruled out is not "
+            f"{_lane_queue_root()}): a lane that cannot be ruled out is not "
             "\"no lane\""
         )
     if live_unread:

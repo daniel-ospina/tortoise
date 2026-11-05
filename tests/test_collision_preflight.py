@@ -9607,6 +9607,75 @@ exec {real} "$@"
         self.assertEqual(rc, 2, out)
         self.assertIn("process-table-unreadable", out)
 
+    def test_the_lane_queue_root_follows_the_DISPATCHERS_home(self):
+        """Cycle-6 review, HIGH: a LITERAL queue root is a false measurement.
+
+        `nonblocking-dispatch.sh` writes `${O:-$HOME/orchestrator}/bg`; the tool
+        read the literal `/home/cmux/orchestrator/bg`. On a cell (`HOME` is
+        `/tmp/cell-home`) that path does not exist, so the arm printed
+        "measured absence — this host runs no background lane queue" about a
+        queue being written one directory away, and a harness lane whose only
+        trace is its queue entry was invisible: CLEAN while it held the work.
+
+        Red under the literal: the entry below is created under $HOME, where the
+        dispatcher writes it, and must be FOUND.
+        """
+        home = self.tmp / "cell-home"
+        queue = home / "orchestrator" / "bg"
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        # ⛔ The seam must be EMPTIED, not merely unmentioned: the suite's
+        # `run_tool` helper exports a default `COLLISION_PREFLIGHT_LANE_QUEUE`
+        # for every test, and an explicit seam wins over the environment (which
+        # is exactly the precedence this test is NOT about). An empty value is
+        # falsy, so the queue roots fall through to the dispatcher's own
+        # resolution. `O`/`ORCHESTRATOR` are emptied too: `pr-doctor` exports `O`
+        # into EVERY worker it spawns, so without this the test would read
+        # `$O/bg` inside a dispatched lane and stop covering `$HOME`.
+        rc, out = self.run_tool(env_extra={
+            "HOME": str(home),
+            "CELL_HOME": str(home),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": "",
+            "O": "",
+            "ORCHESTRATOR": "",
+        })
+        # The hit is what matters: the entry the dispatcher wrote must be FOUND
+        # and attributed. (The overall rc may also be 2 for an unrelated reason —
+        # a relocated HOME makes the fleet board's roster unreadable HERE — so
+        # the assertion is on the arm's own row, not on the verdict code.)
+        self.assertIn("lane:prd-test-owner-test-repo-3061", out)
+        self.assertEqual(1, out.count("lane:prd-test-owner-test-repo-3061"), out)
+        self.assertNotIn("lane queue: NOT PRESENT", out)
+        self.assertNotEqual(rc, 0, out)
+
+    def test_a_lane_queue_under_ANOTHER_candidate_root_still_counts(self):
+        """Cycle-7 review, MEDIUM: one guessed root is not enough.
+
+        `O` is exported into every worker `pr-doctor` spawns but not into every
+        shell, and `ORCHESTRATOR` is set by nobody — so a ladder that picks ONE
+        root and calls a missing one "absent" still reads CLEAN while the entry
+        sits under another candidate. EVERY existing candidate must be read.
+        The direction matters: missing a queue is a false CLEAN (blocking);
+        reading one candidate more is only a false block.
+        """
+        home = self.tmp / "cell-home-2"
+        elsewhere = self.tmp / "o-root"
+        queue = elsewhere / "bg"
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(env_extra={
+            "HOME": str(home),          # this root does NOT exist
+            "CELL_HOME": str(home),
+            "O": str(elsewhere),        # the writer's root, which does
+            "ORCHESTRATOR": str(self.tmp / "nobody-sets-this"),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": "",
+        })
+        self.assertIn("lane:prd-test-owner-test-repo-3061", out)
+        self.assertNotIn("lane queue: NOT PRESENT", out)
+        self.assertNotEqual(rc, 0, out)
+
     def test_an_absent_lane_queue_is_a_measured_absence(self):
         """A macOS box has no /home/cmux — that is a FACT, not a blind read.
 
@@ -9618,7 +9687,10 @@ exec {real} "$@"
             "COLLISION_PREFLIGHT_LANE_QUEUE": str(self.tmp / "no-such-queue")})
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
-        self.assertIn("lane queue: NOT PRESENT at", out)
+        # Cycle-7 review: an absence is only a measurement when the report says
+        # WHICH paths were checked — the seam here is the explicit one.
+        self.assertIn("lane queue: NOT PRESENT —", out)
+        self.assertIn("no-such-queue", out)
 
     def test_an_unlistable_lane_queue_is_incomplete_never_clean(self):
         """The root EXISTS but cannot be listed — that is cannot-look."""
@@ -9649,6 +9721,11 @@ exec {real} "$@"
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertIn("process-cwd-unreadable", out)
         self.assertNotIn("9/9 surfaces queried", out)
+        # Cycle-5 review, MEDIUM: the remedy must not name a cause this report
+        # contradicts. An unreadable cwd is NOT a GitHub read, so "fix gh
+        # auth/network" sends the operator to re-authenticate for nothing.
+        self.assertNotIn("fix gh auth/network", out)
+        self.assertIn("which is not a GitHub read", out)
 
     def test_an_unreadable_queue_pid_is_incomplete_never_clean(self):
         """Review cycle 1, MEDIUM: an unreadable `.pid` is UNDECIDABLE, not dead.
@@ -9665,6 +9742,35 @@ exec {real} "$@"
         self.assertEqual(rc, 2, out)
         self.assertIn("lane-queue-pid-unreadable", out)
         self.assertNotIn("VERDICT: CLEAN", out)
+        # Cycle-5 review, MEDIUM: same remedy contradiction, queue side.
+        self.assertNotIn("fix gh auth/network", out)
+        self.assertIn("which is not a GitHub read", out)
+
+    def test_a_queue_reason_does_not_erase_the_process_reason(self):
+        """Cycle-5 review, LOW: `incomplete()` REPLACES `surface.note`.
+
+        A dead `pi` row (a note, no INCOMPLETE) plus an empty `.pid` (INCOMPLETE)
+        reported ONLY `lane-queue-pid-unreadable` — the process arm's own reason
+        vanished, so an operator fixed one cause and re-ran into the other. Both
+        reasons must survive in the same row.
+        """
+        table = self.tmp / "table-dead-pi-plus-bad-pid.txt"
+        # A live non-ancestor `pi` row that names no issue: it contributes a
+        # note ("no live lane names this issue") without a hit.
+        alive = self._live_non_ancestor_pid()
+        table.write_text(f"1 0 /sbin/init\n{alive} 1 pi\n")
+        queue = self.tmp / "lane-queue-both-reasons"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text("")
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_PROCESS_TABLE": str(table),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue),
+        })
+        self.assertEqual(rc, 2, out)
+        self.assertIn("lane-queue-pid-unreadable", out)
+        # The process arm's measured note must still be there, alongside it.
+        self.assertIn("no live lane names this issue", out)
+        self.assertIn("ALSO:", out)
 
     def test_a_sibling_repo_queue_entry_does_not_block(self):
         """Review cycle 1, MEDIUM: the queue prefix needs a BOUNDARY.
@@ -9891,6 +9997,11 @@ exec {real} "$@"
                 self.assertEqual(rc, 2, out)
                 self.assertIn("VERDICT: INCOMPLETE", out)
                 self.assertIn("lane-queue-pid-unreadable", out)
+                # The wording must name the REAL condition: `-5`/`0` were READ and
+                # are simply not live-process pids, so "unreadable" alone points a
+                # reader at a permissions problem that does not exist (cycle-4
+                # LOW). Reverse pin: the old wording fails this line.
+                self.assertIn("not a live-process pid", out)
 
     def test_an_oversized_queue_pid_is_undecidable_not_a_traceback(self):
         """Cycle-2 MEDIUM: `os.kill()` raises `OverflowError` above the C range.
@@ -9913,6 +10024,7 @@ exec {real} "$@"
         self.assertEqual(rc, 2, out)
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertIn("lane-queue-pid-unreadable", out)
+        self.assertIn("not a live-process pid", out)
         self.assertNotIn("VERDICT: COLLISION", out)
 
     def test_pid_liveness_is_tri_state_never_an_exception(self):
@@ -9996,6 +10108,10 @@ exec {real} "$@"
         self.assertNotIn("VERDICT: CLEAN", out)
         self.assertIn("NOT clean", out)
         self.assertNotEqual(rc, 0, out)
+        # Cycle-6 LOW: an unresolvable repo root is a LIVE-LANE cause, not a
+        # GitHub read — the generic "fix gh auth/network" remedy contradicts
+        # the row that measured it.
+        self.assertNotIn("fix gh auth/network", out)
 
     def test_a_git_without_path_format_still_finds_the_MAIN_worktree(self):
         """The compat half: an old git must not narrow the arm at all.
