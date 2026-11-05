@@ -1639,3 +1639,107 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
         f"sets, but {counted[':Source'] + counted[':Event']} rows are "
         f"`:Source`/`:Event` (the `:Point` row is denied at its SDK doors): "
         f"{counted}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# §9.4 / §12.1b — WHAT THE SOURCE VECTOR EMBEDS (#10980 review, P2)
+# ════════════════════════════════════════════════════════════════════════════
+# ONE FILE, TWO ANSWERS. §9.4 was corrected to say the source vector's text is
+# the narrative in `public.session_narrative`, NOT `:Source.summary`; 432 lines
+# on, §12.1b's `:Source` footnote — the section that decides WHERE vectors live —
+# still told a designer that vector *"would be **indexing an existing field**"*,
+# i.e. embed the `summary` the Source already holds. Under `#10000` that field is
+# a topic lexicon (six content words behind a constant display prefix, `#10852`),
+# so the blurry section orders exactly the bag-of-words vector §9.4 forbids. The
+# reader who lands on §12.1b gets the wrong instruction for the same vector, and
+# nothing reds: both sentences are prose, and the graph stays green while a
+# designer embeds a word list and calls it a summary.
+#
+# ⛔ BOTH DIRECTIONS, and the PREMISE IS DERIVED. The narrative's home is read
+# from `record_projection.NARRATIVE_TABLE` — the projection's own constant, the
+# same one the R7 upsert writes through — not restated here, so a move of that
+# home reds in this pin instead of leaving two paragraphs that agree with each
+# other and with nothing else. The retired phrasings are asserted ABSENT as well
+# as the corrected pointer PRESENT: a presence-only pin certifies whichever text
+# happens to be there (the #10244 review's P2, measured on a frozen `§11.1`).
+_RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
+_RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
+_SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
+
+
+def _storage_doc_text() -> str:
+    """§9.4 and §12.1b both live in the ONE storage architecture document."""
+    return _STORAGE_DOC.read_text(encoding="utf-8")
+
+
+def _source_vector_footnote(text: str) -> str:
+    """§12.1b's `:Source` footnote, whole — the line, not a window around it.
+
+    Anchored, never positional: a line number would drift silently on the first
+    paragraph added above it, and the failure would then be *"the sentence is
+    fine"* reported about a different sentence.
+    """
+    at = text.find(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)
+    assert at != -1, (
+        f"{_STORAGE_DOC.name} no longer carries §12.1b's `:Source` footnote "
+        f"({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) — re-derive where §12.1b states "
+        "what the source vector would index before freezing a pointer at it")
+    start = text.rfind("\n", 0, at) + 1
+    return text[start:].split("\n", 1)[0]
+
+
+def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
+    """§9.4 and §12.1b may not disagree about what the source vector embeds.
+
+    *What value makes this test fail?* The pre-fix tree — measured: on
+    `origin/main` the §9.4 half fails on `_RETIRED_SUMMARY_BLUR` (present there,
+    absent here) and the §12.1b half fails on `_RETIRED_VECTOR_FOOTNOTE`
+    (present there and, until this fix, present here too).
+    *Does the test reach it?* Yes — the document is read from the tree and the
+    home it must name is derived from the projection, not paraphrased here.
+    """
+    from tortoise import record_projection
+
+    # ── the premise: §9.1's narrative home, from the projection that writes it ──
+    home = f"public.{record_projection.NARRATIVE_TABLE}"
+    migration = (REPO_ROOT / "supabase/migrations"
+                 / "20261023000001_record_session_narrative.sql").read_text(
+                     encoding="utf-8")
+    assert f"CREATE TABLE IF NOT EXISTS {home} (" in migration, (
+        f"`record_projection.NARRATIVE_TABLE` names `{home}`, but the migration "
+        f"that creates §9.1's narrative home does not create that table — the "
+        f"home MOVED, so §9.4's pointer (and §12.1b's) must move with it, and "
+        f"this pin must not keep naming the table the projection left behind")
+
+    text = _storage_doc_text()
+
+    # ── §9.4: the corrected pointer PRESENT, the summary/ narrative blur GONE ──
+    assert f"read from `{home}`, NOT from `:Source.summary`" in text, (
+        f"§9.4 no longer states that the source vector's text is read from "
+        f"`{home}` and NOT from `:Source.summary` — that distinction is what "
+        f"stops a design embedding a topic lexicon under #10000")
+    assert _RETIRED_SUMMARY_BLUR not in text, (
+        f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
+        f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
+        f"reading it embeds `:Source.summary` and calls a bag of words a summary")
+
+    # ── §12.1b: the section that decides WHERE vectors live may not order the
+    #    design §9.4 forbids ──
+    footnote = _source_vector_footnote(text)
+    assert _RETIRED_VECTOR_FOOTNOTE not in footnote, (
+        f"§12.1b's `:Source` footnote is back to *\"§9.4's summary vector "
+        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — under #10000 an episodic "
+        f"`:Source.summary` is a topic lexicon, so that sentence tells a "
+        f"designer to embed the one field §9.4 says the vector must not read. "
+        f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
+        f"`summary` the Source holds is §4.4 metadata")
+    assert home in footnote, (
+        f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
+        f"decides where vectors live must point at the narrative's real home, "
+        f"or it leaves the *\"embed the summary already there\"* reading open")
+    #: §9.4 ③'s identity rule is the OTHER half of this footnote and is still
+    #: implemented; a rewrite that drops it would silently un-decide identity.
+    assert "identity is URL + content hash" in footnote, (
+        "§12.1b's `:Source` footnote no longer states §9.4 ③'s identity rule — "
+        "the footnote's two halves are *what the vector reads* and *how identity "
+        "is decided*; dropping the second re-opens `#3998`")
