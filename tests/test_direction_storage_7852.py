@@ -329,3 +329,61 @@ def test_find_operator_distinguishes_opposite_one_way_directions(sdk):
     a, b = _point(sdk, "a"), _point(sdk, "b")
     sdk.create_operator("IMPL", a["id"], [b["id"]], direction="->")
     assert sdk._find_operator("IMPL", [a["id"], b["id"]], direction="<-") is None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #10520 — a RAW-WRITTEN non-scalar direction is ABSENT, never a crash
+# ══════════════════════════════════════════════════════════════════════
+
+def test_a_raw_written_non_scalar_direction_reads_as_ABSENT_not_a_TypeError(sdk):
+    """#10520 — the ONE read-side normalizer must read junk as ABSENT.
+
+    `canonical_direction` tests membership in a frozenset and then does a dict
+    lookup on the STORED value. A raw-written non-scalar (list/map — reachable by
+    hand edit, a foreign/legacy writer, or a bulk import) is UNHASHABLE, so both
+    of those raise `TypeError: unhashable type: 'list'` instead of reading the
+    junk as absent. `None` already means "absent" to every consumer
+    (`direction_flows(None) == (True, True)` — the runtime's historical mutual
+    default), which is the same reading `claim_class.normalize` gives a junk
+    token: junk is ABSENT, never a third state and never a crash.
+
+    The EP LOAD path is the damage this pins: one junk property aborted a belief
+    run it is not about (`TortoiseEP._affected_factors` -> `factor_direction`
+    -> `direction_flows`).
+    """
+    for junk in (["sideways"], {"sideways": True}):
+        assert canonical_direction(junk) is None, (
+            f"a non-scalar {junk!r} must read as ABSENT (None), not be tested "
+            "for membership in the four-value frozenset")
+        assert direction_flows(junk) == (True, True), (
+            "an absent/unknown direction flows BOTH ways — the runtime's "
+            "historical mutual default")
+
+    # The stored-value route, on a real node: the EP load path raises on it.
+    a, b = _point(sdk, "raw junk direction source"), _point(sdk, "raw junk direction target")
+    op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) SET o.direction = ['sideways']",
+        params={"id": op["id"]},
+    )
+    proj = sdk._get_proj()
+    factors = TortoiseEP(proj)._affected_factors({a["id"]})  # must not raise
+    assert isinstance(factors, list)
+
+
+def test_a_raw_written_non_scalar_EDGE_direction_reads_as_ABSENT(sdk):
+    """#10520 — the same junk on a direct EDGE, through the door-local readers.
+
+    `create_direct_edge`/`invalidate_point` and the dedup comparison all read a
+    stored direction through the same normalizer, so a junk edge value is the
+    same crash on the write door rather than only on the load path.
+    """
+    a, b = _point(sdk, "raw junk edge source"), _point(sdk, "raw junk edge target")
+    sdk.create_direct_edge("IMPL", a["id"], b["id"])
+    sdk._get_proj().g.query(
+        "MATCH (:Point {id:$a})-[r:IMPL]->(:Point {id:$b}) "
+        "SET r.direction = ['sideways']",
+        params={"a": a["id"], "b": b["id"]},
+    )
+    assert canonical_direction(_edge_stored(sdk, a["id"], b["id"])) is None
+    assert direction_flows(_edge_stored(sdk, a["id"], b["id"])) == (True, True)
