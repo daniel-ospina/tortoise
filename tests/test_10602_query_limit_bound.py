@@ -305,3 +305,60 @@ def test_the_tag_arm_honours_a_lone_limit_like_the_structural_arm(stub_factory):
     # …and the paged form still reports the population
     paged = tortoise_query(tag="pricing", offset=0, limit=2)
     assert paged["total"] == 5 and paged["hasMore"] is True
+
+
+def test_every_editable_served_skill_that_reads_a_population_discloses_the_bound():
+    """Review round 5 (findings P2-1 / F2) — the SHIPPED consumers, not only the tool text.
+
+    #10602's cost does not land on the tool call, it lands on the skill an agent
+    loaded: a skill that presents a bounded structural read as a complete
+    enumeration makes its reader report a subset as the whole set.
+    `test_the_served_description_discloses_the_bound` above guards the served
+    `tools/list` text; this guards the other served artifact — the skills under
+    `website/apps/dashboard/public/skills/` — because round 4 fixed the tool text
+    while `analyse-for-contradictions` still said `tortoise_query(kind="decision")`
+    was "the committed decisions".
+
+    SCOPE IS "WHAT THIS TREE MAY EDIT". `config/served-skills-upstream.yml` pins
+    three skills as DERIVED mirrors of the MIT skills repo; editing one in place is
+    exactly the defect review round 5 reverted (P1-1), because the fix belongs
+    upstream and must come back through `--sync`. So a pinned skill is out of scope
+    HERE by construction — `how-to-use-tortoise`'s "Returns ALL Points" row is the
+    known gap that fix has to close, tracked as a follow-up rather than edited in
+    place in this repo. Every unpinned skill is in scope: its bytes live here.
+
+    Value whose presence makes this fail: an in-scope skill that issues a
+    `tortoise_query(kind…` read without the two things that make the bound usable —
+    the walk (`offset=`) and the signal it terminates on (`hasMore`).
+    """
+    from pathlib import Path
+
+    from tools import served_skills_parity as sp
+
+    repo = Path(__file__).resolve().parents[1]
+    served_root = repo / "website/apps/dashboard/public/skills"
+    manifest = sp.load_manifest(repo / sp.MANIFEST_REL)
+    pinned = {
+        Path(entry["served_path"]).parent.name
+        for entry in manifest["skills"].values()
+    }
+
+    checked, offenders = [], []
+    for skill in sorted(served_root.iterdir()):
+        doc = skill / "SKILL.md"
+        if not doc.is_file() or skill.name in pinned:
+            continue
+        text = doc.read_text(encoding="utf-8")
+        if "tortoise_query(kind" not in text:
+            continue  # does not issue a structural read — nothing to disclose
+        checked.append(skill.name)
+        if "hasMore" not in text or "offset=" not in text:
+            offenders.append(skill.name)
+
+    assert checked, (
+        "no served skill was examined — the walk found nothing, so this arm proves "
+        "nothing (a rename of the served-skills directory would do it)")
+    assert offenders == [], (
+        "a served skill reads a bounded population but does not tell its reader so "
+        f"(#10602 review P2-1): {offenders}. State the cap AND the walk — `offset=` "
+        "plus `hasMore` — or the skill reports a subset as a complete set.")
