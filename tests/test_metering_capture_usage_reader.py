@@ -21,6 +21,8 @@ degradation), not about FalkorDB.
 """
 from __future__ import annotations
 
+import io
+import tokenize
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +91,37 @@ _ALLOWED = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
 _ENFORCEMENT_CONSUMERS = {"allowance_gate.py"}
 
 
+def _text_without_comments(text):
+    """``text`` with every COMMENT token dropped — a comment is not a call site.
+
+    The pin is about a WIRED reference. The capture door's ``#10949`` declaration
+    names ``metering.get_capture_usage`` in prose to explain the gate's third
+    read, and a raw substring scan counted that sentence as a call site (measured
+    2026-11-04: PR #10935's ``test (e)`` redded on a comment in
+    ``hosted_api.py``). A ``#`` comment is prose ABOUT the code, so it must not
+    be able to fail this pin.
+
+    ⛔ The scope is exactly that narrow, and deliberately so — say it plainly
+    rather than claiming "documentation" generally: only COMMENT tokens are
+    removed. A STRING token still counts, INCLUDING a docstring, because the
+    pin's subject is a wired reference and
+    ``getattr(metering, "get_capture_usage")`` is one. A docstring that names
+    the reader can therefore still red this pin, and that residual is accepted:
+    no statement-context rule can separate a docstring that merely describes
+    the reader from one that is used to reach it, and the reference-shaped
+    false block it leaves is cheaper than a scan that stops seeing wirings.
+    A module ``tokenize`` cannot parse is returned WHOLE (fail-closed) — an
+    unreadable file must never read as a clean one, the same polarity as the
+    floor in ``test_the_gate_is_the_readers_only_consumer``.
+    """
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        kept = [tok.string for tok in tokens if tok.type != tokenize.COMMENT]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return text
+    return "\n".join(kept)
+
+
 def _scan_capture_call_sites(root):
     """Return ``(offending relative paths, every relative path actually read)``.
 
@@ -102,7 +135,8 @@ def _scan_capture_call_sites(root):
             continue
         rel = str(path.relative_to(root))
         scanned.append(rel)
-        if "get_capture_usage" in path.read_text(encoding="utf-8", errors="replace"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "get_capture_usage" in _text_without_comments(text):
             offenders.append(rel)
     return offenders, scanned
 
@@ -166,6 +200,35 @@ def test_the_scope_scan_flags_a_wired_call_site(tmp_path):
     offenders, scanned = _scan_capture_call_sites(tmp_path)
     assert offenders == ["hosted_api.py"]
     assert scanned == ["clean.py", "hosted_api.py"]
+
+
+def test_the_scope_scan_ignores_a_comment_that_names_the_reader(tmp_path):
+    """Non-vacuity, other direction: a COMMENT is not a call site.
+
+    The capture door's ``#10949`` declaration names the reader to explain the
+    third read, and a raw substring scan read that prose as a wired call site —
+    it redded CI on PR #10935 (``test (e)``) while the code was correct.
+    """
+    (tmp_path / "hosted_api.py").write_text(
+        "# the meter is metering.get_capture_usage, resolved off-loop\nX = 1\n",
+        encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert offenders == []
+    assert scanned == ["hosted_api.py"]
+
+
+def test_the_scope_scan_still_flags_a_dynamic_reference_in_a_string(tmp_path):
+    """The comment strip must not become an identifier-only scan.
+
+    A reference assembled as a string (``getattr(metering,
+    "get_capture_usage")``) is still a wiring of the reader, so STRING tokens
+    stay in scope — only COMMENT tokens are dropped.
+    """
+    (tmp_path / "tool_registry.py").write_text(
+        'READER = getattr(metering, "get_capture_usage")\n', encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert offenders == ["tool_registry.py"]
+    assert scanned == ["tool_registry.py"]
 
 
 def test_the_scope_scan_exempts_only_the_defining_modules(tmp_path):
