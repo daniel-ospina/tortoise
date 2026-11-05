@@ -72,9 +72,9 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — `from datetime import
-# UTC` is a 3.11+ name, so on an older interpreter this module would die with an
-# unattributed ImportError before any later-placed guard could run (D9 shape).
+# #5128: refuse a <3.12 interpreter before the imports below — `from datetime import UTC`
+# is module-level and 3.11+, so an older interpreter raises ImportError there before any
+# later guard could run (the guard must be the first statement after the docstring).
 # ⛔ The invocation named is the SCRIPT form: `tests/test_entry_point_python_guard.py`
 # treats `tools/<x>.py` as a loose script (a package module needs a directory chain
 # under `tools/`), so `-m tools.ci_runner_labels` is NOT this file's invocation.

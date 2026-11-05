@@ -42,6 +42,14 @@
 # YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep
 # rationale here or in the docs, never in an ad-hoc comment in the body.
 #
+# LOWERED 82 → 76 on 2026-11-04 by PR #10906 (#4282 Phase 3.2, the first tool batch:
+# the five `run_onboarding` tools deleted). The pin is lowered for the same reason it is
+# raised elsewhere — it is only meaningful at the live surface: left at 82 it would carry
+# six slots of slack, so re-adding any of the five (the regression
+# `tests/test_tool_registry.py` pins) would pass `tools/surface-guard.py` green.
+# ⛔ 76 IS DELIBERATE, NOT AN ANOMALY: if you are reading `tools: 76` next to a live 76
+# and wondering whether to "restore" 82, do not — that re-opens the slack.
+#
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in
 # docs/product/canonical-mcp-tools.md and docs/product/beta-sdk-surface.md; compliance
@@ -49,7 +57,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: ee2a1589195d499a03352e427ee955c1ce281f5b
+cut_at_commit: 61af70a1ca
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -493,13 +501,13 @@ response_fields:
     never re-labels (a Point is a different record, not a relabel of an entity), so `kind_layer_routed` cannot fire
     here. A FOURTH code rides it too (#10368): `terminal_fold_refused`, when the write DEDUP-hits a point that is
     already a terminal claim and the fold carries NO temporal prop while it would write anything else — a caller
-    prop and/or an authored word — because a dedup hit never writes onto a settled belief: on the content leg the caller never named the
-    point (a content coincidence picked the target), and a `key`-resolved hit is an identity match, not a licence
-    to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold, #10377). The whole fold is dropped, the HIT is still reported, and the
-    message names `update_point` as the addressed route that does revise a dead claim deliberately. The journaled
-    provenance retrofit (#7704) still folds, so an evidence-bearing re-run keeps its source. All of these codes ride
-    the SAME key on the dedup-hit return, so a re-run reports them together rather than dropping
-    one'
+    prop and/or an authored word — because a dedup hit never writes onto a settled belief: on the content leg the
+    caller never named the point (a content coincidence picked the target), and a `key`-resolved hit is an identity
+    match, not a licence to rewrite a settled record (#6110 decides identity; ingest already refuses the same fold,
+    #10377). The whole fold is dropped, the HIT is still reported, and the message names `update_point` as the addressed
+    route that does revise a dead claim deliberately. The journaled provenance retrofit (#7704) still folds, so
+    an evidence-bearing re-run keeps its source. All of these codes ride the SAME key on the dedup-hit return, so
+    a re-run reports them together rather than dropping one'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
     whose fold actually applied, so that response stays byte-identical
 - response: tortoise_check_structure
@@ -691,22 +699,22 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 81
+  tools: 76
   sdk_public_methods: 150
   retired: 18
   keyword_distribution:
     fetch: 14
-    create: 17
+    create: 15
     update: 8
     delete: 6
     list: 9
     find: 6
     trace: 2
-    check: 8
-    link: 5
-    operate: 6
+    check: 7
+    link: 4
+    operate: 5
 high_water_counts:
-  tools: 82
+  tools: 76
   sdk_public_methods: 150
 retired:
 - name: tortoise_get
@@ -2572,87 +2580,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_onboarding_demo_create
-  served_from: tortoise/mcp_server.py:151ec8a9d8b34531
-  served_attributes: 734ca6ea44c83df3
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'Create the demo epistemic graph (4 layers) for this team. The SEED is sentinel-gated (a repeat files no
-    new nodes), but the call is NOT idempotent: the handler then writes its onboarding receipt, whose CAS leg re-stores
-    the state and advances state_version on every repeat.'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_seed
-  served_from: tortoise/mcp_server.py:cbd4174af9f85381
-  served_attributes: d36e38d2db6e5d71
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'File the two onboarding anchor Subjects (Organization/organization + User/naturalPerson linked memberOf)
-    — interactive, ontology-precise (#1999 W3): call without names to discover gaps/collisions, with user-confirmed
-    names to file.'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_github_status
-  served_from: tortoise/mcp_server.py:632fee943d809478
-  served_attributes: 734ca6ea44c83df3
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: Return GitHub connection status for this team (Q1 verify).
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_manage_sources
-  served_from: tortoise/mcp_server.py:aef7217e61a2d4ef
+  served_from: tortoise/mcp_server.py:a7e74a57ecd0efb5
   served_attributes: c535c2fe97bf2889
   family: onboarding
   family_rank: 6
@@ -2667,62 +2596,12 @@ rows:
     source: github_issues|github_documents|agent_sessions. list returns EVERY source with its current state and
     its default, in one call. enable/disable act only within the caller''s own permission for this team — a key
     without graphs:write is REFUSED, never self-granted — and no action accepts, returns or echoes a credential:
-    authorising GitHub stays a host/user-side step (use tortoise_onboarding_github_connect for that). source is
-    required for enable/disable and ignored by list. The two GitHub sources share ONE connection but have SEPARATE
-    enable intent (#1924), so disable switches off only the named source and leaves the connection and the sibling
-    source intact; that flag is intent-only today and the payload says so. agent_sessions is ON by default (an optional
-    off-switch, #1927): disable stops recording; enable there reports already-on rather than changing a recorded
-    default.'
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_github_connect
-  served_from: tortoise/mcp_server.py:44609227501e5ee9
-  served_attributes: 57e846f8c03eb41e
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: link
-  keyword_rank: 9
-  cluster: null
-  canonical: null
-  job: Initiate GitHub OAuth — returns authorize URL + CSRF state (Q1).
-  dependency: 'handler-served: no declared SDK link'
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_onboarding_state
-  served_from: tortoise/mcp_server.py:700ed9a50405ecdf
-  served_attributes: 734ca6ea44c83df3
-  family: onboarding
-  family_rank: 6
-  served: http
-  sdk_method: ''
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: Return this team's onboarding progress (Q6 verification).
+    authorising GitHub stays a host/user-side step — the OAuth handshake is deliberately not an agent-callable operation
+    (it runs from the dashboard, `POST /v1/onboarding/github/connect`). source is required for enable/disable and
+    ignored by list. The two GitHub sources share ONE connection but have SEPARATE enable intent (#1924), so disable
+    switches off only the named source and leaves the connection and the sibling source intact; that flag is intent-only
+    today and the payload says so. agent_sessions is ON by default (an optional off-switch, #1927): disable stops
+    recording; enable there reports already-on rather than changing a recorded default.'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: never called, tooling, docs
