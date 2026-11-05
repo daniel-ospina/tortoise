@@ -3804,10 +3804,19 @@ def tortoise_query(kind: str | None = None,
     # (its only drop list is PRIVATE_FILTER_KEYS), so `filters={"kind": ...}`
     # produced the same duplicate-argument text — the round-6 review found the
     # guard checking 2 of the 4 names its own refusal message advertises.
+    # The set is READ from its owner (`tortoise/security.py`), not re-typed here:
+    # a second copy is what drifted, and a `frozenset` literal in this handler is
+    # not even fingerprint-stable — `tools/surface_manifest.py::_code_digest`
+    # reprs `co_consts`, and a 3-element frozenset's repr order follows string
+    # hashes, so `tortoise_query`'s recorded `served_from` digest would differ
+    # between CI processes (measured: 4 distinct digests across 6 PYTHONHASHSEED
+    # values). A name lookup keeps the digest deterministic.
     # `tag`/`text` are not reached here: the `tag` arm ignores `filters` and the
     # `text` arm never forwards them, so neither can collide.
+    from tortoise.security import _RESERVED_FILTER_KEYS
+
     _filters = _public_filters(filters)
-    _collide = sorted(set(_filters) & {"skip", "limit", "kind"})
+    _collide = sorted(set(_filters) & _RESERVED_FILTER_KEYS)
     if _collide:
         return _SafeError({
             "error": f"Reserved filter key: {_collide[0]!r}. This name collides "
