@@ -1942,7 +1942,7 @@ def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path
 
 
 def test_child_invokes_only_the_one_lander(tmp_path):
-    """#1178: no second lander. The child argv is
+    """No second lander. The child argv is
     `bash -c <self-naming wrapper> rail <artifact> <rail-argv…>` — one lander
     invocation, nothing else."""
     co = make_checkout(tmp_path)

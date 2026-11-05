@@ -17,12 +17,14 @@ Nothing was wrong with the rail's verdict — the verdict never got to exist,
 because it was going to be delivered by a process whose lifetime was the lane's.
 An actuator that dies before its work finishes is not an actuator.
 
-THE SHAPE (and why it is not a second lander, #1178)
+THE SHAPE (and why it is not a second lander)
 ----------------------------------------------------
 This tool CONTAINS NO MERGE LOGIC AT ALL. It launches `scripts/admin-merge.sh`
-as it is, with its arguments, and nothing else: every gate (tested-head, moved
-head, baseline, evaluated tree, exemption decision, review attestation) stays in
-the one lander. Two verbs:
+as it is, with its arguments, and nothing else — one lander invocation, and
+`tests/test_rail_detach.py::test_child_invokes_only_the_one_lander` pins it
+(`body.count("admin-merge.sh") == 1`, no `gh pr merge`, no `--admin`). Every gate
+(tested-head, moved head, baseline, evaluated tree, exemption decision, review
+attestation) stays in the one lander. Two verbs:
 
     start <PR>    detach the rail into its own SESSION (setsid), with a pid, its
                   own log, and a durable artifact it owns; return immediately.
