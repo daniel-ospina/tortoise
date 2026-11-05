@@ -501,8 +501,10 @@ no verdict: after a killed run, check `git ls-remote origin 'refs/heads/gh-write
 - `exit 0` = `GH-WRITE-OK(<remote>) — push confirmed by ls-remote; <cleanup>` — the credential can
   write **repository contents**, measured by the one operation that needs it: a throwaway ref was
   **created and confirmed on the remote**, then deleted — unless cleanup was switched off or could not
-  be confirmed. That is the `git push` path, so a lane can publish its branch, which is what every
-  later step needs a remote ref for. Read the `cleanup` clause rather than assuming the remote is
+  be confirmed. That is the `git push` path, so a lane can publish its branch (which is what every
+  later step needs a remote ref for) — provided the branch name is one the repo's rulesets permit; a
+  pattern-restricted repo refuses a lane's own branch exactly as it refuses the probe, which is what
+  `--probe-ref-prefix` diagnoses. Read the `cleanup` clause rather than assuming the remote is
   clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked for), or `deletion UNCONFIRMED` (the delete
   or its read-back failed — the credential still wrote; check the remote).
   ⛔ Under `--json` **no OK line is printed at all** — stdout is pure JSON and the verdict lives in
@@ -514,20 +516,27 @@ no verdict: after a killed run, check `git ls-remote origin 'refs/heads/gh-write
   `REASONS` is a **closed set of ten** and the module docstring publishes all of it. **Ten tokens,
   three groupings — plus one token that reads like a refusal and is not:**
   - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network),
-    `remote-unreachable`. If the run's own detail names a branch protection / ruleset rather than a
-    credential refusal, re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before
-    concluding the credential is read-only — otherwise a constrained repo parks deliverable work.
+    `remote-unreachable`. If the failure detail carries git's own protection evidence — `protected
+    branch`, `policy prohibits`, or a `GH006`/`GH013` rule violation — rather than a credential
+    refusal, re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before concluding
+    the credential is read-only; otherwise a constrained repo parks deliverable work.
   - **NO VERDICT, re-run — never "read-only"** — `push-unknown` (the push did not COMPLETE: timed
     out, signalled, no output), `internal-error` (the probe itself failed), and `verify-mismatch`
     (the push claimed success but the confirming `ls-remote` did not show the ref **at our sha** —
     which also covers a read that could not be performed, since an unreadable target is not a
     proven one). Folding any of these into `push-refused` parks deliverable work on a slow or
     OOM-killed push; the closed set is pinned by
-    `test_the_contract_publishes_the_closed_reason_set`.
+    `test_the_contract_publishes_the_closed_reason_set`. ⛔ If either unwound AFTER its push, a
+    probe ref may be sitting on the remote — the detail names it; delete it (see `delete-failed`).
   - **environment, not the credential** — `git-absent`, `not-a-repo` (`--repo` is a CHECKOUT PATH,
     never `owner/name`), `no-remote` (no remote of that name), `no-head` (`HEAD` does not resolve).
-  - `delete-failed` is **litter, not capability** — the push already succeeded; a survivor ref is
-    left on the shared remote, so re-run and clean up. Never read it as "lanes cannot deliver".
+  - `delete-failed` is **litter, not capability** — the push already succeeded. ⛔ **A RE-RUN DOES NOT
+    CLEAN IT**: every run mints a NEW ref (`<utc>-<pid>-<rand>`) and deletes only its own, so a
+    remote that refuses deletes grows one survivor per run. The tool names it — `PROBE REF SURVIVED
+    on <remote>: refs/heads/<ref>` on stderr, and `probe_ref` in `--json` — so delete THAT ref
+    (`git push <remote> --delete <ref>`), then re-run; if the remote refuses the delete too, re-probe
+    under a namespace it will let you create **and** delete (`--probe-ref-prefix`). Never read it as
+    "lanes cannot deliver".
 - `exit 2` = usage (argparse's own code, deliberately not a verdict).
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
@@ -555,9 +564,13 @@ create, a PR comment, a constituent-PR close, or an issue close — any of those
 whose contents half is fine, and vice versa. #10930 records the requirement exactly: a **landing**
 lane's preflight must prove **three grants** — `Contents`, `Pull requests`, `Issues` — **not two**,
 because #10945's two-leg probe passed tokens that then died at the issue-close step. This gate
-proves one of the three. It also proves the credential **`git`** resolves for this checkout's push
-URL; `--repo` is a CHECKOUT PATH that is asserted, not a redirect, so pass the checkout you will
-push from.
+proves one of the three. If your lane LANDS — comments the evidence on the PR, closes constituents,
+closes delivered issues — `exit 0` proves none of that, so prove those two surfaces by the operation
+itself before you start: read → `PATCH` the title back unchanged → re-read, once on an issue number
+and once on a PR number (#10930 measured it residue-free), or escalate rather than build. It also
+proves the credential **`git`** resolves for this checkout's push URL — not the one **`gh`** resolves,
+which can be a different token (that is why the surfaces above stay unproven); `--repo` is a CHECKOUT
+PATH that is asserted, not a redirect, so pass the checkout you will push from.
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
