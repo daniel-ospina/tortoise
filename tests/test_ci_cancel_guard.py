@@ -359,6 +359,12 @@ def test_a_fork_head_never_decides_our_branch(fixture):
     fixture.apply("prs.json", pr(PR_HEAD_MOVED, repo="someone/tortoise-fork"))
     r = guard(fixture, "41840910128", "--apply")
     assert r.returncode == 3
+    # ⛔ NAME THE ARM, not just the exit code (round-9 review, F1). Both halves of clause 4
+    # return 3, so an exit-code-only assertion lets this case be satisfied by the OTHER
+    # arm if the PR-map keying ever changes — the exact confusion that left the run-side
+    # arm unpinned in the first place. `no-open-pr-on-branch` is this side's arm.
+    assert "no-open-pr-on-branch" in r.stdout, r.stdout
+    assert "foreign-head-repo" not in r.stdout, r.stdout
     assert fixture.cancelled() == []
 
 
