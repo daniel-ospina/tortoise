@@ -12,10 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 64 mutation rows have now been run
-(**61 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled), plus M64-M65 from cycle 15 (**63 distinct** in total). **65 are KILLED**; M49 survives
-ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. 72 mutation rows have now been run
+(**69 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **71 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -29,9 +28,16 @@ ALONE by the documented layering:
     M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60, cycle-14 added M61-M63 (all KILLED).
-Cycle-15 added M64-M65, each re-run individually at this head rather than inferred (both KILLED):
-  M64 `_warn_write_failed` print unguarded .... KILLED   M65 `_mutable_words_in` forks the vocabulary .... KILLED
+Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60, cycle-14 added M61-M63.
+The fixer lane then added M64-M65 (its own numbering) and cycle-15 added M66-M71 — ⛔ TWO LANES
+NUMBERED INDEPENDENTLY, so the cycle-15 ids were renumbered from their first run (M64-M69) to
+M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly one mutation:
+  M64 `_warn_write_failed` print unguarded ........... KILLED   M65 `_mutable_words_in` forks the vocabulary ... KILLED
+  M66 required_set fabricates `contexts` again ....... KILLED   M67 `repo.labels` empty name allowed ......... KILLED
+  M68 workflow `id` type check removed ............... KILLED   M69 `node_id` no longer required .............. KILLED
+  M70 OverflowError dropped from ttl coercion ........ KILLED   M71 OverflowError dropped from now coercion .. KILLED
+⛔ M67 SURVIVED on its first test, which passed a DICT page where a LIST page is required — the
+SHAPE guard satisfied it and the empty-name check was unreachable. Fixed, then KILLED.
 
   M52 runner `labels` ABSENT read as empty ..... KILLED   M51 `visibility` cached again ......... KILLED
 
@@ -1044,7 +1050,9 @@ def test_store_is_atomic_a_failed_replace_leaves_the_old_entry_intact(
     monkeypatch.setattr(C.os, "replace", boom)
 
     def reader_then_crash(key: str) -> bytes:
-        return json.dumps({"id": 999, "full_name": "o/r", "default_branch": "main"}).encode()
+        return json.dumps(
+            {"id": 999, "node_id": "N999", "full_name": "o/r", "default_branch": "main"}
+        ).encode()
 
     got = _read(
         "repo.metadata",
@@ -1254,7 +1262,9 @@ def test_cli_no_cache_reads_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     def fake_reader(repo: str, branch: str):
         def _r(key: str) -> bytes:
             calls.append(key)
-            return json.dumps({"id": 5, "full_name": "o/r", "default_branch": "main"}).encode()
+            return json.dumps(
+                {"id": 5, "node_id": "N5", "full_name": "o/r", "default_branch": "main"}
+            ).encode()
 
         return _r
 
@@ -1319,7 +1329,9 @@ def test_cli_honours_a_tightened_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyP
     def fake_reader(repo: str, branch: str):
         def _r(key: str) -> bytes:
             calls.append(key)
-            return json.dumps({"id": 1, "full_name": "o/r", "default_branch": "main"}).encode()
+            return json.dumps(
+                {"id": 1, "node_id": "N1", "full_name": "o/r", "default_branch": "main"}
+            ).encode()
 
         return _r
 
@@ -1562,7 +1574,9 @@ def test_required_set_with_only_checks_projects() -> None:
     out = C.INVARIANTS["repo.required_set"].project(
         [{"required_status_checks": {"checks": [{"context": "docs"}]}}]
     )
-    assert out == {"contexts": [], "checks": ["docs"]}
+    # ⛔ `contexts` is OMITTED, not fabricated as []: an empty list for a key the body did not
+    # carry reads as "no required checks" on the merge-gating key.
+    assert out == {"checks": ["docs"]}
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -1601,7 +1615,7 @@ def test_the_documented_shapes_still_project() -> None:
     """The added strictness must not refuse the shapes GitHub actually sends."""
     assert C.INVARIANTS["repo.required_set"].project(
         [{"required_status_checks": {"contexts": ["docs"]}}]
-    ) == {"contexts": ["docs"], "checks": []}
+    ) == {"contexts": ["docs"]}
     assert C.INVARIANTS["repo.workflows"].project(
         [{"workflows": [{"id": 1, "path": ".github/workflows/ci.yml", "state": "active"}]}]
     ) == [{"id": 1, "path": ".github/workflows/ci.yml", "state": "active"}]
@@ -1645,7 +1659,7 @@ def test_cli_no_cache_emits_the_SAME_SCHEMA_as_the_cached_path(
         == 0
     )
     assert cached.buffer.getvalue() == live.buffer.getvalue()
-    assert json.loads(live.buffer.getvalue()) == {"contexts": ["docs"], "checks": []}
+    assert json.loads(live.buffer.getvalue()) == {"contexts": ["docs"]}
 
 
 @pytest.mark.parametrize(
@@ -2050,3 +2064,79 @@ def test_the_decision_and_the_refusal_message_AGREE_on_every_key(key: str) -> No
     assert C._is_mutable_name(key) == bool(C._mutable_words_in(key)), (
         f"{key!r}: decision={C._is_mutable_name(key)} words={C._mutable_words_in(key)!r}"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# CYCLE-15 — never fabricate a key; type the list projections; no denylist on coercion
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_required_set_NEVER_fabricates_a_key_the_body_did_not_carry() -> None:
+    """⛔ Returning `"contexts": []` for a body that only sent `checks` is an empty required set
+    inferred from an ABSENCE — and a merge gate reading `contexts` (the field legacy protection
+    uses) then sees "no required checks" for a branch that requires `docs`."""
+    checks_only = C.INVARIANTS["repo.required_set"].project(
+        [{"required_status_checks": {"checks": [{"context": "docs"}]}}]
+    )
+    assert checks_only == {"checks": ["docs"]}
+    assert "contexts" not in checks_only
+
+    contexts_only = C.INVARIANTS["repo.required_set"].project(
+        [{"required_status_checks": {"contexts": ["docs"]}}]
+    )
+    assert contexts_only == {"contexts": ["docs"]}
+    assert "checks" not in contexts_only
+
+
+def test_required_set_null_still_answers_both_keys_empty() -> None:
+    """The legitimate "nothing configured" answer names BOTH, so it cannot be misread."""
+    assert C.INVARIANTS["repo.required_set"].project([{"required_status_checks": None}]) == {
+        "contexts": [],
+        "checks": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "body"),
+    [
+        # ⛔ a LIST page: the dict spelling `[{"name": ""}]` is refused by the SHAPE guard instead,
+        # leaving the empty-name check unreachable — measured, M65 SURVIVED on it.
+        ("repo.labels", [[{"name": ""}]]),
+        ("repo.labels", [[{"name": 5}]]),
+        ("repo.workflows", [{"workflows": [{"id": "abc", "path": "a", "state": "active"}]}]),
+        ("repo.workflows", [{"workflows": [{"id": True, "path": "a", "state": "active"}]}]),
+        ("repo.workflows", [{"workflows": [{"id": 1, "path": "", "state": "active"}]}]),
+        ("repo.workflows", [{"workflows": [{"id": 1, "path": "a", "state": ""}]}]),
+        ("repo.metadata", [{"id": 1, "node_id": None, "full_name": "o/r", "default_branch": "m"}]),
+    ],
+)
+def test_the_list_projections_type_check_too(key: str, body) -> None:
+    """⛔ "wrong type / empty / explicit null are refused" was uniform for `_pick_last` only."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS[key].project(body)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan"), 10**400])
+def test_a_ttl_that_cannot_be_an_int_is_refused_not_OverflowError(bad, tmp_path: Path) -> None:
+    """⛔ `int(inf)` raises OverflowError, which is NOT a ValueError, so a denylist here let it
+    escape `read()`'s contract and reach the CLI's `except (MutableReadRefused, TtlNotPermitted,
+    Unreadable)` as a traceback."""
+    r = Counter()
+    with pytest.raises(C.TtlNotPermitted):
+        _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path, ttl_s=bad)
+    assert r.n == 0
+
+
+def test_a_clock_that_cannot_be_a_float_is_refused_not_OverflowError(tmp_path: Path) -> None:
+    """The identical hole on the `now` conversion: `float(10**400)` raises OverflowError."""
+    r = Counter()
+    with pytest.raises(C.TtlNotPermitted):
+        _read("repo.metadata", now=10**400, reader=r, cache_dir=tmp_path)
+    assert r.n == 0
+
+
+@pytest.mark.parametrize("nonfinite", [float("inf"), float("-inf"), float("nan")])
+def test_a_non_finite_clock_is_a_MISS_not_a_refusal(nonfinite, tmp_path: Path) -> None:
+    """The other half: `inf` IS a float, so it can only ever fail to prove freshness — a MISS."""
+    r = Counter()
+    out = _read("repo.metadata", now=nonfinite, reader=r, cache_dir=tmp_path)
+    assert json.loads(out)["id"] == 1
+    assert r.n == 1

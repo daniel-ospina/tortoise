@@ -277,7 +277,9 @@ def _project_repo_metadata(docs: Sequence[Any]) -> Any:
         docs,
         ("id", "node_id", "full_name", "default_branch"),
         key="repo.metadata",
-        required=("id", "full_name", "default_branch"),
+        # `node_id` is what a GraphQL caller addresses the repo by; an explicit null must not
+        # survive as a complete-looking identity (the `{"id": null, …}` note above).
+        required=("id", "node_id", "full_name", "default_branch"),
         str_fields=("node_id", "full_name", "default_branch"),
         int_fields=("id",),
     )
@@ -331,7 +333,16 @@ def _project_required_set(docs: Sequence[Any]) -> Any:
         and all(isinstance(c, dict) and isinstance(c.get("context"), str) for c in checks)
     ):
         raise Unreadable("repo.required_set: `checks` is not a list of {context} objects")
-    return {"contexts": list(contexts or []), "checks": [c["context"] for c in (checks or [])]}
+    # ⛔ NEVER FABRICATE A KEY THE BODY DID NOT CARRY. Returning `"contexts": []` for a body that
+    # only sent `checks` is an empty required set inferred from an absence — and a merge gate
+    # reading `contexts` (the field legacy protection uses) then sees "no required checks" for a
+    # branch that requires `docs`. An OMITTED key cannot be misread as "none".
+    out: dict[str, Any] = {}
+    if contexts is not None:
+        out["contexts"] = list(contexts)
+    if checks is not None:
+        out["checks"] = [c["context"] for c in checks]
+    return out
 
 
 def _project_labels(docs: Sequence[Any]) -> Any:
@@ -339,8 +350,10 @@ def _project_labels(docs: Sequence[Any]) -> Any:
     out = []
     for page in docs:
         for item in page:
-            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-                raise Unreadable(f"repo.labels: entry {item!r} is not a label")
+            if not isinstance(item, dict) or not (
+                isinstance(item.get("name"), str) and item["name"]
+            ):
+                raise Unreadable(f"repo.labels: entry {item!r} is not a named label")
             out.append(item["name"])
     return out
 
@@ -355,8 +368,13 @@ def _project_workflows(docs: Sequence[Any]) -> Any:
             # `[{}]` AND `[{"id": null, "path": null, "state": null}]` both used to project to a
             # workflow list naming no workflow, cached for an hour. Null is as useless as absent.
             raise Unreadable(f"repo.workflows: entry has null {missing} — not a workflow")
-        if not isinstance(w["path"], str) or not isinstance(w["state"], str):
-            raise Unreadable("repo.workflows: entry has a non-string path/state")
+        # ⛔ `id` is what a caller ADDRESSES a workflow by, so a string (or a bool) must not pass,
+        # and an EMPTY path/state is as useless as a null one.
+        if not isinstance(w["id"], int) or isinstance(w["id"], bool):
+            raise Unreadable(f"repo.workflows: entry id {w['id']!r} is not an int")
+        for f in ("path", "state"):
+            if not isinstance(w[f], str) or not w[f]:
+                raise Unreadable(f"repo.workflows: {f!r} is not a non-empty string")
         # `state` here is the DEFINITION's enabled/disabled state on the default branch —
         # invariant on this timescale. It is not a run's state.
         out.append({k: w.get(k) for k in ("id", "path", "state")})
@@ -1075,7 +1093,10 @@ def read(
     # inside the freshness test — an unhandled crash where the contract promises "any doubt → MISS".
     try:
         now = float(now)
-    except (TypeError, ValueError) as exc:
+    # ⛔ OverflowError IS NOT A ValueError: `float(10**400)` escaped this and crashed out of
+    # `read()`, past the contract, past `main()`'s handlers — the very denylist mistake `_load`
+    # documents having fixed, re-committed here.
+    except (TypeError, ValueError, OverflowError) as exc:
         raise TtlNotPermitted(f"now must be a number of seconds, got {now!r}") from exc
     # Defence in depth for guard 2: the IMPORT-TIME check runs once, so a spec inserted straight
     # into INVARIANTS afterwards (bypassing declare_invariant) would otherwise be read and cached
@@ -1099,7 +1120,7 @@ def read(
             )
     try:
         effective = ceiling if ttl_s is None else int(ttl_s)
-    except (TypeError, ValueError) as exc:  # same conversion hole that was fixed for `now`
+    except (TypeError, ValueError, OverflowError) as exc:  # same conversion hole as `now`
         raise TtlNotPermitted(f"ttl_s must be a positive int, got {ttl_s!r}") from exc
     if effective <= 0:
         raise TtlNotPermitted(f"ttl_s must be positive, got {ttl_s!r}")
