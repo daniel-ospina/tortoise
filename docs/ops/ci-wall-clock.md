@@ -182,9 +182,13 @@ SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitt
 watchdog + 6 m embedder + **~6.7 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 3 m 03 s, 10:21:30 → 10:24:32, plus 3 m 36 s of uncapped setup steps to the suite's
 first line, 10:24:32.98 → 10:28:58.91 minus the embedder's own 50 s — run 42000057137, job
-`test (d)`) + the 9 m bounded save pin the workflow carries (#11063 — the row's own `~9 m`, now
-enforced by `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`)
-+ ~0.4 m last-failed save = 59.1 m against 90, x 1.5 = 88.6) — and that watchdog comes from
+`test (d)`) + **no cache-write term at all** — #11063 removed this job's uv+pip save instead of
+bounding it, because the pool's own measured upload (0.9 MB/s sustained, 3,019,898,880 B in
+3,412 s, cancelled at 77.8% of a 3,882,423,064 B payload) needs ~72 min, more headroom than this cap
+has; a bounded save could only burn its bound and never write the key, and
+`tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` now pins the
+ABSENCE of a writer + ~0.4 m last-failed save = 49 m against 90, x 1.5 = 73.5) — and that watchdog
+comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
@@ -196,7 +200,7 @@ cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at
 30). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
-because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2816-2818`) and so
+because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2742-2744`) and so
 writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
 move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
 
