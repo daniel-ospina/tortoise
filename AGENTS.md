@@ -504,11 +504,11 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   write **repository contents**, measured by the one operation that needs it: a throwaway ref was
   **created and confirmed on the remote**, then deleted — unless cleanup was switched off or could not
   be confirmed. That is the `git push` path, so a lane can publish its branch (which is what every
-  later step needs a remote ref for) — provided the branch name is one the repo's rulesets permit; a
-  pattern-restricted repo refuses a lane's own branch exactly as it refuses the probe, which is what
-  `--probe-ref-prefix` diagnoses. Read the `cleanup` clause rather than assuming the remote is
-  clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked for), or `deletion UNCONFIRMED` (the delete
-  or its read-back failed — the credential still wrote; check the remote).
+  later step needs a remote ref for) — subject to the branch-ruleset caveat in the `push-refused`
+  bullet below, which is the one case where a writable credential is refused. Read the `cleanup`
+  clause rather than assuming the remote is clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked
+  for), or `deletion UNCONFIRMED` (the delete or its read-back failed — the credential still wrote;
+  check the remote).
   ⛔ Under `--json` **no OK line is printed at all** — stdout is pure JSON and the verdict lives in
   its `writable` / `cleaned_up` fields, so a caller that greps for `GH-WRITE-OK` must not pass
   `--json`. The `GH-WRITE-UNAVAILABLE` marker is different: it goes to stderr in **both** modes.
@@ -519,11 +519,15 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   `REASONS` is a **closed set of ten** and the module docstring publishes all of it. **Ten tokens,
   three groupings — plus one token that reads like a refusal and is not:**
   - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network).
-    If the failure detail carries git's own protection evidence — `protected branch`, `policy
-    prohibits`, or a `GH006`/`GH013` rule violation — rather than a credential refusal, re-run once
-    with `--probe-ref-prefix <a namespace the ruleset allows>` before concluding the credential is
-    read-only; otherwise a constrained repo parks deliverable work. (The failing step keeps only its
-    last 800 characters, so if the code itself is truncated, read the rule text rather than
+    ⚠️ **A ruleset that restricts branch *creation* to a pattern (say `main`/`fix/*`) can refuse the
+    PROBE's namespace `gh-write-preflight/…` while permitting YOUR OWN branch** — the tool's own
+    STATED RESIDUAL, and it reports `push-refused` for a credential that CAN write. So a
+    `push-refused` is not proof your branch is refused: when the failure detail carries git's own
+    protection evidence — `protected branch`, `policy prohibits`, or a `GH006`/`GH013` rule
+    violation — re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before
+    concluding the credential is read-only and reporting BLOCKED. Otherwise you park work that would
+    have landed, which is the failure this whole rule exists to prevent. (The failing step keeps only
+    its last 800 characters, so if the code itself is truncated, read this bullet rather than
     concluding "read-only".)
   - **NO VERDICT, re-run — never "read-only"** — `push-unknown` (the push did not COMPLETE: timed
     out, signalled, no output), `internal-error` (the probe itself failed), `remote-unreachable` (the
@@ -534,10 +538,11 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
     could not be performed, since an unreadable target is not a proven one). Folding any of these
     into `push-refused` parks deliverable work on a slow, unreachable or OOM-killed push; the closed
     set is pinned by `test_the_contract_publishes_the_closed_reason_set`. ⛔ If any of them unwound
-    AFTER its push, a probe ref may be sitting on the remote. `push-unknown`'s detail names no ref:
-    read `cleaned_up` / `leftover_ref` / `probe_ref` instead, because the survivor note is appended
-    under ANY reason (`delete-failed` is stamped only when nothing else explains the failure) — then
-    delete that ref as the `delete-failed` bullet says.
+    AFTER its push, a probe ref may be sitting on the remote. Do not rely on the detail line to name
+    it — read `cleaned_up` / `leftover_ref` / `probe_ref` instead, because the detail may name no ref
+    at all (it is stdout+stderr, truncated to the last 800 characters) and the survivor note is
+    appended under ANY reason (`delete-failed` is stamped only when nothing else explains the
+    failure) — then delete that ref as the `delete-failed` bullet says.
   - **environment, not the credential** — `git-absent`, `not-a-repo` (`--repo` is a CHECKOUT PATH,
     never `owner/name`), `no-remote` (no remote of that name), `no-head` (`HEAD` does not resolve).
   - `delete-failed` is **litter, not capability** — the push already succeeded. ⛔ **A RE-RUN DOES NOT
