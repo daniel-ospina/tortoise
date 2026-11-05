@@ -20,7 +20,7 @@ system of record for every layer; FalkorDB is a derived hot cache.** The one exc
 
 **Measured at:** `origin/main@3ac6b1636` on 2026-11-05, after review cycle 1. This lane's first reading was at
 `641e5f1b3`, twelve commits earlier, and **three of its load-bearing rows were stale within that window** —
-#10185 and #10671 both closed, and the `search_keys` narrowing landed inside a batch fold. Two more were
+issues #10185 and #10671 both closed, and the `search_keys` narrowing landed inside a batch fold. Two more were
 **simply wrong** (#10620 is an unrelated docs PR; the detection machinery this plan first called "existing" does
 not exist in code). §10 records every correction so the next lane does not re-derive them.
 
@@ -68,7 +68,7 @@ inert.
 **⇒ The one-sentence verdict.** The record's correctness work is done and merged; **the epic's entire first mile
 is one blocked deploy**, and until that deploy lands the record cannot be evidenced, priced, or used, and nothing
 may be safely evicted from the cache. ⛔ **Do not read `/health`'s `migrations_head` as evidence either way:**
-#10896's own verification comment establishes it is *"the highest migration-shaped file THE IMAGE CARRIES"*
+**#10896**'s own verification comment establishes it is *"the highest migration-shaped file THE IMAGE CARRIES"*
 (`migrations_source: checkout`) — **it answers which migration the image ships, never which one has been
 APPLIED.** The unapplied state is evidenced by the drift gate's refusal itself, which reads prod's
 `supabase_migrations.schema_migrations` and names the two migrations as `BLOCKING repo-ahead`.
@@ -84,8 +84,9 @@ This lane first cited **#10620** as the `search_keys` defect throughout. **It is
 (`docs(8447): the census names the bound the surface actually has, and censuses tortoise_query`, CLOSED,
 `mergedAt: null`). #10648's own review had already falsified the attribution — its body, review finding 4: *"the
 change was traced to #10620, which is an unrelated docs PR."* The likely origin of the confusion is that the pin
-file is named `tests/test_record_searchkeys_10620.py`. **The correct references are #10593 (the open symptom) and
-#10648 / `a6e20f05b` (the fix).** Corrected in this document and in `01-test-design.md` §10.
+file is named `tests/test_record_searchkeys_10620.py`.
+**The correct references are #10593 (the open symptom) and #10648 / `a6e20f05b` (the fix).** Corrected in this
+document and in `01-test-design.md` §10.
 
 ⚠️ **The misattribution is not fully removable, and saying so is the point.** Migrations are append-only, so
 `20261102000002_record_point_search_keys_text.sql`'s own header still reads *"(#10620, epic #7879 · R4's remaining
@@ -158,7 +159,7 @@ acceptance criteria**, with one criterion honestly marked *waived* rather than s
 
 ## 3. Dependency order
 
-```
+```text
 #11075  declared-type guard
    ↑ NO GATE: DB-free, needs no deploy — start in parallel today. Its only link to #10896 is that the field it
 guards is only *live* once the deploy lands.
@@ -209,9 +210,9 @@ That class has now cost rows twice. The delta is appended to `01-test-design.md`
 
 ## 5. The decomposition
 
-**24 existing issues carry this work; exactly one is new** (25 rows: **21 open, 3 closed records — #10185,
-#10683, #10671 — and 1 new child, #11075**). Filing a peer for a known root is the defect this tracker has
-already paid for once, so the decomposition's product is **navigation and order**.
+**24 existing issues carry this work; exactly one is new** (25 rows: **21 open, 3 closed records
+— #10185, #10683, #10671 — and 1 new child, #11075**). Filing a peer for a known root is the defect this tracker
+has already paid for once, so the decomposition's product is **navigation and order**.
 
 | # | what | group | state at `3ac6b1636` | action |
 |---|---|---|---|---|
@@ -389,4 +390,4 @@ recorded removal.
 | 1 | plan coherence + MECE + the new issue (fresh context) | **15 issues: 10 × P1, 5 × P2.** All 15 verified against the tree and fixed: (1) `jsonb_columns()` does not exist — §7.1; (2) `#10620` misattributed — §1.1; (3) narrowing credited to the wrong PR — §1; (4) MECE gap #9129/#9997 — §5 rows 19–20; (5) criterion 3 wrongly "met" — §2; (6) missing `#9567 → #9548` edge — §3; (7) #8607 wrongly escalated — §3; (8) G2 blocked by an out-of-scope #10000 route — §2.1; (9) G5 has no closable carrier — §5.1; (10) #9559 conditional — §3; (11) #11075 wrongly serialised — §3; (12) two counts not reproducible — §0/§1; (13) #10683's wrong migration filename — §6; (14) deleted-vocabulary disclosure — §7.2; (15) carve-out config rating — #11075 body |
 | 2 | MECE re-verification + fix verification (fresh context) | **12 issues (4 × P1, 8 × P2).** All verified and fixed: (1) the `:Source.summary` carrier §2.1 promised was absent from §5 and mis-grouped — new **§5.2**; (2) #10593's body was never corrected — comment `6663361035` posted, row re-worded; (3) the class was named by `22P02` while #9264 measured `DatatypeMismatch` — §7 re-stated by property; (4) G5's ruling names **five** measurements, not three — §5.1; (5) the §5 preamble count did not reproduce — 24 existing + 1 new; (6) #9129/#9997 were claimed linked but were not — **now linked**; (7) #10896 carried **zero** labels — now labelled; (8) #11075 was still drawn inside the deploy subtree — **hoisted**; (9) present-tense production state — §1 now dates every reading and notes `{}` is not green without #9994; (10) `db: complex` rested on a claim the code contradicts — §7.1 corrected (type is captured, the predicate is new) and the closure claim bounded by the 7-term vocabulary; (11) "the owner approved the shape" had no artifact — replaced with the relay that exists, citing the #7879 comment; (12) "the misnumbering stops here" was false — the migration header still carries `#10620` and is append-only, so §1.1 now says where the correction does and does not travel |
 | 2b | `[VGATE]` content verification of the two committed artifacts (fresh context, before commit) | **5 issues, all in this document's own text and four of them introduced BY the cycle-2 fixes:** (i) §5 row 6 still read `#10683 OPEN` while this lane had already closed it; (ii) §0's "added 21" was the pre-cycle-2 figure — measured 23 added, 36 total, 22 open; (iii) `01-test-design.md` §10 and §7.1 **contradicted each other** on whether type extraction is built or captured — reconciled to "capture one, build three", stated once in §7.1 and cross-cited; (iv) §7.1 carried a truncated sentence (`the reader must be.`); (v) `#9264`'s duration cell said "closed same day" while its timestamps give **2.9 days** — corrected, and `#10593`'s cell now reads "~3 days and counting". This is the class a commit-gate exists for: every one was a self-inflicted staleness produced by fixing the previous round |
-| 2c | `[VGATE]` round 3 **+ the existing-work census the owner asked for** | **One BLOCKING finding: F1 — this plan carried #9548's SUPERSEDED "hosted postponed" ruling as live.** The owner authorised arming on 2026-11-03T19:06Z with its own `OVERRIDES:` marker, the record is live-armed (`"armed": true`), and **PR #11064** (open, `BLOCKED`) exists precisely to purge that superseded instruction from docs — which this plan would have re-seeded. Fixed in §2.1, §3 (the "TWO serialisation points" claim was **wrong**: there is ONE, and #9548 is a dependent) and §5 row 9. **F2**: a quote dropped `this form` mid-phrase against `record_projection.py:220`. **Census (§1.2)**: open-issue population measured at **1691**, not the 300 a capped sweep returns; no issue or PR proposes a declared-type guard; `collision_preflight 7879` → **CLEAN**; and it surfaced **#10852** (the `:Source.summary` carrier was called an orphan and is in fact an open PR) and **#11004** (the egress census, which must not be folded into G5).
+| 2c | `[VGATE]` round 3 **+ the existing-work census the owner asked for** | **One BLOCKING finding: F1 — this plan carried #9548's SUPERSEDED "hosted postponed" ruling as live.** The owner authorised arming on 2026-11-03T19:06Z with its own `OVERRIDES:` marker, the record is live-armed (`"armed": true`), and **PR #11064** (open, `BLOCKED`) exists precisely to purge that superseded instruction from docs — which this plan would have re-seeded. Fixed in §2.1, §3 (the "TWO serialisation points" claim was **wrong**: there is ONE, and #9548 is a dependent) and §5 row 9. **F2**: a quote dropped `this form` mid-phrase against `record_projection.py:220`. **Census (§1.2)**: open-issue population measured at **1691**, not the 300 a capped sweep returns; no issue or PR proposes a declared-type guard; `collision_preflight 7879` → **CLEAN**; and it surfaced **#10852** (the `:Source.summary` carrier was called an orphan and is in fact an open PR) and **#11004** (the egress census, which must not be folded into G5). |
