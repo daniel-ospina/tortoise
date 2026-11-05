@@ -467,8 +467,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_query_points_by_tag",
         id="surface.query_points_by_tag",
         description="DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). "
-                    "Returns the raw, complete tag result set (incl. tombstones); it takes no "
-                    "offset/page, so it cannot be walked, and is internally capped at 10000 rows. "
+                    "Returns the raw tag result set (incl. tombstones). It takes no "
+                    "offset/page, so a truncated answer cannot be walked — keep that in mind "
+                    "above 10000 tagged rows, where it truncates. "
                     "Kept for one release; will be removed in the next release — migrate now.",
         risk="read",
         http_policy=True,

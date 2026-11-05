@@ -263,8 +263,11 @@ def test_the_served_description_discloses_the_bound():
     # has no LIMIT, so the whole tagged population is materialised and then sliced
     # (tortoise/sdk.py). That distinction is the one review round 4 found mis-stated in
     # the opposite direction (round 2 under-claimed "not capped", round 3's fix then
-    # over-claimed "not a full-population scan"). Pin the ACCURATE sentence, and pin the
-    # SDK fact it rests on, so a future edit cannot restore either error silently.
+    # over-claimed "not a full-population scan"). These assertions pin the SENTENCE, not
+    # the SDK fact it rests on: if `query_points_by_tag` ever gained a LIMIT the text
+    # would keep asserting an unbounded read and nothing would red — the safe direction
+    # (an under-claim), and the SDK's own Cypher is what the sentence quotes. Kept
+    # explicit so a future reader does not assume more coverage than exists.
     assert "tag=" in low, f"the tag= arm is not addressed at all: {desc}"
     assert "not capped" not in low, (
         f"the description still claims one arm is uncapped: {desc}")
@@ -281,7 +284,8 @@ def test_the_tag_alias_is_not_silently_truncated_by_the_new_bound(stub_factory):
     no way to see the rest — and no way to tell. It now passes an explicit limit.
     """
     from tortoise.mcp_server import _TAG_ALIAS_LIMIT, tortoise_query_points_by_tag
-    assert _TAG_ALIAS_LIMIT == 10_000, "the alias's ceiling is the SDK's own max limit"
+    assert _TAG_ALIAS_LIMIT == 10_000, (
+        "the alias's cap is population-sized; no SDK limit guard runs on this path")
     stub_factory(n_points=5, n_tag_points=250)
     result = tortoise_query_points_by_tag("pricing")
     assert len(result) == 250, (
@@ -344,3 +348,58 @@ def test_the_tag_arms_unbounded_read_and_non_total_order_are_censused():
         f"on: {row}")
     # The residue has a home, not just a complaint.
     assert "#11062" in row, f"the row cites no follow-up: {row}"
+def test_every_editable_served_skill_that_reads_a_population_discloses_the_bound():
+    """Review round 5 (findings P2-1 / F2) — the SHIPPED consumers, not only the tool text.
+
+    #10602's cost does not land on the tool call, it lands on the skill an agent
+    loaded: a skill that presents a bounded structural read as a complete
+    enumeration makes its reader report a subset as the whole set.
+    `test_the_served_description_discloses_the_bound` above guards the served
+    `tools/list` text; this guards the other served artifact — the skills under
+    `website/apps/dashboard/public/skills/` — because round 4 fixed the tool text
+    while `analyse-for-contradictions` still said `tortoise_query(kind="decision")`
+    was "the committed decisions".
+
+    SCOPE IS "WHAT THIS TREE MAY EDIT". `config/served-skills-upstream.yml` pins
+    three skills as DERIVED mirrors of the MIT skills repo; editing one in place is
+    exactly the defect review round 5 reverted (P1-1), because the fix belongs
+    upstream and must come back through `--sync`. So a pinned skill is out of scope
+    HERE by construction — `how-to-use-tortoise`'s "Returns ALL Points" row is the
+    known gap that fix has to close, tracked as a follow-up rather than edited in
+    place in this repo. Every unpinned skill is in scope: its bytes live here.
+
+    Value whose presence makes this fail: an in-scope skill that issues a
+    `tortoise_query(kind…` read without the two things that make the bound usable —
+    the walk (`offset=`) and the signal it terminates on (`hasMore`).
+    """
+    from pathlib import Path
+
+    from tools import served_skills_parity as sp
+
+    repo = Path(__file__).resolve().parents[1]
+    served_root = repo / "website/apps/dashboard/public/skills"
+    manifest = sp.load_manifest(repo / sp.MANIFEST_REL)
+    pinned = {
+        Path(entry["served_path"]).parent.name
+        for entry in manifest["skills"].values()
+    }
+
+    checked, offenders = [], []
+    for skill in sorted(served_root.iterdir()):
+        doc = skill / "SKILL.md"
+        if not doc.is_file() or skill.name in pinned:
+            continue
+        text = doc.read_text(encoding="utf-8")
+        if "tortoise_query(kind" not in text:
+            continue  # does not issue a structural read — nothing to disclose
+        checked.append(skill.name)
+        if "hasMore" not in text or "offset=" not in text:
+            offenders.append(skill.name)
+
+    assert checked, (
+        "no served skill was examined — the walk found nothing, so this arm proves "
+        "nothing (a rename of the served-skills directory would do it)")
+    assert offenders == [], (
+        "a served skill reads a bounded population but does not tell its reader so "
+        f"(#10602 review P2-1): {offenders}. State the cap AND the walk — `offset=` "
+        "plus `hasMore` — or the skill reports a subset as a complete set.")
