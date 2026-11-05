@@ -249,6 +249,10 @@ _RETRACTION_RULES_1_TO_3 = (
     r"|(?:is|was|are|were)\s+(?:now\s+)?(?:superseded|stale|outdated|obsolete|invalid|wrong|moot)\b"
     r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
     r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
+    # (1b) the finding is said to be ABSENT, not fixed — `no evidence the P1 was resolved`
+    # otherwise reads as a COMPLETION (`was resolved`) and the severity arm stands down.
+    r"|\bno\s+(?:evidence|proof|test|sign|indication|mention|attempt)\b"
+    r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
     # (2) attributed to another artifact / a former state of this one
     r"|(?:previous|earlier|prior|old)\s+(?:head|record|round|assessment|verdict|review)\b"
     r"|that\s+(?:was|is)\s+the\s+(?:previous|earlier|prior|old)\b"
@@ -259,41 +263,74 @@ _RETRACTION_RULES_1_TO_3 = (
     # (4) a still-live finding, declared in words
     r"|unfixed\b|unaddressed\b|still\s+open\b|remains?\s+open\b|not\s+fixed\b"
 )
-#: Rule (4)'s SEVERITY arm — kept separate because a negation word in the suffix has to exempt
-#: it (see `_NEGATED_SUFFIX_RE`), while rules (1)–(3) must keep applying in both cases.
-_RETRACTION_SEVERITY = r"|\bP[0-2]\b"
-#: ⛔ A NEGATION WORD OR A COMPLETION EXEMPTS THE SEVERITY ARM, NOT THE WHOLE GUARD. A severity
-#: token under a negation word is the CLEAR spelling (`no P0/P1/P2 findings; three P3 nits
-#: noted`, `without P1`), and so is one under a COMPLETION (`The two P2 findings are closed`,
-#: `all P1 findings were fixed`) — the tokens sit in SLASH LISTS and in plural sentences, so a
-#: per-token lookbehind cannot see the word that governs them. When either is present the
-#: severity arm stands down and rules (1)–(3) still decide, so `CLEAN. No blocking findings;
-#: the P1 remains open` is still caught by `remains open`.
-_SUFFIX_EXEMPTION_RE = re.compile(
-    r"(?i)(?:\b(?:no|without|zero|none)\b"
-    r"|(?:is|are|was|were|has|have|had)\s+(?:now\s+)?(?:closed|fixed|resolved|addressed)\b)"
-)
-_CLEAR_RETRACTED_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + _RETRACTION_SEVERITY + r")")
+#: Rule (4)'s SEVERITY arm — the bare tokens, and the ones a reviewer actually writes.
+#: ⛔ THIS ARM IS GRADED PER TOKEN, NOT PER LINE. An earlier draft stood the whole arm down
+#: whenever a negation word appeared ANYWHERE in the suffix, so one `no` anywhere erased a live
+#: P1 — `**Verdict: CLEAN** — there is no test for the P1.` cleared while
+#: `**Verdict: CLEAN** — the P1 was not resolved.` blocked, one word apart. The exemption now
+#: has to GOVERN the token it exempts.
+_SEVERITY_TOKEN_RE = re.compile(r"(?i)\b(?:P[0-2]|blockers?|priority\s+[0-2])\b")
+#: Rules (1)–(3) plus rule (4)'s WORD arm, compiled once and graded over the PARAGRAPH.
 _RETRACTION_NO_SEVERITY_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + r")")
-#: ⛔ A VERDICT ATTRIBUTED TO ANOTHER ARTIFACT IS A CITATION, AND A CITATION MAY HAVE NO SUFFIX
-#: AT ALL: `Previous review: CLEAN.` reports a past verdict and stops, leaving the window above
-#: nothing to find — the PREAMBLE is then the only signal. Read the rest of the LINE before the
-#: match, so an honest clear elsewhere in the same body still counts (`asserts_a_clear` returns
-#: True on ANY unretracted match).
+#: The clear spelling for a token: `no P0/P1/P2` / `without P1` — a negation IMMEDIATELY before
+#: it, allowing the slash-separated list it governs (`no P0/P1/P2` negates all three). It must
+#: be immediate: `no test for the P1` is a LIVE finding, not an exemption.
+_SEVERITY_NEGATED_BEFORE_RE = re.compile(
+    r"(?i)(?:\bno|\bwithout\b|\bzero\b|\bnone\s+of?)\s+(?:the\s+)?(?:P[0-2]\s*[/,]\s*)*\Z"
+)
+#: The other clear spelling: the token is followed by a COMPLETION — `the P2 findings are
+#: closed`, `the P1 has been addressed`, `the P1 and the P2 are both addressed now`. ⛔ `been`
+#: and intervening adverbs are NOT optional: omitting them refused the two most natural
+#: completions there are, which is a permanent false NOT-READY in the #10962 class.
+_SEVERITY_COMPLETED_AFTER_RE = re.compile(
+    r"(?i)\b(?:is|are|was|were|has|have|had)(?:\s+been)?"
+    r"(?:\s+(?:now|both|all|already|since))?\s+"
+    r"(?:closed|fixed|resolved|addressed|gone)\b"
+)
+#: ⛔ A VERDICT ATTRIBUTED TO ANOTHER ARTIFACT IS A CITATION. The preamble is graded to the
+#: START OF THE LINE — an arbitrary character cap bought nothing and cost a bypass: the same
+#: `returned` verb stopped being in a 90-char window once a long clause sat between it and the
+#: verdict. The verb class is grammatical (who REPORTED it), not an enumerated neighbourhood:
+#: an earlier draft listed only `says?|returned|had been`, so `According to the review …`,
+#: `The review's verdict …`, `stated`, `recorded` and `asserted` all cleared a live P1.
 _ATTRIBUTED_BEFORE_RE = re.compile(
-    r"(?i)(?:\b(?:previous|earlier|prior|last|old)\s+(?:review|verdict|round|record|head|assessment)\b"
-    r"|\bthe\s+record\b|\bsays?\b|\breturned\b|\bhad\s+been\b)"
+    r"(?i)(?:"
+    r"\b(?:previous|earlier|prior|last|old)\s+(?:review|verdict|round|record|head|assessment)\b"
+    r"|\b(?:review|round|record|verdict|assessment)'s\b"
+    r"|\bthe\s+record\b"
+    r"|^\s*(?:according\s+to|per|as\s+reported|per\s+the)\b"
+    r"|\b(?:said|says?|stated?|recorded|asserted?|reported|wrote|written|noted|concluded"
+    r"|returned|confirmed|quoted|cited)\b"
+    r"|\bhad\s+been\b"
+    r")"
 )
 
 
 def _retracted_from(text: str, end: int) -> bool:
-    """True when the REST OF THE LINE after ``end`` retracts, attributes or qualifies the clear."""
+    """True when what FOLLOWS ``end`` retracts, attributes or qualifies the clear.
+
+    ⛔ TWO WINDOWS, ON PURPOSE. Rules (1)–(3) and rule (4)'s WORD arm are graded over the rest
+    of the PARAGRAPH: a verdict on its own line followed by a line break is still one sentence
+    on screen, so `**Verdict: CLEAN**\n— except the open P1`, `verdict: CLEAN\r\nno longer
+    holds` and the blank-line form all cleared a live P1 under a line-scoped window. The BARE
+    SEVERITY arm stays LINE-scoped and per-token, because the paragraph-wide form of it is what
+    refuses the real `**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.` — the `P1` there is a
+    SUBJECT, not a retraction. The docstring's earlier claim that the two trades were
+    unavoidable was wrong; splitting the windows gives both.
+    """
+    para_end = text.find("\n\n", end)
+    para = text[end : para_end if para_end != -1 else len(text)]
+    if _RETRACTION_NO_SEVERITY_RE.search(para):
+        return True
     line_end = text.find("\n", end)
-    suffix = text[end : line_end if line_end != -1 else len(text)]
-    if _SUFFIX_EXEMPTION_RE.search(suffix):
-        # The severity arm stands down under a negation or a completion; rules (1)–(3) still decide.
-        return bool(_RETRACTION_NO_SEVERITY_RE.search(suffix))
-    return bool(_CLEAR_RETRACTED_RE.search(suffix))
+    line = text[end : line_end if line_end != -1 else len(text)]
+    for token in _SEVERITY_TOKEN_RE.finditer(line):
+        if _SEVERITY_NEGATED_BEFORE_RE.search(line[: token.start()]):
+            continue
+        if _SEVERITY_COMPLETED_AFTER_RE.search(line, token.end(), token.end() + 48):
+            continue
+        return True
+    return False
 
 
 def _attributed_before(text: str, start: int, end: int) -> bool:
@@ -302,9 +339,10 @@ def _attributed_before(text: str, start: int, end: int) -> bool:
     The window ends at the MATCH'S END, not its start: `CLEAR_VERDICT_RE`'s cue arm matches
     from the cue word, so `Previous review: CLEAN.` starts matching at `review` — a window
     ending at `start` sees only `Previous ` and the attribution word is the very next token.
+    It also starts at the LINE START, with no character cap (see `_ATTRIBUTED_BEFORE_RE`).
     """
     line_start = text.rfind("\n", 0, start) + 1
-    return bool(_ATTRIBUTED_BEFORE_RE.search(text[max(line_start, end - 90) : end]))
+    return bool(_ATTRIBUTED_BEFORE_RE.search(text[line_start:end]))
 
 
 def asserts_a_clear(text: str) -> bool:
@@ -312,15 +350,16 @@ def asserts_a_clear(text: str) -> bool:
 
     Every match is checked, not just the first: a body may cite a retracted verdict in one
     clause and assert its own in another, and the assertion is what counts. Both directions are
-    graded — the suffix window (a retraction) and the same-line preamble (an attribution) —
-    because a citation can carry neither, one, or both.
+    graded — the suffix (a retraction) and the same-line preamble (an attribution) — because a
+    citation can carry neither, one, or both.
 
-    ⛔ KNOWN RESIDUAL, deliberate: a verdict on its own line followed by a BLANK line and then a
-    retraction (`verdict: CLEAN\n\nthe head has since moved`) still clears — the suffix window
-    is one line, and widening it to the next paragraph refuses the real
-    `**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.`, which is the false-block direction with
-    measured history in this file (#10962). The realistic form of that status comment names its
-    source (`The record says verdict: CLEAN`), and the preamble arm catches it.
+    ⛔ THE SUFFIX IS GRADED IN TWO WINDOWS, and the earlier note claiming only one was possible
+    was wrong. Rules (1)–(3) and the rule-(4) WORD arm run over the rest of the PARAGRAPH, so a
+    line break — blank, single, or inside emphasis, `**Verdict: CLEAN**\n— except the open P1` —
+    no longer hides a retraction. Only the BARE SEVERITY arm stays line-scoped, because a
+    paragraph-wide severity search refuses the real
+    `**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.`, where the `P1` is a SUBJECT rather than a
+    retraction. Splitting the windows is what makes both directions available at once.
     """
     for m in CLEAR_VERDICT_RE.finditer(text):
         if _retracted_from(text, m.end()):
