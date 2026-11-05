@@ -1151,7 +1151,7 @@ class CacheTest(unittest.TestCase):
         prevent, one variant over.
         """
         variants = ("GHE.example.com", "https://ghe.example.com", "ghe.example.com/")
-        for i, spelling in enumerate(variants):
+        for spelling in variants:
             env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_HOST=spelling)
             r = subprocess.run(
                 [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
@@ -1291,7 +1291,7 @@ class CacheTest(unittest.TestCase):
             for _ in range(8)
         ]
         for p in procs:
-            out, err = p.communicate(timeout=120)
+            _out, err = p.communicate(timeout=120)
             self.assertEqual(p.returncode, 0, err)
         self.assertEqual([p.name for p in self.cachedir.glob("*.tmp")], [], "no temp file may survive")
         entries = list(self.cachedir.glob("*.json"))

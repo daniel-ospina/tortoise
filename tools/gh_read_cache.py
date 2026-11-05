@@ -138,6 +138,7 @@ Seams
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -606,14 +607,10 @@ def _write_entry(path: Path, entry: dict) -> None:
         os.replace(tmp, path)
     except BaseException:
         if fd >= 0:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -1037,7 +1034,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 2
 
     argv = _format_argv(decl.argv, repo, args.base)
-    account, account_known = _account_fingerprint(host)
+    # `status` answers for the entry `get` would write (and only reports — it never
+    # fetches), so an unresolvable credential is not a refusal here: `get` refuses to
+    # STORE, while `status` is truthfully reporting that nothing can be found.
+    account, _account_known = _account_fingerprint(host)
     ident = _identity(
         decl.key, repo, args.base, argv, decl.argv, host, account, decl.account_scoped
     )
@@ -1112,7 +1112,8 @@ def cmd_check(_args: argparse.Namespace) -> int:
         ({**good, "fetched_at": now + 59}, 1, True),
         ({**good, "fetched_at": now + 61}, 1, False),
         ({**good, "fetched_at": now + 61}, 600, False),
-        ({"schema": SCHEMA, "fetched_at": now - 10, **ident}, 0, False),        ({**good, "fetched_at": float("nan")}, 60, False),
+        ({"schema": SCHEMA, "fetched_at": now - 10, **ident}, 0, False),
+        ({**good, "fetched_at": float("nan")}, 60, False),
         ({**good, "fetched_at": float("inf")}, 60, False),
         ({k: v for k, v in good.items() if k != "fetched_at"}, 60, False),
         ({k: v for k, v in good.items() if k != "body"}, 60, False),
