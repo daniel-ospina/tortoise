@@ -384,11 +384,17 @@ def _gh_api_json(endpoint: str) -> dict:
 def _split_pages(stdout: str, endpoint: str = "") -> list[str]:
     """Split concatenated JSON objects (the `--paginate` output) safely.
 
-    FAIL-CLOSED: an unterminated trailing object is a DROPPED PAGE, and a dropped
-    page is exactly how a superseding red attempt disappears and a check reads
-    green. So a truncated tail raises instead of being discarded.
+    FAIL-CLOSED, and it ACCOUNTS FOR THE WHOLE INPUT. Only balanced `{...}`
+    literals are collected, so anything outside braces must be whitespace —
+    otherwise it is content this function would silently discard. That matters:
+    a `--paginate` output can contain an ARRAY page, and discarding the `[` and
+    `]` around an element would reinterpret that element as a page OBJECT and
+    merge its fields at the top level — so a red required attempt living in the
+    discarded page disappears and the check reads green. An unterminated tail is
+    a dropped page for the same reason.
     """
-    chunks, depth, start, in_str, esc = [], 0, None, False, False
+    spans: list[tuple[int, int]] = []
+    depth, start, in_str, esc = 0, None, False, False
     for i, ch in enumerate(stdout):
         if in_str:
             if esc:
@@ -407,16 +413,33 @@ def _split_pages(stdout: str, endpoint: str = "") -> list[str]:
         elif ch == "}":
             depth -= 1
             if depth == 0 and start is not None:
-                chunks.append(stdout[start : i + 1])
+                spans.append((start, i + 1))
                 start = None
+
     where = f" from {endpoint}" if endpoint else ""
     if depth != 0 or in_str:
         raise RequiredSetUnreadable(
             f"gh output{where} ended mid-object — a page was truncated (refusing to read a partial set)"
         )
-    if not chunks:
+    if not spans:
         raise RequiredSetUnreadable(f"gh output{where} contained no JSON object")
-    return chunks
+
+    # Everything that is not one of the collected objects must be whitespace.
+    previous = 0
+    for begin, end in spans:
+        if stdout[previous:begin].strip():
+            raise RequiredSetUnreadable(
+                f"gh output{where} carried non-object content between pages "
+                f"({stdout[previous:begin].strip()[:40]!r}) — refusing to discard it"
+            )
+        previous = end
+    if stdout[previous:].strip():
+        raise RequiredSetUnreadable(
+            f"gh output{where} carried trailing non-object content "
+            f"({stdout[previous:].strip()[:40]!r}) — refusing to discard it"
+        )
+
+    return [stdout[begin:end] for begin, end in spans]
 
 
 def _run_id_of(run: dict) -> int | None:

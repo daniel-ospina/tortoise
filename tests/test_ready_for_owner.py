@@ -1089,6 +1089,123 @@ def test_a_non_object_run_reaching_the_evaluator_is_a_verdict(tmp_path):
     assert "not an object" in result.detail
 
 
+def test_a_queue_mode_merge_only_name_is_evaluated_not_deferred(tmp_path):
+    """Under `queue` mode NOTHING is deferred, and no row is duplicated.
+
+    A queue-mode config whose merge_conditions names a check absent from
+    queue_conditions must report FAIL(missing) for it — never DEFERRED, and never
+    a second contradictory row alongside the first.
+    """
+    queue_mode = """\
+queue_rules:
+  - name: main
+    branch_protection_injection_mode: queue
+    queue_conditions:
+      - check-success=docs
+    merge_conditions:
+      - check-success=python-ci-gate
+"""
+    tree = _write_tree(tmp_path, mergify=queue_mode)
+    required = rfo.resolve_required_set(tree)
+    runs = [run("docs")]  # python-ci-gate genuinely absent
+    result = evaluate(tree, runs)
+    assert result.verdict == rfo.FAIL_MISSING
+    assert not any(r.verdict == rfo.DEFERRED for r in result.rows)
+    assert len(result.rows) == len(required.names)
+
+
+def test_an_array_page_is_refused_not_merged_into_the_next_page():
+    """A `--paginate` array page must not be reinterpreted as a page object.
+
+    Everything outside balanced `{...}` must be whitespace; otherwise the `[`/`]`
+    are discarded, the array ELEMENT is read as a page, and a red required attempt
+    living in that page disappears — the false PASS this file exists to prevent.
+    """
+    stdout = (
+        '[{"name":"docs","status":"completed","conclusion":"failure","id":9}]'
+        '{"total_count":1,"check_runs":[{"name":"docs","status":"completed",'
+        '"conclusion":"success","id":8}]}'
+    )
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo._split_pages(stdout, "ep")
+    assert "non-object content" in str(excinfo.value)
+
+
+def test_gate_report_field_matches_the_condition_verdict(tmp_path, monkeypatch):
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    runs = [run("docs", conclusion="failure"), run("python-ci-gate", status="in_progress", conclusion=None)]
+    monkeypatch.setattr(rfo, "fetch_check_runs", lambda repo, sha: runs)
+    monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+    report = rfo.gate(1, "o/r", "deadbeef", tree)
+    c2 = next(c for c in report["conditions"] if c["condition"] == 2)
+    assert c2["verdict"] == rfo.FAIL_RED
+    assert report["condition_2_verdict"] == rfo.FAIL_RED
+
+
+def test_the_TEXT_path_also_exits_2_for_a_snapshot_only_set(tmp_path):
+    tree = _write_tree(tmp_path, snapshot=["docs"])
+    assert rfo.main(["--required-set", "--root", str(tree)]) == rfo.EXIT_UNREADABLE
+
+
+def test_head_resolution_is_actually_used(tmp_path, monkeypatch):
+    """Prove the resolved sha reaches the read, so the test cannot drift vacuous."""
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: "cafebabe")
+    seen = {}
+
+    def capture(repo, sha):
+        seen["sha"] = sha
+        return [run("docs"), run("ai-review-gate"), run("python-ci-gate")]
+
+    monkeypatch.setattr(rfo, "fetch_check_runs", capture)
+    monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+    assert rfo.main(["--pr", "1", "--root", str(tree)]) == rfo.EXIT_PASS
+    assert seen["sha"] == "cafebabe"
+
+
+@pytest.mark.parametrize("snapshot", [["docs", 5], [], [1]])
+def test_a_malformed_snapshot_is_a_verdict_not_a_traceback(tmp_path, snapshot):
+    import json as _json
+    tree = tmp_path
+    record = tree / "docs" / "ci" / "required-contexts.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(_json.dumps({"required_contexts": snapshot}), encoding="utf-8")
+    assert rfo.main(["--required-set", "--root", str(tree)]) == rfo.EXIT_UNREADABLE
+
+
+def test_a_timeout_caused_by_a_rate_limit_is_reported_as_one():
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise sp.TimeoutExpired("gh api x", 120, stderr=b"API rate limit exceeded for user ID 1")
+
+    original = sp.run
+    sp.run = boom
+    try:
+        with pytest.raises(rfo.RateLimited) as excinfo:
+            rfo._gh_api_json("repos/o/r/commits/x/check-runs")
+        assert "GH-RATE-LIMITED" in str(excinfo.value)
+    finally:
+        sp.run = original
+
+
+def test_a_plain_timeout_is_not_reported_as_a_rate_limit():
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise sp.TimeoutExpired("gh api x", 120, stderr=b"")
+
+    original = sp.run
+    sp.run = boom
+    try:
+        with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+            rfo._gh_api_json("repos/o/r/commits/x/check-runs")
+        assert not isinstance(excinfo.value, rfo.RateLimited)
+        assert "timed out" in str(excinfo.value)
+    finally:
+        sp.run = original
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
