@@ -1766,6 +1766,31 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
     return text[start:end]
 
 
+def _ontology_section_of(field: str) -> str:
+    """The `### §x.y` section of `docs/ONTOLOGY.md` that owns `field`'s row.
+
+    DERIVED, not restated — the same rule the narrative home above follows. §12.1b's
+    footnote asserts which ontology section a `:Source`'s `summary` is filed under,
+    and this branch's pre-rebase wording had that WRONG (§4.4, which is `Document`,
+    not `Source`). A hardcoded `§4.6` in the assertion would go stale the moment the
+    ontology renumbers, and the pin would keep certifying the number it was born
+    with — the "a past state quoted as a current one" defect, in the one assertion
+    whose whole subject is a section number.
+    """
+    section = None
+    for line in (REPO_ROOT / "docs/ONTOLOGY.md").read_text(
+            encoding="utf-8").split("\n"):
+        heading = re.match(r"^#{2,4}\s+(§\d+\.\d+)\b", line)
+        if heading:
+            section = heading.group(1)
+        elif section and line.startswith(f"| `{field}` |"):
+            return section
+    raise AssertionError(
+        f"`docs/ONTOLOGY.md` has no `| `{field}` |` property row under a "
+        f"numbered section heading — the ontology moved, so §12.1b's pointer at "
+        f"it must be re-derived rather than kept")
+
+
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     """§9.4 and §12.1b may not disagree about what the source vector embeds.
 
@@ -1809,6 +1834,10 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"this pin must not keep naming the table the projection left behind")
 
     text = _storage_doc_text()
+    #: DERIVED once, used by BOTH §12.1b messages below — a failure message that
+    #: restates a number this test derives re-stales on the same renumber the
+    #: assertion is here to catch (#10980 review, round 2, on the §9.4 message).
+    summary_section = _ontology_section_of("summary")
 
     # ── §9.4: the pointer PRESENT, the blur GONE ──
     # ⚠️ The pointer/negation/count assertions below are SCOPED to §9.4; the
@@ -1828,9 +1857,10 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"is how the forbidden instruction comes back in ADDITIVE form: the "
         f"correct pointer stays and the wrong one appears beside it, which a "
         f"presence-only check misses. ⚠️ This counts the `:Source.summary` "
-        f"spelling ONLY — §9.4 legitimately names bare `summary` (\"a §4.6 "
-        f"`:Source` property\"), so a bare-`summary` additive form is NOT "
-        f"covered at all: `_RETIRED_SUMMARY_BLUR` matches that ONE retired "
+        f"spelling ONLY — §9.4 legitimately names bare `summary` (\"a "
+        f"{summary_section} `:Source` property\"), so a bare-`summary` "
+        f"additive form is NOT covered at all: `_RETIRED_SUMMARY_BLUR` "
+        f"matches that ONE retired "
         f"sentence's exact wording, so a NEW bare-`summary` sentence is caught "
         f"by nothing here. The "
         f"exactness is deliberate and fails CLOSED: a future legitimate second "
@@ -1857,7 +1887,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"`:Source.summary` is a topic lexicon, so that sentence would tell a "
         f"designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
-        f"`summary` the Source holds is §4.6 metadata")
+        f"`summary` the Source holds is {summary_section} metadata")
     assert home in footnote, (
         f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
         f"decides where vectors live must point at the narrative's real home, "
@@ -1868,3 +1898,15 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "§12.1b's `:Source` footnote no longer states §9.4 ③'s identity rule — "
         "the footnote's two halves are *what the vector reads* and *how identity "
         "is decided*; dropping the second re-opens `#3998`")
+    #: ...and the THIRD claim the footnote makes is WHICH ontology section a
+    #: `summary` is filed under — the one this branch's pre-rebase wording got
+    #: WRONG (§4.4, which is `Document`). `summary_section` is DERIVED from the
+    #: ontology that defines it, so a renumber reds here instead of leaving a
+    #: footnote that points a reader at a different type. The message above
+    #: interpolates the same derived value, for the same reason.
+    assert f"{summary_section} metadata" in footnote, (
+        f"§12.1b's `:Source` footnote no longer files `summary` as "
+        f"{summary_section} metadata — `docs/ONTOLOGY.md` puts `summary`'s row "
+        f"under `{summary_section}`, so a footnote citing any other section "
+        f"sends a reader to a different type (the pre-rebase wording here said "
+        f"§4.4, which is `Document`)")
