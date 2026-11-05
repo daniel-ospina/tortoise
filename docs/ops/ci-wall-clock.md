@@ -171,13 +171,14 @@ payer: its own `.[test,postgres]` downloads (`python-ci.yml:4253`; `[embeddings]
 deliberately absent) are a rounding error beside the shared archive it restores and re-saves.
 
 **Re-derived by the arm-2 rule from THIS run, not from the estimate this note used to carry.** It
-pre-computed `20 → 40` from an assumed ~9 m save; the measured save is **≥16 m and was still in
-flight at the kill**, so it is a CENSORED lower bound and the input — not the rule — was the thing
-that was wrong: **12 m in-step watchdog + ~1 m setup/provision + ≥16 m save = 29 m × 1.5 = 43.5 →
-50** (`≥` rather than `≈` is the honest operator here; at this runner's ~3.7 MB/s a completed
-3.6 GB upload is ~20 m, which puts the SUM at ~33 m and still rounds to 50). Arm 2 rather than
-arm 1 for the reason it always was: the save this row pays on a key change is the SHARED archive,
-not its own downloads — so `2 × 15.43 = 30` is not the number.
+pre-computed `20 → 40` from an assumed ~9 m save; the measured save is **15.9 m (953 s) and was
+still in flight at the kill** — a CENSORED lower bound, since GitHub reported 79.8% sent — so the
+input, not the rule, was the thing that was wrong: **12 m in-step watchdog + ~1 m setup/provision +
+15.9 m save = 28.9 m × 1.5 = 43.4 → 50**. The censoring makes even that an underestimate, and the
+second reading agrees: at this runner's ~3.7 MB/s a completed 3.6 GB upload is ~20 m, which puts
+the SUM at ~33 m and 33 × 1.5 = 49.5 — still 50. Arm 2 rather than arm 1 for the reason it always
+was: the save this row pays on a key change is the SHARED archive, not its own downloads — so
+`2 × 15.43 = 30` is not the number.
 
 ⚠ It is not a free move: **the cap IS the stale-head exposure** (#3239), and 50 m is the most this
 job may hold a per-PR concurrency slot when it genuinely wedges (p50 1.62 m, p95 14.61 m).
@@ -201,11 +202,13 @@ SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitt
 watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
-is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
-moved: nothing has measured any of them being cancelled, and this document's own rule is to move a
-cap from a measurement instead of on suspicion. `test-record-postgres` was the first — 22 m against
-20 on the arm-2 estimate — and it false-killed on 2026-11-05, so it has MOVED: `20 → 50` from the
-measured ≥16 m save (above), and it is now the second row the post-step arm has moved. `test-slow` sits exactly AT its
+is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were
+recorded here rather than moved: nothing had measured any of them being cancelled, and this
+document's own rule is to move a cap from a measurement instead of on suspicion. THREE of the four
+are still in that state. `test-record-postgres` was the first — 22 m against 20 on the arm-2
+estimate — and it false-killed on 2026-11-05, so it has MOVED: `20 → 50` from the measured
+15.9 m censored save (above); the remaining three are `test-slow`, `test-carve-out` and
+`test-concurrency-falkor`. `test-slow` sits exactly AT its
 cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
 `test-carve-out` is 9 m past it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against
 30). The last has the least headroom of all:
@@ -254,7 +257,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
   writable shared key (`python-ci.yml:4239-4247`) and is therefore NOT an arm-1 row — on a key
-  change its save IS the archive, measured at 3.6 GB / ≥16 m on 2026-11-05 (see the note under the
+  change its save IS the archive, measured at 3.6 GB / 15.9 m on 2026-11-05 (see the note under the
   table, and the cap it moved to). Arm 1 applies to a job whose save is
   small because nothing restores an archive into its cache path, not because its `pip install`
   line omits torch.

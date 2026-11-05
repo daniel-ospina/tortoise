@@ -4209,14 +4209,15 @@ jobs:
     # next 10m`), from THIS run rather than from the estimate the document
     # pre-computed, because the estimate is the term the run falsified:
     #
-    #   12m in-step pytest watchdog + ~1m setup/provision + >=16m observed save
-    #   = 29m  ->  x1.5 = 43.5  ->  50
+    #   12m in-step pytest watchdog + ~1m setup/provision + 15.9m observed save
+    #   = 28.9m  ->  x1.5 = 43.4  ->  50
     #
-    # The save is a CENSORED lower bound (killed at 79.8%, so it never finished);
-    # at this runner's ~3.7 MB/s a full 3.6 GB upload is ~20m, i.e. a completed
-    # save puts the SUM at ~33m and still rounds to 50. The document's
-    # pre-computed `20 -> 40` came from an ESTIMATED 9m save, so it is the INPUT
-    # that moved, not the rule.
+    # The 15.9m is 953 s (07:44:53 -> 08:00:46) and it is a CENSORED lower bound:
+    # killed at 79.8%, so the save never finished. At this runner's ~3.7 MB/s a
+    # full 3.6 GB upload is ~20m, which puts the SUM at ~33m, and 33 x 1.5 = 49.5
+    # rounds to 50 as well — both readings agree, so the number is not in doubt.
+    # The document's pre-computed `20 -> 40` came from an ESTIMATED 9m save, so it
+    # is the INPUT that moved, not the rule.
     #
     # Raising the cap is the right arm HERE — and restore-only (#10327) is the
     # right arm for `test-carve-out` — because this cap has room to hold the SUM
