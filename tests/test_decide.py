@@ -68,6 +68,43 @@ def _mk():
     return uuid.uuid4().hex[:8]
 
 
+# `decide.py` prints `⚠` for two different events, and only one of them is a
+# defect of the run:
+#
+#   * a GENUINE soft-failure — a point that did not land (`⚠ <pid>: <err>`, the
+#     #49 `context=` TypeError class), an operator that did not resolve
+#     (`⚠ <src> --IMPL--> <tgt>: <note>`, the #334 stub class), or a ranking
+#     that came out EMPTY (`⚠ EP produced NO posterior …`);
+#   * a RECOVERED one — `⚠ graph-wide EP pass refused: <err>`. The script's own
+#     contract is that the graph-wide pass may refuse "on state that is not
+#     this decision's (an uncalibrated foreign claim, a fail-closed calibration
+#     posture)" and that this "must not cost us OUR ranking"
+#     (`graph-scripts/decide.py:293-300`): it re-runs the pass over THIS
+#     decision's operator factors, and the ranking assertion below proves that
+#     recovery actually produced a ranking.
+#
+# MEASURED, 2026-11-05, PR #10807 job 126938902641 (shard `test (f)`): the
+# legacy container answered the graph-wide pass with `Query timed out`, the
+# recovery ranked both options (opt:a 0.7453, opt:b 0.5243, converged=True),
+# and the blanket `"⚠" not in out` assertion reded the required check on a run
+# that had produced the correct answer. Tolerating exactly that one recovered
+# line keeps every genuine soft-failure red — including the un-recovered arm,
+# which additionally prints `⚠ EP produced NO posterior …` and so still comes
+# back from `_soft_failures()`.
+_RECOVERED_MARKER = "⚠ graph-wide EP pass refused:"
+
+
+def _soft_failures(out: str) -> list[str]:
+    """The `⚠` lines in `out` that mark an UNRECOVERED soft-failure.
+
+    The graph-wide EP refusal is the script's documented, self-healing path
+    (see the comment above); every other `⚠` `decide.py` can emit is a defect
+    of this run and must red the smoke test.
+    """
+    return [ln for ln in out.splitlines()
+            if "⚠" in ln and _RECOVERED_MARKER not in ln]
+
+
 class TestDecideScriptSmoke:
     """#1643 (D3): the decide.py SCRIPT itself must run end-to-end — points
     land (no #334 stubs), operators resolve, EP ranks the options. The #49
@@ -112,11 +149,73 @@ class TestDecideScriptSmoke:
         )
         out = res.stdout + res.stderr
         assert res.returncode == 0, f"decide.py failed:\n{out}"
-        # Every point created (no ⚠ soft-failures — the #49 TypeError class).
-        assert "⚠" not in out, f"soft-failures present:\n{out}"
+        # Every point created (no UNRECOVERED ⚠ soft-failures — the #49
+        # TypeError class; the recovered graph-wide EP refusal is not a
+        # defect, see `_soft_failures`).
+        residuals = _soft_failures(out)
+        assert not residuals, (
+            "soft-failures present:\n" + "\n".join(residuals)
+            + "\n--- full decide.py output ---\n" + out)
         assert out.count("✓") >= 3, f"expected >=3 point ticks:\n{out}"
-        # EP computation + ranking ran.
-        assert "EP computed" in out or "rank" in out.lower(), out
+        # EP computation + ranking ran. This requires the RANKED line, not the
+        # substring "rank": the recovered-refusal notice itself reads
+        # "ranking this decision's operator factors", so the looser
+        # `"rank" in out.lower()` arm would pass on a run whose ranking never
+        # materialised.
+        assert "✓ EP computed:" in out, out
+
+
+class TestSoftFailureClassifier:
+    """Non-vacuity pins for `_soft_failures` (pure — no graph, no DB).
+
+    Every case is written so it cannot pass by accident: the tolerated arm is
+    the REAL output that reded shard `test (f)` (job 126938902641), and each
+    near-miss below it has to come back as a failure.
+    """
+
+    # Real fragment from PR #10807's `test (f)` failure (job 126938902641).
+    _RECOVERED = (
+        "  ✓ opt:a → 1a1a909d178-82e0d52cd29b\n"
+        "  ✓ opt:b → 1a1a909eac9-9b76bbffa590\n"
+        "  ✓ crit:1 --IMPL--> opt:a\n"
+        "  ⚠ graph-wide EP pass refused: Query timed out\n"
+        "  (no posterior for this decision's options — ranking this"
+        " decision's operator factors)\n"
+        "\n✓ EP computed: 15 iterations, converged=True\n"
+    )
+
+    def test_recovered_graph_wide_refusal_is_not_a_soft_failure(self):
+        assert _soft_failures(self._RECOVERED) == []
+
+    def test_point_soft_failure_still_reds(self):
+        # The #49 `context=` TypeError class.
+        out = self._RECOVERED.replace(
+            "  ✓ opt:a → 1a1a909d178-82e0d52cd29b",
+            "  ⚠ opt:a: TypeError: create_point() got an unexpected keyword"
+            " argument 'context'")
+        assert _soft_failures(out), "a point soft-failure must be reported"
+
+    def test_operator_soft_failure_still_reds(self):
+        # The #334 stub class.
+        out = self._RECOVERED.replace(
+            "  ✓ crit:1 --IMPL--> opt:a",
+            "  ⚠ crit:1 --IMPL--> opt:a: operator resolution failed")
+        assert _soft_failures(out), "an operator soft-failure must be reported"
+
+    def test_empty_ranking_still_reds(self):
+        # The UN-recovered arm: the script prints both the refusal and, when
+        # the fallback produced nothing, the empty-ranking warning. Tolerating
+        # the refusal must never tolerate its own failure to recover.
+        out = self._RECOVERED.replace(
+            "\n✓ EP computed: 15 iterations, converged=True",
+            "\n⚠ EP produced NO posterior for this decision's options"
+            " (0 iterations) — the ranking is EMPTY, not converged")
+        assert _soft_failures(out), "an empty ranking must still red"
+
+    def test_clean_output_has_no_soft_failures(self):
+        assert _soft_failures(
+            "  ✓ opt:a → x\n✓ EP computed: 3 iterations, converged=True\n"
+        ) == []
 
 
 class TestDecideWiring:
