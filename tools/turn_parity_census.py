@@ -6,6 +6,17 @@ Read-only on BOTH stores. It never deletes, never writes, never issues a
 feature. What it does is answer the ONE question #10017 gates the destructive
 half on, per session, exactly:
 
+⚠️ "Read-only" is a statement about the COMMANDS it issues, and it is now also
+a statement about the STORE's graph list: the graph leg refuses a graph the
+store does not already hold, instead of creating it (#11112 — a typo'd
+`--graph-name` used to leave a stub graph behind). It is NOT a claim that
+opening the store is free of side effects: on the EMBEDDED leg the redislite
+open itself rewrites the RDB file (measured: 1,402,361 → 1,402,370 B on one
+read), which is why the byte census must be taken around a run, not from a
+copy the run itself touched. On the URI leg the bind issues no graph write
+(measured: `GRAPH.LIST` unchanged), but it IS a connection, and "no graph
+write" is not "no server-side effect" — the census never claims the latter.
+
     For every turn node the graph holds, does the record hold a row with the
     SAME key and the SAME transcript-bearing fields — so that deleting the
     graph copy loses nothing?
@@ -770,6 +781,44 @@ def resolve_graph_name(uri: str | None, db_path: str | None,
     return "tortoise"
 
 
+def _refuse_unless_graph_present(proj, requested: str | None) -> None:
+    """Refuse BEFORE addressing a graph this store does not already hold.
+
+    `FalkorProjection`'s bind is NOT inert: `__init__` runs the schema DDL
+    (`_ensure_indexes`) and, unless skipped, an open-time health probe — and the
+    first `GRAPH.QUERY` on a graph that does not exist CREATES IT. Measured on
+    the embedded leg (#11112): seeding a store with `tortoise` only and then
+    binding `tortise` left `GRAPH.LIST` at `['tortoise', 'tortise']`. The caller
+    here therefore binds with `skip_health_check=True, ensure_indexes=False`,
+    which issues nothing, and only then asks.
+
+    Presence is asked of the STORE (`GRAPH.LIST`, which creates nothing). The
+    name asked about is the projection's OWN resolved name, not the caller's
+    argument: a redirect or a test-name derivation can change which graph is
+    addressed, and refusing on the argument would refuse a graph the store
+    actually holds.
+
+    A store that cannot be listed is a refusal, never a skip — in a gate, "I
+    could not ask" is not "it is there".
+    """
+    wanted = getattr(proj, "_graph_name", None) or getattr(
+        proj, "graph_name", None) or requested or "tortoise"
+    try:
+        present = sorted(str(n) for n in proj.db.list_graphs())
+    except Exception as exc:
+        raise CensusError(
+            f"the store could not be listed ({type(exc).__name__}: {exc}) — "
+            "an absence is NOT established") from exc
+    if wanted in present:
+        return
+    raise CensusError(
+        f"the graph {wanted!r} does not exist in this store — refused BEFORE "
+        f"opening it, so no graph was created (#11112). The store holds: "
+        f"{present or '[]'}. A wrong --graph-name / --db-path is NOT the same "
+        "thing as a drained graph, and this gate does not create the target "
+        "it certifies")
+
+
 def read_graph_turns(uri: str | None, db_path: str | None,
                      graph_name: str | None, *,
                      node_ids: Iterable[str] | None = None,
@@ -814,19 +863,32 @@ def read_graph_turns(uri: str | None, db_path: str | None,
                 f"tortoise import failed ({type(exc).__name__}: {exc})") from exc
         try:
             if uri:
-                proj = FalkorProjection.from_uri(uri, graph_name=graph_name)
+                proj = FalkorProjection.from_uri(
+                    uri, graph_name=graph_name,
+                    skip_health_check=True, ensure_indexes=False)
             else:
                 # `--graph-name` is a TARGET selector, not a URI-only flag: the
                 # embedded store selects the graph by name too. Dropping it
                 # here censused the default `tortoise` graph while the operator
                 # asked for another — a wrong-target read that still reported a
                 # verdict.
-                proj = FalkorProjection(db_path,
-                                        graph_name=graph_name or "tortoise")
+                #
+                # `skip_health_check=True, ensure_indexes=False`: this tool
+                # CERTIFIES a store, so its bind must issue nothing (#11112).
+                # Both defaults write — the health probe and the schema DDL are
+                # `GRAPH.QUERY` statements, and on a graph that does not exist
+                # the first one creates it.
+                proj = FalkorProjection(
+                    db_path, graph_name=graph_name or "tortoise",
+                    skip_health_check=True, ensure_indexes=False)
         except Exception as exc:
             raise CensusError(
                 f"the graph could not be read ({type(exc).__name__}: {exc}) — "
                 "an absence is NOT established") from exc
+        # Presence BEFORE any query on the selected graph: the query is what
+        # creates it. A caller that already holds `g` is exempt by construction
+        # — it is addressing a store it can already read.
+        _refuse_unless_graph_present(proj, graph_name)
         g = proj.g
     try:
         if ids is None:
