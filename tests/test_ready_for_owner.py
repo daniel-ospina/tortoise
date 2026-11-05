@@ -223,6 +223,13 @@ queue_rules:
 
 
 def test_an_unknown_injection_mode_is_unreadable(tmp_path):
+    """Pin the MODE check itself, not an aggregate verdict.
+
+    This test previously called `condition_2` unpatched, so the assertion was
+    satisfied by a LIVE `gh api` 404 on the trailing read rather than by the mode
+    branch — deleting the mode check left the suite green. It now asserts the
+    branch's own detail and never touches the network.
+    """
     weird = """\
 queue_rules:
   - name: main
@@ -230,8 +237,30 @@ queue_rules:
     queue_conditions:
       - check-success=docs
 """
-    result = rfo.condition_2(_write_tree(tmp_path, mergify=weird), "o/r", "deadbeef")
-    assert result.verdict == rfo.FAIL_UNREADABLE
+    tree = _write_tree(tmp_path, mergify=weird)
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo.resolve_required_set(tree)
+    assert "unrecognised branch_protection_injection_mode" in str(excinfo.value)
+    assert "sideways" in str(excinfo.value)
+
+
+def test_two_rules_with_different_valid_modes_are_unreadable(tmp_path):
+    """Mixed modes cannot be reasoned about as one required set."""
+    mixed = """\
+queue_rules:
+  - name: a
+    branch_protection_injection_mode: merge
+    queue_conditions:
+      - check-success=docs
+  - name: b
+    branch_protection_injection_mode: queue
+    queue_conditions:
+      - check-success=test-isolation
+"""
+    tree = _write_tree(tmp_path, mergify=mixed)
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo.resolve_required_set(tree)
+    assert "disagree" in str(excinfo.value)
 
 
 # ── 3. Unreadable config → snapshot → FAIL(unreadable) ──────────────────────
@@ -970,6 +999,26 @@ def test_a_non_integer_check_run_id_is_unreadable_not_a_guess(tmp_path):
     )
     assert result.verdict == rfo.FAIL_UNREADABLE
     assert "cannot be ordered" in result.detail
+
+
+def test_a_field_that_changes_type_across_pages_is_a_verdict(monkeypatch):
+    """A rewritten list field must not raise AttributeError from `.extend`."""
+    pages = '{"total_count":2,"check_runs":null}{"total_count":2,"check_runs":[{"name":"docs"}]}'
+
+    class Proc:
+        returncode = 0
+        stdout = pages
+        stderr = ""
+
+    import subprocess as sp
+    original = sp.run
+    sp.run = lambda *a, **k: Proc()
+    try:
+        with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+            rfo._gh_api_json("repos/o/r/commits/x/check-runs")
+        assert "changed type across pages" in str(excinfo.value)
+    finally:
+        sp.run = original
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────

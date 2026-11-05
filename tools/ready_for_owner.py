@@ -360,8 +360,23 @@ def _gh_api_json(endpoint: str) -> dict:
             )
         for key, value in obj.items():
             if isinstance(value, list):
-                merged.setdefault(key, []).extend(value)
+                if key not in merged:
+                    merged[key] = list(value)
+                elif isinstance(merged[key], list):
+                    merged[key].extend(value)
+                else:
+                    # A key that is a list on one page and not on another is a
+                    # rewritten payload. Blindly `.extend`ing raises AttributeError,
+                    # which escapes every handler and exits 1 — read as "a required
+                    # check is red". Fail as a verdict instead.
+                    raise RequiredSetUnreadable(
+                        f"gh api {endpoint}: field {key!r} changed type across pages"
+                    )
             else:
+                if key in merged and isinstance(merged[key], list):
+                    raise RequiredSetUnreadable(
+                        f"gh api {endpoint}: field {key!r} changed type across pages"
+                    )
                 merged.setdefault(key, value)
     return merged
 
