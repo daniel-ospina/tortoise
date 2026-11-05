@@ -145,12 +145,14 @@ def check_registry_text(text: str, shown: str) -> list[str]:
 
     The TEXT entry point exists because one caller holds the document in hand
     rather than on disk: `tools/ci_timing.py::integrity_problems` validates the
-    REFRESHED manifest BEFORE `refresh_durations` writes it, so a path-based
-    check there would grade the file that is about to be REPLACED. Measured
-    (#10726 review): with a duplicate `.durations` key planted, a path check
-    reported it while the text path did not exist at all, so the weekly
-    `--refresh-durations` could persist exactly the manifest the required
-    `manifest-integrity` job then reds.
+    REFRESHED manifest BEFORE `refresh_durations` writes it, so grading the text
+    keeps that gate's question ("is the document I am about to write valid?")
+    the one it answers. Measured (#10726 review): with a duplicated TOP-LEVEL
+    `durations:` key — the shape that actually reaches that writer, which the
+    renderer emits twice and `validate_refreshed_manifest` does not report — the
+    duplicate-key walk catches it and no other composed validator does. (A
+    duplicated `.durations:` ROW is already refused earlier, by
+    `_locate_durations_block`, so it cannot reach the write at all.)
 
     Same fail-closed rule as the path form: text that cannot be parsed returns
     a problem, never an empty list.

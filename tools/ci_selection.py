@@ -3679,11 +3679,14 @@ def duplicate_mapping_key_issues(
 
     ``text`` grades a document held in memory instead of one on disk. It exists
     for ``tools/ci_timing.py::integrity_problems``, which validates the
-    REFRESHED manifest BEFORE ``--refresh-durations`` writes it: a path-based
-    check there would grade the file that is about to be REPLACED and let the
-    weekly refresh persist a duplicate the required ``manifest-integrity`` job
-    then reds. Supplying ``text`` is the ONLY way to close that gap — the
-    duplicate does not have to exist on disk yet for it to be written.
+    REFRESHED manifest BEFORE ``--refresh-durations`` writes it. Grading the
+    text is a deliberate design choice rather than the only possible one: in the
+    shape that actually reaches that writer — a duplicated TOP-LEVEL
+    ``durations:`` key, which the renderer emits twice and
+    ``validate_refreshed_manifest`` does not report — the duplicate is already
+    in the INPUT file, so a path-based composition would also catch it. Grading
+    the text simply keeps the gate's question ("is the document I am about to
+    write valid?") the one it answers.
     """
     path = Path(manifest_path or MANIFEST)
     tools_dir = str(Path(__file__).resolve().parent)
