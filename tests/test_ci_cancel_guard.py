@@ -606,7 +606,13 @@ def test_a_widened_comparison_window_may_not_authorise_a_post(fixture):
     may not satisfy the staleness check — but `--max-age` IS that check's bound, and it
     was only lower-bounded. Pre-fix, `--apply --max-age 100000` on this PERMIT fixture
     issued the POST and exited 0: clause 6 (the anti-TOCTOU property this tool exists
-    for) was one flag away from being unbounded. Delete the ceiling arm and this POSTs.
+    for) was one flag away from being unbounded.
+
+    Non-vacuity, MEASURED — there are TWO ceiling arms, so state which one each
+    mutation exercises (review of #10963): delete `main`'s arm alone and `evaluate`'s arm
+    raises `ValueError` (uncaught here, so the run exits **1** with a traceback and no
+    POST); delete BOTH and the widened window POSTs and exits 0. `evaluate`'s arm is
+    pinned separately by `test_evaluate_itself_refuses_a_widened_window`.
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
@@ -650,6 +656,12 @@ def test_evaluate_itself_refuses_a_widened_window(fixture):
 
     widened = drive("1000000")
     assert widened.returncode != 0, widened.stdout + widened.stderr
+    # ⛔ `ValueError`, not `Unreadable`: nothing was read and no surface is at fault —
+    # the caller's contract is violated, and reporting it as "a surface could not be
+    # read" would be the argv-vs-surface conflation this module already fixed for a
+    # typo'd `--fake-elapsed` (review of #10963). Pinned by TYPE, not just a non-zero
+    # exit, so a revert to `Unreadable` reds here.
+    assert "ValueError" in widened.stderr, widened.stderr
     assert "wider than" in widened.stderr, widened.stderr
     assert fixture.cancelled() == []
 

@@ -407,14 +407,21 @@ def evaluate(repo: str, run_id: int, max_age: int,
     skip the check by calling `decide` directly.
     """
     if max_age > MAX_COMPARISON_AGE_S:
-        # ⛔ THE BOUND LIVES WITH THE MEASUREMENT, NOT WITH ONE CALLER. `main` refuses
-        # a widened `--max-age` with 64, but THIS function is where the window is
-        # consumed, and the doctrine above is stated in in-process terms ("no caller
-        # can skip the check by calling `decide` directly"). Without this arm the
-        # guarantee held for argv and not for a direct caller — `evaluate(..., 10**6)`
-        # returned the identical widened PERMIT the pre-fix CLI produced (review of
-        # #10963). Unreachable from the CLI: `main` refuses first, with a usage message.
-        raise Unreadable(
+        # ⛔ THE BOUND LIVES WITH THE MEASUREMENT, NOT WITH ONE CALLER. THE WINDOW IS
+        # THE ONLY GATE BETWEEN A VERDICT AND THE POST, so a caller-supplied window may
+        # no more widen it than a caller-supplied age may satisfy it. `main` refuses a
+        # widened `--max-age` with 64 BEFORE calling this function; this arm is the
+        # in-process half, which this module's doctrine requires ("no caller can skip
+        # the check by calling `decide` directly"). Measured without it: `evaluate(...
+        # 10**6)` returns the identical widened PERMIT the pre-fix CLI produced.
+        #
+        # ⛔ `ValueError`, NOT `Unreadable`. `Unreadable` means "a surface the decision
+        # depends on could not be read COMPLETELY" and its only handler maps to exit 2
+        # ("a surface could not be read"). Nothing is read here and no surface is at
+        # fault — the CALLER's contract is violated — so reusing it would reintroduce,
+        # one layer down, the exact argv-vs-surface conflation this module fixed for the
+        # typo'd `--fake-elapsed` (review of #10963). A programming error should be loud.
+        raise ValueError(
             f"max_age {max_age}s is wider than the {MAX_COMPARISON_AGE_S}s window "
             "this guard is built on — a caller-supplied window may not widen the "
             "staleness check")
