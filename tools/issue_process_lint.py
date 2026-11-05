@@ -352,12 +352,22 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
 
 
 def classify_issue(comment_bodies: list[str], number: int | str,
-                   wip: bool | None = None) -> tuple[list[Finding], dict]:
+                   wip: bool | None = None,
+                   notes: list[str] | None = None) -> tuple[list[Finding], dict]:
     """ARM 2 — WIP with no `## Satisfies` checklist.
 
     Returns (findings, measured) where `measured` carries the marker count, because "0 markers read"
     and "0 issues with WIP" are different claims and the caller must print the first.
+
+    `notes`, when supplied, receives the UNTERMINATED-FENCE note for this issue's bodies. Arm 1 got
+    this first (a `--sweep` swallowed it); the issue modes kept swallowing it, so the one thing that
+    says "the scan could not see the rest of this body" was reported for a PR and silently dropped
+    for the same content read as an issue — the same one-population-two-measurements shape as the
+    discarded issue body below.
     """
+    hidden = sum(strip_code(body)[1] for body in comment_bodies)
+    if hidden and notes is not None:
+        notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in #{number}")
     markers = in_flight_markers(comment_bodies)
     if wip is None:
         is_wip = bool(markers)
@@ -512,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
             bodies = _comments_from_file(args.comments_file) if args.comments_file else []
             body = args.issue_body_file.read_text(encoding="utf-8")
             # The issue's own body is a comment-shaped input: a checklist or a claim may live there.
-            found, measured = classify_issue([body, *bodies], "issue-body-file", wip)
+            found, measured = classify_issue([body, *bodies], "issue-body-file", wip, notes)
             findings += found
             measured_rows.append(measured)
             population = f"1 issue body + {len(bodies)} comment(s) (offline)"
@@ -525,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
             # lines above has always said so; this one discarded it, so identical content got two
             # verdicts depending on whether it was read from gh or from a file (review P2).
             body, bodies = fetch_issue(args.issue, repo)
-            found, measured = classify_issue([body, *bodies], args.issue, wip)
+            found, measured = classify_issue([body, *bodies], args.issue, wip, notes)
             findings += found
             measured_rows.append(measured)
             population = f"1 issue ({len(bodies)} comment(s) + body)"
@@ -537,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:
         else:  # --sweep-issues
             rows = sweep_issues(repo, args.limit, args.label)
             for number, bodies in rows:
-                found, measured = classify_issue(bodies, number, wip)
+                found, measured = classify_issue(bodies, number, wip, notes)
                 findings += found
                 measured_rows.append(measured)
             population = f"{len(rows)} open issue(s)"
