@@ -313,14 +313,17 @@ bounds, both deliberate:
 ### Obligation: `#10852` DELETES this rule, it does not converge with it
 
 `#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
-derives `_searchText` from `topics` — §4.4 metadata, not §9.1/D1 prose, which is
+derives `_searchText` from `topics` — §4.6 metadata, not §9.1/D1 prose, which is
 what `docs/architecture/STORAGE-ARCHITECTURE.md:527` rules (*"`summary`/`title`
-stay on the node"*). The narrowing above is keyed on the ROW's IDENTITY, so it
-cannot tell that provenance from the prose: it would decline both, on the
-record→cache door only (the live journal fold keeps them), and the reconciler
-subtraction would keep that out of the mismatch count. So this rule is correct
-for a pre-fix row and **wrong** for a post-`#10852` one, and it must not outlive
-it — `#10852` deletes `_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
+stay on the node"*; the same sentence names them **§4.6** metadata, and ONTOLOGY
+**§4.6 `Source`** is the property table that declares `summary`, `title` and
+`topics` — §4.4 is *"Document — a source, not an entity"*). The narrowing above
+is keyed on the ROW's IDENTITY, so it cannot tell that provenance from the
+prose: it would decline both, on the record→cache door only (the live journal
+fold keeps them), and the reconciler subtraction would keep that out of the
+mismatch count. So this rule is correct for a pre-fix row and **wrong** for a
+post-`#10852` one, and it must not outlive it — `#10852` deletes
+`_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
 `_props_from_row`, `episodic_source_prose_properties`,
 **`episodic_source_declined_properties`**, `is_episodic_source_node`, the
 `scan_cache_view` subtraction, and **`record_serve.parity_difference`'s decline**,
