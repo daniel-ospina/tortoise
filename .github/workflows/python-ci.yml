@@ -953,12 +953,12 @@ jobs:
       #
       # ⛔ OVERRIDES: the vendor's own CI recommendation — uv docs, "Caching
       # dependencies" — is to run `uv cache prune --ci`, which "removes all
-      # pre-built wheels … but retains any wheels that were built from source",
-      # on the premise that re-downloading from the registry beats carrying them.
-      # That is exactly backwards for this job: the pre-built wheels ARE #7612's
-      # payload (140 torch wheels, ~3.2 GB, 93-219 s per job cold), and `--ci`
-      # would delete the very thing the cache exists for. Plain `uv cache prune`
-      # (unused entries + centralised environments, per the same page) keeps them.
+      # pre-built wheels"; we keep plain `uv cache prune` (unused entries +
+      # centralised environments), and the reason is NOT the torch set: `~/.cache/uv`
+      # holds only what `uv sync --frozen` puts there — the dev group, which has
+      # none — so `--ci` would drop the registry wheels each cold shard
+      # re-resolves (~252 MiB on `main`, order of magnitude); the 3.2 GB torch
+      # set is `pip`'s cache (`install-cpu-torch`), which this save never touches.
       #
       # ARM 2, ARITHMETICALLY (`docs/ops/ci-wall-clock.md` §2: `cap >= SUM x 1.5`
       # and the `test` cap stays 90 ⇒ SUM <= 60 m). The measured `test` SUM without
@@ -1956,7 +1956,7 @@ jobs:
       # so the ACCUMULATION case is bounded. It is NOT what shrank this upload: the
       # 5.9x is pip's SCOPE variance (397,897,273 B on `main` vs 3,616,385,308 B in
       # a PR scope) and the uv half is ~266 MB in both — splitting the payload did
-      # it. NOT `--ci`: that would delete #7612's pre-built wheels (OVERRIDES above).
+      # it. NOT `--ci`: that would drop the dev-group wheels `uv sync` re-resolves (OVERRIDES above).
       #
       # Bound 2 — TIME. `timeout-minutes: 1` / `7`: an aborted prune leaves a
       # bigger archive for a still-bounded save, and an aborted save leaves a

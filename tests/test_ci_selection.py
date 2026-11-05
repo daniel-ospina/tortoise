@@ -9912,9 +9912,10 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"(found {len(pruners)}). Without it the save archives the runner's whole "
         "accumulated uv history — the persistent-runner case, not a "
         "single-environment one (#11063). NOTE: plain `uv cache prune`, NOT the "
-        "vendor's `--ci` variant, which deletes the pre-built wheels that ARE "
-        "#7612's payload. Only EXECUTING lines are searched, so a commented-out "
-        "prune does not satisfy this arm.")
+        "vendor's `--ci` variant, which deletes the pre-built registry wheels "
+        "`uv sync --frozen` re-resolves cold on every shard — #7612's 3.2 GB "
+        "torch set is `pip`'s cache, which this job only READS. Only EXECUTING "
+        "lines are searched, so a commented-out prune does not satisfy this arm.")
     prune = pruners[0]
     prune_code = "\n".join(_code_lines(prune))
     # ⛔ `always()`, and asserted — the SAVE runs unconditionally, so a prune left
@@ -9930,15 +9931,46 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "key that can never be overwritten.")
     # ⛔ The `OVERRIDES:` departure is PLAIN `prune`, and an unguarded substring
     # let the vendor's `--ci` variant read green (#11065 cycle 5, finding 4) —
-    # which deletes the pre-built wheels that ARE #7612's payload, i.e. the exact
-    # tidy-up the marker exists to prevent.
+    # which deletes the pre-built registry wheels `uv sync --frozen` re-resolves
+    # cold on every shard, i.e. the exact tidy-up the marker exists to prevent.
     assert "--ci" not in prune_code, (
         "the uv prune was switched to `uv cache prune --ci`, which `uv`'s own "
         "docs say \"removes all pre-built wheels and unzipped source "
-        "distributions\" — the torch wheel set this cache exists to keep. The "
-        "`OVERRIDES:` line at .github/workflows/python-ci.yml:954-962 records "
+        "distributions\" — the dev-group registry wheels that `uv sync --frozen` "
+        "re-resolves cold on every shard are what this cache exists to keep (NOT "
+        "the torch set: that is `pip`'s cache, which this job restores read-only). "
+        "The `OVERRIDES:` line at .github/workflows/python-ci.yml:954-962 records "
         "why this job departs from the vendor's CI recommendation; use plain "
         "`uv cache prune`.")
+
+    # ⛔ THE `OVERRIDES:` REASON MUST NAME THE PAYLOAD `--ci` WOULD ACTUALLY DROP
+    # (#11065 cycle 7, P3 claim-mismatch). The marker's first version attributed
+    # the 3.2 GB torch wheel set to `~/.cache/uv`; it is in `~/.cache/pip`
+    # (`install-cpu-torch` installs torch with `pip`), and `~/.cache/uv` is
+    # populated by one command, `uv sync --frozen`, which installs the dev group
+    # — no torch. The marker is the artifact an adopter meets BEFORE re-deriving
+    # the decision, so a false attribution there is carried into the next lane
+    # (that is the RESEARCH FIRST failure this pin exists to stop) and reddens a
+    # payload-SHRINKING change with a fact that cannot be true.
+    wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
+    wf_lines = wf_path.read_text().splitlines()
+    start = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
+    block = []
+    for ln in wf_lines[start:]:
+        if re.match(r"\s*#\s*ARM \d", ln):
+            break
+        block.append(ln)
+    overrides = "\n".join(block)
+    assert "~/.cache/uv" in overrides and "uv sync --frozen" in overrides, (
+        "the `OVERRIDES:` block does not name the cache directory it governs "
+        "(`~/.cache/uv`) or its only writer (`uv sync --frozen`), so its reason "
+        "is unattributable — restate it against the uv-side payload.")
+    assert "#7612's payload" not in overrides, (
+        "the `OVERRIDES:` block still attributes #7612's payload (the 3.2 GB "
+        "torch wheel set) to `~/.cache/uv`. It is not there: `install-cpu-torch` "
+        "installs torch with `pip`, so it lives in `~/.cache/pip`, which this "
+        "job only restores. `--ci` would drop the DEV-GROUP registry wheels "
+        "`uv sync --frozen` re-resolves — say that instead (#11065 cycle 7).")
     assert prune.get("continue-on-error") is True, (
         "the uv prune must be `continue-on-error: true` — a prune that cannot run "
         "only leaves a bigger archive for a save that is bounded on its own")
