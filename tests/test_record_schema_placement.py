@@ -394,11 +394,19 @@ _INDEX_CENSUS_RE = re.compile(
 # and the owner's 2026-11-03 decision (comment `6612968196`) that superseded the
 # ruling which had forbidden the provisioning.
 _INDEX_ARMED_CLAIM = "the record is ✅ ARMED on the hosted deployment"
-#: What makes that claim EVIDENCE rather than a second assertion — the build the
-#: reading was taken on and the counter that was actually read (the epic's own
-#: rounded bound: an empty `record_write_failures` falsifies "writes are failing"
-#: and does NOT establish that a row was written).
-_INDEX_ARMED_EVIDENCE = ("record_write_failures", "fc6a8a64b")
+#: What makes that claim EVIDENCE rather than a second assertion — the counter
+#: that was actually read (the epic's own rounded bound: an empty
+#: `record_write_failures` falsifies "writes are failing" and does NOT establish
+#: that a row was written).
+_INDEX_ARMED_EVIDENCE = ("record_write_failures",)
+#: …and the build the reading was taken on, pinned by **shape, not by value**
+#: (#11064 review, non-blocking note 1). The value in the row is a *measurement*
+#: (`fc6a8a64b` was serving when it was taken); it changes on the next deploy, so
+#: pinning the literal would steer the next fixer to restore a build that no
+#: longer serves — a stale evidence claim, which is the defect class this pin
+#: exists to close. What must survive is that the row names a build at all, so a
+#: rewrite cannot degrade the reading into an anonymous assertion.
+_INDEX_ARMED_BUILD_RE = re.compile(r"build `[0-9a-f]{7,40}`")
 #: The retired live-state sentences. They may STAY as history — this repo keeps a
 #: superseded statement in place, labelled and dated (the shape #11064 used at
 #: `08:205-238`, `09:196-212` and in the runbook) — but a row that carries one
@@ -712,14 +720,19 @@ def test_the_routing_index_declares_the_measured_arming_not_the_census():
 
     RED on the pre-fix text — measured at #11064's head before the correction: the
     row carried **neither** `the record is ✅ ARMED on the hosted deployment`
-    **nor** the `record_write_failures` / `fc6a8a64b` evidence, and both retired
-    sentences appeared with **no** `SUPERSEDED` marker anywhere in the row.
+    **nor** the `record_write_failures` counter and a measured build, and both
+    retired sentences appeared with **no** `SUPERSEDED` marker anywhere in the row.
 
     Non-vacuity is the inverted half: the retired sentences are NOT banned — they
     are this repo's convention for an overridden ruling (keep it, label it, date
     it) — so the assertion is that any retained one is preceded by the label. A
     row that re-asserts "R1 has still not armed the DSN" as live reds here, and so
     does a rewrite that deletes the measured state instead of correcting it.
+
+    The build is pinned by SHAPE (a `build` reference plus a sha), never by value:
+    the value in the row is a measurement of a build that changes on the next
+    deploy, and pinning the literal would send the next fixer to restore a build
+    that is no longer serving (#11064 review, non-blocking note 1).
     """
     row = _index_record_row()
     assert _INDEX_ARMED_CLAIM in row, (
@@ -734,6 +747,13 @@ def test_the_routing_index_declares_the_measured_arming_not_the_census():
             "counter, and keep the bound: an empty `record_write_failures` is not "
             "evidence that a row was written)"
         )
+    assert _INDEX_ARMED_BUILD_RE.search(row), (
+        "docs/00_index.md's #7879 row states arming without naming the BUILD the "
+        "reading was taken on (expected a `build` reference plus a sha). Leave the "
+        "sha's value alone — it is a measurement, and it changes on the next "
+        "deploy; what must survive is the reference, so the claim cannot decay "
+        "into an anonymous assertion"
+    )
     for retired in _INDEX_RETIRED_ARMING:
         at = row.find(retired)
         if at == -1:
@@ -752,6 +772,148 @@ def test_the_routing_index_declares_the_measured_arming_not_the_census():
         assert anchor in text, (
             f"{path} no longer states the measured arming ({anchor!r}) — the "
             "index row's correction was derived from it, so re-derive both together"
+        )
+
+
+# ── the SAME stale-premise sweep, applied to the file the index routes to ─────
+# #11064's round-1 fix corrected the runbook and left the two live epic docs
+# carrying the superseded ruling; the round-3 fix corrected those and left the
+# index; this round's finding is that the §A8 disclaimer then claimed a COMPLETE
+# enumeration of the remaining census-point statements — two — while the file
+# carried four. A closed list is the mechanism: it tells a reader that everything
+# unlisted is current, so each correction that enumerates its sites hands the
+# next stale sentence a place to hide. The two pins below hold the fix in the
+# shape that cannot rot that way (state the invariant, label the list
+# non-exhaustive) and hold the one cross-artifact disagreement this round found.
+
+#: §A8's disclaimer must say what makes a statement here trustworthy — its own
+#: measurement date — rather than claiming its list of exceptions is complete.
+_PREREQ_DISCLAIMER_INVARIANT = "does not carry its own measurement date"
+_PREREQ_DISCLAIMER_NOT_EXHAUSTIVE = "NOT exhaustive"
+#: The retired closed-list claim: `the two remaining census-point statements`.
+#: It was wrong when written (the file carried four — R6's read-back note, R7
+#: item 2, R8's drill attribution and the A8 RLS row — and the §G paragraph made
+#: five), and because it enumerated it made every unlisted sentence read as
+#: vetted-current.
+_PREREQ_DISCLAIMER_RETIRED_CLOSED_LIST = "the two remaining census-point statements"
+
+#: R8's drill attribution after the correction, and the runbook's §9 drill row it
+#: must agree with. Two artefacts an operator reads for this epic disagreed on
+#: what blocks the drill, and the direction was the costly one: 08 said "blocked
+#: on arming", which is the premise that made lane `p0-10000` conclude that the
+#: only remaining move was the prohibited one.
+_DRILL_BLOCKER_ANCHORS = (
+    # a captured session that actually wrote the two row kinds
+    "captured",
+    "journal_event",
+    # the record leg needs a DIRECT (not pooler) backup-capable DSN
+    "direct",
+)
+_DRILL_RETIRED_ATTRIBUTION = "#9548 hosted arming / #9551 CI"
+_RUNBOOK_DOC = REPO_ROOT / "docs" / "infra-runbook.md"
+_RUNBOOK_DRILL_ROW_MARKER = "a restore executed against a **real armed record**"
+
+
+def test_the_epic_a8_disclaimer_states_an_invariant_not_a_closed_list():
+    """§A8 tells a reader how to judge any statement here, not just listed ones.
+
+    The disclaimer that the previous fix round added enumerated its exceptions
+    ("the two remaining census-point statements elsewhere in it") and was wrong
+    on its own count — the file carried four, and the §G paragraph made five. The
+    defect is not the number: an enumeration that claims completeness makes every
+    unlisted sentence read as vetted-current, which is exactly how a stale
+    "R1 is unarmed" survived two sweeps scoped to "the files this PR touched".
+
+    So the pin is on the shape: state the invariant (any statement without its own
+    measurement date describes the tree that was), label the list NOT exhaustive,
+    and never re-assert the closed-list claim. RED on the pre-fix text — measured
+    at #11064's head before this correction: `the two remaining census-point
+    statements` was present and neither the invariant nor the non-exhaustive
+    label was.
+    """
+    text = re.sub(r"\s+", " ", _PREREQUISITES_DOC.read_text(encoding="utf-8"))
+    assert _PREREQ_DISCLAIMER_RETIRED_CLOSED_LIST not in text, (
+        "08-hosted-prerequisites.md §A8 claims its list of census-point "
+        f"statements is complete ({_PREREQ_DISCLAIMER_RETIRED_CLOSED_LIST!r}) — it "
+        "was not (the file carried four, R6's read-back note and R8's drill "
+        "attribution among them). State the invariant and label the list NOT "
+        "exhaustive instead of counting sites"
+    )
+    assert _PREREQ_DISCLAIMER_INVARIANT in text, (
+        "08-hosted-prerequisites.md §A8 no longer states the invariant that makes "
+        f"this file readable ({_PREREQ_DISCLAIMER_INVARIANT!r}): a statement "
+        "without its own measurement date describes the tree that was. Without "
+        "it, only the listed sites are safe and the next stale sentence hides"
+    )
+    assert _PREREQ_DISCLAIMER_NOT_EXHAUSTIVE in text, (
+        "08-hosted-prerequisites.md §A8's list of dated sites must be labelled "
+        f"{_PREREQ_DISCLAIMER_NOT_EXHAUSTIVE!r} — an unlabelled list of "
+        "exceptions reads as a complete one"
+    )
+
+
+def test_the_epic_r8_drill_blocker_agrees_with_the_runbook():
+    """R8's unmeasured-drill attribution must name what is actually missing.
+
+    Both artefacts state why the hosted drill has not run, and they disagreed:
+    `docs/infra-runbook.md` §9's drill row was corrected to *"the blocker is not
+    the arming any more"* (missing: a captured session that wrote a
+    `journal_event` + `point` row, and a direct backup-capable DSN), while R8
+    still said the row was unmeasured `(#9548 hosted arming / #9551 CI
+    TEST_RECORD_DB_URI)` — two things the same runbook states are both satisfied.
+    The costly direction: 08 sent a lane back to the arming premise.
+
+    RED on the pre-fix text: the retired attribution was present in R8 and neither
+    `captured` nor `direct` appeared in the R8 section. Non-vacuity is the
+    cross-artifact half — the runbook's own drill row must still carry the same
+    two elements, so this cannot be satisfied by weakening 08 alone.
+
+    The retired wording may STAY as labelled history (this repo keeps a superseded
+    statement in place, dated and relabelled), so it is only a failure when it
+    appears with no `SUPERSEDED` marker before it.
+    """
+    text = _PREREQUISITES_DOC.read_text(encoding="utf-8")
+    flat = re.sub(r"\s+", " ", text)
+    start = flat.index("### R8 —")
+    # R9 is the next section — scope to it so "the epic says captured somewhere"
+    # cannot stand in for "R8 names what blocks the drill".
+    section = flat[start : flat.index("### R9 —")]
+    for anchor in _DRILL_BLOCKER_ANCHORS:
+        assert anchor in section, (
+            f"08-hosted-prerequisites.md §R8 does not name {anchor!r} as part of "
+            "what blocks the hosted drill. The runbook's §9 drill row (the "
+            "corrected one) names a captured session that wrote a "
+            "`journal_event` + `point` row and a DIRECT backup-capable DSN; an "
+            "operator reading R8 must not be sent back to the arming premise"
+        )
+    retired_at = section.find(_DRILL_RETIRED_ATTRIBUTION)
+    if retired_at != -1:
+        labelled_at = section.find(_INDEX_SUPERSEDED_MARKER)
+        assert labelled_at != -1 and labelled_at < retired_at, (
+            "08-hosted-prerequisites.md §R8 attributes the unmeasured drill to "
+            f"{_DRILL_RETIRED_ATTRIBUTION!r} with no "
+            f"{_INDEX_SUPERSEDED_MARKER} marker before it — both of those "
+            "blockers are satisfied (2026-10-26 arming; #9551 closed "
+            "2026-10-23), so as a live attribution it sends a lane to redo work "
+            "that is done. Keep it only as labelled history"
+        )
+    # …and the two artifacts must still agree, which is the finding itself.
+    runbook_rows = [
+        line
+        for line in _RUNBOOK_DOC.read_text(encoding="utf-8").splitlines()
+        if _RUNBOOK_DRILL_ROW_MARKER in line
+    ]
+    assert len(runbook_rows) == 1, (
+        "docs/infra-runbook.md §9 has no single "
+        f"{_RUNBOOK_DRILL_ROW_MARKER!r} drill row ({len(runbook_rows)} found) — "
+        "the correction in 08 §R8 is derived from it"
+    )
+    runbook_row = re.sub(r"\s+", " ", runbook_rows[0])
+    for anchor in ("captured", "direct"):
+        assert anchor in runbook_row, (
+            f"docs/infra-runbook.md §9's armed-record drill row no longer names "
+            f"{anchor!r} as part of the blocker — re-derive 08 §R8's attribution "
+            "with it rather than letting the two drift apart again"
         )
 
 
