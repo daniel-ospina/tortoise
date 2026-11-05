@@ -133,7 +133,13 @@ class _Stub:
         return f"http://127.0.0.1:{self.port}"
 
 
-def _env(stub_base: str, token: str | None) -> dict:
+def _env(stub_base: str, token: str | None, **overrides: str) -> dict:
+    """The ONE child environment: no host credential, no host gh config, no host proxy.
+
+    `overrides` are applied LAST so a test can plant `GH_CONFIG_DIR`/`HOME` instead of hand-building a
+    second copy of this dict — three tests used to build their own with a bare comprehension and so
+    escaped every rule below (review finding F2 at `7d7ce3d57`). One construction site is the point.
+    """
     env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
     # ⛔ BOTH CONFIG-DIR LEGS ARE STRIPPED, SO THE TESTS READ THE TEST'S OWN SETUP AND NOT THE HOST'S.
     # The tool resolves `GH_CONFIG_DIR` → `XDG_CONFIG_HOME` → `~/.config`, so either variable left in
@@ -143,17 +149,21 @@ def _env(stub_base: str, token: str | None) -> dict:
     env.pop("XDG_CONFIG_HOME", None)
     env.pop("GH_CONFIG_DIR", None)
     # ⛔ A PROXY INHERITED FROM THE HOST BREAKS THE PREMISE EVERY `seen` ASSERTION RESTS ON (review
-    # finding F1 at `a9007b139`). `_request` opens through `build_opener()`, which is proxy-aware, so
-    # with `http_proxy`/`https_proxy`/`all_proxy` exported (either case) the tool's probe goes to the
-    # proxy and the stub records NOTHING — MEASURED: the same probe-everything mutant left `seen == []`
-    # with a proxy set, i.e. an inert arm again, silently. This file's header promises "no network",
-    # and that promise is only true if the child cannot be pointed at one.
+    # finding F1 at `a9007b139`). `_request` opens through `build_opener()`, which is proxy-aware, so a
+    # probe can be routed off the box and the stub then records NOTHING.
+    # MEASURED for the `http://` stub bases this file uses: `http_proxy` (any case) → the probe goes to
+    # the proxy and `seen` stays empty on a probe-everything mutant, i.e. an inert arm again, silently.
+    # `https_proxy` and `all_proxy` are stripped DEFENSIVELY, not because they were measured as vectors
+    # here: `OpenerDirector` consults `*_proxy` per URL SCHEME, so `https_proxy` cannot reroute an
+    # `http://` base and `all_proxy` is never read (measured: both leave `seen == 4`). Stripping them
+    # costs nothing and keeps this true for an `https://` base a future test might bind.
     for key in [k for k in env if k.lower() in ("http_proxy", "https_proxy", "all_proxy")]:
         env.pop(key, None)
     env["HOME"] = "/tmp/gh-preflight-no-home"          # keeps hosts.yml out of the picture
     env["GH_WRITE_PREFLIGHT_API"] = stub_base
     if token is not None:
         env["GH_TOKEN"] = token
+    env.update(overrides)
     return env
 
 
@@ -527,22 +537,40 @@ def test_fully_writable_token_passes():
 def test_the_child_env_carries_no_proxy():
     """A host proxy would send the tool's probe where no stub can see it (review F1 at `a9007b139`).
 
-    `_request` opens through `build_opener()`, which reads `http_proxy`/`https_proxy`/`all_proxy` from
-    the environment. MEASURED: with a proxy exported, the probe-everything mutant left `seen == []` —
-    the arm that is supposed to catch it went inert instead of red, silently. This file promises a
-    hermetic stub, so the child must not inherit a route off the box.
+    `_request` opens through `build_opener()`, which reads `http_proxy` (any case) from the environment
+    — and NOT `all_proxy`, which `OpenerDirector` never consults (measured). MEASURED: with
+    `http_proxy` exported, the probe-everything mutant left `seen == []` — the arm that is supposed to
+    catch it went inert instead of red, silently. This file promises a hermetic stub, so the child
+    must not inherit a route off the box.
     """
     planted = {"http_proxy": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
                "all_proxy": "http://127.0.0.1:9"}
     try:
         os.environ.update(planted)
         env = _env("http://127.0.0.1:9", "ghp_dummy")
+        # …and through the OVERRIDES leg, which is how the hosts.yml tests plant `GH_CONFIG_DIR`: an
+        # override applied after the strip must not resurrect a proxy (review finding F2 at
+        # `7d7ce3d57` — three tests hand-built their own env and escaped every rule in `_env`).
+        env_override = _env("http://127.0.0.1:9", None, GH_CONFIG_DIR="/tmp/gh-preflight-ghdir")
     finally:
         for key in planted:
             os.environ.pop(key, None)
     leaked = [k for k in env if k.lower() in ("http_proxy", "https_proxy", "all_proxy")]
     assert leaked == [], f"the child inherits a proxy, so its probes can bypass the stub: {leaked}"
     assert env["GH_WRITE_PREFLIGHT_API"] == "http://127.0.0.1:9", env
+    assert env_override["GH_CONFIG_DIR"] == "/tmp/gh-preflight-ghdir", env_override
+    assert not [k for k in env_override if k.lower() in ("http_proxy", "https_proxy", "all_proxy")], \
+        env_override
+
+    # ⛔ ONE CONSTRUCTION SITE, structurally: the strip lives in `_env`, so a test that builds its own
+    # child environment from `os.environ` is a hole this pin cannot see through. That is exactly how
+    # F2 arrived — three hand-built dicts that passed every test while losing the rule.
+    src = Path(__file__).read_text(encoding="utf-8")
+    # …the needle is assembled rather than written literally, or this assertion would count ITSELF.
+    builders = src.count("os.environ" + ".items()")
+    assert builders == 1, (
+        f"{builders} places build a child environment from the host env — route them through `_env`, "
+        "or they silently opt out of the proxy/config-dir rules")
 
 
 def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
@@ -1239,9 +1267,7 @@ def test_the_credential_source_label_is_scrubbed_because_it_carries_hosts_yml_te
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {secret}\n    oauth_token: {secret}\n    git_protocol: https\n")
-        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
-        env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
-                    "HOME": "/tmp/gh-preflight-no-home"})
+        env = _env("http://127.0.0.1:9", None, GH_CONFIG_DIR=d)
         p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
                            capture_output=True, text=True, env=env, timeout=120)
     blob = p.stdout + p.stderr
@@ -1263,9 +1289,7 @@ def test_a_login_shaped_value_is_kept_but_file_content_never_becomes_the_label()
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {not_a_login}\n    oauth_token: {token}\n    git_protocol: https\n")
-        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
-        env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
-                    "HOME": "/tmp/gh-preflight-no-home"})
+        env = _env("http://127.0.0.1:9", None, GH_CONFIG_DIR=d)
         p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
                            capture_output=True, text=True, env=env, timeout=120)
     blob = p.stdout + p.stderr
@@ -1304,9 +1328,7 @@ def test_inputs_that_are_not_credentials_are_still_never_echoed_as_one():
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {secret}\n    oauth_token: 0123456789abcdef0123456789abcdef01234567\n    git_protocol: https\n")
-        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
-        env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
-                    "HOME": "/tmp/gh-preflight-no-home-3"})
+        env = _env("http://127.0.0.1:9", None, GH_CONFIG_DIR=d, HOME="/tmp/gh-preflight-no-home-3")
         p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
                            capture_output=True, text=True, env=env, timeout=120)
     blob = p.stdout + p.stderr
