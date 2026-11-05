@@ -1117,7 +1117,8 @@ def _exit_verdict(st: RailState, snap: _Snapshot, repo: str = "") -> RailState:
     return st
 
 
-def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
+def collect(state_dir: Path, repo: str, pr: int,
+            artifact: Path | None = None) -> RailState | None:
     """Read the artifact and the rail's log. NO side effects: no writes, no
     network, no process signals. The only external call is a local `ps` state
     read, and only on a box without procfs. Returns None when no artifact
@@ -1132,9 +1133,28 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     trust. The honest answer for a record that no longer exists is `absent` (3).
     """
     try:
-        return _collect_read(state_dir, repo, pr)
+        return _collect_read(state_dir, repo, pr, artifact)
     except FileNotFoundError:
         return None
+
+
+def _candidate_records(state_dir: Path, repo: str, pr: int) -> list[Path]:
+    """Every record for `pr` that names THIS repo — canonical first, then legacy."""
+    art = artifact_path(state_dir, repo, pr)
+    key = _repo_key(repo or "")
+    sd = Path(state_dir)
+    cands = [art] if art.exists() and _record_names_repo(art, repo) else []
+    if key and sd.exists():
+        for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
+            if cand == art:
+                continue
+            try:
+                text = cand.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _repo_key(read_field(text, "REPO") or "") == key:
+                cands.append(cand)
+    return cands
 
 
 def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | None:
@@ -1190,19 +1210,7 @@ def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | No
     closed here, and the other one ends when the fleet is past this commit.
     """
     art = artifact_path(state_dir, repo, pr)
-    key = _repo_key(repo or "")
-    sd = Path(state_dir)
-    cands = [art] if art.exists() and _record_names_repo(art, repo) else []
-    if key and sd.exists():
-        for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
-            if cand == art:
-                continue
-            try:
-                text = cand.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if _repo_key(read_field(text, "REPO") or "") == key:
-                cands.append(cand)
+    cands = _candidate_records(state_dir, repo, pr)
     if not cands:
         return None
     if len(cands) == 1:
@@ -1270,6 +1278,23 @@ def _record_is_merged(art: Path, pr: int, repo: str = "") -> bool:
     return state == MERGED
 
 
+def _waiting_record(state_dir: Path, repo: str, pr: int) -> RailState | None:
+    """The record of this PR (under ANY spelling) that says a rail is WAITING.
+
+    ⛔ `collect` ANSWERS A VERDICT, AND THE DUPLICATE-RAIL GUARD NEEDS A LIVENESS
+    FACT. When a merged record coexists with a live one — the rollout state this
+    module exists for — `collect` correctly returns the MERGED one, so a guard
+    reading `collect(...).state == WAITING` saw "not live" and started a SECOND rail
+    on the same PR, truncating the live record on the way (measured). So the guard
+    asks each candidate, and refuses on the first one that is waiting.
+    """
+    for cand in _candidate_records(state_dir, repo, pr):
+        st = collect(state_dir, repo, pr, artifact=cand)
+        if st is not None and st.state == WAITING:
+            return st
+    return None
+
+
 def _record_names_repo(art: Path, repo: str) -> bool:
     """Does this record's own `REPO=` name `repo` (or name nothing at all)?
 
@@ -1330,10 +1355,12 @@ def _record_is_live(art: Path) -> bool:
     return _rail_alive(leader, child, str(art), age=age)
 
 
-def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
+def _collect_read(state_dir: Path, repo: str, pr: int,
+                  artifact: Path | None = None) -> RailState | None:
     """The read itself (see `collect` for the contract, the two passes and the
     attempt-scoping rationale)."""
-    art = _artifact_for_any_spelling(state_dir, repo, pr)
+    art = artifact if artifact is not None else _artifact_for_any_spelling(
+        state_dir, repo, pr)
     if art is None:
         return None
     # ⛔ DERIVED FROM THE RECORD, NOT RE-SLUGGED FROM `repo`: a record written under
@@ -1870,6 +1897,13 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
                     "separate --state-dir for this repo."
                 )
         prior = collect(state_dir, repo, pr)
+        # ⛔ AND THE GUARD ASKS A LIVENESS QUESTION, NOT A VERDICT ONE. `collect`
+        # answers with the MERGED record when a merged one coexists with a live one
+        # (correct: a merge is monotone), and reading that as "not WAITING ⇒ free"
+        # let `launch` truncate the LIVE record and start a second rail — the #3061
+        # collision this guard exists to refuse, measured. So the guard looks for ANY
+        # record of this PR that is waiting, and refuses on that.
+        prior = _waiting_record(state_dir, repo, pr)
         if prior is not None and prior.state == WAITING:
             # ⛔ THE HINT IS PER-ARM, because `pid == 0` covers TWO waiting arms and
             # only ONE of them has no clock: an un-pid'd launch that has named NO

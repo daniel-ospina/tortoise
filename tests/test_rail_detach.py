@@ -2819,3 +2819,83 @@ def test_two_processes_racing_start_produce_exactly_one_rail(tmp_path, monkeypat
         st = rd.collect(sd, "o/r", 76)
         if st is not None and st.pid:
             kill_group(st.pid)
+
+
+def test_the_duplicate_rail_guard_asks_a_liveness_question(tmp_path):
+    """⛔ A MERGED RECORD COEXISTING WITH A LIVE ONE MUST NOT READ AS "FREE" (#10963).
+
+    `collect` answers a VERDICT, and merged-first ranking (correct: a merge is
+    monotone) means it returns the MERGED record when a merged one coexists with a
+    live one. `launch` read that as `prior.state == WAITING` being false — so it
+    truncated the LIVE record and started a second rail on one PR, the #3061
+    collision the guard exists to refuse, and stripping the live attempt's
+    `ATTEMPT_ID=` made its own announcements unreadable (#2235). Measured.
+
+    Non-vacuity: revert `prior` to `collect(state_dir, repo, pr)` and this launch is
+    ACCEPTED, so the `pytest.raises` fails.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    live = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        # the MERGED record, under the legacy spelling so it is not the canonical path
+        merged = sd / "rail-github.com-o-r-55.md"
+        logp = merged.with_suffix(".log")
+        merged.write_text(f"PR=55\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"ATTEMPT_ID=m1\nEXIT_ATTEMPT=m1\nEXIT=0\nLOG={logp}\n",
+                          encoding="utf-8")
+        logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=m1 (detached) =====\n"
+                        "admin-merge: ✅ merged PR #55 at deadbeefcafe1234 "
+                        "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+        # …and a LIVE attempt for the same PR, under the canonical name
+        canon = rd.artifact_path(sd, "o/r", 55)
+        canon.write_text(f"PR=55\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                         f"PID={live.pid}\n", encoding="utf-8")
+
+        assert rd.collect(sd, "o/r", 55).state == rd.MERGED, "the merged record wins the verdict"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(55, cwd=co, state_dir=sd, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value), str(exc.value)
+        assert canon.read_text(encoding="utf-8").startswith("PR=55\nREPO=o/r"), \
+            "the refused launch rewrote the live record"
+    finally:
+        live.kill()
+        live.wait()
+
+
+def test_the_shared_log_is_refused_even_without_the_artifact(tmp_path):
+    """⛔ `rm <artifact>` IS THE DOCUMENTED RECOVERY, AND THE LOG SURVIVES IT.
+
+    The shared-path refusal was gated on `art.exists()`, so after the recovery both
+    refusal hints print the artifact is gone while the log is not, and the refusal
+    did not fire: `a-b/c#9` truncated the surviving log and the still-live `a/b-c#9`
+    rail appended its `✅ merged PR #9` into it — whose last evidence line then read
+    as `a-b/c`'s own, so `--assert-merged` exited 0 for a repo that never merged
+    (measured end-to-end). One-sided: a log with no evidence line still allows the
+    launch, so this repo's own rm-and-relaunch flow is untouched.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    shared = sd / "rail-a-b-c-9.log"
+    shared.write_text("admin-merge: repo a/b-c (resolved from --repo)\n",
+                      encoding="utf-8")
+    with pytest.raises(rd.Refused) as exc:
+        rd.launch(9, cwd=co, state_dir=sd, repo="a-b/c")
+    assert "ANOTHER repo's rail" in str(exc.value), str(exc.value)
+    assert "a/b-c" in shared.read_text(encoding="utf-8"), \
+        "the refused launch truncated another repo's log"
+
+    # …and the SAME repo's own log does NOT block its relaunch (the rule is
+    # one-sided: a log its own rail wrote is not evidence against it).
+    shared.write_text("admin-merge: repo a-b/c (resolved from --repo)\n",
+                      encoding="utf-8")
+    ln = rd.launch(9, cwd=co, state_dir=sd, repo="a-b/c")
+    try:
+        assert ln.pid > 0
+    finally:
+        kill_group(ln.pid)
