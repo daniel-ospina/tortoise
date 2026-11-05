@@ -10602,23 +10602,42 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "pays the cold torch download #7612 removed. Re-derive the remedy (#10327 "
         "vs a bounded writer here) rather than leaving this pin asserting a stale "
         "premise.")
+    # ── KEY IDENTITY, not a root prefix ────────────────────────────────────
+    # The root test above is a PREFIX test: `pip-${{ github.sha }}` satisfies it,
+    # and `pip_writer_rows`' membership test (`pip_key_root in _key_of(s)`) is a
+    # SUBSTRING test, so a one-sided key-formula change reads GREEN while nothing
+    # writes the key this job reads — every shard then pays the ~3.2 GB cold torch
+    # download and #7612 is reverted with a green pin (#11065 review, reproduced by
+    # mutation). The expected spelling is therefore taken from a SIBLING WRITER,
+    # never restated here, so renaming the shared key in one place reds.
+    pip_sibling_keys = sorted({row[2] for row in pip_writer_rows})
+    assert pip_key in pip_sibling_keys, (
+        f"the `test` job restores {pip_key!r}, which is not the key ANY other job "
+        f"writes ({pip_sibling_keys}). A change on this side only leaves the job "
+        "reading a key nothing populates — the #7612 regression with a green pin. "
+        "Use the shared spelling, or change BOTH sides in one commit.")
     # A writer that runs LESS OFTEN than this job empties the key this job reads.
     # `test` runs on `python == 'true'`; a writer whose job carries that same
     # expression runs whenever this job runs, and one gated only on `always()` is
-    # strictly broader. The two DIFF-GATED writers (`slow_run`, `carve_out_run`)
-    # are the ones that can vanish on a run that still reaches this job — so a
-    # COUNT of writers names the wrong population: it cannot tell the two
-    # unconditional writers from the two diff-gated ones, and its message named
-    # `test-carve-out` twice while omitting `test-d14-hosted-api` and
-    # `test-record-postgres` (#11065 cycle 4, finding 2).
+    # strictly broader. `test-slow` (`slow_run`) is the DIFF-GATED pip writer and is
+    # the one that can vanish on a run which still reaches this job — so a COUNT of
+    # writers names the wrong population: it cannot tell the unconditional writers
+    # from the diff-gated one, and its message named `test-carve-out` twice while
+    # omitting `test-d14-hosted-api` and `test-record-postgres` (#11065 cycle 4).
+    # (`test-carve-out` is not in the population at all: its pip step is
+    # restore-only by `test_the_carve_out_job_restores_the_pip_cache_without_saving_it`.)
     test_gate = str(job.get("if") or "").strip()
 
     def _gate_of(job_id: str) -> str:
         return str((wf["jobs"].get(job_id) or {}).get("if") or "").strip()
 
-    load_bearing = [jid for jid in pip_writers_elsewhere
-                    if _gate_of(jid) == test_gate
-                    or _gate_of(jid).startswith("always()")]
+    # ⛔ EXACT gate strings, never a prefix. `always() && needs.changes.result ==
+    # 'success' && needs.changes.outputs.carve_out_run == 'true'` STARTS WITH
+    # `always()` and is diff-gated, so a `startswith("always()")` test accepts the
+    # very shape this arm exists to reject (#11065 review, reproduced by mutation:
+    # with every writer diff-gated, the prefix form read GREEN).
+    broader = {test_gate, "always() && needs.changes.result == 'success'"}
+    load_bearing = [jid for jid in pip_writers_elsewhere if _gate_of(jid) in broader]
     assert load_bearing, (
         f"every job writing the shared pip key is diff-gated away from this job's "
         f"own run: {[(jid, _gate_of(jid)) for jid in pip_writers_elsewhere]} vs "
@@ -10627,8 +10646,9 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "so this job reads an entry nothing wrote. The unconditional writers are "
         "`test-d14-hosted-api` and `test-record-postgres` (`always() && "
         "needs.changes.result == 'success'`), and `test-concurrency-falkor` shares "
-        "this job's own gate; `test-slow` and `test-carve-out` are the diff-gated "
-        "pair and cannot be the load-bearing writer.")
+        "this job's own gate; `test-slow` (`slow_run`) is the only diff-gated pip "
+        "writer, and `test-carve-out` is NOT a writer — its pip step is "
+        "restore-only by its own pin.")
 
 
     # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
