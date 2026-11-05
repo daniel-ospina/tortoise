@@ -7491,35 +7491,38 @@ def test_a_losing_builder_neither_installs_nor_LEAKS_its_handle(monkeypatch):
 
 
 @pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
-def test_a_URI_drift_DURING_the_build_is_recorded_against_what_was_built(
+def test_a_URI_drift_DURING_the_build_is_REBUILT_not_cached_under_either_identity(
         monkeypatch):
-    """The cached identity must describe the handle that was actually built.
+    """A drift that lands between the identity read and the build costs one
+    REBUILD, and no handle is ever cached against an identity it may not have
+    been built for.
 
     `_make_sdk` re-reads `TORTOISE_DB_URI` immediately before it constructs, so
-    a drift that lands between this caller's identity read and the build is
-    resolved in the BUILD's favour. Recording the pre-build read instead pairs
-    a NEW server's handle with the OLD identity, and a later caller still
-    resolving the old identity is then served a handle bound to the new one —
-    a cross-server read, which is the drift `_registry_probe_sdk` exists to
-    refuse (#1502's "reusing it would probe a graph this process no longer
-    resolves to").
+    a reconfiguration in that gap can bind the handle to a server this caller
+    never named, while leaving it filed under the identity this caller read.
+    The stability rule (pre-read == post-read) cannot tell such a handle from a
+    correct one, so it REFUSES it: the first handle is closed un-installed and
+    the second — built entirely under the drifted identity — is what gets
+    cached. Pre-fix the first handle was cached under the POST-build identity,
+    which is only right when the build itself did not drift.
     """
     import tortoise.hosted_api as ha
 
     monkeypatch.setenv("TORTOISE_DB_URI",
                        "docker://:pw@localhost:6379/drift-old")
     ha._reset_registry_probe_sdk()
-    constructed = []
+    built = []
 
     class _Recording:
         def __init__(self):
-            constructed.append(1)
+            self.closed = 0
+            built.append(self)
 
         def _get_proj(self):
             return object()
 
         def close(self):
-            pass
+            self.closed += 1
 
     def _drifting_make_sdk(*, namespace=None, graph_name=None):
         # The reconfiguration lands AFTER the caller read the identity and
@@ -7530,15 +7533,167 @@ def test_a_URI_drift_DURING_the_build_is_recorded_against_what_was_built(
 
     monkeypatch.setattr(ha, "_make_sdk", _drifting_make_sdk)
     try:
-        first = ha._registry_probe_sdk()
+        hand = ha._registry_probe_sdk()
         assert ha._REGISTRY_PROBE_URI.endswith("/drift-new"), (
             "the cached identity kept the pre-build URI, so the handle built "
             "against the NEW server is filed under the OLD one")
-        assert ha._registry_probe_sdk() is first, (
+        assert len(built) == 2, (
+            f"the ambiguous build was CACHED instead of rebuilt: {built}")
+        assert hand is built[1], (
+            "the handle built across the drift was installed; only the handle "
+            "built entirely under the identity we cached may be")
+        assert built[0].closed == 1, (
+            "the discarded (ambiguous) handle was neither installed nor "
+            "closed — a connection leak")
+        assert ha._registry_probe_sdk() is hand, (
             "a repeat call at the identity we just recorded rebuilt the handle")
-        assert len(constructed) == 1, constructed
+        assert len(built) == 2, built
     finally:
         ha._reset_registry_probe_sdk()
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_a_drift_during_the_BIND_never_files_the_old_graph_under_the_new_identity(
+        monkeypatch):
+    """REGRESSION PIN (measured, CI run 42069864951).
+
+    The window a post-build identity read has to cover is not the microseconds
+    between two reads — it is the WHOLE eager bind (`_get_proj()`: connect plus
+    nine `CREATE INDEX`). A pin re-bound inside it produced a handle bound to
+    the PREVIOUS test's path-derived graph and filed it under the NEW pin: the
+    auth path trusts this cache, so it read a graph the test never seeded. That
+    is the fail-open behind the two reds of that run —
+    `tests/test_invites_http.py::TestInviteCreate::test_unknown_team_404`
+    (`assert 403 == 404`, shard (g)) and the empty `GET /v1/organizations` in
+    `tests/test_onboarding_endpoints.py::TestOnboardingTeam::\
+    test_create_team_then_session_key_mint_registry` (shard (f)).
+
+    The pre-fix code installed the pre-drift handle under the post-drift
+    identity and left the ambiguity unclosed, so this leg reds on it: the
+    pre-drift handle must be closed un-installed, and the handle handed out must
+    be the one built entirely after the drift.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/bind-prev-test")
+    ha._reset_registry_probe_sdk()
+    built = []
+    drifted: list[bool] = []
+
+    class _Handle:
+        def __init__(self, index):
+            self.index = index
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            # The reconfiguration lands DURING the eager bind, i.e. AFTER
+            # `_make_sdk`'s own env read — so THIS handle addresses the graph
+            # that was configured when it was constructed (the previous test's),
+            # never the one the new pin names.
+            if not drifted:
+                drifted.append(True)
+                monkeypatch.setenv("TORTOISE_DB_URI",
+                                   "docker://:pw@localhost:6379/bind-this-test")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        return _Handle(len(built))
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    try:
+        hand = ha._registry_probe_sdk()
+        assert hand is built[-1] and hand.index == 1, (
+            "the probe handed out (or cached) the handle built BEFORE the "
+            "drift — it addresses the previous test's graph, and the auth path "
+            "reads through this cache (#9334 :35278 class)")
+        assert built[0].closed == 1, (
+            "the ambiguous pre-drift handle was neither installed nor closed — "
+            "the pre-fix code left it installed under the NEW identity")
+        assert hand.closed == 0, "the installed handle was closed"
+        assert ha._REGISTRY_PROBE_URI.endswith("/bind-this-test")
+        assert ha._registry_probe_sdk() is hand, (
+            "a repeat call at the recorded identity rebuilt a correctly-paired "
+            "handle — the cache the probe exists for was defeated")
+        assert len(built) == 2, built
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_an_identity_that_never_settles_is_served_UNCACHED_never_installed(
+        monkeypatch):
+    """The bound on the rebuild: an identity that churns through every attempt
+    must leave the cache EMPTY rather than install a pairing it cannot vouch
+    for, and it must not leak the handles it refused.
+
+    An un-cached handle can mislead only the call that built it; an installed
+    one misleads every later caller on that identity, for the life of the
+    process. So the retry is bounded (`_REGISTRY_PROBE_BUILD_ATTEMPTS`) and the
+    last resort is "serve, do not cache" — plus a warning, because a process
+    whose identity never settles is a configuration fault, not a routine miss.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/churn-0")
+    ha._reset_registry_probe_sdk()
+    built = []
+    churn = {"n": 0}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            # EVERY build drifts, so no attempt can ever see a stable identity.
+            churn["n"] += 1
+            monkeypatch.setenv("TORTOISE_DB_URI",
+                               f"docker://:pw@localhost:6379/churn-{churn['n']}")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(ha, "_make_sdk",
+                        lambda *, namespace=None, graph_name=None: _Handle())
+    try:
+        hand = ha._registry_probe_sdk()
+        assert hand is built[-1], "the probe did not hand back the last build"
+        assert ha._REGISTRY_PROBE_SDK is None and ha._REGISTRY_PROBE_URI is None, (
+            "an unvouchable pairing was INSTALLED — every later caller on that "
+            "identity now reads the graph of a handle nobody could identify")
+        assert len(built) == ha._REGISTRY_PROBE_BUILD_ATTEMPTS + 1, (
+            f"the retry was not bounded at {ha._REGISTRY_PROBE_BUILD_ATTEMPTS} "
+            f"attempts plus the un-cached fallback: {len(built)} builds")
+        assert ha._REGISTRY_PROBE_SDK is None and ha._REGISTRY_PROBE_URI is None, (
+            "an unvouchable pairing was INSTALLED — every later caller on that "
+            "identity now reads the graph of a handle nobody could identify")
+        assert [handle.closed for handle in built[:-1]] == [1] * len(built[:-1]), (
+            "a discarded handle was not closed — a connection leak per churn")
+        assert hand.closed == 0, "the served handle was closed before use"
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+def test_the_registry_probe_retry_is_BOUNDED_and_it_is_not_a_spin(
+        monkeypatch):
+    """The retry constant is a bound, not a slider: the rebuild exists for a
+    reconfiguration that settles, so a handful of attempts is the whole budget.
+    A process whose identity never settles must reach the un-cached fallback
+    quickly rather than rebuild in a loop on a request path."""
+    import tortoise.hosted_api as ha
+
+    assert 2 <= ha._REGISTRY_PROBE_BUILD_ATTEMPTS <= 5, (
+        f"_REGISTRY_PROBE_BUILD_ATTEMPTS={ha._REGISTRY_PROBE_BUILD_ATTEMPTS} is "
+        "either too small to absorb one reconfiguration or unbounded enough to "
+        "spin builds on the request path")
+
 
 
 @pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
