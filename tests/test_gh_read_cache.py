@@ -348,6 +348,13 @@ class CacheTest(unittest.TestCase):
             # `api` flag), so the position test must treat its value as skippable by the
             # "immediately follows a flag" rule rather than by the flag table.
             ("--repo", "o/n", "pr", "view", "42"),
+            # ⛔ AND AN EMPTY TOKEN IS SKIPPED BY gh ITSELF. `gh "" pr view` RAN `pr view`
+            # (measured: it spends a real call, so do not re-measure it), so an empty
+            # argument must not end the verb search — the position rule treats `""` like a
+            # flag. This is the one shape the any-verb-word rule caught and a naive position
+            # rule lost.
+            ("", "pr", "view"),
+            ("", "api", "graphql"),
             # the residual the cycle-5 review named: a porcelain value-flag before the verb.
             ("--limit", "5", "pr", "list"),
             # ⛔ AN ABSOLUTE URL IS A ROUTE gh FORWARDS VERBATIM. Every declared mutable
@@ -421,6 +428,12 @@ class CacheTest(unittest.TestCase):
             ("repo", "view", "api", "graphql"),
             ("search", "issues", "run", "view"),
             ("search", "code", "pr", "view"),
+            # ⛔ AND WITH A LEADING FLAG, the position rule must still be "EVERY earlier token
+            # is a flag or a flag's value", not "argv[0] is a flag": degrading the predicate
+            # to `argv[k].startswith("-") or k > 0` leaves the suite green and re-refuses
+            # these two as 'run view' / 'pr view' (measured).
+            ("-R", "o/n", "search", "issues", "run", "view"),
+            ("--repo", "o/n", "search", "code", "pr", "view"),
             ("search", "issues", "graphql", "--repo", "graphql/graphql-js"),
             # ⛔ AND A `repos/`-SHAPED SEARCH QUERY IS A QUERY. Matching `repos/…` tokens
             # wherever they sit refused these as "command 'api repos/{repo}/actions/runs'".

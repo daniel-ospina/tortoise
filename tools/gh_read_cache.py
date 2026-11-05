@@ -745,12 +745,27 @@ def _verb_positions(argv: tuple[str, ...]) -> list[int]:
     one class over. An index qualifies when everything before it is a flag, or a value
     immediately following a flag, so `run`/`pr`/`api` sitting among a command's own
     arguments is an argument, while the same token behind leading flags is the verb.
+
+    ⛔ THE WHOLE CONJUNCTION IS THE FIX, not the `argv[0]` test it replaced: degrading it to
+    `argv[k].startswith("-") or k > 0` ("any index qualifies once `argv[0]` is a flag")
+    leaves the SUITE green and re-refuses `-R o/n search issues run view` — see the two
+    flag-prefixed legitimate reads pinned beside the flagless ones.
+
+    ⛔ AND AN EMPTY ARGUMENT DOES NOT END THE SEARCH, BECAUSE gh SKIPS IT. `gh "" pr view`
+    does not fail: it RAN `pr view` (measured — and it spends a real call, so do not repeat
+    it), so treating `""` as a non-flag token that ends the verb search lost the refusal
+    the previous head earned. `""` now qualifies like a flag. The residual that remains is
+    a token that is neither flag, flag-value nor empty: such a token before the verb IS the
+    verb, so gh runs the rest as arguments — and an under-match here spends a call, it
+    cannot cache a mutable answer (`--argv` stores nothing).
     """
     return [
         i
         for i in range(len(argv))
         if all(
-            argv[k].startswith("-") or (k > 0 and argv[k - 1].startswith("-"))
+            argv[k] == ""
+            or argv[k].startswith("-")
+            or (k > 0 and argv[k - 1].startswith("-"))
             for k in range(i)
         )
     ]
@@ -797,11 +812,14 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
 
     ⛔ AND `normpath` IS NOT THE EDGE'S RULE — it is a SUPERSET of it, applied to every
     route. Measured unauthenticated, with `--path-as-is` and no redirect following:
-    `/repos/../rate_limit` → 200, `/repos/../graphql` → 401 (i.e. it resolved to the
-    graphql endpoint), while `/foo/../rate_limit`, `/users/../rate_limit`,
+    `/repos/../rate_limit` → 200, `/repos/../graphql` → 401 whose body is the graphql
+    endpoint's own (the bare `/graphql` answers 403 unauth, so only the body evidences
+    resolution), while `/foo/../rate_limit`, `/users/../rate_limit`,
     `/orgs/../rate_limit`, `/repos/o/../rate_limit` and `/repos/o/n/../../rate_limit` all
-    → 404. So the edge collapses the prefix `repos/..` and NOT dot segments in general —
-    there is no single normalisation rule behind those six answers, which is exactly why
+    → 404. So the edge applies ONE rule — it collapses the literal prefix `repos/..` to the
+    API root and leaves every other dot segment literal — corroborated by
+    `/repos/../notifications` → 401 naming the notifications endpoint and
+    `/users/../notifications` → 404. That is not RFC 3986 resolution, and is exactly why
     `normpath` (RFC 3986 §5.2.4) must not be described as "the way the server resolves
     it". A dot-segment candidate can therefore refuse a spelling the edge would have
     404'd: that is deliberate OVER-refusal of something no caller should write, bounded to
