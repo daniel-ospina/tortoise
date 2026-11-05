@@ -1083,23 +1083,33 @@ class RecordWriter:
                 # here, because the caller of this seam (`write_live_record`)
                 # logs `str()` of this exception and nothing else.
                 #
-                # ⚠️ THE TRADE-OFF, named rather than absorbed: a psycopg2
+                # ⚠️ THE TRADE-OFF, named rather than absorbed — and stated for the
+                # code that ACTUALLY runs (#10726 review P2: an earlier version of
+                # this note rejected "the primary message only" as the alternative,
+                # which is what `_bounded_cause` already ships). A raw psycopg2
                 # message interpolates its parameters client-side, so the
-                # `LINE`/`DETAIL` it carries can quote a PREFIX of a row's
-                # values (the #9548 case quotes `Token "err4032" is invalid`).
-                # Pre-fix this line carried a class name and nothing else, so
-                # this IS a new exposure on the live path. Accepted: a lost row
-                # nobody can attribute is the worse failure (§17's own rule —
-                # the seam must never drop a row in silence), the row is the
-                # tenant's own data going to that tenant's own log, and the
-                # alternative (the primary message only) removes exactly the
-                # value/column half that made 302 drops unattributable.
+                # `LINE`/`DETAIL` it carries can quote a PREFIX of a row's values
+                # (the #9548 case quotes `Token "err4032" is invalid`). That half is
+                # WITHHELD here, not accepted: a driver exception is recognised by
+                # its shape (`diag`/`pgcode`) and only its TERSE protocol message is
+                # kept (`record_projection._primary_message`, which refuses
+                # `DETAIL`/`CONTEXT`/`W`). Nor is the column half lost by that
+                # choice: `replay()` raises `RecordStatementError` carrying
+                # `_failure_line(_statement_attribution(...), _driver_fault(exc))`,
+                # so the statement, its table and its columns ride the projection's
+                # OWN attribution rather than the driver's row dump. The residual
+                # is narrow and named: a driver that exposes NEITHER `diag` nor
+                # `pgcode` is not recognised as one, and its `str(exc)` is logged —
+                # length-bounded by `_bounded_cause`, but not value-withheld. That
+                # residual is accepted, because a lost row nobody can attribute is
+                # the worse failure (§17's own rule — the seam must never drop a row
+                # in silence) and the row is the tenant's own data going to that
+                # tenant's own log.
                 #
                 # ⛔ BOUNDED since #10648: `_bounded_cause` keeps that cause to
                 # the projection's OWN attribution budget rather than logging an
                 # unbounded driver message (one number, one place — see its
-                # docstring), so the exposure named above stays one bounded
-                # log line.
+                # docstring), so whatever it carries stays one bounded log line.
                 f"({type(exc).__name__}: {_bounded_cause(exc)})"
             ) from exc
 

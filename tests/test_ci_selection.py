@@ -7722,20 +7722,24 @@ def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
     attachment is carried ENTIRELY by the `⛔` that opens the block, because
     `tools.ci_timing._NOTE_OPENER_RE` (`^(?:#?\\d{3,5}…|[A-Z])`) reads the block's
     semantic first word — "The CASE COUNT …" — as a NEW note. Drop the emoji in a
-    routine cleanup and the whole note silently stops being read: measured at
-    `2ec1f36d1`, that edit takes the joined note from 2,150 chars to **0**.
+    routine cleanup and the whole note silently stops being read: measured at this
+    head, read-only, that edit takes the joined note from 2,870 chars to **0**.
 
     ⛔ NOT `_row_continuation_lines(...) >= 1`, AND NOT `assert block` either. The
-    writer FLATTENS a wrapped note on a CUT or a wholesale replacement
-    (`tools/ci_timing.py:2939-2945`: `lines[index] = f"{rendered_row}{tail}"` plus
-    `drop.update(continuation)`), so a HEALTHY map can have ZERO continuation lines
-    with the whole note read off the row line. The sibling
-    `tests/test_ci_timing.py::_assert_preamble_shape` refused the same clause for
-    that reason (#10575 review, P2). Measured at this head, read-only:
+    writer FLATTENS a wrapped note on a CUT or a wholesale replacement —
+    `tools.ci_timing.render_refreshed_manifest`'s CUT branch, the
+    `lines[index] = f"{rendered_row}{tail}"` beside its `drop.update(continuation)`
+    (`tools/ci_timing.py:3038-3039`) — so a HEALTHY map can have ZERO continuation
+    lines with the whole note read off the row line. The blank-line rule that makes
+    the span what it is lives in `_row_continuation_lines`'s own docstring
+    (`tools/ci_timing.py:2237`: a blank line does not end a note, any other
+    non-comment line does). The sibling `tests/test_ci_timing.py::
+    _assert_preamble_shape` refused the same clause for that reason (#10575
+    review, P2). Measured at this head, read-only, with the guards' own readers:
 
-        committed                                     span = 31, reader joins 2,150
+        committed                                     span = 42, reader joins 2,870
         CUT arm, `_joined_note_tail` -> `{rendered_row}{tail}`
-                                                      span =  0, reader joins 2,122
+                                                      span =  0, reader joins 2,918
         `⛔` dropped so the block opens a note         span =  0, reader joins      0
 
     So the shapes are told apart by READABILITY alone, and the pin below is the one
