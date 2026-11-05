@@ -3296,6 +3296,78 @@ def test_cmd_cut_is_actually_wired_to_carry_the_recorded_fields(tmp_path, monkey
     )
 
 
+def test_a_recut_carries_the_committed_observed_usage_forward(tmp_path, monkeypatch):
+    """A re-cut must NOT re-stamp the evidence it cannot reproduce (#10914 review P2).
+
+    `used_by` / `recommendation` / `basis` / `reason` are read from THIS box's call log, and
+    `exemption` is a human recording. None is a function of the code, so a routine re-cut used
+    to overwrite the columns the owner reads with whatever this machine happened to observe —
+    measured on #10914: two rows the change never touched flipped `agents` -> `never called`,
+    while a tool the PR had just introduced was stamped `called by agents` off the lane's own
+    test call. Every gate stayed green over it, because these keys are not compared.
+
+    The sentinels below cannot be produced by the derivation (the first two are not corpus
+    labels, and `exemption` is written `False` for every row), so a re-cut that re-derives
+    them fails here on the PRE-fix code.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    tool = next(r for r in doc["rows"] if r["name"] == "tortoise_query")
+    tool["used_by"] = "never called, sentinel-corpus"
+    tool["recommendation"] = "review"
+    tool["basis"] = "decided"
+    tool["reason"] = "sentinel reason committed by a human and carried forward"
+    exempt = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    exempt["exemption"] = True
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "evidence.yml"))
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+
+    derived = {r["name"]: r for r in sm.build_doc()["rows"]}
+    carried = derived["tortoise_query"]
+    for key in ("used_by", "recommendation", "basis", "reason"):
+        assert carried[key] == tool[key], (
+            f"a re-cut re-derived `{key}` instead of carrying the committed evidence: "
+            f"{carried[key]!r} != {tool[key]!r}")
+    assert derived[exempt["name"]]["exemption"] is True, (
+        "a re-cut reset a recorded `exemption` — the human recording the guard judges")
+
+
+def test_a_recut_does_not_stamp_a_new_row_as_called_by_agents(tmp_path, monkeypatch):
+    """The #10914 defect itself: a NEW row picked up this box's log as if it were usage.
+
+    The container is new in this PR, so it cannot have production usage — but the cutting box
+    logged the lane's own `mcp_tool_call` to the tool it had just written, and `build_doc`
+    turned that into `called by agents` in the column the owner reads. The log is reproduced
+    here (a real `analytics_fallback.jsonl` under a temp `HOME`), and the SAME state is derived
+    twice: `--refresh-observations` is what a re-cut used to do unconditionally, so it shows
+    the defect is real rather than described, and the default shows it is gone.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    # Remove the container row: it is NEW to the manifest, exactly as it was when this PR cut.
+    doc["rows"] = [r for r in doc["rows"] if r.get("name") != "tortoise_graph_overview"]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "new-row.yml"))
+    home = tmp_path / "home"
+    (home / ".tortoise").mkdir(parents=True)
+    (home / ".tortoise" / "analytics_fallback.jsonl").write_text(
+        '{"event": "mcp_tool_call", "properties": {"tool_name": "tortoise_graph_overview"}}\n'
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    refreshed = {r["name"]: r for r in sm.build_doc(refresh_observations=True)["rows"]}
+    assert refreshed["tortoise_graph_overview"]["used_by"].startswith("agents"), (
+        "the fixture no longer reproduces the defect — this is the value the pre-fix cut wrote")
+
+    carried = {r["name"]: r for r in sm.build_doc()["rows"]}
+    new_row = carried["tortoise_graph_overview"]
+    assert not new_row["used_by"].startswith("agents"), (
+        "a re-cut stamped a brand-new tool `called by agents` from the cutting box's own log")
+    assert new_row["used_by"].startswith("never called"), (
+        f"a new row must record that no call was observed, got {new_row['used_by']!r}")
+
+
 def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkeypatch):
     """The drift step must be satisfiable OFF the machine that committed the file.
 
@@ -3308,8 +3380,8 @@ def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkey
     committed document.
 
     The render reads COMMITTED inputs only. `used_by` is the checked-in cell the document
-    already prints, so the flag is derived from it; the log keeps driving the artifact
-    through `build_doc`, which refreshes the MANIFEST and lands as a reviewed diff.
+    already prints, so the flag is derived from it; `build_doc` only WRITES a new value under
+    `--refresh-observations` or for a row with no committed evidence (#10914 review P2).
     """
     sm = _load_manifest_tool()
     out = _render_scratch()

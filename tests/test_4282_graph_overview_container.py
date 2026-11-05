@@ -78,6 +78,57 @@ REPOINTED = {
 }
 
 
+#: Every door `_overview_section` dispatches, in `tortoise_<name>` form. Listed here so the
+#: dispatch can be MEASURED (by substitution) instead of read out of a declared tuple — see
+#: `_dispatched_sections`. `raising=True` on the patches is deliberate: a renamed door must
+#: fail this file loudly, not be created on the spot by a permissive spy.
+OVERVIEW_DOORS = (
+    "taxonomy", "summarize_structure", "check_structure", "list_pointkinds",
+    "list_tags", "list_sources", "list_namespaces", "list_graphs", "list_topics",
+    "health", "status", "stale", "validate_domain", "audit", "dream_health",
+)
+
+
+def _dispatched_sections(monkeypatch, candidates) -> set[str]:
+    """The sections `_overview_section` ACTUALLY dispatches — measured, not declared.
+
+    `_OVERVIEW_SECTIONS` is the tuple the ERROR MESSAGE iterates; the dispatch is the
+    `if section == ...` chain in `tortoise/mcp_server.py`. The two can disagree, and when
+    they do a section is advertised by the error text and dead-ends in the `unknown
+    section` `_SafeError` — which is why asserting membership in the tuple is an assertion
+    about the advertisement, not about the call (#10914 review P3).
+
+    Each candidate is called once with EVERY door substituted and a full argument set, so a
+    routed section reaches exactly one door and a section with no arm reaches none. NO
+    DATABASE: the doors are the only thing that would touch one.
+    """
+    reached: list[str] = []
+
+    def record(label):
+        def _fn(*args, **kwargs):
+            reached.append(label)
+            return {"door": label}
+        return _fn
+
+    for door in OVERVIEW_DOORS:
+        monkeypatch.setattr(ms, f"tortoise_{door}", record(door))
+
+    dispatched: set[str] = set()
+    for section in candidates:
+        before = len(reached)
+        result = ms._overview_section(
+            section, entity_id="point-1", days=30, limit=50,
+            domain="product", point_kinds=["statement"],
+        )
+        if len(reached) > before:
+            dispatched.add(section)
+            continue
+        assert isinstance(result, dict) and "unknown section" in str(result.get("error")), (
+            f"{section!r} reached no door and did not refuse by name either: {result!r} — "
+            "an arm that neither dispatches nor refuses is a silent hole")
+    return dispatched
+
+
 class TestDeclaration:
     def test_the_container_is_on_the_advertised_surface(self):
         assert CONTAINER in {t.name for t in TOOL_REGISTRY}
@@ -184,8 +235,15 @@ class TestEveryPointerResolvesInOneHop:
         sorted([(n, s) for n, s in REPOINTED.items()]
                + [(n, None) for n in RETIRED_INTO_CONTAINER]),
     )
-    def test_pointer_section_is_one_the_container_dispatches(self, name, section):
-        """The named section must be a real member, or the pointer names a call that fails."""
+    def test_pointer_section_is_one_the_container_dispatches(self, name, section, monkeypatch):
+        """The named section must be DISPATCHED, not merely listed.
+
+        `_OVERVIEW_SECTIONS` is what the error message advertises; the dispatch is the
+        `if section ==` chain. A tuple-membership assertion therefore stayed green for a
+        section the container never routes, while the pointer dead-ended in `unknown
+        section` — the assertion was weaker than the property its name states (#10914
+        review P3). This measures the dispatch by substitution instead.
+        """
         replacement = RETIRED_USE_INSTEAD[name]
         assert "section=" in replacement
         if 'section="' not in replacement:
@@ -196,8 +254,26 @@ class TestEveryPointerResolvesInOneHop:
             assert replacement == f"{CONTAINER}(section=...)", replacement
             return
         declared = replacement.split('section="', 1)[1].split('"', 1)[0]
-        assert declared in ms._OVERVIEW_SECTIONS, (
-            f"{name} points at section {declared!r}, which the container does not dispatch")
+        dispatched = _dispatched_sections(monkeypatch, [declared])
+        assert declared not in {"definitely_not_a_section"}, "sanity: the probe is not a section"
+        assert declared in dispatched, (
+            f"{name} points at section {declared!r}, which the container does not dispatch "
+            f"(measured, not read off `_OVERVIEW_SECTIONS`)")
+
+    def test_every_advertised_section_is_actually_dispatched(self, monkeypatch):
+        """`_OVERVIEW_SECTIONS` ⊆ dispatched: the tuple and the chain cannot drift.
+
+        The tuple is the ADVERTISEMENT (the error text and the default-summary loop); the
+        chain is the DISPATCH. A member added to one and not the other is a section the
+        container tells callers to use and then refuses.
+        """
+        advertised = list(ms._OVERVIEW_SECTIONS)
+        dispatched = _dispatched_sections(monkeypatch, advertised)
+        assert set(advertised) - dispatched == set(), (
+            "advertised by `_OVERVIEW_SECTIONS` but no `if section ==` arm dispatches "
+            f"them: {sorted(set(advertised) - dispatched)}")
+        assert "definitely_not_a_section" not in dispatched, (
+            "the probe routed a name that has no arm — the measurement is not measuring")
 
 
 class TestSectionRouting:
@@ -244,11 +320,22 @@ class TestSectionRouting:
         ms.tortoise_graph_overview(section="structure_check")
         assert [c[0] for c in spy] == ["summarize_structure", "check_structure"]
 
-    def test_unknown_section_lists_every_section(self):
+    def test_unknown_section_lists_every_section(self, monkeypatch):
+        # The message is BUILT from `_OVERVIEW_SECTIONS`, so asserting "every listed name
+        # appears in the message" compared that constant with itself and could never
+        # disagree with it (#10914 review P3). Compare it with what the chain DISPATCHES.
+        advertised = list(ms._OVERVIEW_SECTIONS)
+        dispatched = _dispatched_sections(monkeypatch, advertised)
         result = ms.tortoise_graph_overview(section="nope")
         assert "unknown section" in result["error"]
-        for section in ms._OVERVIEW_SECTIONS:
-            assert section in result["error"]
+        listed = {
+            part.strip()
+            for part in result["error"].split("Valid sections:", 1)[1].split(",")
+            if part.strip()
+        }
+        assert listed == dispatched, (
+            "the error message advertises sections the dispatch chain does not reach: "
+            f"{sorted(listed - dispatched)}")
 
 
 class TestDefaultSummaryIsUnchanged:

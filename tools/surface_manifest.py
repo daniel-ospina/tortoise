@@ -465,9 +465,16 @@ def read_approval(path: Path | None = None) -> dict:
 #     another checkout — measured with the log absent, 132 `used_by` and 25 `reason` rows
 #     differ, and those are the ONLY row keys that do. `recommendation` and `basis` are
 #     computed from the same observed-call signal, so they are excluded even where today's
-#     rows happen to agree. NOTE: a PR author can therefore rewrite the evidence the owner
-#     READS (the rendered `Used by` / `Recomm.` columns) while every gate stays green. That
-#     is a documented residual — the columns are not a function of the code — FILED, not hidden.
+#     rows happen to agree.
+#     ⛔ A re-cut does NOT re-derive them: `cut` CARRIES the committed values forward
+#     (`_carried_row_evidence`), and the log is consulted only for a row that has no
+#     committed evidence or under a deliberate `--refresh-observations` (#10914 review P2).
+#     Before that, every `cut` re-stamped these columns from whichever box ran it — measured
+#     on #10914, two untouched rows flipped `agents` -> `never called` while a tool the PR had
+#     just introduced was stamped `called by agents` off the lane's own test call, and every
+#     gate stayed green over it (they are not compared). So the residual is now narrower and
+#     explicit: a re-cut preserves the evidence it cannot reproduce, a hand edit or
+#     `--refresh-observations` is what moves it, and that edit lands in a reviewed diff.
 #   * `approval` is an unvalidated AUDIT reference: a PR number and a principal. NO check
 #     validates its shape, and none verifies that the review it names exists — the approval
 #     itself is READ from `docs/product/canonical-mcp-tools.md` (#4185). The consent carrier is
@@ -481,6 +488,8 @@ def read_approval(path: Path | None = None) -> dict:
 #     recording one — the path CONTRIBUTING documents — made the REQUIRED check red with no
 #     way back (`cut` resets it to False forever). Verified: `exemption: true` on an SDK row
 #     makes the guard report "1 exempt" and the check FAIL "recorded {True}, derived {False}".
+#     `cut` now CARRIES it forward (`CARRIED_TOOL_ROW_KEYS` / `CARRIED_SDK_ROW_KEYS`), so the
+#     recording survives a re-cut and `surface-guard.py` — not the re-cut — is what judges it.
 #   * `cut_at_commit` is provenance: `cut` records the commit it ran at.
 #   * the four top-level `approval_*` keys are deliberately NOT here. They are DERIVED
 #     (#4185): `read_approval` reads them from `docs/product/canonical-mcp-tools.md` at
@@ -501,6 +510,30 @@ def read_approval(path: Path | None = None) -> dict:
 NON_DERIVABLE_ROW_KEYS = frozenset(
     {"used_by", "recommendation", "basis", "reason", "approval", "exemption"}
 )
+
+# WHICH non-derivable row keys a re-cut must CARRY FORWARD verbatim (#10914 review P2).
+#
+# Being non-derivable (excluded from the drift comparison) is what makes a key safe from
+# `check`, not what makes it safe from `cut`. `build_doc` used to RE-DERIVE these from
+# `~/.tortoise/analytics_fallback.jsonl` — this box's own call log — so a routine re-cut
+# silently rewrote the evidence the owner reads. Measured on #10914: `tortoise_query` and
+# `tortoise_search` flipped `agents` -> `never called` (two rows the change never touched,
+# because that box's log carried no slice for them) while a tool the lane had just WRITTEN
+# was stamped `called by agents` (from the lane's own test call). `check`, `surface-guard`
+# and the render-diff all stayed green over it, because these keys are not compared.
+#
+# So `cut` now carries the committed value forward, exactly as `high_water_counts` and
+# `response_fields` are carried: the columns are EVIDENCE the manifest records, refreshed
+# only by a deliberate `--refresh-observations`.
+#
+# `approval` is DELIBERATELY NOT here: `cmd_cut` resets the per-row audit reference on
+# purpose and CONTRIBUTING.md makes that reset the control — carrying it would silently
+# reverse a recorded decision.
+CARRIED_TOOL_ROW_KEYS = ("used_by", "recommendation", "basis", "reason", "exemption")
+# An `sdk:` row carries no observed-usage columns, and its `reason` is DERIVED from the
+# caller scan (it must follow the code, so freezing it would report a stale call graph
+# forever). Only the human recording travels.
+CARRIED_SDK_ROW_KEYS = ("exemption",)
 NON_DERIVABLE_DOC_KEYS = frozenset(
     {
         "cut_at_commit",
@@ -1055,6 +1088,45 @@ def _component_fingerprint(fn) -> str | None:
     return f"{rel}:{_code_digest(code)}"
 
 
+def _carried_row_evidence() -> dict[str, dict]:
+    """Row name -> the COMMITTED evidence a re-cut must not re-derive (#10914 review P2).
+
+    Reads `MANIFEST_FILE` at call time (never a bound default) and returns only the keys a
+    row of that kind carries (`CARRIED_TOOL_ROW_KEYS` / `CARRIED_SDK_ROW_KEYS`), each
+    accepted only when its type is the one the derivation emits — a hand-mangled cell is
+    ignored and the row is re-derived rather than copied into the artifact.
+
+    Absence is not an error here: a tool introduced by this very change has no committed
+    row, and that is exactly the case the observed-usage columns must not invent. An
+    UNREADABLE manifest returns `{}` too, because `cmd_cut` refuses that case itself
+    (`_recorded_approvals`) — this function must not be the thing that raises first.
+    """
+    try:
+        with MANIFEST_FILE.open() as fh:
+            doc = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
+        return {}
+    types = {"used_by": str, "recommendation": str, "basis": str, "reason": str, "exemption": bool}
+    carried: dict[str, dict] = {}
+    for row in doc["rows"]:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        keys = CARRIED_SDK_ROW_KEYS if name.startswith("sdk:") else CARRIED_TOOL_ROW_KEYS
+        kept = {
+            key: row[key]
+            for key in keys
+            if key in row and isinstance(row[key], types[key])
+        }
+        if kept:
+            carried[name] = kept
+    return carried
+
+
 def _carried_response_fields() -> list:
     """Preserve the hand-authored `response_fields` block across a re-cut.
 
@@ -1126,7 +1198,7 @@ def _carried_high_water_counts(fallback: dict) -> dict:
     return out
 
 
-def build_doc(commit: str | None = None) -> dict:
+def build_doc(commit: str | None = None, refresh_observations: bool = False) -> dict:
     """Derive the baseline from the declaration. THE single derivation.
 
     `cut` writes what this returns; `check` compares the committed artifact against it.
@@ -1183,6 +1255,10 @@ def build_doc(commit: str | None = None) -> dict:
     corpora = usage_index()
     called_names = telemetry_tools()
     clusters = seed_clusters()
+    # The COMMITTED observed-usage evidence, carried forward into this derivation (#10914
+    # review P2). Empty on a first cut (no manifest), and empty under
+    # `--refresh-observations`, which is the one deliberate way to re-stamp it.
+    carried_evidence = {} if refresh_observations else _carried_row_evidence()
 
     served_http = None
     try:
@@ -1266,7 +1342,21 @@ def build_doc(commit: str | None = None) -> dict:
         if resolves:
             bound_by.setdefault(declared, []).append(entry.name)
         cluster, canonical = clusters.get(entry.name, (None, None))
-        called = (entry.name in called_names) if called_names else None
+        # #10914 review P2 — the observed-usage columns are CARRIED, not re-derived.
+        #
+        # A row with committed evidence is written from it verbatim (the fresh derivation
+        # below is discarded). A row WITHOUT committed evidence is NEW to this artifact, so
+        # no production call can exist for it: `called=False` records that honestly instead
+        # of letting this box's log stamp the container `called by agents` off the lane's
+        # own test call. The log only drives these columns when the operator asks for it
+        # (`--refresh-observations`), so a re-cut can no longer re-stamp the evidence.
+        committed = carried_evidence.get(entry.name) or {}
+        if committed:
+            called = None
+        elif refresh_observations:
+            called = (entry.name in called_names) if called_names else None
+        else:
+            called = False
         used_by_str = used_by(entry.name, corpora, called)
         lifecycle = "deprecated alias" if entry.name in DEPRECATED_ALIASES else "active"
         # The full description, verbatim. An earlier cut took the first sentence,
@@ -1311,13 +1401,16 @@ def build_doc(commit: str | None = None) -> dict:
                           else "handler-served: no declared SDK link")
                 ),
                 "lifecycle": lifecycle,
-                "used_by": used_by_str,
-                "recommendation": _rec[0],
-                "basis": "decided" if _rec[0] in ("merge", "kill", "fix-declaration") else "observed",
-                "reason": _rec[1],
+                "used_by": committed.get("used_by", used_by_str),
+                "recommendation": committed.get("recommendation", _rec[0]),
+                "basis": committed.get(
+                    "basis",
+                    "decided" if _rec[0] in ("merge", "kill", "fix-declaration") else "observed",
+                ),
+                "reason": committed.get("reason", _rec[1]),
                 "recommended_family": None,
                 "proposed": False,
-                "exemption": False,
+                "exemption": committed.get("exemption", False),
                 "approval": None,
             }
         )
@@ -1333,6 +1426,7 @@ def build_doc(commit: str | None = None) -> dict:
         if declared:
             bound_by.setdefault(declared, []).append(f"{entry.name} (retired)")
     for name in public:
+        sdk_committed = carried_evidence.get(f"sdk:{name}") or {}
         reached = bool(bound_by.get(name))
         reached_paths = sorted(
             {category(p) for p in callers.get(name, set()) if not p.startswith(TEST_PREFIXES)}
@@ -1399,7 +1493,7 @@ def build_doc(commit: str | None = None) -> dict:
                 ),
                 "recommended_family": None,
                 "proposed": False,
-                "exemption": False,
+                "exemption": sdk_committed.get("exemption", False),
                 "approval": None,
                 "class": cls,
             }
@@ -1544,7 +1638,9 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 
 def cmd_cut(args: argparse.Namespace) -> int:
     try:
-        doc = build_doc(args.commit)
+        doc = build_doc(
+            args.commit, refresh_observations=getattr(args, "refresh_observations", False)
+        )
     except SurfaceEvidenceUnreadable as exc:
         return _refuse(exc)
 
@@ -1630,9 +1726,9 @@ def observed_usage(row: dict) -> str | None:
     absent (an empty `HOME`): every row lost its flag and `_never` counted all 82
     tools, so the committed document stopped matching its own generator and
     `render` + `git diff --exit-code` — the drift step — could only ever pass on one
-    laptop. The log still drives the artifact, through `build_doc`, which refreshes
-    the MANIFEST; that lands as a reviewed, committed diff instead of as whichever
-    machine happens to run the render.
+    laptop. A plain re-cut does not consult it either (#10914 review P2): `build_doc`
+    CARRIES the committed `used_by` forward and reads the log only for a row with no
+    committed evidence, or under a deliberate `--refresh-observations`.
     """
     first = (row.get("used_by") or "").split(",")[0].strip()
     if first == "agents":
@@ -2559,6 +2655,15 @@ def main() -> int:
         "--allow-approval-reset",
         action="store_true",
         help="permit dropping recorded per-row approvals (default: refuse and name every row)",
+    )
+    p_cut.add_argument(
+        "--refresh-observations",
+        action="store_true",
+        help=(
+            "re-derive the observed-usage columns (used_by/recommendation/basis/reason) "
+            "from THIS machine's tool-call log instead of carrying the committed values. "
+            "Without it a re-cut carries the evidence forward (#10914 review P2)."
+        ),
     )
     p_cut.set_defaults(func=cmd_cut)
     sub.add_parser("render").set_defaults(func=cmd_render)
