@@ -961,14 +961,22 @@ jobs:
       # (unused entries + centralised environments, per the same page) keeps them.
       #
       # ARM 2, ARITHMETICALLY (`docs/ops/ci-wall-clock.md` §2: `cap >= SUM x 1.5`
-      # and the `test` cap stays 90 ⇒ SUM <= 60 m). Measured `test` SUM without any
-      # cache-write term is 49 m, so <= 11 m is available; this shape takes 8
-      # (1 m prune + 7 m save), SUM 57, x 1.5 = 85.5. Inside that bound the
-      # degraded rate measured on this pool (0.9 MB/s) affords ~380 MB, and the
-      # same runner class saved a 3,616,385,308 B archive in 12 m 21 s four hours
-      # later (PR 11036, run 42032493028: `Sent 3616385308 of 3616385308 (100.0%),
-      # 7.1 MBs/sec` at 14:42:50Z, the action's own reported rate — 4.9 MB/s across
-      # the whole post step, which is the honest end-to-end figure).
+      # and the `test` cap stays 90 ⇒ SUM <= 60 m). The measured `test` SUM without
+      # any cache-write term is 49.6 m — 10 m last-failed pre-phase + 26 m emitted
+      # worst shard watchdog + 6 m embedder + 3.03 m `Set up job` + 4.23 m of
+      # uncapped pre-suite + 0.38 m last-failed save — so <= 10.4 m is available;
+      # this shape takes 8 (1 m prune + 7 m save), SUM 57.6, x 1.5 = 86.5.
+      #
+      # WHY SPLIT RATHER THAN JUST BOUND 3.88 GB, at its real size: the degraded
+      # uplink this run measured is 0.9 MB/s sustained (3,019,898,880 B in 3,412 s),
+      # at which a 7 m save affords ~380 MB. But the SAME runner class completed a
+      # cold 3,616,385,308 B write four hours later (PR 11036, run 42032493028, job
+      # 127280762096: `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` at
+      # 14:42:50Z — the action's own rate, 4.9 MB/s across the whole 12 m 21 s post
+      # step), so the honest cost of 3.88 GB is ~13 m healthy and ~57 m+ degraded
+      # against the ~10.4 m of room: over the bound either way, but by ~1.3x rather
+      # than 8x. Splitting the payload is what brings it inside — not an assumption
+      # that this pool cannot write it.
       #
       # FAIL-OPEN IN EVERY BRANCH: a prune or save that aborts on its bound is a
       # MISS, never a red — both are `continue-on-error: true` — and the save is
@@ -980,7 +988,6 @@ jobs:
       # cold key (the first run after this lands, and every `uv.lock` bump) — which
       # is why the bound is 7 m and not 30.
       - name: Restore pip dependency cache (#7612, read-only — #11063)
-        id: pip-cache
         continue-on-error: true
         uses: actions/cache/restore@v4
         with:
@@ -1059,7 +1066,12 @@ jobs:
         # ⛔ RESTORE-ONLY, and this job does not need to write it (#11063).
         # `actions/cache` saves in a POST step charged against this job's
         # `timeout-minutes` (#10182) with no timeout of its own. On the run that
-        # filed #11063 the RESTORE missed, and the post step then took **8 m 57 s**
+        # filed #11063 the RESTORE TIMED OUT — that is NOT a miss: the entry
+        # existed (`Cache hit for: hf-embedding-cache-v2-Linux` 10:25:10.499;
+        # `refs/heads/main` holds it at 78,606,219 B) and the transfer died
+        # mid-flight (`Received 8388608 of 78130875 (10.7%)` 10:26:59.604, then
+        # `Failed to restore: The operation cannot be completed in timeout`) — and
+        # the post step then RE-SAVED it, taking **8 m 57 s**
         # end-to-end to land `Cache saved with key: hf-embedding-cache-v2-Linux`
         # (10:45:55.928 → 10:54:52.693) for a 78,130,925 B archive, uploading at
         # `Sent 72024064 of 78130925 (92.2%), 0.2 MBs/sec` — the slowest post step
@@ -1079,10 +1091,16 @@ jobs:
         # for the pip cache on the carve-out job, applied to the one archive
         # where the post step measured expensive here.
         #
+        # Recorded, not hidden: that load-bearing writer is ITSELF an
+        # `actions/cache@v4` implicit save, on a 15 m cap whose own SUM
+        # `docs/ops/ci-wall-clock.md` §2 records at about 30 m. It is a member of
+        # the un-fixed class (see "Not fixed here" on #11063), not an exception to
+        # it, so this job's restore-only shape is only as durable as that job is
+        # un-cancelled.
+        #
         # continue-on-error: a cache-SERVICE error must never red the leg; a miss
         # is the fail-open case (the provision step below downloads the pinned
         # model, and its own failure mode is already named, #2573/#4387).
-        id: hf-cache
         continue-on-error: true
         uses: actions/cache/restore@v4
         with:
@@ -1976,7 +1994,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           # ⛔ `~/.cache/uv` ALONE. Adding `~/.cache/pip` here is what made the
-          # payload 3.88 GB; that half is written by five other jobs and is read
+          # payload 3.88 GB; that half is written by FOUR other jobs and is read
           # above, so a second writer would only re-upload 3.6 GB per miss shard.
           path: ~/.cache/uv
           key: uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}

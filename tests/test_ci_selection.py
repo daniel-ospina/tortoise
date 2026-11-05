@@ -9684,7 +9684,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "Use `actions/cache/restore@` plus an explicit, BOUNDED "
         "`actions/cache/save@`.")
 
-    # ── The pip half: READ ONLY, because five other jobs write it ─────────────
+    # ── The pip half: READ ONLY, because FOUR other jobs write it ──────────────
     pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
     assert pip_steps, (
         "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
@@ -9712,7 +9712,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"the `test` job WRITES the shared pip cache again {pip_writers_here}. "
         "That archive measured 3,616,385,308 B in a PR scope — restoring it and "
         "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
-        "and it buys nothing: five other jobs already write the key (#10327's "
+        "and it buys nothing: FOUR other jobs already write the key (#10327's "
         "argument, applied to the bigger half).")
     pip_writers_elsewhere = [jid for jid, jd in wf["jobs"].items() if jid != "test"
                              for s in (jd.get("steps") or [])
@@ -9775,14 +9775,14 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"the uv save's `timeout-minutes` is {save_bound!r}; it must be a positive "
         "integer <= 8. Arm 2 of `docs/ops/ci-wall-clock.md` §2 caps the `test` "
         "job's SUM at 60 m (x1.5 <= the 90 m cap) and the measured SUM without a "
-        "cache-write term is 49 m, so the prune + save terms have <= 11 m between "
+        "cache-write term is 49.6 m, so the prune + save terms have <= 10.4 m between "
         "them; a larger bound does not make the payload smaller, it only spends "
         "the margin a real regression needs.")
     save_paths = [ln.strip() for ln in _path_of(uv_save).splitlines() if ln.strip()]
     assert save_paths == ["~/.cache/uv"], (
         f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
-        "measured 3,616,385,308 B and is written by five other jobs.")
+        "measured 3,616,385,308 B and is written by FOUR other jobs.")
     gate = str(uv_save.get("if") or "").strip()
     expected_gate = (
         f"always() && steps.{uv_restore.get('id')}.outputs.cache-hit != 'true'"
@@ -9892,19 +9892,26 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert isinstance(embedder, int) and embedder > 0, (
         "the embedder-provision step must keep its own `timeout-minutes` — it is "
         "a term in the job's SUM")
-    # MEASURED on run 42000057137 / job `test (d)`. These are the terms the
-    # workflow cannot state as a file fact, so they are stated HERE as the
-    # measurements they are:
-    #   `Set up job`                    10:21:30 -> 10:24:32          3.05 m
-    #   other UNCAPPED pre-suite steps  10:24:32.98 -> 10:28:58.91   3.60 m
-    #     (that window minus the embedder's own measured time: checkout, the
-    #     uv restore, install-cpu-torch, `pip install -e`, the HF restore, the
-    #     FalkorDB provision, the canary/FILES step, the lastfailed restore).
-    #     Counting this at zero is what let a 12 m save bound look like it cleared
-    #     the cap: worst-case pre-suite is 12.65 m, not 3 m.
-    setup = 3.05              # measured, above
-    uncapped_pre_suite = 3.6  # measured, above
-    lastfailed = 0.38         # measured 23 s (10:45:07 -> 10:45:30), same run
+    # MEASURED on run 42000057137 / job `test (d)` (`actions/jobs/127165076497`,
+    # step timestamps). These are the terms the workflow cannot state as a file
+    # fact, so they are stated HERE as the measurements they are:
+    #   `Set up job`                    10:21:30 -> 10:24:32          182 s = 3.03 m
+    #   other UNCAPPED pre-suite steps  10:24:32 -> 10:28:58          266 s = 4.43 m
+    #     that window MINUS the embedder's own measured 12 s (10:26:59 -> 10:27:11;
+    #     its 6 m cap is a term above, so counting its elapsed time here too would
+    #     double-count it) = 254 s = 4.23 m. The steps in it are: resolve-artifact-
+    #     paths 1 s, checkout 14 s, setup-python 1 s, setup-node 1 s, uv restore
+    #     4 s, install-cpu-torch 5 s, `pip install -e` 9 s, reap 0 s, HF restore
+    #     112 s, FalkorDB provision 45 s, compute-uri 0 s, coverage manifest 61 s,
+    #     lastfailed restore 1 s.
+    #     An earlier revision derived 3.60 m here by subtracting 50 s for the
+    #     embedder — a figure this job's own record contradicts (12 s), which
+    #     understated the term by 0.63 m. Counting it at zero is what let a 12 m
+    #     save bound look like it cleared the cap: worst-case pre-suite is 12.65 m,
+    #     not 3 m.
+    setup = 3.03               # measured 182 s, above
+    uncapped_pre_suite = 4.23  # measured 254 s, above
+    lastfailed = 0.38          # measured 23 s (10:45:07 -> 10:45:30), same run
     # The cache-write term IS a file fact now: the two bounds this job declares.
     cache_write = prune_bound + save_bound
     total = (pre_phase + worst_watchdog + embedder + setup + uncapped_pre_suite
