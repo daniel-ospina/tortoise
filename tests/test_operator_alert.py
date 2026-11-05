@@ -473,7 +473,7 @@ def test_reset_clears_every_piece_of_state(monkeypatch):
     assert not oa._RESERVATIONS, (
         "a stale token must not survive the reset: its late release has to be a "
         "no-op, not a decrement of the next admission")
-    assert oa._NEXT_RESERVATION == counter_before, (
+    assert counter_before == oa._NEXT_RESERVATION, (
         "the reservation counter is process-lifetime monotonic — resetting it would "
         "let a stale token alias a fresh one")
     assert oa._SINCE_SWEEP == 0
