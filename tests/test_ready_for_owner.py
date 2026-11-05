@@ -417,8 +417,19 @@ def test_a_non_bool_head_stable_from_a_fixture_is_never_a_stable_head(value: Any
     `is_draft` fields take the same coercion and previously failed closed only by accident
     (a string coerced to `True` reads as merged/draft); they are `_tri_bool` now too.
 
-    Mutation check: reverting `head_stable` to `bool(data["head_stable"])` turns the `"false"`,
-    `"unstable"`, `0` and `1` arms green (every param but a real `bool`) and fails this test.
+    Mutation check, measured with `head_stable` reverted to `bool(data["head_stable"])`:
+
+        head_stable='false'    -> passed=True  reason=''          ← GREEN, says head did NOT stay
+        head_stable='unstable' -> passed=True  reason=''          ← GREEN
+        head_stable=1          -> passed=True  reason=''          ← GREEN
+        head_stable=0          -> passed=False reason='head-moved-mid-read'   ← RED, WRONG reason
+
+    ⛔ So three of the four params go GREEN and `0` does not: `bool(0) is False`, so the old
+    coercion sends it down the OTHER branch and it reads as a moved head rather than as
+    unreadable. That makes the `0` arm discriminated ONLY by the `unreadable`/`reason`
+    assertions below — its `assert check.passed is False` already holds on the old code. Do not
+    narrow this test to that assertion: doing so would leave `[0]` green under the old
+    coercion, i.e. an unfalsifiable arm wearing a note that says it is covered.
     """
     check = _check("exclusions", head_stable=value)
     assert check.passed is False, f"head_stable={value!r} graded PASS"
