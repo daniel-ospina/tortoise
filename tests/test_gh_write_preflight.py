@@ -21,6 +21,7 @@ Run under pytest:    python3 -m pytest tests/test_gh_write_preflight.py -q
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.gh_write_preflight import (  # noqa: E402
     EXIT_UNAVAILABLE,
     EXIT_WRITABLE,
+    REASONS,
+    Proc,
     Runner,
+    _child_env,
+    _ref_state,
     check_writable,
     main,
     redact,
@@ -47,6 +52,7 @@ _GIT_ENV = {
     "GIT_COMMITTER_EMAIL": "t@example.com",
     "HOME": "/tmp",
 }
+_PROBE = "gh-write-preflight"
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────────────────────────
@@ -123,7 +129,7 @@ def test_read_only_leaves_no_ref_on_the_remote(tmp_path: Path):
     verdict = check_writable(work)
 
     assert _remote_refs(remote) == before
-    assert "gh-write-preflight/" not in _remote_refs(remote)
+    assert _PROBE + "/" not in _remote_refs(remote)
     # Discriminating power: a tool that pushed NOTHING would also leave no ref, so pin that the
     # push was actually attempted and actually failed.
     push = [s for s in verdict.steps if s["step"] == "push"]
@@ -138,7 +144,6 @@ def test_write_credential_passes(tmp_path: Path):
 
     assert verdict.writable is True
     assert verdict.reason is None
-    # The probe must be confirmed by ls-remote, not taken from push's own exit code.
     assert any(s["step"] == "ls-remote-verify" and s["rc"] == 0 for s in verdict.steps)
     assert verdict.cleaned_up is True
 
@@ -162,7 +167,7 @@ def test_write_probe_ref_is_deleted_from_the_remote(tmp_path: Path):
 
     assert verdict.writable is True
     refs = _remote_refs(remote)
-    assert "gh-write-preflight/" not in refs, f"probe ref survived: {refs}"
+    assert _PROBE + "/" not in refs, f"probe ref survived: {refs}"
     assert "refs/heads/main" in refs, "the real branch must be untouched"
 
 
@@ -186,8 +191,7 @@ def test_git_dir_cannot_redirect_the_probe(tmp_path: Path, monkeypatch):
 
     Measured defect: with `GIT_DIR` exported (git exports it inside hooks — and a pre-push gate is
     the natural integration point), `--repo <read-only>` reported `writable=True` while
-    `repo_root` and `remote_url` named DIFFERENT repos. That is a false PASS of exactly the class
-    the tool exists to remove.
+    `repo_root` and `remote_url` named DIFFERENT repos.
     """
     ro_work, _ro_remote = _make_pair(tmp_path / "ro", read_only=True)
     good_work, _good_remote = _make_pair(tmp_path / "good")
@@ -198,12 +202,62 @@ def test_git_dir_cannot_redirect_the_probe(tmp_path: Path, monkeypatch):
 
     assert verdict.writable is False, "GIT_DIR redirected the probe — false PASS"
     assert verdict.reason == "push-refused"
-    # And the answer must describe the repo that was ASKED about, consistently.
     assert str(verdict.repo_root).endswith("ro/work")
     assert "ro/remote.git" in (verdict.remote_url or "")
 
 
-# ══ (4) distinct refusals for distinct causes (network != credential != bad path) ══════════════
+def test_git_work_tree_cannot_redirect_the_probe(tmp_path: Path, monkeypatch):
+    """The sibling of the GIT_DIR regression: GIT_WORK_TREE must not redirect either."""
+    ro_work, _ro_remote = _make_pair(tmp_path / "ro", read_only=True)
+    good_work, _good_remote = _make_pair(tmp_path / "good")
+
+    monkeypatch.setenv("GIT_WORK_TREE", str(good_work))
+
+    verdict = check_writable(ro_work)
+
+    assert verdict.writable is False
+    assert str(verdict.repo_root).endswith("ro/work")
+
+
+# ══ (4) the env contract: strip REDIRECTION and TRACE, keep CREDENTIAL-CARRYING config ═════════
+def test_child_env_strips_redirectors_and_traces_but_keeps_credential_config(monkeypatch):
+    """Over-stripping `GIT_*` would probe a DIFFERENT credential path than a lane's real push.
+
+    That is a false block — a lane parks work it could have landed — which is this tool's purpose
+    inverted. `GIT_CONFIG_*` and `GIT_SSH_COMMAND` carry the credential on such a box and must
+    survive; the repository redirectors and the trace variables must not.
+    """
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/tmp/idx")
+    monkeypatch.setenv("GIT_CURL_VERBOSE", "1")
+    monkeypatch.setenv("GIT_TRACE", "1")
+    monkeypatch.setenv("GIT_TRACE_PACKET", "1")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "http.extraheader")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "Authorization: Basic abc")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/key")
+
+    env = _child_env()
+
+    for stripped in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CURL_VERBOSE",
+        "GIT_TRACE", "GIT_TRACE_PACKET",
+    ):
+        assert stripped not in env, f"{stripped} must be stripped"
+    for kept in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_SSH_COMMAND"):
+        assert kept in env, f"{kept} must survive (it carries the credential)"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_child_env_keeps_a_supplied_askpass(monkeypatch):
+    """A box that supplies an askpass helper must not have it replaced."""
+    monkeypatch.setenv("GIT_ASKPASS", "/opt/askpass-helper")
+
+    assert _child_env()["GIT_ASKPASS"] == "/opt/askpass-helper"
+
+
+# ══ (5) distinct refusals for distinct causes (network != credential != bad path) ══════════════
 def test_missing_remote_is_named_not_guessed(tmp_path: Path):
     work, _remote = _make_pair(tmp_path)
 
@@ -262,7 +316,7 @@ def test_git_absent_is_named(tmp_path: Path):
     class NoGit(Runner):
         def run(self, argv, cwd=None, timeout=120):
             if argv[0] == "git" and argv[1] == "--version":
-                return 127, "git: not found"
+                return Proc(127, err="git: not found")
             return super().run(argv, cwd=cwd, timeout=timeout)
 
     verdict = check_writable(work, runner=NoGit())
@@ -271,7 +325,64 @@ def test_git_absent_is_named(tmp_path: Path):
     assert verdict.reason == "git-absent"
 
 
-# ══ (5) a surviving probe ref must be reported, and must not erase the primary reason ═════════
+# ══ (6) the marker contract is TOTAL: no path exits 1 without a REASONS token ═════════════════
+def test_unexpected_exception_becomes_internal_error_not_none(tmp_path: Path, capsys):
+    """A `return` inside `finally` used to SWALLOW an exception and emit `(None)`."""
+    work, _remote = _make_pair(tmp_path)
+    boom = {"fired": False}
+
+    class Boom(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            if argv[1] == "push" and "--delete" not in argv:
+                boom["fired"] = True
+                raise RuntimeError("simulated crash")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    verdict = check_writable(work, runner=Boom(), keep_ref=True)
+
+    assert boom["fired"] is True
+    assert verdict.writable is False
+    assert verdict.reason == "internal-error", f"got {verdict.reason!r} — marker would be (None)"
+    assert verdict.reason in REASONS
+
+
+def test_cli_never_prints_a_none_reason(tmp_path: Path, capsys, monkeypatch):
+    """`main()` must map a missing reason onto a REASONS token, never print `(None)`.
+
+    Patches `check_writable` itself (not a Runner): `main()` builds its own Runner, so a stub
+    injected at the Runner seam would never be reached and the test would assert nothing.
+    """
+    import tools.gh_write_preflight as gwp
+
+    monkeypatch.setattr(
+        gwp, "check_writable", lambda *a, **k: gwp.Verdict(False, None, detail="boom")
+    )
+
+    rc = main(["--repo", str(tmp_path), "--json"])
+    cap = capsys.readouterr()
+
+    assert rc == EXIT_UNAVAILABLE
+    assert "GH-WRITE-UNAVAILABLE(None)" not in cap.err
+    assert "GH-WRITE-UNAVAILABLE(internal-error)" in cap.err
+
+
+def test_oserror_is_mapped_not_raised(tmp_path: Path):
+    """EMFILE/ENOMEM-class OSError must not escape as an unmarked traceback."""
+    work, _remote = _make_pair(tmp_path)
+
+    class OSFail(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            if argv[1] == "rev-parse":
+                return Proc(126, err=f"{argv[0]}: [Errno 24] Too many open files")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    verdict = check_writable(work, runner=OSFail())
+
+    assert verdict.writable is False
+    assert verdict.reason == "not-a-repo"  # rev-parse failed → clean, named refusal
+
+
+# ══ (7) a surviving probe ref must be reported WITHOUT erasing the primary reason ══════════════
 def test_undeletable_probe_ref_is_reported(tmp_path: Path):
     """A tool that leaves garbage on a shared remote must not report a clean PASS."""
     work, remote = _make_pair(tmp_path)
@@ -297,28 +408,28 @@ def test_undeletable_probe_ref_is_reported(tmp_path: Path):
 def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_cause(tmp_path: Path):
     """Push may report failure AFTER the remote applied the update — cleanup must still run.
 
-    Simulated with a Runner: push returns 1, but the ref IS visible on `ls-remote`. The delete must
-    be attempted, and a ref that survives must be reported WITHOUT overwriting `push-refused` —
-    otherwise a caller learns about litter and never learns its lanes cannot deliver.
+    Simulated: push returns 1, the ref IS on the remote, and the delete ALSO fails. The ref
+    survives, so `leftover_ref` must be True while `reason` stays `push-refused` — a caller has to
+    learn BOTH that its lanes cannot deliver and that there is litter. A regression that overwrote
+    `push-refused` with `delete-failed` fails here.
     """
-    probe_prefix = "refs/heads/gh-write-preflight/"
-    state = {"ref_exists": False, "delete_attempted": False, "delete_ok": False}
+    state = {"ref_exists": False, "delete_attempted": False}
 
     class TransportLie(Runner):
         def run(self, argv, cwd=None, timeout=120):
             joined = " ".join(argv)
-            if argv[1] == "ls-remote" and probe_prefix.split("/")[-1] in joined:
-                return (0, "deadbeef\t" + joined.split()[-1] + "\n") if state["ref_exists"] else (0, "")
+            is_probe_query = argv[1] == "ls-remote" and _PROBE in joined
+            if is_probe_query:
+                ref = joined.split()[-1]
+                return Proc(0, out=f"deadbeef\t{ref}\n") if state["ref_exists"] else Proc(0, out="")
             if argv[1] == "ls-remote":
-                return 0, "deadbeef\trefs/heads/main\n"
+                return Proc(0, out="deadbeef\trefs/heads/main\n")
             if argv[1] == "push" and "--delete" in argv:
                 state["delete_attempted"] = True
-                state["ref_exists"] = False
-                state["delete_ok"] = True
-                return 0, "deleted"
+                return Proc(1, err="remote: deletion denied")   # delete FAILS
             if argv[1] == "push":
-                state["ref_exists"] = True       # applied, then the transport died
-                return 1, "fatal: the remote end hung up unexpectedly"
+                state["ref_exists"] = True        # applied, then the transport died
+                return Proc(1, err="fatal: the remote end hung up unexpectedly")
             return super().run(argv, cwd=cwd, timeout=timeout)
 
     work, _remote = _make_pair(tmp_path)
@@ -326,8 +437,70 @@ def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_c
 
     assert state["delete_attempted"] is True, "cleanup must run even when push reports failure"
     assert verdict.writable is False
-    assert verdict.reason == "push-refused", "the primary cause must survive"
+    assert verdict.reason == "push-refused", "the primary cause must NOT be overwritten"
+    assert verdict.leftover_ref is True, "a surviving ref must be reported"
+    assert verdict.cleaned_up is False
+
+
+def test_push_failed_and_nothing_created_is_clean_not_leftover(tmp_path: Path):
+    """The common case: push refused, no ref exists, so cleanup is genuinely clean."""
+    class RefusedClean(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            joined = " ".join(argv)
+            if argv[1] == "ls-remote" and _PROBE in joined:
+                return Proc(0, out="")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="deadbeef\trefs/heads/main\n")
+            if argv[1] == "push":
+                return Proc(1, err="remote: denied")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    work, _remote = _make_pair(tmp_path)
+    verdict = check_writable(work, runner=RefusedClean())
+
+    assert verdict.reason == "push-refused"
+    assert verdict.leftover_ref is False
     assert verdict.cleaned_up is True
+
+
+def test_unverifiable_cleanup_is_none_not_true(tmp_path: Path):
+    """A failed confirming read must NOT be reported as verified-clean.
+
+    `_ref_state` used to fold "could not check" into "absent", so `cleaned_up=True` was asserted
+    from an absence of evidence — the exact property the tool claims to verify.
+    """
+    class Unreadable(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            joined = " ".join(argv)
+            if argv[1] == "ls-remote" and _PROBE in joined:
+                return Proc(128, err="fatal: could not read from remote")
+            if argv[1] == "ls-remote":
+                return Proc(0, out="deadbeef\trefs/heads/main\n")
+            if argv[1] == "push" and "--delete" in argv:
+                return Proc(1, err="deletion denied")
+            if argv[1] == "push":
+                return Proc(0, out="pushed")
+            return super().run(argv, cwd=cwd, timeout=timeout)
+
+    work, _remote = _make_pair(tmp_path)
+    verdict = check_writable(work, runner=Unreadable())
+
+    assert verdict.cleaned_up is None, "unconfirmed cleanup must be None, never True"
+    assert verdict.leftover_ref is False
+    assert "UNCONFIRMED" in verdict.detail
+
+
+def test_ref_state_is_tristate(tmp_path: Path):
+    class R(Runner):
+        def __init__(self, rc, out):
+            self._rc, self._out = rc, out
+
+        def run(self, argv, cwd=None, timeout=120):
+            return Proc(self._rc, out=self._out)
+
+    assert _ref_state(R(0, "abc\trefs/heads/x\n"), ".", "origin", "x") == "present"
+    assert _ref_state(R(0, ""), ".", "origin", "x") == "absent"
+    assert _ref_state(R(128, ""), ".", "origin", "x") == "unverifiable"
 
 
 def test_verify_mismatch_still_attempts_cleanup(tmp_path: Path):
@@ -337,15 +510,15 @@ def test_verify_mismatch_still_attempts_cleanup(tmp_path: Path):
     class LyingPush(Runner):
         def run(self, argv, cwd=None, timeout=120):
             joined = " ".join(argv)
-            if argv[1] == "ls-remote" and "gh-write-preflight" in joined:
-                return 0, ""                      # nothing visible -> verify-mismatch
+            if argv[1] == "ls-remote" and _PROBE in joined:
+                return Proc(0, out="")            # nothing visible -> verify-mismatch
             if argv[1] == "ls-remote":
-                return 0, "deadbeef\trefs/heads/main\n"
+                return Proc(0, out="deadbeef\trefs/heads/main\n")
             if argv[1] == "push" and "--delete" in argv:
                 state["delete_attempted"] = True
-                return 0, "deleted"
+                return Proc(0, out="deleted")
             if argv[1] == "push":
-                return 0, "pushed"
+                return Proc(0, out="pushed")
             return super().run(argv, cwd=cwd, timeout=timeout)
 
     work, _remote = _make_pair(tmp_path)
@@ -366,10 +539,31 @@ def test_keep_ref_is_explicit_and_the_message_does_not_lie(tmp_path: Path, capsy
     assert rc == EXIT_WRITABLE
     assert "KEPT" in cap.out
     assert "probe ref" in cap.out and "deleted" not in cap.out
-    assert "gh-write-preflight/" in _remote_refs(remote), "--keep-ref must leave the ref"
+    assert _PROBE + "/" in _remote_refs(remote), "--keep-ref must leave the ref"
 
 
-# ══ (6) no credential ever reaches output, and none is retained in memory ══════════════════════
+# ══ (8) stdout/stderr are parsed separately (a stderr warning must not become data) ════════════
+def test_stderr_warning_does_not_become_the_repo_path(tmp_path: Path):
+    """`warning: redirecting to https://…` on stderr once became the repo path."""
+    work, _remote = _make_pair(tmp_path)
+
+    class WarningOnStderr(Runner):
+        def run(self, argv, cwd=None, timeout=120):
+            p = super().run(argv, cwd=cwd, timeout=timeout)
+            if argv[1] == "rev-parse" and "--show-toplevel" in argv:
+                return Proc(p.rc, out=p.out, err="warning: unrelated advisory\n")
+            return p
+
+    verdict = check_writable(work, runner=WarningOnStderr())
+
+    assert verdict.writable is True, "a stderr warning must not break the verdict"
+    # Compare to the REAL path: the tmp_path itself contains "warning" in its name, so a
+    # substring test would be satisfied by the fixture directory rather than by the code.
+    assert verdict.repo_root == str(work)
+    assert "unrelated advisory" not in (verdict.repo_root or "")
+
+
+# ══ (9) no credential ever reaches output, and none is retained in memory ══════════════════════
 def test_redaction_covers_every_url_scheme_and_auth_header():
     cases = {
         "https://x-access-token:ghs_abc123456789@github.com/o/r.git": "ghs_abc123456789",
@@ -379,6 +573,10 @@ def test_redaction_covers_every_url_scheme_and_auth_header():
         "//user:hunter2supersecret@example.com/r.git": "hunter2supersecret",
         "Authorization: Basic dXNlcjp0b2tlbg==": "dXNlcjp0b2tlbg==",
         "Authorization: Bearer abc123secret": "abc123secret",
+        # one-token header (no scheme word) — previously survived
+        "Authorization: ZXhhbXBsZTpiZWFyZXI=": "ZXhhbXBsZTpiZWFyZXI=",
+        "{'Authorization': 'Basic dXNlcjp0b2tlbg=='}": "dXNlcjp0b2tlbg==",
+        "Proxy-Authorization: Basic cHJveHk=": "cHJveHk=",
         "api_token = abcdef123": "abcdef123",
         "using token ghp_ABCDEFGH12345678": "ghp_ABCDEFGH12345678",
         "github_pat_11ABCDEFG0_xyz": "github_pat_11ABCDEFG0_xyz",
@@ -434,7 +632,7 @@ def test_verdict_object_holds_no_credential(tmp_path: Path):
     assert "ghp_LEAKLEAKLEAK123" not in json.dumps(verdict.steps)
 
 
-# ══ (7) the tool is importable/runnable the way the repo's tools are ═══════════════════════════
+# ══ (10) the tool is importable/runnable the way the repo's tools are ══════════════════════════
 def test_help_documents_the_exit_contract():
     proc = subprocess.run(
         [sys.executable, str(TOOL), "--help"],
@@ -442,7 +640,7 @@ def test_help_documents_the_exit_contract():
         text=True,
         check=False,
         # argparse wraps to COLUMNS; pin it so a narrow terminal cannot break the assertion.
-        env={**__import__("os").environ, "COLUMNS": "200"},
+        env={**os.environ, "COLUMNS": "200"},
     )
     assert proc.returncode == 0
     assert "Exit 0 writable" in proc.stdout

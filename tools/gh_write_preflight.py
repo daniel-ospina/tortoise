@@ -37,24 +37,33 @@ Contract
 * Exit **0** — the credential can write: a throwaway branch was created, confirmed by
   ``git ls-remote``, and deleted.
 * Exit **1** — ``GH-WRITE-UNAVAILABLE(<reason>)`` on stderr (emitted in ``--json`` mode too; stdout
-  stays pure JSON). Reasons are stable tokens, listed in ``REASONS``, so a caller can branch on them
-  without parsing prose.
+  stays pure JSON). Reasons are stable tokens from ``REASONS`` (top-level, non-nested), so a caller
+  can branch on them without parsing prose. **No path returns 1 without a token from that set** —
+  including an unexpected exception, which is caught and mapped to ``internal-error``.
 * Exit **2** — usage error (argparse's own code, deliberately not reused for a verdict).
 
-Safety
-------
-* **The child environment is stripped of every ``GIT_*`` variable.** Git's own state variables
-  (``GIT_DIR``, ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY``, ``GIT_NAMESPACE``,
-  …) redirect repository resolution away from ``--repo``; inheriting them made this tool report
-  ``writable=True`` about a DIFFERENT, writable repository than the one asked for — a false PASS of
-  exactly the class it exists to remove (measured; pinned by
-  ``test_git_dir_cannot_redirect_the_probe``). Stripping them also removes ``GIT_TRACE`` /
-  ``GIT_CURL_VERBOSE``, which would otherwise route git's own ``Authorization:`` header into our
-  output.
+Safety and soundness
+--------------------
+* **Repository redirection is stripped; credential-carried config is not.** Git's *state* variables
+  (``GIT_DIR``, ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``, ``GIT_OBJECT_DIRECTORY``,
+  ``GIT_ALTERNATE_OBJECT_DIRECTORIES``, ``GIT_COMMON_DIR``, ``GIT_NAMESPACE``, ``GIT_PREFIX``) and
+  the trace/verbose pair (``GIT_TRACE*``, ``GIT_CURL_VERBOSE``) are removed: the first redirect
+  which repository git operates on, which once made this tool report ``writable=True`` about a
+  DIFFERENT, writable repository than the one asked for (a false PASS, pinned by
+  ``test_git_dir_cannot_redirect_the_probe``); the second would route git's own ``Authorization:``
+  header into our output. ``GIT_CONFIG_*`` and ``GIT_SSH_COMMAND`` are deliberately KEPT — they
+  carry the credential on boxes that inject it through config or a custom SSH command, and dropping
+  them would make the probe test a different path than the lane's real push and refuse a credential
+  that can write (a false block, the failure this tool exists to prevent, inverted).
+* **stdout and stderr are parsed separately.** git writes diagnostics to stderr (e.g. ``warning:
+  redirecting to https://…``); reading a "last line" out of a merged stream mistook a warning for a
+  path and could invent a leftover ref.
 * The probe ref is namespaced (``gh-write-preflight/<utc>-<pid>-<rand>``) so it cannot collide with
   a real branch, and it is **always** cleaned up — including when the push *reports* failure, since
-  a transport error can arrive after the remote applied the update. Cleanup is verified by
-  ``ls-remote``, not assumed, and a ref that survives DEMOTES the verdict.
+  a transport error can arrive after the remote applied the update. Cleanup is confirmed by
+  ``ls-remote`` and the result is **tri-state**: ``cleaned_up=True`` only on a positive
+  "ref absent" read; a read that could not be performed sets ``cleaned_up=None`` rather than
+  claiming verified-clean from an absence of evidence.
 * The probe pushes the commit already at ``HEAD`` (``HEAD:refs/heads/<probe>``). It does not create
   a commit and does not touch the working tree or index, so it is safe to run in a dirty worktree.
 * A credential never reaches the output: redaction happens **at ingestion** (``step()`` stores an
@@ -62,6 +71,8 @@ Safety
 * A branch push does not trigger CI in this repo (no workflow has an unfiltered ``on: push``;
   ``publish-pypi`` is ``tags: v*`` only). That is a property of THIS repo: the tool is generic via
   ``--repo``, so probing another checkout inherits that repo's triggers.
+* The probe pushes with ``--no-verify``, so a PASS says the CREDENTIAL can write; it does not claim
+  a lane's own pre-push hook would cooperate.
 
 Usage
 -----
@@ -91,7 +102,8 @@ from pathlib import Path
 EXIT_WRITABLE = 0
 EXIT_UNAVAILABLE = 1
 
-# Stable reason tokens. A caller may key on these; never invent one outside this set.
+# Stable TOP-LEVEL reason tokens. Every `writable=False` verdict carries one of these, so a caller
+# can branch on a flat enum rather than walking nested state.
 REASONS = {
     "git-absent": "the git binary is not on PATH",
     "not-a-repo": "the target is not a directory inside a git work tree",
@@ -100,7 +112,8 @@ REASONS = {
     "remote-unreachable": "the remote refused or failed `ls-remote`",
     "push-refused": "`git push` was refused (read-only credential, branch protection, or no network)",
     "verify-mismatch": "the push reported success but `ls-remote` does not show the ref",
-    "delete-failed": "the probe ref could not be deleted; it was left on the remote",
+    "delete-failed": "the probe ref could not be deleted; it is left on the remote",
+    "internal-error": "the probe itself failed unexpectedly (no verdict is available)",
 }
 
 # ── redaction ──────────────────────────────────────────────────────────────────────────────────
@@ -110,8 +123,12 @@ _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # userinfo in a URL — ANY scheme, plus scheme-relative `//user:pw@host`. The leftmost
     # alternative wins, so `https://…` keeps its scheme and `ssh://`/`git://` are covered too.
     (re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://|//)[^@/\s]+@"), r"\1<userinfo-redacted>@"),
-    # git's own HTTP auth header — reachable when GIT_TRACE/GIT_CURL_VERBOSE was in the env.
-    (re.compile(r"(?i)\b(authorization:\s*\S+)\s+\S+"), r"\1 <redacted>"),
+    # Any Authorization header, one token or two, quoted-key repr included. The whole value goes —
+    # preserving the scheme word buys a diagnostic nobody needs and risks a one-token miss.
+    (
+        re.compile(r"(?i)([\"']?(?:proxy-)?authorization[\"']?\s*[:=]\s*)\S+(?:\s+\S+)?"),
+        r"\1<redacted>",
+    ),
     # `token = …`, `api_token: …`, `DEEPSEEK_API_KEY=…` and friends.
     (
         re.compile(r"(?i)([A-Za-z0-9_.\-]*(?:token|password|secret|passwd|api_?key))(\s*[=:]\s*)\S+"),
@@ -132,12 +149,29 @@ def redact(text: str) -> str:
 
 
 @dataclass
+class Proc:
+    """One subprocess result, with stdout and stderr kept APART.
+
+    Parsing a merged stream is how a `warning: redirecting to …` on stderr became a repository
+    path, and how a harmless warning could invent a leftover ref. Callers read `.out` for data and
+    `.err` for diagnosis.
+    """
+
+    rc: int
+    out: str = ""
+    err: str = ""
+
+    @property
+    def detail(self) -> str:
+        return (self.out or "") + (self.err or "")
+
+
+@dataclass
 class Verdict:
     """The answer. `writable` is the only field a caller should branch on.
 
-    Every string field is stored ALREADY REDACTED (see `check_writable`), so a caller that logs,
-    reprs, or prints this object cannot leak a credential. `redact()` is still applied on render as
-    a belt, not as the only guard.
+    Every string field is stored ALREADY REDACTED, so a caller that logs, reprs, or prints this
+    object cannot leak a credential.
     """
 
     writable: bool
@@ -149,12 +183,11 @@ class Verdict:
     probe_ref: str | None = None
     head_sha: str | None = None
     steps: list[dict] = field(default_factory=list)
+    # None = cleanup could not be CONFIRMED (the confirming read failed) — never "clean".
     cleaned_up: bool | None = None
     kept_ref: bool = False
-    # A probe ref that SURVIVED on the remote. Reported ALONGSIDE `reason` rather than replacing it:
-    # a leftover is an operational problem, but it must not erase the primary verdict (a credential
-    # that cannot write). Overwriting `push-refused` with `delete-failed` is how a caller learns
-    # about litter and never learns its lanes cannot deliver.
+    # A probe ref that SURVIVED on the remote, reported ALONGSIDE `reason` so a leftover does not
+    # erase the primary verdict (a credential that cannot write).
     leftover_ref: bool = False
 
     def as_json(self) -> str:
@@ -180,20 +213,41 @@ class Verdict:
         )
 
 
-# Git's own state variables redirect WHICH repository git operates on, regardless of `cwd`. Any of
-# them inherited from the caller would let the probe describe a different repo than `--repo` — a
-# false PASS. They are stripped wholesale (prefix match, so a variable added by a future git is
-# covered too), and `GIT_TRACE`/`GIT_CURL_VERBOSE` go with them, which also keeps git's
-# `Authorization:` header out of our output.
-_GIT_ENV_PREFIX = "GIT_"
+# Git variables that REDIRECT which repository git operates on, or that trace traffic. Removed.
+_GIT_REDIRECT_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CURL_VERBOSE",
+)
+# Traces are prefix-matched (`GIT_TRACE`, `GIT_TRACE_PACKET`, … — new ones keep appearing).
+_GIT_TRACE_PREFIX = "GIT_TRACE"
 
 
 def _child_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith(_GIT_ENV_PREFIX)}
+    """The env the probe runs under.
+
+    Strips only what can REDIRECT the repository or TRACE traffic. Credential-carrying config
+    (`GIT_CONFIG_*`, `GIT_SSH_COMMAND`) is kept on purpose: a box that injects its write credential
+    that way must be probed through the same path its real `git push` uses, or the tool refuses a
+    credential that can write — a false block, and the inversion of its purpose.
+    """
+    drop = set(_GIT_REDIRECT_ENV)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in drop and not k.startswith(_GIT_TRACE_PREFIX)
+    }
     # Never let git prompt for a credential: a preflight blocked on an interactive username prompt
-    # is a hung lane, not a verdict.
+    # is a hung lane, not a verdict. `setdefault` so a box that deliberately supplies an askpass
+    # helper keeps it (see above).
     env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_ASKPASS"] = "true"
+    env.setdefault("GIT_ASKPASS", "true")
     return env
 
 
@@ -204,7 +258,7 @@ class Runner:
     is the only thing that ever runs git for real.
     """
 
-    def run(self, argv: list[str], cwd: str | None = None, timeout: int = 120) -> tuple[int, str]:
+    def run(self, argv: list[str], cwd: str | None = None, timeout: int = 120) -> Proc:
         try:
             proc = subprocess.run(
                 argv,
@@ -212,19 +266,22 @@ class Runner:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                # `replace` so a non-UTF-8 byte in git's error text cannot raise out of the
+                # verdict path and exit 1 with no marker.
+                errors="replace",
                 env=_child_env(),
             )
         except FileNotFoundError:
-            # Covers BOTH a missing binary and a `cwd` that does not exist; the caller
-            # distinguishes them (see check_writable's is_dir() guard) so the detail stays true.
-            return 127, f"{argv[0]}: not found"
-        except NotADirectoryError as exc:
-            return 126, f"cannot enter working directory: {exc}"
-        except PermissionError as exc:
-            return 126, f"permission denied: {exc}"
+            # Covers a missing binary AND a missing `cwd`; check_writable's is_dir() guard means
+            # the cwd case cannot reach here, so the message stays true.
+            return Proc(127, err=f"{argv[0]}: not found")
         except subprocess.TimeoutExpired:
-            return 124, f"{argv[0]}: timed out after {timeout}s"
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+            return Proc(124, err=f"{argv[0]}: timed out after {timeout}s")
+        except OSError as exc:
+            # EMFILE/ENOMEM/EACCES/E2BIG… — any of these used to escape as an unmarked traceback
+            # (exit 1 with no GH-WRITE-UNAVAILABLE token), breaking the contract.
+            return Proc(126, err=f"{argv[0]}: {exc}")
+        return Proc(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
 def _probe_ref() -> str:
@@ -233,10 +290,15 @@ def _probe_ref() -> str:
     return f"gh-write-preflight/{stamp}-{os.getpid()}-{rand}"
 
 
-def _ref_present(runner: Runner, root: str, remote: str, ref: str) -> bool:
-    """Does `ref` exist on `remote` right now? Used to tell a no-op delete from a real leftover."""
-    rc, out = runner.run(["git", "ls-remote", remote, f"refs/heads/{ref}"], cwd=root)
-    return rc == 0 and bool(out.strip())
+def _ref_state(runner: Runner, root: str, remote: str, ref: str) -> str:
+    """Is `ref` on `remote`? Tri-state, because "could not check" is not "absent".
+
+    Returns ``present`` / ``absent`` / ``unverifiable``.
+    """
+    proc = runner.run(["git", "ls-remote", remote, f"refs/heads/{ref}"], cwd=root)
+    if proc.rc != 0:
+        return "unverifiable"
+    return "present" if proc.out.strip() else "absent"
 
 
 def check_writable(
@@ -247,54 +309,70 @@ def check_writable(
 ) -> Verdict:
     """Answer "can this credential write repository contents here?".
 
-    Returns a Verdict. Never raises for an expected failure; every refusal carries a `REASONS` token
-    so no path can exit 1 without a marker.
+    Returns a Verdict. Never raises for an expected failure, and never returns `writable=False`
+    without a `REASONS` token.
     """
     runner = runner or Runner()
+    try:
+        return _check_writable(repo, remote, runner, keep_ref)
+    except Exception as exc:  # noqa: BLE001 — the contract is "no exit 1 without a marker"
+        return Verdict(
+            False,
+            "internal-error",
+            detail=redact(f"{type(exc).__name__}: {exc}"),
+            repo_root=str(repo),
+            remote=remote,
+            cleaned_up=None,
+        )
+
+
+def _check_writable(
+    repo: str | Path,
+    remote: str,
+    runner: Runner,
+    keep_ref: bool,
+) -> Verdict:
     repo_path = Path(repo).expanduser()
 
     # (0) git present?
-    rc, out = runner.run(["git", "--version"])
-    if rc != 0:
-        return Verdict(False, "git-absent", detail=redact(out))
+    if runner.run(["git", "--version"]).rc != 0:
+        return Verdict(False, "git-absent", detail="git --version failed")
 
     # (1) the target must be a directory. Checked FIRST so a bad `--repo` cannot masquerade as
     # "git is missing" (a nonexistent cwd raises FileNotFoundError inside subprocess).
     if not repo_path.is_dir():
-        return Verdict(
-            False, "not-a-repo", detail=f"not a directory: {repo_path}"
-        )
+        return Verdict(False, "not-a-repo", detail=f"not a directory: {repo_path}")
 
-    # (2) is this a work tree, and where is its root?
-    rc, out = runner.run(["git", "rev-parse", "--show-toplevel"], cwd=str(repo_path))
-    if rc != 0:
-        return Verdict(False, "not-a-repo", detail=redact(out))
-    root = out.strip().splitlines()[-1].strip()
+    # (2) is this a work tree, and where is its root? stdout ONLY.
+    p = runner.run(["git", "rev-parse", "--show-toplevel"], cwd=str(repo_path))
+    root_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
+    if p.rc != 0 or not root_lines:
+        return Verdict(False, "not-a-repo", detail=redact(p.detail))
+    root = root_lines[-1]
 
-    # (3) does the named remote exist?
-    rc, out = runner.run(["git", "remote", "get-url", remote], cwd=root)
-    if rc != 0:
-        return Verdict(
-            False, "no-remote", detail=redact(out), repo_root=root, remote=remote
-        )
-    url = redact(out.strip())  # stored redacted at ingestion
+    # (3) does the named remote exist? stdout only, first line.
+    p = runner.run(["git", "remote", "get-url", remote], cwd=root)
+    url_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
+    if p.rc != 0 or not url_lines:
+        return Verdict(False, "no-remote", detail=redact(p.detail), repo_root=root, remote=remote)
+    url = redact(url_lines[0])  # stored redacted at ingestion
 
     # (4) HEAD must resolve — we push an EXISTING commit, never a new one.
-    rc, out = runner.run(["git", "rev-parse", "HEAD"], cwd=root)
-    if rc != 0:
+    p = runner.run(["git", "rev-parse", "HEAD"], cwd=root)
+    head_lines = [ln.strip() for ln in p.out.splitlines() if ln.strip()]
+    if p.rc != 0 or not head_lines:
         return Verdict(
             False,
             "no-head",
-            detail=redact(out),
+            detail=redact(p.detail),
             repo_root=root,
             remote=remote,
             remote_url=url,
         )
-    head = out.strip().splitlines()[-1].strip()
+    head = head_lines[-1]
 
     verdict = Verdict(
         False,
-        None,
         repo_root=root,
         remote=remote,
         remote_url=url,
@@ -302,82 +380,89 @@ def check_writable(
         probe_ref=_probe_ref(),
     )
 
-    def step(name: str, rc: int, out: str) -> bool:
+    def step(name: str, proc: Proc) -> bool:
         # REDACT AT INGESTION. Nothing downstream has to remember.
-        verdict.steps.append({"step": name, "rc": rc, "detail": redact(out[-800:])})
-        return rc == 0
+        verdict.steps.append(
+            {"step": name, "rc": proc.rc, "detail": redact(proc.detail[-800:])}
+        )
+        return proc.rc == 0
 
     # (5) reachability. A remote we cannot even read is not a write verdict — say so distinctly,
-    # because "network is down" and "credential is read-only" call for different fixes.
-    if not step("ls-remote", *runner.run(["git", "ls-remote", "--heads", remote], cwd=root)):
+    # because "network is down" and "credential is read-only" need different fixes.
+    if not step("ls-remote", runner.run(["git", "ls-remote", "--heads", remote], cwd=root)):
         verdict.reason, verdict.detail = "remote-unreachable", verdict.steps[-1]["detail"]
         return verdict
 
-    push_attempted = False
-    try:
-        # (6) THE REAL WRITE. Push the commit already at HEAD onto a namespaced throwaway ref.
-        push_attempted = True
-        push_ok = step(
-            "push",
-            *runner.run(
-                ["git", "push", "--no-verify", remote, f"HEAD:refs/heads/{verdict.probe_ref}"],
-                cwd=root,
-            ),
-        )
+    # (6) THE REAL WRITE. Push the commit already at HEAD onto a namespaced throwaway ref.
+    push_ok = step(
+        "push",
+        runner.run(
+            ["git", "push", "--no-verify", remote, f"HEAD:refs/heads/{verdict.probe_ref}"],
+            cwd=root,
+        ),
+    )
 
-        if not push_ok:
-            # The defect this tool exists to catch: a read-only credential fails HERE. Do NOT
-            # conclude the ref is absent — a transport error can arrive AFTER the remote applied
-            # the update, so cleanup below still runs and is verified by ls-remote.
-            verdict.reason = "push-refused"
-            verdict.detail = verdict.steps[-1]["detail"]
-            return verdict
-
-        # (7) Confirm on the REMOTE, not from push's own word.
-        rc, out = runner.run(
-            ["git", "ls-remote", remote, f"refs/heads/{verdict.probe_ref}"], cwd=root
-        )
-        step_ok = step("ls-remote-verify", rc, out)
-        seen = out.split()[0] if step_ok and out.strip() else ""
-        if not step_ok or seen != head:
+    if push_ok:
+        # (7) Confirm on the REMOTE, not from push's own word. stdout only.
+        vp = runner.run(["git", "ls-remote", remote, f"refs/heads/{verdict.probe_ref}"], cwd=root)
+        verified = step("ls-remote-verify", vp)
+        seen = vp.out.split()[0] if verified and vp.out.strip() else ""
+        if verified and seen == head:
+            verdict.writable = True
+        else:
             verdict.reason = "verify-mismatch"
             verdict.detail = (
                 f"push reported success but ls-remote returned {seen or '<nothing>'} "
                 f"for refs/heads/{verdict.probe_ref} (expected {head})"
             )
-            return verdict
-        verdict.writable = True
-    finally:
-        # ALWAYS clean up once a push was attempted — on every path, including the failures.
-        if not push_attempted:
-            verdict.cleaned_up = True
-            return verdict if not verdict.writable else verdict
-        if keep_ref:
-            verdict.kept_ref = True
-            verdict.cleaned_up = False
-            return verdict if not verdict.writable else verdict
+    else:
+        # The defect this tool exists to catch: a read-only credential fails HERE. Do NOT conclude
+        # the ref is absent — a transport error can arrive AFTER the remote applied the update, so
+        # cleanup below still runs and is CONFIRMED by ls-remote.
+        verdict.reason = "push-refused"
+        verdict.detail = verdict.steps[-1]["detail"]
 
-        rc, out = runner.run(
-            ["git", "push", "--no-verify", remote, "--delete", verdict.probe_ref], cwd=root
+    # (8) CLEANUP — one place, no `return` (a `return` inside `finally` would swallow an in-flight
+    # exception and emit `GH-WRITE-UNAVAILABLE(None)`).
+    if keep_ref:
+        verdict.kept_ref = True
+        verdict.cleaned_up = False
+        return verdict
+
+    dp = runner.run(
+        ["git", "push", "--no-verify", remote, "--delete", verdict.probe_ref], cwd=root
+    )
+    step("delete", dp)
+    if dp.rc == 0:
+        verdict.cleaned_up = True
+        return verdict
+
+    # The delete failed. It "failed" harmlessly when there was no ref to delete (a refused push),
+    # so ask the remote rather than assume — and treat an unreadable answer as UNCONFIRMED.
+    state = _ref_state(runner, root, remote, verdict.probe_ref)
+    if state == "absent":
+        verdict.cleaned_up = True
+    elif state == "present":
+        verdict.cleaned_up = False
+        verdict.leftover_ref = True
+        # A surviving ref is NOT a pass: the tool must not report writable while it has left
+        # garbage on a shared remote.
+        verdict.writable = False
+        if verdict.reason is None:
+            verdict.reason = "delete-failed"
+        note = (
+            f"PROBE REF SURVIVED on {remote}: refs/heads/{verdict.probe_ref} "
+            f"({verdict.steps[-1]['detail']})"
         )
-        step("delete", rc, out)
-        if rc == 0:
-            verdict.cleaned_up = True
-        else:
-            # A delete "fails" harmlessly when there was no ref to delete (the push was refused).
-            # Only a ref that actually SURVIVES is a leftover, and only that demotes the verdict.
-            survived = _ref_present(runner, root, remote, verdict.probe_ref)
-            verdict.cleaned_up = not survived
-            if survived:
-                verdict.writable = False
-                verdict.leftover_ref = True
-                if verdict.reason is None:
-                    verdict.reason = "delete-failed"
-                note = (
-                    f"PROBE REF SURVIVED on {remote}: refs/heads/{verdict.probe_ref} "
-                    f"({verdict.steps[-1]['detail']})"
-                )
-                verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
+    else:
+        verdict.cleaned_up = None
+        verdict.leftover_ref = False
+        note = (
+            f"cleanup UNCONFIRMED — the delete failed and ls-remote could not be read for "
+            f"refs/heads/{verdict.probe_ref}; check the remote before assuming it is clean"
+        )
+        verdict.detail = f"{verdict.detail} | {note}" if verdict.detail else note
 
     return verdict
 
@@ -405,14 +490,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     verdict = check_writable(args.repo, args.remote, keep_ref=args.keep_ref)
+    # Belt: the type promises a REASONS token; never emit a bare `(None)`.
+    reason = verdict.reason if verdict.reason in REASONS else "internal-error"
 
     # The marker ALWAYS goes to stderr, in both modes, so a caller that greps for it works with
     # --json too (stdout stays pure JSON there).
     if not verdict.writable:
-        print(
-            f"GH-WRITE-UNAVAILABLE({verdict.reason}) — {REASONS.get(verdict.reason or '', '')}",
-            file=sys.stderr,
-        )
+        print(f"GH-WRITE-UNAVAILABLE({reason}) — {REASONS[reason]}", file=sys.stderr)
 
     if args.json:
         print(verdict.as_json())
@@ -430,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
                 else f"probe ref {verdict.probe_ref} deleted"
             )
             print(f"GH-WRITE-OK({verdict.remote}) — push confirmed by ls-remote; {cleanup}")
-        elif verdict.detail:
+        if verdict.detail:
             print(verdict.detail.strip()[-600:], file=sys.stderr)
 
     return EXIT_WRITABLE if verdict.writable else EXIT_UNAVAILABLE
