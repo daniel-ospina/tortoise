@@ -114,11 +114,17 @@ def _names_the_reader(path):
     (``Binding("tortoise.metering", "get_capture_usage", READER)``) — the file
     exempted above for exactly that reason — so a scanner that recognised only
     the two builtins would let a SECOND such registration land without reddening
-    the pin below (#10962 review P2). A bare string OUTSIDE a call — a docstring,
-    a comment, a log message — is deliberately not matched (an ``Expr`` is not a
-    ``Call``), and the comparison is EXACT equality, so prose that merely mentions
-    ``metering.get_capture_usage`` stays invisible: docstrings and comments, which
-    are what this helper exists to exclude, stay excluded. (A name built at
+    the pin below (#10962 review P2). A string Constant is matched ANYWHERE in the
+    module, not only inside a call: a dict-literal registration
+    (``{"get_capture_usage": READER}``) and a dotted path held in a constant
+    (``"tortoise.metering.get_capture_usage"``) are the same reference, and an arm
+    scoped to ``Call``/``Subscript`` read both as CLEAN while the text scan this
+    replaced caught them (#10962 review, P2 — a narrowing of the detection
+    surface, not a strengthening of it). The value must BE the name (``==``) or
+    END WITH it (``.endswith``), so prose that merely mentions
+    ``metering.get_capture_usage`` stays invisible; a docstring is excluded
+    explicitly and a comment never reaches the AST at all, which are what this
+    helper exists to exclude. (A name built at
     RUNTIME, e.g. ``getattr(m, some_variable)`` or ``eval``, is out of scope:
     no static pin can resolve it, and demanding it is demanding an interpreter.)
 
@@ -144,6 +150,23 @@ def _names_the_reader(path):
             f"{path} could not be parsed, so the scope scan never examined it — "
             "an UNREADABLE module must not read as a CLEAN one"
         ) from exc
+    # Docstring constants are PROSE and are collected up front, because the string
+    # arm below matches a Constant ANYWHERE in the module (see it for why). The one
+    # shape it must still refuse is a docstring that happens to BE the dotted path.
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            body = getattr(node, "body", [])
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == "get_capture_usage":
             return True
@@ -153,25 +176,28 @@ def _names_the_reader(path):
             for alias in node.names:
                 if "get_capture_usage" in (alias.name, alias.asname):
                     return True
-        if isinstance(node, (ast.Call, ast.Subscript)):
-            # ⛔ ANY call/subscript carrying the reader's name as a string literal,
-            # not just ``getattr``/``setattr``: a name-keyed registration is a
-            # reference too (``Binding("tortoise.metering", "get_capture_usage",
-            # READER)`` in ``cost_dimensions.py``), and an arm limited to the two
-            # builtins read that shape as CLEAN. Exact equality, and only INSIDE a
-            # call/subscript, so a docstring, comment or log message stays
-            # invisible (an ``Expr`` is not a ``Call``).
-            children = []
-            if isinstance(node, ast.Call):
-                children = list(node.args) + [kw.value for kw in node.keywords]
-            else:
-                children = [node.slice]
-            for child in children:
-                if (
-                    isinstance(child, ast.Constant)
-                    and child.value == "get_capture_usage"
-                ):
-                    return True
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and (
+                node.value == "get_capture_usage"
+                or node.value.endswith(".get_capture_usage")
+            )
+        ):
+            # ⛔ A string Constant ANYWHERE in the module, not only as a call
+            # argument or a subscript key. A name-keyed registration is a reference
+            # whatever spelling it takes — ``Binding("tortoise.metering",
+            # "get_capture_usage", READER)`` (``cost_dimensions.py``),
+            # ``{"get_capture_usage": READER}``, or a dotted path held in a
+            # constant. Scoping this arm to ``Call``/``Subscript`` read the last two
+            # as CLEAN while the text scan it replaced caught them — a narrowing,
+            # not the strengthening the docstring claimed (#10962 review P2).
+            # ``endswith`` covers the dotted path; ``id(node) not in docstrings``
+            # keeps a docstring that IS the path from reading as a consumer. Prose
+            # stays invisible because a log MESSAGE only CONTAINS the name —
+            # ``"metering.get_capture_usage is the reader"`` matches neither test.
+            return True
     return False
 
 
@@ -337,9 +363,11 @@ def test_the_scan_catches_the_reader_named_as_a_string_in_ANY_call(tmp_path):
     lookup) would have landed without reddening the "the gate, and NOTHING else"
     pin — the fail-open direction the pin exists to prevent.
 
-    The match is EXACT equality and only inside a call/subscript, so prose stays
-    invisible: a log message that merely mentions the dotted path is not a
-    consumer, and neither is a docstring (an ``Expr`` is not a ``Call``).
+    Prose stays invisible because the value must BE the name or END WITH it: a
+    log message that merely mentions the dotted path is not a consumer, and
+    neither is a docstring. The arm is not limited to call arguments — the other
+    two spellings have their own leg below
+    (``test_the_scan_catches_the_reader_named_as_a_string_OUTSIDE_a_call``).
     """
     (tmp_path / "registered.py").write_text(
         'from tortoise.cost_dimensions import Binding, READER\n'
@@ -362,6 +390,44 @@ def test_the_scan_catches_the_reader_named_as_a_string_in_ANY_call(tmp_path):
         "the reader named as a string literal of ANY call (a ``Binding`` registration, "
         "a keyword argument) or looked up as a subscript key is a consumer; only "
         f"these were found: {offenders}"
+    )
+
+
+def test_the_scan_catches_the_reader_named_as_a_string_OUTSIDE_a_call(tmp_path):
+    """The shapes a ``Call``/``Subscript``-scoped arm read as CLEAN (#10962 review P2).
+
+    The sibling leg above pins the call shapes. These two spellings reach the
+    same reader and were caught by main's pre-merge text scan, so an AST arm
+    scoped to ``Call``/``Subscript`` NARROWED what it replaced rather than
+    strengthening it: a dict-literal registration
+    (``{"get_capture_usage": READER}``) is the ``Binding``-style registration in
+    another spelling, and a dotted path held in a constant is what an
+    ``importlib``/plugin loader is handed. Each gets its own fixture, because an
+    arm that is never exercised can be deleted without reddening anything.
+
+    ⛔ The docstring fixture is the false-POSITIVE half, and it is pinned HERE
+    rather than left implicit: once the arm matches any string Constant, a
+    docstring whose entire body IS the dotted path is the one shape that must
+    still stay off the offender list.
+    """
+    (tmp_path / "dict_registered.py").write_text(
+        'from tortoise.cost_dimensions import READER\n'
+        'REGISTRY = {"get_capture_usage": READER}\n',
+        encoding="utf-8")
+    (tmp_path / "dotted_path.py").write_text(
+        'PATH = "tortoise.metering.get_capture_usage"\n',
+        encoding="utf-8")
+    (tmp_path / "docstring_is_the_path.py").write_text(
+        '"""tortoise.metering.get_capture_usage"""\nX = 1\n',
+        encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert scanned == [
+        "dict_registered.py", "docstring_is_the_path.py", "dotted_path.py",
+    ]
+    assert sorted(offenders) == ["dict_registered.py", "dotted_path.py"], (
+        "a dict-literal registration and a dotted path in a constant are both "
+        "consumers, while a docstring that IS the path is prose; found: "
+        f"{offenders}"
     )
 
 
