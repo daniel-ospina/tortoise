@@ -936,6 +936,36 @@ def test_a_prefixless_credential_is_redacted_by_value_not_only_by_shape():
     assert secret not in blob, f"the credential VALUE reached the output: {blob!r}"
 
 
+def test_a_long_prefixless_credential_is_not_leaked_even_TRUNCATED():
+    """A credential longer than a field's bound must not survive as its first N characters (cycle 7).
+
+    `_sanitise_result` runs after the field was truncated, so value-redaction there cannot match a
+    prefix; each echoed header/body must be value-scrubbed at the SOURCE, before `[:N]`. These arms use a
+    secret LONGER than the bound and assert no >=8-character prefix of it appears anywhere.
+    """
+    long_secret = "0123456789abcdef" * 6 + "0123"      # 100 chars, no documented prefix
+    def assert_clean(rc, blob, secret):
+        for n in range(8, min(len(secret), 40) + 1):
+            assert secret[:n] not in blob, f"{n} leading char(s) of the credential leaked: {blob!r}"
+
+    # the retry-after branch (bound 32)
+    with _Stub(read=(403, {"retry-after": long_secret},
+                 '{"message":"Resource not accessible by personal access token"}')) as s:
+        env = _env(s.base, long_secret)
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 1, p.stdout
+    assert_clean(p.returncode, p.stdout + p.stderr, long_secret)
+
+    # the scopes branch (bound 64), on a PASSING --json run
+    with _Stub(read=(200, {"x-oauth-scopes": f"repo, {long_secret}"}, '{"default_branch":"main"}')) as s:
+        env = _env(s.base, long_secret)
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert_clean(p.returncode, p.stdout + p.stderr, long_secret)
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

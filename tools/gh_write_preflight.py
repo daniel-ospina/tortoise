@@ -470,7 +470,7 @@ def _request(url: str, token: str, method: str = "GET", body: bytes | None = Non
         return 0, {}, str(e)
 
 
-def _classify_403(headers: dict, body: str) -> tuple[str, str]:
+def _classify_403(headers: dict, body: str, secret: str = "") -> tuple[str, str]:
     """Distinguish a RATE LIMIT from a PERMISSION refusal. Order matters."""
     low = (body or "").lower()
     remaining = (headers.get("x-ratelimit-remaining") or "").strip()
@@ -483,8 +483,8 @@ def _classify_403(headers: dict, body: str) -> tuple[str, str]:
         # validated numerically, so a responder could put a newline + `GH-WRITE-OK(...)` in it (measured
         # against a stub: stdout then carried a line beginning with the pass string). Scrubbed and
         # `!r`-escaped like the bodies, and bounded so a hostile header cannot flood the line either.
-        return "rate-limited", (f"no quota left (x-ratelimit-remaining={_scrub(remaining or '?')[:32]!r}, "
-                                f"retry-after={_scrub(retry_after or '?')[:32]!r})")
+        return "rate-limited", (f"no quota left (x-ratelimit-remaining={_scrub(remaining or '?', secret)[:32]!r}, "
+                                f"retry-after={_scrub(retry_after or '?', secret)[:32]!r})")
     if "saml" in low or "sso" in low:
         return "sso-unauthorized", "the refusal names SAML/SSO — the token is not authorised for the org"
     # The exact wording GitHub uses when a FINE-GRAINED token lacks a resource permission.
@@ -497,7 +497,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
     """Run one write-surface probe. Returns {'ok': bool, 'reason': str, 'detail': str, 'status': int}."""
     status, headers, payload = _request(url, token, method="POST", body=body)
     if status == 0:
-        return {"ok": False, "reason": "transport", "detail": f"could not reach {url!r}: {_scrub(payload)[:160]!r}",
+        return {"ok": False, "reason": "transport", "detail": f"could not reach {url!r}: {_scrub(payload, token)[:160]!r}",
                 "status": 0}
     if status in _WRITE_OK:
         return {"ok": True, "reason": "permitted",
@@ -515,7 +515,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
     if status == 401:
         return {"ok": False, "reason": "bad-credentials", "detail": "401 from the write probe", "status": status}
     if status == 403:
-        reason, detail = _classify_403(headers, payload)
+        reason, detail = _classify_403(headers, payload, token)
         return {"ok": False, "reason": reason, "detail": detail, "status": status}
     if status == 404:
         return {"ok": False, "reason": "repo-not-visible", "detail": "404 from the write probe", "status": status}
@@ -533,7 +533,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
         return {"ok": False, "reason": "server-error",
                 "detail": f"HTTP {status} from GitHub — a service fault, not a verdict about the token",
                 "status": status}
-    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {_scrub(payload)[:200]!r}",
+    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {_scrub(payload, token)[:200]!r}",
             "status": status}
 
 
@@ -590,7 +590,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # ── 1. READ: the disambiguator for any 404 that follows, and the source of default_branch.
     status, headers, body = _request(f"{api_base}/repos/{repo}", token)
     if status == 0:
-        result.update(reason="transport", detail=f"could not reach {_printable_base(api_base)!r}: {_scrub(body)[:160]!r}")
+        result.update(reason="transport", detail=f"could not reach {_printable_base(api_base)!r}: {_scrub(body, token)[:160]!r}")
         return result
     if status == 401:
         result.update(reason="bad-credentials", detail="the API returned 401 — expired, revoked, or mistyped")
@@ -600,7 +600,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
                       detail=f"{repo} is not visible to this credential — an access question, not a write question")
         return result
     if status == 403:
-        reason, detail = _classify_403(headers, body)
+        reason, detail = _classify_403(headers, body, token)
         # ⛔ A REFUSED **READ** IS A READ PROBLEM, NOT A MISSING WRITE PERMISSION. `_classify_403`'
         # wording/name is written for a write probe ("the token lacks write …"), and `not-permitted`
         # is deliberately absent from the REASONS contract — so feeding it straight through emitted an
@@ -619,7 +619,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
                       detail=f"HTTP {status} on the READ probe — a GitHub service fault, not a verdict about the token")
         return result
     if status != 200:
-        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {_scrub(body)[:160]!r}")
+        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {_scrub(body, token)[:160]!r}")
         return result
 
     result["read_ok"] = True
@@ -628,14 +628,18 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # `GH-WRITE-OK(...)` into it — put that text in the tool's own output. Scrubbed at the source: the
     # scope NAMES that make the line useful are unaffected, only token-shaped strings and control
     # characters go.
-    result["scopes"] = _scrub(headers.get("x-oauth-scopes", ""))[:64]   # classic/OAuth ONLY
-    result["ratelimit_remaining"] = (headers.get("x-ratelimit-remaining") or "").strip()
+    # ⛔ SCRUB BY VALUE **BEFORE** BOUNDING IT (review cycle 7). `_sanitise_result` runs after the field
+    # was already truncated, so a credential longer than the bound survived as its first N characters —
+    # the guarantee is "never printed … not even truncated". The token is in scope here, so each echoed
+    # header/body is value-scrubbed at the SOURCE and only then cut to size.
+    result["scopes"] = _scrub(headers.get("x-oauth-scopes", ""), token)[:64]   # classic/OAuth ONLY
+    result["ratelimit_remaining"] = _scrub(headers.get("x-ratelimit-remaining") or "", token).strip()[:32]
 
     # ── 2. RATE LIMIT pre-check: never spend a write probe on an exhausted account, and never
     #      report a permission defect for a bucket that will refill.
     if result["ratelimit_remaining"] == "0":
         result.update(reason="rate-limited",
-                      detail=f"x-ratelimit-remaining=0 on the read (reset={_scrub(headers.get('x-ratelimit-reset') or '?')[:32]!r}); "
+                      detail=f"x-ratelimit-remaining=0 on the read (reset={_scrub(headers.get('x-ratelimit-reset') or '?', token)[:32]!r}); "
                              f"the token may be perfectly good — shared-account exhaustion, not a permission defect")
         return result
 
