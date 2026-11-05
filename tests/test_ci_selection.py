@@ -5905,27 +5905,6 @@ top:
   y: 3
 """
 
-# The SAME nesting, but with a `<<:` key REPEATED inside the anchored mapping.
-# That is a genuine key repeat (YAML 1.2.2 §3.2.1.3) and
-# `tools/registry_integrity.py` — the sibling step of the same required job —
-# refuses it from the raw node graph. The parse-level guard did NOT: the flatten
-# RECURSES into an anchored mapping it merges, so `top` flattened `inner`'s node
-# first and its merge keys were already deleted when `inner` was constructed in
-# its own right, leaving the repeat check an empty list. Reading the keys from
-# `before` in `flatten_mapping` is what closes it (#10790 review r4 P3, measured:
-# `parse_manifest_text` ACCEPTED this document at head, while the sibling gate
-# reported `duplicate mapping key '<<' at .outer.inner`).
-MERGE_KEY_REPEAT_BEHIND_A_MERGE_DOC = """\
-b: &b {x: 1}
-outer:
-  inner: &m
-    <<: *b
-    <<: *b
-top:
-  <<: *m
-  y: 2
-"""
-
 #: Every legal `<<:` override shape, keyed by the name a failure reports.
 LEGAL_MERGE_DOCS = {
     "anchor-overridden-key-first": MERGE_KEY_OVERRIDE_DOC,
@@ -6080,39 +6059,58 @@ fresh:
     assert "line 9 repeats line 8" in issues[0], issues[0]
 
 
-def test_a_REPEATED_merge_key_inside_an_ANCHOR_is_refused_even_when_a_sibling_merges_it(
-    tmp_path,
-):
-    """The repeat must not vanish when a later `<<:` flattens the anchor first.
+#: Two `<<:` keys in ONE mapping, in the shape a count in `construct_mapping`
+#: cannot see: the repeat lives in an ANCHORED mapping that a LATER sibling
+#: merges, so the parent's `flatten_mapping` recursion DELETES those key nodes
+#: before the anchor is ever constructed in its own right.
+REPEATED_MERGE_KEY_NESTED_DOC = """\
+b: &b
+  x: 1
+outer:
+  inner: &m
+    <<: *b
+    <<: *b
+top:
+  <<: *m
+  y: 2
+"""
 
-    Non-vacuity, measured on the pre-fix loader: `parse_manifest_text` ACCEPTED
-    this document (it returned the merged mapping, no exception) while
-    `tools/registry_integrity.py` refused it — the one-hazard/two-verdicts split
-    every guard-agreement arm in this block exists to prevent. The repeat lives
-    in an anchored mapping that a LATER sibling merges, so the parent's flatten
-    reaches it first and deletes the `<<` nodes before the anchor is constructed
-    in its own right; `flatten_mapping` reads the keys from `before`, which is
-    still intact.
+
+def test_a_repeated_merge_key_inside_an_anchor_flattened_first_is_refused(
+        tmp_path):
+    """The repeat a `construct_mapping` count cannot see (#10790 review r7 P3).
+
+    `flatten_mapping` recurses into the mapping a `<<:` merges, and pyyaml
+    constructs nested mappings from its generator queue AFTER the shallower
+    ones, so `top` flattens `m`'s node — DELETING its `<<` key nodes — before
+    `outer.inner` is constructed. A count taken in `construct_mapping` then
+    reads an empty merge-key list: MEASURED pre-fix, this document was
+    ACCEPTED, while `tools/registry_integrity.py` — the sibling step of the
+    SAME required `manifest-integrity` job — refused it at `.outer.inner`. One
+    hazard, two verdicts, in one required job: exactly the divergence
+    `test_the_two_duplicate_key_guards_agree_on_a_duplicate` exists to prevent.
+    Recording the repeat in `flatten_mapping` (while the key nodes still exist)
+    is what closes it — and it is the only point where every shape converges,
+    because every MappingNode is flattened with its merge keys intact once.
     """
     from tools import ci_selection as cs
     from tools import registry_integrity
 
-    path = tmp_path / "repeat-merge-key-in-anchor.yml"
-    path.write_text(MERGE_KEY_REPEAT_BEHIND_A_MERGE_DOC)
+    path = tmp_path / "nested-repeat-merge-key.yml"
+    path.write_text(REPEATED_MERGE_KEY_NESTED_DOC)
 
     sibling = registry_integrity.check_registry(path)
     assert any("duplicate mapping key '<<'" in issue for issue in sibling), (
-        "the node-graph gate's verdict is the one this parse must agree with",
-        sibling)
+        "the node-graph gate refuses this shape; the parse must agree", sibling)
 
     with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
-        cs.parse_manifest_text(MERGE_KEY_REPEAT_BEHIND_A_MERGE_DOC)
+        cs.parse_manifest_text(REPEATED_MERGE_KEY_NESTED_DOC)
     issues = excinfo.value.issues
     assert len(issues) == 1, issues
     assert "'<<'" in issues[0], issues[0]
-    # The pair named is the ANCHOR's two merge-key lines (4 and 5), never an
-    # inherited pair of `b`.
-    assert "line 5 repeats line 4" in issues[0], issues[0]
+    # The pair named is the two merge-key lines INSIDE the anchor (5 and 6),
+    # never an inherited pair and never the alias site.
+    assert "line 6 repeats line 5" in issues[0], issues[0]
 
 
 def test_a_sequence_merge_overrides_the_LAST_applied_mapping():
