@@ -589,8 +589,30 @@ def _newest_per_group(
         attempt decides — a re-run is a retry, not a second check;
       * `app.slug` + a distinct `workflow_id` keeps two DIFFERENT workflows that
         publish the same job name separate, so neither can mask the other.
+
+    ⛔ THE COLLAPSE RESTS ON AN ASSUMPTION THIS FUNCTION CANNOT CHECK: that two
+    attempts sharing `(app, workflow_id, name)` are a RETRY of one check, not two
+    JOBS of the same workflow that publish the same effective name. GitHub permits
+    duplicate `jobs.<id>.name`, and the check-run payload carries nothing that
+    tells the two apart — so within one workflow this reads "newest wins" over a
+    case where "red wins" would be correct (a measured shape: older `failure`
+    id 100, newer `success` id 200, same `workflow_id` -> PASS).
+    The disambiguation lives where it IS decidable, in the workflow YAML:
+    `tools/mergify_config_guard.py::_emitters` derives every job's effective name
+    (`name:` when set, else the job id) per workflow file, so a duplicate name
+    within one file is enumerable there. It is LATENT, not live: every file under
+    `.github/workflows/` was parsed and no workflow declares two jobs with the
+    same effective name. Do not read the collapse above as a guarantee.
+
     When the workflow map is unavailable the run id stands in, which is stricter
-    (it never merges two attempts) and so can only over-report red.
+    (it never merges two attempts) and so can never manufacture a PASS — but it
+    over-reports FAILURE, not specifically red: a required check published by a
+    NON-Actions app has no run id at all, so its attempts each become their own
+    group and `_ambiguous_names` then refuses the name as `FAIL(unreadable)` on
+    every run, permanently, whenever it has more than one attempt. That is the
+    accepted fail-closed cost of refusing to guess between "retry" and "two
+    sibling checks" (all seven live required contexts are Actions-emitted, so the
+    path is currently unreachable).
 
     The newest attempt within a group is chosen by `id`: `started_at` is nullable
     for a queued attempt, and `latest` is a per-suite field that does not
@@ -1034,7 +1056,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.pr:
         ap.error("--pr is required unless --required-set is given")
     # A partial --sha list would pair by index and evaluate PR A at PR B's head —
-    # a confidently wrong verdict about a tree nobody asked about.
+    # a confidently wrong verdict about a tree nobody asked about. The count check
+    # is necessary but NOT sufficient (a FULL, crossed list passes it), so each
+    # pairing is verified too — see `_verify_sha_pairs_with_pr`.
     if args.sha and len(args.sha) != len(args.pr):
         ap.error("--sha must be given for every --pr, or for none")
 
@@ -1043,8 +1067,16 @@ def main(argv: list[str] | None = None) -> int:
     failures = []
     for index, pr in enumerate(args.pr):
         try:
-            sha = args.sha[index] if args.sha else _resolve_head(repo=args.repo, pr=pr)
+            if args.sha:
+                sha = args.sha[index]
+                verified, why = _verify_sha_pairs_with_pr(repo=args.repo, pr=pr, sha=sha)
+            else:
+                sha = _resolve_head(repo=args.repo, pr=pr)
+                # The sha came FROM the resolution, so the pairing cannot be crossed.
+                verified, why = True, None
             report = gate(pr, args.repo, sha, root)
+            report["head_sha_verified"] = verified
+            report["head_sha_verified_reason"] = why
         except RequiredSetUnreadable as exc:  # includes RateLimited
             message = str(exc) if isinstance(exc, RateLimited) else f"{FAIL_UNREADABLE}: #{pr}: {exc}"
             # A machine consumer of `--json` must be able to PARSE stdout, and an
@@ -1099,9 +1131,51 @@ def _resolve_head(repo: str, pr: int) -> str:
     return proc.stdout.strip()
 
 
+def _verify_sha_pairs_with_pr(repo: str, pr: int, sha: str) -> tuple[bool, str | None]:
+    """`(verified, reason)` for a caller-supplied `--sha` paired with `--pr`.
+
+    `--sha` is paired with `--pr` BY INDEX, and `main`'s count check cannot tell a
+    correct pairing from a crossed one: `--pr 1 --pr 2 --sha <head-of-2> <head-of-1>`
+    satisfies it, and each report then describes the OTHER PR's tree while the run
+    exits 0 — a confident verdict about a tree nobody asked about, which is the
+    exact failure class this instrument exists to remove.
+
+    Three answers, deliberately not two:
+      * the sha IS this PR's head     -> `(True, None)`;
+      * the sha is a DIFFERENT head   -> raise. Issuing a verdict here is the bug:
+        a ``FAIL(unreadable)`` record naming the mismatch is the honest result;
+      * the head cannot be resolved   -> `(False, reason)`, NOT a raise. A caller
+        may have supplied `--sha` precisely because resolution is flaky on its box,
+        so blocking there is a false block. The report then CARRIES the absence of
+        verification (`head_sha_verified: false` + the reason) instead of letting a
+        scripted consumer trust the pairing silently.
+    """
+    try:
+        head = _resolve_head(repo=repo, pr=pr)
+    except RequiredSetUnreadable as exc:
+        return False, str(exc)
+    if not head:
+        return False, f"cannot verify --sha for #{pr}: head resolution returned an empty sha"
+    if head != sha:
+        raise RequiredSetUnreadable(
+            f"--sha {sha} is not the head of #{pr} ({head}) — refusing to report a "
+            "verdict about a tree that is not this PR's (a crossed --sha/--pr "
+            "pairing is a caller error, not a check result)"
+        )
+    return True, None
+
+
 def _print_report(report: dict) -> None:
     rs = report.get("required_set")
     print(f"\n=== PR #{report['pr']} @ {report['head_sha'][:12]} — {report['verdict']} ===")
+    if report.get("head_sha_verified") is False:
+        # Not a failure — the verdict below is real for the sha it names. It is a
+        # warning that the `--sha`/`--pr` PAIRING was not confirmed, so nothing
+        # should read this line as "the verdict describes this PR's head".
+        print(
+            "  ⚠️ head sha NOT verified against this PR "
+            f"({report.get('head_sha_verified_reason')})"
+        )
     if rs:
         print(f"  required set from {rs['source']}")
         print(f"  union ({len(rs['names'])}): {', '.join(rs['names'])}")

@@ -688,6 +688,140 @@ def test_a_partial_sha_list_is_refused_rather_than_mispaired():
         rfo.main(["--pr", "1", "--pr", "2", "--sha", "abc"])
 
 
+def test_a_CROSSED_sha_pairing_is_refused_not_reported_at_the_other_prs_head(tmp_path, monkeypatch, capsys):
+    """The count check is necessary but NOT sufficient: a full crossed list passes it.
+
+    `--pr 1 --pr 2 --sha <head-of-2> <head-of-1>` has the right LENGTH, so the
+    pre-fix code paired by index and reported each PR at the OTHER's tree with
+    exit 0 — a confident verdict about a tree nobody asked about. The message
+    must name the mismatch, and no PASS/FAIL may be issued for the PR.
+    """
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    heads = {1: "aaaa1111", 2: "bbbb2222"}
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: heads[pr])
+    monkeypatch.setattr(
+        rfo, "fetch_check_runs",
+        lambda repo, sha: [run("docs"), run("ai-review-gate"), run("python-ci-gate")],
+    )
+    monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+
+    code = rfo.main([
+        "--pr", "1", "--pr", "2",
+        # CROSSED on purpose: #1 gets #2's head and vice versa.
+        "--sha", heads[2], "--sha", heads[1],
+        "--json", "--root", str(tree),
+    ])
+    out = capsys.readouterr().out
+    docs = json.loads(out)
+    # No verdict about a tree that is not the PR's: both are unreadable records.
+    assert code == rfo.EXIT_UNREADABLE
+    assert [d["condition_2_verdict"] for d in docs] == [
+        rfo.FAIL_UNREADABLE, rfo.FAIL_UNREADABLE
+    ]
+    assert all(d["head_sha"] is None for d in docs)
+    assert "is not the head of #1" in json.dumps(docs)
+
+
+def test_a_VERIFIED_sha_pairing_reads_its_own_pr(tmp_path, monkeypatch, capsys):
+    """The same two-PR invocation, correctly paired, verifies both and evaluates."""
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    heads = {1: "aaaa1111", 2: "bbbb2222"}
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: heads[pr])
+    monkeypatch.setattr(
+        rfo, "fetch_check_runs",
+        lambda repo, sha: [run("docs"), run("ai-review-gate"), run("python-ci-gate")],
+    )
+    monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+
+    code = rfo.main([
+        "--pr", "1", "--pr", "2", "--sha", heads[1], "--sha", heads[2],
+        "--json", "--root", str(tree),
+    ])
+    docs = json.loads(capsys.readouterr().out)
+    assert code == rfo.EXIT_PASS
+    assert [d["head_sha"] for d in docs] == [heads[1], heads[2]]
+    assert all(d["head_sha_verified"] is True for d in docs)
+
+
+def test_an_UNVERIFIABLE_sha_is_FLAGGED_not_a_false_block(tmp_path, monkeypatch, capsys):
+    """A caller that supplied `--sha` may have done so because resolution is flaky.
+
+    Blocking there would be a false block, so the run still evaluates — but the
+    report must SAY the `--sha`/`--pr` pairing was not confirmed, so no consumer
+    reads the verdict as describing this PR's head.
+    """
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    monkeypatch.setattr(
+        rfo, "fetch_check_runs",
+        lambda repo, sha: [run("docs"), run("ai-review-gate"), run("python-ci-gate")],
+    )
+    monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+
+    def boom(repo, pr):
+        raise rfo.RequiredSetUnreadable("gh: not logged in")
+
+    monkeypatch.setattr(rfo, "_resolve_head", boom)
+    code = rfo.main(["--pr", "1", "--sha", "deadbeef", "--json", "--root", str(tree)])
+    doc = json.loads(capsys.readouterr().out)[0]
+    assert code == rfo.EXIT_PASS  # the verdict at that sha is real; the PAIRING is not proven
+    assert doc["head_sha"] == "deadbeef"
+    assert doc["head_sha_verified"] is False
+    assert "not logged in" in doc["head_sha_verified_reason"]
+
+
+def test_a_RESOLVED_head_is_marked_verified(tmp_path, monkeypatch, capsys):
+    """With no `--sha` the sha COMES from the resolution, so the pairing cannot cross."""
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: "cafebabe")
+    monkeypatch.setattr(
+        rfo, "fetch_check_runs",
+        lambda repo, sha: [run("docs"), run("ai-review-gate"), run("python-ci-gate")],
+    )
+    monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+    code = rfo.main(["--pr", "1", "--json", "--root", str(tree)])
+    doc = json.loads(capsys.readouterr().out)[0]
+    assert code == rfo.EXIT_PASS
+    assert doc["head_sha"] == "cafebabe"
+    assert doc["head_sha_verified"] is True
+    assert doc["head_sha_verified_reason"] is None
+
+
+def test_a_non_actions_check_with_attempts_is_UNREADABLE_never_a_guess(tmp_path):
+    """Pins the DOCUMENTED fail-closed cost of `_newest_per_group`'s fallback.
+
+    A check published by a non-Actions app has no run id at all, so its attempts
+    each become their own group and `_ambiguous_names` refuses the name — on EVERY
+    run, permanently, while it has more than one attempt. That is deliberate
+    ("retry" and "two sibling checks" are indistinguishable from the payload), and
+    it is the claim the docstring makes; without this test the docstring would be
+    prose nothing checks. The failure direction is over-reporting, never a PASS.
+    """
+    tree = _write_tree(tmp_path, mergify=_mergify())
+    # A NON-Actions publisher: `details_url` carries no `/actions/runs/`, so there
+    # is no run id and no workflow id to group by — the review's stated shape.
+    def external(name: str, conclusion: str, run_id: int) -> dict:
+        return {
+            "name": name,
+            "status": "completed",
+            "conclusion": conclusion,
+            "id": run_id,
+            "app": {"slug": "some-ci-app"},
+            "details_url": f"https://ci.example.com/build/{run_id}",
+        }
+
+    runs = [
+        external("docs", "failure", 100),
+        external("docs", "success", 200),
+        run("ai-review-gate"),
+        run("python-ci-gate"),
+    ]
+    result = evaluate(tree, runs, {})
+    assert result.verdict == rfo.FAIL_UNREADABLE
+    assert "cannot decide docs" in (result.detail or "")
+    # NOT a PASS and NOT a guess in either direction: the newer `success` does not
+    # win, and the older `failure` does not red — the name is simply undecidable.
+
+
 # ── 6f. An unavailable workflow map must not guess ────────────────────────
 
 
@@ -746,11 +880,15 @@ def test_exit_2_when_the_head_cannot_be_read(tmp_path, monkeypatch):
         raise rfo.RequiredSetUnreadable("boom")
 
     monkeypatch.setattr(rfo, "fetch_check_runs", boom)
+    # `--sha` is verified against the PR's head, so a hermetic test must supply the
+    # resolution too — otherwise this would reach real `gh` and PR #1's live head.
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: "deadbeef")
     assert rfo.main(["--pr", "1", "--sha", "deadbeef", "--root", str(tree)]) == rfo.EXIT_UNREADABLE
 
 
 def test_exit_2_when_the_required_set_is_unreadable_in_pr_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(rfo, "fetch_check_runs", lambda repo, sha: [])
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: "deadbeef")
     assert rfo.main(["--pr", "1", "--sha", "deadbeef", "--root", str(tmp_path)]) == rfo.EXIT_UNREADABLE
 
 
@@ -759,6 +897,7 @@ def test_exit_1_when_a_required_check_is_genuinely_red(tmp_path, monkeypatch):
     runs = [run("docs", conclusion="failure"), run("ai-review-gate"), run("python-ci-gate")]
     monkeypatch.setattr(rfo, "fetch_check_runs", lambda repo, sha: runs)
     monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: "deadbeef")
     assert rfo.main(["--pr", "1", "--sha", "deadbeef", "--root", str(tree)]) == rfo.EXIT_FAIL
 
 
@@ -834,6 +973,7 @@ def test_exit_0_for_a_green_head_in_pr_mode(tmp_path, monkeypatch):
     runs = [run("docs"), run("ai-review-gate"), run("python-ci-gate")]
     monkeypatch.setattr(rfo, "fetch_check_runs", lambda repo, sha: runs)
     monkeypatch.setattr(rfo, "fetch_workflow_ids", lambda repo, sha: ({}, None))
+    monkeypatch.setattr(rfo, "_resolve_head", lambda repo, pr: "deadbeef")
     assert rfo.main(["--pr", "1", "--sha", "deadbeef", "--root", str(tree)]) == rfo.EXIT_PASS
 
 
