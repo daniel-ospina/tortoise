@@ -3329,7 +3329,7 @@ surfaces:
   # `tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1`.
   - test_worktree_report.py
   # #11027: the credential write-capability preflight (`tools/gh_write_preflight.py`)
-  # and its 67 hermetic arms — a throwaway bare repo plus a `pre-receive` refusal in
+  # and its 71 hermetic arms — a throwaway bare repo plus a `pre-receive` refusal in
   # `tmp_path`, PATH stubs only for shapes working git cannot produce; no network, no
   # DB, no model, no real credential. Hermetic, so `core` owns it. Registering the
   # TEST file alone is INERT for a tool-only diff: `tools/` is a flat

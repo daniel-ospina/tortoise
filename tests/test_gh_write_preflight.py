@@ -24,6 +24,8 @@ Run under pytest:    python3 -m pytest tests/test_gh_write_preflight.py -q
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -655,6 +657,51 @@ def test_post_push_failure_funnel_cleans_a_landed_ref(tmp_path: Path) -> None:
     assert ref not in _remote_heads(clone), "the landed ref was left on the remote"
 
 
+def test_after_push_failure_attempts_the_delete_when_presence_is_unreadable(tmp_path: Path) -> None:
+    """⛔ REVIEW P2, round 10 — the SIBLING of `probe()`'s unmeasured-presence arm.
+
+    `probe()` was fixed to attempt the delete when the presence read fails; this function one level up
+    was not, and its docstring claimed "the three failure shapes (non-zero exit, timeout, OSError) all
+    confirm-and-clean here" while the unreadable arm confirmed and did NOT clean. That branch is
+    reached from the TIMEOUT arm — the arm the docstring itself calls "the most likely to have landed"
+    — so a probe whose write landed and whose `ls-remote` read was the only thing failing kept one
+    probe branch on the shared remote per run, silently and forever.
+
+    The masking objection that justified skipping it ("its own post-delete confirmation would also
+    fail and mask `reason` with `cleanup-failed`") was already solved one arm over: keep the reason
+    and APPEND the cleanup detail. Both halves are asserted here — the ref is physically gone from the
+    remote, AND the reason is still the pre-cleanup one.
+
+    Mutation check: restoring the early `return v` before `_cleanup` leaves the ref on the remote and
+    fails the `not in _remote_heads` assert. A fix that routes through `_cleanup_failure` instead fails
+    the reason assert (it would rewrite it to `cleanup-failed`, sending a lane to the repo-state
+    remedy for a timeout).
+    """
+    mod = _load_tool()
+    clone = _make_remote_and_clone(tmp_path)
+    ref = "gh-write-preflight-unreadable-presence"
+    _git("push", "origin", f"HEAD:refs/heads/{ref}", cwd=clone)
+    assert ref in _remote_heads(clone), "fixture: the ref must be on the remote first"
+
+    # only the PRESENCE READ is unreadable; the delete itself and its confirming `ls-remote` are real
+    mod._exists_any = lambda _cwd, _t, _ref, _t2=30: ("", False)  # type: ignore[assignment]
+    v = mod.Verdict()
+    v.ref = ref
+    v.repo = "fixture"
+    v.target = "origin"
+    out = mod._after_push_failure(
+        v, clone, ["origin"], ref, reason="cannot-verify:timeout", detail="simulated stall"
+    )
+
+    assert out.reason == "cannot-verify:timeout", f"the diagnosis must survive the cleanup: {out.detail}"
+    assert "cleanup-failed" not in out.reason, out.reason
+    assert ref in out.detail, out.detail
+    # ⛔ THE DELETE WAS ATTEMPTED: the landed ref is physically gone
+    assert ref not in _remote_heads(clone), (
+        f"a ref that may have landed was left on the remote because the presence read failed: {out.detail}"
+    )
+
+
 def test_post_push_failure_funnel_reports_a_failed_cleanup(tmp_path: Path) -> None:
     """If the landed ref cannot be removed, that is `cleanup-failed` and the ref must be NAMED."""
     mod = _load_tool()
@@ -1151,29 +1198,76 @@ exec {GIT} "$@"
 
 
 def test_the_docstring_exit_code_for_every_reason_matches_the_code() -> None:
-    """⛔ REVIEW N1. The docstring is what `AGENTS.md` sends a lane to for the exit-code mapping, and it
-    had drifted from the code: the reason table listed `cleanup-failed` with no bucket at all while the
-    code exits 2 for it, and exit 1 was described as a "MEASURED refusal" although `no-remote` exits 1
-    with a footer that says nothing about the credential was measured. A lane that branches on the
-    NUMBER (`[ $? -eq 1 ]` -> do not start) reads a repo-config problem as a dead token.
+    """⛔ REVIEW N1 + P2. The docstring is what `AGENTS.md` sends a lane to for the exit-code mapping, and
+    it had drifted from the code TWICE: first the reason table listed `cleanup-failed` with no bucket
+    while the code exits 2 for it, and exit 1 was described as a "MEASURED refusal" although `no-remote`
+    exits 1 with a footer that says nothing about the credential was measured. Then — after the first
+    fix — `no-git-checkout` was documented `[exit 1]` while the BINARY exited 2, because this test
+    compared each row with `exit_code_for()`, the *model*, and `_emit` could overrule that model from a
+    call site's `cannot_verify=True`. Green suite, false table, and the table's exit 1 sends a lane to
+    "fix the credential" for a `--workdir` typo. A lane that branches on the NUMBER (`[ $? -eq 1 ]` ->
+    do not start) read a repo-config problem as a dead token.
 
-    Pinned the mechanical way: every reason row that carries an `[exit N]` / `[N]` marker is compared
-    with `exit_code_for(reason)` — the single owner `_emit` now derives its code from. Rows that wrap
-    across lines are not matched (the marker must end the line), so the assert on the specific reasons
-    below keeps this from passing vacuously on an empty match set.
+    Pinned the mechanical way, against the ARTIFACT rather than the model: every reason row is driven
+    through `_emit` — the one function `main()` returns from, so its int IS the process's exit code —
+    and that code must equal the bracket. `exit_code_for()` is then asserted to agree, which is the
+    helper/call-site agreement whose absence was the bug. Rows that wrap across lines are not matched
+    (the marker must end the line), so the explicit key assert keeps this from passing vacuously on an
+    empty match set.
+
+    The binary is also EXECUTED for the one reason reachable with no network or credential
+    (`no-git-checkout`), so the docstring, the model and a real `$?` cannot disagree again.
     """
     mod = _load_tool()
     doc = mod.__doc__ or ""
     rows = re.findall(r"^    ([A-Za-z*][\w:*.-]*)\s{2,}.*\[(?:exit )?([12])\]$", doc, re.M)
     keys = {k for k, _ in rows}
-    for required in ("no-remote", "cleanup-failed", "ls-remote-mismatch", "push-refused"):
+    for required in ("no-remote", "no-git-checkout", "cleanup-failed", "ls-remote-mismatch", "push-refused"):
         assert required in keys, f"{required} lost its exit-code row in the docstring: {sorted(keys)}"
+    assert len(rows) >= 9, f"the reason table was not matched (got {len(rows)} rows): {sorted(keys)}"
     for reason, stated in rows:
         probe_reason = "cannot-verify:anything" if reason.endswith("*") else reason
-        assert mod.exit_code_for(probe_reason) == int(stated), (
-            f"the docstring says {reason} exits {stated} but exit_code_for() answers "
-            f"{mod.exit_code_for(probe_reason)}"
+        # what the process actually exits with — `_emit` is the single return path of `main()`
+        with contextlib.redirect_stdout(io.StringIO()) as sink:
+            emitted = mod._emit(mod._fail(probe_reason, "detail"), json_out=False, quiet=True)
+        assert emitted == int(stated), (
+            f"the docstring says {reason} exits {stated} but the tool EMITS {emitted} "
+            f"(emitted output: {sink.getvalue()!r})"
         )
+        assert mod.exit_code_for(probe_reason) == emitted, (
+            f"{reason}: exit_code_for() answers {mod.exit_code_for(probe_reason)} but the tool emits "
+            f"{emitted} — a call site can outvote the helper, so the docstring cannot be derived "
+            f"from the helper alone"
+        )
+
+
+def test_the_emitted_exit_code_survives_as_a_real_process_exit_status(tmp_path: Path) -> None:
+    """⛔ REVIEW P2's fix direction, literally: run the tool and read `$?`, don't read the model.
+
+    `no-git-checkout` is the one documented reason reachable with no network, no credential and no
+    Docker — a `--workdir` that is not a work tree — so it is the arm where the docstring can be
+    compared with a REAL process exit status. Gate it against doc, code and binary all at once.
+
+    Mutation check: reverting `no-git-checkout` to the exit-1 bucket (i.e. dropping it from
+    `_CANNOT_VERIFY_REASONS` and restoring the call site's `cannot_verify=True`) makes the emitted
+    code 2 while `exit_code_for()` says 1 — the docstring row then fails its `[exit 2]` assert, and
+    restoring `[exit 1]` fails the `$?` assert below. Neither arm can be satisfied by editing a comment.
+    """
+    mod = _load_tool()
+    rows = dict(
+        re.findall(r"^    ([A-Za-z*][\w:*.-]*)\s{2,}.*\[(?:exit )?([12])\]$", mod.__doc__ or "", re.M)
+    )
+    assert "no-git-checkout" in rows, "the reason lost its exit-code row"
+    plain = tmp_path / "not-a-work-tree"
+    plain.mkdir()
+    res = _run(plain)
+    combined = res.stdout + res.stderr
+    assert "no-git-checkout" in combined, f"this run must reach the arm under test: {combined}"
+    assert res.returncode == int(rows["no-git-checkout"]), (
+        f"the docstring says no-git-checkout exits {rows['no-git-checkout']} but the process exited "
+        f"{res.returncode}: {combined}"
+    )
+
 
 
 def test_a_second_refusing_pushurl_cannot_pass(tmp_path: Path) -> None:

@@ -2977,7 +2977,7 @@ def test_gh_write_preflight_test_file_change_selects_core():
 
 
 def test_gh_write_preflight_tool_change_fails_closed_to_full():
-    """#11027: a tool-only change must run the preflight's own 67 hermetic arms.
+    """#11027: a tool-only change must run the preflight's own 71 hermetic arms.
 
     `tools/gh_write_preflight.py` owns `tests/test_gh_write_preflight.py`, which pins
     the properties that make the tool safe to tell every lane to run: no credential
@@ -14354,3 +14354,49 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_session_events_seal.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_gh_write_preflight_arm_count_stated_in_every_artifact_matches_the_suite():
+    """#11027 review P3: the preflight suite's size was stated as sixty-seven in THREE places while
+    the file actually collected sixty-nine — a count that broke in the same two commits that added
+    the arms, so the comments were stale the moment they were written and nothing noticed.
+
+    A count in a comment is a claim about an artifact, so pin it against the artifact: the number in
+    each of the three carriers must equal the module-level `def test_` count of
+    `tests/test_gh_write_preflight.py`. That suite has no parametrize decorators, so collected ==
+    defined (asserted below, because a parametrized arm would make a bare `def test_` count lie).
+
+    Each carrier is matched by its OWN anchor rather than by a bare number regex: the same files
+    carry a second, unrelated arm count for `test_work_claim.py`, and a loose match would pin that
+    one to the wrong suite.
+
+    Mutation check: adding, removing or renaming a test in the preflight suite without updating the
+    three statements reds this with the exact stale number named — the drift that survived two
+    review rounds at "67".
+    """
+    suite = REPO / "tests" / "test_gh_write_preflight.py"
+    src = suite.read_text(encoding="utf-8")
+    defined = len(re.findall(r"^def test_", src, re.M))
+    assert defined > 0, "the preflight suite defined no tests — the count probe is broken"
+    assert "parametrize" not in src, (
+        "the preflight suite gained a parametrize decorator, so `def test_` no longer equals the "
+        "collected count; update this pin to count collected arms"
+    )
+
+    anchors = (
+        (REPO / "config" / "ci-surfaces.yml", r"# and its (\d+) hermetic arms"),
+        (REPO / "tools" / "ci_selection.py",
+         r"owns tests/test_gh_write_preflight\.py — the (\d+) hermetic arms"),
+        (REPO / "tests" / "test_ci_selection.py",
+         r"a tool-only change must run the preflight's own (\d+) hermetic arms"),
+    )
+    for path, pattern in anchors:
+        found = re.findall(pattern, path.read_text(encoding="utf-8"))
+        assert len(found) == 1, (
+            f"expected exactly one arm-count statement in {path.relative_to(REPO)}, found {found} — "
+            f"the anchor went stale"
+        )
+        assert int(found[0]) == defined, (
+            f"{path.relative_to(REPO)} states {found[0]} hermetic arms but the preflight suite "
+            f"defines {defined} — update the count (or the suite) so all three agree"
+        )

@@ -33,22 +33,24 @@ Exit codes (callers branch on them; they are not interchangeable)
     1   GH-WRITE-UNAVAILABLE(<reason>)       a refusal — do not start. Two shapes land here: a
                                               MEASURED credential refusal (`contents-write-denied`,
                                               `workflow-scope-denied`, `push-refused`) and a
-                                              mechanical repo-state refusal
-                                              (`no-remote`, `no-git-checkout`) whose own footer
-                                              says so — read the reason, not just the code
+                                              mechanical repo-state refusal (`no-remote`) whose own
+                                              footer says so — read the reason, not just the code
     2   GH-WRITE-UNAVAILABLE(cannot-verify:<reason>)   the probe COULD NOT RUN (usage, missing
-                                                      tool, timeout, unconfirmable), or it ran and
+                                                      tool, timeout, unconfirmable, a `--workdir`
+                                                      that is not a git work tree), or it ran and
                                                       could not prove its own claim
                                                       (`cleanup-failed`, `ls-remote-mismatch`). A
                                                       cannot-verify is never a pass — still non-zero.
 
 Reasons (stable, greppable — the whole point is that a lane's log says which one). Each row's
-bracket is its exit code, and `tests/test_gh_write_preflight.py` compares it with the code's own
-`exit_code_for()` so the table cannot drift again (review N1); a row must stay on ONE line to be
-checked, so keep the marker at the end of an unwrapped row.
+bracket is its exit code, and `tests/test_gh_write_preflight.py` compares it with what `_emit`
+ACTUALLY RETURNS for that reason — the code the process exits with — so the table cannot drift
+again (review N1/P2: comparing it with `exit_code_for()` ALONE let `no-git-checkout` read `[exit 1]`
+here while the binary exited 2, because a call site can pass `cannot_verify=True` and overrule the
+helper). A row must stay on ONE line to be checked, so keep the marker at the end of an unwrapped row.
 -------------------------------------------------------------------------------
     no-remote                  no `origin` to probe (and no --repo to assert against)   [exit 1]
-    no-git-checkout            --workdir is not a git work tree                          [exit 1]
+    no-git-checkout            --workdir is not a git work tree                          [exit 2]
     contents-write-denied      the server refused the push (403 / "Permission to … denied") [1]
     workflow-scope-denied      a PAT without the `workflow` scope, on a branch touching `.github/workflows/*` [exit 1]
     push-refused               the push failed for another measured reason (SSH key, DNS, …) [exit 1]
@@ -567,20 +569,29 @@ def _after_push_failure(
     post-receive hook that hangs, a 120 s stall AFTER the ref was written — RAISES rather than
     returning non-zero, so a push that had already landed was reported as a plain refusal with the
     branch left on the remote: no `cleanup-failed`, no ref named, no remedy. Measured. So the three
-    failure shapes (non-zero exit, timeout, OSError) all confirm-and-clean here.
+    failure shapes (non-zero exit, timeout, OSError) all confirm-and-clean here — INCLUDING the shape
+    where the presence read itself fails (review P2, round 10): the delete is ATTEMPTED unmeasured.
     """
     v.reason = reason
     v.detail = detail
     landed, ok = _exists_any(cwd, targets, ref, timeout)
     if not ok:
-        # Cannot confirm whether the ref was created. Deleting would be the right attempt, but its
-        # own post-delete confirmation would also fail and would mask `reason` with `cleanup-failed`,
-        # so say what is unknown instead of guessing in either direction.
+        # ⛔ AN UNREADABLE PRESENCE READ STILL ATTEMPTS THE DELETE (review P2, round 10). This used to
+        # return without one, to avoid its own post-delete confirmation failing and masking `reason`
+        # with `cleanup-failed`. That masking objection is solved one arm over, in `probe()`: keep the
+        # reason and APPEND the cleanup detail — never route through `_cleanup_failure`, which would
+        # rewrite the reason and lose the diagnosis. Skipping the delete left the exact defect the
+        # module docstring forbids, on the arm that most needs it: this branch is reached from the
+        # TIMEOUT arm, where the ref is the most likely to have landed, so a probe whose write landed
+        # and whose `ls-remote` read is the only thing failing kept one branch per run on the shared
+        # remote — silently and forever. `_cleanup` is idempotent and confirms by `ls-remote`.
+        cleanup_detail = _cleanup(cwd, targets, ref, timeout)
         v.detail = (
             f"{detail} — and whether {ref} was created could not be confirmed (ls-remote failed); "
             f"check it and delete it if present: git ls-remote --heads <target> {ref}, where the "
             f"target is {v.target or '<unresolved>'} (in a fork checkout `origin` is the FETCH url and "
             f"would answer empty for a ref that IS on the push target)"
+            + ("" if not cleanup_detail else f" (the delete also could not be confirmed: {cleanup_detail})")
         )
         return v
     if landed:
@@ -824,11 +835,15 @@ def main(argv: list[str] | None = None) -> int:
             cannot_verify=True,
         )
     if not cwd.is_dir() or not _is_git_worktree(cwd):
+        # ⛔ NO EXPLICIT `cannot_verify=` HERE (review P2). Passing True made this arm the authority on
+        # its own bucket while `exit_code_for("no-git-checkout")` answered 1 — two owners, disagreeing,
+        # and the docstring table was written from the wrong one. `_CANNOT_VERIFY_REASONS` now says 2
+        # and `_emit` derives the code from the reason alone, so there is ONE owner; the emitted code is
+        # pinned by `test_the_emitted_exit_code_for_every_reason_matches_the_docstring`.
         return _emit(
             _fail("no-git-checkout", f"{cwd} is not a git work tree"),
             json_out=args.json,
             quiet=args.quiet,
-            cannot_verify=True,
         )
 
     fetch_url = _fetch_url(cwd)
@@ -946,7 +961,7 @@ def main(argv: list[str] | None = None) -> int:
 # code from the REASON here — and having `_emit` derive it too — means no call site can pick a bucket
 # that disagrees with the reason it just emitted, which is how the PR body came to list `cleanup-failed`
 # under exit 1 while the code exits 2.
-_CANNOT_VERIFY_REASONS = ("cleanup-failed", "ls-remote-mismatch")
+_CANNOT_VERIFY_REASONS = ("cleanup-failed", "ls-remote-mismatch", "no-git-checkout")
 
 
 def exit_code_for(reason: str) -> int:
@@ -955,6 +970,13 @@ def exit_code_for(reason: str) -> int:
     ⛔ `cleanup-failed` and `ls-remote-mismatch` are 2, not 1: in both the write was measured (or the
     push exited 0), so nothing about the CREDENTIAL was refused — `cleanup-failed`'s own detail says
     the credential CAN write, and exiting 1 told a lane that can deliver "do not start".
+
+    ⛔ `no-git-checkout` is 2 for the same reason (review P2, round 10): the workdir is not a work tree,
+    so the probe NEVER RAN and nothing about the credential was measured. It sat in the docstring's
+    exit-1 bucket — "fix the credential … grant the scope named above", the wrong-remedy class this
+    file exists to remove — while `main()` passed `cannot_verify=True` and `_emit` therefore exited 2.
+    The call site could overrule the helper, so the helper was the half that lied. `_emit` now owns the
+    code from the reason alone, and the EMITTED code is pinned by test, not by this mapping.
     """
     if reason.startswith("cannot-verify") or reason in _CANNOT_VERIFY_REASONS:
         return 2
