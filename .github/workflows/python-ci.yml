@@ -1518,11 +1518,7 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
-          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
-          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
-          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
-          # it; the reporter now states it from there.
+          # #10914: the leg's own junitxml — a killed leg's log has no FAILED record.
           bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
             --junit "$PYTEST_JUNIT"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
