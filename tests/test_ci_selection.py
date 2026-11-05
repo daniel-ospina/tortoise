@@ -7200,13 +7200,23 @@ def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_rea
     re-derive what was wrong; and a `2.0 -> 3.1` ADOPTED CI reading — the
     `test_oauth_consent_page_step4.py` shape — must stay silent, or the pin would
     forbid the refresher from doing its job.
+
+    ⛔ BOTH halves are reconstructed, and the TAIL half is not optional: the
+    exemption `_added_files_off_the_flat_default` applies is keyed on the row's
+    tail (a CI basis), never on its value. Reusing the LIVE tail exempts the
+    reconstructed pre-fix value the moment `--refresh-durations` adopts this row
+    onto its row line — which the row's own note promises it will — and this pin
+    then reds about its own fixture. `""` is the FAITHFUL pre-fix tail: `36b028494`
+    carried `4.0` bare on the row line, its measurement note in the continuation
+    block below (#10726 review round 4, P2).
     """
     from tools.ci_selection import load_manifest
     real = load_manifest()["durations"]
     tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
     victim = "test_9548_record_search_keys_shape.py"
     pre_fix = dict(real, **{victim: 4.0})
-    assert _added_files_off_the_flat_default(pre_fix, tails) == [(victim, 4.0)], (
+    pre_fix_tails = dict(tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)], (
         "the reconstruction must find exactly the row this review corrected — "
         "otherwise the pin is not testing that defect")
     adopted = dict(real, **{victim: 3.1})
@@ -7216,6 +7226,39 @@ def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_rea
     assert _added_files_off_the_flat_default(adopted, adopted_tails) == [], (
         "a row the refresher ADOPTED from a junit sweep must not be reported — "
         "that value is the CI reading the balancer should take")
+
+
+def test_the_pre_fix_reconstruction_clears_the_tail_a_sweep_would_adopt():
+    """Regression pin for the half-reconstruction defect (review round 4, P2).
+
+    Simulates the state the FIRST post-landing `--refresh-durations` sweep produces
+    for this row — an adopted junit basis written ONTO the row line — without waiting
+    for that sweep, so the hazard is falsifiable in the repo rather than a year from
+    now in a red shard.
+
+    Both directions matter: the control asserts the exemption really IS tail-keyed
+    (a valid adopted row stays silent, so the fix cannot be "make the helper ignore
+    tails"), and the second arm asserts the reconstruction still finds the pre-fix
+    row once its tail is cleared — which is exactly what reusing the live tail
+    (the pre-fix test body) stops doing.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    victim = "test_9548_record_search_keys_shape.py"
+    swept_tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    swept_tails[victim] = (
+        "  # ci-timing junit-census+top-15 2026-11-09 (run 99999999999); was 2.0")
+    adopted = dict(real, **{victim: 3.1})
+    assert _added_files_off_the_flat_default(adopted, swept_tails) == [], (
+        "control: an ADOPTED row must be exempt on its tail — this is why the tail "
+        "cannot be reused when reconstructing the PRE-fix row")
+    pre_fix = dict(real, **{victim: 4.0})
+    assert _added_files_off_the_flat_default(pre_fix, swept_tails) == [], (
+        "control: reusing a swept tail exempts the pre-fix value, i.e. the pin "
+        "would report nothing and the reconstruction assertion above would red — "
+        "the exact defect this pin exists for")
+    pre_fix_tails = dict(swept_tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)]
 
 
 # The refresher (`tools/ci_timing.py::render_refreshed_manifest`) rewrites a row's
