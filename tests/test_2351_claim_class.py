@@ -1711,6 +1711,11 @@ def test_the_repoint_door_carries_no_door_local_direction_filter():
                         else [node.target])
         if isinstance(_target, ast.Name) and _target.id == "_eff_dir"
     ]
+    assert _assigns, (
+        "the 2a-DIRECT pre-flight no longer assigns `_eff_dir` — if the "
+        "canonicalizer read was renamed or hoisted, update "
+        "_REPOINT_DIRECTION_READ/this pin; if it was REPLACED, the ONE-reader "
+        "rule (#10520 A4) needs re-arguing, not this test")
     assert len(_assigns) == 1, (
         "the 2a-DIRECT pre-flight assigns `_eff_dir` "
         f"{len(_assigns)} times — a second assignment IS the door-local copy of "
