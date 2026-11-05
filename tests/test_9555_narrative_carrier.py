@@ -1688,8 +1688,9 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # A presence-only `in` check over the whole document would stay green while §9.4
 # itself was reverted, as long as one copy of the correct sentence survived
 # elsewhere in 2,000 lines — the "presence-only pin certifies whichever text
-# happens to be there" failure the #10244 review measured on a frozen `§11.1`. The retired phrasings are asserted ABSENT as well as the
-# corrected pointer PRESENT.
+# happens to be there" failure the #10244 review measured on a frozen `§11.1`.
+# The retired phrasings are asserted ABSENT as well as the corrected pointer
+# PRESENT.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
@@ -1748,16 +1749,35 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
       • `the one-line `summary` read from `public.session_narrative`.`summary``
         — names a COLUMN of the narrative's own table as the vector's text (that
         column exists: `supabase/migrations/20261023000001_record_session_narrative.sql:130`
-        `summary     text,`), so the fortiest reading of the sentence is a vector of
-        the summary — the one thing these two sections exist to forbid;
+        `summary     text,`), so the most forgiving reading of the sentence is a
+        vector of the summary — the one thing these two sections exist to forbid;
       • `it is NOT read from `public.session_narrative`` — the pointer's own
         negation, and the assert passed it;
       • `read from `public.session_narrative`'s `summary` column` — the home
         namespacing its own column.
 
     So the clause is asserted with the phrase that carries the object
-    (`the S1 narrative read from `home``), the negated frame is refused, and the
-    home may not be used as a namespace for a column.
+    (`the S1 narrative read from `home``), a NEGATED READING of `home` is
+    refused, and `home` may not be used as a namespace for a column.
+
+    ⛔ BOTH GUARDS ARE BOUND TO `home`, and that is not a detail — the first cut
+    asserted `"not read from" not in line` and `` f"`{home}`." not in line ``,
+    i.e. the negation and the PERIOD anywhere on the line. Both misfire on prose
+    that says the RIGHT thing, and each message then reported the exact inverse
+    of the document (measured by replay on §9.4's own sentence, wording only):
+
+      • *"…and that text is **not read from** `:Source.summary`"* — a correct
+        restatement of the negation §9.4 DOES want — RED with *"the vector's
+        text is not read from `home`"*, which the sentence does not say;
+      • *"…read from `home`.**"* — a correct sentence that merely ENDS on the
+        backticked home — RED with *"points the vector at a COLUMN"*.
+
+    A pin that reds on a correct re-wording is not a guard, it is a spelling
+    lock on one draft's phrasing, and this branch's own recorded decision is the
+    opposite (cycle-2 F4: the pin stays rendering-agnostic over merged prose).
+    So the negation is read as a CUE APPLIED TO `home` (cue + a read/embed/index
+    verb + the backticked home, with no backtick between them), and a column is
+    the `` `home`.`col` `` / `` `home`'s col `` SHAPE, never a bare period.
     """
     assert f"the S1 narrative read from `{home}`" in line, (
         f"{where} no longer states that the source vector's text IS the S1 "
@@ -1766,17 +1786,60 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
         f"`{home}`.`summary``) or NEGATING the pointer (`it is NOT read from "
         f"`{home}`)` both satisfy a bare substring, and both order the vector "
         f"these sections forbid (measured GREEN before this assert)")
-    assert "not read from" not in line.lower(), (
-        f"{where} NEGATES the pointer — the sentence now says the vector's text "
-        f"is *not* read from `{home}`, which a presence check cannot see; the "
-        f"negation these sections DO want is about `:Source.summary`, not about "
-        f"the narrative's home")
-    assert f"`{home}`." not in line and f"`{home}`'" not in line, (
+    assert not _negates_the_home(line, home), (
+        f"{where} NEGATES the pointer — a negation cue (`not` / `never` / `no "
+        f"longer`) is applied to the READ of `{home}`, which a presence check "
+        f"cannot see; the negation these sections DO want is about "
+        f"`:Source.summary`, not about the narrative's home. ⚠️ The cue is "
+        f"bound to `{home}` on purpose: an unbounded `'not read from' not in "
+        f"line` reds the CORRECT phrasing *'…not read from `:Source.summary`'* "
+        f"and then reports the inverse of what the sentence says (measured)")
+    assert not _namespaces_a_column(line, home), (
         f"{where} points the vector at a COLUMN of `{home}` rather than at its "
         f"text (`{home}`.`summary` / `{home}`'s `summary`). The table has a "
         f"`summary` column (`20261023000001_record_session_narrative.sql:130`), "
         f"so this reading is grammatical and is exactly the bag-of-words vector "
-        f"§9.4 forbids")
+        f"§9.4 forbids. ⚠️ The match is COLUMN-SHAPED, not 'a period follows "
+        f"the home': a correct sentence ending *'…read from `{home}`.'* is "
+        f"not a column and must not red (measured)")
+
+
+def _negates_the_home(line: str, home: str) -> bool:
+    """Does a negation cue apply to the READ of `home` — the claim, not the line?
+
+    ⛔ THE NEGATION'S TARGET IS THE WHOLE QUESTION. A line-wide `"not read "
+    "from" in line` refuses *every* negation, including the one §9.4 requires
+    (*"…that text is not read from `:Source.summary`"*), and then reports that
+    the sentence negates `home` — the inverse of what it says. So the cue is
+    bound to the object by three anchored parts, in order: a cue, at most two
+    filler words, a READ/EMBED/INDEX verb, then at most 30 characters with NO
+    backtick in them, then the backticked home. The no-backtick span is what
+    keeps a negation of a DIFFERENT backticked object from reaching `home`: in
+    *"never from `:Source.summary`"* the next backtick opens another name, so
+    the match cannot continue on to `public.session_narrative`.
+    """
+    return re.search(
+        rf"\b(?:not|never|no longer)\s+(?:\w+\s+){{0,2}}"
+        rf"(?:read|reads|reading|embed|embeds|embedding|index|indexes|"
+        rf"indexing|come|comes)\b[^`]{{0,30}}`{re.escape(home)}`",
+        line, re.IGNORECASE) is not None
+
+
+def _namespaces_a_column(line: str, home: str) -> bool:
+    """Is `home` used as a NAMESPACE — `` `home`.`col` `` or `` `home`'s col ``?
+
+    ⛔ COLUMN-SHAPED, not "a period follows the home". The old check refused
+    `` f"`{home}`." ``, which is also how a CORRECT sentence ends
+    (*"…read from `public.session_narrative`."*), and reported it as *"points
+    the vector at a COLUMN"*. A column is a DOT or a POSSESSIVE immediately
+    followed by a NAME, so that is what is matched; a period followed by
+    anything else (space, newline, `)`, end of line) is prose — so the dot form
+    is matched only when the name follows it IMMEDIATELY (`` `home`.`col` `` /
+    `` `home`.col ``), because a sentence-ending period is followed by a space.
+    """
+    return re.search(
+        rf"`{re.escape(home)}`\.(?:\w|`)|`{re.escape(home)}`'s\b",
+        line) is not None
 
 
 def _source_vector_footnote(text: str) -> str:
@@ -1902,6 +1965,101 @@ def _ontology_section_of(field: str) -> str:
         f"this derived value must re-derive it: §9.4's deciding sentence and "
         f"§12.1b's footnote both assert it, and fixing only ONE of those two "
         f"call sites would leave the other pointing at a different type")
+
+
+#: §9.1's narrative home, DERIVED from the projection that writes it — the same
+#: expression the pin below derives, so a home move reds here and there together.
+_HOME = f"public.{rp.NARRATIVE_TABLE}"
+
+#: Lines that state §9.4's claim and word it DIFFERENTLY from the draft on the
+#: head document. The pin must ACCEPT every one: the contract is what the
+#: sentence SAYS (the recorded decision, `#10978`), never one draft's phrasing of
+#: it. The first two are the MEASURED misfires — under the pre-fix guards
+#: (`"not read from" not in line`, `` f"`{home}`." not in line ``) both RED,
+#: each with a message asserting the inverse of what the line says.
+_VECTOR_REWORDINGS: list[tuple[str, str]] = [
+    ("a correct negation, applied to the SUMMARY rather than to the home",
+     "whose embedded text is the S1 narrative read from `{home}` — and that "
+     "text is not read from `:Source.summary`"),
+    ("a correct sentence that simply ENDS on the backticked home",
+     "whose embedded text is the S1 narrative read from `{home}`. It is one "
+     "vector attached to the `:Source` node"),
+    ("the head document's own wording (control: green before AND after the fix)",
+     "whose embedded text is the S1 narrative read from `{home}` — ⛔ never "
+     "from `:Source.summary`"),
+]
+
+#: Lines that carry the correct PHRASE and still invert or re-specify the claim
+#: about `{home}`. These are what the two object-bound guards are FOR, so they
+#: must stay refused — deleting the guards (rather than binding them) would pass
+#: the list above and fail here.
+_VECTOR_INVERSIONS: list[tuple[str, str]] = [
+    ("the pointer's own negation, beside the correct phrase",
+     "the S1 narrative read from `{home}` was the earlier claim; it is not read "
+     "from `{home}`"),
+    ("the home namespacing its own column (dot form)",
+     "the S1 narrative read from `{home}`.`summary` is what the vector embeds"),
+    ("the home namespacing its own column (possessive form)",
+     "the S1 narrative read from `{home}`'s `summary` column is the vector"),
+]
+
+
+@pytest.mark.parametrize(
+    "why,line", _VECTOR_REWORDINGS,
+    ids=["negation-of-the-summary", "ends-on-the-backticked-home",
+         "head-document-wording"])
+def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
+    """*What value makes this test fail?* The pre-fix guards, on cases 1 and 2.
+
+    They asserted `"not read from" not in line` and `` f"`{home}`." not in
+    line `` — a negation ANYWHERE on the line, and a PERIOD after the home — so:
+
+      • case 1 says the SUMMARY is what the text is not read from, which is
+        §9.4's own instruction, and RED with *"the vector's text is not read
+        from `{home}`"* — the sentence says no such thing;
+      • case 2 merely ENDS the sentence on the backticked home and RED with
+        *"points the vector at a COLUMN of `{home}`"*.
+
+    A guard that refuses a correct re-wording is a spelling lock on one draft,
+    and it reports a failure the document does not contain — the same
+    *"message names a check it does not perform"* class this file has already
+    corrected twice (`71c4b089a`, `3664cc89d`). Both pass now because each guard
+    is bound to the object it is about (`_negates_the_home` /
+    `_namespaces_a_column`), not to the whole line.
+    """
+    formatted = line.format(home=_HOME)
+    try:
+        _assert_vector_reads_the_narrative(
+            formatted, "the re-wording case", _HOME)
+    except AssertionError as refused:
+        raise AssertionError(
+            f"the pin REFUSED a correct re-wording ({why}): {formatted!r}\n"
+            f"— it said: {refused}") from None
+
+
+@pytest.mark.parametrize(
+    "why,line", _VECTOR_INVERSIONS,
+    ids=["negated-pointer", "column-dot-form", "column-possessive-form"])
+def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
+    """*What value makes this test fail?* A fix that DROPS the two guards.
+
+    Binding them to their object is the fix; removing them also silences the
+    misfires, and that is the regression this list exists to catch. Each line
+    carries the correct phrase — so the phrase assert cannot be what refuses it
+    — and inverts the claim about `{home}` in one of the three shapes the
+    helper's docstring names: a negation applied to the READ of the home, and
+    the home used as a namespace for a column (dot and possessive forms).
+    """
+    formatted = line.format(home=_HOME)
+    try:
+        _assert_vector_reads_the_narrative(
+            formatted, "the inversion case", _HOME)
+    except AssertionError:
+        return
+    raise AssertionError(
+        f"the pin ACCEPTED a line that inverts or re-specifies the claim "
+        f"({why}): {formatted!r} — the guards must be OBJECT-BOUND, never "
+        f"removed to stop them misfiring on a correct re-wording")
 
 
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
