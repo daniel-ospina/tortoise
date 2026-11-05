@@ -135,6 +135,7 @@ def test_name_in_both_lists_is_a_config_error(tmp_path):
     both = """\
 queue_rules:
   - name: main
+    branch_protection_injection_mode: merge
     queue_conditions:
       - check-success=docs
     merge_conditions:
@@ -149,6 +150,7 @@ def test_overlap_reaches_the_verdict_as_FAIL_config_not_a_quiet_success(tmp_path
     both = """\
 queue_rules:
   - name: main
+    branch_protection_injection_mode: merge
     queue_conditions:
       - check-success=docs
     merge_conditions:
@@ -157,6 +159,79 @@ queue_rules:
     result = rfo.condition_2(_write_tree(tmp_path, mergify=both), "o/r", "deadbeef")
     assert result.verdict == rfo.FAIL_CONFIG
     assert "docs" in result.detail
+
+
+# ── 2b. The injection MODE is read, never assumed ────────────────────
+
+
+def test_under_queue_mode_an_overlap_is_LEGAL_not_a_config_error(tmp_path):
+    """`queue` mode REQUIRES `merge_conditions` ⊆ `queue_conditions`.
+
+    Hard-coding `merge` semantics reported FAIL(config) for a legal `queue` config
+    — a false FAIL on every PR, and a disagreement with the guard's own clause ii.
+    """
+    queue_mode = """\
+queue_rules:
+  - name: main
+    branch_protection_injection_mode: queue
+    queue_conditions:
+      - check-success=docs
+      - check-success=python-ci-gate
+    merge_conditions:
+      - check-success=python-ci-gate
+"""
+    required = rfo.resolve_required_set(_write_tree(tmp_path, mergify=queue_mode))
+    assert required.mode == "queue"
+    assert required.names == ("docs", "python-ci-gate")
+
+
+def test_under_queue_mode_nothing_is_deferred_and_a_missing_heavy_check_fails(tmp_path):
+    """`queue` injects for QUEUING too, so the heavy check gates ENTRY.
+
+    Deferring it (the `merge` rule) would report PASS at a head with no
+    python-ci-gate run — the normal state of every head.
+    """
+    queue_mode = """\
+queue_rules:
+  - name: main
+    branch_protection_injection_mode: queue
+    queue_conditions:
+      - check-success=docs
+      - check-success=python-ci-gate
+    merge_conditions:
+      - check-success=python-ci-gate
+"""
+    runs = [run("docs")]  # python-ci-gate genuinely absent
+    result = evaluate(_write_tree(tmp_path, mergify=queue_mode), runs)
+    assert result.verdict == rfo.FAIL_MISSING
+    row = next(r for r in result.rows if r.name == "python-ci-gate")
+    assert row.verdict == rfo.FAIL_MISSING  # NEVER DEFERRED under queue mode
+
+
+def test_an_absent_injection_mode_defaults_to_queue_like_mergify(tmp_path):
+    no_mode = """\
+queue_rules:
+  - name: main
+    queue_conditions:
+      - check-success=docs
+    merge_conditions:
+      - check-success=docs
+"""
+    required = rfo.resolve_required_set(_write_tree(tmp_path, mergify=no_mode))
+    assert required.mode == "queue"
+    assert required.names == ("docs",)
+
+
+def test_an_unknown_injection_mode_is_unreadable(tmp_path):
+    weird = """\
+queue_rules:
+  - name: main
+    branch_protection_injection_mode: sideways
+    queue_conditions:
+      - check-success=docs
+"""
+    result = rfo.condition_2(_write_tree(tmp_path, mergify=weird), "o/r", "deadbeef")
+    assert result.verdict == rfo.FAIL_UNREADABLE
 
 
 # ── 3. Unreadable config → snapshot → FAIL(unreadable) ──────────────────────
@@ -193,6 +268,7 @@ def test_a_config_error_does_NOT_fall_back_to_the_snapshot(tmp_path):
     both = """\
 queue_rules:
   - name: main
+    branch_protection_injection_mode: merge
     queue_conditions:
       - check-success=docs
     merge_conditions:
@@ -699,6 +775,26 @@ def test_a_complete_set_passes_the_total_count_check(monkeypatch):
     runs = [{"name": "docs", "status": "completed", "conclusion": "success", "id": 1}]
     monkeypatch.setattr(rfo, "_gh_api_json", lambda endpoint: {"total_count": 1, "check_runs": runs})
     assert rfo.fetch_check_runs("o/r", "deadbeef") == runs
+
+
+def test_short_check_runs_are_unreadable_when_total_count_is_missing(monkeypatch):
+    """A guard that disables itself on missing input is fail-open."""
+    monkeypatch.setattr(rfo, "_gh_api_json", lambda endpoint: {"check_runs": []})
+    with pytest.raises(rfo.RequiredSetUnreadable) as excinfo:
+        rfo.fetch_check_runs("o/r", "deadbeef")
+    assert "total_count" in str(excinfo.value)
+
+
+def test_a_non_string_details_url_does_not_traceback(monkeypatch):
+    runs = [{"name": "docs", "status": "completed", "conclusion": "success",
+             "id": 1, "details_url": 12345}]
+    monkeypatch.setattr(
+        rfo, "_gh_api_json",
+        lambda endpoint: {"total_count": 1, "check_runs": runs}
+        if "check-runs" in endpoint else {"workflow_runs": []},
+    )
+    result = rfo.evaluator_for(rfo.resolve_required_set(REPO_ROOT), rfo.fetch_check_runs("o/r", "x"), {})
+    assert result.verdict in {rfo.PASS, rfo.FAIL_MISSING, rfo.FAIL_UNREADABLE}
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────

@@ -84,9 +84,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.mergify_config_guard import (  # noqa: E402
+    KNOWN_INJECTION_MODES,
     MERGIFY_REL,
     RECORD_REL,
     GuardUnreadable,
+    _effective_mode,
     _load_mergify,
     _success_names,
 )
@@ -100,10 +102,6 @@ EXIT_PASS, EXIT_FAIL, EXIT_UNREADABLE = 0, 1, 2
 # `skipped`) and the ones GitHub has not documented yet, which must never fall
 # through a gap into a pass.
 GREEN_CONCLUSIONS = frozenset({"success"})
-
-# A non-`completed` status means "come back later", which is a different message
-# from "this is broken" — but neither is a pass.
-IN_FLIGHT_STATUSES = frozenset({"queued", "in_progress", "waiting", "requested", "pending"})
 
 # Verdict vocabulary. `PASS` is the ONLY non-failure; `DEFERRED` is the one
 # non-failure that is also not a claim of greenness (see `evaluator_for`).
@@ -147,6 +145,16 @@ class RequiredSet:
     # False only for a snapshot-only fallback, which cannot be evaluated: the
     # flat `required_contexts` list carries no entry/merge split.
     entry_merge_split: bool = True
+    # `branch_protection_injection_mode` — LOAD-BEARING, never assumed. Under
+    # `merge` (set here) the required contexts are injected for the MERGE only, so
+    # `queue_conditions` IS the entry gate and a name in both lists is a config
+    # error. Under `queue` (Mergify's default) they are injected for QUEUING AND
+    # MERGING, so `merge_conditions` must be a SUBSET of `queue_conditions` — the
+    # overlap is LEGAL and every context is an entry requirement, with nothing
+    # deferred. A gate that hard-codes one mode disagrees with the guard about
+    # what a legal config is; `.mergify.yml` itself says "Read the mode before
+    # reasoning about the list".
+    mode: str = "merge"
 
     @property
     def overlap(self) -> tuple[str, ...]:
@@ -181,9 +189,26 @@ def derive_from_config(root: Path) -> RequiredSet:
     rules = doc["queue_rules"]
     queue_names: list[str] = []
     merge_names: list[str] = []
+    modes: set[str] = set()
     for rule in rules:
         queue_names.extend(_success_names(rule.get("queue_conditions") or []))
         merge_names.extend(_success_names(rule.get("merge_conditions") or []))
+        modes.add(_effective_mode(rule))
+
+    # The injection mode decides what the entry gate IS, so it is READ, never
+    # assumed. Two rules in one file with different modes cannot be reasoned
+    # about as a single required set — refuse rather than pick one.
+    if len(modes) != 1:
+        raise RequiredSetUnreadable(
+            f"{MERGIFY_REL}: queue rules disagree on branch_protection_injection_mode "
+            f"({sorted(modes)}); the entry gate is mode-dependent and cannot be mixed"
+        )
+    mode = modes.pop()
+    if mode not in KNOWN_INJECTION_MODES:
+        raise RequiredSetUnreadable(
+            f"{MERGIFY_REL}: unrecognised branch_protection_injection_mode {mode!r} "
+            f"(known: {list(KNOWN_INJECTION_MODES)})"
+        )
 
     # De-duplicate a name repeated in the SAME list (harmless) but NEVER a name
     # present in both lists (a config error, raised below).
@@ -198,12 +223,16 @@ def derive_from_config(root: Path) -> RequiredSet:
 
     q, m = _uniq(queue_names), _uniq(merge_names)
     overlap = tuple(n for n in q if n in set(m))
-    if overlap:
+    # Only under `merge` is an overlap a CONFIGURATION ERROR (the contract's "named
+    # in EXACTLY ONE list"). Under `queue` the guard REQUIRES
+    # merge_conditions subset-of queue_conditions, so an overlap is the legal shape.
+    if mode == "merge" and overlap:
         raise RequiredSetConfigError(
             "check(s) named in BOTH queue_conditions and merge_conditions: "
             + ", ".join(overlap)
-            + " — the configuration contract (clause 1) requires EXACTLY ONE list; "
-            "a name in both is a configuration error, not a de-duplication problem"
+            + " — under branch_protection_injection_mode=merge the configuration "
+            "contract (clause 1) requires EXACTLY ONE list; a name in both is a "
+            "configuration error, not a de-duplication problem"
         )
 
     union = tuple(dict.fromkeys(q + m))
@@ -232,6 +261,7 @@ def derive_from_config(root: Path) -> RequiredSet:
         merge_names=m,
         snapshot_agrees=agrees,
         notes=tuple(notes),
+        mode=mode,
     )
 
 
@@ -282,8 +312,18 @@ def _gh_api_json(endpoint: str) -> dict:
         )
     except FileNotFoundError as exc:
         raise RequiredSetUnreadable(f"`gh` is not on PATH: {exc}") from None
-    except subprocess.TimeoutExpired:
-        raise RequiredSetUnreadable(f"gh api {endpoint} timed out after 120s") from None
+    except subprocess.TimeoutExpired as exc:
+        # The captured stderr is thrown away by default, which loses the cause —
+        # observed live: a 120 s kill reported only "timed out" while gh's stderr
+        # carried "API rate limit exceeded … shared rate-limit window". That is
+        # the same misdiagnosis the RateLimited docstring exists to prevent.
+        raw = exc.stderr or ""
+        tail = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        if "rate limit" in tail.lower():
+            raise RateLimited(endpoint, "see gh api rate_limit") from None
+        raise RequiredSetUnreadable(
+            f"gh api {endpoint} timed out after 120s" + (f"; stderr: {tail.strip()[:300]}" if tail.strip() else "")
+        ) from None
     except OSError as exc:
         raise RequiredSetUnreadable(f"gh api {endpoint} could not run: {exc}") from None
 
@@ -353,8 +393,8 @@ def _split_pages(stdout: str, endpoint: str = "") -> list[str]:
 
 def _run_id_of(run: dict) -> int | None:
     """The Actions run id embedded in `details_url`, if this run has one."""
-    details = run.get("details_url") or ""
-    if "/actions/runs/" not in details:
+    details = run.get("details_url")
+    if not isinstance(details, str) or "/actions/runs/" not in details:
         return None
     try:
         return int(details.split("/actions/runs/")[1].split("/")[0])
@@ -382,7 +422,15 @@ def fetch_check_runs(repo: str, sha: str) -> list[dict]:
     # disappears and a check reads green, and a short-but-valid body would sail
     # straight through as a PASS.
     total = doc.get("total_count")
-    if isinstance(total, int) and len(runs) < total:
+    if not isinstance(total, int):
+        # A guard that silently disables itself when its input is missing is
+        # fail-open: an absent/rewritten `total_count` must not turn the ONLY
+        # truncation defence off.
+        raise RequiredSetUnreadable(
+            f"check-runs response for {sha} carried no integer `total_count` — "
+            "cannot prove the set is complete"
+        )
+    if len(runs) < total:
         raise RequiredSetUnreadable(
             f"check-runs truncated for {sha}: received {len(runs)} of {total} — refusing to read a partial set"
         )
@@ -538,18 +586,26 @@ def evaluator_for(
     by_name = _newest_per_group(runs, workflow_of)
     rows: list[ContextResult] = []
 
-    for name in required.queue_names:
-        rows.append(_evaluate_at_head(name, by_name.get(name) or [], runs))
+    if required.mode == "queue":
+        # Injected for QUEUING AND MERGING: every required context gates ENTRY, so
+        # every one is evaluated at the head and NOTHING is deferred (a `queue`
+        # config lists the heavy check in queue_conditions too, by the guard's own
+        # clause ii, which is why the two lists overlap there).
+        for name in required.names:
+            rows.append(_evaluate_at_head(name, by_name.get(name) or [], runs))
+    else:
+        for name in required.queue_names:
+            rows.append(_evaluate_at_head(name, by_name.get(name) or [], runs))
 
-    for name in required.merge_names:
-        attempts = by_name.get(name) or []
-        if not attempts:
-            rows.append(ContextResult(
-                name, DEFERRED, None, None, 0,
-                "merge_conditions: evaluated on the queue branch, not at the PR head",
-            ))
-        else:
-            rows.append(_evaluate_at_head(name, attempts, runs))
+        for name in required.merge_names:
+            attempts = by_name.get(name) or []
+            if not attempts:
+                rows.append(ContextResult(
+                    name, DEFERRED, None, None, 0,
+                    "merge_conditions: evaluated on the queue branch, not at the PR head",
+                ))
+            else:
+                rows.append(_evaluate_at_head(name, attempts, runs))
 
     reds = [r for r in rows if r.verdict == FAIL_RED]
     pending = [r for r in rows if r.verdict == FAIL_PENDING]
@@ -649,7 +705,10 @@ def condition_2(root: Path, repo: str, sha: str) -> ConditionResult:
         result = evaluator_for(required, runs, workflow_of, workflow_error)
     except RequiredSetUnreadable as exc:  # includes RateLimited
         return ConditionResult(verdict=FAIL_UNREADABLE, required=required, detail=str(exc))
-    if workflow_error and result.verdict != PASS:
+    if workflow_error:
+        # Attached UNCONDITIONALLY: a PASS computed without a workflow identity is
+        # a PASS that assumed one attempt per name, and a reader must be able to
+        # tell it apart from a fully-informed PASS.
         result.required = _with_note(required, workflow_error)
     return result
 
@@ -664,6 +723,7 @@ def _with_note(required: RequiredSet, note: str) -> RequiredSet:
         snapshot_agrees=required.snapshot_agrees,
         notes=required.notes + (note,),
         entry_merge_split=required.entry_merge_split,
+        mode=required.mode,
     )
 
 
@@ -717,6 +777,7 @@ def gate(pr: int, repo: str, head_sha: str, root: Path) -> dict:
             "snapshot_agrees": c2.required.snapshot_agrees,
             "notes": list(c2.required.notes),
             "entry_merge_split": c2.required.entry_merge_split,
+            "injection_mode": c2.required.mode,
         },
         "conditions": conditions,
         "verdict": decided,
@@ -750,9 +811,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"merge_conditions: {', '.join(rs.merge_names) or '(none)'}")
         print(f"OVERLAP: {', '.join(rs.overlap) or '(none — contract satisfied)'}")
         print(f"union ({len(rs.names)}): {', '.join(rs.names)}")
+        print(f"injection_mode: {rs.mode}")
         print(f"snapshot_agrees: {rs.snapshot_agrees}")
         for note in rs.notes:
             print(f"note: {note}")
+        if not rs.entry_merge_split:
+            # Reporting the set is useful; claiming it resolved is not. The set
+            # came from the flat snapshot, so condition 2 cannot be evaluated and
+            # a scripted consumer must not read exit 0 as "the set resolved".
+            print("cannot evaluate condition 2: this set has no entry/merge split")
+            return EXIT_UNREADABLE
         return EXIT_PASS
 
     if not args.pr:
