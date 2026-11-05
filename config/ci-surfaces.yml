@@ -3907,6 +3907,19 @@ surfaces:
   # (scratch trees; the live I1 read is injected) — it pins
   # tools/mergify_config_guard.py, which `core` runs on engine-wide changes.
   - test_mergify_config_guard.py
+  # #10991: the ready-for-owner instrument (`tools/ready_for_owner.py`) — condition 2
+  # in one call: the required set derived from `.mergify.yml` (queue=ENTRY, merge=merge-time,
+  # per `branch_protection_injection_mode`) and the head's check-runs reduced by STRICT
+  # polarity (only `success` is green; `cancelled`/`neutral`/`skipped`/`stale`/in-flight/
+  # missing are never a pass, RED beats in-flight), grouped by `(app, workflow_id, name)` so
+  # a retry collapses and a sibling workflow cannot mask one, with `total_count` completeness
+  # refused unless it EQUALS the distinct ids read. `core` is where the file is CLASSIFIED
+  # beside the other gate pins (`test_required_set_sync.py`, `test_merge_throughput.py`,
+  # `test_mergify_config_guard.py`) — `--integrity` (the REQUIRED `manifest-integrity` job)
+  # reds on any unregistered `tests/**/test_*.py`, which is how this row came to exist.
+  # Hermetic: no DB, no network (every `gh` surface is injected; measured ~5s), so it runs
+  # clean in the docker fast lane.
+  - test_ready_for_owner.py
   - test_drift_guard.py  # #4174: the branch-drift gate must FETCH before it measures (a stale `origin/main` is not a pass) and must fail on a conflict-free revert, reporting paths + line counts
   # #4503: dual-registered -- the file also pins the EP edge-flush /
   # rebuild behaviour of `tortoise/ep.py` + the projection replay
