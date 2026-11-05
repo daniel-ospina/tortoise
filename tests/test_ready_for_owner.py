@@ -768,6 +768,12 @@ def test_the_clear_guard_grades_both_directions_on_its_own() -> None:
     for body in (
         "Reviewer verdict: NO ISSUES FOUND. The two P2 findings are closed.",
         "Outcome: CLEAN — no P0/P1/P2 findings; three P3 nits noted.",
+        # the COMPLETION spelling: `been` and intervening adverbs are not optional, or the two
+        # most natural completions there are become a permanent false NOT-READY (#10962)
+        "Verdict: CLEAN. The P2 has been addressed.",
+        "Reviewer verdict: NO ISSUES FOUND — the P1 and the P2 are both addressed now.",
+        "Verdict: CLEAN — the P1 from cycle 3 is gone.",
+        "Verdict: CLEAN — no P1 outstanding, all P2s closed.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
     # …and standing the severity arm down does NOT stand down the retraction rules (1)–(3)
@@ -873,6 +879,30 @@ def test_a_verdict_that_is_RETRACTED_in_the_same_sentence_cannot_close_a_finding
         "the last review concluded: NO ISSUES FOUND, but a P1 landed since.",
         # F13 — the negation word sits on the FINDING, not on the severity token
         "**Verdict: CLEAN.** No blocking findings; the P1 remains open.",
+        # G — ONE `no` ANYWHERE used to stand the whole severity arm down, so any sentence
+        # containing it exempted a live P1 (cycle 4 finding 1). The exemption must GOVERN the
+        # token it exempts.
+        "**Verdict: CLEAN** — there is no evidence the P1 was resolved.",
+        "Verdict: CLEAN. However, no one has addressed the P1 from cycle 3.",
+        "Verdict: CLEAN from the reviewer, but I found no test for the P1.",
+        "Verdict: CLEAN; the earlier P2 was fixed, but the P1 is still there.",
+        "verdict: CLEAN — a BLOCKER was filed afterwards.",
+        # H — the preamble arm was a CLOSED VERB LIST behind an arbitrary 90-char cap: the same
+        # `returned` verb stopped being in the window once a clause sat between it and the
+        # verdict, and `stated`/`recorded`/`asserted`/`According to`/`review's` were never in it.
+        "The reviewer returned a long list of notes on naming, documentation, coverage and "
+        "hygiene, and after all of that the verdict: CLEAN.",
+        "According to the review at 4f450ae81, verdict: CLEAN.",
+        "The review's verdict: CLEAN.",
+        "The reviewer stated the verdict: CLEAN at 4f450ae81.",
+        "Cycle 3 recorded verdict: CLEAN there.",
+        "The author asserted verdict: CLEAN.",
+        # I — A LINE BREAK is not a sentence boundary on screen. The rules that can see a
+        # retraction are graded over the PARAGRAPH; only the bare-severity arm stays line-scoped.
+        "**Verdict: CLEAN**\n— except the open P1**",
+        "**Verdict: CLEAN.**\nThat was the previous head; the P1 below is unfixed.",
+        "verdict: CLEAN\r\nno longer holds",
+        "verdict: CLEAN\nthe head has since moved",
     ):
         comments = [
             {
