@@ -7183,7 +7183,20 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
     # anchored to a determiner so a note that merely SAYS `is` somewhere and then
     # describes the counterfactual ("the file is in the fast pool, so its absence
     # packs it at the flat 2.0s default") is not read as a claim.
+    #
+    # ⛔ The second alternation is the SAME claim spelled with the constant's NAME
+    # instead of `2.0s`: "the weight stays the flat `DEFAULT_FAST_WEIGHT`
+    # declaration". That spelling was invisible to BOTH this guard and
+    # `tools.ci_timing._STALE_FLAT_DEFAULT_CLAIM_RE` — the verb list did not carry
+    # `stays`/`remains`/`keeps`, and the first alternation insists on the literal
+    # `flat 2.0s default` phrase — so `test_10602_query_limit_bound.py: 2.3` and
+    # `test_5095_s3_identity_policy.py: 0.4` each shipped a measured value beside a
+    # note asserting the flat default. That is the map's own #2818 shape, "the claim
+    # and the value disagree in the same row, and the claim is the half a reader
+    # trusts" (review P3 on #11057 at `4727c013a`). A guard whose whole purpose is
+    # this claim cannot depend on one spelling of it.
     r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+2\.0s?\s+default"
+    r"|\b(?:takes|carries|holds|stays|remains|keeps)\b[^.;]{0,60}?flat\s+`?DEFAULT_FAST_WEIGHT`?"
     r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+2\.0s?\s+default",
     re.IGNORECASE)
 
@@ -7363,11 +7376,25 @@ def test_flat_default_claim_check_is_not_vacuous():
         " flat 2.0s default.\n"
         "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
         "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
-        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.")
-    durations = {f"test_{c}.py": 1.0 for c in "abcdef"}
+        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.\n"
+        # the COUNTERFACTUAL spelling of the same constant NAME the second
+        # alternation recognises — no claim verb, so it must stay silent
+        "  test_g.py: 6.5  # its absence packs it at the flat `DEFAULT_FAST_WEIGHT`.")
+    # …and the NAMED-CONSTANT spelling of the claim, which shipped twice on the real
+    # map (`test_10602_query_limit_bound.py: 2.3`, `test_5095_s3_identity_policy.py:
+    # 0.4`) because neither guard's verb list carried `stays` and the first
+    # alternation insists on the literal `flat 2.0s default` phrase.
+    named_constant = (
+        "  test_h.py: 2.3  # The weight stays the flat `DEFAULT_FAST_WEIGHT`"
+        " declaration a file a PR ADDS takes.\n"
+        "  test_i.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
+    durations = {f"test_{c}.py": 1.0 for c in "abcdefghi"}
     assert _durations_rows_claiming_the_flat_default(stale, durations) == [
         ("test_a.py", 2.2), ("test_b.py", 3.7)]
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
+    assert _durations_rows_claiming_the_flat_default(named_constant, durations) == [
+        ("test_h.py", 2.3), ("test_i.py", 0.4)]
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")

@@ -2335,12 +2335,21 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 # rows carry a claim of this shape, which is why the repair is here and not a
 # hand-edit of the three rows a guard happens to name today.
 #
-# The claim is recognised by its VERB (`takes`/`carries`/`holds` … flat … default),
-# never by the bare phrase, because the COUNTERFACTUAL forms are legitimate and must
-# survive: "without this row the file packs at the flat 2.0s default", "its absence
-# packs it at the flat 2.0s default", "a real weight, not the flat 2.0 default".
+# The claim is recognised by its VERB (`takes`/`carries`/`holds`/`stays`/`remains`/
+# `keeps` … flat … default), never by the bare phrase, because the COUNTERFACTUAL
+# forms are legitimate and must survive: "without this row the file packs at the
+# flat 2.0s default", "its absence packs it at the flat 2.0s default", "a real
+# weight, not the flat 2.0 default".
+# ⛔ `stays`/`remains`/`keeps` are in the verb list because the claim is also
+# spelled with the constant's NAME, not `2.0s` — "The weight stays the flat
+# `DEFAULT_FAST_WEIGHT` declaration". That spelling was recognised by NEITHER this
+# cut-then-render path NOR the test-side twin, so a row could assert the flat
+# default while carrying a measured value (review P3 on #11057 at `4727c013a`: two
+# rows on the real map, `test_10602_query_limit_bound.py` and
+# `test_5095_s3_identity_policy.py`). The whole point of the cut is the claim a
+# reader trusts; it cannot depend on one spelling.
 _STALE_FLAT_DEFAULT_CLAIM_RE = re.compile(
-    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\b"
+    r"\b(?:takes|carries|holds|stays|remains|keeps)\b[^.;]{0,60}?flat\b"
     r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+(?:2\.0s?\s+)?default",
     re.IGNORECASE)
 
