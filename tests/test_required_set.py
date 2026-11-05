@@ -258,3 +258,58 @@ def test_the_result_is_frozen() -> None:
     required: RequiredSet = derive_from_config(REPO_ROOT)
     with pytest.raises(dataclasses.FrozenInstanceError):
         required.names = ()  # type: ignore[misc]
+
+
+def test_a_context_the_config_derives_and_the_record_lacks_also_refuses(tmp_path: Path) -> None:
+    """⛔ BOTH DIVERGENCE DIRECTIONS REFUSE. Clause 1 is an EQUALITY, and the CI guard
+    (`mergify_config_guard._clause_iv`) compares the same two sets for that reason.
+
+    This is the config-ONLY direction: evaluate-more-than-required is the fail-closed way
+    to be wrong, so a note would be tempting — but the repo's own guard calls it
+    `EXIT_DIVERGED`, and an instrument that quietly tolerates it would disagree with the
+    guard about whether the tree is sound. Revert to a note and this reds.
+    """
+    with pytest.raises(RequiredSetConfigError) as excinfo:
+        derive_from_config(_tree(tmp_path, required_contexts=[*ENTRY, HEAVY, "unrecorded"]))
+    assert "unrecorded" in str(excinfo.value)
+
+
+def test_derive_from_ref_discloses_the_sha_it_read(tmp_path: Path) -> None:
+    """`git show <ref>` does not fetch, so freshness cannot be asserted — it must be
+    DISCLOSED. The sha in `source` is the only honest statement about what was read.
+
+    Drop the `git rev-parse` and the `source` loses the sha; a stale protected ref then
+    reads exactly like a fresh one.
+    """
+    _tree(tmp_path)
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "config")
+    expected = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    required = derive_from_ref(tmp_path, "HEAD")
+    assert expected[:12] in required.source
+    assert "HEAD" in required.source
+
+
+def test_derive_from_ref_refuses_a_non_utf8_blob(tmp_path: Path) -> None:
+    """A blob that will not decode is a REFUSAL, not a traceback.
+
+    `subprocess.run(text=True)` raises `UnicodeDecodeError` (a `ValueError`); it is not an
+    `OSError`, so without `ValueError` in the handler it escaped a function documented to
+    return a set or refuse.
+    """
+    _tree(tmp_path)
+    raw = b"queue_rules: []\n\xff\xfe\x00"
+    blob = tmp_path / MERGIFY_REL
+    blob.write_bytes(raw)
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "config")
+    with pytest.raises((RequiredSetUnreadable, GuardUnreadable)):
+        derive_from_ref(tmp_path, "HEAD")

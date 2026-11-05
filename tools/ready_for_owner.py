@@ -40,6 +40,17 @@ Output is exactly one of::
     NOT-READY(<PR>, failed=<condition,...>)     # exit 1, with each failing raw value
                                                 # printed on its own check line above
 
+``--required-set`` is the ONE exception, and it is a different QUESTION ("what is required
+here?", not "is this PR ready?"), so it is a different output shape by design::
+
+    source: … / mode: … / queue_conditions: … / merge_conditions: … / union (N): …
+                                                # exit 0, the derived set
+    REQUIRED-SET-CONFIG-ERROR(...)              # exit 2, the two sources disagree
+    REQUIRED-SET-UNREADABLE(...)                # exit 2, could not be read
+
+It takes no PR number and needs no credential, and it never emits either of the two lines
+above — a caller grepping for READY/NOT-READY cannot mistake one for the other.
+
 ⛔ **It must never print READY on a partial read.** An input that could not be read is
 ``FAIL(unreadable)`` — never assumed, never skipped, never defaulted to green. That is
 the whole point of the tool: a human who does not review relies on this thing saying no.
@@ -76,6 +87,8 @@ Live use::
     python tools/ready_for_owner.py 10962
     python tools/ready_for_owner.py 10962 --json
     python tools/ready_for_owner.py 10962 --repo daniel-ospina/tortoise
+    python tools/ready_for_owner.py --required-set              # what is REQUIRED here
+    python tools/ready_for_owner.py --required-set --ref HEAD   # …as THIS tree declares
 
 ⛔ ONE RESIDUAL IN THE GATE READ, NAMED RATHER THAN HIDDEN: the required set is DERIVED
 from `.mergify.yml` and carries check NAMES only, while `ci_verdict`'s ``GroupVerdict``
@@ -2084,9 +2097,12 @@ def _read_required_contexts(gh: Gh, workdir: Path) -> tuple[RequiredSet, str]:
     every PR head, which a flat set can only read as ``FAIL(missing)``: NOT-READY forever.
 
     ``docs/ci/required-contexts.json`` remains the committed witness of the LIVE
-    protection read (clause 2), and ``tools.required_set`` refuses on disagreement with
-    it. The API is deliberately not called here: it IS the credential dependency this
-    removes, and its recorded answer is already in the tree.
+    protection read (clause 2), and ``tools.required_set`` refuses when the two DISAGREE in
+    either direction — a record naming a context the config no longer derives is the #3016
+    regression, and a config deriving one the record does not confirm is the same EQUALITY
+    violated (the CI guard's `_clause_iv` treats both as `EXIT_DIVERGED`). The API is
+    deliberately not called here: it IS the credential dependency this removes, and its
+    recorded answer is already in the tree.
 
     ⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT, so the bytes come
     from the PROTECTED ref (``origin/main``), never from the workdir being judged. Both
@@ -2556,10 +2572,18 @@ def collect_probe(
         probe.head_committed_at = ""
 
     # ⛔ ORDER MATTERS: the required set is read from `origin/main`, and `_try_tree` is
-    # what FETCHES it. Reading the derived set first would use whatever `origin/main` the
-    # worktree happened to hold — a stale protected ref is exactly the "stale list is a
-    # silent deadlock" ` .mergify.yml` clause 2 warns about. A failed fetch leaves
-    # `origin/main` unrefreshed and the read below is then a REFUSAL, not a guess.
+    # what FETCHES it (`git fetch --no-tags origin main`). Reading the derived set first
+    # would use whatever `origin/main` the worktree happened to hold — a stale protected
+    # ref is exactly the "stale list is a silent deadlock" `.mergify.yml` clause 2 warns
+    # about.
+    #
+    # ⛔ WHAT THIS ORDER DOES *NOT* BUY, stated so nobody re-derives it as a guarantee:
+    # `derive_from_ref` does not fetch, and `git show` succeeds on any ref that EXISTS,
+    # stale or not — so ordering alone cannot prove freshness. What holds is narrower and
+    # sufficient: every `_read_tree` path that FAILS returns `tree=None` BEFORE the base
+    # fetch, so a run that reaches a verdict has `tree` readable and therefore fetched.
+    # Everything weaker than that is disclosed rather than assumed — the derived `source`
+    # carries the sha it actually read.
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     try:
         required, probe.required_raw = _read_required_contexts(gh, workdir)
@@ -2729,7 +2753,16 @@ def report_required_set(workdir: Path, ref: str = "origin/main") -> int:
     except (GuardUnreadable, RequiredSetUnreadable) as exc:
         print(f"REQUIRED-SET-UNREADABLE({exc})")
         return 2
-    print(f"source: {required.source}" + (f" at {ref}" if ref else " (this worktree)"))
+    except Exception as exc:
+        # Same backstop discipline as `main()`: a reporting verb must always emit a
+        # labelled line and a documented exit code. Every reader is meant to convert its
+        # own failure, but a case nobody foresaw (a blob that will not decode, a vendor
+        # surprise) must not become a traceback with an exit code that reads as a verdict.
+        print(f"REQUIRED-SET-UNREADABLE({type(exc).__name__}: {exc})")
+        return 2
+    # `source` already carries the ref AND the sha it resolved to (derive_from_ref
+    # discloses what it actually read), so do not append the ref a second time.
+    print(f"source: {required.source}")
     print(f"mode: {required.mode}")
     print(f"queue_conditions (ENTRY, at the PR head): {', '.join(required.queue_names)}")
     print(f"merge_conditions (MERGE-time, deferred here): {', '.join(required.merge_names)}")

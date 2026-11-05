@@ -86,6 +86,7 @@ uses for its own clause checks, not a second parser that could drift from it.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from dataclasses import dataclass
@@ -290,6 +291,26 @@ def derive_from_config(root: Path) -> RequiredSet:
                 "protection, re-cut the record so the two agree"
             )
         if not agrees:
+            # ⛔ BOTH DIRECTIONS REFUSE, because clause 1 is an EQUALITY and the CI guard
+            # (`mergify_config_guard._clause_iv`) already treats both as `EXIT_DIVERGED`:
+            # `config_checks != required_set`. A note here would make this instrument
+            # quietly tolerate a divergence the repo's own guard calls an error, and the
+            # two would disagree about whether the tree is sound.
+            #
+            # The config-only direction IS the fail-closed one for a gate (it evaluates
+            # more names than the record knows, so it can only over-refuse), which is why
+            # refusing still costs nothing real: the reachable window is between a config
+            # edit landing and the record being re-cut, and in that window CI is red
+            # already, so no PR could merge anyway. Re-cut the record instead.
+            config_only = tuple(n for n in union if n not in set(snapshot))
+            if config_only:
+                raise RequiredSetConfigError(
+                    f"{MERGIFY_REL} derives {', '.join(config_only)} but {RECORD_REL} does "
+                    "not record it as live-required — the two sources disagree about "
+                    "clause 1's EQUALITY, so condition 2 would be a verdict about a set "
+                    "the repo does not agree is required. Re-cut the record with "
+                    "`uv run python tools/mergify_config_guard.py --recut`"
+                )
             notes.append(
                 f"{RECORD_REL} disagrees with {MERGIFY_REL}: snapshot-only="
                 f"{sorted(set(snapshot) - set(union))} config-only="
@@ -308,7 +329,6 @@ def derive_from_config(root: Path) -> RequiredSet:
 
 def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -> RequiredSet:
     """Derive the required set as it stands on a PROTECTED ref — never the caller's tree.
-
     ⛔ A GATE THAT READS ITS OWN SUBJECT IS DEFEATABLE BY ITS SUBJECT. Both inputs are
     tracked files, so a PR can edit `.mergify.yml` and `docs/ci/required-contexts.json`
     in the SAME diff and the two agree with each other: the snapshot witness would then
@@ -325,10 +345,39 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
     ``ref`` is a parameter because `--required-set --ref HEAD` is a legitimate
     diagnostic ("what would THIS tree require?"); it is not a default, because the
     protected ref is the authoritative answer.
+
+    ⛔ IT DOES NOT FETCH, AND IT DOES NOT PRETEND TO. `git show <ref>:<rel>` succeeds on any
+    ref that EXISTS, however stale, so freshness is not something this function can assert.
+    What it does instead is DISCLOSE the sha it read (`source` carries `<ref> (<sha12>)`), so
+    a stale protected ref is visible in every verdict rather than being invisible. A caller
+    that needs a fresh ref must fetch it: `ready_for_owner.collect_probe` does, via
+    `_read_tree`, which is why that read is ordered FIRST there.
     """
     import subprocess
     import tempfile
 
+    def _rev_parse() -> str:
+        """The sha `ref` resolves to HERE — so the caller can see what was actually read."""
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--verify", ref],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise RequiredSetUnreadable(f"git rev-parse {ref}: {exc}") from None
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            raise RequiredSetUnreadable(
+                f"git rev-parse --verify {ref} failed: "
+                f"{detail[0] if detail else f'exit {proc.returncode}'}"
+            )
+        return proc.stdout.strip()
+
+    sha = _rev_parse()
     with tempfile.TemporaryDirectory(prefix="required-set-") as tmp:
         root = Path(tmp)
         for rel in (MERGIFY_REL, RECORD_REL):
@@ -341,7 +390,10 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
                     timeout=timeout,
                     check=False,
                 )
-            except (OSError, subprocess.TimeoutExpired) as exc:
+            except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+                # `ValueError` covers `UnicodeDecodeError`: `text=True` decodes the blob,
+                # and a non-UTF-8 `.mergify.yml` raised straight out of a function whose
+                # contract is to return a set or refuse.
                 raise RequiredSetUnreadable(f"git show {ref}:{rel}: {exc}") from None
             if proc.returncode != 0:
                 detail = (proc.stderr or proc.stdout or "").strip().splitlines()
@@ -357,4 +409,6 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
         # The committed-config parser is the SAME one, so the ref path cannot drift
         # from the workdir path: only the bytes differ.
         derived = derive_from_config(root)
-    return derived
+    # Disclose WHAT WAS READ, not what was hoped for: `git show` does not fetch, so the sha
+    # is the only honest statement about freshness.
+    return dataclasses.replace(derived, source=f"{derived.source} at {ref} ({sha[:12]})")
