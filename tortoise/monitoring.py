@@ -3113,8 +3113,13 @@ async def run_control_plane_call(fn, *, op: str,
 
     Fail-closed: a missed bound or a saturated backlog raises
     :class:`ControlPlaneOffloadError`. A builtin ``TimeoutError`` raised by
-    ``fn`` ITSELF is a DOMAIN error and propagates unchanged — the three cases
-    are disambiguated by inspecting the future, not conflated (#3498 review).
+    ``fn`` ITSELF is a DOMAIN error and propagates unchanged WHEN IT WAS RAISED
+    WITHIN ITS BOUND — raised AFTER the deadline it is a late answer like any
+    other, so the caller gets :class:`ControlPlaneOffloadError` instead (#10941;
+    see the clock arm below). The three cases are told apart from the future
+    PLUS the worker's completion stamp, never from the exception class alone —
+    the class cannot discriminate, which is exactly why both halves exist
+    (#3498 review).
 
     ⛔ #10941: the WITNESS is not enough for this arm — the CLOCK is. A future
     that is DONE when the bound's ``TimeoutError`` arrives proves only that the
@@ -3175,7 +3180,10 @@ async def run_control_plane_call(fn, *, op: str,
             # Distinguish the three sources of TimeoutError that meet here:
             #   1. `fn` raised it, WITHIN its bound -> a domain error, propagate
             #   2. the pool refused the submit      -> `_WorkerBacklogFull`, fail closed
-            #   3. `wait_for`'s bound expired first -> fail closed
+            #   3. `wait_for`'s bound expired first -> fail closed, EXCEPT that the
+            #      timer's cancel can win the `_ready` batch after the callable
+            #      answered INSIDE its deadline — that is a success (see the stamp
+            #      arm below), not a fail-closed bound miss
             future_exc = (future.exception()
                           if future.done() and not future.cancelled() else None)
             # ⛔ BOTH halves are required (#10941), on BOTH polarities. The

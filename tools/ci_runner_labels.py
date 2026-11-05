@@ -76,9 +76,11 @@ import sys
 # is module-level and 3.11+, so an older interpreter raises ImportError there before any
 # later guard could run (the guard must be the first statement after the docstring).
 # ⛔ The invocation named below is the SCRIPT form, which is what the pin DERIVES and
-# ASSERTS: `_package_module` returns None for a `tools/<x>.py` (`len(parts) < 3` — only
-# a path UNDER a chain of `__init__.py`-carrying directories is addressed by `-m`), so
-# `_expected_invocation` yields the path form and the pin asserts the refusal NAMES it.
+# ASSERTS: `_package_module` returns None for a `tools/<x>.py` under a HARD-CODED
+# depth rule (`len(parts) < 3`: a top-level script is a loose script whatever
+# `__init__.py` sits beside it, so `tools/__init__.py` does NOT make it a package
+# module), so `_expected_invocation` yields the path form and the pin asserts the
+# refusal NAMES it.
 # `-m tools.ci_runner_labels` does resolve too — a namespace package is enough, measured
 # with `tools/__init__.py` removed, still exit 0 — but it is not the form the pin
 # derives, so it is not the one this refusal names.
