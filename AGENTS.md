@@ -492,16 +492,32 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 **One line, before delivery work:** `uv run python tools/gh_write_preflight.py --repo "$OR"`
 
 - `exit 0` = `GH-WRITE-OK(issues+pull-requests+contents writable @ https://api.github.com)` — the credential
-  carries Issues, Pull-requests and Contents write, so it will not be refused at push/comment/close time.
+  carries Issues, Pull-requests and Contents write, so it will not be refused at push/comment/close time,
+  **provided `git` resolves the same credential** (this proves the one `gh` resolves; a `git` whose
+  `credential.helper` holds a different token is outside what it measures — see the tool's
+  `resolve_credential` residual).
   ⛔ **A pass whose OK line names any endpoint other than `https://api.github.com` is NOT a pass** — that is
   the hermetic test seam (`GH_WRITE_PREFLIGHT_API`), so unset it and re-run. (The tool proves those three
   grants; it does not promise a branch-protection rule will accept the merge.)
-- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — do NOT start the work. Name the reason in your report; the
-  fix is the credential (re-mint with that permission, or point the lane at the credential that has it).
+- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — do NOT start the work; name the reason in your report.
+  ⛔ **THE REASON NAMES ITS OWN CLASS, AND THE CLASS SAYS WHAT THE FIX IS — the credential is only one of
+  three, so read the reason and not just the exit code:**
+  - **credential verdict** — `contents-write-missing`, `pull-requests-write-missing`,
+    `issues-write-missing`, `token-read-only`, `bad-credentials`, `no-credential`: the credential cannot
+    write. Re-mint it with that permission (or point the lane at the credential that has it) before the
+    work starts.
+  - **environment** — `usage`, `wrong-host`, `repo-not-visible`, `sso-unauthorized`: the invocation or the
+    access is wrong. ⛔ **Do NOT re-mint the token** — fix the `--repo`/`$OR` value (the documented command
+    reads `$OR`, so an unset one answers `usage`), the host, the repo access, or the SSO authorisation.
+  - **transient** — `rate-limited`, `server-error`, `transport`, `forbidden`: GitHub, or the path to it,
+    failed. **Re-run; do not re-mint the token and do not park the work.** The tool orders the rate-limit
+    check ahead of every permission verdict precisely so a shared-account limit is not charged to the
+    credential.
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
 `$HOME/.config/gh/hosts.yml`, so a box with two credentials resolves whichever the environment happens to
-name — and `git` inherits it through `credential.helper = !gh auth git-credential`. A read-only credential
+name — and `git` resolves its own through whatever `credential.helper` that box happens to have configured,
+which may be a different token or none. A read-only credential
 therefore fails **only at push time**, after the work exists, and it presents as
 `remote: Permission … denied`, which reads like an account problem. Measured 2026-11-05: a 17-lane wave
 produced **0 landings** while every lane honestly reported "built, parked".

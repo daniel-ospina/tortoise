@@ -2758,11 +2758,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              "tools/ci_runner_labels.py",
            # gh_write_preflight (#10930): the lane's write-capability gate, wired as a HARD RULE in
            # AGENTS.md. `tools/` is in NON_PYTHON_PREFIXES, so a change to this file selects NO
-           # surface and its 38 pins would run only by luck — the same #1349/#3332/#3616 silent-drop
+           # surface and its own pins would run only by luck — the same #1349/#3332/#3616 silent-drop
            # class above, on the one file whose weakening (adding 200 to `_WRITE_OK`, dropping
            # `_validate_api_base`, deleting the contents probe) turns a refusal into a FALSE PASS.
+           # No count is quoted here on purpose: the pin count IS the size of the suite, so any number
+           # written into this comment re-stales the next time a test is added (and this branch was
+           # already charged that twice).
            # MEASURED before this entry: `select(["tools/gh_write_preflight.py"], "pull_request",
            # load_manifest())` -> surfaces=[], 72 files, own suite ABSENT.
+           # Pinned by `tests/test_ci_selection.py::test_gh_write_preflight_runs_on_a_tools_only_change`.
            "tools/gh_write_preflight.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",

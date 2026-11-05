@@ -24,8 +24,10 @@ Run:
 
 The carve-out is required: this file is stdlib-only and needs NO database, but the repo's default
 pytest session refuses to start without `TORTOISE_DB_URI` (epic #1647 P4) unless the carve-out is
-set — so `uv run pytest tests/test_gh_write_preflight.py` alone errors 24 times for a reason that has
-nothing to do with these tests.
+set — so `uv run pytest tests/test_gh_write_preflight.py` alone errors once per COLLECTED TEST, for a
+reason that has nothing to do with these tests. (No count is stated on purpose: the number is the size
+of this file, so any number written here re-stales the next time a test is added — the defect a review
+finding already charged to this branch twice.)
 """
 
 from __future__ import annotations
@@ -982,12 +984,12 @@ def test_a_TRUNCATED_echo_of_the_credential_is_redacted_too():
     suffixes."""
     secret = "0123456789abcdef" * 6 + "0123"          # 100 chars, no documented prefix
     arms = [
-        (403, {"retry-after": secret[:20]}, '{"message":"Resource not accessible"}', []),
-        (403, {"x-oauth-scopes": f"repo, {secret[:30]}"}, '{"default_branch":"main"}', []),
-        (400, {}, '{"error":"blocked","request":"Authorization: Bearer ' + secret[:61] + '"}', []),
-        (200, {"x-oauth-scopes": f"repo, {secret[24:]}"}, '{"default_branch":"main"}', []),   # SUFFIX
+        (403, {"retry-after": secret[:20]}, '{"message":"Resource not accessible"}'),
+        (403, {"x-oauth-scopes": f"repo, {secret[:30]}"}, '{"default_branch":"main"}'),
+        (400, {}, '{"error":"blocked","request":"Authorization: Bearer ' + secret[:61] + '"}'),
+        (200, {"x-oauth-scopes": f"repo, {secret[24:]}"}, '{"default_branch":"main"}'),   # SUFFIX
     ]
-    for read, args in [(a[0:3], a[3]) for a in arms]:
+    for read in arms:
         with _Stub(read=read) as s:
             env = _env(s.base, secret)
             p = subprocess.run([sys.executable, str(TOOL), "--repo", "daniel-ospina/tortoise", "--json"],
@@ -1097,6 +1099,39 @@ def test_the_early_repo_refusals_scrub_the_base_and_serialise_under_json():
                 f"{bad_repo!r} leaked the credential from api_base at offset {off}: {blob!r}"
 
 
+def test_every_json_refusal_carries_the_same_schema():
+    """A `--json` consumer must not have to branch on WHICH refusal it got (review finding I4).
+
+    The `--repo` argument-error tier serialised its own four-key payload while every refusal out of
+    `preflight()` carried `credential_source`, `token_shape` and `surfaces`, so `res["surfaces"]`
+    raised `KeyError` **precisely on "you typed the command wrong"** — the first path a lane reaches,
+    and the one this branch exists to make parseable. Both tiers are asserted against one key set, so a
+    key added to either shape alone reds here.
+    """
+    schema = {"repo", "api_base", "credential_source", "token_shape", "ok", "reason", "detail",
+              "surfaces"}
+
+    # (a) the argument-error tier — `--repo` with no `/`, refused before any request
+    with _Stub() as s:
+        env = _env(s.base, "github_pat_dummy_finegrained")
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "or", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 1, p.stdout + p.stderr
+    usage = json.loads(p.stdout)
+    assert usage["reason"] == "usage", usage
+    assert set(usage) == schema, sorted(set(usage) ^ schema)
+
+    # (b) the `preflight()` tier — a well-formed repo with no credential
+    with _Stub() as s:
+        env = _env(s.base, None)
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    assert p.returncode == 1, p.stdout + p.stderr
+    measured = json.loads(p.stdout)
+    assert measured["reason"] == "no-credential", measured
+    assert set(measured) == schema, sorted(set(measured) ^ schema)
+
+
 def test_the_repo_field_is_scrubbed_because_or_can_hold_the_credential():
     """`--repo` defaults to `$OR`, and the repo field is echoed in the `--json` artifact (review cycle 13).
 
@@ -1130,7 +1165,8 @@ def test_the_credential_source_label_is_scrubbed_because_it_carries_hosts_yml_te
     `--json` artifact, so the "label is never a value" promise was unenforced.
     """
     secret = "0123456789abcdef0123456789abcdef01234567"      # prefix-less: the shape regex cannot help
-    import tempfile, os as _os
+    import os as _os
+    import tempfile
     with tempfile.TemporaryDirectory() as d:
         with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {secret}\n    oauth_token: {secret}\n    git_protocol: https\n")
@@ -1155,7 +1191,8 @@ def test_a_login_shaped_value_is_kept_but_file_content_never_becomes_the_label()
     """
     token = "0123456789abcdef0123456789abcdef01234567"          # the credential actually used
     not_a_login = "fedcba9876543210fedcba9876543210fedcba98"     # a DIFFERENT prefix-less secret
-    import tempfile, os as _os
+    import os as _os
+    import tempfile
     with tempfile.TemporaryDirectory() as d:
         with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {not_a_login}\n    oauth_token: {token}\n    git_protocol: https\n")
@@ -1197,7 +1234,8 @@ def test_inputs_that_are_not_credentials_are_still_never_echoed_as_one():
     assert secret not in blob, f"a no-credential refusal echoed the repo: {blob!r}"
 
     # (c) the hosts.yml label carries no file content at all
-    import tempfile, os as _os
+    import os as _os
+    import tempfile
     with tempfile.TemporaryDirectory() as d:
         with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
             fh.write(f"github.com:\n    user: {secret}\n    oauth_token: 0123456789abcdef0123456789abcdef01234567\n    git_protocol: https\n")

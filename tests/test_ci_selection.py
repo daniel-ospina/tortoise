@@ -14155,6 +14155,25 @@ def test_purge_legacy_turns_guard_runs_on_a_tools_only_change():
     assert "test_10017_purge_guard.py" in r["test_files"], r
 
 
+def test_gh_write_preflight_runs_on_a_tools_only_change():
+    # #10930: `tests/test_gh_write_preflight.py` (registered `core`) pins the lane's
+    # credential-write gate — the three zero-side-effect probes, `_WRITE_OK = (422,)`
+    # alone, the one-item `not-permitted` allow-list, and every redaction arm. `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry and `tools/gh_write_preflight.py` matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a tools-only diff was filtered
+    # out BEFORE the "not matched -> core" fallback: a PR that added `200` to
+    # `_WRITE_OK`, dropped `_validate_api_base` or deleted the contents probe would run
+    # `python-ci-gate` GREEN with none of the gate's own pins (the #1349/#3332/#3616
+    # silent-drop class) — and the consequence of that one is a FALSE PASS of the
+    # credential gate, i.e. category A.
+    # Mutation check: removing the CORE_ALSO entry fails the arms below
+    # (surfaces == [] and the pin absent from test_files).
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+
+
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
     # #5612: `tests/test_journal_growth.py` (registered `core`) pins the
     # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as
