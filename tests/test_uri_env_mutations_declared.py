@@ -832,6 +832,20 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # lane flip. Do not cite it as a measured leak (review finding, baf951165).
     "test_cli_config_show.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #10610 `test_the_readmes_floor_provenance_claim_matches_the_code`: the ONE
+    # site in this module, and the mutation is the TEST'S INPUT, not a lane it
+    # claims coverage on. DELIBERATE_URI: the pin drives the producer's real
+    # `main()` (the sentence it checks is about a RUN, so a helper-only call
+    # cannot see the split it pins) with `backend_ready()` and the record
+    # readers stubbed, and the URI is pinned to a DELIBERATELY UNREACHABLE
+    # docker DSN (`127.0.0.1:1`) — so a run whose refusal fails to fire before
+    # the backend is touched still cannot fall back to an embedded graph on the
+    # shared default path. Function-scoped `monkeypatch`, auto-undone at
+    # teardown, so no lane flip reaches a later test and nothing here claims a
+    # docker-half green. Read it as: this module forces the docker lane for one
+    # process and asserts a REFUSAL, never a measurement.
+    "test_7949_capstone_measure.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:@127\.0\.0\.1:1/'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
