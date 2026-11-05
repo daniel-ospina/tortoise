@@ -195,7 +195,7 @@ Behavioural, executable, each tracing to exactly one scope item.
 
 **Given** the four DoD rows and the integration-surface map
 **When** `tools/dod_5090_probe.py` runs at the closing head **and** the capstone walks the surface map
-**Then** every DoD row is `MET`, or names an issue that is **OPEN at that head** owning its remainder
+**Then** every DoD row is `MET`, or names **an OPEN issue or an open decision's own recorded home** owning its remainder
 **And** every capability S1–S4 appears in the surface map with a named test layer
 **And** the capstone checklist passes end-to-end
 
@@ -260,3 +260,7 @@ Rewritten after the prior-answer audit (`01-align.md` §8). Changes: V1 removed 
 `04-plan.md` carries the **coherence review and the risk table** in §8 (it records no separate gate log);
 `05-decompose.md` carries its verification plan in §6. The plan's review outcome is recorded here (§7.5) and
 in the PR cycle. The PR review at head `9f5a419` returned **2 P1 + 8 P2** — all incorporated in this revision: acceptance item 3 restated (it still read "V1 decided and implemented", the reversal the rewrite exists to prevent); **this gate log, which the rewrite had dropped**; the **384-dim** correction; **S4's premise corrected** (the attribute is assigned unconditionally; only the warning is gated; the served set is never retained); the withdrawn profit chain removed from §3/§5; the dangling `§3.2` pointer; the plan's false J2↔D6 claim and the dropped `scan_fallback` case; **C2's target replaced** ("zero unclassified" is already true at HEAD, so it could not distinguish completion from a no-op); and the **reconciliation against the 2026-10-31 child set**.
+
+**Rounds 2–4, on top of that** — recorded because this log stopped at round 1 while three more rounds landed fixes, which is the "each cycle's issues and fixes documented" exit condition failing quietly. After `9f5a419` the head moved through `db6454113d`, `b481222e46`, `5fa0c2ac08` and `5e98f4de9d`, with findings on: a **second** fabricated-quote class (owner rulings quoted but never relayed to an artifact — fixed by relaying both verbatim at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691)); the four-vs-five resident-index count, where the lead sentence said four *further* and the conclusion said four *in total*; the arming correction (the owner never withheld arming — it was authorised 2026-11-03T19:06Z, and `#9548` is open on its write path, rejected `22P02` under `#10593`); a `[sic]`-stripped quotation of the `#4333` unit ruling; two probe-docstring quotations that did not resolve against their source; and the row-4 closure rule below.
+
+**This delta, at `8a7e60fe0b`** — the last of the closure rule's three statements, E2E-7, was still issue-only while §6 and R6 admitted a decision's own home; a capstone executing E2E-7 would have failed the epic's own gate on a row §6 passes. All three now agree.
