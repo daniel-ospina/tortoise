@@ -1090,6 +1090,32 @@ def test_the_early_repo_refusals_scrub_the_base_and_serialise_under_json():
                 f"{bad_repo!r} leaked the credential from api_base at offset {off}: {blob!r}"
 
 
+def test_the_repo_field_is_scrubbed_because_or_can_hold_the_credential():
+    """`--repo` defaults to `$OR`, and the repo field is echoed in the `--json` artifact (review cycle 13).
+
+    The sibling `api_base` key was scrubbed in cycle 12 while this one was not, so a mis-set `$OR` that
+    contained the credential printed it in full. Both the guard tier and `preflight()` are covered here.
+    """
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    # ⛔ TWO DIFFERENT ASSERTIONS, ON PURPOSE: a BARE token has no `/`, so it is a usage refusal; a token in
+    # the NAME half (`o/<token>`) is a syntactically valid repo, so it is measured (and may pass) — the
+    # property under test there is the REDACTION, not a refusal. Asserting a refusal for the second shape
+    # was a false red in the first version of this test.
+    for repo_value, expect_rc in ((secret, 1), ("o/" + secret, 0)):
+        with _Stub() as s:
+            env = _env(s.base, secret)
+            p = subprocess.run([sys.executable, str(TOOL), "--repo", repo_value, "--json"],
+                               capture_output=True, text=True, env=env, timeout=120)
+        assert p.returncode == expect_rc, f"{repo_value[:12]}… expected rc {expect_rc}: {p.stdout}{p.stderr}"
+        res = json.loads(p.stdout)
+        if expect_rc:
+            assert res["reason"] == "usage", res
+        blob = p.stdout + p.stderr
+        for off in range(0, max(1, len(secret) - 7)):
+            assert secret[off:off + 8] not in blob, \
+                f"the repo field leaked the credential at offset {off}: {blob!r}"
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

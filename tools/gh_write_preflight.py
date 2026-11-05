@@ -355,7 +355,7 @@ def _sanitise_result(res: dict, secret: str) -> dict:
     on stderr, and `--json`), and a fix applied per call site left `ratelimit_remaining` raw after
     cycles 5 and 6 both closed a sibling header — the exact "scrub at the source" lesson.
     """
-    for key in ("detail", "ratelimit_remaining", "scopes", "api_base"):
+    for key in ("detail", "ratelimit_remaining", "scopes", "api_base", "repo"):
         if isinstance(res.get(key), str):
             res[key] = _scrub(res[key], secret)
     if isinstance(res.get("surfaces"), dict):
@@ -561,7 +561,10 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
 
 def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     result: dict = {
-        "repo": repo,
+        # ⛔ THE REPO IS ECHOED TOO — scrub it by value, like api_base (review cycle 13): `--repo`
+        # defaults to `$OR`, so a mis-set `$OR` (or a literal token) would otherwise be printed in the
+        # `--json` artifact. Added to the sanitise key list as well, for any field added later.
+        "repo": _scrub(repo, token or ""),
         # ⛔ WHICH ENDPOINT ANSWERED IS PART OF THE VERDICT. Without this key a consumer holding the
         # `--json` artifact cannot tell a measurement of GitHub from a measurement of anything else.
         # ⛔ REDACTED, because this dict IS the `--json` output: see `_printable_base`.
@@ -798,7 +801,7 @@ def main(argv: list[str]) -> int:
     # control characters raise `UnicodeEncodeError` inside `http.client` (cycle 3). A missing `/` is the
     # same refusal class, so it serialises the same way instead of printing a human line at a JSON consumer.
     def _repo_refusal(detail: str) -> int:
-        print(json.dumps({"repo": args.repo,
+        print(json.dumps({"repo": _scrub(args.repo, token),
                           "api_base": _scrub(_printable_base(args.api_base), token),
                           "ok": False, "reason": "usage", "detail": detail},
                          indent=2, sort_keys=True) if args.json
