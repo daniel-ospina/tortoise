@@ -1676,9 +1676,50 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
              # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
              # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
-             # Pinned by
-             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1.
-             "tools/gh_write_preflight.py",
+             # Pinned by TWO cases, and they do not cover the same thing:
+             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
+             # (the entry EXISTS; green under either the exact path or the prefix) and
+             # tests/test_ci_selection.py::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped
+             # (the entry is a PREFIX — reds on THREE mutations, not just a narrowing: narrowed
+             # back to the exact path, widened to the blanket `tools/`, and removed outright. The
+             # WIDENING is the one the sibling asserts cannot catch — a blanket `tools/` still
+             # claims both siblings — so the body carries an over-match negative control
+             # (`tools/other_tool.py` must not claim this suite), which is the bound the prefix's
+             # stated cost relies on. Measured: under the exact path the second case FAILS and the
+             # first still passes, which is why the first alone did not pin this line).
+             # ⚠️ Both citations carry their `tests/…py` path deliberately. The ratchet that makes
+             # "Pinned by" checkable only resolves citations written as `tests/<path>.py::<name>`,
+             # so a bare `::<name>` is INVISIBLE to it — such a citation would silently survive a
+             # rename or deletion of the very case that pins this line.
+             # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
+             # NOTE THE TUPLE — which tuple holds a `tools/` path is what decides its fate, and
+             # that is why this entry is in `CORE_ALSO` rather than `TOOL_CARVEOUTS`:
+             #   * `CORE_ALSO` membership KEEPS the path (`_selection_relevant`) AND CLAIMS it, so
+             #     `core` is forced into the selection — the `matched.add("core")` in `select()`'s
+             #     `CORE_ALSO` branch — hence this entry yields `core` only, `full=False`. Cited by
+             #     SYMBOL, not by line: a line number here has already drifted twice on this entry.
+             #   * `TOOL_CARVEOUTS` membership only KEEPS the path (`_keep_changed`); it claims no
+             #     surface, so a kept path that no `SOURCE_PATTERNS` row matches stays unknown and
+             #     fails closed to the FULL matrix — `tools/work_claim.py` -> all eight surfaces,
+             #     `full=True`. Measured by moving THIS entry there: `full=True`, every surface.
+             #   * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` ->
+             #     `eval`, `full=False`).
+             #   * in NEITHER tuple is the path kept at all: `surfaces=[]`, `full=False` — the
+             #     tier-1 smoke set, which does not carry this suite. That is the silent drop below.
+             # ⚠️ Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row
+             # matches, so the tuple alone is the variable that differs between them — do not
+             # restate this as "the row decides", which was wrong in the opposite direction.
+             # The mechanism here is the same `startswith`, so an EXACT path claims only the
+             # spelling that exists today and silently re-opens this very drop for a split-out
+             # sibling (`gh_write_preflight_<something>.py`): the gate would again be a diff that
+             # runs none of its own arms. Over-matching costs extra CI on a file that is not the
+             # tool; under-matching ships the write proof nobody runs.
+             # ⛔ The prefix does NOT buy RENAME survival — a renamed `tools/write_preflight.py` no
+             # longer carries the stem, and nothing here claims it. Said explicitly because this
+             # sentence previously read as if both shapes were covered, which is the "a pin that
+             # does not exist" class (the prefix case's docstring states the same boundary; a
+             # rename-detection pin belongs with the diff that performs the rename).
+             "tools/gh_write_preflight",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
