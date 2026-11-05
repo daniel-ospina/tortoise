@@ -297,7 +297,6 @@ _R4_WORDS = r"|unfixed\b|unaddressed\b|still\s+open\b|remains?\s+open\b|not\s+fi
 #: P1 — `**Verdict: CLEAN** — there is no test for the P1.` cleared while
 #: `**Verdict: CLEAN** — the P1 was not resolved.` blocked, one word apart. The exemption now
 #: has to GOVERN the token it exempts.
-_SEVERITY_TOKEN_RE = re.compile(r"(?i)\b(?:P[0-2]|blockers?|priority\s+[0-2])\b")
 _SEVERITY_TOKEN_RE = re.compile(r"(?i)\b(?:P[0-2]s?|blockers?|priority\s+[0-2]s?)\b")
 #: ⛔ A BLANK LINE IS A LINE WHOSE ONLY CONTENT IS WHITESPACE — not just `\n\n`. A body written
 #: in a browser or pasted from a terminal carries `\r\n\r\n`, and an editor that leaves a space
@@ -319,28 +318,30 @@ _RETRACTION_NO_SEVERITY_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + 
 _NEXT_PARA_RETRACTION_RE = re.compile(
     r"(?i)(?:" + _R1_NO_LONGER + _R2_ATTRIBUTED + _R4_WORDS + r")"
 )
-#: A SEVERITY TOKEN'S COMPLETION MAY SIT ON ITS LEFT. `Fixed the P1 in 4f450ae81` and `I fixed
-#: the P1 and the P2 in 4f450ae81` state the completion BEFORE the token, which the after-arm
-#: cannot see. Bounded to the SAME SENTENCE (`[^.!?\n]{0,60}`) so it cannot reach across a
-#: full stop from an unrelated earlier sentence.
+#: ⛔ IT MAY NOT CROSS A CONTRASTIVE, A CLAUSE BREAK, OR A COMMA (review cycle 8). A plain
+#: character window reached from `fixed` in `the earlier P2 was fixed, but the P1 is still
+#: there` all the way to the P1 and exempted the very finding the sentence warns about; the
+#: comma form is the same defect one word over: `Fixed the P2, the P1 needs work.`
 _SEVERITY_COMPLETED_BEFORE_RE = re.compile(
     r"(?i)\b(?:closed|closes|fixed|fixes|resolved|resolves|addressed|addresses|landed)\b"
-    # ⛔ IT MAY NOT CROSS A CONTRASTIVE OR A CLAUSE BREAK. `the earlier P2 was fixed, but the
-    # P1 is still there` states a COMPLETION for the P2 and a LIVE finding for the P1; a plain
-    # character window reaches from `fixed` to the `P1` and exempts the thing the sentence is
-    # warning about. `but`/`however`/`though`/`yet` and `;` end the completion's reach, which
-    # is the same rule the file already applies to bare contrastives one level up.
-    r"(?:(?!\bbut\b|\bhowever\b|\bthough\b|\byet\b)[^.!?;\n]){0,60}\Z"
+    r"(?:(?!\bbut\b|\bhowever\b|\bthough\b|\byet\b)[^.!?,;\n]){0,60}\Z"
+)
+#: A ZERO-COUNT is the other way to clear a severity in a status comment: `P1: none`,
+#: `P1 findings: 0`, `P2s — nil`. This module already reads that shape for the report side
+#: (`ZERO_SEVERITY_COUNT_RE`), so a clear guard that could not see it refused real clears.
+_SEVERITY_ZERO_COUNT_RE = re.compile(
+    r"(?i)\s*(?:findings?|issues?|blockers?)?\s*[:—–-]\s*(?:none|0|zero|nil|n/a)\b"
 )
 #: The clear spelling for a token: `no P0/P1/P2` / `without P1` — a negation IMMEDIATELY before
 #: it. It must be immediate, and it must be able to see the LIST the negation governs and the
-#: qualifiers a writer puts inside it: `no P0, P1 or P2`, `no P0/P1/P2`, `No new P1`. A window
-#: that accepted only `[/,]` lists refused `No P0, P1 or P2 findings remain.` and `No new P1
-#: findings` — real clears, dismissed on a spelling (review cycle 7, finding 2). It must NOT be
-#: so permissive that it runs away from the negation: `no test for the P1` is a LIVE finding.
+#: QUALIFIERS a writer puts inside it: `no P0, P1 or P2`, `no P0/P1/P2`, `No new P1 findings`,
+#: `No remaining blockers`, `Zero outstanding blockers`. A window that accepted only `[/,]`
+#: lists and the word `new` refused every other qualifier — real clears, dismissed on a
+#: spelling (review cycles 7 and 8). It must NOT be permissive enough to run away from the
+#: negation: `no test for the P1` is a LIVE finding.
 _SEVERITY_NEGATED_BEFORE_RE = re.compile(
     r"(?i)(?:\bno|\bwithout\b|\bzero\b|\bnone\s+of)\b"
-    r"(?:\s+new)?\s+(?:the\s+)?"
+    r"(?:\s+(?:new|remaining|outstanding|other|further|open))?\s+(?:the\s+)?"
     r"(?:P[0-2]s?\s*(?:[/,]|\bor\b|\band\b)?\s*)*\Z"
 )
 #: The other clear spelling: the token is followed by a COMPLETION — `the P2 findings are
@@ -351,11 +352,30 @@ _SEVERITY_NEGATED_BEFORE_RE = re.compile(
 #: SECOND token, so `the P1 and the P2 are both addressed now` must exempt the `P1` too.
 _SEVERITY_COMPLETED_AFTER_RE = re.compile(
     r"(?i)(?:\s*(?:,|and|or)\s*(?:the\s+)?P[0-2]s?)*\s*"
-    # ⛔ THE VERB IS OPTIONAL. `no P1 outstanding, all P2s closed` is ELLIPTICAL — the second
-    # clause borrows the first's verbless shape, and requiring `is|are|has been` refused it.
+    # A noun may qualify the finding between it and its completion: `The P1 fix landed in
+    # 4f450ae81.` — `landed` is the completion, `fix` is the subject the token modifies. The
+    # same slot carries the finding's PROVENANCE: `the P1 from cycle 3 is gone`. Both are
+    # anchored and bounded, so they cannot drift into the character-window bug below.
+    r"(?:\s+(?:fix|patch|change|update|remediation|resolution|findings?|issues?))?\s*"
+    r"(?:\s+from\s+\w[\w/ ]{0,18})?\s*"
+    # ⛔ THE VERB IS OPTIONAL because the elliptical form is real (`no P1 outstanding, all P2s
+    # closed`). It must therefore be ANCHORED to the token — see `_retracted_from`, which uses
+    # `match`, not `search`. With a `search` over a character window any `fixed|closed|…` sixty
+    # characters away stood the arm down, so `The P1 was never fixed.` CLEARED (review cycle 8,
+    # P0). Anchored, the phrase has to start at the token.
     r"(?:\b(?:is|are|was|were|has|have|had)(?:\s+been)?"
     r"(?:\s+(?:now|both|all|already|since))?\s+)?"
-    r"(?:closed|fixed|resolved|addressed|gone)\b"
+    r"(?:closed|fixed|resolved|addressed|gone|landed)\b"
+)
+#: ⛔ A COMPLETION ON THE LEFT MAY NOT GOVERN A TOKEN THAT STARTS ITS OWN PREDICATE. In
+#: `Fixed the P2 and the P1 needs work.` the completion verb plainly governs the P2, and the P1
+#: is the SUBJECT of a new clause that says it is still live — but a left window cannot tell that
+#: from `I fixed the P1 and the P2 in 4f450ae81.`, where one completion governs both. The
+#: predicate after the token is what separates them, and it is why this arm is skipped there
+#: (`the P2 are both addressed now` still clears through `_SEVERITY_COMPLETED_AFTER_RE`).
+_SEVERITY_PREDICATE_AFTER_RE = re.compile(
+    r"(?i)\s*(?:needs?|requires?|remains?|is|are|was|were|still|unresolved|open|unfixed|not"
+    r"|has|have|had)\b"
 )
 #: ⛔ A VERDICT ATTRIBUTED TO ANOTHER ARTIFACT IS A CITATION. The preamble is graded to the
 #: START OF THE LINE — an arbitrary character cap bought nothing and cost a bypass: the same
@@ -422,13 +442,20 @@ def _retracted_from(text: str, end: int) -> bool:
         return True
     # The severity arm is graded over the WHOLE suffix, so where the token sits makes no
     # difference: on the verdict's line, on the next line, one paragraph down, or four.
+    # ⛔ THE CLEAR EXEMPTIONS ARE ANCHORED TO THE TOKEN, not searched in a character window.
+    # `ever a completion sixty characters away stood the arm down, so `The P1 was never fixed.`
+    # and `The P1 is still not closed.` both CLEARED (review cycle 8, P0) — a character window
+    # is the bug, whichever distance it happens to use.
     for token in _SEVERITY_TOKEN_RE.finditer(suffix):
         left = suffix[: token.start()]
         if _SEVERITY_NEGATED_BEFORE_RE.search(left):
             continue
-        if _SEVERITY_COMPLETED_BEFORE_RE.search(left):
+        if _SEVERITY_ZERO_COUNT_RE.match(suffix, token.end()):
             continue
-        if _SEVERITY_COMPLETED_AFTER_RE.search(suffix, token.end(), token.end() + 64):
+        if _SEVERITY_COMPLETED_BEFORE_RE.search(left) and not \
+                _SEVERITY_PREDICATE_AFTER_RE.match(suffix, token.end()):
+            continue
+        if _SEVERITY_COMPLETED_AFTER_RE.match(suffix, token.end()):
             continue
         return True
     return False

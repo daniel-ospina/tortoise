@@ -2591,3 +2591,65 @@ def test_the_severity_arm_reads_the_PLURAL() -> None:
         "**Verdict: CLEAN.**\n\nThe P1s are all closed.",
     ):
         assert rfo.asserts_a_clear(body) is True, body
+
+
+def test_a_completion_cannot_neutralise_a_live_token_from_across_the_sentence() -> None:
+    """A clear-side exemption must GOVERN the token it exempts, not merely be nearby.
+
+    Review cycle 8 found this as a **P0**: `_retracted_from` looked for the completion with
+    `search(suffix, token.end(), token.end() + 64)` over a pattern whose leading whitespace and
+    coordination groups can both match empty. So any `fixed|closed|resolved|addressed|gone`
+    within sixty characters stood the arm down — including the NEGATED spellings, which say the
+    exact opposite, and including a completion that governs a DIFFERENT token:
+
+        '**Verdict: CLEAN.** The P1 was never fixed.'                    -> CLEARED
+        '**Verdict: CLEAN.** The P1 is still not closed.'                -> CLEARED
+        '**Verdict: CLEAN.** The P1 has not yet been addressed.'         -> CLEARED
+        '**Verdict: CLEAN.** The P1 is nowhere near fixed.'              -> CLEARED
+        '**Verdict: CLEAN.** A P1 remains; the P2 was addressed.'        -> CLEARED
+        '**Verdict: CLEAN.** A P1 is open; the old flag is gone.'        -> CLEARED
+        '**Verdict: CLEAN.**\nFixed the P2, the P1 needs work.'          -> CLEARED
+        '**Verdict: CLEAN.**\nFixed the P2 and the P1 needs work.'       -> CLEARED
+        '**Verdict: CLEAN.**\n\nP1 open. P2 resolved.'                   -> CLEARED
+
+    Each one reported READY-FOR-OWNER over an open P1. The completion is now `match`ed AT the
+    token, the left-arm may not cross a comma, and a completion on the left never governs a
+    token that starts its own predicate. This arm is the tripwire for all three.
+    """
+    for body in (
+        "**Verdict: CLEAN.** The P1 was never fixed.",
+        "**Verdict: CLEAN.** The P1 is still not closed.",
+        "**Verdict: CLEAN.** The P1 has not yet been addressed.",
+        "**Verdict: CLEAN.** The P1 is nowhere near fixed.",
+        "**Verdict: CLEAN.** The P1 is a live regression. Nothing else was fixed.",
+        "**Verdict: CLEAN.** A P1 remains; the P2 was addressed.",
+        "**Verdict: CLEAN.** A P1 is open; the old flag is gone.",
+        "**Verdict: CLEAN.**\nFixed the P2, the P1 needs work.",
+        "**Verdict: CLEAN.**\nFixed the P2 and the P1 needs work.",
+        "**Verdict: CLEAN.**\n\nP1 open. P2 resolved.",
+    ):
+        assert rfo.asserts_a_clear(body) is False, body
+
+
+def test_the_zero_count_and_the_noun_qualifier_clear_spellings_still_clear() -> None:
+    """…and the anchoring must not refuse the shapes where the exemption DOES govern.
+
+    Review cycle 8 also reported the opposite direction, which is what makes the fix above a
+    trade rather than a tightening: a summary form this module already reads elsewhere
+    (`ZERO_SEVERITY_COUNT_RE` — `P[0-2]: 0|none|nil|zero`), the qualifiers a writer puts inside
+    a negation, and a noun or a provenance phrase sitting between the token and its completion
+    were all refused.
+    """
+    for body in (
+        "**Verdict: CLEAN.**\n\nP1: none. P2: none.",
+        "**Verdict: CLEAN.**\n\nP1 findings: 0",
+        "**Verdict: CLEAN.**\n\nP1 — none.",
+        "**Verdict: CLEAN.**\n\nNo remaining blockers.",
+        "**Verdict: CLEAN.**\n\nZero outstanding blockers.",
+        "**Verdict: CLEAN.**\n\nno other blockers",
+        "**Verdict: CLEAN.**\n\nThe P1 fix landed in 4f450ae81.",
+        "Verdict: CLEAN — the P1 from cycle 3 is gone.",
+        "Reviewer verdict: NO ISSUES FOUND. The two P2 findings are closed.",
+        "**Verdict: CLEAN.**\n\nI fixed the P1 and the P2 in 4f450ae81.",
+    ):
+        assert rfo.asserts_a_clear(body) is True, body
