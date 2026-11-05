@@ -1714,13 +1714,17 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     """§9.4 and §12.1b may not disagree about what the source vector embeds.
 
-    *What value makes this test fail?* The pre-fix tree, measured at
-    `71832318b` (the base before #10978 merged): §9.4 fails on
-    `_RETIRED_SUMMARY_BLUR` (present there, absent here) and §12.1b's footnote
-    fails on `_RETIRED_VECTOR_FOOTNOTE` (present there and, until this fix,
-    present here too). The sha is named because `origin/main` moves: once
-    #10978 merged, the retired strings were gone from `main` as well, so
-    "measured on origin/main" would have been FALSE within the hour.
+    *What value makes this test fail?* Measured per tree, because the answer
+    MOVED and the sha is named for that reason — `origin/main` is not a stable
+    referent: at `71832318b` (the base before `#10978` merged) BOTH retired
+    strings are present, so §9.4 fails on `_RETIRED_SUMMARY_BLUR` and §12.1b's
+    footnote fails on `_RETIRED_VECTOR_FOOTNOTE`. From `b748df7d0` (main,
+    post-`#10978`) onward NEITHER is present — and neither was present at any
+    commit of THIS branch, whose origin `2cc7a95ea` already carried `#10980`'s
+    correction. So on this branch both halves are that correction's REGRESSION
+    GUARD, not its author: the pin reds if either section drifts back, which is
+    the only thing that would catch it. "Measured on origin/main" would have
+    been FALSE within the hour, which is why the sha is named.
     *Does the test reach it?* Yes — the document is read from the tree, each half
     is scoped to its own section, and the home it must name is derived from the
     projection, not paraphrased here.
@@ -1747,9 +1751,9 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"`{home}` — that pointer is what stops a design embedding a topic "
         f"lexicon under #10000 once `#10852` lands")
     assert ":Source.summary" in s94, (
-        f"§9.4 no longer names `:Source.summary` as the field the vector must "
-        f"NOT read — naming the home without naming the trap leaves the "
-        f"*\"embed the summary already there\"* reading open")
+        "§9.4 no longer names `:Source.summary` as the field the vector must "
+        "NOT read — naming the home without naming the trap leaves the "
+        "*\"embed the summary already there\"* reading open")
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
         f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
