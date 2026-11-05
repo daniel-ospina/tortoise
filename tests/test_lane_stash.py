@@ -21,6 +21,7 @@ Run:
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -993,6 +994,52 @@ def test_lane_key_is_a_valid_git_ref_for_hostile_directory_names(tmp_path):
         ref = f"{mod.REFS_NS}/{key}/stash/1"
         cp = subprocess.run(["git", "check-ref-format", ref], capture_output=True, text=True)
         assert cp.returncode == 0, f"{name!r} -> {ref!r} is not a valid ref: {cp.stderr}"
+
+
+def test_lane_key_digest_does_not_follow_the_filesystem_encoding(tmp_path, monkeypatch):
+    """The digest INPUT is pinned to UTF-8, so the key cannot rotate with how the path is RE-ENCODED.
+
+    `os.fsencode` encodes with `sys.getfilesystemencoding()`, and the lane key names refs in a
+    SHARED namespace (`refs/lane/<key>/…`, `refs/pi-lane-wip/<key>/…`), so a digest that
+    followed the box's encoding would rewrite the key of a path that already had one — the
+    "pins look lost while they sat under the old key" verdict `lane_key`'s docstring forbids.
+    Measured: `'/tmp/café'` digests `19f0d7cb` as UTF-8 and `89b4df2f` as latin-1.
+
+    Scope, stated precisely: this pins the RE-ENCODE only. The DECODE that produced the path
+    string still uses the filesystem encoding, so the same on-disk bytes can yield a different
+    string (and so a different key) on a box that decodes them differently — measured
+    `b'/tmp/caf\xc3\xa9'` -> `19f0d7cb` decoded UTF-8 vs `6c7aacb7` decoded latin-1. The key is
+    stable across boxes that decode the path the same way, and this test claims no more.
+
+    The assertion is a SPY, not a locale switch, because the filesystem encoding cannot be
+    varied portably in-process: `os.fsencode` reads CPython's startup-time encoding (so
+    monkeypatching `sys.getfilesystemencoding` changes nothing — verified), and under a
+    non-UTF-8 locale `Path.resolve()` raises before the digest is even reached. Refusing the
+    call is discriminating on every box, UTF-8 or not.
+    """
+    mod = _load_tool()
+    d = tmp_path / "café"
+    d.mkdir()
+    resolved = str(d.resolve())
+
+    seen: list[str] = []
+    real = os.fsencode
+
+    def spy(path):
+        seen.append(str(path))
+        return real(path)
+
+    monkeypatch.setattr(os, "fsencode", spy)
+    key = mod.lane_key(d)
+
+    assert resolved not in seen, (
+        f"lane_key digested with the filesystem encoding (os.fsencode got {resolved!r})"
+    )
+    expected = hashlib.sha1(resolved.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+    assert key.endswith("-" + expected), key
+    # and it is the PRE-#10812 `.encode()` digest, so every key already written stays
+    # reachable rather than looking lost under the old one.
+    assert expected == hashlib.sha1(resolved.encode()).hexdigest()[:8]
 
 
 def test_push_pins_in_a_hostile_named_worktree(repo, tmp_path):
