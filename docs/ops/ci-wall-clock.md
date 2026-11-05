@@ -407,7 +407,11 @@ one run owns the pool, so every other PR waits for that run's shard set to drain
    those runners, so it bounds one PR's matrix fan-out and is not a guarantee that three other PRs
    always get a runner (see "What the cap does NOT bound: the total").
 
-Only `C = 3` satisfies both. An interval simulation over the same 9 runs — each job keeps its own
+With ONE cap for all three matrices — the choice this section makes — only `C = 3` satisfies both:
+invariant 1 forces `C >= 3` and invariant 2 forces `C <= 3`. ⛔ The two inequalities alone do NOT
+pin 3: an unequal split can satisfy them (3/2/3 holds 8 matrix slots and needs at most 3 waves, and
+`tests/test_ci_selection.py` accepts it), so what rules those splits out is the choice of a single
+cap, not the invariants. An interval simulation over the same 9 runs — each job keeps its own
 observed start as an earliest bound, so the delta is an **upper** bound: it does not credit back
 the queue the PR no longer waits behind — gives per-PR peak / matrix-band delta:
 

@@ -761,8 +761,12 @@ jobs:
       # that, not job duration, is what makes the queue (`queued=35`,
       # `in_progress=3` at the read) serve one PR at a time.
       #
-      # `3` IS DERIVED, NOT CHOSEN. Two inequalities pin it, and only 3
-      # satisfies both:
+      # `3` IS DERIVED, NOT CHOSEN. One cap for all three matrices, and the two
+      # inequalities pin it: with equal caps only 3 satisfies both (`C >= 3` from
+      # (a), `C <= 3` from (b)). ⛔ The two inequalities alone do NOT pin 3 — an
+      # unequal split can satisfy them too (3/2/3 holds 8 and needs at most 3
+      # waves, and the shipped test accepts it), so what rules those out is the
+      # choice of ONE cap, not the invariants:
       #   (a) DO NOT INVENT WAVES THE POOL ALREADY CREATES. Measured per-shard
       #       wall p50 10.5m (range 5.8–15.7m) against a measured start stagger
       #       across the 9 shards of 4.0–23.9m (p50 ~10m): under the present
