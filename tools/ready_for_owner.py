@@ -715,7 +715,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mergify", type=Path, default=None, help="path to .mergify.yml")
     ap.add_argument("--snapshot", type=Path, default=None,
                     help="path to the committed required-contexts snapshot")
-    args = ap.parse_args(argv)
+    # `--json` must be one document on EVERY path — including a malformed argv,
+    # which argparse answers with SystemExit(2) and an EMPTY stdout. The flag is
+    # detected from the RAW argv because parsing is what just failed.
+    json_mode = "--json" in (sys.argv[1:] if argv is None else argv)
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as exit_request:
+        code = exit_request.code if isinstance(exit_request.code, int) else EXIT_UNREADABLE
+        if code == EXIT_PASS:
+            return EXIT_PASS          # `--help`: argparse already printed it
+        if json_mode:
+            print(json.dumps({
+                "repo": None, "required": None, "state": GATE_UNREADABLE,
+                "reasons": ["usage error: the arguments could not be parsed — nothing "
+                            "was measured (see stderr)"],
+                "reports": [],
+            }, indent=2))
+        return code
 
     def note(text: str) -> None:
         """Human prose — to STDERR under `--json`, so stdout stays parseable."""
@@ -727,7 +744,9 @@ def main(argv: list[str] | None = None) -> int:
     def emit(document: dict[str, Any], exit_code: int) -> int:
         """The ONLY stdout writer under `--json`: exactly one document, ever.
 
-        EVERY exit path routes through here — including the pre-loop refusals. A
+        EVERY measurement exit path routes through here — including the pre-loop
+        refusals; an unparseable argv is answered separately (it never reaches
+        here, and it emits its own document under `--json`). A
         `--json` consumer must never have to special-case "this failure printed
         nothing": an empty stdout is indistinguishable from a truncated run.
         """

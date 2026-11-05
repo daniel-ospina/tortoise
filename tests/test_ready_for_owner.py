@@ -1189,3 +1189,23 @@ def test_a_config_error_at_the_head_is_not_flattened_to_plain_fail(capsys):
     assert code == 1
     assert payload["state"] == GATE_CONFIG_ERROR, payload["state"]
     assert payload["reports"][0]["state"] == GATE_CONFIG_ERROR
+
+
+def test_a_usage_error_still_emits_one_document(capsys):
+    """`--json` promises one document on EVERY path; argparse wrote zero bytes.
+
+    A consumer parsing stdout got an empty document from a run that exited 2 —
+    indistinguishable from a truncated run.
+    """
+    assert main(["--json", "--pr", "notanint"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == GATE_UNREADABLE and payload["reasons"]
+
+
+def test_help_is_not_turned_into_a_refusal(capsys):
+    """`--help` raises SystemExit(0); mapping it to 2 would make `--help` an error."""
+    assert main(["--help"]) == 0
+    capsys.readouterr()
+    # …and help + --json must not ALSO emit a usage-error document
+    assert main(["--help", "--json"]) == 0
+    assert '"state"' not in capsys.readouterr().out
