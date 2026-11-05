@@ -752,9 +752,11 @@ def test_a_none_pairing_cannot_make_the_reporter_raise():
     is a trap". It is reachable by exactly the caller the form is designed for (a
     repair script, a backfill), so it is pinned here.
 
-    Non-vacuous: drop `Statement.__post_init__`'s normalization AND the `or ()`
-    in `value_types()` and this test reds on the `TypeError` above — not on an
-    assertion, on the construction of the error itself.
+    Non-vacuous, and the ORDER below is the proof: the error is CONSTRUCTED
+    first, so dropping the fix reds on the `TypeError` above — on the
+    construction of the diagnostic itself, not on any assertion. Dropping
+    `__post_init__`'s normalization ALONE is already enough to red it, because
+    the statement reaches `value_types()` the way a repair script's would.
     """
     cause = ValueError("invalid input syntax for type json")
     statement = record_projection.Statement(
@@ -763,14 +765,10 @@ def test_a_none_pairing_cannot_make_the_reporter_raise():
         None,  # `main`'s spelling: the pairing is declined
     )
 
-    # The field is normalized, so no reader — this one included — can trip.
-    assert statement.param_columns == (), (
-        "a declined pairing must normalize to the empty tuple, not stay `None`: "
-        f"{statement.param_columns!r}")
-    assert statement.value_types() == "", (
-        "a statement that names no columns has no value types to report: "
-        f"{statement.value_types()!r}")
-
+    # ⚠️ BEFORE any assertion: this is the line that raised the `TypeError` at
+    # the pre-fix head. An assertion first would have caught the same defect and
+    # proved something weaker (that the field was not normalized) rather than
+    # that the reporter stays a reporter.
     error = record_projection.RecordStatementError(
         statement, cause, index=0, total=1)
     text = str(error)
@@ -779,6 +777,15 @@ def test_a_none_pairing_cannot_make_the_reporter_raise():
         f"the driver's cause is the half the reporter must never replace: {text}")
     assert "UPDATE public.point" in text, (
         f"the failing statement must still be named: {text}")
+
+    # The field-level invariant behind that: a declined pairing is the EMPTY
+    # tuple, so no reader — this one or a later one — can trip over it.
+    assert statement.param_columns == (), (
+        "a declined pairing must normalize to the empty tuple, not stay `None`: "
+        f"{statement.param_columns!r}")
+    assert statement.value_types() == "", (
+        "a statement that names no columns has no value types to report: "
+        f"{statement.value_types()!r}")
 
 
 def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
