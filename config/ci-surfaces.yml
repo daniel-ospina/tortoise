@@ -5923,6 +5923,29 @@ surfaces:
   # deliberately NOT carve_out-registered: it belongs on the fast pool, at the flat
   # `DEFAULT_FAST_WEIGHT` row below until a push-to-main sweep measures it.
   - test_cache_eviction_census.py
+  # #10976 (egress EXECUTOR): `tortoise/cache_evictor.py` — the sweeper that consumes
+  # the census verdict, plus the four red-first cases (bounded under writes, evicted
+  # entry re-reads from the record, bound fails closed, in-flight read survives).
+  # `core` is its HOME surface for the same reason as the sibling above: the module
+  # matches no `SOURCE_PATTERNS` row, so a `tortoise/cache_evictor.py`-only diff falls
+  # through to `core` and THIS row is what selects the suite for the code it guards.
+  # ⛔ It is ALSO `uri_requiring` (below) — unlike the census suite, every case drives
+  # a real FalkorDB because a control signal that looks right against a fake can be
+  # wrong against the engine (that is how the byte-vs-entry bound question was settled).
+  # The trade is stated rather than implied: the tier-2 PR fast lane has no URI and
+  # `uri_requiring` subtracts this file, so it does not gate on a PR — it is covered by
+  # the `push`/`full` matrix, which is the same trade every docker-lane suite here makes
+  # (`test_eval_ingest_cache.py` and its siblings). The PR-TIME gate on this seam is
+  # `test_cache_eviction_evictor_pins.py` (below), which is hermetic and registered on
+  # `core` for exactly that reason — the census suite pins the census, not the executor.
+  - test_cache_eviction_evictor.py
+  # #10976 (executor, PR-TIME gate): the hermetic refusal pins. The live suite above is
+  # `uri_requiring`, so the tier-2 PR lane — which has no URI — never runs it. Left as
+  # the only suite, a change to the DELETE gate would merge on a green PR with ZERO
+  # executor tests executed. This file carries the decision logic that needs no engine
+  # (the four refusal gates, the fail-closed bound, the dry run, the licence cap) on
+  # `core`, where every PR touching the module selects it.
+  - test_cache_eviction_evictor_pins.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -8200,6 +8223,7 @@ carve_out:
 # give rc=1/3, not this rc=5 shape) is the attribution half of #6884 and is
 # tracked on the issue, not here.
 uri_requiring:
+- test_cache_eviction_evictor.py
 - test_capabilities_endpoint.py
 - test_eval_ingest_cache.py
 - test_invite_fusion_docker.py
@@ -10348,6 +10372,8 @@ durations:
   # cited count would be read by the wrong instrument. `tools/ci_timing.py
   # --refresh-durations` replaces this row from junit once a sweep collects it.
   test_cache_eviction_census.py: 2.0
+  test_cache_eviction_evictor.py: 2.0
+  test_cache_eviction_evictor_pins.py: 0.5
   test_calendar_anchors.py: 0.2
   test_canonical_store_guard.py: 0.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.6
   test_capacity_page.py: 0.1
