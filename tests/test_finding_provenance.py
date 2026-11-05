@@ -42,6 +42,10 @@ from pathlib import Path
 
 import yaml
 
+# The gate's own classifier, IMPORTED — never a copy. The F1 repair keys the
+# form-filed refusal on what this predicate selects.
+from tools.finding_provenance import claims_finding
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "finding_provenance.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "finding-provenance.yml"
@@ -83,29 +87,78 @@ def _provenance(ref: str, sha: str) -> str:
 
 
 def _decide_source() -> str:
-    """The workflow's `decide` step `run:` source, verbatim."""
-    wf = (ROOT / ".github" / "workflows" / "finding-provenance.yml").read_text(
-        encoding="utf-8")
-    decide = wf.split("Decide whether this issue is a finding", 1)[1]
-    return decide.split("Gate the finding's provenance", 1)[0]
+    """The `decide` step's `run:` source, verbatim — sliced from PARSED YAML.
+
+    The previous version split on the step NAME and on a step name in the NEXT
+    job, so it returned 148 lines (the tail of `classify` plus the head of
+    `provenance`) while documenting itself as "the `decide` step `run:` block".
+    Every assertion using it happened to hold anyway — which is exactly how a
+    helper that is not what it says stays in place.
+    """
+    wf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return next(step["run"] for step in wf["jobs"]["classify"]["steps"]
+                if step.get("id") == "decide")
+
+
+# The agent-finding form is one half of the #10146 contract and the F1 repair is
+# keyed on what IT delivers, so the tests below render a body FROM THE TEMPLATE
+# FILE — never a hand-written body carrying the key. A hand-written body injects
+# the precondition it is meant to detect; that is precisely the defect F1 found
+# in this suite (the old tests injected `labels="internal\n"`, a label the form
+# cannot deliver because the repo does not have it).
+AGENT_FINDING_FORM = (ROOT / ".github" / "ISSUE_TEMPLATE"
+                      / "agent_finding.yml")
+
+
+def _render_agent_finding_body() -> str:
+    """What GitHub puts in the issue body for an UNANSWERED agent-finding form.
+
+    A `markdown` block's `value` verbatim; for each question field a
+    `### <label>` heading and the answer (`_No response_` when blank).
+    """
+    form = yaml.safe_load(AGENT_FINDING_FORM.read_text(encoding="utf-8"))
+    lines: list[str] = []
+    for item in form["body"]:
+        kind = item.get("type")
+        attrs = item.get("attributes") or {}
+        if kind == "markdown":
+            lines.append(str(attrs.get("value", "")))
+            continue
+        lines.append(f"### {attrs.get('label', '')}")
+        lines.append("")
+        if kind == "checkboxes":
+            for opt in attrs.get("options") or []:
+                lines.append(f"- [ ] {opt.get('label', '')}")
+        else:
+            lines.append(str(attrs.get("placeholder") or "_No response_"))
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _run_decide(*, body: str, labels: str,
-                kind: str = "issue") -> tuple[int, str, str]:
+                kind: str = "issue",
+                title: str | None = None) -> tuple[int, str, str]:
     """EXECUTE the workflow's own `decide` step against a body + labels.
 
     Behavioural, not structural: it runs the real `run:` block, so a
     re-introduced SKIP fails here whatever shape it takes (#10146 F2). Returns
     ``(rc, is_finding, combined log)``.
+
+    ``labels=""`` is the PRODUCTION case for a form-filed issue — the file the
+    step greps exists and is empty, exactly what `gh issue view --json labels`
+    writes for an unlabeled issue. Injecting a label the repo does not have is
+    what made the pre-F1 tests report success about an unreachable branch.
+    ``title`` writes the ``title.txt`` the step reads on the issue arm; it is
+    deliberately NOT written when ``None``, so a caller can pin the arm that a
+    title-less body takes.
     """
-    wf = yaml.safe_load((ROOT / ".github" / "workflows" /
-                         "finding-provenance.yml").read_text(encoding="utf-8"))
-    run = next(step["run"] for step in wf["jobs"]["classify"]["steps"]
-               if step.get("id") == "decide")
+    run = _decide_source()
     with tempfile.TemporaryDirectory(prefix="decide-step.") as tmp:
         d = Path(tmp)
         (d / "body.md").write_text(body, encoding="utf-8")
         (d / "labels.txt").write_text(labels, encoding="utf-8")
+        if title is not None:
+            (d / "title.txt").write_text(title, encoding="utf-8")
         out = d / "verdict.txt"
         out.write_text("", encoding="utf-8")
         r = subprocess.run(
@@ -505,45 +558,51 @@ class FindingProvenanceTestBase(unittest.TestCase):
                         "the claim check must precede the beta-feedback exemption")
 
     # ── #10146 F2 — a form-filed finding must be REFUSED, never skipped ──
+    # ⛔ THE F1 REWRITE: every test in this block drives the step with the
+    # labels a form-filed issue ACTUALLY gets — NONE. The pre-F1 versions
+    # injected `labels="internal\n"`, and `internal` is not a label in this
+    # repo, so GitHub drops it at filing and that input cannot occur: the tests
+    # asserted an unreachable branch, passed, and reported success about an
+    # adjacent object while the production path skipped silently. A test that
+    # manufactures its own precondition is not a test of the system.
 
     def test_decide_gates_a_claim_the_column_zero_grep_missed(self) -> None:
         """#10146 F2: the reported shape — a claim NOT at column 0 — was skipped.
 
         ``PROVENANCE_CLAIM_RE`` tolerates a markdown prefix, so
         ``- Measured at: 98ab138c9`` is a claim. The issue-body arm classified
-        with ``grep -qE '^Measured at:'``, which sees column 0 only, and
-        ``internal`` is the ONLY label the agent-finding form stamps
-        (``agent_finding.yml``) — so this body matched no branch at all and the
-        step reported ``is_finding=false``. A finding that never reached the
-        gate, reported as "not a finding": the fail-open #10146's real root
-        cause left behind.
+        with ``grep -qE '^Measured at:'``, which sees column 0 only — and the
+        body carries NO label, so it matched no branch at all and the step
+        reported ``is_finding=false``. A finding that never reached the gate,
+        reported as "not a finding": the fail-open #10146's real root cause
+        left behind. Pinned with the production label set (empty), so the
+        classifier alone decides it.
         """
         rc, is_finding, log = _run_decide(
             body="### The finding\n\n- Measured at: 98ab138c9\n",
-            labels="internal\n")
+            labels="")
         self.assertEqual(rc, 0, log)
         self.assertEqual(is_finding, "true",
                          f"a claim the column-0 grep misses must still be GATED: {log}")
 
-    def test_decide_refuses_a_form_filed_body_with_no_parseable_claim(self) -> None:
-        """#10146 F2: ``required: true`` makes the field NON-EMPTY, not PARSEABLE.
+    def test_decide_refuses_the_body_a_form_filed_issue_actually_arrives_with(
+            self) -> None:
+        """#10146 F1 — CASE A: a form-filed issue, NO labels, must be REFUSED.
 
-        A form-filed body whose provenance answer is prose selects nothing in
-        the claim parser, so the branch that decides is the label fallback —
-        and falling through to ``is_finding=false`` there is exactly the silent
-        skip this test forbids. The body must be REFUSED loudly: routed to the
-        gate, which refuses it as ``UNKNOWN_PROVENANCE`` and annotates it, with
-        the refusal NAMED in the log rather than a "skipping" note.
+        This is the case the previous tests could not reach and the one that
+        runs in production: the body is RENDERED FROM THE TEMPLATE FILE
+        (``.github/ISSUE_TEMPLATE/agent_finding.yml``) and the label set is
+        EMPTY, exactly what a form-filed issue gets. Before the F1 repair the
+        step answered ``is_finding=false`` here — the silent skip — while the
+        suite stayed green on an injected ``internal`` label.
         """
-        body = "### Provenance (paste the `--emit` line)\n\nprose answer\n"
-        rc, is_finding, log = _run_decide(body=body, labels="internal\n")
+        body = _render_agent_finding_body()
+        rc, is_finding, log = _run_decide(body=body, labels="")
         self.assertEqual(rc, 0, log)
-        self.assertEqual(is_finding, "true",
-                         f"a form-filed body with no parseable line must be "
-                         f"refused by the gate, not skipped: {log}")
-        self.assertIn("REFUSED", log, log)
-        for word in ("agent-finding form", "UNKNOWN_PROVENANCE"):
-            self.assertIn(word, log, log)
+        self.assertEqual(
+            is_finding, "true",
+            "the body a form-filed issue actually arrives with (no labels) was "
+            f"SKIPPED — the #10146 fail-open is still open: {log}")
         # …and the gate this routes to really does refuse that body. Without
         # this half the test would pin only that the step stopped skipping, not
         # that stopping is a REFUSAL.
@@ -551,6 +610,76 @@ class FindingProvenanceTestBase(unittest.TestCase):
                            capture_output=True, text=True, check=False)
         self.assertEqual(v.returncode, 1, v.stdout + v.stderr)
         self.assertIn("UNKNOWN_PROVENANCE", v.stdout)
+
+    def test_decide_refuses_a_form_titled_body_whose_marker_was_removed(
+            self) -> None:
+        """The SECOND form-delivered key: the ``[finding]: `` title prefix.
+
+        The marker in the body is the primary key, but a filer can delete a
+        line. The form's ``title:`` prefix is applied by GitHub at filing and
+        is never validated against repo state, so it is delivered where a label
+        was not — this arm catches that body and REFUSES it loudly.
+        """
+        rc, is_finding, log = _run_decide(
+            body="### Provenance (paste the `--emit` line)\n\nprose answer\n",
+            labels="", title="[finding]: the graph ignores the description\n")
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(is_finding, "true",
+                         f"a form-titled body with no parseable line must be "
+                         f"refused, not skipped: {log}")
+        self.assertIn("REFUSED", log, log)
+        self.assertIn("UNKNOWN_PROVENANCE", log, log)
+
+    def test_decide_still_skips_an_ordinary_issue_with_no_labels(self) -> None:
+        """Do NOT fix fail-open by breaking fail-closed on ordinary issues.
+
+        A feature request carries no claim, no form provenance and no labels.
+        It must still be SKIPPED — the gate was never written about it. This is
+        the control for the two refusals above: same label set (empty), same
+        step, opposite verdict, decided only by what the body is.
+        """
+        rc, is_finding, log = _run_decide(
+            body="### What\n\nPlease add a `--json` flag to the CLI.\n",
+            labels="")
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(is_finding, "false",
+                         f"an ordinary feature request must still be skipped: {log}")
+        self.assertIn("skipping", log, log)
+        self.assertIn("not a finding", log, log)
+
+    def test_the_form_delivers_the_key_the_gate_keys_on(self) -> None:
+        """The anti-rot pin: the FORM and the gate's PREDICATE agree.
+
+        #10146 F1's root cause was a key the repo did not hold — a template
+        `labels:` entry that GitHub dropped — so the repair keys on what the form
+        delivers by itself. That only holds while the form KEEPS delivering it,
+        so this asserts against a body RENDERED FROM THE TEMPLATE FILE: the
+        marker is present and the gate's own ``claims_finding()`` selects it
+        (imported, never copied), and the ``title:`` prefix is declared. Delete
+        either key from the template and this test reddens.
+        """
+        form = yaml.safe_load(AGENT_FINDING_FORM.read_text(encoding="utf-8"))
+        body = _render_agent_finding_body()
+        self.assertTrue(
+            claims_finding(body),
+            "the body the agent-finding form produces is NOT selected by the "
+            "gate's own claims_finding() — a form-filed finding would be "
+            "skipped, which is #10146 F1 again")
+        self.assertIn("<!-- finding -->", body,
+                      "the form's body marker is gone from the rendered body")
+        self.assertEqual(form.get("title"), "[finding]: ",
+                         "the form's title prefix is the second delivered key "
+                         "the decide step reads — it is gone")
+        # A valid provenance line still passes the gate: the marker must not
+        # turn a CORRECT filing into a refusal. Measured against this base
+        # class's own repo (origin/main -> tip), so the line is resolvable and
+        # current.
+        line = f"Measured at: origin/main@{self.tip} on 2026-11-05"
+        good = body + "\n" + line + "\n"
+        v = subprocess.run([PYTHON, str(TOOL), "--validate", "-"], input=good,
+                           capture_output=True, text=True, check=False,
+                           cwd=str(self.repo))
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
 
     def test_decide_never_uses_a_shell_copy_of_the_claim_predicate(self) -> None:
         """#10146 F2 root cause: the issue arm classified with a ``grep``.
@@ -584,20 +713,30 @@ class FindingProvenanceTestBase(unittest.TestCase):
         The old final branch said "not a finding (no provenance line, not an
         internal bug) — skipping" for every shape, so a form-filed finding and
         a feature request were indistinguishable in the log. Each skip now
-        names its own discriminator, and the ``bug`` / ``internal`` labels are
-        gated rather than skipped.
+        names its own discriminator, and the ``bug`` label and the form's own
+        provenance are gated rather than skipped.
+
+        ⛔ The ``internal`` LABEL branch is gone, and must stay gone (#10146
+        F1): the label does not exist in this repo, so GitHub dropped it at
+        filing and the branch was dead code the suite kept green by injecting
+        the label. The refusal is decided on the form's own ``[finding]:``
+        title now, which repo state cannot take away.
         """
         decide = _decide_source()
         code = [ln for ln in decide.splitlines()
                 if not ln.strip().startswith("#")]
-        for label in ("beta-feedback", "internal", "bug"):
+        for label in ("beta-feedback", "bug"):
             self.assertTrue([ln for ln in code if f"grep -qx '{label}'" in ln],
                             f"the {label!r} branch is gone")
-        # `internal` (the agent-finding form's label) must reach the GATE.
-        internal_at = next(i for i, ln in enumerate(code)
-                           if "grep -qx 'internal'" in ln)
-        internal_arm = "\n".join(code[internal_at:internal_at + 3])
-        self.assertIn("is_finding=true", internal_arm,
+        self.assertFalse([ln for ln in code if "grep -qx 'internal'" in ln],
+                         "a branch keyed on the `internal` label is back — that "
+                         "label does not exist in this repo, so the branch is "
+                         "dead code (#10146 F1)")
+        # The form-filed refusal must reach the GATE.
+        form_at = next((i for i, ln in enumerate(code)
+                        if "[finding" in ln and "grep" in ln), None)
+        self.assertIsNotNone(form_at, "the agent-finding form refusal branch is gone")
+        self.assertIn("is_finding=true", "\n".join(code[form_at:form_at + 3]),
                       "a form-filed issue must be gated, never skipped")
 
     # ── the COMMENT path's workflow shape (#4732)

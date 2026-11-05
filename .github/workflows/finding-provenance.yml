@@ -26,9 +26,20 @@
 # comment arm (#10146 F2) — never by a `grep` for a column-0 `Measured at:`,
 # which missed every bulleted, quoted, indented or backtick-wrapped claim and
 # so skipped those findings entirely. An issue with NO claim is then a finding
-# if it is `bug`-labeled or `internal`-labeled; `internal` is the agent-finding
-# form's own label, stamped by nothing else, and a form-filed body with no
-# parseable line is REFUSED by the gate rather than skipped (#10146).
+# if it is `bug`-labeled, or if it WAS FILED THROUGH THE AGENT-FINDING FORM —
+# whose own `title:` prefix (`[finding]: `) and `<!-- finding -->` body marker
+# are selected here, so a form-filed body with no parseable line is REFUSED by
+# the gate rather than skipped (#10146).
+# ⛔ THAT LAST KEY USED TO BE A LABEL (`internal`) AND IT WAS DEAD CODE (#10146
+# F1). `internal` is not a label in this repo (measured 2026-11-05:
+# `gh api .../labels?per_page=100` → 78 labels, none named `internal`), and
+# GitHub SILENTLY DROPS a template label that does not exist — so a form-filed
+# issue arrived with NO label at all, the branch never fired, and the fail-open
+# it was written to close stayed open in production while its tests passed on an
+# injected label that cannot occur. A label is repo STATE, and state silently
+# diverged; the key is now what the FORM ITSELF delivers (its title prefix and
+# its hidden body marker), which no repo state can take away. Do not put a label
+# back in front of this decision without a pin that the label EXISTS.
 # `beta-feedback` reports (external, about a released version, no checkout to
 # emit from) are exempt from the REQUIRED case; features, epics and process
 # issues are untouched.
@@ -261,6 +272,13 @@ jobs:
           else
             echo "kind=issue" >> "$GITHUB_OUTPUT"
             gh issue view "$N" --json body -q .body > "$RUNNER_TEMP/body.md"
+            # THE FORM'S OWN TITLE PREFIX (#10146 F1) — the key that replaced a
+            # label. See the `decide` step and the header for why a label cannot
+            # carry this decision: `agent_finding.yml` declares `title:
+            # "[finding]: "`, GitHub applies it at filing, and NOTHING validates
+            # it against repo state, so it cannot be silently dropped the way an
+            # absent label is.
+            gh issue view "$N" --json title -q .title > "$RUNNER_TEMP/title.txt"
           fi
           gh issue view "$N" --json labels -q '.labels[].name' > "$RUNNER_TEMP/labels.txt"
 
@@ -291,9 +309,20 @@ jobs:
             "$RUNNER_TEMP/body.md" || rc=$?
           case "$rc" in
             0)
-              # The body CLAIMS to be a finding, in whatever form it wrote it.
-              # It is gated — never exempted, whatever its labels (#4732).
+              # The body CLAIMS to be a finding, in whatever form it wrote it —
+              # a `Measured at:` line of ANY shape, or the agent-finding form's
+              # `<!-- finding -->` marker. It is gated — never exempted,
+              # whatever its labels (#4732).
+              #
+              # THIS IS THE FORM-FILED PATH (#10146 F1): the marker is in the
+              # form's own body, so a form-filed finding reaches here with NO
+              # label, which is all a form-filed issue actually gets. The gate
+              # then refuses it as FAIL UNKNOWN_PROVENANCE when the provenance
+              # line is missing or unparseable — REFUSED, not skipped. Nothing
+              # about that depends on the repo's label set.
               echo "is_finding=true" >> "$GITHUB_OUTPUT"
+              echo "the body claims to be a finding (the repo's own"
+              echo "classifier selected it) — gating it"
               ;;
             1)
               # No claim. Whether that is a SKIP or a REFUSAL depends on what
@@ -313,14 +342,23 @@ jobs:
                 # claim — the `0` arm above is unconditional.
                 echo "is_finding=false" >> "$GITHUB_OUTPUT"
                 echo "beta-feedback report with no measured commit — skipping"
-              elif grep -qx 'internal' "$RUNNER_TEMP/labels.txt"; then
-                # ⛔ REFUSED, NOT SKIPPED (#10146 F2). `internal` is the label
-                # the agent-finding form stamps (agent_finding.yml `labels:`)
-                # and nothing else applies it, so such a body IS a finding by
-                # construction: its one required substantive field is the
-                # provenance line. The claim parser found nothing in it — and
-                # `required: true` makes that field NON-EMPTY, not PARSEABLE,
-                # so "required" is not a substitute for this check (#10146).
+              elif grep -qE '^\[finding\]' "$RUNNER_TEMP/title.txt" 2>/dev/null; then
+                # ⛔ REFUSED, NOT SKIPPED (#10146 F2), keyed on WHAT THE FORM
+                # DELIVERS (#10146 F1). This branch used to test for an
+                # `internal` LABEL — and `internal` is not a label in this
+                # repo, so GitHub dropped it at filing and this branch never
+                # ran for the path it was written for. The title prefix is the
+                # form's own `title: "[finding]: "`, applied by GitHub at
+                # filing and not validated against repo state, so it is
+                # delivered where a label was not. (The marker arm above is the
+                # primary key; this one still catches a body whose marker line a
+                # filer deleted.)
+                #
+                # Such a body IS a finding by construction: its one required
+                # substantive field is the provenance line. The claim parser
+                # found nothing in it — and `required: true` makes that field
+                # NON-EMPTY, not PARSEABLE, so "required" is not a substitute
+                # for this check (#10146).
                 #
                 # It is routed to the GATE, not to a green. `--validate`
                 # refuses a body with no parseable line as FAIL
@@ -333,9 +371,10 @@ jobs:
                 # would be the same reports-about-the-wrong-object defect this
                 # branch exists to stop.
                 echo "is_finding=true" >> "$GITHUB_OUTPUT"
-                echo "finding-provenance: REFUSED — this issue was filed through"
-                echo "the agent-finding form ('internal' label), whose required"
-                echo "provenance field carries no line the claim parser can"
+                echo "finding-provenance: REFUSED, NOT SKIPPED — this issue was"
+                echo "filed through the agent-finding form (its '[finding]: '"
+                echo "title), whose required provenance field carries no line"
+                echo "the claim parser can"
                 echo "select (missing, or hand-typed prose). Routing it to the"
                 echo "gate to be refused as UNKNOWN_PROVENANCE (#10146)."
                 echo
@@ -347,8 +386,9 @@ jobs:
                 # which this gate was never written about. Named here so the
                 # log says WHICH test declined, not just "skipping".
                 echo "is_finding=false" >> "$GITHUB_OUTPUT"
-                echo "not a finding (no provenance claim, and none of the"
-                echo "'bug' / 'internal' / 'beta-feedback' labels) — skipping"
+                echo "not a finding (no provenance claim, no agent-finding"
+                echo "form provenance, and neither the 'bug' nor the"
+                echo "'beta-feedback' label) — skipping"
               fi
               ;;
             *)

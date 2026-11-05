@@ -1,11 +1,33 @@
 name: Agent finding (internal)
 description: An internal finding from a lane — a measured result, a defect, or a routing decision
 title: "[finding]: "
-labels: ["internal"]
+# ⛔ NO `labels:` KEY HERE, DELIBERATELY (#10146 F1). This template used to
+# declare `labels: ["internal"]`, and the gate refused a malformed form-filed
+# body by testing for that label. `internal` is NOT a label in this repo
+# (measured 2026-11-05: `gh api repos/daniel-ospina/tortoise/labels?per_page=100`
+# → 78 labels, `.name | grep -x internal` → exit 1), and GitHub SILENTLY DROPS a
+# template label that does not exist. So every form-filed issue arrived with NO
+# label, the refusal branch never fired, and the fail-open it was written to
+# close stayed open in production while its own tests passed — they injected
+# the label this form cannot deliver.
+#
+# A label the repo must own is repo STATE, and state silently diverged. The gate
+# therefore keys on what THIS FILE delivers by itself and no repo state can take
+# away:
+#   * the `title:` prefix above (`[finding]: `), read by the gate's `decide`
+#     step — GitHub applies it at filing and never validates it against the
+#     repo's label set;
+#   * the hidden `<!-- finding -->` marker in the first markdown block below,
+#     which is the same token `tools/finding_provenance.py` already selects via
+#     `FINDING_MARKER_RE` / `claims_finding()` for the COMMENT arm.
+# Pinned in `tests/test_finding_provenance.py`
+# (`test_the_form_delivers_the_key_the_gate_keys_on`) against a body RENDERED
+# FROM THIS FILE, so deleting either key reddens that test.
 body:
   - type: markdown
     attributes:
       value: |
+        <!-- finding -->
         **Keep this short.** The owner's standing instruction is to reduce bureaucracy, so this form is
         deliberately four fields. A finding that reaches the graph is worth more than a well-formatted one
         that stays in a session.
