@@ -910,7 +910,7 @@ jobs:
         # this suite's `node --test` passes no `--experimental-strip-types` flag).
         with:
           node-version: '22'
-      - name: Cache uv + pip dependency caches (#7612)
+      - name: Restore uv + pip dependency caches (#7612, RESTORE-ONLY — #11063)
         # #7612: the runners are EPHEMERAL (ubuntu-latest) and nothing cached the
         # dependency caches, so every job resolved and downloaded its deps from
         # cold on every run. This step sits BEFORE install-cpu-torch so that the
@@ -922,7 +922,52 @@ jobs:
         # already-downloaded artifacts. In THIS job `uv sync --frozen` still runs
         # afterwards and enforces uv.lock, so the installed versions are
         # unchanged. Reverting this step costs wall-clock only.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY. The save is NOT dropped — it moves to the BOUNDED step
+        # that is now the LAST step of this job
+        # (`Save uv + pip dependency caches`), because the implicit post-step save
+        # is UNBOUNDED and is charged against this job's `timeout-minutes`
+        # (#10182), so no cap can amortize it (#11063).
+        #
+        # MEASURED (run 42000057137, job `test (d)` 127165076497, runner
+        # `pi-runner-vm-6`): the restore MISSED —
+        #   `Cache not found for input keys: uv-pip-Linux-8755d72f…, uv-pip-Linux-`
+        # while other shards of the same run HIT the same key in 2-6 s
+        # (`Cache hit occurred on the primary key …, not saving cache.`, e.g.
+        # `test (a)` 10:23:29 -> 10:23:36, `test (f)` 10:23:42 -> 10:24:04), so this
+        # is the MISS arm, not a key collision. The post step then tarred
+        # 10:54:53 -> 10:59:00 and began uploading
+        #   `Sent 0 of 3882423064`  ->  a 3.88 GB archive, 5.9x the entry
+        # (662,393,744 B, the cache-API `size_in_bytes` of the key, NOT a number
+        # this run printed) that the siblings restored, at a sustained 0.89 MB/s.
+        # Every WORK step was green (suite 10:28:58 -> 10:45:07, orphan gate
+        # 10:45:54) and the job was `cancelled` at 11:51:54 by its 90 m cap,
+        # 57 m 02 s into that post step — which `python-ci-gate` reads as RED by
+        # design (#5219: a cancelled leg certifies nothing). A required check was
+        # WITHHELD by a cache upload on a passing shard.
+        #
+        # Why not restore-only-with-no-writer (the `test-carve-out` / #10327
+        # shape): this key is written by THIS JOB ALONE — `uv-pip-<os>-<hash
+        # uv.lock>` occurs nowhere else in the workflow — so an unwritten key
+        # would re-add the cold torch download to all nine shards, which is the
+        # exact cost #7612 exists to remove. The save is therefore KEPT and
+        # BOUNDED, which is also the vendor's documented pattern for many
+        # parallel jobs on one dependency set (`actions/cache` caching-strategies,
+        # "Make cache read only / Reuse cache from centralized job"): restore in
+        # every consumer, one explicit `actions/cache/save`.
+        #
+        # (The `hf-embedding-cache-v2-<os>` step below takes the OTHER treatment —
+        # restore-only with NO save — because four sibling jobs write that key, so
+        # dropping this job's save loses nothing. Different key, different fact,
+        # different remedy; both are needed to leave this job with no unbounded
+        # post-step save at all.)
+        #
+        # continue-on-error: a cache-SERVICE error (transport/503) must never red
+        # this leg — a miss is the fail-open case, and install-cpu-torch downloads
+        # the pinned CPU wheel either way.
+        id: uvpip-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/uv
@@ -977,13 +1022,36 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
+      - name: Restore HF embedding model (BAAI/bge-small-en-v1.5) (#11063)
         # ~130MB; persisted so the pre-cache step below is a no-op on
         # subsequent runs and CI never re-downloads from huggingface.co.
         # Cache key v2 (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and
         # must never serve bge-small runs — a v1 restore would silently
         # exercise the WRONG embedder.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY, and this job does not need to write it (— #11063).
+        # `actions/cache` saves in a POST step charged against this job's
+        # `timeout-minutes` (#10182) with no timeout of its own. On the run that
+        # filed #11063 this save MISSED and then took **8 m 57 s** to move
+        # 78,130,925 B (10:45:55.928 → 10:54:52.693, 483.7 s → 0.16 MB/s) — the
+        # slowest sustained upload anywhere in that job, and 5.5x the 1 m 38 s
+        # the carve-out job measured for the same cache, which is why #10327
+        # could leave it in place there and this job cannot.
+        #
+        # Nothing is lost: this key is SHARED and written on every run by four
+        # sibling jobs that also mount `~/.cache/huggingface` on
+        # `hf-embedding-cache-v2-<os>` — `test-slow`, `test-concurrency-falkor`,
+        # `test-carve-out` — so this job only ever READ it. That is the SAME
+        # argument #10327 used for the pip cache on the carve-out job, applied
+        # to the one archive where the post step actually measured expensive
+        # here.
+        #
+        # continue-on-error: a cache-SERVICE error must never red the leg; a miss
+        # is the fail-open case (the provision step below downloads the pinned
+        # model, and its own failure mode is already named, #2573/#4387).
+        id: hf-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/huggingface
           key: hf-embedding-cache-v2-${{ runner.os }}
@@ -1828,6 +1896,64 @@ jobs:
         # FalkorDB container holding memory on the runner host.
         if: always()
         uses: ./.github/actions/falkordb-teardown
+
+      # ⛔ LAST STEP OF THE JOB, ON PURPOSE (#11063). As a POST step this save ran
+      # after everything else; as a NORMAL step it must run after everything else
+      # too, or a bound that elapses here would `cancelled`-kill the job BEFORE
+      # the pytest-log artifact upload, the fail-closed skip-fail guard and the
+      # FalkorDB teardown ran — losing the timing artifact, the live-test guard
+      # and the container cleanup on the shared Docker daemon (#6673).
+      - name: Save uv + pip dependency caches (BOUNDED — #11063)
+        # #11063: the writer for `uv-pip-<os>-<hash uv.lock>`. `actions/cache`
+        # saves in a POST step, and (#10182) that post step is charged against the
+        # job's `timeout-minutes` like any other while having NO timeout of its
+        # own — an UNBOUNDED term, and headroom amortizes a bounded cost, never an
+        # unbounded one. As a normal step it takes the `timeout-minutes` below: an
+        # upload that cannot finish is ABORTED at the bound and, under
+        # `continue-on-error`, does not fail the job — the job concludes on the
+        # suite, which is the whole point (#5219: `cancelled` certifies nothing).
+        #
+        # WHAT THE BOUND IS, AND IS NOT. Numbers, all measured on run
+        # 42000057137 / job `test (d)`:
+        #   archive the miss arm built      3,882,423,064 B  (`Sent 0 of 3882423064`)
+        #   entry a hit restores            662,393,744 B    (cache-API `size_in_bytes`)
+        #   uv+pip upload rate              0.89 MB/s        (3,019,898,880 B / 3412 s)
+        #   HF upload rate, same job        0.16 MB/s        (78,130,925 B / 483.7 s)
+        #   `tar --posix -z` of the 3.88 GB 4 m 07 s
+        # It is NOT a promise that the cache gets written: at 0.89 MB/s a ~700 MB
+        # entry needs ~13 m of transfer plus tar, so 12 m completes an entry-sized
+        # save only at >= ~1.0 MB/s and FAILS OPEN below that — the cache is then
+        # simply not written this run, which is exactly a miss, minus the red. The
+        # bound's job is to stop the term eating the cap, not to guarantee a save.
+        #
+        # SIZING (`docs/ops/ci-wall-clock.md` §2, arm 2: cap >= SUM x 1.5): 10 m
+        # last-failed pre-phase + 26 m worst emitted shard watchdog + 6 m embedder
+        # provision + ~3 m measured setup (`Set up job` 10:21:30 -> 10:24:32) + 12 m
+        # (= this bound) + ~1 m last-failed save (measured 23 s, 10:45:07 ->
+        # 10:45:30) = 58 m, x 1.5 = 87 <= 90. The row still clears, nothing to move.
+        # ⚠ The bound is the term that makes this row clear; widening it past ~14 m
+        # puts arm 2 out of reach without a cap raise, and a cap raise re-opens
+        # #3239's stale-head exposure — so the pin re-derives rather than allows it.
+        #
+        # Why `cache-hit != 'true'` and not an unconditional save: on the exact
+        # primary-key hit nothing needs uploading (the service refuses a second
+        # write to the same key and the archive would be identical to the entry
+        # already there). On a MISS the output is unset (`''`, per the vendor:
+        # `cache-hit` is only set on a match) and on a `restore-keys` PARTIAL hit
+        # it is `'false'` — both sides of `!= 'true'`, so both save. Every such
+        # shard then offers its save and the cache service arbitrates the
+        # reservation: exactly one uploads, the rest exit immediately. That removes
+        # the need to nominate a "writer shard", which no matrix field guarantees
+        # exists on a tier-2 subset.
+        if: always() && steps.uvpip-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 12
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+          key: uv-pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
   test-slow:
     needs: changes
