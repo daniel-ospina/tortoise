@@ -675,10 +675,22 @@ def assess(
     instrument that did not run, was not CLEAN, or covered part of the population
     leaves the class ``cannot-answer``.
 
-    The verdict is computed from the WRONG direction on purpose: **one unproven
-    class refuses the whole sweep.** A partial sweep would be a pass that answered
-    the question for some nodes and swept the rest on the strength of it, which is
-    exactly what #10976 forbids.
+    The verdict is computed from the WRONG direction on purpose: **an unproven class
+    is never evicted.** ``PLAN`` licenses ONLY the populations named in
+    ``plan["evictable"]`` — each one proved by its own instrument's report. Every other
+    class is listed in ``problems`` and ``plan["not_evictable"]`` and may not be
+    touched, so a partial plan is safe **by construction**: evicting exactly the
+    proven populations still satisfies #10976's "0 evictions of a node the record
+    cannot serve".
+
+    ⛔ DO NOT READ ``PLAN`` AS "EVERYTHING WAS PROVEN". It is not a statement about the
+    classes it omits — it is a licence scoped to the list it prints. An earlier
+    revision of this docstring said "one unproven class refuses the whole sweep",
+    which described a rule the function does not implement: a caller who believed it
+    would write ``if census.verdict == "PLAN": sweep_every_label()`` and delete every
+    ``:Point``, ``Source`` and ``GraphEvent`` in the graph — the data loss #10976
+    exists to prevent, reached by trusting prose over the artefact. The artefact is
+    ``plan["evictable"]``, and it is the only thing a licence covers.
     """
     state = measure_state(client, graph_name, ceiling_bytes=ceiling_bytes)
     counts = resident_counts(graph)
