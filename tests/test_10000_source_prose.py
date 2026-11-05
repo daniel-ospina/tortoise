@@ -24,6 +24,7 @@ RED before the fix (measured on `816b37f1876`), GREEN after.
 """
 from __future__ import annotations
 
+import inspect
 import re
 
 import pytest
@@ -95,6 +96,133 @@ def _nodes_carrying(sdk, needle: str) -> list[tuple[list[str], dict, object]]:
                 hits.append((list(labels), {key: value}, node_id))
                 break
     return hits
+
+
+def _the_search_text_set_comment_block() -> str:
+    """The comment block IMMEDIATELY above the ``_searchText`` SET, verbatim.
+
+    The block is the ONLY prose at the write site, so it is the text a future
+    editor reads while deciding whether to touch the ``coalesce``. It is
+    extracted from the live source rather than restated here: a guard that
+    quotes the claim in its own body can go green while the claim returns to
+    ``sdk.py``.
+
+    ⛔ THE ANCHOR IS ASSERTED TO MATCH EXACTLY ONCE. A ``break``-on-first-hit
+    walk over a source with two candidate lines would silently inspect the
+    wrong one, and the whole guard would then be measuring a comment nobody
+    reads. An anchor that stops matching is a FAIL, never an empty block.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    src = inspect.getsource(TortoiseSDK._materialize_session_source)
+    lines = src.splitlines()
+    anchor = "SOURCE_SEARCH_TEXT_FIELD}=coalesce($st,"
+    found = [i for i, line in enumerate(lines) if anchor in line]
+    assert len(found) == 1, (
+        f"the `_searchText` SET ({anchor!r}) must appear EXACTLY ONCE in "
+        f"`_materialize_session_source`; found it at {found}. Re-point this "
+        "guard at the SET rather than deleting it — it is the only thing "
+        "tying this file to the comment that justifies the clause")
+    block: list[str] = []
+    for line in reversed(lines[:found[0]]):
+        if not line.lstrip().startswith("#"):
+            break
+        block.append(line)
+    return "\n".join(reversed(block))
+
+
+def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
+    """The comment above the `_searchText` SET must not assert the retraction.
+
+    THE DEFECT THIS PINS, and why it is not cosmetic. This PR measured that a
+    pre-#10000 node is **NOT** healed by a re-capture (the MINT GATE makes the
+    re-capture a #1727 no-op replay, so these SETs are never reached) and
+    corrected three artifacts that said otherwise — the method docstring, the
+    PR body, and a test that was RENAMED off the claim. A FOURTH artifact was
+    then written by the same PR, ten lines below the docstring's ``⛔``: the
+    inline block quoted the retracted mechanism back at the exact line a future
+    editor changes, and cross-referenced a note that does not exist.
+
+    That is not a typo class. The false premise had already cost this PR two
+    rounds: an earlier cut rewrote this ``coalesce`` as an equivalent
+    ``CASE WHEN $st IS NOT NULL …`` and claimed the rewrite WAS the healing
+    (it is the same function — a provable no-op), and a test was named for
+    healing while exercising a different state. Both were later falsified. A
+    comment that re-arms the premise at the write site is the cheapest possible
+    route back to a third round, and the docstring's ``⛔ Do NOT make the
+    healing true by re-SETting on the replay arm`` is exactly what it
+    undercuts — a reader who believes the population self-heals has no reason
+    to respect that guard, and re-SETting on the replay arm reverses
+    #2104/#1727.
+
+    WHAT IS ASSERTED is therefore the CORRECTION, in both directions: the
+    retracted claim is ABSENT, and the correcting mechanism (mint gate / replay
+    / #1727) is PRESENT. The second half is what stops the cheap green of
+    deleting the block: a write site whose ``coalesce`` has no comment at all
+    is how the claim got re-derived in the first place.
+
+    Citations are made EXECUTABLE rather than trusted (#7948's lesson — a
+    hand-maintained prose reference rots and nothing notices): every ``test_*``
+    name the block cites must exist in this module, and a reference to
+    ``_session_source_metadata``'s "note" must resolve to a note that is
+    actually there.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    block = _the_search_text_set_comment_block()
+    assert block.strip(), (
+        "no comment sits above the `_searchText` SET — the clause is a "
+        "keep-arm whose reasoning has been re-derived from scratch twice "
+        "already; restore the corrected comment rather than deleting it")
+
+    # (1) The retracted claim is ABSENT. These are the shapes a future lane
+    # re-introduces it in; the second is the pre-fix text verbatim, so this
+    # arm was RED against `4529894849`.
+    for retracted in ("makes an old node heal", "the DERIVATION is",
+                      "so it replaces that text"):
+        assert retracted not in block, (
+            f"the comment above the `_searchText` SET asserts the RETRACTED "
+            f"mechanism ({retracted!r}). A re-capture does not heal a "
+            f"pre-fix node — the mint gate makes it a replay, so these SETs "
+            f"are never reached (#10852 review P2). Cite the docstring "
+            f"above and the surviving-pair test instead.\n\n{block}")
+
+    # (2) The CORRECTION is PRESENT — the mint-gate mechanism the docstring
+    # states, in the block's own words. Deleting the block cannot pass this.
+    lowered = block.lower()
+    assert "replay" in lowered and "1727" in lowered, (
+        "the comment above the `_searchText` SET states neither the REPLAY "
+        "(the mechanism that makes a re-capture a no-op) nor #1727 — the "
+        "two things that make the clause correct. Without them the block is "
+        "readable as 're-capture repairs the old population', which is "
+        f"false:\n\n{block}")
+
+    # (3) Executable citations. A dangling reference is how the previous block
+    # sent a reader to `_session_source_metadata`'s "note" — a note that has
+    # never existed on that function.
+    #
+    # The pattern skips a FILE reference (`tests/this_file.py`, which is the
+    # path the block cites) and admits only the `::symbol` / bare-symbol use,
+    # so the guard resolves the thing that must exist rather than the filename
+    # it lives in — measured: matching the bare `\btest_…` shape red the guard
+    # on its own file path instead of on this arm.
+    for cited in set(re.findall(
+            r"(?<![/\w])(test_[a-z0-9_]+)(?!\.py)", block)):
+        assert cited in globals(), (
+            f"the comment above the `_searchText` SET cites `{cited}`, which "
+            "does not exist in this module — a prose reference to a test that "
+            "is not there reads as proof and pins nothing")
+
+    if "_session_source_metadata" in block:
+        announced = (block.split("_session_source_metadata", 1)[1][:60]
+                     .lower())
+        if "note" in announced:
+            assert "heal" in (_session_source_metadata.__doc__ or "").lower(), (
+                "the comment above the `_searchText` SET points at "
+                "`_session_source_metadata`'s note on healing, and that "
+                "function's docstring carries no such note (measured at "
+                "`4529894849`) — the note is in `_materialize_session_source`'s "
+                "own docstring. Point at the artifact that says it")
 
 
 def _capture(sdk, session_id: str) -> dict:

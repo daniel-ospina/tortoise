@@ -16750,24 +16750,24 @@ class TortoiseSDK:
             # is a view of.
             "s.topics=CASE WHEN size($topics) > 0 THEN $topics "
             "ELSE coalesce(s.topics, []) END",
-            # `coalesce` keeps the stored text ONLY when this capture derives
-            # none — it is a KEEP arm, and it can never CLEAR a stale value, so
-            # it is not the healing mechanism. Neither is the derivation: a
-            # pre-#10000 node is NOT healed by a re-capture, because a capture
-            # of an ALREADY captured session id never reaches these SETs at all
-            # — the mint gate in `capture_session` (#2104/#1727) makes it the
-            # no-op REPLAY. This method's own docstring spells that mechanism
-            # out, and `tests/test_10000_source_prose.py::
-            # test_a_re_capture_does_not_heal_a_pre_fix_node` PINS the stale
-            # `summary`/`_searchText` pair surviving a replay. The routes that
-            # DO clear it: a capture under a NEW `session_id`, a retry of a
-            # prior FAILED capture, or a record-sourced re-projection for a
-            # node the projection CREATES. An earlier cut rewrote this clause
-            # as an equivalent `CASE WHEN $st IS NOT NULL …` and claimed the
-            # healing; the two forms are the same function, so that change was
-            # a no-op and its claim was false (measured in the #10852 review).
-            # The two capture writes cannot collide with the indexer either
-            # way: this writer only touches `session:<id>` Sources.
+            # #10000: `coalesce` keeps the stored text ONLY when this capture
+            # derives none — the KEEP-ARM, which is all a keep-arm can be. It
+            # is NOT the healing mechanism, and neither is the DERIVATION: a
+            # PRE-FIX node (one that ALREADY carries the prose pair) is not
+            # healed by a re-capture at all, because the MINT GATE makes a
+            # re-capture of an already-captured session the #1727 no-op REPLAY,
+            # and a replay never reaches these SETs. The mechanism, and the
+            # routes that DO clear such a node, are in this method's docstring
+            # above; the survival is pinned by
+            # `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`.
+            # Load-bearing alongside it, and correct on its own: an earlier cut
+            # rewrote this clause as an equivalent `CASE WHEN $st IS NOT NULL
+            # …` and claimed THAT rewrite was the healing — the two forms are
+            # the same function, so the change was a no-op and its claim was
+            # false (measured — `#10852` review, P2). Do not restore either
+            # claim; the ⛔ in the docstring is the guard. The two capture
+            # writes cannot collide with the indexer either way: this writer
+            # only touches `session:<id>` Sources.
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
             # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
