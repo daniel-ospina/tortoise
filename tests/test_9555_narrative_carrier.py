@@ -1827,12 +1827,32 @@ _NEGATION_CUE = (
     r"|\w+n['’]t\b)"
 )
 
+#: Cues that negate only what FOLLOWS them: in *"X rather than Y"* the negated
+#: term is Y, never X. They are admitted in the LEADING arm alone.
+#:
+#: ⛔ Adding them to `_NEGATION_CUE` instead would refuse CORRECT prose —
+#: *"the vector's text is the S1 narrative read from `public.session_narrative`
+#: rather than the summary"* negates the SUMMARY, not the home, and the trailing
+#: arm would bind it to the home and report *"NEGATES the pointer"* (measured).
+#: The trailing arm exists to catch an object used as the SUBJECT of a negation;
+#: for these two cues the object is always the negated TERM.
+_NEGATION_CUE_LEADING_ONLY = r"(?:\brather\s+than\b|\binstead\s+of\b)"
+
+#: Adversative conjunctions. What FOLLOWS one is the ASSERTED term, so a negation
+#: must not reach across it — *"not the bare summary but `public.session_narrative`"*
+#: asserts the home, and *"does not read a summary but `:Source.summary`"* asserts
+#: the trap. Measured both ways before this stop existed: the first was REFUSED
+#: with *"NEGATES the pointer"* (a false red on correct prose) and the second was
+#: ACCEPTED (the pin certifying the exact instruction it exists to forbid).
+_NEG_ADVERSATIVE = r"(?:\bbut\b|\brather\b|\binstead\b)"
+
 #: What a negation may NOT cross on its way to the object it negates: another
 #: backticked name, or a clause boundary (`. , ; : ( — –`). The BACKTICK half
 #: keeps a negation of a DIFFERENT name from reaching this one — in *"never from
 #: `:Source.summary`"* the next backtick opens another object, so the match cannot
 #: continue on to `public.session_narrative`; the CLAUSE half keeps a negation in
-#: a NEIGHBOURING clause from binding to this one.
+#: a NEIGHBOURING clause from binding to this one. The ADVERSATIVE stop lives in
+#: `_neg_span` (a word, which a character class cannot express).
 _NEG_CLAUSE_SAFE = r"[^`;:,.—–(]"
 #: The read/embed/index verbs that make a clause a claim about what the vector
 #: EMBEDS (the leading direction only — see `_negation_bound_to`).
@@ -1849,7 +1869,19 @@ _NEG_READ_VERB = (
 _NEG_TRAILING_SUBJECT = r"(?:\s+(?:be|is|was|were|the|what|it|this|that)\b)"
 
 
-def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool) -> bool:
+def _neg_span(n: int) -> str:
+    r"""Up to `n` clause-safe characters, crossing NO adversative conjunction.
+
+    `_NEG_CLAUSE_SAFE` is a character class, so it can express a clause boundary
+    but not a WORD — and `but` / `rather` / `instead` are the words that flip which
+    term a negation applies to (see `_NEG_ADVERSATIVE`). The lookahead is what
+    stops the span at them.
+    """
+    return rf"(?:(?!{_NEG_ADVERSATIVE}){_NEG_CLAUSE_SAFE}){{0,{n}}}"
+
+
+def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
+                       trailing: bool = True) -> bool:
     r"""Is a negation cue bound to `object_regex` — in EITHER direction?
 
     ⛔ **DIRECTION IS HALF THE CLAIM, and it was missing.** Both object-bound
@@ -1893,16 +1925,25 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool) -> bool
     ACCEPTS (`stored` is neither a copula nor an article, so
     `_NEG_TRAILING_SUBJECT` does not fire) — a docstring naming a check the code
     does not perform, the class this file has already corrected four times.
+
+    ⛔ `trailing=False` makes the binding LEADING-ONLY, and §12.1b needs that.
+    The two objects sit on OPPOSITE sides of the claim: the home/narrative IS the
+    embedded text (§9.4 ③, §12.1b), while `:Source.summary` is NOT. So the
+    subject form *"`:Source.summary` is never what the vector reads"* states the
+    claim, while *"the narrative is never what gets embedded"* states its
+    INVERSE. One helper cannot admit both, and admitting the inverted one is a
+    FAIL-OPEN: it certifies a document that says the opposite of the section it
+    is supposed to pin (measured — the pin stayed GREEN with that sentence
+    transplanted into the REAL footnote).
     """
-    spans = rf"{_NEG_CLAUSE_SAFE}{{0,40}}"
-    leading = _NEGATION_CUE + spans
+    leading = f"(?:{_NEGATION_CUE_LEADING_ONLY}|{_NEGATION_CUE})" + _neg_span(40)
     if read_verb:
-        leading += rf"{_NEG_READ_VERB}\b{_NEG_CLAUSE_SAFE}{{0,30}}"
-    return re.search(
-        f"(?:{leading}{object_regex})"
-        f"|(?:{object_regex}{_NEG_CLAUSE_SAFE}{{0,30}}"
-        f"{_NEGATION_CUE}{_NEG_TRAILING_SUBJECT})",
-        line, re.IGNORECASE) is not None
+        leading += rf"{_NEG_READ_VERB}\b{_neg_span(30)}"
+    pattern = f"(?:{leading}{object_regex})"
+    if trailing:
+        pattern += (f"|(?:{object_regex}{_neg_span(30)}"
+                    f"{_NEGATION_CUE}{_NEG_TRAILING_SUBJECT})")
+    return re.search(pattern, line, re.IGNORECASE) is not None
 
 
 def _negates_the_home(line: str, home: str) -> bool:
@@ -1976,13 +2017,23 @@ def _negates_the_narrative(line: str) -> bool:
     §9.4 half was bound to its OBJECT while §12.1b's half stayed a spelling lock.
     The assert this replaced was ``assert "never the narrative" in footnote``,
     so a correct re-wording of the SAME claim — *"…is §4.6 metadata, not the
-    narrative."*, *"…and the narrative is never what gets embedded"*, *"…and
-    cannot be the narrative"* — went RED and was reported as *"§12.1b's `:Source`
-    footnote no longer states the NEGATION"*: a message naming the inverse of
-    what the sentence says. That is the class cycle 18 fixed one section earlier,
-    on the same claim and the same object (measured on the REAL footnote: all
-    four non-head re-wordings in `_NARRATIVE_NEGATION_REWORDINGS` RED under the
-    literal — 4 of 4, replayed, not inferred).
+    narrative."*, *"…and cannot be the narrative"* — went RED and was reported as
+    *"§12.1b's `:Source` footnote no longer states the NEGATION"*: a message
+    naming the inverse of what the sentence says. That is the class cycle 18
+    fixed one section earlier, on the same claim and the same object (measured on
+    the REAL footnote: the non-head re-wordings in `_NARRATIVE_NEGATION_REWORDINGS`
+    RED under the literal).
+
+    ⛔ **CORRECTED (cycle 19): TWO entries that list used to carry were NOT
+    re-wordings of this claim, and admitting them was a FAIL-OPEN.** *"…and the
+    narrative is never what gets embedded"* and *"…and the narrative is not the
+    vector's text"* make the narrative the SUBJECT, which INVERTS the footnote —
+    *"the vector's TEXT is the S1 narrative read from `public.session_narrative`"*
+    is the sentence immediately above it. Measured: transplanting either into the
+    REAL footnote left the whole pin GREEN, so the guard certified a document
+    stating the opposite of §12.1b. That is why the binding is LEADING-ONLY here
+    (`trailing=False`): for THIS object the cue must precede it, because the
+    narrative is the text that IS embedded, not the text that is not.
 
     ⚠️ THE OBJECT IS A BARE WORD HERE, not a backticked name, and that is why
     this is a separate helper instead of one more call to `_negates_the_summary`:
@@ -1993,16 +2044,22 @@ def _negates_the_narrative(line: str) -> bool:
     "`public.session_narrative`")` is None), which is what keeps the footnote's
     own pointer from being read as the negated object.
 
-    Bound in EITHER direction by `_negation_bound_to`, like both other guards: a
-    cue, a clause-stopped span with no backtick, then `narrative` — **or**
-    `narrative`, a span, then the cue and `_NEG_TRAILING_SUBJECT`. ⚠️ The span is
-    clause-stopped, which is what lets *"…is §4.6 metadata, not the narrative"*
-    be accepted (the comma precedes the CUE, not the object) while keeping
-    *"the narrative is not on the node; `summary` is §4.6 metadata"* refused —
-    there the cue sits in the narrative's own clause, so it must NOT be read as
-    the negation §12.1b requires, and it is not (`;` stops nothing here because
-    the CUE is inside the first clause; `_NEG_TRAILING_SUBJECT` refuses it —
-    measured, and it is a control case).
+    Bound by `_negation_bound_to` with `trailing=False` — LEADING ONLY, unlike
+    the other two guards: a cue, a clause-stopped span with no backtick and no
+    adversative conjunction, then `narrative`. ⚠️ The span is clause-stopped,
+    which is what lets *"…is §4.6 metadata, not the narrative"* be accepted (the
+    comma precedes the CUE, not the object).
+
+    ⛔ Why leading-only is the RIGHT scope here and not a convenience: the
+    narrative is the text the vector DOES embed, so a cue placed AFTER it makes
+    the narrative the subject of a negation and necessarily states the inverse —
+    *"the narrative is never what gets embedded"*, *"the narrative is not the
+    vector's text"*. Those are in `_NARRATIVE_NEGATION_INVERSIONS`, and the real
+    footnote is mutated into each of them to prove the guard refuses them. The
+    mirror-order DECLARED OVER-BLOCK is a correct trailing form that this scope
+    refuses on purpose — *"the narrative is never the summary"* — see
+    `_DECLARED_OVER_BLOCK_NARRATIVE`; the direction that would be lost by
+    admitting it is the FAIL-OPEN one.
 
     ⚠️ It does NOT accept a line that merely NAMES the narrative with no cue:
     *"a session's `summary` is §4.6 metadata and the narrative."* is REFUSED —
@@ -2010,7 +2067,8 @@ def _negates_the_narrative(line: str) -> bool:
     the *"embed the summary already there"* reading open), it is measured on the
     REAL footnote, and it is a control case in `_NARRATIVE_NEGATION_INVERSIONS`.
     """
-    return _negation_bound_to(line, r"\bnarrative\b", read_verb=False)
+    return _negation_bound_to(line, r"\bnarrative\b", read_verb=False,
+                              trailing=False)
 
 
 def _namespaces_a_column(line: str, home: str) -> bool:
@@ -2388,6 +2446,9 @@ def test_the_declared_fail_CLOSED_over_block_is_the_documented_one():
 #: passed and red nothing: **4 of the 5** are the measured reds — the count the
 #: test's own docstring below always carried, and which this header used to
 #: contradict (*"Each went RED"*, corrected after the review at `e457c2aa15`).
+#: ⚠️ Two cases were added after that measurement — the `rather than` cue, and its
+#: own RED-before-admission replay — so the list is now six: one control, four
+#: original reds, one later red.
 _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     ("the head document's own wording", "never from `:Source.summary`"),
     ("and not from", "and not from `:Source.summary`"),
@@ -2397,6 +2458,11 @@ _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     #: the same ruling, and the leading-only guard REFUSED it (measured).
     ("the trap as the subject of the negation",
      "`:Source.summary` is never what the vector reads"),
+    #: `rather than` / `instead of`: the same ruling in ordinary prose, and a
+    #: LEADING-ONLY cue — *"X rather than Y"* negates Y. Measured RED before the
+    #: cue was admitted, on the REAL deciding sentence.
+    ("rather than, cue before the trap",
+     "rather than `:Source.summary`"),
 ]
 
 #: Lines that NAME the trap with NO negation cue applied to it, or apply one to
@@ -2416,7 +2482,9 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 @pytest.mark.parametrize(
     "why,clause", _SUMMARY_NEGATION_REWORDINGS,
     ids=["head-document-wording", "and-not-from", "must-not-be",
-         "never-the-field", "trap-as-negated-subject"])
+         "never-the-field", "trap-as-negated-subject", "rather-than-cue"])
+
+
 def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str):
     """*What value makes this test fail?* The phrase lock the object-bound helper
     replaced — on every case but the first.
@@ -2471,19 +2539,30 @@ def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
 #: §9.4's half of this same claim. The first entry is the head document's own
 #: wording and is the CONTROL (it passed the literal too, so it is 4 reds of 5,
 #: not 5).
+#:
+#: ⛔ **THAT "FOUR" WAS TWO RE-WORDINGS AND TWO INVERSIONS (cycle 19).** The two
+#: subject forms — *"the narrative is never what gets embedded"*, *"the narrative
+#: is not the vector's text"* — state the OPPOSITE of the footnote, which says
+#: one sentence earlier that the vector's TEXT **is** the S1 narrative. They were
+#: moved to `_NARRATIVE_NEGATION_INVERSIONS` and the binding was made
+#: leading-only; the historical 4-of-5 count above belongs to the literal, and the
+#: list below is now the subset that really is the same claim (plus the two cues
+#: `rather than` / `instead of`, measured RED before they were admitted).
 _NARRATIVE_CARRIER = (
     "a session's `summary` is §4.6 metadata and {}.")
 _NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     ("the head document's own wording", "never the narrative"),
     ("not, no conjunction", "not the narrative"),
-    ("the narrative as the subject of a trailing cue",
-     "the narrative is never what gets embedded"),
-    ("a copula form, narrative as subject",
-     "the narrative is not the vector's text"),
     #: A cue from the shared vocabulary that the FIRST draft of `_NEGATION_CUE`
     #: did not carry — the same widening `_SUMMARY_NEGATION_INVERSIONS` pins for
     #: the other object, read in the ACCEPT direction here.
     ("cannot, cue before the object", "cannot be the narrative"),
+    #: `rather than` / `instead of` are the same ruling in ordinary prose
+    #: (`X rather than Y` == `X, not Y`) and are admitted as LEADING-ONLY cues.
+    #: Measured RED before they were admitted, with the message *"no longer
+    #: states the NEGATION"* about a sentence that states it.
+    ("rather-than, cue before the object", "rather than the narrative"),
+    ("instead-of, cue before the object", "instead of the narrative"),
 ]
 
 #: Lines that NAME the narrative with NO cue bound to it, or bind the cue to
@@ -2512,14 +2591,24 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: the fix.
     ("the cue across a clause boundary from the object",
      "the narrative — not the summary"),
+    #: ⛔ THE SUBJECT FORMS — and they were ACCEPT-listed before cycle 19. The
+    #: narrative is the text the vector DOES embed, so making it the subject of a
+    #: negation states the INVERSE of §12.1b's footnote (*"the vector's TEXT is
+    #: the S1 narrative read from `public.session_narrative`"*, one sentence
+    #: above). MEASURED on the REAL footnote: with either transplanted into it,
+    #: the whole pin stayed GREEN — the fail-open these two cases close, and the
+    #: reason the binding is `trailing=False`.
+    ("the narrative as the subject of a trailing cue",
+     "the narrative is never what gets embedded"),
+    ("a copula form, narrative as subject",
+     "the narrative is not the vector's text"),
 ]
 
 
 @pytest.mark.parametrize(
     "why,clause", _NARRATIVE_NEGATION_REWORDINGS,
-    ids=["head-document-wording", "not-no-conjunction",
-         "narrative-as-subject-trailing", "copula-form-narrative-as-subject",
-         "cannot-cue"])
+    ids=["head-document-wording", "not-no-conjunction", "cannot-cue",
+         "rather-than-cue", "instead-of-cue"])
 def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
         why: str, clause: str):
     """*What value makes this test fail?* The phrase lock this replaced, on four
@@ -2549,7 +2638,8 @@ def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
 @pytest.mark.parametrize(
     "why,clause", _NARRATIVE_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
-         "negation-in-other-clause", "cue-across-a-clause-boundary"])
+         "negation-in-other-clause", "cue-across-a-clause-boundary",
+         "subject-form-trailing-cue", "subject-form-copula"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
@@ -2617,6 +2707,66 @@ def test_the_REAL_footnote_LOSES_the_negation_when_it_is_dropped():
             f"{mutated!r}")
 
 
+#: The mirror-order over-block this object's LEADING-ONLY binding declares: a
+#: CORRECT trailing form is REFUSED. The footnote's claim is *"a session's
+#: `summary` … is never the narrative"*, which reads the same with the narrative
+#: first — but the SAME word order is how the INVERSE is written (*"the narrative
+#: is never what gets embedded"*), and admitting it admits the fail-open. So the
+#: pin is fail-CLOSED here on purpose, the limit is declared, and it is pinned by
+#: the test below.
+_DECLARED_OVER_BLOCK_NARRATIVE = (
+    "a session's `summary` is §4.6 metadata and the narrative is never the "
+    "summary.")
+
+
+def test_the_REAL_footnote_REFUSES_each_listed_inversion():
+    """*What value makes this test fail?* The ACCEPT list certifying an inversion.
+
+    Cycle 19 found the fail-open this closes: two SUBJECT forms sat in
+    `_NARRATIVE_NEGATION_REWORDINGS`, and MEASURED they left the whole pin GREEN
+    when transplanted into the REAL footnote — a document stating *"the narrative
+    is never what gets embedded"* was certified by the pin whose job is to forbid
+    that reading. Proved here on the artifact, not on a constructed line: EVERY
+    entry in the inversions list is applied to the footnote a reader lands on.
+    """
+    footnote = _source_vector_footnote(_storage_doc_text())
+    head_clause = "and never the narrative"
+    assert head_clause in footnote, (
+        f"§12.1b's footnote no longer carries {head_clause!r} — this control "
+        f"mutates THAT clause, so a re-wording of the document must update this "
+        f"anchor or the control silently skips")
+    for why, clause in _NARRATIVE_NEGATION_INVERSIONS:
+        mutated = footnote.replace(head_clause, "and " + clause)
+        assert mutated != footnote, (
+            f"the mutation for {why!r} changed nothing in the footnote")
+        assert not _negates_the_narrative(mutated), (
+            f"the REAL §12.1b footnote was mutated into an inversion of its own "
+            f"claim ({why}: {clause!r}) and `_negates_the_narrative` ACCEPTED "
+            f"it: {mutated!r} — naming the narrative is not denying it, and a "
+            f"cue placed AFTER it makes the narrative the SUBJECT, which states "
+            f"the opposite of the sentence one line above in the same footnote")
+
+
+def test_the_declared_narrative_over_block_is_the_documented_one():
+    """*What value makes this test fail?* A declared limit with no code behind it.
+
+    `_negates_the_narrative` declares that the mirror order — a CORRECT trailing
+    form — is refused by the leading-only scope. Asserted, not narrated: the line
+    does state §12.1b's claim, and the guard REFUSES it. A future cycle that
+    admits the trailing direction is making a SCOPE decision (it re-opens the
+    fail-open) and must update this case and the docstring together.
+    """
+    line = _DECLARED_OVER_BLOCK_NARRATIVE
+    assert "the narrative is never the summary" in line, (
+        f"the declared over-block no longer carries the trailing form it "
+        f"declares, so it would be refused for the wrong reason: {line!r}")
+    assert _negates_the_narrative(line) is False, (
+        f"`_negates_the_narrative`'s docstring declares this CORRECT sentence "
+        f"REFUSED by the leading-only scope, and it is ACCEPTED: {line!r} — "
+        f"either the scope was widened (which re-opens the subject-form "
+        f"fail-open) or the docstring names a check the code does not perform")
+
+
 def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
     """The control the helper lists cannot give: the REAL §9.4 sentence re-worded.
 
@@ -2667,9 +2817,10 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     paragraph above it is caught too), but that half is not executed by a plain
     run at all. From `b748df7d0` (the base before the rebase,
     post-`#10978`) onward NEITHER retired string is present, and neither is
-    present at `78161a50a` — the merge-base at `83c4129a9`, and ⚠️ no longer the
-    base: the later main-merge `6b1d697193` moved it to `acfebd81f5`, where
-    neither string is present either (measured 0 and 0 on BOTH trees) — nor at
+    present at `78161a50a` — the merge-base at `83c4129a9`, and no longer the
+    base: successive main-merges moved it — `6b1d697193` → `acfebd81f5`, then
+    `5d806d69a` → `af36e9240` (the merge-base at THIS head) — and neither string
+    is present at any of them (measured 0 and 0 on every tree named) — nor at
     any commit of THIS branch: both of this branch's earlier bases already carried
     `#10978`'s correction (`b748df7d0` before the rebase, `e2584e2cb` after it).
     So on this
