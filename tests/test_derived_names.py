@@ -596,6 +596,10 @@ _ENV_URI_PIN_FILES = (
     # main's #10164 gave its `from_uri(` sites an explicit `graph_name=`, so
     # the loose-net hazard this tuple guards (a declared, un-named site) no
     # longer exists in that file.
+    # #8447 C3: declares the same `from_uri(uri)` shape — every `uri` there is
+    # `_fresh_graph()` -> a per-test `test_8447_*` graph, so the invariant below
+    # (no raw-env `uri =` assignment) is what keeps that true.
+    "test_8447_c3_ingest_door.py",
 )
 
 
