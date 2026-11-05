@@ -411,16 +411,66 @@ def test_cli_default_is_a_dry_run_and_writes_the_plan(tmp_path, capsys):
     assert any("restore-proof" in m for m in plan["recovery"]["missing"])
 
 
+@pytest.mark.parametrize("flag,extra", [
+    ("--uri", []),
+    ("--db-path", []),
+    ("--graph-name", ["--uri", "docker://:pw@127.0.0.1:1/x"]),
+])
+def test_an_EMPTY_graph_target_flag_refuses_by_name(flag, extra, capsys):
+    """⛔ THE SAME SHELL ACCIDENT, THE SAME REFUSAL — in the SECOND producer.
+
+    Measured before the fix (review P2, cycle 3): `purge --uri ""` read the EMBEDDED
+    store and then died with `ValueError: Unsupported scheme:` escaping the
+    `CensusError` handler — exit **1**, the documented USAGE code, so a shell accident
+    read as a mistyped flag; with the URI unset but a working read it could exit 0 and
+    write a census artifact naming a graph on an instance the URI never named. And
+    `--db-path X --graph-name ""` exited 0 with `graph: ""` in the artifact while the
+    read fell back to `tortoise`.
+
+    Mutation that goes RED here: dropping the `empty_graph_target_flag` call from
+    `main` (all three red), or dropping `--graph-name` from the helper's own loop (the
+    third only).
+    """
+    code = purge.main([flag, "", *extra, "--record-dsn", _DSN,
+                       "--org-id", "org", "--graph-id", "graph",
+                       "--plan-out", "/tmp/unused-plan.json"])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err and flag in err
+    assert "Nothing was read and nothing was deleted" in err
+
+
+def test_an_unresolvable_uri_is_exit_three_not_a_traceback(capsys):
+    """A URI whose scheme cannot be resolved must read as "the graph could not be read".
+
+    Measured before the fix (review P2, cycle 3), the reachable arm of this class was
+    `--uri ""`: the empty value fell through to the EMBEDDED read (which succeeds) and
+    the resolver's `ValueError` then escaped every handler, so the interpreter exited
+    **1** — indistinguishable from a mistyped flag, on a target nothing had
+    established. That input is now refused BY NAME before any read (the pin above);
+    this one keeps the sibling property pinned — a bad scheme is a named exit 3, never
+    a traceback.
+    """
+    code = purge.main(["--uri", "postgres://h:1/g", "--record-dsn", _DSN,
+                       "--org-id", "org", "--graph-id", "graph"])
+
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "could not be read" in err
+    assert "Unsupported scheme" in err
+    assert "an absence is NOT established" in err
+
+
 def test_the_census_artifact_names_the_graph_the_run_opened(monkeypatch, tmp_path):
     """⛔ `census()` HAS A SECOND PRODUCER, AND IT MUST NAME ITS TARGET TOO.
 
-    `purge_legacy_turns.py` calls `census()` too, and it reuses the same
-    `instrument` tag — so an artifact it writes is fed to
-    `cache_eviction.load_parity_report`, which now REFUSES a report that names no graph
-    (review P2 on #11097). Omitting the name did not merely lose a field: it made every
-    artifact this producer writes unusable AS EVIDENCE, while asserting an absence the
-    run itself disproves (`census()`'s own comment: an artifact that does not know its
-    target must say so — this one does know).
+    `purge_legacy_turns.py` calls `census()` too, and it reuses the same `instrument`
+    tag — so an artifact it writes is fed to `cache_eviction.load_parity_report`, which
+    now REFUSES a report that names no graph (review P2 on #11097). Omitting the name
+    did not merely lose a field: it made every artifact this producer writes unusable
+    AS EVIDENCE, while asserting an absence the run itself disproves (`census()`'s own
+    comment: an artifact that does not know its target must say so — this one does).
 
     Mutation that goes RED here: dropping `graph_name=` from the call site (then
     `seen["graph_name"]` is None while the report says null).

@@ -698,6 +698,37 @@ def _graph_rows(g) -> list:
             return rows
 
 
+def empty_graph_target_flag(args: Any) -> str | None:
+    """The refusal message for a graph-target flag passed EMPTY, else ``None``.
+
+    ⛔ ONE IMPLEMENTATION, TWO CALLERS. `turn_parity_census` and
+    `purge_legacy_turns` both open a graph from the same three flags, and both were
+    exposed to the same shell accident: `--uri "$TORTOISE_DB_URI"` with the variable
+    UNSET is a set-but-EMPTY value, `read_graph_turns` selects its arm by TRUTHINESS,
+    so the run silently read the EMBEDDED store — and because this tool now authors the
+    graph identity into the artifact, the report then named a graph on an instance the
+    run never touched, which the cache census accepts for a hosted graph of the same
+    name (review P2 on #11097, both cycles). `--graph-name ""` is the mirror: it won
+    `graph_name is not None`, so the artifact said ``graph: ""`` while the read fell
+    back to ``tortoise``.
+
+    An empty flag value is NOT "no flag". Both callers must refuse it BY NAME before
+    anything is read, and both say the same thing, because a second copy of this rule
+    is a second chance to disagree about it.
+    """
+    for flag in ("--uri", "--db-path", "--graph-name"):
+        value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
+        if value is not None and not str(value).strip():
+            return (
+                f"{flag} was passed but is EMPTY (a shell expansion like {flag} "
+                f"\"$UNSET_VAR\" yields nothing). An empty flag value is NOT 'no "
+                f"flag': falling through reads the EMBEDDED store instead of the "
+                f"target you named, and the report would then name a graph on an "
+                f"instance this run never touched. Refusing instead."
+            )
+    return None
+
+
 def resolve_graph_name(uri: str | None, db_path: str | None,
                        graph_name: str | None) -> str:
     """The graph this run MEASURED — the name the report must carry.
@@ -2062,21 +2093,17 @@ def main(argv: list[str] | None = None) -> int:
     # naming `tortoise`, which the cache census accepts for a hosted graph of the same
     # name. A shell accident therefore licensed a sweep of an instance the census never
     # touched: the exact `different instance` shape the binding exists to refuse.
-    # `--graph-name` is in the same loop for the mirror reason (review P2, cycle 2):
+    # `--graph-name` is in the same rule for the mirror reason (review P2, cycle 2):
     # `--graph-name ""` used to win `graph_name is not None` and be written into the
     # artifact as `graph: ""` while the EMBEDDED read fell back to `tortoise` — an
     # artifact that misstates its own target AND can never be loaded as evidence.
-    for flag, value in (("--uri", args.uri), ("--db-path", args.db_path),
-                       ("--graph-name", args.graph_name)):
-        if value is not None and not str(value).strip():
-            sys.stderr.write(
-                f"turn_parity_census: {flag} was passed but is EMPTY (a shell "
-                f"expansion like {flag} \"$UNSET_VAR\" yields nothing). An empty "
-                f"flag value is NOT 'no flag': falling through reads the EMBEDDED "
-                f"store instead of the target you named, and the report would then "
-                f"name a graph on an instance this run never touched. Refusing "
-                f"instead.\n")
-            return 1
+    # The rule itself is `empty_graph_target_flag` — ONE implementation, because
+    # `purge_legacy_turns` opens a graph from the same three flags and was exposed to
+    # the same accident (review P2, cycle 3).
+    empty_flag = empty_graph_target_flag(args)
+    if empty_flag:
+        sys.stderr.write(f"turn_parity_census: {empty_flag}\n")
+        return 1
 
     # ⛔ THE FLAG'S PRESENCE, NOT ITS TRUTHINESS (review P2). `if
     # args.local_record_dir:` treated a set-but-EMPTY value as "no flag", so

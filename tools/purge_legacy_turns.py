@@ -1757,6 +1757,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.sample < 0:
         parser.error("--sample must be >= 0")
+    # ⛔ THE SAME PRESENCE-NOT-TRUTHINESS RULE AS THE CENSUS CLI, from the SAME
+    # implementation (review P2, cycle 3). This tool opens a graph from the same three
+    # flags, so `--uri "$UNSET_VAR"` read the EMBEDDED store and then either died with a
+    # traceback (`ValueError` escaping the `CensusError` handler below, exit 1 — the
+    # documented USAGE code) or, with `--graph-name` set, exited 0 having written a
+    # census artifact naming that graph for a store the URI never named; and
+    # `--db-path X --graph-name ""` exited 0 with `graph: ""` in the artifact while the
+    # read fell back to `tortoise`. Both are the accident the census CLI refuses.
+    empty_flag = census_mod.empty_graph_target_flag(args)
+    if empty_flag:
+        sys.stderr.write(f"purge_legacy_turns: {empty_flag}")
+        sys.stderr.write(" Nothing was read and nothing was deleted.\n")
+        return 1
     record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
     if not args.org_id or not args.graph_id:
         sys.stderr.write(

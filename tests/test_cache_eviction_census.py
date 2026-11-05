@@ -626,10 +626,10 @@ def test_a_report_carrying_no_graph_identity_is_REFUSED(tmp_path):
     (`turn_parity_census.census`), so a report without one is an artifact that cannot
     say what it measured.
 
-    Mutation that goes RED here: deleting the `names no graph` refusal, or restoring
-    the `graph_name` alias fallback (see the ALIAS pin below — with the refusal in
-    place, the RETURN expression alone is a no-op, because `reported_graph` is already
-    non-None by then; naming it as the mutation was a claim the pin could not support).
+    Mutation that goes RED here: deleting the `names no graph` refusal. NOT the
+    `graph_name` alias (measured: this payload carries neither key, so the alias still
+    yields None and the refusal fires — the ALIAS pin below owns that half), and NOT
+    the return-expression fill-in (a no-op once the refusal has passed).
     """
     import json
 
