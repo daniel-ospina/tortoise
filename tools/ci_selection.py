@@ -3262,7 +3262,10 @@ def _duplicate_key_loader():
     resolution the whole manifest depends on (``166.0`` stays a ``float``, a
     quoted stamp stays a ``str``) and overrides only the mapping constructor.
     A repeat is recorded only among a mapping's OWN pairs, so a ``<<:`` merge
-    override — legal by the YAML merge type — is not reported.
+    override — legal by the YAML merge type — is not reported. The merge KEY is
+    one of those own pairs, though: two ``<<:`` in one mapping is a repeat and is
+    recorded, because the flatten deletes the key nodes and the repeat would
+    otherwise be the one duplicate this loader could not see.
     """
     global _DUP_KEY_LOADER
     if _DUP_KEY_LOADER is not None:
