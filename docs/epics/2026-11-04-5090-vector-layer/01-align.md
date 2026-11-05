@@ -68,8 +68,9 @@ means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCH
 - **The epic may be dissolved rather than solved.** Turns were ~80 % of a measured graph (`#10000`) and
   dominated the vector class. Ingress plus egress work could shrink the bill without the epic deciding
   anything.
-- **The measured case for indexing is weak today.** ~6 ms, against four resident HNSW structures on a
-  store that charges provisioned RAM with no eviction. §12.1c already concludes that is not worth it.
+- **The measured case for indexing is weak today.** ~6 ms, against four further resident HNSW
+  structures on a store that charges provisioned RAM with no eviction. §12.1c already concludes that is
+  not worth it.
 - **Most of what is left is an owner decision or a document.** Filing issues where the work is already
   owned is motion, not progress.
 
@@ -169,8 +170,8 @@ there is no cheaper way to stop paying rent on four unindexed labels than to dec
 
 **Alternatives considered:** discharge as complete (A1 — rejected on `§14.3 V3 "rides on V1"` alone: the
 epic is the only *actionable* record of the deferral — the doc row and the runtime warning state it but cannot be closed or reassigned — so discharging it converts a *deferred* defect
-into an *accepted* one); index the four labels in the graph (A2 — rejected: V1's content, four resident
-HNSW structures, ~6 ms); move vectors to Postgres now (A3 — rejected: no `pgvector` exists, the record
+into an *accepted* one); index the four labels in the graph (A2 — rejected: V1's content, four further
+resident HNSW structures, ~6 ms); move vectors to Postgres now (A3 — rejected: no `pgvector` exists, the record
 forbids `object`/`subject` embeddings, the record is armed but its write path rejects `22P02` (`#10593`)); fold into a neighbour
 (A4 — rejected: three different claims); let the neighbours dissolve the cost (A5 — adopted as the shape
 of the remainder).

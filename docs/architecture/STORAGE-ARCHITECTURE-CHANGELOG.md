@@ -1940,7 +1940,14 @@ a THIRD"* resident HNSW index. That count predates the served set reaching five 
 carries a vector DDL/index (`tortoise/projection/__init__.py`, both the procedure and the Cypher form).
 So **four** served labels are unindexed today — `Event`, `Object`, `Source`, `Subject` — and the argument
 is correspondingly stronger than it read. The design document now states the four-label count and the
-four-versus-one conclusion with no reference to the passage's previous wording.
+four-further conclusion with no reference to the passage's previous wording. ⚠️ **The count is
+incremental, and both conclusion sentences now say so in one frame:** the four are *on top of* the one
+`Point` index that exists today, i.e. **five resident HNSW structures in total** against Postgres's one
+filtered index. The pre-edit passage was arithmetically a total (1 `Point` + a `SECOND` + a `THIRD` = three,
+stated as *"Three resident HNSW indexes vs one filtered index"*), so correcting the derivation from two
+unindexed labels to four while leaving the conclusion in the total frame would have *undercounted by one* —
+`01-align.md`, `02-research.md` and `05-decompose.md` all count *four further*, and §12.1c is the register
+a lane reads to take V1, so it is the last artifact that may carry its own arithmetic.
 
 **§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
 45 MB index total, on 141 MB"*. Two independent problems: the 141/45 MB pair is the dated 2026-09-24
@@ -1958,8 +1965,8 @@ neither: 12,657 is the **2026-09-24** count of the `:Object` 7,859 + `:Event` 4,
 **unindexed** population, 38 % of every vector stored — and `#5090`'s 2026-10-08 comment reaches it as a
 SCOPE correction (*"the 50 MB figure requires counting the `:Point` leg — the one leg that IS indexed"*),
 not as a re-measurement. `#10976`'s measured block carries no vector count and no 19.4 MB line, and
-`tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure *"is 2026-09-24 and is **not to be
-re-quoted**"* — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a
+`tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure is a 2026-09-24 number and is not
+to be re-quoted — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a
 2026-11-04 graph reading is exactly the mixing of readings this whole correction exists to stop.
 
 **And §12.1c no longer contradicts §14.3.** Before this correction the two disagreed *inside one
@@ -1998,8 +2005,8 @@ therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B
 vector stored**, which is `#5090`'s 2026-10-08 SCOPE correction — not a re-measurement, and not a
 2026-11-04 figure. The 2026-11-04 reading of `live-v4` (`#10976`) is a **graph** reading:
 `indices_sz_mb` **93** on a **195 MB** graph, with per-label attribute bytes and no vector count; the
-probe's own docstring says the 12,657 count *"is 2026-09-24 and is not to be re-quoted"*, and `--census`
-re-measures it per label on a named graph at a timestamp.
+probe's own docstring says the 12,657 count is a 2026-09-24 number that is not to be re-quoted, and
+`--census` re-measures it per label on a named graph at a timestamp.
 
 **The places that still cited it, all now dated** — named by their ACTUAL section, because the first
 draft of this list named six and got five of them wrong: **§2.2**'s *"45 MB of
