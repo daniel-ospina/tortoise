@@ -120,10 +120,11 @@ one this epic owns.
 **The correction travels in #10683's recording comment** (where a reader of the decision looks), **cannot travel
 in the migration**, and **has no sweep issue** — filing one, or adding this scope to `#10864`, is the residual
 carrier's decision, and this document asserting either would be the false pointer this paragraph just fixed.
-⚠️ **And that recording comment is itself a second live carrier of the falsified mechanism claim:** comment `6663370867` line 45 still reads *"`record_projection._COLUMN_RE`
-already captures the type name"* — the wording §7.1 falsifies. So the document that says *"the correction travels
-in #10683's recording comment"* points a reader at a comment that repeats the error; §7.1 is authoritative and the
-comment needs the same one-line correction `#11075`'s body does. ⚠️ **`08-hosted-prerequisites.md`
+⚠️ **And that recording comment is itself a second live carrier of the falsified mechanism claim:** comment
+`6663370867` line 45 still reads *"`record_projection._COLUMN_RE` already captures the type name"* — the wording
+§7.1 falsifies. So the document that says *"the correction travels in #10683's recording comment"* points a
+reader at a comment that repeats the error; §7.1 is authoritative and the comment needs the same one-line
+correction `#11075`'s body does. ⚠️ **`08-hosted-prerequisites.md`
 is a DECLARED residual, not a covered one:** #10864 is scoped to three other post-#10648 contradictions and does
 not reach this one, so no carrier takes it — nor the five code sites above — today, and a lane that reads that
 file meets the misnumbering unopposed.
