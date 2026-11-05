@@ -9863,9 +9863,27 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
         "measured 3,616,385,308 B and is written by FOUR other jobs.")
     gate = str(uv_save.get("if") or "").strip()
+    # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
+    # finding 3). The literal let a rename or a deletion read GREEN — and a
+    # missing id makes `steps.install-extras.outcome` null, so the save's `if:` is
+    # permanently false and the uv key is NEVER written again: exactly the "ZERO
+    # writers … a reopen of #7612" outcome the neighbouring arm exists to catch.
+    # (actionlint does catch the null, which is why this was P3 — but the pin's own
+    # claim was unbacked.)
+    install_steps = [s for s in steps
+                     if str(s.get("name") or "").startswith(
+                         "Install package + test extras")]
+    assert len(install_steps) == 1, (
+        f"expected one `Install package + test extras` step in the `test` job, "
+        f"found {len(install_steps)} — the uv save's `if:` is built from its id")
+    install_id = str(install_steps[0].get("id") or "").strip()
+    assert install_id, (
+        "the `Install package + test extras` step declares no `id:`, so the uv "
+        "save's `if:` cannot reference its outcome — a leg that died inside "
+        "`uv sync` would then write a partial archive into an immutable key")
     expected_gate = (
         f"always() && steps.{uv_restore.get('id')}.outputs.cache-hit != 'true'"
-        " && steps.install-extras.outcome == 'success'")
+        f" && steps.{install_id}.outcome == 'success'")
     assert gate == expected_gate, (
         f"the uv save's `if:` is {gate!r}; it must be exactly {expected_gate!r}. "
         "`cache-hit` is `'true'` ONLY on an exact primary-key match (`'false'` on a "
@@ -9875,20 +9893,46 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "`install-extras` term is what stops a leg that died inside `uv sync` from "
         "writing a partial archive into a key that can never be overwritten.")
 
-    pruners = [s for s in steps if "uv cache prune" in str(s.get("run") or "")]
+    # ⛔ ONLY CODE LINES COUNT (#11065 cycle 6, finding 1). A plain `in run`
+    # substring match also fires on a `#`-commented command, so commenting the
+    # prune out read GREEN while every other arm — the `--ci` absence, the bound,
+    # the lock wait, the order — still held. The step that bounds the uploaded
+    # payload would then stop executing while the pin certified it, and the save
+    # would upload the runner's accumulated `~/.cache/uv` (the 7.2 GB class this
+    # workflow's own comment cites) into a 7 m bound: aborted, permanent MISS,
+    # nothing red.
+    def _code_lines(step: dict) -> list:
+        return [ln for ln in str(step.get("run") or "").splitlines()
+                if not ln.strip().startswith("#")]
+
+    pruners = [s for s in steps
+               if any("uv cache prune" in ln for ln in _code_lines(s))]
     assert len(pruners) == 1, (
         "the `test` job must run `uv cache prune` exactly once before its save "
         f"(found {len(pruners)}). Without it the save archives the runner's whole "
         "accumulated uv history — the persistent-runner case, not a "
         "single-environment one (#11063). NOTE: plain `uv cache prune`, NOT the "
         "vendor's `--ci` variant, which deletes the pre-built wheels that ARE "
-        "#7612's payload.")
+        "#7612's payload. Only EXECUTING lines are searched, so a commented-out "
+        "prune does not satisfy this arm.")
     prune = pruners[0]
+    prune_code = "\n".join(_code_lines(prune))
+    # ⛔ `always()`, and asserted — the SAVE runs unconditionally, so a prune left
+    # on GitHub's default `success()` gate is SKIPPED on any earlier failure while
+    # the save still writes: a red-suite run would then archive the UNPRUNED
+    # accumulation into an immutable key, which is the case #11063 exists to bound
+    # (#11065 cycle 6, finding 2).
+    assert str(prune.get("if") or "").strip() == "always()", (
+        f"the uv prune's `if:` is {str(prune.get('if') or '').strip()!r}; it must be "
+        "`always()`, the same status function the uv save carries. On the default "
+        "`success()` gate a run whose suite FAILED still saves (the save is "
+        "`always() && …`) but skips the prune, so an unpruned archive lands in a "
+        "key that can never be overwritten.")
     # ⛔ The `OVERRIDES:` departure is PLAIN `prune`, and an unguarded substring
     # let the vendor's `--ci` variant read green (#11065 cycle 5, finding 4) —
     # which deletes the pre-built wheels that ARE #7612's payload, i.e. the exact
     # tidy-up the marker exists to prevent.
-    assert "--ci" not in str(prune.get("run") or ""), (
+    assert "--ci" not in prune_code, (
         "the uv prune was switched to `uv cache prune --ci`, which `uv`'s own "
         "docs say \"removes all pre-built wheels and unzipped source "
         "distributions\" — the torch wheel set this cache exists to keep. The "
@@ -9914,7 +9958,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # inline (`UV_LOCK_TIMEOUT=10 uv cache prune`) to keep the workflow's line
     # count — and therefore every `python-ci.yml:NNNN` citation this PR re-anchors
     # — byte-for-byte unchanged.
-    lock = re.search(r"UV_LOCK_TIMEOUT=(\d+)", str(prune.get("run") or ""))
+    lock = re.search(r"UV_LOCK_TIMEOUT=(\d+)", prune_code)
     assert lock, (
         "the prune step does not bound `UV_LOCK_TIMEOUT`. `uv`'s default cache-lock "
         "wait is 300 s — longer than this step's 1 m bound — so on any host where "
