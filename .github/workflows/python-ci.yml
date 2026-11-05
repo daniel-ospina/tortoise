@@ -1959,10 +1959,10 @@ jobs:
       # Bound 1 — SIZE. `uv cache prune` (uv docs, "Caching dependencies":
       # removes unused entries and centralised project environments, both of which
       # are recreated as needed) drops every entry no current environment reaches,
-      # so what the save archives is this job's wheel set and not the runner's
-      # accumulated history — the 5.9x gap that turned a 662 MB entry into a
-      # 3.88 GB upload. It is deliberately NOT `--ci`, which would delete the
-      # pre-built wheels that are #7612's payload (see the OVERRIDES note above).
+      # so the ACCUMULATION case is bounded. It is NOT what shrank this upload: the
+      # 5.9x is pip's SCOPE variance (397,897,273 B on `main` vs 3,616,385,308 B in
+      # a PR scope) and the uv half is ~266 MB in both — splitting the payload did
+      # it. NOT `--ci`: that would delete #7612's pre-built wheels (OVERRIDES above).
       #
       # Bound 2 — TIME. `timeout-minutes: 1` / `7`: an aborted prune leaves a
       # bigger archive for a still-bounded save, and an aborted save leaves a

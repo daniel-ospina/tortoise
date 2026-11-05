@@ -187,7 +187,7 @@ plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed s
 90, x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
 is now read from the shared `pip-<os>-<hash uv.lock>` key that FOUR other jobs write, while
-`~/.cache/uv` keeps exactly one writer here, bounded in size (`uv cache prune`) and in time
+`~/.cache/uv` keeps exactly one writer here, bounded in ACCUMULATION (`uv cache prune` — it drops entries no environment reaches, not a single environment's set) and in time
 (`timeout-minutes: 7`, `continue-on-error`, fail-open to a MISS). A SINGLE 3.88 GB write still does
 not fit — but on the measured rates, not on an assumption: this run's degraded uplink was 0.9 MB/s
 sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner

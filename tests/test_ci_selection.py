@@ -10582,7 +10582,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert pip_key_root == "pip-", (
         f"the pip cache key is {pip_key!r}; the SHARED key other jobs write is "
         "`pip-<os>-<hash uv.lock>` — any other spelling silently unships it from "
-        "the five writers that populate it")
+        "the four writers that populate it")
     pip_writers_here = [s.get("name") for s in steps
                         if _is_writer(s) and pip_key_root in _key_of(s)]
     assert not pip_writers_here, (
@@ -10606,6 +10606,25 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "diff-gated, so the load-bearing writer is `test-concurrency-falkor` — the "
         "one that shares THIS job's `python == 'true'` gate. If it drops out, a run "
         "can reach this job with nothing writing the key.")
+    # ⛔ THE ROOT TEST ABOVE IS A PREFIX TEST, and a prefix test is a FALSE PASS on
+    # the invariant it is named for (#11065 review, verified by mutation): it
+    # accepts any `pip-<formula>` spelling, so changing this job's key to
+    # `pip-<os>-<github.sha>` leaves the root `pip-`, still matches a sibling's
+    # `pip-` (the arm below is a substring test too), and reads GREEN — while no
+    # job ever writes the key this one reads, so every shard cold-downloads the
+    # 3.2 GB torch set and #7612 is silently reverted. The expected spelling is
+    # therefore taken from a SIBLING WRITER, never restated here.
+    pip_sibling_keys = sorted({_key_of(s) for jid, jd in wf["jobs"].items()
+                               if jid != "test"
+                               for s in (jd.get("steps") or [])
+                               if _is_writer(s) and pip_key_root in _key_of(s)})
+    assert pip_key in pip_sibling_keys, (
+        f"the `test` job restores {pip_key!r}, which is not the key ANY other job "
+        f"writes ({pip_sibling_keys}). A key-formula change on this side only is "
+        "the #7612 regression with a green pin: the root arm above passes on any "
+        "`pip-…` spelling and the sibling arm is a substring match, so the miss "
+        "is invisible until every shard pays the cold torch download. Use the "
+        "shared spelling, or change BOTH sides in one commit.")
 
     # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
     uv_steps = [s for s in steps if "~/.cache/uv" in _path_of(s)]
@@ -10639,6 +10658,13 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "nothing has written — that is a reopen of #7612, not a local fix. TWO is "
         "the unbounded duplicate this pin exists to stop.")
     uv_save = uv_writers[0]
+    assert _key_of(uv_save) == uv_key, (
+        f"the uv WRITER saves under {_key_of(uv_save)!r} while the reader restores "
+        f"{uv_key!r}. Both roots are `uv-cache-`, so the one-writer arm above is "
+        "satisfied and this reads GREEN — but a writer on a DIFFERENT formula "
+        "populates a key this job never reads, so the exact-hit path dies and "
+        "every run pays a full bounded write. Same string, or the pin certifies "
+        "nothing about the hit path it exists to protect.")
     assert _uses_of(uv_save) == "actions/cache/save@v4", (
         f"the uv writer must be the EXPLICIT `actions/cache/save@v4` step, not "
         f"{_uses_of(uv_save)!r} — an implicit `actions/cache@` save runs as a POST "
