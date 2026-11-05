@@ -18,8 +18,11 @@ Which makes exactly two shapes defects, and this tool flags only those:
 arm                        flagged when
 =========================  =========================================================================
 ``pr-unclaimed-issue``     a PR **claims** an issue (a ``#N`` — optionally ``owner/repo#N`` —
-                           attached to a **claiming word**: ``Refs`` / ``Related`` / ``Part of`` /
-                           ``See also`` / ``serves`` / ``addresses`` and the closing/satisfies words;
+                           attached to a **claiming word**: ``Refs`` / ``Part of`` / ``serves`` /
+                           ``addresses`` and the closing/satisfies words — ``Related`` and
+                           ``See also`` are NOT claiming words (they say the PR does NOT serve the
+                           issue, which is the form ``skills/code-review/SKILL.md`` mandates for a
+                           non-closing reference);
                            a comma-continued list after that word is claimed in FULL, but only the
                            **first** ref of a RESOLVING word resolves — GitHub's documented
                            multi-issue form repeats the keyword (``Resolves #10, resolves #123``),
@@ -44,10 +47,13 @@ A claim is a reference the author is using to say **"this PR serves this issue"*
 on a line that carries a claiming word, and this module reads only those — plus it excludes the PR's
 own number, inline code spans, HTML comments and fenced blocks.
 
-⛔ Two populations are DELIBERATELY NOT FLAGGED, and the tests pin them as negative controls:
+⛔ Three populations are DELIBERATELY NOT FLAGGED, and the tests pin them as negative controls:
 
 * a **fresh issue with no criteria** — normal, the scoping has not run yet;
-* a **PR that claims no issue** — not every change serves an issue.
+* a **PR that claims no issue** — not every change serves an issue;
+* a **``Related:`` / ``See also``** reference — the repo-mandated form for saying a PR does NOT
+  serve the issue (`docs/ops/ISSUE-WORKING-PROCESS.md`), so flagging it would punish an author for
+  following this repo's own review instructions.
 
 A false positive in either direction points bureaucracy at legitimate work, which is worse than the
 defect. That is the whole reason this tool is advisory.
@@ -281,7 +287,7 @@ def claims(body: str, own_number: int | None = None,
            repo: str | None = None) -> dict[str, list[int]]:
     """The refs this body CLAIMS, grouped by what the claim does.
 
-    `closing` / `satisfies` resolve an issue; `weak` (`Refs`, `Related`, `Part of`, `See also`)
+    `closing` / `satisfies` resolve an issue; `weak` (`Refs`, `Part of`, `serves`, `addresses`)
     links nothing and closes nothing — that is the #10534 hole.
     """
     return _claims_in(strip_code(body)[0], own_number, repo)
@@ -300,7 +306,7 @@ def _claims_in(text: str, own_number: int | None = None,
     the shape this module refuses everywhere else (`Unmeasurable`, never a pass).
     """
     found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": [],
-                                   "continued": []}
+                                   "continued_resolving": []}
     declined_lines = {i for i, line in enumerate(text.splitlines()) if DECLINE_RE.search(line)}
     line_starts = [0]
     for line in text.splitlines(keepends=True):
@@ -334,15 +340,18 @@ def _claims_in(text: str, own_number: int | None = None,
                 into.append(num)
             elif word in CLOSING_WORDS:
                 (found["weak"] if continued else found["closing"]).append(num)
+                if continued:
+                    found["continued_resolving"].append(num)
             elif word in SATISFIES_WORDS:
                 (found["weak"] if continued else found["satisfies"]).append(num)
+                if continued:
+                    found["continued_resolving"].append(num)
             else:
+                # A LINKING word never resolves anything, so its list continuation is not a
+                # "first ref of a keyword" question at all — the FIRST-ref rule is about CLOSING
+                # keywords only, and `Part of #A, #B` / `Refs #A, #B` are the DOMINANT shapes in
+                # the measured population (review P3).
                 found["weak"].append(num)
-            if continued:
-                # Which subjects are a LIST CONTINUATION, so the caller can say so only where it
-                # applies — the diagnosis is irrelevant for a plain `Refs #N` claim, which is the
-                # dominant class (review P3).
-                found["continued"].append(num)
     for key in found:
         found[key] = sorted(set(found[key]))
     return found
@@ -447,9 +456,11 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
         return []
     detail = (f"claims #{', #'.join(str(n) for n in unresolved)} with no closing keyword of its "
               f"own: neither `Satisfies #N: <ids>` nor a closing keyword resolves it.")
-    if set(unresolved) & set(c["continued"]):
-        # Only where it APPLIES: for a plain `Refs #N` claim — the dominant class, 18 of 18 in the
-        # measured population — this sentence would be an irrelevant diagnosis (review P3).
+    if set(unresolved) & set(c["continued_resolving"]):
+        # Only where it APPLIES: the FIRST-ref rule is a CLOSING-keyword rule (GitHub's documented
+        # multi-issue form repeats the keyword), so it is irrelevant for a plain `Refs #N` claim AND
+        # for a linking-word list (`Part of #A, #B`) — the dominant shapes in the measured
+        # population (review P3).
         detail += (" GitHub closes only the FIRST ref of a keyword (`Resolves #10, resolves #123`), "
                    "so a comma-continued ref does not close it either.")
     detail += " Delivered work then cannot close what it serves."
