@@ -341,8 +341,13 @@ def test_a_LIVE_pid_in_ANOTHER_group_is_not_our_rail():
     (`assert rd._in_group(pid, 42) is False`, its own control arm), which the
     forward-merge brought in — so "NOTHING pinned it" is false at this head, and
     the figure is a frozen count of a file the merge has since grown (45
-    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`, 76 here). Reproduce with a
-    plugin that sets `rail_detach._in_group = lambda pid, pgid: True`:
+    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`, 76 here). ⛔ TWO COUNTING
+    DEFINITIONS meet in this paragraph and neither figure is wrong: the `46
+    passed` quoted above is pytest's COLLECTED population at `e49e641f4^` (45
+    `^def test_` functions, one of them carrying a 2-case `parametrize`, so
+    45 + 1 = 46), while the parenthetical counts `^def test_` definitions. Do
+    not "correct" one figure to match the other. Reproduce with a plugin that
+    sets `rail_detach._in_group = lambda pid, pgid: True`:
     `2 failed, 75 passed`.
 
     The gap this test fills survives that correction, and it is narrower than the
