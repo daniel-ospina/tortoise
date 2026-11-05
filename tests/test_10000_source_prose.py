@@ -225,6 +225,18 @@ def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
                 "own docstring. Point at the artifact that says it")
 
 
+# NOTE (reconciliation, `#10852`): the projection-door doc guard that briefly
+# lived here as `test_the_projection_door_doc_does_not_claim_a_re_capture_repairs_a_legacy_node`
+# now lives in `tests/test_10000_cache_projection_doc_pin.py`. Two lanes reached
+# the same fix; the surviving guard is the DB-free one registered in `tier1`,
+# because the guarded artifact is under `docs/` and a docs-only diff runs `tier1`
+# ONLY — in this file (the `core` surface, one throwaway FalkorDB per case) the
+# doc arm would sleep on exactly the diff that re-arms the claim. Nothing is
+# lost: that file asserts the same absence/presence pair, over the WHOLE doc,
+# plus the doc<->module-docstring agreement and the resolvability of every
+# `test_*` the doc's "### The pin" section cites.
+
+
 def _capture(sdk, session_id: str) -> dict:
     return sdk.capture_session(
         conversation=[

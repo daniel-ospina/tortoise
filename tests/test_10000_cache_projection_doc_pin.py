@@ -62,11 +62,15 @@ COSTS_HEADING = "### Costs, named rather than implied"
 PIN_HEADING = "### The pin"
 
 #: Shapes a future lane re-introduces the retracted claim in. The first is the
-#: pre-fix text VERBATIM (so this arm was RED at `e13c6eeea7`); the second is the
-#: mechanism clause that followed it.
+#: pre-fix text VERBATIM (so this arm was RED at `e13c6eeea7`); the rest are the
+#: mechanism clause that followed it and the two casings a lane reaches for when
+#: it paraphrases the claim back in.
 RETRACTED_SHAPES = (
     "until it is re-captured",
     "the capture now overwrites the pair",
+    "now overwrites the pair",
+    "heals on re-capture",
+    "HEALS on re-capture",
 )
 
 #: The correction, as keywords rather than a sentence: a reworded but CORRECT
@@ -92,7 +96,21 @@ REQUIRED_PINNED_LEGS = (
 PIN_MODULES = (
     ROOT / "tests" / "test_10853_session_source_prose.py",
     ROOT / "tests" / "test_10000_source_prose.py",
+    # This file is itself a leg the pin section cites.
+    ROOT / "tests" / "test_10000_cache_projection_doc_pin.py",
 )
+
+
+def _doc_text() -> str:
+    """The whole doc, verbatim — the scope of the ABSENCE arm.
+
+    ⛔ THE ABSENCE ARM SCANS THE WHOLE FILE, not only the costs section: moving
+    the retracted sentence to another section (or back into the introduction)
+    must not take it out of the guard's scope. The PRESENCE arms stay
+    section-scoped, because the correction belongs to the cost list an operator
+    reads.
+    """
+    return DOC.read_text(encoding="utf-8")
 
 
 def _section(heading: str) -> str:
@@ -134,9 +152,10 @@ def test_the_doc_does_not_claim_a_re_capture_heals_a_pre_fix_node():
     `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`.
     """
     costs = _section(COSTS_HEADING)
+    whole = _doc_text()
 
     for retracted in RETRACTED_SHAPES:
-        assert retracted not in costs, (
+        assert retracted not in whole, (
             f"`{DOC.name}` re-arms the RETRACTED mechanism ({retracted!r}). A "
             "re-capture does NOT heal a pre-#10000 node: re-capturing an "
             "already-captured session id is the `#2104`/`#1727` no-op replay, so "
