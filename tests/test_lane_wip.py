@@ -3926,6 +3926,87 @@ def test_pin_refuses_a_directory_INSIDE_a_worktree(hub: Path) -> None:
         (hub / "hub_new.py").unlink(missing_ok=True)
 
 
+def test_pin_from_an_IGNORED_SUBDIRECTORY_of_a_LANE_keys_the_LANE(hub: Path) -> None:
+    """`cd <lane>/build && pin` must pin THE LANE — not refuse, and never key `build`.
+
+    `_lane_root` answers an ignored or empty path as its OWN lane key, which is right for the
+    RECREATED-lane shape (`<hub>/.worktrees/<lane>`, inside the HUB) and wrong for every
+    ignored subdirectory of a LIVE lane (`build/`, `.venv`). `pin` then refused with "… is not
+    a worktree root — it is a directory inside <lane>", telling an operator standing inside
+    their lane to run inside their lane — and on `origin/main` the same invocation pinned the
+    lane correctly (`Path(_worktree_root(root) or root)`), so this was a regression of the
+    tool's PRIMARY protection verb, in the state a lane is most likely to be in.
+
+    `list` was already given this discriminator (`test_list_from_an_IGNORED_SUBDIRECTORY_finds_
+    the_lanes_pins`); the two verbs must not disagree about one state.
+    """
+    wt = dirty_lane(hub, "wt-ignoredpin")
+    with (wt / ".gitignore").open("a") as fh:
+        fh.write("build/\n")
+    assert git("add", ".gitignore", cwd=wt).returncode == 0
+    assert git("commit", "-qm", "ignore build", cwd=wt).returncode == 0
+    (wt / "build").mkdir()
+    (wt / "build" / "out.bin").write_text("artifact\n")
+
+    pinned = run_tool("pin", cwd=wt / "build")
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    # The pin was taken AT the lane: keying `build` would have said "from …/build" and minted
+    # a key `list` at the lane root does not read.
+    assert f"from {wt.resolve()}" in pinned.stdout, pinned.stdout
+    ref = pin_ref(pinned.stdout)
+    at_root = run_tool("list", cwd=wt)
+    assert ref in at_root.stdout, at_root.stdout
+    in_build = run_tool("list", cwd=wt / "build")
+    assert ref in in_build.stdout, in_build.stdout
+    assert "has no wip pin" not in in_build.stdout, in_build.stdout
+
+
+def test_pin_from_an_EMPTY_SUBDIRECTORY_of_a_LANE_keys_the_LANE(hub: Path) -> None:
+    """`cd <lane>/newpkg && pin` (a JUST-created, non-ignored directory) must pin the lane.
+
+    Same regression as the ignored-subdir arm: `_lane_root` reads ANY empty directory as its
+    own lane key, so `pin` refused a lane that was standing in the very directory it had just
+    created — the state a lane is in while it starts a new package. On `origin/main` it pinned
+    the enclosing worktree.
+    """
+    wt = dirty_lane(hub, "wt-emptypin")
+    sub = wt / "newpkg"
+    sub.mkdir()
+
+    pinned = run_tool("pin", cwd=sub)
+    assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+    assert f"from {wt.resolve()}" in pinned.stdout, pinned.stdout
+    listed = run_tool("list", cwd=wt)
+    assert pin_ref(pinned.stdout) in listed.stdout, listed.stdout
+
+
+def test_pin_refuses_a_POPULATED_recreated_lane_path(hub: Path) -> None:
+    """Content in `<hub>/.worktrees/<lane>` does not make it a lane — the HUB is still behind it.
+
+    The refusal must key on WHERE the directory sits (inside the repository's MAIN worktree),
+    not on "ignored AND empty": a recreated lane path that already holds files is the shape
+    most likely to be rescued into, and keying the hub for it would snapshot the hub's work
+    under the lane's key — the false "your work is safe" verdict the refusal exists for.
+    """
+    with (hub / ".gitignore").open("a") as fh:
+        fh.write(".worktrees/\n")
+    assert git("add", ".gitignore", cwd=hub).returncode == 0
+    assert git("commit", "-qm", "ignore lanes", cwd=hub).returncode == 0
+    lane = hub / ".worktrees" / "lane-y"
+    lane.mkdir(parents=True)
+    (lane / "rescued.py").write_text("copied out of a dying lane\n")
+    (hub / "hub_new.py").write_text("the HUB's work\n")
+    try:
+        out = run_tool("pin", "--path", str(lane), cwd=hub)
+        assert out.returncode == 2, f"{out.returncode}: {out.stdout}{out.stderr}"
+        assert "is not a worktree root" in out.stderr, out.stderr
+        assert "pinned " not in out.stdout, out.stdout
+        refs = git("for-each-ref", "--format=%(refname)", "refs/pi-lane-wip/", cwd=hub)
+        assert refs.stdout.strip() == "", f"a pin was minted over the hub: {refs.stdout}"
+    finally:
+        (hub / "hub_new.py").unlink(missing_ok=True)
+
+
 def test_one_unreadable_index_only_path_does_not_cost_the_whole_pin(hub: Path) -> None:
     """The `add -f` step for index-only paths must degrade, not fail, on one bad path.
 

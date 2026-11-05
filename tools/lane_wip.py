@@ -1078,6 +1078,55 @@ def _paths_git_calls_dirty(root: Path) -> list[str]:
     return out
 
 
+def _is_main_worktree(root: Path) -> bool:
+    """True when ``root`` is the repository's MAIN worktree (the hub), not a LINKED one (a lane).
+
+    ⛔ THE DISCRIMINATOR `_lane_root` NEEDS IS WHERE THE DIRECTORY SITS, NOT WHAT IT HOLDS. An
+    ignored or empty directory is answered as its own lane KEY — required for the RECREATED-lane
+    shape, because `<hub>/.worktrees/<lane>` (`mkdir -p` after a `worktree remove --force`) sits
+    inside the HUB and its key must stay the LANE's so `list` finds the pins. That same rule also
+    swallowed every ignored or empty subdirectory of a LIVE lane (`build/`, `.venv`, a
+    just-created `newpkg`), and `pin` — the verb whose entire job is protecting that lane — then
+    refused with "run inside the lane" to an operator standing in it (measured; `origin/main`
+    pinned the lane there). A git dir that differs from the COMMON dir is a linked worktree, and a
+    lane can only ever be one of those: so a subdirectory of a linked worktree belongs to that
+    lane. Content is NOT the test — a recreated lane path that already holds rescued files is
+    still inside the HUB (`test_pin_refuses_a_POPULATED_recreated_lane_path`).
+    """
+    # `--path-format=absolute` so the two answers are comparable: `--git-dir` is relative in the
+    # main worktree's subdirectories (`/abs/.git` vs `../.git` depending on the prefix) while a
+    # linked worktree answers absolute paths, and comparing them unresolved would read the MAIN
+    # worktree as "linked" from any subdirectory. The repo's own floor is >= 2.31, where the flag
+    # exists (`--path-format` is documented in git-rev-parse(1) since 2.31).
+    cp = _git(
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+        check=False,
+        cwd=root,
+    )
+    # ⛔ A FAILED READ IS NOT A VERDICT. Guessing "linked" would key the enclosing worktree and
+    # pin it under a key nobody asked for; guessing "main" would refuse a live lane. Neither is
+    # this file's contract, so an unreadable answer fails closed like every other read here.
+    if cp.returncode != 0:
+        raise GitFailed(
+            cp.returncode,
+            f"could not tell whether {root} is the main worktree or a linked one: "
+            f"{(cp.stderr or cp.stdout).strip() or 'no diagnostic'}. The lane key is derived "
+            "from that answer, and a guessed key is a pin `list` may never find",
+        )
+    lines = cp.stdout.splitlines()
+    if len(lines) < 2:
+        raise GitFailed(
+            cp.returncode,
+            f"could not tell whether {root} is the main worktree or a linked one: "
+            f"`rev-parse --git-dir --git-common-dir` answered {len(lines)} line(s), not 2 "
+            f"({cp.stdout.strip() or 'no output'})",
+        )
+    return lines[0] == lines[1]
+
+
 def _lane_root(path: Path) -> Path:
     """``path`` normalised to the worktree it IS — but never a LANE into its hub.
 
@@ -1091,6 +1140,13 @@ def _lane_root(path: Path) -> Path:
     describes. The fleet's lane directory is GITIGNORED (`.worktrees/`), so "ignored by the
     enclosing worktree, or empty (a recreated lane path)" is the discriminator — the same
     test the nested-worktree guard already uses.
+
+    ⛔ BUT THE HUB IS THE ONLY PLACE THAT SHAPE LIVES. `_is_main_worktree` asks where the
+    directory sits: inside the MAIN worktree, an ignored/empty directory keeps its own key (the
+    recreated lane); inside a LINKED worktree (a live lane), the same directory is a plain
+    subdirectory of that lane and keys it. Without that half, `pin` refused `<lane>/build` and a
+    just-created `<lane>/newpkg` — the lane's own primary protection verb, unavailable in the
+    directory the lane is standing in.
     """
     enclosing = _worktree_root(path)
     if not enclosing:
@@ -1102,18 +1158,21 @@ def _lane_root(path: Path) -> Path:
         empty = not any(path.iterdir())
     except OSError:
         empty = False
-    if empty:
-        return path.resolve()
-    ignored = _git("check-ignore", "-q", str(path), check=False, cwd=enclosing)
-    if ignored.returncode == 0:
-        return path.resolve()
-    if ignored.returncode != 1:
-        raise GitFailed(
-            ignored.returncode,
-            f"could not decide whether {enclosing} ignores {path}: "
-            f"{(ignored.stderr or ignored.stdout).strip() or 'no diagnostic'}",
-        )
-    return enclosing_path
+    if not empty:
+        ignored = _git("check-ignore", "-q", str(path), check=False, cwd=enclosing)
+        if ignored.returncode == 1:
+            # An ordinary subdirectory: whatever it holds, it is not its own lane.
+            return enclosing_path
+        if ignored.returncode != 0:
+            raise GitFailed(
+                ignored.returncode,
+                f"could not decide whether {enclosing} ignores {path}: "
+                f"{(ignored.stderr or ignored.stdout).strip() or 'no diagnostic'}",
+            )
+    # EMPTY, or GITIGNORED: the RECREATED lane path (inside the HUB — its own key, so `list`
+    # finds the lane's pins and `pin` refuses to snapshot the hub under it) or a subdirectory of
+    # a LIVE lane (a linked worktree — that lane).
+    return path.resolve() if _is_main_worktree(enclosing_path) else enclosing_path
 
 
 def _callers_cwd() -> Path:
@@ -1164,13 +1223,15 @@ def cmd_pin(args: argparse.Namespace) -> int:
     if not _inside_work_tree(root, what="git work tree"):
         raise LaneWipError(f"{root} is not a git work tree — nothing to pin there")
     # ⛔ A PIN SOURCE MUST BE A WORKTREE ROOT, NOT A DIRECTORY INSIDE ONE. `_lane_root`
-    # keeps a gitignored/empty directory as its own lane KEY (so `list` finds the lane's
-    # pins), but `--is-inside-work-tree` is TRUE for `<hub>/.worktrees/<lane>` because it
-    # sits inside the HUB — so `pin --path <recreated lane>` snapshotted the HUB's working
-    # state under the LANE's key (measured: the pin held `.gitignore`/`hub_new.py`, and the
-    # printed remedy named `--branch main`), or said "clean — nothing to pin" over a hub
-    # that had nothing to save — the false "your work is safe" verdict, in the exact state
-    # the RECIPE describes.
+    # answers an IGNORED/EMPTY directory as its own lane KEY **when it sits inside the MAIN
+    # worktree** — the RECREATED-lane shape, so `list` finds the lane's pins — and
+    # `--is-inside-work-tree` is TRUE for it because it sits inside the HUB — so `pin
+    # --path <recreated lane>` snapshotted the HUB's working state under the LANE's key
+    # (measured: the pin held `.gitignore`/`hub_new.py`, and the printed remedy named
+    # `--branch main`), or said "clean — nothing to pin" over a hub that had nothing to
+    # save — the false "your work is safe" verdict, in the exact state the RECIPE describes.
+    # Inside a LINKED worktree `_lane_root` answers the LANE instead, so a lane's own
+    # subdirectory never reaches this refusal.
     at_root = _worktree_root(root)
     if not at_root or Path(at_root).resolve() != root:
         raise LaneWipError(
@@ -1419,13 +1480,13 @@ def cmd_list(args: argparse.Namespace) -> int:
             f"{root}; the LANE KEY still comes from {keyed}",
             file=sys.stderr,
         )
-    # ⛔ AN IGNORED SUBDIRECTORY OF A LIVE LANE IS NOT ITS OWN LANE. `_lane_root` answers the
-    # ignored path as its own key — correct for the RECREATED-lane shape (the state RECIPE
-    # describes), but equally true of every ignored subdirectory of a LIVE lane (`.venv`,
-    # `build/`, an `ignored/` dir), so `list` run from there said "lane ignored-… has no wip
-    # pin" at exit 0 over a lane that was fully pinned — and RECIPE step 3 reads an empty pin
-    # list as "the work is genuinely gone". The path alone cannot tell the two shapes apart,
-    # so read BOTH keys rather than ever printing the false verdict.
+    # ⛔ THE TWO VERBS MUST NOT DISAGREE ABOUT ONE STATE. `_lane_root` answers an
+    # ignored/empty directory as its own key only inside the MAIN worktree, and keys the
+    # ENCLOSING lane when the directory is a subdirectory of a LINKED one — `pin` and `list`
+    # share that rule. Read BOTH keys anyway: the shapes `_lane_root` still answers as
+    # own-key are exactly the ones where a ref may be filed under either key (a recreated
+    # lane path inside the hub), and RECIPE step 3 reads an empty pin list as "the work is
+    # genuinely gone", so a single-key read that misses is a false verdict, not a miss.
     keys = [keyed]
     enclosing = _worktree_root(keyed)
     if enclosing:
