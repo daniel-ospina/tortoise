@@ -5345,8 +5345,21 @@ class WaitBoundMiddleware:
         # while MCP tool calls are the ones being refused. `_is_jsonrpc_surface`
         # is the same predicate `_send_wait_bound_refusal` uses three lines below
         # to CHOOSE that body, so the label and the body cannot disagree.
-        _monitoring.record_wait_bound_breach(
-            "mcp" if _is_jsonrpc_surface(route_path) else "rest")
+        #
+        # ⛔ WRAPPED, for the rule every other monitoring write on a request
+        # path in this module already carries (`record_egress`/`record_compute`
+        # below): measurement must never be a NEW failure mode for the request
+        # it measures. That rule is load-bearing HERE rather than merely
+        # tidy — this call sits AFTER `refused = True` and BEFORE the send, so
+        # an exception escaping it would skip `_track_wait_bound_request` and
+        # `_send_wait_bound_refusal` and hand the client an opaque 500 with no
+        # `Retry-After` and no `-32009` body: the illegible refusal #3834/#10602
+        # exist to remove, produced by the observation meant to expose it.
+        try:
+            _monitoring.record_wait_bound_breach(
+                "mcp" if _is_jsonrpc_surface(route_path) else "rest")
+        except Exception:
+            _logger.debug("wait-bound count failed", exc_info=True)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))

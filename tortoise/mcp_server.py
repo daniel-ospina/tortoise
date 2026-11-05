@@ -519,7 +519,16 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
     # already counted, as ``mcp``), so one refused MCP request is one count no
     # matter which detector saw it. `test_the_mcp_module_has_exactly_one
     # _breach_counting_site` pins that a second site is not added.
-    monitoring.record_wait_bound_breach("mcp")
+    #
+    # ⛔ WRAPPED, the same rule the emit below carries: telemetry must never
+    # turn a refusal into a generic error. This call sits on the refusal path
+    # BEFORE `_wait_bound_refusal_result` builds its `-32009` body, so a raise
+    # here would replace that legible refusal with a bare tool error — the
+    # observation destroying the thing it observes (#3834/#10602).
+    try:
+        monitoring.record_wait_bound_breach("mcp")
+    except Exception:  # measurement must never break a refusal
+        _log.debug("mcp wait-bound count failed", exc_info=True)
 
     def _emit() -> None:
         try:

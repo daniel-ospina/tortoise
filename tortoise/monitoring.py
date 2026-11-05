@@ -1633,6 +1633,7 @@ def record_wait_bound_breach(surface: str) -> None:
 def wait_bound_breach_counts() -> dict:
     """In-process snapshot of ``WAIT_BOUND_BREACH_COUNT`` (#10602).
 
+    On a successful read:
     ``{"total": N, "by_surface": {"mcp": n, "rest": n}, "error": None}``.
 
     ⛔ NEVER RAISES, and that is a CONTRACT rather than a convenience: this is
@@ -1644,22 +1645,33 @@ def wait_bound_breach_counts() -> dict:
     Every known surface is present even at 0 — a missing key and a measured
     zero must not read the same (``#3253``'s rule for ``graph_size_error``).
 
-    ⛔ A FAILED READ IS NOT A ZERO, so the same rule applies to that failure:
-    when the counter family cannot be collected, ``error`` carries the reason
-    and the counts stay 0. Reporting a bare 0 would be the false reassurance
-    this whole channel exists to remove, so a reader must check ``error`` —
-    absent/None means MEASURED.
+    ⛔ A FAILED READ IS NOT A ZERO — and it is not a zero in ANY field, so the
+    failure shape is ``None``, not padded counts: when the counter family
+    cannot be collected this returns
+    ``{"total": None, "by_surface": None, "error": "…unreadable: …"}``.
+
+    The stricter shape is the rule this very payload already records three keys
+    away: ``hosted_api.health``'s ``record`` counters are ``None`` when they
+    could not be READ, "never ``{}``: an unread counter and a zero are different
+    facts, and the obvious consumer (``counts.get(\"write_failed\", 0)``) would
+    read the second from the first" (``#9548`` review P2). Padding the failure
+    to ``0`` leaves exactly that consumer reading a healthy zero out of a failed
+    read, and only a reader who happens to check the sibling ``error`` field is
+    safe — a scrape or alert rule keyed on ``total`` is not. ``None`` cannot be
+    misread as "no breach was measured", which is the whole point of the
+    channel (#10602).
     """
     by_surface = dict.fromkeys(_WAIT_BOUND_SURFACES, 0)
-    error: str | None = None
     try:
         by_surface.update(_collect_by_label(WAIT_BOUND_BREACH_COUNT, "surface"))
     except Exception as exc:
         logger.warning(
             "#10602: wait-bound breach counts unreadable: %r", exc)
-        error = f"wait_bound_breaches unreadable: {type(exc).__name__}"
+        return {"total": None, "by_surface": None,
+                "error": f"wait_bound_breaches unreadable: "
+                         f"{type(exc).__name__}"}
     return {"total": sum(by_surface.values()), "by_surface": by_surface,
-            "error": error}
+            "error": None}
 
 
 def record_silent_revision_loss(reason: str) -> None:

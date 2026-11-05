@@ -314,7 +314,8 @@ def test_an_unreadable_counter_is_reported_and_never_raises(baseline,
     probes.
 
     …and the failure must not be reported as a clean `0` either — that is the
-    same false reassurance as an absent key. `error` carries it.
+    same false reassurance as an absent key. `error` carries it, and BOTH
+    numeric fields abstain rather than padding to zero.
     """
     def _boom(_metric, _label, **_kw):
         raise RuntimeError("#10602 test: metric family unreadable")
@@ -327,13 +328,23 @@ def test_an_unreadable_counter_is_reported_and_never_raises(baseline,
     assert channel["error"], (
         "a failed read must be reported in `error`, never as a bare 0")
     assert "RuntimeError" in channel["error"]
-    # The shape survives the failure, so a caller need not branch on it.
-    assert set(channel["by_surface"]) == {"mcp", "rest"}
-    assert channel["total"] == 0
+    # ⛔ None, NOT 0. The failure shape is the None-not-zero rule this SAME
+    # /health payload records for its `record` counters (#9548 review P2): "an
+    # unread counter and a zero are different facts, and the obvious consumer
+    # (`counts.get("write_failed", 0)`) would read the second from the first".
+    # Padding the failure to 0 hands a `total`-keyed scrape or alert rule a
+    # healthy reading out of a failed read — only a reader that happens to
+    # check the sibling `error` is safe, and an alert rule cannot. Mutation-
+    # verified: returning the padded zeros below fails here and nowhere else.
+    assert channel["total"] is None, (
+        "a failed read must not report `total: 0` — 0 is a MEASURED zero")
+    assert channel["by_surface"] is None, (
+        "a failed read must not report padded per-surface zeros either")
 
     # And the endpoint that promises never to 5xx still answers.
     body = asyncio.run(ha.health())
     assert body["wait_bound_breaches"]["error"]
+    assert body["wait_bound_breaches"]["total"] is None
 
 
 # ── 10: the bare family never reads "this build cannot see breaches" ─────
@@ -378,3 +389,62 @@ def test_the_metrics_exposition_carries_both_surfaces_at_zero():
         "the exposition must declare BOTH bounded surface children at import, "
         "so a scrape before the first refusal reads 0 (measured) rather than "
         "absent (unreadable): " f"{series}")
+
+
+# ── 11: a failing counter must never eat the legible refusal ─────────────
+
+@pytest.mark.asyncio
+async def test_a_failing_counter_write_does_not_replace_the_refusal(
+        baseline, monkeypatch):
+    """Measurement must never be a NEW failure mode for the request it measures.
+
+    Every other monitoring write on a request path in `hosted_api.py` is wrapped
+    with exactly that rule (`record_egress`, `record_compute`). This channel's
+    write sits on the REFUSAL path, AFTER the refusal decision and BEFORE the
+    send — so an exception escaping it is not merely a lost measurement: it
+    skips `_track_wait_bound_request` and `_send_wait_bound_refusal` and hands
+    the client an opaque 500 with no `Retry-After` and no `-32009` body. The
+    observation would destroy the legible refusal it exists to expose, which is
+    the precise failure mode #3834/#10602 exist to remove.
+
+    Mutation-verified: deleting the `try/except` around the middleware's
+    `record_wait_bound_breach` call makes this the only failing test in the
+    file — the refusal comes back as a raised `RuntimeError` instead of a 504.
+    """
+    def _boom(_surface):
+        raise RuntimeError("#10602 test: counter write failed")
+
+    monkeypatch.setattr(monitoring, "record_wait_bound_breach", _boom)
+    monkeypatch.setattr(ha._monitoring, "record_wait_bound_breach", _boom)
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.05)
+    mw = ha.WaitBoundMiddleware(_slow_app(5.0))
+
+    rec = await _drive(mw, _scope("/mcp/", method="POST"))
+
+    assert rec.status == 504, (
+        "a failing counter write must not turn the wait-bound refusal into an "
+        "opaque 500 — the client still gets the legible refusal")
+    from tortoise.mcp_auth import ERR_TIMEOUT
+    assert rec.json["error"]["code"] == ERR_TIMEOUT, (
+        "the JSON-RPC `-32009` body is the product on this path; a counter "
+        "that can suppress it re-creates the illegible outcome of #10602")
+
+
+def test_the_mcp_count_write_is_guarded(monkeypatch):
+    """The MCP arm's counting write is on the refusal path TOO.
+
+    `_emit_mcp_wait_bound_breach_off_loop` runs BEFORE `_wait_bound_refusal_
+    result` builds its `-32009` body, so an unguarded raise there replaces a
+    legible tool refusal with a generic error. Asserted structurally because
+    the seam's refusal return is only reachable through the whole MCP dispatch
+    path; the behavioural half is pinned above for the transport arm, which
+    shares the rule.
+    """
+    def _boom(_surface):
+        raise RuntimeError("#10602 test: counter write failed")
+
+    monkeypatch.setattr(monitoring, "record_wait_bound_breach", _boom)
+
+    # Must not raise: the emit is scheduled after the count, so a surviving
+    # call proves the count did not abort it.
+    mcp_server._emit_mcp_wait_bound_breach_off_loop("org", 1250, "tortoise_search")

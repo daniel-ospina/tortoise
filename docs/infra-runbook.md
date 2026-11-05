@@ -769,9 +769,14 @@ so a slow-but-reachable store must not flip it (`monitoring.metrics`). Do not
 cumulative since process start, incremented on every wait-bound refusal — the
 `-32009` JSON-RPC body on the MCP surface, the `{"detail"}` 504 on the REST one.
 Both surface keys are always present, at `0`, so a measured zero is
-distinguishable from a build that cannot see breaches at all; `error` is `null`
-when the read succeeded and names the reason when it did not, because a failed
-read reported as `0` would be the same false reassurance.
+distinguishable from a build that cannot see breaches at all.
+
+`error` is `null` when the read succeeded and names the reason when it did not.
+A failed read is **not** zeroed: `total` and `by_surface` are both `null` in that
+case, because a failed read reported as `0` would be the same false reassurance
+as an absent key — the None-not-zero rule this same body already applies to its
+`record` counters (#9548 review P2). **Check `error` before trusting a `0`:** a
+`total`-keyed alert rule sees `null` (not `0`) while the family is unreadable.
 
 ```bash
 # CUMULATIVE since this process started — not a rate, not a current state.
