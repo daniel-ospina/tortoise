@@ -187,24 +187,31 @@ def test_the_drift_banner_remedy_passes_yes_too() -> None:
     one level out: the copy-paste remedy dies on the v3 consent gate, so an operator resolving
     OUT OF ORDER versions repairs nothing and cannot tell why.
 
-    Asserted on the PARSED workflow (this file's convention), and only on banner lines that print
-    the consent-gated remedy, so a banner carrying prose alone cannot false-red.
+    Asserted on the PARSED workflow (this file's convention), and only on banner messages that
+    print the consent-gated remedy, so a banner carrying prose alone cannot false-red.
     """
-    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    # One message per `::warning::` rather than one per PHYSICAL LINE, and the selector names the
+    # command root, not just its flag: both narrow a false-red found in review. A cosmetic shell
+    # line-continuation reflow is semantically identical (the shell deletes `\` + newline), but it
+    # would separate `--yes` from the remedy on the next physical line and red a CORRECT banner;
+    # and a future banner that merely EXPLAINS the repair in prose would otherwise be selected as
+    # if it were one. Reuses `_applier_steps()` so there is one YAML traversal to keep in sync.
     banners = [
-        line
-        for job in (doc.get("jobs") or {}).values()
-        for step in (job.get("steps") or [])
-        for line in str(step.get("run") or "").splitlines()
-        if "::warning::" in line
+        "::warning::" + part
+        for step in _applier_steps()
+        for part in str(step.get("run") or "").split("::warning::")[1:]
     ]
-    remedies = [line for line in banners if "--status applied" in line]
+    remedies = [
+        banner
+        for banner in banners
+        if "migration repair" in banner and "--status applied" in banner
+    ]
     assert remedies, (
         "the drift banner must still name the `migration repair --status applied` remedy: an "
         "operator shown OUT OF ORDER versions needs a command to run (#1095)"
     )
-    for line in remedies:
-        assert "--yes" in line, (
+    for banner in remedies:
+        assert "--yes" in banner, (
             "the drift banner's printed remedy must carry `--yes`: `migration repair` against a "
             "hosted project is consent-gated in CLI v3 (docs → 'Migrating to Supabase CLI v3') "
             "and fails unattended without it, so the operator's copy-paste repairs nothing and "
