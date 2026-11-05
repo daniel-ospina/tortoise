@@ -1655,28 +1655,38 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # vector, and nothing reds: both sentences are prose, and the graph stays green
 # while a designer embeds a word list and calls it a summary.
 #
-# ⛔ BOTH DIRECTIONS, EACH HALF ANCHORED, and the PREMISE IS DERIVED. The
-# narrative's home is read from `record_projection.NARRATIVE_TABLE` — the
-# projection's own constant, the same one the R7 upsert writes through — not
+# ⛔ BOTH DIRECTIONS, and THREE SCOPES, each stated because one check cannot cover
+# the others. The narrative's home is read from `record_projection.NARRATIVE_TABLE`
+# — the projection's own constant, the same one the R7 upsert writes through — not
 # restated here, so a move of that home reds in this pin instead of leaving two
-# paragraphs that agree with each other and with nothing else. The POINTER,
-# NEGATION and COUNT assertions are asserted INSIDE their own section (§9.4 by
-# heading slice, §12.1b by its footnote anchor, whose UNIQUENESS is itself
-# asserted): a whole-document `in` check would
-# stay green while §9.4 itself was reverted, as long as one copy of the correct
-# sentence survived elsewhere in 2,000 lines — the "presence-only pin certifies
-# whichever text happens to be there" failure the #10244 review measured on a
-# frozen `§11.1`. ⚠️ ONE check is deliberately NOT in-section: the retired-blur
-# absence is asserted over the WHOLE document, because that sentence is a claim
-# about the S1 narrative wherever it appears, and scoping it to §9.4 would let it
-# return in §10 unremarked. The retired phrasings are asserted ABSENT as well as the
+# paragraphs that agree with each other and with nothing else.
+#
+#   • PER-LINE (§9.4's DECIDING sentence, §12.1b's footnote): the anchor is
+#     resolved document-wide, and §9.4's is then ASSERTED TO LIE INSIDE §9.4 —
+#     without that binding, moving the sentence into §9.5 with a bare negation
+#     left behind satisfies the pointer and negation asserts while §9.4 no longer
+#     says what the vector reads (measured, and it stayed GREEN before the
+#     binding existed). Both anchors' UNIQUENESS is asserted too: a duplicate
+#     placed above the real sentence rebinds every assertion over it.
+#   • PER-SECTION (§9.4 by heading slice): the `:Source.summary` COUNT. This is
+#     the one that catches an ADDITIVE wrong instruction on a different line of
+#     §9.4, which a per-line check cannot see at all.
+#   • WHOLE-DOCUMENT: the retired-blur absence, deliberately, because that
+#     sentence is a claim about the S1 narrative wherever it appears, and scoping
+#     it to §9.4 would let it return in §10 unremarked.
+#
+# A presence-only `in` check over the whole document would stay green while §9.4
+# itself was reverted, as long as one copy of the correct sentence survived
+# elsewhere in 2,000 lines — the "presence-only pin certifies whichever text
+# happens to be there" failure the #10244 review measured on a frozen `§11.1`. The retired phrasings are asserted ABSENT as well as the
 # corrected pointer PRESENT.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
 #: §9.4's DECIDING sentence — the one line that says what the vector reads. Carries
-#: BOTH the pointer and the negation, so it is asserted per-LINE as well as
-#: per-section (see the two-scoping note below).
+#: BOTH the pointer and the negation, so both are asserted on THIS LINE (resolved
+#: document-wide, then asserted to lie inside §9.4 — see the three-scope note above).
+#: The section-scoped check is a different assertion: the `:Source.summary` COUNT.
 _SOURCE_VECTOR_SECTION_94_ANCHOR = "it is one vector attached to the `:Source` node"
 _S94_HEADING = "### 9.4 "
 _S95_HEADING = "### 9.5 "
@@ -1854,10 +1864,12 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     the pin reds if either section drifts back, which is the only thing that
     would catch it. "Measured on origin/main" would have been FALSE within the
     hour, which is why the sha is named.
-    *Does the test reach it?* Yes — the document is read from the tree, each half
-    is scoped to its own section (with the retired-blur check deliberately
-    document-wide), and the home it must name is derived from the projection,
-    not paraphrased here.
+    *Does the test reach it?* Yes — the document is read from the tree; §9.4's
+    deciding sentence is anchored document-wide and then asserted to lie INSIDE
+    §9.4, with the pointer and the negation checked on that sentence; the
+    `:Source.summary` count is scoped to the §9.4 slice; the retired blur is
+    checked over the whole document; and the home it must name is derived from
+    the projection, not paraphrased here.
     """
     # ── the premise: §9.1's narrative home, from the projection that writes it ──
     home = f"public.{rp.NARRATIVE_TABLE}"
@@ -1869,10 +1881,11 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         p.read_text(encoding="utf-8")
         for p in sorted((REPO_ROOT / "supabase/migrations").glob("*.sql")))
     assert f"CREATE TABLE IF NOT EXISTS {home} (" in migrations, (
-        f"`record_projection.NARRATIVE_TABLE` names `{home}`, but the migration "
-        f"that creates §9.1's narrative home does not create that table — the "
-        f"home MOVED, so §9.4's pointer (and §12.1b's) must move with it, and "
-        f"this pin must not keep naming the table the projection left behind")
+        f"`record_projection.NARRATIVE_TABLE` names `{home}`, but NO migration "
+        f"under `supabase/migrations/` creates that table — the home MOVED (or "
+        f"its creating migration was squashed away), so §9.4's pointer (and "
+        f"§12.1b's) must move with it, and this pin must not keep naming the "
+        f"table the projection left behind")
 
     text = _storage_doc_text()
     #: DERIVED once, used by BOTH §12.1b messages below — a failure message that
@@ -1887,14 +1900,28 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # narrative wherever it appears, and scoping it would let the same blur
     # return in §10 unremarked. Its failure message says so.
     s94 = _section(text, _S94_HEADING, _S95_HEADING)
-    # ⛔ TWO scopings for the pointer, on purpose, because they catch OPPOSITE
-    # regressions and neither subsumes the other:
-    #   • the DECIDING LINE (`_source_vector_section_94_line`) catches the pointer
-    #     MOVING out of the sentence that chooses the vector's input while a copy
-    #     survives elsewhere in §9.4 — a slice-only pin certifies that;
+    # ⛔ THREE scopings, on purpose, because each catches a regression the others
+    # cannot see:
+    #   • the DECIDING LINE (`_source_vector_section_94_line`), bound to §9.4 by
+    #     the assert immediately below, catches the pointer MOVING out of the
+    #     sentence that chooses the vector's input while a copy survives
+    #     elsewhere — both a slice-only pin and an unbound anchor certify that;
     #   • the SECTION slice catches an ADDITIVE wrong instruction (`count` below),
-    #     which a line-only pin cannot see at all.
+    #     which a line-only pin cannot see at all;
+    #   • the WHOLE DOCUMENT catches the retired blur returning in §10, which a
+    #     section scope would let through unremarked.
     deciding = _source_vector_section_94_line(text)
+    # ⛔ THE BINDING, and it is not decoration: `_anchored_line` resolves the anchor
+    # ANYWHERE in the document, so without this the deciding sentence can be moved
+    # into §9.5 (leaving §9.4 a bare negation) and the two asserts below still pass
+    # — measured, and the pin stayed GREEN. "§9.4 says it" means the sentence is IN
+    # §9.4, so that is asserted rather than assumed.
+    assert deciding in s94, (
+        f"§9.4's DECIDING sentence (*{_SOURCE_VECTOR_SECTION_94_ANCHOR} …*) is "
+        f"NOT inside §9.4 — `_anchored_line` finds the anchor anywhere in the "
+        f"document, so a copy moved into another section satisfies the pointer "
+        f"and negation asserts while §9.4 itself no longer says what the source "
+        f"vector reads; re-derive where §9.4 states it before trusting this pin")
     assert f"read from `{home}`" in deciding, (
         f"§9.4's DECIDING sentence (*{_SOURCE_VECTOR_SECTION_94_ANCHOR} …*) no "
         f"longer states that the source vector's text is read from `{home}` — "
