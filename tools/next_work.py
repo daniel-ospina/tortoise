@@ -503,6 +503,14 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
         # command merged **#1** — a runnable command aimed at the wrong artifact.
         return isinstance(value, int) and not isinstance(value, bool)
 
+    # The refusal channel first: if IT is not a list the run cannot report anything
+    # else, and the falsy cases would silence every refusal appended afterwards.
+    if not isinstance(snap.unreadable, list):
+        snap.unreadable = [
+            f"unreadable: the snapshot's refusal list is {type(snap.unreadable).__name__}, "
+            "not a list — nothing it carries can be trusted"
+        ]
+
     # ⛔ THE ISSUE LIST HAS THE SAME ELEMENT RULE. `_is_int` guards a pull's number,
     # but an issue's was delegated to "the outer frame" — and the outer frame raises
     # NOTHING for `true` or `100.9`: `int(True) == 1` and `int(100.9) == 100` both
@@ -616,13 +624,6 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
             "not a string — the claim keys cannot be addressed"
         )
     snap.claim_ns = str(raw.get("claim_ns") or "refs/claims")
-    # The refusal channel first: if IT is not a list the run cannot report anything
-    # else, and the falsy cases would silence every refusal appended afterwards.
-    if not isinstance(snap.unreadable, list):
-        snap.unreadable = [
-            f"unreadable: the snapshot's refusal list is {type(snap.unreadable).__name__}, "
-            "not a list — nothing it carries can be trusted"
-        ]
     for name in _LIST_FIELDS[1:]:
         value = getattr(snap, name)
         if not isinstance(value, list):
@@ -1323,7 +1324,8 @@ def next_action(unit: Unit, repo: str) -> str | None:
         # The record carries no usable digest: re-mint at the head, no review owed.
         return (
             f"re-record {target} at head {unit.head} — the record has no usable digest, so "
-            f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
+            f"record-review.sh {unit.pr} <current-head> clean {shlex.quote(repo)} needs NO new "
+            "review"
         )
     if any(d.startswith("review-gate-red:") for d in unit.detail):
         return (
@@ -1337,8 +1339,8 @@ def next_action(unit: Unit, repo: str) -> str | None:
         # asked for a review; a retry is what is owed.
         return (
             f"retry the attestation read for {target} at head {unit.head} "
-            f"(record-review.sh --check-carry {unit.pr} {repo}) — an UNREADABLE diff is a "
-            "RETRY, not a review"
+            f"(record-review.sh --check-carry {unit.pr} {shlex.quote(repo)}) — an UNREADABLE diff "
+            "is a RETRY, not a review"
         )
     if unit.position == "NEEDS-REVIEW" and any("carry-patch" in d for d in unit.detail):
         # ⛔ `carry-patch` IS NOT A REVIEW CYCLE. `record-review.sh` exit 6 says
@@ -1348,12 +1350,15 @@ def next_action(unit: Unit, repo: str) -> str | None:
         # nudged toward the fabricated-evidence shape the recorder warns about.
         return (
             f"re-record at {target} head {unit.head} — the reviewed PATCH is unchanged, so "
-            f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
+            f"record-review.sh {unit.pr} <current-head> clean {shlex.quote(repo)} needs NO new "
+            "review"
         )
     if unit.position == "NEEDS-REVIEW":
         return (
-            f"dispatch a reviewer at {target} head {unit.head} ({repo}), then record it with "
-            f"record-review.sh {unit.pr} <current-head> clean {repo} --evidence comment:<id>"
+            f"dispatch a reviewer at {target} head {unit.head} ({shlex.quote(repo)}), then "
+            "record it with "
+            f"record-review.sh {unit.pr} <current-head> clean {shlex.quote(repo)} "
+            "--evidence comment:<id>"
         )
     if unit.position == "NEEDS-TEST" and any("merge-tree: UNMEASURED" in d for d in unit.detail):
         # Nothing is in a runner queue here; the tree could not be measured (head
@@ -2021,7 +2026,10 @@ def render(
     top: int,
 ) -> tuple[str, Unit | None]:
     out: list[str] = []
-    out.append(f"next-work — repo {repo} · base {snap.base} · gate {snap.config_source or 'UNREADABLE'}")
+    gate_label = snap.config_source or (
+        "(parsed, source unnamed)" if cfg is not None else "UNREADABLE"
+    )
+    out.append(f"next-work — repo {repo} · base {snap.base} · gate {gate_label}")
     out.append(
         f"read: {len(snap.issues)} open P0/P1 issue(s) · {len(snap.pulls)} open PR(s) · "
         f"{len(snap.check_runs)} head(s) with check-runs · {len(snap.claims)} claim key(s)"
@@ -2073,7 +2081,13 @@ def render(
             # "runner" for EVERY top row without a command — so a NEEDS-REVIEW top
             # row printed "dispatch a reviewer at #N" and, one line later, told the
             # operator to wait for a runner that would never move it.
-            if pick.position == "NEEDS-REVIEW":
+            if pick.draft:
+                why = "the rank leader is a DRAFT — the author's, see ACTION"
+            elif any(d.startswith("gate-refusal:") for d in pick.detail):
+                why = "the rank leader is GATE-REFUSED (see ACTION) — a human edits the PR"
+            elif any(d.startswith("review-gate-red:") for d in pick.detail):
+                why = "the rank leader's review gate is RED with a bound record — a human decides"
+            elif pick.position == "NEEDS-REVIEW":
                 why = "the rank leader needs a REVIEW (see ACTION), so nothing runs until it has one"
             elif pick.position == "NEEDS-TEST" and any(
                 "merge-tree: UNMEASURED" in d for d in pick.detail
@@ -2149,10 +2163,15 @@ def render(
         out.append("")
     pickable = [u for u in units if u.pickable]
     shown = pickable[: max(top, 0)]
-    out.append(
-        f"TOP {len(shown)} PICKABLE of {len(units)} unit(s) "
-        "(rank order; held, superseded and duplicate rows excluded)"
-    )
+    if snap.unreadable:
+        # ⛔ NOTHING IS "PICKABLE" ON A REFUSED RUN — `--json` already says
+        # `pickable: false` for every row, and the footer contradicted it.
+        out.append(f"TOP 0 PICKABLE of {len(units)} unit(s) — this run is REFUSED")
+    else:
+        out.append(
+            f"TOP {len(shown)} PICKABLE of {len(units)} unit(s) "
+            "(rank order; held, superseded and duplicate rows excluded)"
+        )
     # ⛔ A REFUSED RUN DELIVERS NO COMMAND IN EITHER FORMAT. The `--json` path
     # nulled every `next_command` while this footer still printed them, so a text
     # consumer grepping for a command could find one on a run the tool itself

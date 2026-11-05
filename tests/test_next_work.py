@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -2827,3 +2828,82 @@ def test_a_draft_with_a_failing_check_dispatches_no_fixer():
     assert row.position == "NEEDS-FIX"
     assert row.draft
     assert next_command(row, REPO) is None, "a fixer was dispatched at a draft"
+
+
+HOSTILE_REPO = "evil/repo;touch /tmp/PWNED"
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    ["nodigest", "carry-patch", "unreadable", "norecord", "fresh"],
+)
+def test_every_action_quotes_the_repo_slug(verdict):
+    """The ACTION strings interpolated `repo` RAW while every COMMAND quoted it.
+
+    `evil/repo;touch /tmp/PWNED` appeared verbatim in the NEXT ACTION block at
+    exit 0 — the block's own instruction, on the code path whose docstring says
+    "EVERY VALUE IN THIS STRING IS UNTRUSTED". An operator who copy-pastes an ACTION
+    would run it; the regression tests only covered `next_command`.
+    """
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x"}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": verdict}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    action = next_action(row, HOSTILE_REPO) or ""
+    # the QUOTED form is present, so a copy-paste is one inert argument
+    assert shlex.quote(HOSTILE_REPO) in action, action
+
+
+def test_the_header_does_not_call_a_parsed_gate_unreadable():
+    """`gate {config_source or 'UNREADABLE'}` labelled a successfully parsed gate."""
+    s = _rich_snapshot()
+    s.config_source = ""
+    text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    head = text.splitlines()[0]
+    assert "UNREADABLE" not in head, head
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "want"),
+    [
+        ({"draft": True}, "DRAFT"),
+        ({"base": {"ref": "release/1.x"}}, "GATE-REFUSED"),
+    ],
+)
+def test_the_runnable_note_names_a_draft_or_a_gate_refusal(kwargs, want):
+    """The epilog names five reasons a top row has no command; the ladder implemented three.
+
+    A DRAFT top row printed "dispatch a reviewer …"? no — it printed the UNDRAFT
+    ACTION and then, one line below, "the rank leader needs a REVIEW", the same
+    "name the actual reason" defect the code above claims to have fixed.
+    """
+    s = snap(
+        issues=[issue(100), issue(200)],
+        pulls=[
+            {**pull(1001, closes=[100]), "head_ref": "fix/100-x", **kwargs},
+            {**pull(2002, closes=[200], head="b" * 40), "head_ref": "fix/200-x"},
+        ],
+        check_runs={"a" * 40: all_green(), "b" * 40: _runs_for_position("NEEDS-FIX")},
+        attestation={"1001": {"verdict": "head"}, "2002": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}, "2002": {"clean": True}},
+    )
+    text, pick = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert pick is not None
+    assert "RUNNABLE" in text
+    tail = text.split("RUNNABLE", 1)[1]
+    assert want in tail, tail[:300]
+
+
+def test_the_footer_does_not_call_rows_pickable_on_a_refused_run():
+    """`TOP 1 PICKABLE` contradicted `--json`'s `pickable: false` on the same snapshot."""
+    s = _rich_snapshot()
+    s.unreadable = ["GH-TIMEOUT(search:P0-blocker)"]
+    text, _ = render(build_units(s, CFG), CFG, s, repo=REPO, top=5)
+    assert "TOP 0 PICKABLE" in text
+    assert "REFUSED" in text
