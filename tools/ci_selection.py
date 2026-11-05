@@ -1634,6 +1634,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
              "tools/worktree_report.py",
+             # #11026: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py
+             # (registered `core`), and it hit the SAME silent drop: `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY
+             # change selected NO surface, took the docs-only early return and landed on tier-1
+             # smoke, where that file is not registered. The PR that weakens the write proof —
+             # the check that exists because a read-only GH_TOKEN let a 17-lane wave deliver
+             # NOTHING — would then be the one that never ran the cases pinning it.
+             # MEASURED before this entry: `select(["tools/gh_write_preflight.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
+             # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
+             # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
+             # Pinned by
+             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1.
+             # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
+             # `_keep_changed` matches with `startswith(TOOL_CARVEOUTS)`, so an EXACT path
+             # silently re-opens this very drop for a rename or a split-out sibling
+             # (`gh_write_preflight_<something>.py`): the gate would again be a diff that runs
+             # none of its own arms. Over-matching costs extra CI on a file that is not the
+             # tool; under-matching ships the write proof nobody runs.
+             "tools/gh_write_preflight",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -2956,31 +2976,6 @@ TOOL_CARVEOUTS = (
     # A narrower core-only mapping is possible but not needed: a
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
-    # #11027: the credential write-capability preflight (tools/gh_write_preflight.py)
-    # owns tests/test_gh_write_preflight.py — the 73 hermetic arms that pin the
-    # safety-critical properties of the tool a lane runs BEFORE the first hour of
-    # work: no credential value reaches stdout/stderr/`--json` on any route, every
-    # exit-0 path measured push-exit-0 + an exact `refs/heads/<ref>` `ls-remote`
-    # confirmation on EVERY push target + a confirmed delete, and no probe ref left
-    # on any handled path (+ its refusal contract: `--repo` is an assertion, not a
-    # redirect; cannot-verify never becomes exit 0). The registration in
-    # ci-surfaces.yml is NOT a substitute: it applies to edits of the TEST file, and
-    # `--integrity` reds a PR that ADDS the test without it. For a TOOL-ONLY diff `tools/` is a flat
-    # NON_PYTHON_PREFIXES entry with no SOURCE_PATTERNS row, so `changed` comes back
-    # empty, select() takes the docs-only early return — which bypasses the
-    # `if not matched: matched.add("core")` fallback entirely — and NOT ONE of those
-    # arms runs on the most likely change to weaken the gate. Measured before this
-    # entry: `select(["tools/gh_write_preflight.py"], "pull_request",
-    # load_manifest())` -> surfaces=[], full=False, tier-1 smoke,
-    # test_gh_write_preflight.py ABSENT; after -> surfaces=['core'], full=True,
-    # test_files=ALL. No SOURCE_PATTERNS entry matches the path, so it lands in the
-    # unknown-path branch -> FULL matrix (fail closed).
-    # PREFIX, not the exact file (the #9487 P2 lesson): `_keep_changed` matches with
-    # `startswith`, so an exact path silently re-opens the drop for a rename or a
-    # split-out sibling. Over-matching costs extra CI; under-matching ships a gate
-    # with no arms.
-    # Pinned by test_ci_selection.test_gh_write_preflight_tool_change_fails_closed_to_full.
-    "tools/gh_write_preflight",
     # #4408: the local-branch reaper (tools/branch_reaper.py) owns
     # tests/test_branch_reaper.py. Same silent-drop class as the preflight
     # carve-out above: the flat "tools/" prefix would swallow a reaper-only
@@ -6164,14 +6159,15 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     a non-empty map whose every weight is the `0.0` sentinel, and a stale
     capture date).
 
-    `ci_manifest.map_issues` also carries main's two newer manifest checks —
-    `fast_shard_issues` (#6135, the top-level `fast_shards` declaration) and
-    `duplicate_entries` (#2913/#5373, the same-surface `merge=union` gate) — and
-    `ci_manifest.floor_issues` (a weight declared as a floor/cap rather than a
-    reading, cut on this branch rather than inherited) beside them, because the
-    union of the two pipelines must not drop any of the three. Composing them here
-    keeps the branch's invariant (every check reachable from ONE place) while
-    keeping main's coverage.
+    `ci_manifest.map_issues` also carries `fast_shard_issues` (#6135, the
+    top-level `fast_shards` declaration), `duplicate_entries` (#2913/#5373, the
+    same-surface `merge=union` gate) and `floor_issues` (#10575, a weight declared
+    as a floor/cap rather than a reading) beside them. All three are main's: the
+    first two landed on main beside the #5050 validator, and #10575 landed on main
+    through #10704 — so none of the three is re-added here. The union of the two
+    pipelines must not drop any of them, and composing them in ONE place keeps the
+    invariant (every check reachable from one entry point) while keeping main's
+    coverage.
 
     An ImportError is reported as an issue, never swallowed: returning ``[]``
     would leave ``--integrity`` GREEN with none of these checks having run —
@@ -6625,15 +6621,14 @@ def main() -> int:
         # now coerces as well, so the packer cannot raise at all). That order is
         # preserved inside `ci_manifest.map_issues`, which owns the composition
         # as of #5050: the map's checks (`duration_issues`, `leg_coverage_issues`,
-        # `duration_coverage_issues`), main's newer manifest checks
+        # `duration_coverage_issues`), the newer manifest checks
         # (`fast_shard_issues` for the top-level `fast_shards` declaration and
         # `duplicate_entries` for the same-surface `merge=union` gate — both
-        # landed on main beside this one while it was open), and THIS branch's
-        # own `floor_issues` for a weight declared as a floor/cap rather than a
-        # reading (⚠️ `origin/main` has NO `floor_issues` at all — #10575 cut it
-        # HERE, so it is not an inherited check and must not be described as
-        # one). ALL of them are folded into the same one place rather than being
-        # re-added here, plus the
+        # landed on main beside this one while it was open), and `floor_issues`
+        # for a weight declared as a floor/cap rather than a reading (#10575,
+        # which landed on main through #10704 — so it IS inherited, and must not
+        # be described as this branch's own). ALL of them are folded into the
+        # same one place rather than being re-added here, plus the
         # plausibility/freshness checks the validator adds (any weight the writer
         # could not have rendered — sub-floor, finer precision, or negative — a
         # non-empty map whose every weight is the `0.0` sentinel, and a stale

@@ -2932,6 +2932,30 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_gh_write_preflight_tool_change_selects_core_not_tier1():
+    """A change to the credential write preflight must run the cases pinning it (#11026).
+
+    `tests/test_gh_write_preflight.py` is registered on `core` and owns the write-proof's
+    guarantees: a read-only credential is REFUSED, the probe ref is created and confirmed and
+    deleted, cleanup is verified on the PUSH target, and no credential reaches argv or output. That
+    registration is INERT for a tool-only diff — `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    no SOURCE_PATTERNS row matches `tools/gh_write_preflight.py`, so `select()` returns NO surface,
+    takes the docs-only early return and falls back to the tier-1 smoke set, which does not contain
+    the file. The PR that weakens the proof would then be the one that never ran the cases pinning
+    it — the same silent-drop class as #10220's report, and worse here, because this tool exists
+    precisely to stop a silent pass (a 17-lane wave delivered nothing while every lane reported
+    "built, parked").
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields `full: False` with no pin,
+    so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_worktree_report_tool_change_selects_core_not_tier1():
     """A change to the lane report must run the rules it pins (#10220).
 
@@ -2954,53 +2978,6 @@ def test_worktree_report_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_worktree_report.py" in r["test_files"], r
     assert r["full"] is False, r
-
-
-def test_gh_write_preflight_test_file_change_selects_core():
-    """#11027: the preflight suite is a `core` file — a change to IT must run it.
-
-    The other half of the registration pair (see the tool-change pin below): the suite
-    pins a gate every lane is told to run before its first hour of work, so an edit
-    that weakens a pin must be graded by the surface that owns the file. Before the
-    `core` registration, `classify_test_file` returned None and
-    `tools/ci_selection.py --integrity` redded `manifest drift:
-    ['test_gh_write_preflight.py']` — the required `manifest-integrity` leg.
-
-    Mutation check: deleting the `- test_gh_write_preflight.py` line from the `core`
-    surface fails the first assert (surfaces=[] -> tier-1 smoke) and `integrity()`
-    reports the file as drift (asserted by
-    `test_integrity_covers_all_test_files`).
-    """
-    r = _sel(["tests/test_gh_write_preflight.py"])
-    assert "core" in r["surfaces"], r
-    assert "test_gh_write_preflight.py" in r["test_files"], r
-
-
-def test_gh_write_preflight_tool_change_fails_closed_to_full():
-    """#11027: a tool-only change must run the preflight's own 73 hermetic arms.
-
-    `tools/gh_write_preflight.py` owns `tests/test_gh_write_preflight.py`, which pins
-    the properties that make the tool safe to tell every lane to run: no credential
-    value reaches any stream, every exit-0 path measured push-exit-0 + an exact
-    `refs/heads/<ref>` confirmation on EVERY push target + a confirmed delete, no
-    probe ref left behind on any handled path, `--repo` is an assertion and not a
-    redirect, and cannot-verify never becomes exit 0. Registering the TEST under
-    `core` does not cover a change to the TOOL: `tools/` is a flat
-    NON_PYTHON_PREFIXES entry with no SOURCE_PATTERNS row, so `changed` came back
-    empty, `select()` took the docs-only early return — which bypasses the
-    `if not matched: matched.add("core")` fallback entirely — and the whole suite was
-    ABSENT from a tool-only diff (measured: surfaces=[], full=False, tier-1 smoke).
-    No SOURCE_PATTERNS entry matches the path, so with the TOOL_CARVEOUTS entry it
-    lands in the unknown-path branch -> FULL matrix (fail closed), the safe default
-    for a tool whose answer decides whether a lane can deliver at all.
-
-    Mutation check: removing the `tools/gh_write_preflight` TOOL_CARVEOUTS entry
-    filters the path out (docs-only early return), failing all three asserts below.
-    """
-    r = _sel(["tools/gh_write_preflight.py"])
-    assert r["full"] is True
-    assert r["test_files"] == "ALL"
-    assert "core" in r["surfaces"]
 
 
 def test_ci_catch_history_tool_change_selects_core_not_tier1():
@@ -14354,49 +14331,3 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_session_events_seal.py" in r["test_files"], r
     assert r["full"] is False, r
-
-
-def test_gh_write_preflight_arm_count_stated_in_every_artifact_matches_the_suite():
-    """#11027 review P3: the preflight suite's size was stated as sixty-seven in THREE places while
-    the file actually collected sixty-nine — a count that broke in the same two commits that added
-    the arms, so the comments were stale the moment they were written and nothing noticed.
-
-    A count in a comment is a claim about an artifact, so pin it against the artifact: the number in
-    each of the three carriers must equal the module-level `def test_` count of
-    `tests/test_gh_write_preflight.py`. That suite has no parametrize decorators, so collected ==
-    defined (asserted below, because a parametrized arm would make a bare `def test_` count lie).
-
-    Each carrier is matched by its OWN anchor rather than by a bare number regex: the same files
-    carry a second, unrelated arm count for `test_work_claim.py`, and a loose match would pin that
-    one to the wrong suite.
-
-    Mutation check: adding, removing or renaming a test in the preflight suite without updating the
-    three statements reds this with the exact stale number named — the drift that survived two
-    review rounds at "67".
-    """
-    suite = REPO / "tests" / "test_gh_write_preflight.py"
-    src = suite.read_text(encoding="utf-8")
-    defined = len(re.findall(r"^def test_", src, re.M))
-    assert defined > 0, "the preflight suite defined no tests — the count probe is broken"
-    assert "parametrize" not in src, (
-        "the preflight suite gained a parametrize decorator, so `def test_` no longer equals the "
-        "collected count; update this pin to count collected arms"
-    )
-
-    anchors = (
-        (REPO / "config" / "ci-surfaces.yml", r"# and its (\d+) hermetic arms"),
-        (REPO / "tools" / "ci_selection.py",
-         r"owns tests/test_gh_write_preflight\.py — the (\d+) hermetic arms"),
-        (REPO / "tests" / "test_ci_selection.py",
-         r"a tool-only change must run the preflight's own (\d+) hermetic arms"),
-    )
-    for path, pattern in anchors:
-        found = re.findall(pattern, path.read_text(encoding="utf-8"))
-        assert len(found) == 1, (
-            f"expected exactly one arm-count statement in {path.relative_to(REPO)}, found {found} — "
-            f"the anchor went stale"
-        )
-        assert int(found[0]) == defined, (
-            f"{path.relative_to(REPO)} states {found[0]} hermetic arms but the preflight suite "
-            f"defines {defined} — update the count (or the suite) so all three agree"
-        )
