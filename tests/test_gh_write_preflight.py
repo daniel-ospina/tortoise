@@ -47,7 +47,10 @@ from tools.gh_write_preflight import (
     Proc,
     Runner,
     _child_env,
+    _read_env,
+    _read_targets,
     _ref_state,
+    _url_has_credential,
     check_writable,
     main,
     redact,
@@ -811,6 +814,47 @@ def test_every_credential_pushurl_gets_its_own_insteadof_rewrite(tmp_path: Path)
     )
     assert verdict.writable is True, verdict.detail
     assert verdict.cleaned_up is True, verdict.detail
+
+
+def test_scp_like_password_never_reaches_argv():
+    """A password in scp-like userinfo must be routed through the ENV, never onto argv.
+
+    `user:secret@host:path` is the shape `urlsplit` parses worst: `user` becomes the SCHEME, so
+    `parts.password` is None and a scheme-based credential check cannot see the secret — measured
+    on the pre-fix code, `_url_has_credential("user:hunter2@host:repo.git")` returned False, so
+    `_read_targets` handed the raw URL to `git ls-remote`. argv is mode 0444 (`/proc/<pid>/cmdline`)
+    on a cell every lane shares, so that is a live credential readable by any process on the box.
+    The tool's contract is that a secret never reaches argv or output: `redact()` covers the output
+    half, and this is the argv half.
+
+    The opposite direction is asserted too, because over-blocking is the failure mode this tool
+    must NEVER add: `git@host:repo.git` carries an SSH user and no secret, so it stays a plain
+    argv target rather than being pushed through a rewrite it does not need.
+    """
+    fetch_url = "https://example.invalid/fetch.git"
+    secret_url = "user:hunter2@example.invalid:repo.git"
+
+    assert _url_has_credential(secret_url) is True, (
+        "a password in scp-like userinfo IS a credential — urlsplit reads `user` as the scheme, "
+        "so the parts.password check cannot see it and the raw URL would land on argv"
+    )
+    targets = _read_targets("origin", fetch_url, [secret_url])
+    assert targets == ["gh-write-preflight-push0:"], targets
+    assert all(secret_url not in t for t in targets)
+    env = _read_env("origin", fetch_url, [secret_url])
+    # The rewrite itself must live in the env (mode 0400), not on argv: `url.<secret>.insteadOf`
+    # names the alias, so the secret is a KEY here and never an argv element.
+    assert env["GIT_CONFIG_KEY_0"] == f"url.{secret_url}.insteadOf", env
+    assert env["GIT_CONFIG_VALUE_0"] == "gh-write-preflight-push0:", env
+    assert all(secret_url not in t for t in _read_targets("origin", fetch_url, [secret_url]))
+
+    # False-block direction — an SSH user is not a secret, so it stays on argv.
+    assert _url_has_credential("git@example.invalid:repo.git") is False
+    assert _read_targets("origin", fetch_url, ["git@example.invalid:repo.git"]) == [
+        "git@example.invalid:repo.git"
+    ]
+    # A local path that merely CONTAINS `@` has no userinfo at all.
+    assert _url_has_credential("/tmp/bare/remote@1.git") is False
 
 
 def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):

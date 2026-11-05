@@ -350,12 +350,17 @@ def _url_has_credential(url: str) -> bool:
         return False
     if parts.password:
         return True
-    # A userinfo with no scheme (scp-like `user:pass@host:path`) — treat a colon as a secret.
-    if not parts.scheme and "@" in url:
-        userinfo = url.rsplit("@", 1)[0]
-        if ":" in userinfo:
-            return True
-    return False
+    # A userinfo with a password and NO parseable scheme, e.g. the scp-like
+    # `user:secret@host:path`. `urlsplit` reads the leading `user:` as the SCHEME, so
+    # `parts.password` stays None and the check above cannot see it — measured:
+    # `_url_has_credential("user:hunter2@host:repo.git")` returned False while the raw URL was
+    # handed to git on argv, which is mode 0444 on a shared cell. The userinfo is the text before
+    # the FIRST `@`, and a userinfo can never contain `/`, so that pair of facts separates a
+    # credential from a path that merely contains `@`. Erring toward True is safe and is the right
+    # asymmetry: a false positive only routes the target through the `insteadOf` env rewrite, which
+    # git resolves to the same URL, while a false negative puts a secret on world-readable argv.
+    userinfo = url.split("@", 1)[0]
+    return "@" in url and "/" not in userinfo and ":" in userinfo
 
 
 class Runner:
