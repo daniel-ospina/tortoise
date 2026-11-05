@@ -555,9 +555,15 @@ def test_a_named_repo_is_threaded_into_every_gh_call(
 
     Every mutating and reading `gh` invocation is asserted to carry the flag, so a
     future call added without it fails here.
+
+    ⛔ SCOPE, corrected: this test calls `_gh` DIRECTLY, so it measures the HELPER,
+    not the call sites. It cannot see `main()` handing `_gh` the wrong repo —
+    measured: replacing `args.repo` with `None` at all four `main()` call sites left
+    this file green. The CLI-half is
+    `test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes`; the two are
+    deliberately separate because they fail for different reasons.
     """
     seen: list[list[str]] = []
-
     def fake_run(argv, **kwargs):
         seen.append(list(argv))
 
@@ -576,6 +582,89 @@ def test_a_named_repo_is_threaded_into_every_gh_call(
     bo._gh(["pr", "close", "101"], "other-org/other-repo")
     assert seen, "no gh call recorded"
     assert seen[-1][-2:] == ["--repo", "other-org/other-repo"], seen[-1]
+
+
+def test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(e2) `--repo` at the CLI seam, which the `_gh`-level pin cannot see.
+
+    `test_a_named_repo_is_threaded_into_every_gh_call` calls `_gh` DIRECTLY: it
+    proves the helper injects the flag, not that `main()` hands it a repo. Measured
+    before this pin: replacing `args.repo` with `None` at ALL FOUR `main()` call
+    sites (the fold fetch, `constituent_refs`, the label-only path and the close
+    path) left this file at 48 passed. So the measured defect that pin was written
+    for — `--apply --repo other/repo` mutating same-numbered PRs in whatever
+    repository the operator stands in — could return through any call site, green.
+
+    This runs the real `main()` end to end with `--repo` and asserts EVERY `gh` argv
+    it produced carries the flag. Non-vacuity: set any one call site's repo to
+    `None` and this reds naming that argv.
+    """
+    monkeypatch.setattr(bo, "fetch_fold", lambda n, repo=None: (0, "f" * 40, "fold-br", "body"))
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    seen_refs: list[str | None] = []
+
+    def _refs(n, repo=None):
+        seen_refs.append(repo)
+        return "a" * 40, "b" * 40
+
+    monkeypatch.setattr(bo, "constituent_refs", _refs)
+    monkeypatch.setattr(
+        bo, "verdict_for", lambda n, h, b, f, cwd: _verdict(n, "CONTAINED-CONTENT", "")
+    )
+    seen: list[list[str]] = []
+
+    def fake_gh(argv, repo=None):
+        seen.append([*argv, "--repo", repr(repo)])
+        return 0, ""
+
+    monkeypatch.setattr(bo, "_gh", fake_gh)
+
+    rc = bo.main(["--fold", "900", "--repo", "other-org/other-repo",
+                  "--apply", "--constituent", "101"])
+    assert rc == 0, rc
+    assert seen, "main() made no gh call at all, so the assertion below is vacuous"
+    wrong = [argv for argv in seen if argv[-1] != repr("other-org/other-repo")]
+    assert not wrong, (
+        "a `gh` call under `--repo other-org/other-repo` was made against a "
+        f"different (or no) repo, so it can mutate same-numbered PRs elsewhere: {wrong}"
+    )
+    assert seen_refs and all(r == "other-org/other-repo" for r in seen_refs), (
+        f"constituent_refs was not handed the named repo: {seen_refs}"
+    )
+
+
+def test_an_empty_constituent_diff_proves_nothing(
+    scratch_repo: Path,
+) -> None:
+    """(b3e) The FOURTH verdict arm, and the last one that had no pin (T2).
+
+    `content_contained` measured that an empty diff is NOT a containment proof —
+    "treating it as contained would close a PR on no evidence at all" — but nothing
+    exercised it: measured, flipping the arm to `CONTAINED-CONTENT` left this file
+    at 48 passed, so it could regress to closing a constituent on a diff that
+    proves nothing, with a fully green suite. `_CONTAINED_STATES` would let it
+    through, because the flip returns exactly a state the allow-list admits.
+
+    Reachable without any contrivance: a constituent whose head is a no-op commit
+    above the base (`git commit --allow-empty`) has an empty `base...head` diff.
+    """
+    base = _commit(scratch_repo, {"f.txt": "one\n"}, [], "base")
+    # The SAME tree one commit above the base: `git diff base...empty` is genuinely
+    # empty, which is what makes this the empty-diff arm and not a delete-the-file one.
+    empty = _commit(scratch_repo, {"f.txt": "one\n"}, [base], "an empty answer")
+    fold = _commit(scratch_repo, {"g.txt": "fold\n"}, [], "fold")
+
+    state, detail = bo.content_contained(empty, base, fold, scratch_repo)
+    assert state == "NOT-CONTAINED", (
+        "an EMPTY diff was computed and proves nothing, so the constituent is not "
+        f"contained — got {state!r} ({detail})"
+    )
+    assert "diff is empty" in detail, detail
+    assert state not in bo._CONTAINED_STATES, (
+        f"{state!r} must never be in the closable allow-list — an empty diff proves nothing"
+    )
 
 
 def test_gh_without_a_repo_adds_no_flag() -> None:
