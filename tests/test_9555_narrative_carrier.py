@@ -1758,7 +1758,7 @@ def _source_vector_section_94_line(text: str) -> str:
     ``read from `public.session_narrative` `` out of this line and adding it as a
     fresh line under the `### 9.4 ` heading leaves the SECTION-scoped assertion
     GREEN (the section still contains the string) while this one REDs. Without
-    it the pin certifies that exact regression (§10980's landing had this scoping
+    it the pin certifies that exact regression (#10980's landing had this scoping
     and this branch's first union pass widened it away).
     """
     return _anchored_line(text, _SOURCE_VECTOR_SECTION_94_ANCHOR,
@@ -1779,7 +1779,9 @@ def _section(text: str, start_heading: str, end_heading: str, where: str) -> str
         f"re-derive where {where} states what the source vector reads")
     assert end_heading in text, (
         f"{_STORAGE_DOC.name} no longer carries the heading {end_heading!r} — "
-        f"the section this pin brackets ({where}) has MOVED or been renamed")
+        f"that is the heading that CLOSES {where}'s slice, and without it the "
+        f"slice would run to end of file and absorb every later section's text "
+        f"into this pin's assertions")
     # ⛔ BOTH headings' uniqueness is asserted, not assumed, and the two hazards are
     # OPPOSITE directions of one hole. `index` below binds to the FIRST start
     # match, so a duplicate start heading placed ABOVE the real section WIDENS the
@@ -2042,6 +2044,40 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"(Asserted over the WHOLE document, not only §12.1b's footnote line: the "
         f"instruction is wrong wherever §12.1b states it, and the paragraph "
         f"above the footnote is where it was last read)")
+    # ⛔ THE FOOTNOTE CARRIES THE SAME TWO CLAIMS §9.4 DOES, so it gets the same two
+    # asserts. Until these existed, §12.1b's half was pinned only by the ABSENCE of
+    # one verbatim retired string and by `home in footnote` — a substring that the
+    # `(§9.1, and §9.4 above …)` parenthesis alone satisfies. Measured, all three
+    # GREEN before this pair, each reinstating the vector this pin exists to forbid:
+    #   • delete "and never the narrative"                       -> GREEN
+    #   • append "; embed that `:Source.summary` as the vector's text" -> GREEN
+    #   • rewrite the vector's text as "the summary the node holds,
+    #     see `public.session_narrative`"                        -> GREEN
+    assert f"read from `{home}`" in footnote, (
+        f"§12.1b's `:Source` footnote no longer states that the vector's TEXT is "
+        f"read from `{home}` — `{home}` merely appearing on the line (the "
+        f"`(§9.1, and §9.4 above …)` parenthesis is enough) does not say the "
+        f"vector reads it, and this is the section that decides WHERE vectors "
+        f"live; without this the footnote can order a different input and stay "
+        f"green")
+    assert "never the narrative" in footnote, (
+        "§12.1b's `:Source` footnote no longer states the NEGATION (*\"a "
+        "session's `summary` is … metadata and never the narrative\"*) — the "
+        "footnote's whole point is that the summary is NOT what gets embedded, "
+        "and §9.4 asserts the same negation on its own sentence; dropping it "
+        "here leaves the *\"embed the summary already there\"* reading open in "
+        "the section a designer lands on when placing a vector")
+    assert footnote.count(":Source.summary") == 0, (
+        f"§12.1b's `:Source` footnote now names `:Source.summary` "
+        f"{footnote.count(':Source.summary')} time(s). It did not before, and it "
+        f"does not need to: the footnote calls the field \"a session's "
+        f"`summary`\" and §9.4 is where the forbidden spelling lives. A mention "
+        f"ADDED here is how the forbidden instruction returns in additive form "
+        f"— the correct sentence stays and an \"embed `:Source.summary`\" "
+        f"clause appears beside it, which every presence check above misses "
+        f"(measured). Fails CLOSED on purpose, like §9.4's count: a future "
+        f"legitimate use of this spelling here reds every docs-only PR, and the "
+        f"message tells the next lane to widen the assert deliberately")
     assert home in footnote, (
         f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
         f"decides where vectors live must point at the narrative's real home, "
