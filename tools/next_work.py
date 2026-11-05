@@ -516,9 +516,17 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
     # NOTHING for `true` or `100.9`: `int(True) == 1` and `int(100.9) == 100` both
     # succeed, so `issues=[{"number": true, …}]` produced `dispatch-merge.sh … 1` at
     # exit 0 for an issue the snapshot never named. Same class, one level over.
+    # ⛔ THE CONTAINER IS JUDGED BEFORE ITS ELEMENTS ARE ITERATED. `for row in snap.issues`
+    # ran ahead of the `_LIST_FIELDS` check far below, so a PRESENT-BUT-WRONG-TYPED `issues`
+    # (`5`, `null`, `true`, `1.5`) raised `TypeError: … is not iterable` out of the outer
+    # frame instead of the field-named refusal this function's SCOPE block promises. Safe
+    # polarity (exit 2, no command emitted) but the message was the one thing the door
+    # exists to replace. Measured before the fix: `issues: 5` ->
+    # "INCOMPLETE — the snapshot could not be decided (TypeError: 'int' object is not iterable)".
     kept_issues: list[dict[str, Any]] = []
     bad_issue_fields: list[str] = []
-    for row in snap.issues:
+    issue_rows = snap.issues if isinstance(snap.issues, list) else []
+    for row in issue_rows:
         if not isinstance(row, dict):
             bad_issue_fields.append(f"issue element {row!r}")
             continue
@@ -540,7 +548,8 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
         )
         snap.issues = kept_issues
     dropped_pulls: list[Any] = []
-    for pr in snap.pulls:
+    pull_rows = snap.pulls if isinstance(snap.pulls, list) else []
+    for pr in pull_rows:
         if not isinstance(pr, dict):
             # ⛔ AN ELEMENT THAT IS NOT A PULL IS DROPPED AND NAMED, not left to the
             # outer frame: it would raise in `build_units` before `render`, so the

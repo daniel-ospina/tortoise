@@ -1531,6 +1531,14 @@ def _read_review(
             None,
             f"{workdir / 'scripts' / 'record-review.sh'} is absent "
             "(the scripts/ pointer is not materialised)",
+            # ⛔ THE FOURTH ELEMENT IS NOT OPTIONAL. This branch returned a 3-tuple while the
+            # signature, both other returns and `collect_probe`'s 4-value unpack all expect a
+            # verdict slot, so on any box without the `scripts/` pointer the unpack raised
+            # `ValueError: not enough values to unpack (expected 4, got 3)` — the intended
+            # "unreadable, name the missing pointer" refusal became unreachable and the CLI
+            # fell back to `READY-GATE-ERROR` with EVERY condition failed. The verdict is
+            # genuinely unknown on this path, so it is `None`.
+            None,
         )
     proc = _run(["bash", str(script), "--check-carry", str(pr), repo], GIT_TIMEOUT, cwd=workdir)
     verdict = _record_verdict(pr, repo)

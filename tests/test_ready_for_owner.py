@@ -1316,8 +1316,9 @@ def test_a_parsed_stale_token_fails_even_at_exit_0(monkeypatch: pytest.MonkeyPat
 def test_absent_scripts_pointer_is_unreadable_not_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     """The pointer is gitignored and materialised per machine; its absence must FAIL."""
     monkeypatch.setattr(rfo, "_review_script", lambda workdir: None)
-    token, rc, raw = rfo._read_review(1, REPO, REPO_ROOT)
+    token, rc, raw, verdict = rfo._read_review(1, REPO, REPO_ROOT)
     assert token is None and rc is None
+    assert verdict is None
     assert "absent" in raw
 
 
