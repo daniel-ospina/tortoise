@@ -1192,14 +1192,20 @@ def cmd_get(args: argparse.Namespace) -> int:
             sys.stderr.write("gh_read_cache: --argv pass-through fetch failed — no value emitted\n")
             return 4
         if not body.strip():
-            # ⛔ THE THIRD BRANCH, AND IT WAS THE ONE THAT DID NOT AGREE. The caching path
-            # (:1230) and the degraded-credential path (:1187) both fail closed on an empty
-            # body; this pass-through emitted `rc=0` with ZERO bytes on stdout — "success" and
-            # no value — while the docstring's contract (:165-176) says `0` means "a value was
-            # emitted". Reachable without a stub: the tool's own invariants use `--jq`, so a
-            # caller copying that pattern onto `--argv` can get no output (`--jq` yielding
-            # nothing, `--silent`, a 204), and a caller keying on the exit code then proceeds
-            # with an empty value. An empty answer is not a value, on every branch.
+            # ⛔ THE THIRD BRANCH, AND IT WAS THE ONE THAT DID NOT AGREE. The other two
+            # branches that can emit a fetched value — the CACHING path below and the
+            # DEGRADED-CREDENTIAL path above — already fail closed on an empty body; this
+            # pass-through emitted `rc=0` with ZERO bytes on stdout — "success" and no
+            # value — while the module docstring's "Exit codes" section says `0` means "a
+            # value was emitted". Cited by SYMBOL, not by line: line numbers in this region
+            # have already drifted (a previous cut of this very comment pointed `:1187` at
+            # itself), and a stale citation is indistinguishable from a wrong claim.
+            # Reachable without a stub: the tool's own invariants use `--jq`, so a caller
+            # copying that pattern onto `--argv` can get no output (`--jq` yielding nothing,
+            # `--silent`, a 204), and a caller keying on the exit code then proceeds with an
+            # empty value. An empty answer is not a value, on every branch.
+            # Pinned by `test_a_pass_through_that_fetched_nothing_is_not_a_value`, which is
+            # killed by removing this guard and by nothing else (mutated, measured).
             sys.stderr.write(
                 "gh_read_cache: --argv pass-through: gh succeeded but returned an empty "
                 "body; an empty answer is not a value\n"

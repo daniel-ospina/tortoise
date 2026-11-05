@@ -3065,9 +3065,14 @@ def test_gh_read_cache_tool_change_selects_core_not_tier1():
     PR that never ran the cases pinning it — and this tool is what every lane's declared
     reads route through, so a wrong fresh answer is served fleet-wide.
 
-    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
-    (`"core" in r["surfaces"]`); the docs-only early return then yields
-    `full: False` with no pin, so the later asserts pass unexercised.
+    Mutation check: removing the CORE_ALSO entry fails the first TWO asserts
+    (`"core" in r["surfaces"]` and `"test_gh_read_cache.py" in r["test_files"]`);
+    only the third (`r["full"] is False`) survives, unexercised. MEASURED both ways:
+    with the entry `surfaces=['core']`, `full=False`, file present; without it
+    `surfaces=[]`, `full=False`, 73 tier-1 files and the pin ABSENT. Stated as two
+    because the tier-1 fallback genuinely does not carry this file — the very premise
+    three lines above — so an earlier cut of this docstring that claimed only the
+    FIRST assert fails understated the pin and mis-described its own failure mode.
     """
     r = _sel(["tools/gh_read_cache.py"])
     assert "core" in r["surfaces"], r
