@@ -196,7 +196,13 @@ def _require_shape(docs: Sequence[Any], key: str, *, want: str) -> None:
 
 
 def _pick_last(
-    docs: Sequence[Any], fields: Sequence[str], *, key: str, required: Sequence[str] = ()
+    docs: Sequence[Any],
+    fields: Sequence[str],
+    *,
+    key: str,
+    required: Sequence[str] = (),
+    str_fields: Sequence[str] = (),
+    int_fields: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The identity projection: a named subset of the last document, never the whole body.
 
@@ -218,6 +224,21 @@ def _pick_last(
         # cache a six-hour identity naming no repository.
         raise Unreadable(f"{key}: the body has null {missing} — refusing to project nulls")
     out = {f: last.get(f) for f in fields}
+    # ⛔ TYPE AND EMPTINESS, not just presence and null. `{"full_name": ""}` and
+    # `{"login": {"unexpected": 1}, "id": true}` both passed the null test and cached — the
+    # first a 1-hour identity naming no repository, the second a 12-hour identity whose `login`
+    # is not even a string. Every other projection in this module type-checks its fields; so
+    # does this one.
+    for f in str_fields:
+        if f in out and out[f] is not None and not (isinstance(out[f], str) and out[f]):
+            raise Unreadable(f"{key}: {f!r} is not a non-empty string ({out[f]!r})")
+    for f in int_fields:
+        if (
+            f in out
+            and out[f] is not None
+            and (not isinstance(out[f], int) or isinstance(out[f], bool))
+        ):
+            raise Unreadable(f"{key}: {f!r} is not an int ({out[f]!r})")
     if all(v is None for v in out.values()):
         raise Unreadable(f"{key}: every projected field is null — the body was not an answer")
     return out
@@ -257,6 +278,8 @@ def _project_repo_metadata(docs: Sequence[Any]) -> Any:
         ("id", "node_id", "full_name", "default_branch"),
         key="repo.metadata",
         required=("id", "full_name", "default_branch"),
+        str_fields=("node_id", "full_name", "default_branch"),
+        int_fields=("id",),
     )
 
 
@@ -373,7 +396,14 @@ def _project_runners_inventory(docs: Sequence[Any]) -> Any:
 
 
 def _project_user_identity(docs: Sequence[Any]) -> Any:
-    return _pick_last(docs, ("login", "id"), key="user.identity", required=("login", "id"))
+    return _pick_last(
+        docs,
+        ("login", "id"),
+        key="user.identity",
+        required=("login", "id"),
+        str_fields=("login",),
+        int_fields=("id",),
+    )
 
 
 @dataclass(frozen=True)
@@ -610,11 +640,12 @@ def _tokens(key: str) -> list[str]:
 def _is_mutable_name(key: str) -> bool:
     """Token-exact match, plus adjacent-PAIR phrases, plus a glued suffix/prefix test."""
     tokens = _tokens(key)
-    repo_scoped = bool(tokens) and tokens[0] == "repo"
-    # The container words are mutable on ANY scope EXCEPT `repo.`, where they name the
-    # DEFINITION set rather than an assignment.
+    # ⛔ THE EXEMPTION IS EXACTLY `repo.labels`, NOT ANY `repo.`-PREFIXED NAME. A prefix test
+    # admitted `repo.pr.labels` (argv `repos/{repo}/pulls/9/labels`) — a PR's triage ASSIGNMENT
+    # cached for an hour, which is the case this exemption exists to keep OUT.
+    definitions_key = tokens == ["repo", "labels"]
     mutable_here = _MUTABLE_TOKENS | _CONTAINER_SCOPED_MUTABLE
-    if repo_scoped:
+    if definitions_key:
         mutable_here = _MUTABLE_TOKENS - _CONTAINER_SCOPED_MUTABLE
     if any(t in mutable_here for t in tokens):
         return True

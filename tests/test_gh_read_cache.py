@@ -12,9 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 61 mutation rows have now been run
-(**58 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **60 are KILLED**; M49 survives ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. 64 mutation rows have now been run
+(**61 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **63 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -28,7 +28,7 @@ re-labelled). **60 are KILLED**; M49 survives ALONE by the documented layering:
     M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60 (all KILLED):
+Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60, cycle-14 added M61-M63 (all KILLED):
 
   M52 runner `labels` ABSENT read as empty ..... KILLED   M51 `visibility` cached again ......... KILLED
 
@@ -1909,3 +1909,54 @@ def test_a_slash_named_branch_is_ESCAPED_into_the_path(monkeypatch: pytest.Monke
     assert "repos/o/r/branches/release%2F1.0/protection" in joined, joined
     # the repo's own slash must survive
     assert "repos/o/r/" in joined
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 17. CYCLE-14 FINDINGS — presence+null was still not type, and the exemption was a prefix
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize(
+    ("key", "body"),
+    [
+        # an EMPTY STRING passed the null test: a 1-hour identity naming no repository
+        ("repo.metadata", [{"id": 1, "full_name": "", "default_branch": "main"}]),
+        ("repo.metadata", [{"id": 1, "full_name": "o/r", "default_branch": ""}]),
+        # a BOOLEAN id passes `is not None`, and a non-string login reaches callers as an identity
+        ("repo.metadata", [{"id": True, "full_name": "o/r", "default_branch": "main"}]),
+        ("user.identity", [{"login": {"unexpected": 1}, "id": 1}]),
+        ("user.identity", [{"login": "someone", "id": True}]),
+        ("user.identity", [{"login": "", "id": 1}]),
+        ("user.identity", [{"login": 42, "id": 1}]),
+    ],
+)
+def test_identity_fields_are_TYPE_checked_not_only_null_checked(key: str, body) -> None:
+    """⛔ `{"full_name": ""}` and `{"login": {...}, "id": true}` both passed the null test and were
+    cached — a 1-hour identity naming no repository, and a 12-hour identity whose `login` is not a
+    string. Every other projection in this module type-checks its fields; `_pick_last` did not."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS[key].project(body)
+
+
+def test_a_real_identity_still_projects() -> None:
+    assert C.INVARIANTS["user.identity"].project([{"login": "a", "id": 7}]) == {
+        "login": "a",
+        "id": 7,
+    }
+    assert C.INVARIANTS["repo.metadata"].project(
+        [{"id": 1, "node_id": "N", "full_name": "o/r", "default_branch": "main"}]
+    ) == {"id": 1, "node_id": "N", "full_name": "o/r", "default_branch": "main"}
+
+
+@pytest.mark.parametrize("key", ["repo.pr.labels", "repo.issue.labels", "repo.pulls.labels"])
+def test_the_labels_exemption_is_the_EXACT_shipped_key_not_a_prefix(key: str) -> None:
+    """⛔ The exemption was `tokens[0] == "repo"`, so a `labels` ASSIGNMENT spelled with the
+    registry's own convention was admitted: `repo.pr.labels` (argv
+    `repos/{repo}/pulls/9/labels`) cached a PR's triage set for an hour."""
+    assert C._is_mutable_name(key), f"{key!r} is an assignment set but was exempted"
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d)
+
+
+def test_repo_labels_is_still_the_invariant_definition_set() -> None:
+    """The other direction: the shipped key must not be caught by the tightened rule."""
+    assert not C._is_mutable_name("repo.labels")
+    assert C.kind_of("repo.labels") == "invariant"
