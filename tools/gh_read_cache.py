@@ -347,13 +347,19 @@ def _project_runners_inventory(docs: Sequence[Any]) -> Any:
             # `[{}]` AND `[{"name": null}]` both used to project to an inventory entry naming no
             # runner, cached for 30 minutes.
             raise Unreadable("runners.inventory: entry has a non-null-string `name` — not a runner")
-        if not isinstance(r.get("labels", []), list):
+        # ⛔ ABSENCE IS NOT AN EMPTY LABEL SET. A missing `labels` key read as "this runner carries
+        # no labels" and cached that "no" for 30 minutes — the last spelling of the failure the
+        # comment below closes, and the same rule `_expand` and `_project_required_set` already
+        # apply. `labels: []` is the legitimate empty answer; ABSENCE is not.
+        if "labels" not in r:
+            raise Unreadable("runners.inventory: entry has no `labels` key — not a runner body")
+        if not isinstance(r["labels"], list):
             raise Unreadable("runners.inventory: entry has a non-list `labels`")
         # ⛔ NO SILENT FILTER. `if isinstance(lbl, dict)` dropped every unrecognised label entry, so
         # a lane asking "is there a runner with label X" got a cached "no" from a body the
         # projection did not understand. `_project_labels` type-checks; so does this.
         labels = []
-        for lbl in r.get("labels") or []:
+        for lbl in r["labels"]:
             if not isinstance(lbl, dict) or not isinstance(lbl.get("name"), str):
                 raise Unreadable(f"runners.inventory: label entry {lbl!r} is not a named label")
             labels.append(lbl["name"])

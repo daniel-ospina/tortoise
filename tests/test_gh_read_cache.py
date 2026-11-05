@@ -12,9 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 50 mutation rows have now been run
-(**47 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **49 are KILLED**; M49 survives ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. 53 mutation rows have now been run
+(**50 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **52 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -28,7 +28,10 @@ re-labelled). **49 are KILLED**; M49 survives ALONE by the documented layering:
     M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Cycle-9 added M47-M50:
+Cycle-9/10/11 added M47-M52:
+
+  M52 runner `labels` ABSENT read as empty ..... KILLED   M51 `visibility` cached again ......... KILLED
+
 
   M47 explicit `null` required_set accepted .... KILLED   M49 argv dropped from the FILENAME .. SURVIVES
   M48 runner labels silently filtered .......... KILLED   M50 argv dropped from the ENVELOPE .. KILLED
@@ -1702,6 +1705,14 @@ def test_a_runner_label_entry_the_projection_does_not_understand_is_refused(labe
     30 minutes. `_project_labels` type-checks; this now does too."""
     with pytest.raises(C.Unreadable):
         C.INVARIANTS["runners.inventory"].project([{"runners": [{"name": "r1", "labels": labels}]}])
+
+
+@pytest.mark.parametrize("entry", [{"name": "cmux"}, {"name": "cmux", "os": "linux"}])
+def test_a_runner_entry_with_NO_labels_key_is_refused(entry) -> None:
+    """⛔ ABSENCE read as "carries no labels" and cached that "no" for 30 min — the last spelling of
+    the failure the sibling comment closes. `labels: []` is legitimate; a MISSING key is not."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS["runners.inventory"].project([{"runners": [entry]}])
 
 
 def test_a_runner_with_no_labels_still_projects() -> None:
