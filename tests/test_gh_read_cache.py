@@ -12,8 +12,8 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 22 mutations of the module have now
-been run; **21 are KILLED** and one survives ALONE, on purpose:
+fail for the bug they named — a green suite proving nothing. 38 mutations of the module have now
+been run; **37 are KILLED** and one survives ALONE, on purpose:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -27,12 +27,15 @@ been run; **21 are KILLED** and one survives ALONE, on purpose:
     M10 projection dropped from the FILENAME only ...... SURVIVES  M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-A further 8 mutations were run after the cycle-6 review, all KILLED:
+Two further rounds added M23-M38 after review (all KILLED):
 
-    M23 required_set treats ABSENT as empty .. KILLED    M27 all-null projection accepted ..... KILLED
-    M24 _pick_last `required` check removed .. KILLED    M28 non-dict envelope check removed . KILLED
-    M25 workflow entry-field check removed ... KILLED    M29 reader-returns-bytes check gone  KILLED
-    M26 runner `name` check removed .......... KILLED    M30 _load catches only the denylist  KILLED
+  cycle-6: M23 required_set ABSENT as empty | M24 _pick_last required | M25 workflow entry key
+           M26 runner `name` | M27 all-null answer | M28 non-dict envelope | M29 reader non-bytes
+           M30 _load denylist only
+  cycle-7: M31 read() stores bytes verbatim (the guard-2 hole) | M32 reader projects instead
+           M33 source digest dropped from the filename (cache never hits) | M34 kind_of mutable
+           M35 _IMPORT_CHECK constant (needed the checked-key SET — a count was spoofable by `6`)
+           M36 ttl_s ValueError | M37 required_set inner absence | M38 _project doesn't refuse
 
 M10 surviving is the documented layering, not a hole: for the PROJECTION the envelope stamp is
 authoritative and the filename digest only stops two projections from thrashing one file. (For the
@@ -62,8 +65,37 @@ SCOPE = "daniel-ospina/tortoise@main"
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────────────────────
+#: A RAW (unprojected) response body per key, as a `reader` must supply it. Each carries volatile
+#: fields beside the invariant ones, so a `read()` that forgot to project is caught immediately.
+RAW = {
+    "repo.metadata": lambda n: json.dumps(
+        {
+            "id": n,
+            "node_id": "N1",
+            "full_name": "o/r",
+            "default_branch": "main",
+            "visibility": "private",
+            "pushed_at": "2020-01-01",
+            "open_issues_count": 412,
+        }
+    ).encode(),
+    "repo.required_set": lambda n: json.dumps(
+        {
+            "required_status_checks": {"contexts": ["docs"], "checks": [{"context": "docs"}]},
+            "enforce_admins": {"enabled": False},
+        }
+    ).encode(),
+    "user.identity": lambda n: json.dumps({"login": "someone", "id": n}).encode(),
+}
+
+
 class Counter:
-    """A reader that answers with a monotonic payload and counts its calls."""
+    """A reader that answers with a monotonic RAW body and counts its calls.
+
+    ⛔ The reader returns RAW response bytes: the PROJECTION is `read()`'s job, so a test reader
+    that returned a projected document would hide exactly the hole that let a library caller cache
+    a whole body.
+    """
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -73,7 +105,8 @@ class Counter:
         self.calls.append(key)
         if self.fail is not None:
             raise self.fail
-        return b"payload-%d" % len(self.calls)
+        shape = RAW.get(key, RAW["repo.metadata"])
+        return shape(len(self.calls))
 
     @property
     def n(self) -> int:
@@ -98,7 +131,7 @@ def test_cached_hit_does_not_call_reader(tmp_path: Path) -> None:
     first = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     second = _read("repo.metadata", now=1000.0 + 1.0, reader=r, cache_dir=tmp_path)
 
-    assert first == b"payload-1"
+    assert json.loads(first)["id"] == 1
     assert second == first, "a fresh cached value must be served verbatim"
     assert r.n == 1, (
         "the pool emptied because every poll was a live call — a hit inside the TTL MUST NOT "
@@ -113,7 +146,7 @@ def test_ttl_expiry_calls_reader_again(tmp_path: Path) -> None:
         "repo.metadata", now=1000.0 + C.ttl_for("repo.metadata") + 1.0, reader=r, cache_dir=tmp_path
     )
     assert r.n == 2
-    assert out == b"payload-2"
+    assert json.loads(out)["id"] == 2
 
 
 def test_exact_ttl_boundary_is_a_miss(tmp_path: Path) -> None:
@@ -149,11 +182,11 @@ def test_a_different_scope_is_a_different_entry(tmp_path: Path) -> None:
 
     def reader_a(key: str) -> bytes:
         calls.append("A")
-        return b'{"checks":["tortoise-only"]}'
+        return json.dumps({"required_status_checks": {"contexts": ["tortoise-only"]}}).encode()
 
     def reader_b(key: str) -> bytes:
         calls.append("B")
-        return b'{"checks":["agent-infra-only"]}'
+        return json.dumps({"required_status_checks": {"contexts": ["agent-infra-only"]}}).encode()
 
     a = _read(
         "repo.required_set",
@@ -171,7 +204,7 @@ def test_a_different_scope_is_a_different_entry(tmp_path: Path) -> None:
     )
 
     assert a != b, "a cross-scope hit served repo A's required set as repo B's"
-    assert b == b'{"checks":["agent-infra-only"]}'
+    assert json.loads(b)["contexts"] == ["agent-infra-only"]
     assert calls == ["A", "B"], "reader B must actually be called"
 
 
@@ -256,7 +289,9 @@ def test_two_credentials_never_share_an_identity(
 
     def reader(key: str) -> bytes:
         calls.append("x")
-        return b'{"login":"%s"}' % (b"alice" if len(calls) == 1 else b"bob")
+        return json.dumps(
+            {"login": "alice" if len(calls) == 1 else "bob", "id": len(calls)}
+        ).encode()
 
     monkeypatch.setenv("GH_TOKEN", "tok-alice")
     a = _read(
@@ -406,7 +441,7 @@ def test_corrupt_envelope_is_a_miss(tmp_path: Path) -> None:
     _entry(tmp_path).write_bytes(b"{not json")
     out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)
     assert r.n == 2
-    assert out == b"payload-2"
+    assert json.loads(out)["id"] == 2
 
 
 def test_tampered_payload_is_a_miss(tmp_path: Path) -> None:
@@ -478,7 +513,7 @@ def test_ANY_reader_failure_is_fail_closed_not_just_unreadable(
 def test_missing_cache_dir_is_a_miss_not_a_crash(tmp_path: Path) -> None:
     r = Counter()
     out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path / "nope" / "deeper")
-    assert out == b"payload-1"
+    assert json.loads(out)["id"] == 1
     assert r.n == 1
 
 
@@ -857,12 +892,16 @@ def test_gh_reader_APPLIES_the_projection(monkeypatch: pytest.MonkeyPatch) -> No
         return Proc()
 
     monkeypatch.setattr(C.subprocess, "run", fake_run)
-    out = C._gh_reader("o/r", "main")("runners.inventory")
+    raw = C._gh_reader("o/r", "main")("runners.inventory")
 
-    assert json.loads(out) == [{"name": "r1", "labels": ["self-hosted"]}], (
-        f"the reader stored an unprojected body: {out!r}"
+    # ⛔ The reader returns RAW bytes on purpose: the projection belongs to `read()`, so that a
+    # caller supplying its own reader is protected too. Projecting here would leave the library
+    # path caching whole bodies (measured: `pushed_at` served for a 6-hour TTL).
+    stored = json.loads(C._project("runners.inventory", raw))
+    assert stored == [{"name": "r1", "labels": ["self-hosted"]}], (
+        f"the projection let volatile fields through: {stored!r}"
     )
-    assert b"online" not in out and b"busy" not in out
+    assert "online" not in json.dumps(stored) and "busy" not in json.dumps(stored)
     assert seen and "--paginate" in seen[0]
     for flag in C._FORBIDDEN_ARGV_FLAGS:
         assert flag not in seen[0], f"the argv handed to gh carries {flag!r}"
@@ -899,7 +938,7 @@ def test_gh_reader_surfaces_a_projection_failure_as_unreadable(
 
         monkeypatch.setattr(C.subprocess, "run", lambda cmd, **kw: Proc())
         with pytest.raises(C.Unreadable):
-            C._gh_reader("o/r", "main")(key)
+            C._project(key, C._gh_reader("o/r", "main")(key))
     finally:
         C.INVARIANTS.pop(key, None)
 
@@ -977,7 +1016,7 @@ def test_store_is_atomic_a_failed_replace_leaves_the_old_entry_intact(
     monkeypatch.setattr(C.os, "replace", boom)
 
     def reader_then_crash(key: str) -> bytes:
-        return b"payload-NEW"
+        return json.dumps({"id": 999, "full_name": "o/r", "default_branch": "main"}).encode()
 
     got = _read(
         "repo.metadata",
@@ -985,7 +1024,9 @@ def test_store_is_atomic_a_failed_replace_leaves_the_old_entry_intact(
         reader=reader_then_crash,
         cache_dir=tmp_path,
     )
-    assert got == b"payload-NEW", "a failed cache WRITE must not fail a read that just succeeded"
+    assert json.loads(got)["id"] == 999, (
+        "a failed cache WRITE must not fail a read that just succeeded"
+    )
     assert _entry(tmp_path).read_bytes() == good, (
         "a crashed swap must not have touched the existing entry — the write was not staged"
     )
@@ -1013,7 +1054,9 @@ def test_the_import_time_registry_guard_actually_RAN() -> None:
     """⛔ The call was bare, so it could be deleted with all 107 earlier tests still green
     (every test called `_assert_every_key_projects` DIRECTLY). It is now bound to `_IMPORT_CHECK`,
     so deleting the call site raises AttributeError here."""
-    assert C._IMPORT_CHECK is True
+    # The set the loop actually VISITED — not a boolean and not a count. Measured: a hardcoded
+    # `_IMPORT_CHECK = 6` satisfied `== len(INVARIANTS)` and survived the whole suite.
+    assert frozenset(C.INVARIANTS) == C._IMPORT_CHECK
 
 
 def test_read_validates_the_spec_on_every_call(tmp_path: Path) -> None:
@@ -1040,7 +1083,7 @@ def test_a_non_numeric_clock_is_refused_not_a_crash(tmp_path: Path) -> None:
         with pytest.raises(C.TtlNotPermitted):
             _read("repo.metadata", now=bad, reader=r, cache_dir=tmp_path)  # type: ignore[arg-type]
     assert r.n == 0
-    assert _read("repo.metadata", now="1000", reader=r, cache_dir=tmp_path) == b"payload-1"
+    assert json.loads(_read("repo.metadata", now="1000", reader=r, cache_dir=tmp_path))["id"] == 1
 
 
 def test_an_Infinity_stamped_envelope_is_a_MISS_not_a_latched_crash(tmp_path: Path) -> None:
@@ -1057,7 +1100,7 @@ def test_an_Infinity_stamped_envelope_is_a_MISS_not_a_latched_crash(tmp_path: Pa
 
     out = _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path)  # must NOT raise
     assert r.n == 2, "the malformed entry must be a MISS, and the MISS must rewrite it"
-    assert out == b"payload-2"
+    assert json.loads(out)["id"] == 2
     # ...and it must be HEALED: the next read is a normal hit, not another failure.
     _read("repo.metadata", now=1000.0 + 1.0, reader=r, cache_dir=tmp_path)
     assert r.n == 2, "the bad entry was not healed by the re-read"
@@ -1109,8 +1152,10 @@ def test_a_cached_entry_stops_matching_when_the_shipped_projection_changes(
     _read(key, now=1000.0, reader=r, cache_dir=tmp_path)
     assert r.n == 1
 
+    base = C.INVARIANTS[key].project  # capture BEFORE patching, or it recurses into itself
+
     def widened(docs):
-        return {**C.INVARIANTS[key].project(docs), "new_field": True}
+        return {**base(docs), "new_field": True}
 
     import dataclasses
 
@@ -1180,7 +1225,7 @@ def test_cli_no_cache_reads_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     def fake_reader(repo: str, branch: str):
         def _r(key: str) -> bytes:
             calls.append(key)
-            return b'{"live": true}'
+            return json.dumps({"id": 5, "full_name": "o/r", "default_branch": "main"}).encode()
 
         return _r
 
@@ -1191,7 +1236,7 @@ def test_cli_no_cache_reads_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         ["--key", "repo.metadata", "--repo", "o/r", "--cache-dir", str(tmp_path), "--no-cache"]
     )
     assert rc == 0
-    assert out.buffer.getvalue() == b'{"live": true}'
+    assert json.loads(out.buffer.getvalue())["id"] == 5
     assert calls == ["repo.metadata"]
     assert not list(tmp_path.iterdir()), "--no-cache must not write an entry"
 
@@ -1209,7 +1254,7 @@ def test_cli_global_key_without_a_token_still_reads_LIVE(
     def fake_reader(repo: str, branch: str):
         def _r(key: str) -> bytes:
             calls.append(key)
-            return b'{"login": "someone"}'
+            return json.dumps({"login": "someone", "id": 9}).encode()
 
         return _r
 
@@ -1218,7 +1263,7 @@ def test_cli_global_key_without_a_token_still_reads_LIVE(
     monkeypatch.setattr(C.sys, "stdout", out)
     rc = C.main(["--key", "user.identity", "--cache-dir", str(tmp_path)])
     assert rc == 0, "a global key with no identifiable credential must be read LIVE, not refused"
-    assert out.buffer.getvalue() == b'{"login": "someone"}'
+    assert json.loads(out.buffer.getvalue())["login"] == "someone"
     assert calls == ["user.identity"]
     assert not list(tmp_path.iterdir()), "an unidentifiable-credential read must not be cached"
 
@@ -1229,7 +1274,7 @@ def test_cli_honours_a_tightened_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyP
     def fake_reader(repo: str, branch: str):
         def _r(key: str) -> bytes:
             calls.append(key)
-            return b"{}"
+            return json.dumps({"id": 1, "full_name": "o/r", "default_branch": "main"}).encode()
 
         return _r
 
@@ -1334,3 +1379,129 @@ def test_a_reader_returning_non_bytes_is_Unreadable(payload, tmp_path: Path) -> 
     with pytest.raises(C.Unreadable):
         _read("repo.metadata", now=1000.0, reader=bad_reader, cache_dir=tmp_path)
     assert r.n == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 12. CYCLE-7 FINDINGS — guard 2 must hold for EVERY caller, and the cache must actually HIT
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_read_PROJECTS_a_raw_body_from_an_injected_reader(tmp_path: Path) -> None:
+    """⛔ THE HOLE. `read()` stored whatever the reader returned, VERBATIM, so guard 2 held only
+    inside the private `_gh_reader`. A caller following the documented `reader=my_reader` usage
+    cached a WHOLE body — measured: `pushed_at` and `open_issues_count` served for a 6-hour TTL,
+    which is exactly what the `repo.metadata` registry comment says must never happen.
+
+    The reader contract is therefore: supply RAW response bytes. `read()` decodes and projects,
+    before the store, on every path.
+    """
+    raw = json.dumps(
+        {
+            "id": 1,
+            "full_name": "o/r",
+            "default_branch": "main",
+            "visibility": "private",
+            "node_id": "N1",
+            "pushed_at": "1999-01-01",
+            "open_issues_count": 412,
+            "stargazers_count": 7,
+        }
+    ).encode()
+    calls: list[str] = []
+
+    def reader(key: str) -> bytes:
+        calls.append(key)
+        return raw
+
+    out = _read("repo.metadata", now=1000.0, reader=reader, cache_dir=tmp_path)
+    assert b"pushed_at" not in out, f"read() cached a whole body: {out!r}"
+    assert b"open_issues_count" not in out
+    assert json.loads(out)["full_name"] == "o/r"
+
+    # ...and the HIT is the projection too, not the raw body.
+    hit = _read("repo.metadata", now=1001.0, reader=reader, cache_dir=tmp_path)
+    assert hit == out
+    assert b"pushed_at" not in hit
+    assert len(calls) == 1
+
+
+def test_read_REFUSES_an_error_document_from_an_injected_reader(tmp_path: Path) -> None:
+    """Claim 6 has to hold on the library path too, not only inside `_gh_reader`."""
+
+    def reader(key: str) -> bytes:
+        return b'{"message": "Server Error"}'
+
+    with pytest.raises(C.Unreadable):
+        _read("repo.metadata", now=1000.0, reader=reader, cache_dir=tmp_path)
+    assert not list(tmp_path.iterdir()), "an unrecognised body must not be stored"
+
+
+def test_two_projection_revisions_do_not_thrash_one_cache_file(tmp_path: Path) -> None:
+    """⛔ A cache that never HITS is as bad as none.
+
+    The source-bearing digest was in the envelope only, so two checkouts of this file at different
+    projection revisions overwrote each other's entry on every access (measured: 8 alternating
+    accesses -> 8 live reads, never converging — and `main()` defaults to a box-wide cache dir).
+    """
+    key = "repo.proj_rev_probe"
+
+    def v1(docs):
+        return {"id": 1}
+
+    def v2(docs):
+        return {"id": 1, "extra": True}
+
+    C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="same-id", project=v1)
+    try:
+        p1 = C._cache_path(key, SCOPE, ttl_s=600).name
+        C.INVARIANTS[key] = C.Invariant(
+            ttl_s=600, argv=("api", "x"), projection="same-id", project=v2
+        )
+        p2 = C._cache_path(key, SCOPE, ttl_s=600).name
+        assert p1 != p2, (
+            "two revisions of the same projection share one filename, so each overwrites the "
+            "other's entry and the cache never hits"
+        )
+    finally:
+        C.INVARIANTS.pop(key, None)
+
+
+def test_a_hand_registered_mutable_key_is_still_refused() -> None:
+    """⛔ `_assert_every_key_projects` checks only the SPEC, never the NAME, so `kind_of`'s
+    mutable-name branch is the ONLY gate against a key inserted straight into INVARIANTS. It was
+    unpinned: deleting those two lines left the suite green."""
+    C.INVARIANTS["pr.state"] = C.Invariant(
+        ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d
+    )
+    try:
+        assert C.kind_of("pr.state") == "mutable"
+        r = Counter()
+        with pytest.raises(C.MutableReadRefused):
+            _read("pr.state", now=1000.0, reader=r, cache_dir=Path("/tmp/nope-unused"))
+        assert r.n == 0
+    finally:
+        C.INVARIANTS.pop("pr.state", None)
+
+
+def test_a_non_int_ttl_is_refused_not_a_ValueError(tmp_path: Path) -> None:
+    """The same conversion hole that was fixed for `now`: a caller mistake must be a
+    `TtlNotPermitted` refusal, not a traceback out of `int()`."""
+    r = Counter()
+    for bad in ("abc", None if False else "1.5", object()):
+        with pytest.raises(C.TtlNotPermitted):
+            _read("repo.metadata", now=1000.0, reader=r, cache_dir=tmp_path, ttl_s=bad)
+    assert r.n == 0
+
+
+def test_required_set_without_contexts_or_checks_is_refused() -> None:
+    """Absent one level DEEPER: `{"strict": false}` names no check list, so reading it as an EMPTY
+    required set infers "no required checks" from an absence — on the merge-gating key."""
+    for rsc in ({"strict": False}, {}):
+        with pytest.raises(C.Unreadable):
+            C.INVARIANTS["repo.required_set"].project([{"required_status_checks": rsc}])
+
+
+def test_required_set_with_only_checks_projects() -> None:
+    """The other direction: a real App-based protection sends `checks` and no `contexts`."""
+    out = C.INVARIANTS["repo.required_set"].project(
+        [{"required_status_checks": {"checks": [{"context": "docs"}]}}]
+    )
+    assert out == {"contexts": [], "checks": ["docs"]}

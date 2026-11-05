@@ -56,12 +56,14 @@ earlier blanket claim ("each is pinned by a test that fails when the guard is re
    served as another's — valid envelope, valid digest, fresh age, wrong subject. Global keys
    (``api user``) are scoped by a **credential fingerprint**, and ``read()`` recomputes it rather
    than trusting a caller-supplied string.
-2. **NO KEY CACHES A WHOLE RESPONSE BODY.** Every key declares a ``project`` callable over the
-   decoded pages. Enforced on EVERY ``read()`` and at import; argv may not carry
-   ``--jq``/``--slurp``. Stated honestly: this pins the SIX SHIPPED KEYS, not the concept — a
-   ``project=lambda d: d`` passes every guard, so a future key still needs a reviewer. What IS
-   mechanical is that a projection cannot silently return an empty or all-``None`` answer from a
-   body it does not recognise (see :func:`_require_shape`).
+2. **NO KEY CACHES A WHOLE RESPONSE BODY.** The READER supplies raw response bytes and
+   ``read()`` stores only ``spec.project(decode_pages(raw))`` — so the guard holds for every
+   caller, including one that supplies its own ``reader`` (it used to hold only on the CLI's
+   private helper, and the documented library usage cached whole bodies). Enforced at import as
+   well; argv may not carry ``--jq``/``--slurp``. Stated honestly: this pins the SIX SHIPPED
+   KEYS, not the concept — a ``project=lambda d: d`` passes every guard, so a future key still
+   needs a reviewer. What IS mechanical is that a projection cannot silently return an empty or
+   all-``None`` answer from a body it does not recognise (see :func:`_require_shape`).
 3. **FRESHNESS ARITHMETIC CANNOT BE BYPASSED.** ``now`` and ``stored_at`` must be finite and the
    test is a single ``0 <= age < ttl``. Two separate returns let a NaN ``now`` make both false and
    an arbitrarily old entry was served as provably fresh.
@@ -267,6 +269,13 @@ def _project_required_set(docs: Sequence[Any]) -> Any:
         return {"contexts": [], "checks": []}
     if not isinstance(rsc, dict):
         raise Unreadable("repo.required_set: required_status_checks is not an object")
+    # The same rule one level deeper: `{"strict": false}` names no check list, so reading it as an
+    # EMPTY required set would infer "this branch requires no checks" from an absence.
+    if "contexts" not in rsc and "checks" not in rsc:
+        raise Unreadable(
+            "repo.required_set: required_status_checks has neither `contexts` nor `checks` — "
+            "refusing to infer an empty required set from the inner object's shape"
+        )
     return {
         "contexts": list(rsc.get("contexts") or []),
         "checks": [c.get("context") for c in (rsc.get("checks") or []) if isinstance(c, dict)],
@@ -642,17 +651,24 @@ def declare_invariant(
     )
 
 
-def _assert_every_key_projects() -> bool:
-    """Import-time guard (2): no key may cache a whole body. Returns True when it ran."""
+def _assert_every_key_projects() -> frozenset[str]:
+    """Import-time guard (2): no key may cache a whole body. Returns the KEYS it checked.
+
+    ⛔ Returning the checked-key SET is load-bearing, and a count was not enough: ``_IMPORT_CHECK``
+    replaced by the literal ``6`` satisfied ``== len(INVARIANTS)`` and survived the whole suite
+    (measured). The set can only be what this loop actually visited.
+    """
+    checked: set[str] = set()
     for key, spec in INVARIANTS.items():
         _validate_spec(key, spec.argv, spec.projection, spec.project)
-    return True
+        checked.add(key)
+    return frozenset(checked)
 
 
 # ⛔ BOUND TO A NAME, not called bare. A bare `_assert_every_key_projects()` could be DELETED with
 # the whole suite still green (measured — every test called the function directly). Deleting this
 # line now removes `_IMPORT_CHECK` and the guard test reds on AttributeError.
-_IMPORT_CHECK: bool = _assert_every_key_projects()
+_IMPORT_CHECK: frozenset[str] = _assert_every_key_projects()
 
 
 # ── the on-disk format ────────────────────────────────────────────────────────────────────────
@@ -679,8 +695,13 @@ def _filename(key: str, scope: str, projection: str | None = None, ttl_s: int | 
         projection = spec.projection
     if ttl_s is None:
         ttl_s = spec.ttl_s
+    # ⛔ THE SOURCE-BEARING DIGEST IS PART OF THE FILENAME. It was only in the envelope, so two
+    # checkouts of this file at different projection revisions overwrote each other's entry on
+    # every access — measured 8 alternating accesses -> 8 live gh reads, never converging, because
+    # the shared default cache dir is box-wide. With it here, each revision owns its file.
+    src_digest = _projection_digest(projection, INVARIANTS[key].project)
     payload_id = hashlib.sha1(
-        f"{scope}\x00{key}\x00{projection}\x00{int(ttl_s)}".encode()
+        f"{scope}\x00{key}\x00{src_digest}\x00{int(ttl_s)}".encode()
     ).hexdigest()[:12]
     return f"{_CACHE_PREFIX}{_slug(key)}-{_slug(scope)[:20]}-{payload_id}.json"
 
@@ -814,6 +835,21 @@ def _store(path: Path, blob: bytes) -> None:
             tmp.unlink()
 
 
+def _project(key: str, raw: bytes) -> bytes:
+    """Decode a raw response and project it to the declared invariant subset.
+
+    Every failure is ``Unreadable``: a body the projection does not recognise must never reach the
+    cache, because a fresh entry built from an unknown body is a LIE rather than a saving.
+    """
+    spec = INVARIANTS[key]
+    try:
+        return json.dumps(spec.project(decode_pages(raw)), sort_keys=True).encode()
+    except Unreadable:
+        raise
+    except Exception as exc:  # a projection that cannot run must not yield a cached answer
+        raise Unreadable(f"projection for {key!r} failed: {exc}") from exc
+
+
 # ── the read ─────────────────────────────────────────────────────────────────────────────────
 def _credential_fingerprint() -> str | None:
     """A NON-REVERSIBLE fingerprint of the token that will answer a global read.
@@ -896,7 +932,10 @@ def read(
                 f"scope_for({key!r}, …) — got {scope!r}, expected {expected!r}. Otherwise one "
                 f"account's identity is served as another's."
             )
-    effective = ceiling if ttl_s is None else int(ttl_s)
+    try:
+        effective = ceiling if ttl_s is None else int(ttl_s)
+    except (TypeError, ValueError) as exc:  # same conversion hole that was fixed for `now`
+        raise TtlNotPermitted(f"ttl_s must be a positive int, got {ttl_s!r}") from exc
     if effective <= 0:
         raise TtlNotPermitted(f"ttl_s must be positive, got {ttl_s!r}")
     if effective > ceiling:
@@ -921,7 +960,11 @@ def read(
         raise Unreadable(f"re-read of {key!r} failed: {exc}") from exc
     if not isinstance(payload, (bytes, bytearray)):
         raise Unreadable(f"reader for {key!r} returned {type(payload).__name__}, not bytes")
-    payload = bytes(payload)
+    # ⛔ GUARD 2 LIVES HERE, ON THE PATH THAT ACTUALLY RUNS. The reader supplies RAW response
+    # bytes; `read()` decodes the (possibly paginated) stream and stores only the PROJECTION. Doing
+    # it before the store — not only in `_gh_reader` — is what makes "no key caches a whole body"
+    # true for EVERY caller, and it means a hit and a miss return identically-shaped bytes.
+    payload = _project(key, bytes(payload))
     # ⛔ A CACHE-WRITE FAILURE MUST NOT FAIL A SUCCESSFUL READ. The value in hand was just read from
     # GitHub and is as fresh as anything can be; failing to STORE it is a lost optimisation, not a
     # lost answer. Fail-closed governs what may be SERVED from disk, never what may be RETURNED
@@ -984,12 +1027,11 @@ def _gh_reader(repo: str, branch: str):
                 f"{' '.join(cmd)} exited {proc.returncode}: "
                 f"{(proc.stderr or b'').decode('utf-8', 'replace').strip()[:300]}"
             )
-        docs = decode_pages(proc.stdout)
-        try:
-            projected = spec.project(docs)
-        except Exception as exc:  # a projection that cannot run must not yield a cached answer
-            raise Unreadable(f"projection for {key!r} failed: {exc}") from exc
-        return json.dumps(projected, sort_keys=True).encode()
+        # ⛔ RAW BYTES. The PROJECTION is applied by `read()`, never here — so guard 2 holds on
+        # the library path too, not only on the CLI's. This used to project here as well, which
+        # meant a caller following the documented `reader=my_reader` usage cached the WHOLE body
+        # (measured: `pushed_at` and `open_issues_count` served for a 6-hour TTL).
+        return proc.stdout
 
     return _read
 
