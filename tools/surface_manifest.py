@@ -66,8 +66,14 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter BEFORE every other import. The POSITION is
+# the property this exists for, not this file's current import list: the corpus
+# rule (`tests/test_entry_point_python_guard.py`, property 1) requires `import
+# sys` + the guard to precede all other imports, because a module-level
+# 3.11+-only import — `from datetime import UTC`, present in sibling tools —
+# raises ImportError on an old interpreter before any LATER-placed guard could
+# run. This file imports no `datetime` today; the guard is hoisted anyway so the
+# rule holds uniformly instead of being re-litigated per import list.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/surface_manifest.py requires Python >= 3.12 (got "
@@ -259,6 +265,14 @@ MANIFEST_HEADER = (
     "# \u26a0\ufe0f A re-cut emits ONLY this header, then the `yaml.safe_dump` of the derived document.\n"
     "# YAML dumps no comments, so any comment below this block is SILENTLY DROPPED. Keep\n"
     "# rationale here or in the docs, never in an ad-hoc comment in the body.\n"
+    "#\n"
+    "# LOWERED 82 \u2192 76 on 2026-11-04 by PR #10906 (#4282 Phase 3.2, the first tool batch:\n"
+    "# the five `run_onboarding` tools deleted). The pin is lowered for the same reason it is\n"
+    "# raised elsewhere \u2014 it is only meaningful at the live surface: left at 82 it would carry\n"
+    "# six slots of slack, so re-adding any of the five (the regression\n"
+    "# `tests/test_tool_registry.py` pins) would pass `tools/surface-guard.py` green.\n"
+    "# \u26d4 76 IS DELIBERATE, NOT AN ANOMALY: if you are reading `tools: 76` next to a live 76\n"
+    "# and wondering whether to \"restore\" 82, do not \u2014 that re-opens the slack.\n"
     "#\n"
     "# THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so\n"
     "# drift is visible (tools/surface-guard.py). The approved TARGET is recorded in\n"

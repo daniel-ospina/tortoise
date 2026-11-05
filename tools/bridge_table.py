@@ -218,14 +218,13 @@ DESTINATION = {
     # #3540 ruling B: the consolidated source-management operation.
     "tortoise_manage_sources": "manage_sources",
     # ── Onboarding and packs ────────────────────────────────────────
-    "tortoise_onboarding_state": "REMOVED",
-    "tortoise_onboarding_seed": "REMOVED",
-    "tortoise_onboarding_demo_create": "REMOVED",
-    "tortoise_onboarding_github_connect": "REMOVED",
+    # ⛔ #4282 Phase 3.2 REMOVED the five `run_onboarding` members from the
+    # SERVED surface, so they no longer appear in this map at all. Their recorded
+    # reasons are kept in `REMOVED_IN_PHASE_3_2` below — the approval history —
+    # because a map key may not outlive the registry entry it describes.
     # #3540 ruling B: retired INTO the consolidated operation — the 0.1
     # destination is the tool that replaces it, so the redirect agrees.
     "tortoise_onboarding_github_index": "manage_sources",
-    "tortoise_onboarding_github_status": "REMOVED",
     # #3540 ruling B: retired INTO the consolidated operation — the 0.1
     # destination is the tool that replaces it, so the redirect agrees.
     "tortoise_onboarding_session_recording": "manage_sources",
@@ -307,6 +306,24 @@ REMOVALS: dict[str, str] = {
         "ONTOLOGY v2.5; pre-beta there are no legacy v2.5 graphs to migrate, so "
         "the tool has no caller"
     ),
+    "tortoise_packs_list": (
+        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the tenant read "
+        "is preserved on the SDK/REST pack surface, and no competitor exposes pack "
+        "installation on its agent API"
+    ),
+    "tortoise_pack_install": (
+        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the "
+        "tenant-visible WRITE is preserved there rather than folded into an "
+        "operator-only tool"
+    ),
+}
+
+#: The approval history for the five `run_onboarding` tools #4282 Phase 3.2
+#: removed from the served surface. NOT read by the validator — they are gone
+#: from the registry, so there is nothing left to validate — and kept because
+#: the reason a name left the surface is the thing a future "why can't I call
+#: X?" has to find.
+REMOVED_IN_PHASE_3_2: dict[str, str] = {
     "tortoise_onboarding_state": (
         "settled 2026-09-22 (canonical §run_onboarding) — `run_onboarding` dropped "
         "for `check_connection`; this tenant-visible READ is rehomed to the tenancy "
@@ -325,17 +342,8 @@ REMOVALS: dict[str, str] = {
         "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
     ),
     "tortoise_onboarding_github_connect": (
-        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
-    ),
-    "tortoise_packs_list": (
-        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the tenant read "
-        "is preserved on the SDK/REST pack surface, and no competitor exposes pack "
-        "installation on its agent API"
-    ),
-    "tortoise_pack_install": (
-        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the "
-        "tenant-visible WRITE is preserved there rather than folded into an "
-        "operator-only tool"
+        "settled 2026-09-22 — `run_onboarding` is not on the MCP target; the OAuth "
+        "handshake survives as `POST /v1/onboarding/github/connect`"
     ),
 }
 
