@@ -498,6 +498,73 @@ def test_a_callable_returning_inside_its_bound_keeps_its_result(monkeypatch):
     )
 
 
+def test_a_racing_failure_in_the_run_arm_is_recorded_as_a_domain_error(monkeypatch):
+    """#10941: the RUN arm's ordering half, pinned separately from the re-await.
+
+    The same stale-snapshot race the re-await pin below covers, on the path every
+    control-plane call takes: ``future.exception()`` is a SNAPSHOT, and the worker
+    stamps BEFORE it publishes, so the snapshot can say "nothing published yet"
+    while a settled FAILURE is already behind ``future.result()``. Assigning
+    ``outcome = "completed"`` first recorded ``completed`` for a callable that
+    raised — the one thing #5840's single record must never say (#5840's own
+    vocabulary defines ``domain_error`` as "fn failed").
+
+    The re-await stub cannot stand in for this arm: ``answered_in_time`` is gated
+    on the worker stamp, so this stub runs the real ``_stamped`` wrapper to
+    populate ``completed_at`` and only THEN lies about the snapshot.
+    """
+
+    class _SettlingFuture:
+        """Nothing published when asked for an exception; settled when asked for its value."""
+
+        def done(self):
+            return True
+
+        def cancelled(self):
+            return False
+
+        def exception(self):
+            return None  # the STALE snapshot: the worker has not published yet
+
+        def result(self):
+            raise RuntimeError("store said no")
+
+        def add_done_callback(self, cb):
+            raise AssertionError(
+                "a DONE future must not be given an abandoned-outcome callback")
+
+    class _StubWorker:
+        def submit(self, fn):
+            # Run the real wrapper so ``completed_at`` is stamped in time, then
+            # present a future whose snapshot has not caught up with its value.
+            with contextlib.suppress(RuntimeError):
+                fn()
+            return _SettlingFuture()
+
+    async def _expire(future, *, timeout, cancel_on_timeout=True):
+        raise TimeoutError("the bound expired")
+
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool: _StubWorker())
+    monkeypatch.setattr(monitoring, "_await_future", _expire)
+
+    def _fail():
+        raise RuntimeError("store said no")
+
+    async def _run():
+        return await monitoring.run_control_plane_call(
+            _fail, op="run-racing-failure", pool="graph", timeout=5.0)
+
+    with pytest.raises(RuntimeError, match="store said no"):
+        asyncio.run(_run())
+    records = [r for r in monitoring.control_plane_offload_records()
+               if r[0] == "run-racing-failure"]
+    assert [r[2] for r in records] == ["domain_error"], (
+        f"a failed callable was recorded as {[r[2] for r in records]!r} — the "
+        "snapshot raced the settle, and the record must not claim `completed` "
+        "for work that raised")
+
+
 def test_a_callable_returning_after_its_bound_is_still_a_bound_miss(monkeypatch):
     """The over-correction pin for #10941's success arm: LATE is not a verdict.
 
