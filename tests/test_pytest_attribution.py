@@ -1901,7 +1901,14 @@ def test_a_leg_that_exited_normally_gets_no_attribution() -> None:
     ],
     ids=["no-args", "no-budget", "no-rc", "junk-rc", "junk-budget", "unknown-flag"],
 )
-def test_bad_invocation_is_exit_2(argv: list[str]) -> None:
+def test_kill_attribution_bad_invocation_is_exit_2(argv: list[str]) -> None:
+    """A misuse of the KILL reporter is a usage error, so it cannot read as a report.
+
+    Named distinctly from `test_bad_invocation_is_exit_2` above (which covers the
+    older `pytest-attribution.sh`): two same-named definitions in one module are a
+    silent shadow — the earlier one stops being collected and `ruff`'s F811 reds the
+    required `lint` leg, which is how this pair was caught.
+    """
     assert run_kill_attribution(*argv).returncode == 2, argv
 
 
