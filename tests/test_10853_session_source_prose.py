@@ -41,6 +41,8 @@ change closes.
 
 from __future__ import annotations
 
+import ast
+
 import pytest
 
 from tortoise import record_projection as rp
@@ -484,8 +486,10 @@ def test_the_identity_is_read_through_the_props_tail():
     predicate reading the columns alone answered "document", the column door
     never fired, and the prose landed on the node — while
     `is_episodic_source_node` (reading the merged map) called that same node a
-    session and the reconciler therefore counted the pair as CACHE-OWNED. R1
-    ("from any row shape") failed open, and nothing reddened (#10867 review).
+    session. R1 ("from any row shape") failed open, and nothing reddened — not
+    because the reconciler hid it, but because it CANNOT see it: it re-projects
+    the record through this same projector, so both sides carry the prose and
+    compare equal (`record_reconcile.py:449-451`, `:540`) (#10867 review).
     """
     row = _source_row(
         url="session.md",
@@ -938,25 +942,45 @@ def test_the_TAIL_SHAPE_prose_names_no_driver_this_repo_never_imports():
     path that does not exist.
 
     This leg is the anti-drift pin, and it is why the correction cannot rot back:
-    the claim is checkable (`git grep asyncpg -- tortoise/` answered the docstring
-    and nothing else), so a future edit that re-introduces the phantom driver
-    reds here instead of in a reviewer's read. ⛔ THE SCAN IS SOURCE-ONLY on
-    purpose — this file names the driver BECAUSE it refutes it, and that is not
-    the claim under test. If asyncpg ever really becomes a driving read here,
-    delete this leg in the same change that adds the import; the assertion says
-    so, so the failure cannot be mistaken for a typo.
+    the claim is checkable (no module under `tortoise/` imports `asyncpg`), so a
+    future edit that re-introduces the phantom driver reds here instead of in a
+    reviewer's read. ⛔ THE PREDICATE IS AN IMPORT, NOT A SUBSTRING. The scan is
+    scoped to `tortoise/` — this file sits outside it, precisely because it names
+    the driver in order to REFUTE it — and inside that scope it parses each
+    module and matches an `Import`/`ImportFrom` of `asyncpg` alone. A substring
+    scan would red on a COMMENT that mentions the driver, with a message
+    accusing an import that does not exist: the [#10675] text-scanning-pin class
+    this same change removes from `_names_the_reader`
+    (`tests/test_metering_capture_usage_reader.py`), and the two scans must not
+    disagree, one file apart, about whether prose may fail a pin. If `asyncpg`
+    ever really becomes a driving read here, delete this leg in the same change
+    that adds the import; the assertion says so, so the failure cannot be
+    mistaken for a typo.
     """
     from pathlib import Path
 
     import tortoise
 
     root = Path(tortoise.__file__).resolve().parent
+
+    def _imports_asyncpg(path: Path) -> bool:
+        tree = ast.parse(path.read_bytes())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                a.name.split(".")[0] == "asyncpg" for a in node.names
+            ):
+                return True
+            if (
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").split(".")[0] == "asyncpg"
+            ):
+                return True
+        return False
+
     offenders = sorted(
-        f"{path.relative_to(root)}:{lineno}"
+        str(path.relative_to(root))
         for path in root.rglob("*.py")
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1)
-        if "asyncpg" in line
+        if _imports_asyncpg(path)
     )
     assert not offenders, (
         "no module under `tortoise/` imports asyncpg, so prose that attributes "

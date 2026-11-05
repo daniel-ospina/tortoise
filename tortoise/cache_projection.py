@@ -1448,11 +1448,21 @@ def _row_identity_view(row: Mapping[str, Any],
     while the tail carries `sourceKind='agentSession'` produces an EPISODIC
     node — `is_episodic_source_node` says so, because it reads the MERGED map.
     A predicate that read the COLUMNS alone therefore answered "document" for a
-    node the reconciler then classified as a captured session: the prose reached
-    the node through the column door (which never fired), and the reconciler
-    counted the pair as CACHE-OWNED (`graph_only`) instead of as the divergence
-    it is — R1 ("from any row shape") failing OPEN, and the same hazard the
-    `tail_keys` filter exists for, defeated from the other side.
+    node the reconciler classifies as a captured session: the prose reached the
+    node through the column door (which never fired) — R1 ("from any row shape")
+    failing OPEN, and the same hazard the `tail_keys` filter exists for,
+    defeated from the other side.
+
+    ⛔ AND NOTHING DOWNSTREAM REDACTS IT, which is why the failure was SILENT and
+    why it has to be caught HERE. `record_reconcile` builds its RECORD side
+    through this same projector, so the re-projected record carries the prose
+    too; `keep` includes ``record_props`` — that module says a name the record
+    side carries "is always compared" (`record_reconcile.py:449-451`, `:540`) —
+    so the pair compares EQUAL and the reconciler reports neither a field
+    mismatch nor a `graph_only` occurrence. It is not a divergence the reconciler
+    hid under another bucket: it is one it structurally CANNOT see, because both
+    sides are wrong the same way. The harm is the prose itself, sitting on a node
+    §9.1/D1 says must not carry it.
 
     A COLUMN VALUE WINS over the tail's spelling of the same coordinate, which
     preserves the asymmetry :func:`_is_episodic_source_row` declares: an
@@ -1637,8 +1647,13 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     # `{}` for those by design (it also feeds the predicate, which must answer for
     # every shape), and seeding `out` from that would drop the tail's whole
     # content with no signal — the silent loss this module refuses by name
-    # everywhere else. Before the tail was SEEDED, the same row raised `TypeError`
-    # out of `dict(tail)`; the loudness is kept, in this module's own error type.
+    # everywhere else. The pre-#10867 block this replaces was gated on `if tail:`,
+    # so the class split by TRUTHINESS rather than by shape: a TRUTHY non-object
+    # (`[1, 2]`, `7`) raised `TypeError` out of `dict(tail)` — loud, and kept loud
+    # here in this module's own error type — while a FALSY one (`[]`, `0`,
+    # `False`, and the text/decoded spelling of each) was skipped entirely and
+    # projected CLEAN. Both are refused now, so for the falsy half this is NEW
+    # loudness, not preserved loudness.
     tail = _tail_payload(row.get("props"))
     if not isinstance(tail, Mapping):
         raise CacheProjectionError(
@@ -1665,9 +1680,10 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     # `source_kind` COLUMN and `sourceKind` tail disagreed, the row predicate
     # read the column (document) and the node carried the tail (agentSession):
     # R1 failed OPEN on a node `is_episodic_source_node` itself calls a session,
-    # with the turn prose on it, and `scan_cache_view` then subtracted the pair
-    # from `placed` — hiding a real divergence as `graph_only` instead of
-    # reporting it. Seeding `out` from the tail and letting the column loop
+    # with the turn prose on it — and nothing downstream caught it, because the
+    # reconciler re-projects the record through this same projector, so both
+    # sides carry the prose and compare EQUAL (`record_reconcile.py:449-451`).
+    # Seeding `out` from the tail and letting the column loop
     # overwrite it resolves the collision ONCE, in the direction both functions
     # already declare: the record's COLUMN is the authority for a column-backed
     # property (the writer routes it there — `record_projection._split_properties`

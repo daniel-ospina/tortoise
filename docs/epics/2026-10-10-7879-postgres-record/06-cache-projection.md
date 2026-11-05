@@ -249,10 +249,12 @@ prose: a row whose `source_kind` column is NULL while the tail holds
 captured session. A predicate reading the **columns alone** therefore answered
 *"document"* for a node the reconciler classified as a session — R1 (*"from any
 row shape"*) failing **open**, with nothing red: the column door never fired,
-the prose landed, and the reconciler counted the pair as CACHE-OWNED
-(`graph_only`) instead of as the divergence it is. That is the same hazard the
-`props`-tail filter below exists for, defeated from the other side (#10867
-review).
+the prose landed. Nothing reddened — not because the reconciler filed it under
+some other heading, but because it **cannot see** it: it builds its record side
+through this same projector, so the re-projected record carries the prose too,
+`keep` includes `record_props` (`record_reconcile.py:449-451`, `:540`), and the
+pair compares **equal**. That is the same hazard the `props`-tail filter below
+exists for, defeated from the other side (#10867 review).
 
 So `_is_episodic_source_row` reads a **merged view** (columns + decoded tail,
 `_row_identity_view`), which is what makes it agree with
@@ -272,7 +274,7 @@ bounds, both deliberate:
   every agreement leg ran on the one ordering real rows do not have; the pin now
   has a legs pair that builds the row in `SELECT *` order and one that builds the
   same record both ways and requires the SAME node map;
-* **only the KIND can travel _for a row that can become a node_**, because `url` is the
+* **only the KIND can travel *for a row that can become a node***, because `url` is the
   label's CONTRACT KEY — `node_from_row` refuses a NULL one (`UnprojectableRecord`, and
   the schema's own CHECK `chk_source_node_key_is_contract_key` — `url IS NOT NULL AND
   node_key = url`), so the tail's `url` is **unreachable**, never **absent**. ⚠️ The
