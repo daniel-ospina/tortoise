@@ -86,6 +86,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast as _ast
+import os
+import subprocess
 import types
 from pathlib import Path
 
@@ -228,6 +230,159 @@ sys.path.insert(0, str(ROOT))
 DEFAULT_MANIFEST = ROOT / "config" / "surface-manifest.yml"
 CANONICAL_DOC = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
 
+# Every git probe below uses ONE environment: `GIT_NO_LAZY_FETCH` keeps a partial
+# (promisor) clone from answering an absent object with a network error, and
+# `GIT_TERMINAL_PROMPT` keeps a credential prompt from hanging the required job.
+_PROBE_ENV = {**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+
+
+def _is_shallow(root: Path | None = None) -> bool | None:
+    """Whether this checkout has truncated history — `None` when it cannot say.
+
+    A shallow repository answers NEITHER provenance question honestly:
+    `git merge-base --is-ancestor` does not complain about truncated history, it walks
+    what it has and exits 1, which would be read as "not on the default branch".
+    """
+    where = ROOT if root is None else root
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=where, capture_output=True, text=True, env=_PROBE_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    if probe.returncode != 0:
+        return None
+    return probe.stdout.strip() == "true"
+
+
+def _default_branch_ref(root: Path | None = None) -> str | None:
+    """The ref this repository's history is DURABLE in, or `None` when it is not here.
+
+    `origin/main` first (CI checks out a PR head, so a local `main` need not exist), then
+    `main`, then the remote HEAD so a repo whose default branch is named otherwise still
+    answers. No answer is a refusal, never a guess about which branch is the default.
+    """
+    where = ROOT if root is None else root
+    for ref in ("refs/remotes/origin/main", "refs/heads/main", "refs/remotes/origin/HEAD"):
+        try:
+            probe = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", ref],
+                cwd=where, capture_output=True, text=True, env=_PROBE_ENV,
+            )
+        except (OSError, ValueError):
+            return None
+        if probe.returncode == 0 and probe.stdout.strip():
+            return ref
+    return None
+
+
+def _commit_present(sha: str, root: Path | None = None) -> bool | None:
+    """`True` / `False` / `None` — and `None` (shallow) is never read as "absent"."""
+    where = ROOT if root is None else root
+    try:
+        probe = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=where, capture_output=True, text=True, env=_PROBE_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    if probe.returncode == 0:
+        return True
+    shallow = _is_shallow(root)
+    if shallow is None:
+        return None
+    return None if shallow else False
+
+
+def _on_default_branch(sha: str, root: Path | None = None) -> bool | None:
+    """Whether `sha` is IN the default branch's history — `True` / `False` / `None`.
+
+    #11057 review F1: RESOLUTION IS NOT SURVIVAL. A lane commit resolves in the PR's own CI
+    (the checkout fetches every head) and then the repo squash-merges and deletes that
+    branch, so the SHA exists in no ref at all — a rule that only demanded resolution
+    would red `main` forever after the PR that introduced it.
+    """
+    if _is_shallow(root) is not False:
+        return None
+    if _commit_present(sha, root) is None:
+        return None
+    ref = _default_branch_ref(root)
+    if ref is None:
+        return None
+    where = ROOT if root is None else root
+    try:
+        probe = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, ref],
+            cwd=where, capture_output=True, env=_PROBE_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    if probe.returncode == 0:
+        return True
+    if probe.returncode == 1:
+        return False
+    return None
+
+
+def _provenance_problems(
+    doc: dict, *, strict: bool = False, root: Path | None = None,
+) -> tuple[list[str], str | None]:
+    """#11057 review F2: the recorded `cut_at_commit` must resolve AND be in `main`.
+
+    WHY IT LIVES HERE, and not only in `tools/surface_manifest.py`: the `surface-guard`
+    job runs THIS file from the BASE REF and only this file (`python-ci.yml`, the pin
+    loop). A provenance rule that only the checkout's own `surface_manifest.py` enforces
+    is a rule the PR under test can delete in the commit that records a bogus SHA — the
+    very bypass the pin exists to close. This copy is self-contained for the same reason
+    `_read_manifest` and `_canonical_approval` are: nothing in the PR's tree can
+    influence it.
+
+    Returns `(problems, cannot_answer)`. `strict=True` turns `cannot_answer` into a
+    problem, which is what a step that guarantees its own history wants (fail CLOSED);
+    the default arm reds only on a PROVEN defect, because this gate is documented as safe
+    to run anywhere and `checkout@v4` defaults to `fetch-depth: 1`.
+    """
+    sha = str(doc.get("cut_at_commit") or "")
+    if not sha:
+        return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
+
+    def cannot_answer(question: str) -> tuple[list[str], str | None]:
+        message = (
+            f"`cut_at_commit` {sha} is UNPROVABLE in this checkout (shallow or partial "
+            f"clone): it cannot answer whether the commit {question}. Not a verdict on the "
+            "record — re-run with full history (`git fetch --unshallow`, or "
+            "`fetch-depth: 0`) to check it"
+        )
+        if strict:
+            return [f"{message} — and this step requires a checkout that CAN answer"], None
+        return [], message
+
+    present = _commit_present(sha, root)
+    if present is None:
+        return cannot_answer("resolves")
+    if present is False:
+        return [
+            f"`cut_at_commit` {sha} does not resolve to a commit in this repository — the "
+            "baseline records a provenance commit that does not exist, so no reader can "
+            "verify it. Re-cut at a commit in the default branch's history "
+            "(`cut --commit <sha>`), or correct the field to one that resolves"
+        ], None
+    in_history = _on_default_branch(sha, root)
+    if in_history is None:
+        return cannot_answer("is in the default branch's history")
+    if in_history is False:
+        ref = _default_branch_ref(root) or "the default branch"
+        return [
+            f"`cut_at_commit` {sha} resolves here, but it is NOT in {ref}'s history — it "
+            "lives only on a lane branch, and this repo squash-merges and deletes that "
+            "branch on merge, so the commit will exist NOWHERE the moment this lands and "
+            "this gate would red `main` permanently. The field names the default-branch "
+            "commit the baseline was cut AGAINST, not the lane commit it was cut at: "
+            "`cut --commit <sha-in-main>`"
+        ], None
+    return [], None
+
 
 def _frontmatter(path: Path) -> dict:
     """The YAML frontmatter of a product doc, or raises when it carries none
@@ -360,6 +515,13 @@ def main(argv: list[str]) -> int:
         default=str(CANONICAL_DOC),
         help="the owner's approval record the manifest's approval is DERIVED from (#4185)",
     )
+    parser.add_argument(
+        "--provenance-strict",
+        action="store_true",
+        help="red when the manifest's `cut_at_commit` cannot be PROVEN to resolve AND to "
+             "be in the default branch's history (a shallow clone counts as unproven, not "
+             "as a pass) — for the step that owns its own git depth",
+    )
     args = parser.parse_args(argv[1:])
 
     manifest_path = Path(args.manifest)
@@ -381,6 +543,22 @@ def main(argv: list[str]) -> int:
 
     if not isinstance(doc, dict) or "rows" not in doc:
         return die(f"{manifest_path} is malformed: expected a mapping with a `rows:` key.")
+
+    # ── THE RECORDED CUT COMMIT (#11057 reviews P2 + F1) ─────────────────────
+    # Runs from the BASE-REF-PINNED copy of THIS file, which is the only copy the PR
+    # under test cannot edit — the same reason the expansion check lives here. It grades
+    # TWO questions, because either alone is green over a record that is already broken:
+    # the commit must RESOLVE (a PR checkout fetches every head, so a lane SHA resolves
+    # right up to the merge) and it must be IN the default branch's history (a
+    # squash-merged lane commit is neither present nor an ancestor afterwards, and its
+    # only ref is deleted, so a resolution-only rule reds `main` forever).
+    provenance_problems, cannot_answer = _provenance_problems(
+        doc, strict=bool(args.provenance_strict)
+    )
+    if cannot_answer:
+        print(f"::notice::{cannot_answer}")
+    if provenance_problems:
+        return die("the frozen baseline's cut_at_commit is not durable:\n  - " + "\n  - ".join(provenance_problems))
 
     rows = doc.get("rows")
     if not isinstance(rows, list):

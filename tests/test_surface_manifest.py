@@ -1693,6 +1693,10 @@ def test_the_digest_is_docstring_sensitive():
 #: "helpful unification" (`from tortoise._surface_identity import _code_digest`).
 _GUARD_IMPORT_ALLOW_LIST = frozenset({
     "__future__", "argparse", "ast", "asyncio", "hashlib", "pathlib", "sys", "types",
+    # #11057 reviews F1/F2: the provenance arm runs git probes from THIS file, because the
+    # `cut_at_commit` rule must live in the copy CI restores from the base ref. Both are
+    # stdlib — nothing here can be PR-authored, which is the property this list protects.
+    "os", "subprocess",
     "yaml",
     # the gate EXECUTES the declaration, so it must import the surface it measures
     "tortoise", "tortoise.mcp_auth", "tortoise.sdk", "tortoise.tool_registry",
@@ -3044,6 +3048,107 @@ def test_the_committed_cut_commit_resolves_wherever_the_checkout_can_answer():
         "resolve to a commit in this repository — re-cut at a published commit "
         "(`cut --commit <sha>`), or correct the field explicitly"
     )
+
+
+def test_the_check_reds_a_cut_commit_that_resolves_but_is_not_in_the_default_branch(
+    checker, tmp_path, monkeypatch,
+):
+    """#11057 review F1: RESOLUTION IS NOT SURVIVAL, and this is the whole finding.
+
+    A LANE commit resolves in the PR's own CI — `actions/checkout@v4` with
+    `fetch-depth: 0` fetches every head, so `commit_present` answers `True` right up to the
+    moment the PR lands. `.mergify.yml::merge_method: squash` then never creates that SHA
+    on `main`, and `delete_branch_on_merge: true` removes its only ref, so every later
+    clone answers `False` — and the step this PR makes REQUIRED would red `main`
+    permanently. An ancestry requirement is the only durable form of the record.
+
+    Non-vacuous on the pre-fix property, which asked only about resolution: with
+    `commit_present -> True` it returned `[]` and exited 0 over exactly this record.
+    """
+    doc = _manifest()
+    doc["cut_at_commit"] = "9cd6cf28e6d45abd7790fbaf74d33c17b6c18044"  # a lane-only commit
+    monkeypatch.setattr(checker, "commit_present", lambda sha, root=None: True)
+    monkeypatch.setattr(checker, "on_default_branch", lambda sha, root=None: False)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a `cut_at_commit` outside the default branch did not red the check"
+    assert "NOT in" in out and "squash" in out, out
+    assert doc["cut_at_commit"] in out, out
+
+
+def test_the_check_does_not_red_an_ancestry_question_it_cannot_answer(
+    checker, tmp_path, monkeypatch,
+):
+    """Truncated history is a remedy, not a verdict — for the ancestry half too.
+
+    `git merge-base --is-ancestor` does not complain about a shallow clone: it walks what
+    it has and exits 1, which reads as "not on main". So the probe must refuse to answer,
+    and the strict arm is what turns that refusal into the CI red (the case above).
+    """
+    doc = _manifest()
+    monkeypatch.setattr(checker, "commit_present", lambda sha, root=None: True)
+    monkeypatch.setattr(checker, "on_default_branch", lambda sha, root=None: None)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 0, out
+    assert "UNPROVABLE" in out and "default branch's history" in out, out
+    rc, out = _check(checker, doc, tmp_path, strict=True)
+    assert rc == 1, "the strict arm accepted a checkout that cannot answer the ancestry half"
+
+
+def test_the_committed_cut_commit_is_in_the_default_branch_history():
+    """The record this repo ships must SURVIVE its own merge model — not merely resolve.
+
+    `is not False` rather than `is True`: a shallow/partial clone cannot answer at all, and
+    the answer to that is a deeper checkout, never a verdict. On a FULL clone the pre-fix
+    value (`9cd6cf28e6`, reachable only from `p0-hosted-search-2`) returns `False` here.
+    """
+    sm = _load_manifest_tool()
+    sha = _manifest()["cut_at_commit"]
+    in_history = sm.on_default_branch(sha)
+    if in_history is None:
+        pytest.skip(
+            f"`cut_at_commit` {sha} cannot be checked in this checkout (shallow or partial "
+            "clone, or no default-branch ref) — re-run with full history to check it"
+        )
+    assert in_history is True, (
+        f"`cut_at_commit` {sha} resolves but is NOT in the default branch's history, so it "
+        "will exist nowhere once this branch is squash-merged and deleted — record the "
+        "`main` commit the baseline was cut against (`cut --commit <sha-in-main>`)"
+    )
+
+
+def test_the_guard_grades_the_same_two_questions_from_its_own_copy(tmp_path):
+    """#11057 review F2: the PINNED copy must answer both halves itself.
+
+    `tools/surface-guard.py` is the one gate CI restores from the base ref, so a provenance
+    rule that only the PR's `tools/surface_manifest.py` enforces is a rule the PR under test
+    can delete in the same commit that records a SHA no clone resolves. This exercises the
+    guard's own probes (injected, so the verdict does not depend on this clone's shape) and
+    asserts it never imports the sibling module it must not trust.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "surface_guard_pinned", ROOT / "tools" / "surface-guard.py"
+    )
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    doc = _manifest()
+    guard._commit_present = lambda sha, root=None: True
+    guard._on_default_branch = lambda sha, root=None: False
+    problems, cannot = guard._provenance_problems(doc)
+    assert problems and "NOT in" in problems[0], (problems, cannot)
+    assert cannot is None
+
+    guard._on_default_branch = lambda sha, root=None: None
+    problems, cannot = guard._provenance_problems(doc)
+    assert problems == [] and "UNPROVABLE" in cannot, (problems, cannot)
+    problems, _ = guard._provenance_problems(doc, strict=True)
+    assert problems, "the guard's strict arm accepted a checkout that cannot answer"
+
+    guard._commit_present = lambda sha, root=None: False
+    problems, _ = guard._provenance_problems(doc)
+    assert problems and "does not resolve" in problems[0], problems
 
 
 def test_the_render_refuses_instead_of_tracing(tmp_path, monkeypatch, capsys):
