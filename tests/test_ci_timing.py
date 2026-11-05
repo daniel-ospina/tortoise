@@ -3816,17 +3816,22 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
     the whole point is the document that has not been written yet: the path
     form would grade the file the refresh is about to replace.
 
-    ⛔ THE PLANTED ROW MUST CARRY A DIFFERENT VALUE FROM THE REAL ONE, which is
-    load-bearing (#10648 review P3): with the SAME value this assertion would
-    hold under EITHER resolution order and pin only "the key parses". So the
-    planted value is DERIVED from the real one rather than hard-coded — a
-    hard-coded `0.9` would silently stop distinguishing anything the first time
-    a sweep moves this row's weight to 0.9 (#10726 review, P3), leaving the
-    test green while pinning exactly the weaker property this docstring says it
-    does not pin.
+    ⛔ THE PLANTED ROW MUST CARRY A DIFFERENT VALUE FROM THE ROW IT SHADOWS —
+    the property is load-bearing (#10648 review P3), and only because the
+    resolution is ASSERTED below rather than stated here: with the SAME value
+    the planted row would be indistinguishable from the one it precedes, so
+    "last-wins" would be unfalsifiable. First-wins would surface the planted
+    value to every reader of the map; last-wins surfaces the real weight, which
+    is exactly why a persisted duplicate is silent rather than loud.
+
+    The planted value is DERIVED from the real one instead of hard-coded, so
+    that property holds whatever a `--refresh-durations` sweep does to this
+    row: a hard-coded figure collides with the row's own weight the moment a
+    sweep lands on it, which turns this pin into a red about its own FIXTURE
+    rather than about the defect it exists to catch. The difference is asserted
+    below either way, so a botched derivation reds here too.
     """
     import ci_selection as cs
-    import yaml as _yaml
 
     real = cs.MANIFEST.read_text()
     assert ci_timing.integrity_problems(real) == []
@@ -3840,15 +3845,20 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
     at = real.index(anchor)
     planted = real[:at] + dup + real[at:]
 
-    # The loader the shard packer uses cannot see it, and resolves LAST-wins …
+    # The loader the shard packer uses cannot see it …
     assert sum(1 for line in planted.splitlines()
                if line.startswith(anchor)) == 2
-    assert _yaml.safe_load(planted)["durations"][key] == real_value, (
-        "last-wins must resolve to the REAL row, and the planted value must "
-        "differ from it or this pin collapses to \"the key parses\"")
-    assert real_value != other_value
+    # … and it resolves LAST-wins, which is the mechanism that makes a persisted
+    # duplicate inert: `render_refreshed_manifest` rewrites the FIRST row in the
+    # TEXT while every reader of the map loads the LAST, so the refresh would
+    # report a weight the shard packer never reads. Pinned, not assumed.
+    assert yaml.safe_load(planted)["durations"][key] == real_value
+    assert real_value != other_value, (
+        "the planted value must differ from the row it shadows, otherwise "
+        "last-wins and first-wins are indistinguishable here and the "
+        "assertion above proves nothing")
 
-    # … but the refresh's pre-write gate does, by name.
+    # … and the refresh's pre-write gate SEES it, by name.
     problems = ci_timing.integrity_problems(planted)
     assert any("duplicate mapping key 'test_7818_plan_record_5362.py'" in p
                for p in problems), (
@@ -6202,8 +6212,9 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
-# continuation lines (measured at this head: 1 row of 1225 — the block's
-# dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
+# continuation lines (measured at `a91123c76`: 1 row of 1222 did — the block's
+# dominant shape is the PREAMBLE for the row below, so almost every indented block
+# in it opens a note of its own; re-derive both figures at your own head),
 # and the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
@@ -6367,7 +6378,8 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
 #
 # This map's dominant convention is the block that PRECEDES the row it documents
-# (73 of the 74 blocks beside a row at this head open a note of their own),
+# (almost every block beside a row opens a note of its own — re-derive the ratio at
+# the head you are reading; it moves with the map),
 # and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
 # comments are “a presentation detail … not associated with a particular node”.
 #
@@ -6579,6 +6591,46 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     """
     _assert_a_re_base_supersedes_the_newest_basis(
         (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+
+
+def test_a_mid_note_span_does_not_leave_a_space_before_a_sentence_period() -> None:
+    """A re-join glues an ATTACHING mark, and keeps the space everywhere else.
+
+    `_without_span` removes a prior basis from the MIDDLE of a joined note, where
+    the ` — ` it consumes is the RENDERER's separator and not the note's: the writer
+    appended its basis to the row-line FRAGMENT, which can end mid-sentence, so the
+    note's own remainder starts wherever the fragment stopped. `#5256`'s row is that
+    shape — the fragment ends `… not carve_out-registered` and the continuation
+    opens `. The count is re-derived …` — and joining with a space emitted
+    `… carve_out-registered . The count …`. No guard catches that: the map carries
+    zero such occurrences today (so a map scan cannot prove it), and the wrapped-row
+    guard asserts surviving WORDS, which a spurious space does not change. So the
+    predicate is pinned directly, in both directions (#10575 review, P3).
+    """
+    tail = ("… rows in the run — but it is not carve_out-registered"
+            " — ci-timing junit-census+top-15 2026-11-02 (run 1); was 3.2"
+            " . The count is re-derived at your head")
+    start = tail.index(" — ci-timing")
+    end = tail.index(". The count") - 1  # leave the ` . ` separator's own space out
+    assert ci_timing._without_span(tail, start, end).endswith(
+        "carve_out-registered. The count is re-derived at your head"), \
+        ci_timing._without_span(tail, start, end)
+    # CONTROL: an ordinary (non-attaching) continuation keeps the single space the
+    # dash occupied, so the fix is not "glue everything".
+    control = tail.replace(". The count", "x The count")
+    start = control.index(" — ci-timing")
+    end = control.index("x The count") - 1
+    assert ci_timing._without_span(control, start, end).endswith(
+        "carve_out-registered x The count is re-derived at your head"), \
+        ci_timing._without_span(control, start, end)
+    # CONTROL: a QUOTE is both an opening and a closing mark, so the predicate does
+    # NOT glue it — `… "quoted clause"` keeps the word separator the space carries.
+    # Gluing it emitted `word"quoted clause"` (#10704 review round 2).
+    quoted = "word — SPAN \"quoted clause\" here"
+    start = quoted.index(" — ")
+    end = quoted.index('"')
+    assert ci_timing._without_span(quoted, start, end) == 'word "quoted clause" here', \
+        ci_timing._without_span(quoted, start, end)
 
 
 def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
@@ -6901,8 +6953,9 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
     smaller number. Neither is reachable through the writer, so each is a hand-edit
     that left the other half behind — the state a reader cannot reconcile.
 
-    Non-vacuity: with `floor_issues` absent from the composition (pre-fix), both
-    maps are green.
+    Non-vacuity: every arm below calls `floor_issues` DIRECTLY, so this test pins the
+    check's own logic and says nothing about whether it is WIRED — that half is
+    `test_the_floor_check_is_composed_into_the_shared_map_contract` below.
     """
     import ci_manifest
 
@@ -6956,10 +7009,54 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
         {"durations": {"test_a.py": 355.0},
          "durations_floors": ["test_a.py"]})
     assert len(block_as_list) == 1 and "mapping" in block_as_list[0], block_as_list
+    # …and the container's OTHER face: PRESENT but NULL. Deleting a block's entries
+    # while leaving the key line is a plausible "tidy" (and the shape this repo's
+    # duplicate-row repairs take), and reading it as "no declarations" un-enforced
+    # every declared cap on both sides at once with nothing red anywhere
+    # (#10575 review, P3).
+    null_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": None})
+    assert len(null_block) == 1 and "null" in null_block[0], null_block
+    # …and the THIRD face: an EMPTY mapping. A YAML-aware editor or a `safe_dump`
+    # round-trip produces `{}` rather than `null` when a block is emptied, and it is
+    # the same silent revert (#10704 review round 2).
+    empty_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": {}})
+    assert len(empty_block) == 1 and "empty" in empty_block[0], empty_block
     # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
     # a floor to be inconsistent with, and one red per declared floor would turn
     # that UNKNOWN into a wall of reds.
     assert ci_manifest.floor_issues({"durations_floors": {"test_a.py": 355.0}}) == []
+
+
+def test_the_floor_check_is_composed_into_the_shared_map_contract() -> None:
+    """`floor_issues` must be reached through `map_issues`, not only called directly.
+
+    `tools/ci_manifest.py`'s `+ floor_issues(manifest)` inside `map_issues` is the
+    ONLY line that makes a declared cap enforcing at BOTH entry points
+    (`ci_selection --integrity` and `ci_timing.integrity_problems`, via `check`).
+    Every other floor test calls the function directly, so deleting that one line
+    disabled every declared cap with the whole suite green — a false PASS in the
+    required `manifest-integrity` leg, which is why this pin exists.
+
+    Driven on the REAL map, because a hand-built one raises inside `duration_issues`
+    (it has no `surfaces:`), and because the point is that the committed map's own
+    declarations are enforced.
+
+    Non-vacuity: remove `floor_issues(manifest)` from `map_issues` and both
+    assertions below fail.
+    """
+    import ci_manifest
+
+    manifest = yaml.safe_load((REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+    assert manifest["durations"]["test_lane_stash.py"] == 355.0
+    assert ci_manifest.map_issues(manifest) == []
+    # A hand-edit that discounts a DECLARED CAP is what the sweep must never do
+    # silently: this is the #10575 P1 reading, injected.
+    manifest["durations"]["test_lane_stash.py"] = 25.4
+    assert any("durations_floors" in issue for issue in ci_manifest.map_issues(manifest))
+    red, _unknown = ci_manifest.check(manifest)
+    assert any("durations_floors" in issue for issue in red), red
 
 
 def test_the_real_maps_cap_is_a_declared_floor_and_is_never_lowered(
@@ -7152,12 +7249,40 @@ def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
     """
     header = "durations:\n  test_capped.py: 355.0\n"
     for bad in ("durations_floors: [test_capped.py]\n",
+                # PRESENT but NULL — the container's OTHER face. Its entries deleted
+                # is exactly how a merge-resolution "tidy" drops duplicate twins in
+                # this repo, and reading it as "absent" reverted every cap with
+                # nothing red on either side (#10575 review, P3).
+                "durations_floors:\n",
+                "durations_floors: null\n",
+                # …and the THIRD face, the one a YAML editor / `safe_dump` round-trip
+                # produces when a block is emptied (#10704 review round 2).
+                "durations_floors: {}\n",
                 "durations_floors:\n  test_capped.py: [355.0]\n",
                 'durations_floors:\n  test_capped.py: "a lot"\n',
                 "durations_floors:\n  test_capped.py: {value: 355.0, pinned: maybe}\n",
                 "durations_floors:\n  test_capped.py: {value: 355.0, cap: true}\n"):
         with pytest.raises(ci_timing.DurationsBridgeError):
             ci_timing._declared_floors(f"{bad}{header}")
+    # …and the OUTERMOST face: a document that is not parseable at all. This one
+    # returned `{}` ("no declarations") while the docstring above promised
+    # `UNREADABLE -> DurationsBridgeError, NEVER "no declarations"`, so the contract
+    # was false on the one shape a whole-document parse cannot distinguish from an
+    # absent key — the same fail-open the `null`, empty-mapping and list containers
+    # are refused for (#10704 review round 4, P3).
+    with pytest.raises(ci_timing.DurationsBridgeError):
+        ci_timing._declared_floors(
+            "durations_floors:\n  test_capped.py: 355.0\n  twin.py: [oops\n"
+            f"{header}")
+    # …and the ROW-NAME face: a declaration keyed on something that is not a string.
+    # `355.0` (a row name typed as a number) or `yes:` (which YAML keys as `True`)
+    # used to be `continue`d — dropped by the WRITER while `ci_manifest.floor_issues`
+    # red the same document from the READ side, so the two halves of one contract
+    # disagreed about the same bytes (#10704 review round 5, P3).
+    for bad_row_name in ("355.0", "yes"):
+        with pytest.raises(ci_timing.DurationsBridgeError):
+            ci_timing._declared_floors(
+                f"durations_floors:\n  {bad_row_name}: 355.0\n{header}")
     # …and the shapes that ARE readable parse to what they say
     parsed = ci_timing._declared_floors(
         "durations_floors:\n  a.py: 355.0\n  b.py: {value: 12.5, pinned: true}\n"

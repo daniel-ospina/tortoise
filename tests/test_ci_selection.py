@@ -2351,6 +2351,49 @@ def test_an_already_classified_non_api_module_still_runs_the_identity_enumeratio
     )
 
 
+def test_the_8447_census_pins_run_on_a_census_doc_only_diff():
+    """#10704 review P2: a census-doc-only edit must run the pins that read it.
+
+    `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome`
+    binds claims to `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` (§2's
+    citation form and cited symbols, §2a's parked-set summary, §5's
+    mutation-evidence home, the hosted `/v1/points` MARKS row) and — since
+    `160d16d6e` — to the `docs/00_index.md` row that routes a reader into that
+    census. `docs/` is in `NON_PYTHON_PREFIXES` and matches no SOURCE_PATTERNS
+    row, so a **census-doc-only** edit filtered to `changed == []` and took the
+    docs-only early return: the pins never ran on the artifact they guard, so
+    an over-claiming §2a summary could be restored green. Measured pre-fix:
+    `_sel(["docs/architecture/BOUNDED-OPERATION-CONTRACT.md"])` -> `surfaces=[]`,
+    8447 pin ABSENT. Non-vacuity: removing that `CORE_ALSO` entry fails the
+    first arm below (`surfaces == []`).
+
+    The `docs/00_index.md` arm is NOT that same hole and this pin does not buy
+    it: `#9638` (`6429a14b4`) already armed the front door for
+    `test_record_schema_placement.py`, and `160d16d6e` added the index-row pin
+    on top of it (measured: `surfaces=['core']`, 8447 pin selected). The arm is
+    here so the class's SECOND artifact stays armed — a silent deletion of the
+    pre-existing entry would otherwise red only via an unrelated pin, in a
+    different file, whose message names a different reader.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for changed in (
+        "docs/architecture/BOUNDED-OPERATION-CONTRACT.md",
+        "docs/00_index.md",
+    ):
+        assert (root / changed).exists(), f"the census artifact is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (
+            f"{changed} selects {r['surfaces']} — the census pins are registered "
+            "on `core`, so a census-only edit runs them nowhere"
+        )
+        assert "test_8447_truncation_marker.py" in r["test_files"], (
+            f"a census-only edit to {changed} does not run "
+            "tests/test_8447_truncation_marker.py, so its pins cannot fire on "
+            "the change they bind (#10704)"
+        )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
@@ -8027,6 +8070,58 @@ def test_the_cap_block_is_not_read_as_the_row_aboves_note():
     # judged against `test_work_claim.py`'s 3.8.
     assert "355.0 IS A DELIBERATE CAP" not in dict(_durations_row_comments(
         text))["test_work_claim.py"]
+
+
+def test_the_committed_map_still_declares_its_three_caps():
+    """DELETING the `durations_floors` block must red — and this is where that runs.
+
+    `_declared_floors` treats an ABSENT `durations_floors` key as legal, and it has
+    to: every fixture manifest that carries no caps must keep its output. The cost
+    of that leniency is that the third defeat direction of the #10575 P1 — removing
+    the block outright — is invisible to every reader and every gate. All three
+    then see `{}`, no cap binds, and the next `--refresh-durations` (the scheduled
+    sweep, unreviewed) adopts the discounted reading this mechanism exists to stop:
+    `test_lane_stash.py` 355.0 -> 25.4.
+
+    WHY THIS PIN LIVES HERE, and not beside the mechanism in `test_ci_timing.py`.
+    `tests/test_ci_timing.py` already asserts `floors` is non-empty — but a PR that
+    edits ONLY `config/ci-surfaces.yml` does not select it. Measured with the map's
+    own selector (`ci_selection.py --changed-files config/ci-surfaces.yml`):
+    `full=False`, `surfaces=['core']`, and `test_ci_timing.py` is in NEITHER
+    `test_files` NOR `slow_selected` — while `test_ci_selection.py` IS in
+    `slow_selected`, in every diff shape that touches the map (map alone, map+code,
+    map+docs, map+`.gitattributes`). So the map's only pin on its own caps is this
+    file's, and a gate whose pin cannot be selected is not a gate (#10704 review).
+
+    DELETING the block was measured, not assumed: with it removed, `ci_manifest.py`,
+    `registry_integrity.py`, `ci_selection.py --integrity` and
+    `_manifest_contract_issues()` all stay green and `_declared_floors()` returns
+    `{}`. Lowering a cap IS caught (`ci_manifest` reds rc 1 with the CAP
+    diagnostic), so only the deletion face was open.
+
+    Scoped to the three KNOWN caps as a SUBSET: adding a fourth cap must not red
+    this, because deciding a cap is a #9172 CI-budget decision and an ordinary PR
+    may legitimately make one. Dropping one, or dropping them all, must.
+    """
+    from tools.ci_timing import _declared_floors
+
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    floors = _declared_floors(text)
+    required = {
+        "test_lane_stash.py": 355.0,
+        "test_calibration.py": 355.0,
+        "eval/write_path/test_write_path_operator_lane.py": 355.0,
+    }
+    missing = sorted(set(required) - set(floors))
+    assert not missing, (
+        f"the committed map no longer declares {missing} in `durations_floors` "
+        f"(it declares {sorted(floors) or 'NOTHING'}) — an absent block is legal to "
+        "`_declared_floors` by design, so every gate stays green while no cap binds "
+        "and the next sweep discounts the row (#10575 P1). Restore the declaration.")
+    for name, value in required.items():
+        assert floors[name].value == value, (name, floors[name])
+        # A CAP, not a FLOOR: the declared value is the weight in BOTH directions.
+        assert floors[name].pinned is True, name
 
 
 def _durations_rows_stating_a_stale_watchdog_floor(text: str, floor: int):
