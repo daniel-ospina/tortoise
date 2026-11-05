@@ -948,9 +948,9 @@ def _accepted_flags(relpath: str) -> set[str]:
                 and node.func.attr == "add_argument" and node.args):
             continue
         first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            if first.value.startswith("--"):
-                flags.add(first.value)
+        if (isinstance(first, ast.Constant) and isinstance(first.value, str)
+                and first.value.startswith("--")):
+            flags.add(first.value)
     return flags
 
 
@@ -978,14 +978,27 @@ def test_the_documented_way_to_produce_the_parity_report_uses_real_flags():
     )
 
 
-def test_the_documented_parity_example_supplies_the_graph_binding_the_code_requires(tmp_path,
-                                                                                    capsys):
+def test_the_documented_parity_example_supplies_the_graph_binding_the_code_requires(
+        tmp_path, capsys, monkeypatch):
     """The documented example omitted `--parity-graph`, which the code REQUIRES.
 
     A report without the graph it was measured on is a vacuous binding (the whole
     round-2 P1), so the example taught an invocation the tool refuses. This runs the
-    documented command instead of reading it: an unreadable report stops the CLI at
-    its REFUSAL boundary, before any connection, so it never touches a cache.
+    documented command instead of reading it: the report written here is one the
+    loader MUST refuse (an unregistered instrument), so the run stops at its REFUSAL
+    boundary — exit 3 out of `load_parity_report` — before any connection, and it
+    never touches a cache.
+
+    ⛔ THE REPORT MUST BE UNREADABLE FOR THAT TO BE TRUE, and `_connection` is
+    poisoned below so this cannot regress silently. An earlier revision wrote a
+    perfectly READABLE report and then relied on nothing listening on the documented
+    `localhost:6379`, which made the asserted exit 3 an accident of the host: on the
+    dev lane `AGENTS.md` documents (a FalkorDB on that port with that password) the
+    run reaches `assess()` and returns the verdict of the MEASURED cache — UNBOUNDED
+    (4) for a default `maxmemory 0`, or CLEAN (0) — so the pin went red on the
+    documented setup and green only because the port was closed. It is the same
+    "reads as verification while verifying nothing" class as the dangling pin
+    citation fixed one commit earlier.
     """
     import shlex
 
@@ -995,8 +1008,20 @@ def test_the_documented_parity_example_supplies_the_graph_binding_the_code_requi
     assert commands, "the docstring must document the parity-report invocation"
 
     report = tmp_path / "turns.json"
-    report.write_text('{"instrument": "tools/turn_parity_census.py", "verdict": "CLEAN"}',
+    report.write_text('{"instrument": "not-a-registered-instrument", "verdict": "CLEAN"}',
                       encoding="utf-8")
+
+    cli = _cli()
+    attempted: list[str] = []
+
+    def _must_not_connect(*args, **kwargs):
+        attempted.append("connection")
+        raise AssertionError(
+            "the documented command opened a connection before refusing — the report "
+            "must stop the run at the REFUSAL boundary"
+        )
+
+    monkeypatch.setattr(cli, "_connection", _must_not_connect)
 
     for command in commands:
         argv = shlex.split(command)
@@ -1004,12 +1029,61 @@ def test_the_documented_parity_example_supplies_the_graph_binding_the_code_requi
             f"the documented command {command!r} omits --parity-graph, which the CLI "
             f"refuses without (a CLEAN census of one graph would license evicting another)"
         )
-        # Point the report at a real file so the run reaches the report check, not an
-        # IO error — the refusal still happens before any connection.
+        # Point the report at a real file so the run reaches the report LOADER, not an
+        # IO error — the loader refuses it, and the connection is never attempted.
         argv[argv.index("--parity-report") + 1] = str(report)
 
-        code = _cli().main(argv)
+        code = cli.main(argv)
         err = capsys.readouterr().err
 
         assert "requires --parity-graph" not in err, (command, err)
+        assert "not a registered parity instrument" in err, (command, err)
+        assert not attempted, (command, attempted)
         assert code == 3, (command, code, err)
+
+
+def test_the_documented_example_refuses_before_a_reachable_cache_is_measured(
+        tmp_path, capsys, monkeypatch):
+    """⛔ The pin must not depend on the HOST: a cache that ANSWERS cannot change it.
+
+    Measured on the pre-fix test — it wrote a READABLE report and relied on nothing
+    listening on the documented `localhost:6379`, so the same assertion gave a
+    different answer wherever a FalkorDB answered: `UNBOUNDED` (exit 4) for the
+    container default `maxmemory 0`, `CLEAN` (exit 0) below a declared bound. It was
+    green in CI only because #6673 provisions the service on an EPHEMERAL port, i.e.
+    the pin held for a reason unrelated to what it claims to prove, and red on the dev
+    lane `AGENTS.md` documents. Here a cache IS reachable (the suite's own fakes) and
+    the loader refusal must still come first: exit 3 naming the report, with no
+    connection made and no statement issued against the graph.
+    """
+    import shlex
+
+    doc = _docstring_of("tools/cache_eviction_census.py")
+    command = next(c for c in _documented_commands(doc, "tools/cache_eviction_census.py")
+                   if "--parity-report" in c)
+
+    report = tmp_path / "turns.json"
+    report.write_text('{"instrument": "not-a-registered-instrument", "verdict": "CLEAN"}',
+                      encoding="utf-8")
+
+    cli = _cli()
+    graph = _FakeGraph({"Point": 20_000})
+    reached: list[str] = []
+
+    def _a_reachable_cache(*args, **kwargs):
+        # A cache that answers — the state CI does not have and the dev lane does.
+        reached.append("connected")
+        return _FakeClient(used=8_000_000, maxmemory=0), graph
+
+    monkeypatch.setattr(cli, "_connection", _a_reachable_cache)
+
+    argv = shlex.split(command)
+    argv[argv.index("--parity-report") + 1] = str(report)
+
+    code = cli.main(argv)
+    err = capsys.readouterr().err
+
+    assert "not a registered parity instrument" in err, err
+    assert code == 3, (code, err)
+    assert not reached, (reached, "a refused report must refuse BEFORE the cache is read")
+    assert not graph.statements, graph.statements

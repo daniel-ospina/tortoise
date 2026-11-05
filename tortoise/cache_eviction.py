@@ -817,8 +817,10 @@ def load_parity_report(path: str, *, graph_name: str | None = None) -> ParityRep
     never reads as "the record cannot serve".
 
     *graph_name* is the graph this census is measuring. A report carrying its own
-    ``graph`` field must agree with it; a report carrying none records
-    ``graph_name=None`` and the census states the binding is unasserted.
+    ``graph`` field must agree with it. A report carrying none is attributed to the
+    graph the CALLER asked to measure — the instrument emits no identity of its own, so
+    that binding is an operator ASSERTION, which is why the CLI requires
+    ``--parity-graph`` and refuses a value that is not the graph being measured.
     """
     import json
 

@@ -5914,7 +5914,10 @@ surfaces:
   # filters to `changed == []` and takes the docs-only early return. That half is
   # closed by the `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
   # #1349/#3332/#3616 silent-drop class. The suite is hermetic (`_FakeGraph` records
-  # every statement, report files come from `tmp_path`, no DB/URI/network), so it is
+  # every statement, report files come from `tmp_path`, no DB/URI/network) — and the
+  # one case that RUNS the documented CLI enforces that rather than assuming it: it
+  # hands the loader a report it must refuse and poisons `_connection`, so "no network"
+  # is a property of the test instead of a property of the host it runs on. So it is
   # deliberately NOT carve_out-registered: it belongs on the fast pool, at the flat
   # `DEFAULT_FAST_WEIGHT` row below until a push-to-main sweep measures it.
   - test_cache_eviction_census.py
@@ -10333,7 +10336,10 @@ durations:
   # covers: hermetic and near-free — a `_FakeGraph` that records EVERY statement so
   # a `DELETE`/`DETACH DELETE`/`DROP` on a refusal path fails the run, plus a
   # handful of `sys.executable` CLI cases over `tmp_path` report files; no DB, no
-  # URI, no docker, no network, no model. No count is cited here on purpose: this
+  # URI, no docker, no network, no model. The documented-CLI case connects to
+  # NOTHING by construction — it feeds the loader a report it must refuse and
+  # a poisoned `_connection`, so it cannot pass because a port happened to be closed.
+  # No count is cited here on purpose: this
   # file collects MORE cases than it has `def test_` lines (parametrize), so a
   # cited count would be read by the wrong instrument. `tools/ci_timing.py
   # --refresh-durations` replaces this row from junit once a sweep collects it.
