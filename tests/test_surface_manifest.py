@@ -321,6 +321,43 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         )
 
 
+def test_the_two_canonical_documents_table_lists_every_document_it_defers_to():
+    """The vision doc's `## The two canonical documents` table must list every document the same
+    file names as an authority.
+
+    This is a MERGE-ARTEFACT guard, not a style rule. `911a1e240` (a forward-merge of
+    `origin/main`) dropped the `beta-sdk-surface.md` row that BOTH parents carried, leaving a
+    heading that says "The two canonical documents" over a table of one document plus an
+    inventory — while the paragraph six lines below still said `beta-sdk-surface.md` is "the
+    authority for the SDK target (40)". Nothing machine-read the table, so nothing reddened.
+    The property asserted here is derived from the file's own deferrals, so it cannot be
+    satisfied by deleting the sentence that names the authority either.
+    """
+    vision = VISION.read_text(encoding="utf-8")
+    heading = "## The two canonical documents"
+    assert heading in vision, "the vision doc lost its canonical-documents section"
+    section = vision.split(heading, 1)[1]
+    # The table ends at the first blank line after the ``**These documents …**`` sentence.
+    listed = set(re.findall(r"^\|\s*[^|]*\*?`docs/product/([^`]+)`\*?", section, re.M))
+    assert listed, "the canonical-documents table lists no document at all"
+
+    # Every document this file calls an authority must be a row in the table.
+    authorities = set(re.findall(r"`([A-Za-z0-9._-]+\.md)` is the\s+authority for", vision))
+    authorities |= set(re.findall(r"`([A-Za-z0-9._-]+\.md)` is the[a-z\s]*authority", vision))
+    assert authorities, "the vision doc stopped naming which document is the authority"
+    missing = sorted(a for a in authorities if a not in listed)
+    assert not missing, (
+        "vision-mcp-sdk-surface.md defers to documents its own 'canonical documents' table "
+        f"does not list: {missing} (listed: {sorted(listed)})"
+    )
+
+    # Each listed document must exist — a row for a file that is gone is the mirror defect.
+    for name in sorted(listed):
+        assert (ROOT / "docs" / "product" / name).is_file(), (
+            f"the canonical-documents table lists docs/product/{name}, which does not exist"
+        )
+
+
 def test_the_retired_table_does_not_assert_a_nonexistent_sdk_method():
     """A retired alias may have declared an SDK method that never existed
     (`tortoise_health` -> `health`). The retired table must mark it, not describe it

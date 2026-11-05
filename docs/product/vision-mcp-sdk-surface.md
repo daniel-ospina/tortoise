@@ -44,6 +44,7 @@ account — the builder pays; an end-customer never has an organisation account 
 | Document | What it is |
 |---|---|
 | **`docs/product/canonical-mcp-tools.md`** | **The approved MCP list — 23 tools**, 9 READ / 14 WRITE. Merged as `8375c7921`. This is the **naming authority** for the SDK. |
+| **`docs/product/beta-sdk-surface.md`** | **The recommended SDK surface — 40 methods** over 150, from the builder's and the agent's actual work. Includes the discarded-name ledger and the rationale for each. |
 | `docs/product/canonical-sdk-methods.md` | The full inventory of all 150 with descriptions, plus an earlier 32-group sketch over 149 names. **It is an inventory and an earlier target sketch, not the target.** Where it disagrees with `beta-sdk-surface.md`, `beta-sdk-surface.md` governs. |
 
 **These documents are the vision.** This file is the bridge from them to implementation.

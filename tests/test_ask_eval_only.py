@@ -189,9 +189,12 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 then.
     # TWO recorded moves land on this floor together, and 66 is the only figure both
     # imply:
-    #   #4282 (this change) — `graph_overview` absorbs five LISTED names
+    #   #4282 (this change) — `graph_overview` absorbs four LISTED names
     #   (`tortoise_overview`, `tortoise_audit`, `tortoise_validate_domain`,
-    #   `tortoise_dream_health`, `tortoise_summarize_structure`) and adds itself, a net -4.
+    #   `tortoise_summarize_structure`) and adds itself, a net -3. The fifth absorbed
+    #   member, `tortoise_dream_health`, is declared `http_policy=False` (stdio-only),
+    #   so it was NEVER in this listing and contributes nothing here — counting it
+    #   would under-read the floor by one.
     #   #4282 Phase 3.2 (main) — the five `run_onboarding` tools the owner ruled OFF the MCP
     #   (`docs/product/canonical-mcp-tools.md`, settled 2026-09-22, amendment (b) waiving the
     #   replacement warning) were all `http_policy=True`, so every one was in this listing:
