@@ -524,9 +524,10 @@ no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefi
   - **refusal** — `push-refused`. ⛔ **ONLY ONE of its causes is the credential, so read the detail
     before you park** — parking any of the others is the failure this rule exists to prevent.
     `REASONS` names two of them on the marker line itself — **no network** and **branch protection /
-    a ruleset** — and two more reach the token only through the failing step's `detail`: a
-    **transport failure**, and a push that **exited 0 without reporting a ref update** (`nothing was
-    written, so write capability is not proven` — `tools/gh_write_preflight.py:815-819`). None of
+    a ruleset** — and two more reach the token only through the `detail` line: a **transport
+    failure** (the failing step's own detail), and a push that **exited 0 without reporting a ref
+    update**, where nothing failed and the tool writes the message itself (`nothing was written, so
+    write capability is not proven` — `tools/gh_write_preflight.py:816-819`). None of
     those four is "re-mint the credential": re-run, or read the detail — and for branch protection
     the remedy is the caveat below.
     ⚠️ **A ruleset that restricts branch *creation* to a pattern (say `main`/`fix/*`) can refuse the
@@ -607,9 +608,9 @@ uniquely** — which is why a naive two-route proof false-PASSes a token of #109
 - The Issues leg needs an endpoint whose permission set is Issues-only. `POST /repos/{o}/{r}/issues`
   is, but it creates a real issue — close it, or record the residue rather than leaving it.
 
-If neither leg can be proven without residue, **escalate rather than build**; do not record a surface
-as proven because a proxy for it passed. The preflight also proves the credential **`git`** resolves
-for this checkout's push URL (normally the same token `gh` resolves, because the helper is
+If the **Issues** leg cannot be proven without residue, **escalate rather than build**; do not record
+a surface as proven because a proxy for it passed. The preflight also proves the credential **`git`**
+resolves for this checkout's push URL (normally the same token `gh` resolves, because the helper is
 `!gh auth git-credential`; a box whose helper is something else is the exception — and even for one
 token the grant is **per resource kind**, which is why the surfaces above stay unproven).
 
