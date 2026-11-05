@@ -1659,10 +1659,14 @@ def _read_coverage(touched: tuple[str, ...]) -> tuple[tuple[str, ...] | None, st
     smoke set. A path therefore has NO test leg only when ``surfaces == []``,
     ``full is False`` AND ``test_files`` is empty — and that is the only shape reported as
     uncovered. (An earlier version treated ``surfaces == [] and not full`` as uncovered;
-    measured, ``select(["tools/ready_for_owner.py"])`` returns exactly that shape with
+    measured, ``select(["docs/ontology/NOTES.md"])`` returns exactly that shape with
     **72 tests** scheduled, so it would have failed this tool's own PR and every PR that
-    adds a `tools/*.py` file. The docstring said "recorded, not failed"; the code was
-    wrong, not the docstring.)
+    adds a docs-only path. The docstring said "recorded, not failed"; the code was
+    wrong, not the docstring. ⛔ The example is deliberately a DOCS path: it used to be
+    ``tools/ready_for_owner.py``, but #10975 gave that tool a
+    ``ci_selection.TOOL_CARVEOUTS`` entry so a tool-only diff fails closed to the FULL
+    matrix — it now measures ``full: True``, and a restated measurement goes stale the
+    moment the thing it measures is fixed.)
 
     Returns ``(uncovered, raw)``; ``uncovered is None`` means the selection was UNREADABLE
     and the caller must FAIL rather than assume coverage.

@@ -3880,6 +3880,12 @@ def test_a_failed_ls_tree_read_does_not_silence_the_gitlink_warning(
     nested = wt / "nested"
     nested.mkdir()
     assert git("init", "-q", cwd=nested).returncode == 0
+    # ⛔ A nested repo does NOT inherit the hub's identity, and a CI/cell clone has no
+    # global `user.email` — without this the `commit` below exits 128 ("Author identity
+    # unknown"), which reads as the pin's failure. Same convention as the other nested
+    # repos in this file (`git config user.email`, not an ambient identity).
+    git("config", "user.email", "t@example.com", cwd=nested)
+    git("config", "user.name", "t", cwd=nested)
     (nested / "x.py").write_text("nested content\n")
     assert git("add", "x.py", cwd=nested).returncode == 0
     assert git("commit", "-qm", "n", cwd=nested).returncode == 0
@@ -4260,6 +4266,11 @@ def test_recover_WARNS_that_a_nested_repo_came_back_empty(hub: Path) -> None:
     vendored = wt / "vendored"
     vendored.mkdir()
     assert git("init", "-q", cwd=vendored).returncode == 0
+    # A nested repo does NOT inherit the hub's identity; a CI/cell clone has no global
+    # `user.email`, so without this the `commit` exits 128 and the test fails for a reason
+    # that has nothing to do with the pin.
+    git("config", "user.email", "n@example.com", cwd=vendored)
+    git("config", "user.name", "n", cwd=vendored)
     (vendored / "inner.py").write_text("inner v1\n")
     assert git("add", "inner.py", cwd=vendored).returncode == 0
     assert git("commit", "-qm", "inner", cwd=vendored).returncode == 0
@@ -4351,6 +4362,11 @@ def test_recover_from_a_SUBDIRECTORY_path_still_warns_about_a_nested_repo(hub: P
     vendored = wt / "vendored"
     vendored.mkdir()
     assert git("init", "-q", cwd=vendored).returncode == 0
+    # A nested repo does NOT inherit the hub's identity; a CI/cell clone has no global
+    # `user.email`, so without this the `commit` exits 128 and the test fails for a reason
+    # that has nothing to do with `--full-tree`.
+    git("config", "user.email", "n@example.com", cwd=vendored)
+    git("config", "user.name", "n", cwd=vendored)
     (vendored / "inner.py").write_text("inner v1\n")
     assert git("add", "inner.py", cwd=vendored).returncode == 0
     assert git("commit", "-qm", "inner", cwd=vendored).returncode == 0

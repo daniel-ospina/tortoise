@@ -1539,7 +1539,17 @@ def test_read_coverage_per_path_failure_is_unreadable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ROUND-5 P3: the per-path `select` is inside the fail-closed conversion; without
-    that, a raise escapes `collect_probe` and `main()` prints nothing."""
+    that, a raise escapes `collect_probe` and `main()` prints nothing.
+
+    ⛔ The touched path MUST be one whose whole-set selection is NOT `full` — the per-path
+    loop only runs under `if not full:` (`_read_coverage`). `tools/ready_for_owner.py` used to
+    be such a path only because it was the silent-drop gap: #10975 gave it a
+    `ci_selection.TOOL_CARVEOUTS` entry (fail-closed to the FULL matrix), so the whole-set
+    call now returns `full: True`, the per-path loop never executes, and this test stopped
+    exercising its own subject (`uncovered` came back `()` instead of `None`). A docs-only
+    path is the shape that still reaches the loop: `surfaces == []`, `full is False`, with
+    the 72 tier-1 smoke files as `test_files`.
+    """
     from tools import ci_selection
 
     real = ci_selection.select
@@ -1552,7 +1562,8 @@ def test_read_coverage_per_path_failure_is_unreadable(
         return real(paths, event, manifest, explain)
 
     monkeypatch.setattr(ci_selection, "select", flaky)
-    uncovered, raw = rfo._read_coverage(("tools/ready_for_owner.py",))
+    uncovered, raw = rfo._read_coverage(("docs/ontology/NOTES.md",))
+    assert calls["n"] == 2, f"the per-path arm was not reached at all (calls={calls['n']})"
     assert uncovered is None
     assert "blew up" in raw
 
