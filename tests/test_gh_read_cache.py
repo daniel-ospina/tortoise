@@ -12,9 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 57 mutation rows have now been run
-(**54 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **56 are KILLED**; M49 survives ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. 61 mutation rows have now been run
+(**58 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **60 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -28,7 +28,7 @@ re-labelled). **56 are KILLED**; M49 survives ALONE by the documented layering:
     M10 projection dropped from the FILENAME only ...... KILLED    M21 non-dict page accepted ....... KILLED
     M11 projection dropped from the ENVELOPE only ...... KILLED   M22 error-document marker gone .... KILLED
 
-Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56 (all KILLED):
+Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60 (all KILLED):
 
   M52 runner `labels` ABSENT read as empty ..... KILLED   M51 `visibility` cached again ......... KILLED
 
@@ -1829,3 +1829,83 @@ def test_the_write_warning_is_emitted_ONCE(
 def test_a_silent_successful_write_emits_nothing(tmp_path: Path, capsys) -> None:
     _read("repo.metadata", now=1000.0, reader=Counter(), cache_dir=tmp_path)
     assert capsys.readouterr().err == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 16. CYCLE-13 FINDINGS — four guards that were correct but UNPINNED on the path that runs
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+def test_scope_for_carries_the_BRANCH() -> None:
+    """⛔ The CLI derives its scope EXCLUSIVELY through `scope_for`, and dropping `@branch` from it
+    left 221 tests green — every `read()` scope test passes `scope=` as a literal, and every
+    `scope_for` test used the GLOBAL key. Mutating it to `return repo` served one branch's required
+    set as another's, on the merge-gating key."""
+    main = C.scope_for("repo.required_set", "o/r", "main")
+    release = C.scope_for("repo.required_set", "o/r", "release")
+    assert main == "o/r@main"
+    assert release == "o/r@release"
+    assert main != release, "the branch is not part of the scope, so branches share one entry"
+
+
+def test_scope_for_keeps_two_repos_apart() -> None:
+    assert C.scope_for("repo.metadata", "o/a", "main") != C.scope_for(
+        "repo.metadata", "o/b", "main"
+    )
+
+
+@pytest.mark.parametrize("key", ["repo.workflows", "runners.inventory"])
+def test_a_MULTI_PAGE_response_is_CONCATENATED_not_replaced(key: str) -> None:
+    """⛔ `rows = list(inner)` instead of `rows.extend(inner)` left 221 tests green, and cached the
+    LAST page as the whole inventory. This repo has 41 workflow files, so `repo.workflows` really
+    does page. `test_projection_over_multiple_pages_concatenates` covers `repo.labels`, which does
+    not go through `_expand` — so the concat rule had no fence at all."""
+    item = {"id": 1, "path": "a.yml", "state": "active", "name": "r1", "labels": [{"name": "x64"}]}
+    page1 = {
+        f"total_{'workflows' if key == 'repo.workflows' else 'runners'}": 2,
+        ("workflows" if key == "repo.workflows" else "runners"): [item],
+    }
+    page2 = {
+        f"total_{'workflows' if key == 'repo.workflows' else 'runners'}": 2,
+        ("workflows" if key == "repo.workflows" else "runners"): [{**item, "id": 2, "name": "r2"}],
+    }
+    out = C.INVARIANTS[key].project([page1, page2])
+    assert len(out) == 2, f"{key!r} kept only the last page: {out}"
+    field = "id" if key == "repo.workflows" else "name"
+    assert {row[field] for row in out} == ({1, 2} if field == "id" else {"r1", "r2"}), (
+        f"{key!r} lost a page: {out}"
+    )
+
+
+@pytest.mark.parametrize("key", ["prstate", "runstatus", "mergestatestatus"])
+def test_a_GLUED_mutable_spelling_is_refused(key: str) -> None:
+    """⛔ The glued-word clause was only tested in the direction that must NOT match. Removing it
+    left 221 green and let `declare_invariant("prstate", …)` succeed — a mutable-state read
+    becoming cacheable. The docstring's over-refusal note is the invitation to loosen it."""
+    assert C._is_mutable_name(key), f"{key!r} is a glued mutable spelling but was accepted"
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(key, ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d)
+
+
+def test_a_slash_named_branch_is_ESCAPED_into_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⛔ `release/1.0` spelled raw addresses a DIFFERENT route
+    (`…/branches/release/1.0/protection`), so every read of a slash-named protected branch was
+    refused. `{repo}` must keep its `/` — that one IS the path."""
+    seen: list[list[str]] = []
+
+    class Proc:
+        returncode = 0
+        stderr = b""
+        stdout = b'{"required_status_checks": {"contexts": [], "checks": []}}'
+
+    def fake_run(cmd, **kw):
+        seen.append(list(cmd))
+        return Proc()
+
+    monkeypatch.setattr(C.subprocess, "run", fake_run)
+    C._gh_reader("o/r", "release/1.0")("repo.required_set")
+
+    cmd = seen[0]
+    joined = " ".join(cmd)
+    assert "release%2F1.0" in joined, f"the branch was not escaped: {joined}"
+    assert "repos/o/r/branches/release%2F1.0/protection" in joined, joined
+    # the repo's own slash must survive
+    assert "repos/o/r/" in joined

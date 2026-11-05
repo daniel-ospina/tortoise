@@ -143,6 +143,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 __all__ = [
     "GLOBAL_KEYS",
@@ -239,6 +240,9 @@ def _expand(docs: Sequence[Any], key: str, container: str) -> list[Any]:
                 f"{key}: page {i} has no {container!r} list — refusing to read a missing collection "
                 f"as an empty one"
             )
+        # ⛔ EXTEND, NEVER REPLACE. `gh api --paginate` hands every page to the projection, so a
+        # `rows = list(inner)` regression caches the LAST page as the whole inventory — this repo
+        # has 41 workflow files, so `repo.workflows` genuinely pages. Pinned by the two-page test.
         rows.extend(inner)
     return rows
 
@@ -1128,7 +1132,14 @@ def _gh_reader(repo: str, branch: str):
         spec = INVARIANTS.get(key)
         if spec is None:
             raise Unreadable(f"no argv is declared for {key!r}")
-        cmd = ["gh", *[a.replace("{repo}", repo).replace("{branch}", branch) for a in spec.argv]]
+        # ⛔ `{branch}` IS A PATH SEGMENT and must be percent-encoded: `release/1.0` spelled raw
+        # addresses a DIFFERENT route (`…/branches/release/1.0/protection`), so every read for a
+        # slash-named protected branch was refused. `{repo}` keeps its `/` — that one IS the path.
+        enc_branch = quote(branch, safe="")
+        cmd = [
+            "gh",
+            *[a.replace("{repo}", repo).replace("{branch}", enc_branch) for a in spec.argv],
+        ]
         try:
             proc = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
         except (OSError, subprocess.SubprocessError) as exc:
