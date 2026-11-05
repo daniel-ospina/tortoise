@@ -607,10 +607,17 @@ class IngestOutcome(StrEnum):
     #: The ask was done: extraction ran, a metadata capture was written, or the
     #: named document had no ``##`` sections to extract at all — that last arm
     #: prints its own warning and still clears the pending marker, which is the
-    #: recorded ``--upgrade`` parity decision (``_do_upgrade`` step 3). It is
+    #: recorded ``--upgrade`` parity decision (``_do_upgrade`` step 2). It is
     #: NOT the sweep's rule: the sweep leaves a no-sections document PENDING and
     #: returns ``PARTIAL``, because a sweep did not name it. Same condition, two
     #: honest answers, because only one of the two callers chose the target.
+    #: ⚠️ ``_do_upgrade`` DOES parse the content (step 2) and names the condition
+    #: in its own warning, so the parity decision here buys the exit channel, not
+    #: a blindness: the arm reports ``DONE`` with a warning because the caller
+    #: named the target and the marker is cleared, and that choice is recorded
+    #: rather than derived. A caller who must treat "not a Document" as a failure
+    #: gets ``REFUSED_NOT_A_DOCUMENT`` through ``--capture-metadata``, which holds
+    #: the same content and the same parse.
     DONE = "done"
     #: The ask was already satisfied: same content + extractor version.
     SKIPPED_ALREADY_PROCESSED = "skipped-already-processed"
@@ -622,8 +629,8 @@ class IngestOutcome(StrEnum):
     #: (``_do_upgrade`` cannot tell "absent" from "present but not a Document" —
     #: both are a miss on its ``MATCH (s:Source {url})`` — so its arm reports
     #: this one, and the enum does not claim a distinction that door cannot
-    #: make. ``REFUSED_NOT_A_DOCUMENT`` is produced by the ONE arm that CAN tell:
-    #: ``--capture-metadata``, which holds the content and parses it.)
+    #: make. ``REFUSED_NOT_A_DOCUMENT`` is reported by ``--capture-metadata``,
+    #: which parses the content it holds.)
     REFUSED_NOT_FOUND = "refused-not-found"
     #: REFUSED — the content is not a Document (no ``##`` sections), so the
     #: metadata capture the caller asked for is unperformable.

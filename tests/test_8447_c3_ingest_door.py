@@ -377,8 +377,9 @@ class TestTheSkipArmWritesNothing:
         first, _ = _run([str(doc), *base])
         assert first is IngestOutcome.DONE, first
 
-        # A SECOND, untouched --out path: the first run wrote `second.html`, so
-        # existence after the skip means THE SKIP wrote it.
+        # A SECOND, untouched --out path. Both runs in this test write this same
+        # path, so its existence attributes nothing to the skip — only its mtime,
+        # asserted below, can.
         # Same argv as the first run (that is what makes the idempotency
         # key match). The render is rewritten on every non-skip run, so an
         # unchanged mtime after the skip is proof the SKIP wrote nothing.
@@ -881,8 +882,11 @@ class TestAPartialExtractionIsNotDone:
 #: keep: an extension outside that list and a host's TLD
 #: (``api.example.com:8080``, ``https://…:443``) are both outside the list on
 #: purpose, and the lookbehind refuses a match that starts mid-URL.
-#: Deliberately NOT matching a URL's port (``localhost:6379``) or a dotted
-#: host:port — the extension list, not the shape, is what makes it a citation.
+#: Deliberately NOT matching a host:port whose TLD is OUTSIDE the extension
+#: list (``localhost:6379``, ``api.example.com:8080``). ``foo.sh:8080`` and
+#: ``x.md:443`` DO match, because ``.sh``/``.md`` are also source/doc extensions
+#: and the list is the whole rule — a false positive here reds a docstring and
+#: fails a test, never a gate.
 _COORDINATE = re.compile(
     rf"{_LINE_CITATION.pattern}"
     r"|(?<![\w/:.])(?i:[\w./-]+)\.(?i:md|markdown|rst|toml|json|ya?ml|cfg|ini|txt|sh|bash"
@@ -1065,8 +1069,10 @@ class TestThisFilesEvidencePointersCannotGoStale:
 
         The DOTTED host:port is here because the third alternative made it the
         live risk: an extension-agnostic arm would read ``api.example.com:8080``
-        as a citation. The extension list is what prevents it, and this pins
-        that — a TLD is not a file extension.
+        as a citation. What prevents it is the EXTENSION LIST — not the shape —
+        so this pins only the TLDs that list excludes: ``.sh``, ``.md``, ``.ts``
+        and ``.js`` ARE ccTLDs and DO match as citations, which is accepted
+        because a false positive here reds a docstring, never a gate.
         """
         assert _coordinate_citations("docker://:f@localhost:6379/x") == []
         assert _coordinate_citations(

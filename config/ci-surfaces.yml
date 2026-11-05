@@ -10564,7 +10564,7 @@ durations:
   # sweep-idempotency arms drive `_do_upgrade_all` against stubs, and the pointer guard parses this file's
   # own AST and docstrings. They need no database, which is a different claim from needing no scrutiny.
   # ⛔ This row once said
-  # "NOT hermetic" and carried a two-minute figure; both were wrong for the SAME reason, and the mechanism
+  # "NOT hermetic" and carried a hand-picked duration; both were wrong for the SAME reason, and the mechanism
   # is the part worth keeping. The cost was the DOCUMENT UPSERT constructing the real embedding model
   # (`add_document` → projection apply → `entities.encode_for_row` → `EmbeddingModel.get()`), whose
   # huggingface.co HEAD request the hermetic egress guard blocks and retries five times (#4387) — NOT the S7
