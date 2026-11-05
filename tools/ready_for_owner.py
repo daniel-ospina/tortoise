@@ -274,7 +274,7 @@ ISSUES_FOUND_RE = re.compile(r"(?i)(?<!no )\bissues?\s+found\b|\bISSUES\s+\d+\b"
 #: that still read NEUTRAL one round after the header fix: `P2:` followed by a
 #: `` `path:line` `` (the `${review-pr.sh}` USE cue), and a tally that counts a NON-ZERO
 #: blocking severity (`- P1: 0, P2: 2`). A finding NAMES A LOCATION.
-SEVERITY_LOCATED_RE = re.compile(r"(?i)\bP[0-2]\b[^A-Za-z0-9\n]{0,12}`?[\w./-]*\.\w+:\d+")
+SEVERITY_LOCATED_RE = re.compile(r"(?i)\bP[0-2]\b[^.\n]{0,60}?`?[\w./-]*\.\w+:\d+")
 TALLY_NONZERO_RE = re.compile(r"(?i)\bP([0-2])\s*:\s*([1-9]\d*)\b")
 #: ⛔ PARITY WITH `scripts/review-pr.sh`'s OWN CUE LIST — the *label-noun-in-front* cue and
 #: the *table-row* cue, which this module did not have. Round 12 measured ten live shapes
@@ -321,8 +321,7 @@ COUNT_BEFORE_TOKEN_RE = re.compile(
     # DIGITS only for the count-before-token arm: a spelled numeral is an ARTICLE as often
     # as a count ("One P2 was fixed" is not a finding), and the spelled form that DOES
     # count is `one blocking finding`, covered below.
-    r"(?i)(?<![\w-])[1-9]\d*\s+"
-    r"(?:blocking\s+)?(?:findings?\s+)?P[0-2]\b"
+    r"(?i)(?<![\w-])[1-9]\d*(?:\s+\w+){0,3}\s+P[0-2]\b"
     r"|\b(?:one|two|three|four|five|six|several)\s+blocking\s+finding"
 )
 #: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
@@ -333,9 +332,28 @@ BRACKET_SEVERITY_RE = re.compile(
 #: A table row blocks only when it carries a DESCRIPTION cell — `review-pr.sh`'s
 #: table-scaffold rule (:1565): `| **P1** | 0 |`, `| P0 | P1 | P2 |` and `| 0 | 0 | 2 |` are a
 #: reviewer's own tally and must not block.
-SEVERITY_TABLE_RE = re.compile(
-    r"(?im)^\s*\|[^\n]*?\**P[0-2]\**\s*\|[^\n]*?\|[^\n]*?[A-Za-z]{3,}[^\n]*\|"
-)
+TABLE_SEVERITY_ROW_RE = re.compile(r"(?im)^\s*\|\s*\**P[0-2]\**\s*\|\s*([^|\n]*)\|")
+
+
+def _table_finding(text: str) -> bool:
+    """A table row whose severity cell is followed by a DESCRIPTION or a NON-ZERO count.
+
+    A two-column row (`| P1 | the guard returns 0 |`, `| P1 | 2 |`) is the commonest shape;
+    `| **P1** | 0 |` and `| 0 | 0 | 2 |` are a reviewer's own tally and are not findings.
+    Done in code rather than in one regex: a negation lookahead after whitespace is fragile
+    enough that it silently matched the tally rows it was written to exempt.
+    """
+    for match in TABLE_SEVERITY_ROW_RE.finditer(text):
+        cell = match.group(1).strip()
+        if re.fullmatch(r"(?i)(?:0|none|nil|zero)", cell):
+            continue
+        # `| P0 | P1 | P2 |` — every cell is a bare severity token: a tally, not a finding.
+        if re.fullmatch(r"(?i)\**P[0-3]\**", cell):
+            continue
+        return True
+    return False
+
+
 #: A severity COUNT of zero in any spelling — `P1: 0`, `**P1**: none.`, `P1: nil`, `P1: zero`.
 #: `review-pr.sh:1221-1224` exempts exactly these ("`**P0**: none.` is a count").
 ZERO_SEVERITY_COUNT_RE = re.compile(r"(?i)\bP[0-2]\b\**\s*:\s*\**\s*(?:0|none|nil|zero)\b")
@@ -956,7 +974,7 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         or SEVERITY_LOCATED_RE.search(text)
         or TALLY_NONZERO_RE.search(text)
         or BRACKET_SEVERITY_RE.search(text)
-        or SEVERITY_TABLE_RE.search(text)
+        or _table_finding(text)
         or BLOCKING_COUNT_RE.search(text)
         or COUNT_BEFORE_TOKEN_RE.search(text)
         # A severity token beside an ISSUE-block SIBLING is a finding even when the body

@@ -988,6 +988,18 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     ("**Outcome: CLEAN.**\n| 0 | 0 | 2 |", False),
     ("| **P1** | 0 |", False),
     ("| P0 | P1 | P2 |", False),
+    # ROUND-14: a cue is a SHAPE, not an enumerated neighbourhood. A count crosses up to three
+    # words and a location may be words away; pinning the immediate neighbour re-created the
+    # ratchet one word away (review-pr.sh records both as its own measured fail-opens).
+    ("CLEAN — 2 open P1 findings remain.", True),
+    ("CLEAN — 2 remaining P1 defects", True),
+    ("CLEAN — 2 unresolved P1", True),
+    ("2 new P1", True),
+    ("Found one P1 in tools/x.py:12", True),
+    ("there is a P1 in `tools/x.py:12`", True),
+    ("P1 in scripts/x.sh:12", True),
+    ("| P1 | the guard returns 0 |", True),
+    ("| P1 | 2 |", True),
 )
 
 
