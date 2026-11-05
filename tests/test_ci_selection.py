@@ -7172,7 +7172,9 @@ def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
     re-stales — while the other eight files in `ROWED_BY_THIS_FOLD` all took 2.0.
     (Only ONE of the nine is a file this fold ADDED — the `ROWED_BY_THIS_FOLD` block
     above is the authority on what the set actually is, #2148 review P3 — but the whole
-    set is the row-set this pin guards.)    The existence pin above stayed green through it, because a local reading is a
+    set is the row-set this pin guards.)
+
+    The existence pin above stayed green through it, because a local reading is a
     row like any other; the coverage floor could not see it either (it is a RATIO
     with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
     is precisely why it needs its own pin — `test_state_value_verbatim_10360.py` is

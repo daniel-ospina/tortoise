@@ -478,7 +478,8 @@ def test_the_jsonb_columns_are_read_from_the_migrations_never_restated():
     * `search_keys` is **no longer** `jsonb` — it is `text` after
       `20261102000002` (#10620), and a reader that stopped at `CREATE TABLE`
       would keep JSON-quoting it, storing the quotes as data; and
-    * `session.capture_redactions` is NOT either — it is `jsonb` in the base      `CREATE TABLE` and `integer` after #9264's forward migration, so a reader
+    * `session.capture_redactions` is NOT either — it is `jsonb` in the base
+      `CREATE TABLE` and `integer` after #9264's forward migration, so a reader
       that stopped at `CREATE TABLE` would call an integer column a document
       container.
 
