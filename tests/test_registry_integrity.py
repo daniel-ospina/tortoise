@@ -105,9 +105,15 @@ def test_duplicate_sequence_entry_is_refused(tmp_path: Path) -> None:
 def test_a_duplicate_key_inside_a_nested_mapping_is_refused(tmp_path: Path) -> None:
     """Depth is the point: `_walk` must RECURSE into `.durations` (#10894).
 
-    The arms above duplicate the ROOT mapping and a `surfaces:` sequence, so every
-    one of them passes on a `_walk` that descends into sequences but stops before a
-    nested mapping's values. `config/ci-surfaces.yml` carries `merge=union`, and
+    WHICH mutant this pins, measured rather than assumed. Every other arm in this file
+    duplicates the ROOT mapping or a `surfaces:` SEQUENCE, and all eleven of them pass
+    on a `_walk` whose mapping branch stops descending into a nested mapping **whose
+    values are all scalars** — the plausible "a dict of scalars is a leaf" shortcut
+    (measured on that mutant: `1 failed, 11 passed`, the failure being this arm). A
+    cruder mutant that never descends a mapping value at all also reds
+    `test_duplicate_sequence_entry_is_refused` (`2 failed, 10 passed`), so this arm's
+    distinct contribution is the scalar-leaf depth, not "nested-ish" in general.
+    `config/ci-surfaces.yml` carries `merge=union`, and
     `.gitattributes` applies it to the whole FILE — so a retimed block appended on
     both sides of a base move lands as two `durations:` rows with the SAME key, at
     exactly the depth this suite did not reach.
