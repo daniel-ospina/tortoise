@@ -531,8 +531,8 @@ no verdict: after a killed run, check `git ls-remote origin 'refs/heads/gh-write
 - `exit 2` = usage (argparse's own code, deliberately not a verdict).
 
 **Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
-`$HOME/.config/gh/hosts.yml`, and GitHub's manual states the env vars *"take precedence over
-previously stored credentials"* — so a cell that exports a **read-only** token as `GH_TOKEN` never
+`$HOME/.config/gh/hosts.yml`, and GitHub's manual states it *"takes precedence over previously
+stored credentials"* — so a cell that exports a **read-only** token as `GH_TOKEN` never
 reaches the write-capable OAuth token sitting in `hosts.yml`. `git push` inherits the same choice
 through `credential.helper = !gh auth git-credential`. Measured 2026-11-05: a **17-lane wave produced
 0 landings** while every lane honestly reported "built, parked" — none misreported itself; nothing
