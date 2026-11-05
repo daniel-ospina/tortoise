@@ -2288,11 +2288,24 @@ def test_a_padded_key_never_REASSIGNS_the_stored_spelling(sdk):
     postcondition "a dedup hit never reassigns an existing key"), bump
     ``updatedAt`` on every alternating re-run (#490 churn), and be LIVE-ONLY —
     ``PointRevised`` folds no ``key`` arm, so a rebuild reverts it (#9732).
+
+    ⛔ THE FOLD ITSELF IS ASSERTED (#10481 review, finding 2). Without it this
+    test could not tell "folded onto the trimmed holder WITHOUT relaying" from
+    "did not fold at all": on the PRE-FIX tree both stored-value assertions
+    below hold for the opposite reason — the padded seek missed, a SIBLING was
+    minted under ``"  PK  "`` carrying ``SPELL-B``, and the re-runs landed on
+    that sibling — so the property named in the title held while the primary
+    fix was absent (a surviving mutant, per the file's own discrimination
+    posture). With the fold asserted, reverting the seek reddens this test.
     """
     a = sdk.create_point("statement", "SPELL-A", key="PK", dedup=True)
     before = sdk.get_point(a["id"]).get("updatedAt")
-    for _ in range(3):
-        sdk.create_point("statement", "SPELL-B", key="  PK  ", dedup=True)
+    folds = [sdk.create_point("statement", "SPELL-B", key="  PK  ", dedup=True)
+             for _ in range(3)]
+    assert [f["id"] for f in folds] == [a["id"]] * 3, (
+        "a padded re-run did not fold onto the trimmed holder: "
+        f"{[f['id'] for f in folds]} vs {a['id']} — so the spelling assertions "
+        "below would hold for the wrong reason (no fold at all)")
     stored = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id = $id RETURN n.key, n.updatedAt",
         params={"id": a["id"]}).result_set
