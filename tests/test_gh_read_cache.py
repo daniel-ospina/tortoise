@@ -47,6 +47,7 @@ M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly
   M74 decode denylist restored ....................... KILLED   M75 empty-repo scope "@main" accepted ....... KILLED
   M76 the endpoint door is a DENY-LIST again .......... KILLED   M77 argv SHAPE check removed (-X POST) ...... KILLED
   M78 `scope_for` skips the empty repo/branch check ... KILLED   M79 shape guard back AFTER the flag loop .. KILLED
+  M80 refusal message states SUCCESS cond.............. KILLED   M81 `_gh_reader` projects (R2 reopened).... KILLED
 ⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
 parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
 satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
@@ -64,6 +65,20 @@ only itself, plus the families the deny-list never named (`/git/refs/…`, `/bra
   `declare_invariant` shapes and two of the three read-path shapes — and the two that stay green
   are the BARE-STRING argvs, which iterate harmlessly and are refused by `_endpoint_refusal`
   either way: a mutation row must state what it does NOT cover, or it is the M73 shape again.
+  M80 (the `runners.inventory` refusal message restored to the SUCCESS condition — "entry has a
+  non-null, non-empty-string `name`" — on the branch that fires because the entry does NOT have
+  one): **2 failed, 327 passed**, both
+  `test_a_runner_naming_nothing_with_an_EMPTY_STRING_is_refused` arms, which now assert the text
+  and the offending value. That message is the WHOLE operator-facing detail on a refused live read
+  (`gh_read_cache: REFUSED — …`, exit 1), so the arm pins the line a triaging lane actually reads;
+  it does not cover the neighbouring refusal messages, which no arm asserts by text.
+  M81 (`_gh_reader` mutated to project, re-opening R2): **1 failed, 328 passed** — and the ONE is
+  the point: a projecting reader is SILENT through every assertion that reaches the projection via
+  `read()`'s own `_project(...)`, because a second projection of this already-projected runners
+  body is accepted. Without the UNPROJECTED-bytes arm the test's name is a claim, not a fence.
+  It does not cover a reader that projects only SOME keys — the arm asserts the whole body comes
+  back raw for this one key. M80/M81 are the round-17 fix lane's numbering for the two arms THAT
+  round added (it did not touch an earlier id).
 ⛔ M67 SURVIVED on its first test, which passed a DICT page where a LIST page is required — the
 SHAPE guard satisfied it and the empty-name check was unreachable. Fixed, then KILLED.
 ⛔ M67's EMPTY-STRING sibling (M72, cycle-16 review) reached the same blocker from the other side:
