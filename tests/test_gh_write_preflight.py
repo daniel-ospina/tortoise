@@ -14,14 +14,18 @@ the fail-open it replaces (`gh api … .permissions.push` reads `true` for a rea
 PAT because that field describes the USER's repo role, not the token's grant). So the refusal cases
 are the load-bearing ones and are asserted first.
 
-Run standalone:      TORTOISE_TEST_CARVE_OUT=1 python3 -m pytest tests/test_gh_write_preflight.py -q
+Run standalone:      python3 tests/test_gh_write_preflight.py
 Run under pytest:    python3 -m pytest tests/test_gh_write_preflight.py -q
 
-The bare `python3 tests/test_gh_write_preflight.py` form does NOT work in this repo: it still
-loads `tests/conftest.py`, whose session-scoped autouse `_p4_uri_required` fixture
-(`tests/_embedded.py`) fails the session with "default pytest requires TORTOISE_DB_URI (epic
-#1647 P4)" — this suite needs no database, so it takes the carve-out (`TORTOISE_TEST_CARVE_OUT=1`)
-or a lane container (`uv run python tools/test_lane.py run -- tests/test_gh_write_preflight.py -q`).
+The bare `python3 tests/test_gh_write_preflight.py` form works as written: the `__main__` block sets
+`TORTOISE_TEST_CARVE_OUT=1` itself, because the run still loads `tests/conftest.py`, whose
+session-scoped autouse `_p4_uri_required` fixture (`tests/_embedded.py`) otherwise fails the session
+with "default pytest requires TORTOISE_DB_URI (epic #1647 P4)" — this suite opens no database, so
+it is exactly the carve-out case (same one-block fix, same reasoning, as
+tests/test_closes_landing.py's `__main__`). Under a bare `-m pytest` invocation the carve-out is the
+caller's to set, and a lane container works too
+(`uv run python tools/test_lane.py run -- tests/test_gh_write_preflight.py -q`). Pinned by
+`test_documented_standalone_command_actually_runs`.
 """
 
 from __future__ import annotations
@@ -1194,5 +1198,61 @@ def test_help_documents_the_exit_contract():
     assert "1 unavailable" in proc.stdout
 
 
+# ══ (11) the docstring's standalone command runs for real (cycle-2 review P3-3) ═════════════════
+def test_documented_standalone_command_actually_runs():
+    """`Run standalone: python3 tests/test_gh_write_preflight.py` must actually RUN the suite.
+
+    MEASURED pre-fix, on a fresh worktree with no DB configured:
+
+        $ .venv/bin/python tests/test_gh_write_preflight.py
+        … ERROR at setup of test_…: Failed: default pytest requires TORTOISE_DB_URI (epic #1647 P4)
+        55 errors in 2.36s          rc=1
+
+    The docstring's command is what a contributor on a fresh box types first; a suite that reds for
+    an unrelated reason is how a green suite earns "known-broken" status. The fix belongs in the
+    `__main__` block (the carve-out), not in a caveat added to the docstring — the repo already
+    records that shape in tests/test_closes_landing.py's `__main__`.
+
+    DISCRIMINATION: delete the `os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")` line and this
+    test fails (the child re-reports the session-gate ERROR and exits 1). To keep the child from
+    recursing into all 57 cases, `PYTEST_ADDOPTS` narrows it to ONE; and the child env has
+    TORTOISE_DB_URI / TORTOISE_TEST_CARVE_OUT STRIPPED, so the assertion cannot be satisfied
+    vacuously on a lane that happens to export a live URI.
+    """
+    stripped = (
+        "TORTOISE_DB_URI",
+        "TORTOISE_TEST_CARVE_OUT",
+        "TORTOISE_LIVE",
+        "PYTEST_ADDOPTS",
+        "PYTEST_CURRENT_TEST",
+        "PYTEST_XDIST_WORKER",
+    )
+    env = {k: v for k, v in os.environ.items() if k not in stripped}
+    env["PYTEST_ADDOPTS"] = "-k test_help_documents_the_exit_contract"
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve())],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        timeout=600,
+    )
+    tail = f"\n--- stdout ---\n{proc.stdout[-2500:]}\n--- stderr ---\n{proc.stderr[-2500:]}"
+    assert proc.returncode == 0, f"the documented standalone command failed:{tail}"
+    assert "1 passed" in proc.stdout, f"the child ran the wrong selection:{tail}"
+    assert "requires TORTOISE_DB_URI" not in (proc.stdout + proc.stderr), (
+        f"the session gate refused the documented command:{tail}"
+    )
+
+
 if __name__ == "__main__":
+    # THE ONE BLOCK that makes the docstring's `Run standalone:` line real. The repo's session-start
+    # gate (`_p4_uri_required`, epic #1647 P4) refuses a URI-less pytest session, so the advertised
+    # command used to report 55 session-gate ERRORS for a suite that opens no graph at all — the
+    # carve-out is exactly right here and is not optional. `setdefault`, so an explicit value in the
+    # caller's env still wins. Same one-block fix, same reasoning, as
+    # tests/test_closes_landing.py's `__main__` (where a second mid-file copy once silently defeated
+    # it). Pinned by test_documented_standalone_command_actually_runs.
+    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     raise SystemExit(pytest.main([__file__, "-q"]))
