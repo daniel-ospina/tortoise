@@ -28,17 +28,17 @@ Three properties are pinned here, one class each:
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import sys
-import contextlib
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.ingest import IngestOutcome, main  # noqa: E402
+from tortoise.ingest import IngestOutcome, main
 
 # The DB is only needed by the arms that reach a projection. On a URI-less
 # (carve-out) CI lane those arms skip; the enum/exit-contract arms below run
@@ -125,8 +125,34 @@ class TestTheExitContractIsOneMapping:
             "the console script must point at `cli`, which dereferences "
             "`.returncode`; pointing it at `main` hands sys.exit a StrEnum")
 
-    def test_the_installed_entry_point_exits_with_the_outcomes_code(self):
-        """Proven end to end on the REAL entry point, not on `main`."""
+    def test_cli_turns_the_outcome_into_the_process_status(self, monkeypatch):
+        """The dereference itself — the ONE behaviour round 1's P0 was about.
+
+        Without this, `def cli(): main()` passes the whole file: an outcome is
+        returned, `pyproject` names `cli`, and `test_ingest_main_guard` only
+        covers a DONE run — so every refusal would silently exit 0 again. (The
+        defect this PR fixes was a wrong exit status no in-process test could
+        see; the replacement guard must not repeat that blind spot for the
+        refusal direction.)
+        """
+        import tortoise.ingest as ingest_mod
+        for outcome, code in ((IngestOutcome.REFUSED_NOT_FOUND, 1),
+                              (IngestOutcome.PARTIAL, 1),
+                              (IngestOutcome.DONE, 0),
+                              (IngestOutcome.SKIPPED_ALREADY_PROCESSED, 0)):
+            monkeypatch.setattr(ingest_mod, "main",
+                                lambda argv=None, _o=outcome: _o)
+            with pytest.raises(SystemExit) as ei:
+                ingest_mod.cli()
+            assert ei.value.code == code, (outcome, ei.value.code)
+
+    def test_the_installed_entry_point_exits_non_zero_on_a_refusal(self):
+        """The PRE-EXISTING argument refusals still reach the shell non-zero.
+
+        These three raise inside `main` (before any outcome exists), so they
+        prove the entry point is wired, not the outcome mapping — that is
+        `test_cli_turns_the_outcome_into_the_process_status` above.
+        """
         import subprocess
         root = Path(__file__).resolve().parent.parent
         # These are the module's PRE-EXISTING argument refusals (they already
@@ -188,10 +214,10 @@ class TestTheSkipArmWritesNothing:
                 "--out", str(tmp_path / "g.html"),
                 "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
 
-        first, _ = _run([str(doc)] + base)
+        first, _ = _run([str(doc), *base])
         assert first is IngestOutcome.DONE, first
 
-        second, out = _run([str(doc)] + base)
+        second, out = _run([str(doc), *base])
         assert second is IngestOutcome.SKIPPED_ALREADY_PROCESSED, (
             f"the idempotency gate skipped but returned {second!r}")
         assert second.returncode == 0, "an idempotent re-run must stay green"
@@ -233,7 +259,7 @@ class TestTheSkipArmWritesNothing:
                 proj.close()
 
         zero = _resolution_points()
-        first, _ = _run([str(doc)] + base)
+        first, _ = _run([str(doc), *base])
         assert first is IngestOutcome.DONE, first
         after_first = _resolution_points()
         assert after_first == zero + 1, (
@@ -241,7 +267,7 @@ class TestTheSkipArmWritesNothing:
             f"{after_first - zero} resolution Point(s), not 1 — this query "
             "cannot see the point, so the assertion below would be vacuous")
 
-        outcome, _ = _run([str(doc)] + base)
+        outcome, _ = _run([str(doc), *base])
         assert outcome is IngestOutcome.SKIPPED_ALREADY_PROCESSED, outcome
         assert _resolution_points() == after_first, (
             "a SKIPPED ingest minted a resolution Point for work it never "
@@ -288,10 +314,10 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
                 "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
 
         # Park the document with its pending marker without extracting it.
-        meta = [str(doc), "--capture-metadata"] + base
+        meta = [str(doc), "--capture-metadata", *base]
         assert _run(meta)[0] is IngestOutcome.DONE
 
-        first, out1 = _run(["--upgrade-all"] + base)
+        first, out1 = _run(["--upgrade-all", *base])
         assert "1 upgraded" in out1, out1
         assert first is IngestOutcome.DONE, (
             f"a sweep that upgraded its only candidate returned {first!r}")
@@ -299,7 +325,7 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
         # Re-park the SAME content, then sweep again: the only bucket is
         # `already claimed`, which must stay GREEN.
         assert _run(meta)[0] is IngestOutcome.DONE
-        third, out3 = _run(["--upgrade-all"] + base)
+        third, out3 = _run(["--upgrade-all", *base])
         assert "1 already claimed" in out3, out3
         assert third is IngestOutcome.DONE, (
             "a sweep whose ONLY skip is 'already claimed at this extractor "
