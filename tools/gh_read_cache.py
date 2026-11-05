@@ -503,13 +503,16 @@ INVARIANTS: dict[str, Invariant] = {
     # human-paced: the fleet's own autoscaler registers and deregisters runners
     # (`tools/runner_autoscale.py` — "not in the pool" is the ORPHANED classification, which
     # RE-REGISTERS), so 30 min bounds how stale a MEMBERSHIP answer may be; it does not make
-    # membership invariant. What the projection may therefore be asked is a LABEL question — "which
-    # runner names and label names the inventory carried at read time" — whose vocabulary only a
-    # runner-config change adds to. ⛔ It must NEVER answer "is runner X present NOW" / "is the pool
-    # empty NOW": a cached NO on membership is the absence inference `_project_required_set` and
-    # this projection's own `labels`-absence guard both refuse, and a caller deciding whether to
-    # SPAWN must read live. Membership is pinned OUT of the answer by the projection, not by this
-    # note: see `test_the_shipped_runners_projection_drops_status_and_busy_and_the_argv_carries_no_flag`.
+    # membership invariant. LIVENESS (`status`/`busy`) is pinned OUT of the answer by the
+    # projection — see
+    # `test_the_shipped_runners_projection_drops_status_and_busy_and_the_argv_carries_no_flag` — and
+    # the NAME set IS the answer: a read-time snapshot that may be stale in EITHER direction inside
+    # the TTL (a name registered since, a name deregistered since). A LABEL question is what this key
+    # answers well, because label vocabulary only a runner-config change adds to.
+    # ⛔ It must NEVER answer "is runner X present NOW" / "is the pool empty NOW": a cached NO on
+    # membership is the absence inference `_project_required_set` and this projection's own
+    # `labels`-absence guard both refuse, and a caller deciding whether to SPAWN must read live.
+    # Nothing here makes membership invariant; only re-reading does.
     "runners.inventory": Invariant(
         ttl_s=30 * 60,
         argv=("api", "repos/{repo}/actions/runners", "--paginate"),
