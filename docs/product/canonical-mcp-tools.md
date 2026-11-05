@@ -228,7 +228,7 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then). The
 > remaining four — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
 > `tortoise_pack_install` — are still live and keep their own entries here. **This branch's
-> `graph_overview` container then took the live surface 77 → 72**, so 72 is the figure at this
+> `graph_overview` container then took the live surface 76 → 72**, so 72 is the figure at this
 > head (`uv run python tools/surface_manifest.py check` is the live count).
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
@@ -271,7 +271,7 @@ Any deletion PR must use **26 / 111**.
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
 
 **Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
-surface is now **77 advertised tools** with **23** retired-forward entries — the 18 above plus five
+surface is now **72 advertised tools** with **23** retired-forward entries — the 18 above plus five
 more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
 `tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
 

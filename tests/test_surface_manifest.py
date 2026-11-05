@@ -29,6 +29,8 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "config" / "surface-manifest.yml"
 RENDERED = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
+CANONICAL = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+VISION = ROOT / "docs" / "product" / "vision-mcp-sdk-surface.md"
 
 
 def _public_sdk_methods() -> set[str]:
@@ -250,6 +252,73 @@ def test_the_rendered_list_agrees_with_the_manifest():
     )
     if doc.get("retired"):
         assert "warn the caller with the" in text, "the retired legend is missing"
+
+
+def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
+    """A PRESENT-TENSE count in the consent carriers must be the number the manifest derives.
+
+    `docs/product/canonical-mcp-tools.md` is what `read_approval` parses and what the owner reads
+    to decide what to cut, and its own amendment records that the advertised count "was wrong
+    three times, and each error is a different trap". It then drifted once more: it read **77
+    advertised tools** at a head where `counts.tools` derives 72, pairing a post-compose retired
+    count (23) with a pre-compose advertised count — arithmetically impossible on its own, and
+    contradicted two screens earlier in the same file. Nothing machine-reads that prose, which is
+    exactly why it survived, so this pins it.
+
+    Only claims about the CURRENT head are pinned. Both documents legitimately record history
+    ("was 81 before #4282 Phase 3.2", "99 → 94", "the vision started at 99"), and a blanket
+    number match would red on those. A claim's STARTING figure is such a record and is not
+    derivable here; its ENDPOINT is a statement about this head, so the endpoint is what is
+    checked. Each block asserts nothing when its sentence is absent, but the canonical blocks also
+    require their sentence to EXIST, so deleting the claim cannot make the guard vacuous.
+    """
+    live = _manifest()["counts"]["tools"]
+    retired = len(_manifest()["retired"])
+    canonical = CANONICAL.read_text(encoding="utf-8")
+    vision = VISION.read_text(encoding="utf-8")
+
+    # 1. "the surface is now **N advertised tools** with **M** retired-forward entries"
+    now_live = [int(n) for n in re.findall(r"surface is now \*\*(\d+) advertised tools\*\*", canonical)]
+    assert now_live, "the canonical doc's #4282 amendment stopped stating a live count"
+    assert now_live == [live] * len(now_live), (
+        f"canonical-mcp-tools.md says the surface is NOW {now_live[0]} advertised tools; "
+        f"config/surface-manifest.yml derives counts.tools = {live}"
+    )
+    now_retired = [int(n) for n in re.findall(r"with \*\*(\d+)\*\* retired-forward entries", canonical)]
+    assert now_retired, "the canonical doc's #4282 amendment stopped stating a retired count"
+    assert now_retired == [retired] * len(now_retired), (
+        f"canonical-mcp-tools.md says {now_retired[0]} retired-forward entries; the manifest "
+        f"carries {retired}"
+    )
+
+    # 2. "took the live surface A → B" — B is a claim about this head.
+    live_endpoints = [
+        int(b) for b in re.findall(r"took the live surface \d+\s*→\s*(\d+)", canonical)
+    ]
+    assert live_endpoints, "the canonical doc stopped naming the surface this container lands on"
+    assert live_endpoints == [live] * len(live_endpoints), (
+        f"canonical-mcp-tools.md ends the container's movement on {live_endpoints[0]} advertised "
+        f"tools; the manifest derives {live}"
+    )
+
+    # 3. The vision doc's present-tense restatement of the same two numbers.
+    served_claims = re.findall(r"the MCP server serves \*\*(\d+) tools\*\* \((\d+) of them advertised", vision)
+    for served, advertised in served_claims:
+        assert int(advertised) == live, (
+            f"vision-mcp-sdk-surface.md: {advertised} of {served} served tools are advertised; "
+            f"the manifest derives {live} live of {live + retired} served"
+        )
+        assert int(served) == live + retired, (
+            f"vision-mcp-sdk-surface.md: {served} served tools; live + retired = {live + retired}"
+        )
+
+    composed = re.findall(r"\*\*(\d+) live \+ (\d+) retired shims = (\d+) served\*\*", vision)
+    for live_n, retired_n, served_n in composed:
+        assert (int(live_n), int(retired_n), int(served_n)) == (live, retired, live + retired), (
+            "vision-mcp-sdk-surface.md's reconciliation does not compose: "
+            f"{live_n} live + {retired_n} retired = {served_n} served, but the manifest derives "
+            f"{live} + {retired} = {live + retired}"
+        )
 
 
 def test_the_retired_table_does_not_assert_a_nonexistent_sdk_method():

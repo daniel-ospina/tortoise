@@ -65,7 +65,7 @@ leaves the response unchanged is **not** a gate failure, but must be recorded.
 
 > Every figure below is the MERGED surface (72 live + 23 retired shims), not either branch's own
 > measurement: the vision started at **99**, the `graph_overview` container added one served name
-> while retiring four (#4282, 81 → 77 advertised), and the five `run_onboarding` deletions removed
+> while retiring five (#4282, 81 → 77 advertised), and the five `run_onboarding` deletions removed
 > five more (#4282 Phase 3.2, 77 → 72 advertised). 99 + 1 − 5 = **95**. The target remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
