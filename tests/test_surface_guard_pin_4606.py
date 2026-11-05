@@ -169,3 +169,69 @@ def test_a_directory_in_place_of_a_tool_fails_closed(tmp_path: Path) -> None:
 
     assert r.returncode != 0, "the pin accepted a directory in place of the tool"
     assert "not a non-empty regular file" in (r.stdout + r.stderr)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #11057 review P2: the `cut_at_commit` provenance step, and why its ORDER and
+# the job's git DEPTH cannot be left to a human reading the workflow.
+#
+# The recorded commit must RESOLVE (`tools/surface_manifest.py check
+# --provenance-strict`). A `fetch-depth: 1` checkout cannot answer, so the step is
+# only a gate on a full-history checkout; and the pin step's
+# `git fetch --depth=1 origin <base>` MARKS THE CLONE SHALLOW but KEEPS the objects
+# it already fetched — so running the provenance step AFTER the pin turns a real
+# answer into "cannot answer", which the strict arm then reds for the wrong reason
+# (or, without the strict arm, degrades to a `::notice::` nobody gates on).
+#
+# Both facts are asserted from the workflow text: a reorder or a dropped depth is a
+# silent weakening, and no reader of a green tick would see it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PROVENANCE_STEP = "The baseline's recorded cut commit resolves"
+
+
+def _surface_guard_steps() -> list[dict]:
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    return wf["jobs"][JOB]["steps"]
+
+
+def _index_of(prefix: str) -> int:
+    found = [
+        i for i, s in enumerate(_surface_guard_steps())
+        if str(s.get("name", s.get("uses", ""))).startswith(prefix)
+    ]
+    assert len(found) == 1, f"expected exactly one step starting {prefix!r}, found {found}"
+    return found[0]
+
+
+def test_the_provenance_step_can_resolve_the_recorded_commit() -> None:
+    """`fetch-depth: 0` on this job's checkout, and the strict flag on the step.
+
+    Without the depth the step is a no-op gate — `checkout@v4` defaults to 1, so the
+    recorded (ancestor) commit is absent from EVERY run and the check can only print a
+    notice. Without `--provenance-strict` an unprovable checkout is not even a red, so a
+    dropped depth would weaken the gate silently instead of failing it.
+    """
+    steps = _surface_guard_steps()
+    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert (checkout.get("with") or {}).get("fetch-depth") == 0, (
+        "the surface-guard checkout is shallow, so the cut_at_commit provenance step "
+        "cannot resolve the recorded commit — it would pass by being unable to answer"
+    )
+
+    provenance = steps[_index_of(PROVENANCE_STEP)]
+    assert "--provenance-strict" in provenance["run"], provenance["run"]
+
+
+def test_the_provenance_step_runs_before_the_pin_marks_the_clone_shallow() -> None:
+    """The pin step's `git fetch --depth=1` flips `--is-shallow-repository` to `true`.
+
+    Verified on a 3-commit scratch clone: full clone reports `false`, a `--depth=1` fetch
+    then reports `true`, and the first commit's objects are STILL PRESENT. So the strict
+    arm run after the pin would red "this checkout cannot answer" on a checkout that holds
+    the answer — a false red for the next lane, in the least debuggable direction.
+    """
+    assert _index_of(PROVENANCE_STEP) < _index_of(PIN_PREFIX), (
+        "the provenance step runs after the pin step, whose `git fetch --depth=1` makes the "
+        "clone report itself shallow — move the provenance step above the pin"
+    )

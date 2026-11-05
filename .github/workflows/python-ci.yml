@@ -3883,11 +3883,33 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # #11057 review P2: the `cut_at_commit` provenance step below must be able to
+          # RESOLVE the recorded commit, and a `fetch-depth: 1` checkout cannot (an
+          # ancestor is absent from it by construction). The `changes` job already pays a
+          # full-history fetch on every run, so this is the same shape one job over — and
+          # it is the price of the alternative being worse: a provenance gate that runs
+          # only where it cannot answer is a NO-OP gate, and an unresolvable recorded
+          # commit stayed green in every job for eight review rounds while `render`
+          # published that sha to `docs/product/mcp-sdk-surface.md` for the owner to read.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install
         run: pip install -e .
+      # ── THE RECORDED CUT COMMIT MUST RESOLVE (#11057) ──────────────────────
+      # ⛔ ORDER IS LOAD-BEARING: this runs BEFORE the pin step, because that step's
+      # `git fetch --depth=1 origin <base>` MARKS THE CLONE SHALLOW (`git rev-parse
+      # --is-shallow-repository` flips to `true`) while the objects it already fetched
+      # stay. Run after the pin, the strict arm would red for "cannot answer" on a
+      # checkout that had just held the answer. Verified on a 3-commit scratch clone:
+      # full clone → `false`, then `--depth=1` fetch → `true`, first commit still present.
+      # `--provenance-strict` turns "this checkout cannot answer" into a RED rather than a
+      # notice, so dropping `fetch-depth: 0` above reds here instead of silently
+      # weakening the gate to a log line.
+      - name: The baseline's recorded cut commit resolves
+        run: python3 tools/surface_manifest.py check --provenance-strict
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the

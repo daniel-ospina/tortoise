@@ -645,12 +645,13 @@ def checker(monkeypatch, derived_baseline):
     return sm
 
 
-def _check(sm, doc: dict, tmp_path) -> tuple[int, str]:
+def _check(sm, doc: dict, tmp_path, *, strict: bool = False) -> tuple[int, str]:
     """Run `cmd_check` with a redirected manifest, capturing stdout AND stderr.
 
     stderr is captured because a traceback goes there: an assertion that the output carries
     no traceback is vacuous against a stdout-only buffer (review finding). `MANIFEST_FILE`
-    is restored, so a test cannot leak the redirect into another one.
+    is restored, so a test cannot leak the redirect into another one. `strict` drives the
+    `--provenance-strict` arm (#11057) through the SAME path the workflow step uses.
     """
     path = tmp_path / "manifest.yml"
     path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
@@ -662,7 +663,7 @@ def _check(sm, doc: dict, tmp_path) -> tuple[int, str]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
-            rc = sm.cmd_check(argparse.Namespace())
+            rc = sm.cmd_check(argparse.Namespace(provenance_strict=strict))
     finally:
         sm.MANIFEST_FILE = previous
     return rc, buf.getvalue()
@@ -2972,6 +2973,77 @@ def test_the_check_refuses_a_baseline_with_no_cut_at_commit(checker, tmp_path):
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 1, "a baseline with no cut_at_commit did not red the check"
     assert "::error::" in out and "cut_at_commit" in out, out
+
+
+def test_the_check_reds_a_cut_commit_that_resolves_to_nothing(checker, tmp_path, monkeypatch):
+    """#11057 review P2: `cut_at_commit` was EXCLUDED from the drift comparison and only
+    shape-checked, so a baseline whose recorded commit exists nowhere in the repository
+    passed every gate for eight review rounds while `cmd_render` published that sha to the
+    owner.
+
+    Measured at `3a95ee6b9`: `9542024cb…` was absent from the object database AND from the
+    remote (`upload-pack: not our ref`), while the value it replaced resolved — `cut` writes
+    `git rev-parse HEAD` in whatever worktree it runs in, and that head was rebased away.
+    The probe is INJECTED so the verdict does not depend on this checkout's clone shape.
+    """
+    doc = _manifest()
+    doc["cut_at_commit"] = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setattr(checker, "commit_present", lambda sha, root=None: False)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a `cut_at_commit` that resolves to nothing did not red the check"
+    assert "does not resolve" in out and doc["cut_at_commit"] in out, out
+
+
+def test_the_check_does_not_red_when_the_checkout_cannot_answer(checker, tmp_path, monkeypatch):
+    """A SHALLOW checkout must not be read as "the recorded commit does not exist".
+
+    `actions/checkout@v4` defaults to `fetch-depth: 1`, so every job that does not ask for
+    history is shallow by construction and an ancestor commit is absent from it. Reding
+    there would fail every PR for a correct record; the honest output is a remedy, and a
+    gate that says NOTHING in that state is how this stayed invisible.
+    """
+    doc = _manifest()
+    monkeypatch.setattr(checker, "commit_present", lambda sha, root=None: None)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 0, out
+    assert "UNPROVABLE" in out and "--unshallow" in out, out
+
+
+def test_the_provenance_strict_arm_reds_a_checkout_that_cannot_answer(checker, tmp_path, monkeypatch):
+    """The strict arm is what makes the CI step fail CLOSED (#11057).
+
+    The `surface-guard` step runs on a `fetch-depth: 0` checkout and passes
+    `--provenance-strict`. Without this arm, dropping that depth would degrade the gate to
+    a notice and nobody would see the loss — a no-op gate with a green tick beside it.
+    """
+    doc = _manifest()
+    monkeypatch.setattr(checker, "commit_present", lambda sha, root=None: None)
+    rc, out = _check(checker, doc, tmp_path, strict=True)
+    assert rc == 1, "the strict arm accepted a checkout that cannot answer"
+    assert "UNPROVABLE" in out and "requires a checkout that CAN answer" in out, out
+
+
+def test_the_committed_cut_commit_resolves_wherever_the_checkout_can_answer():
+    """The record this repo actually ships must be checkable — not just well-shaped.
+
+    `is not False` rather than `is True`: a shallow/partial clone cannot answer at all, and
+    the answer to that is a deeper checkout, never a verdict (the remedy arm above). The
+    assertion still fails on a tree that ships the pre-fix value, because a FULL clone
+    returns `False` for a commit that does not exist.
+    """
+    sm = _load_manifest_tool()
+    sha = _manifest()["cut_at_commit"]
+    present = sm.commit_present(sha)
+    if present is None:
+        pytest.skip(
+            f"`cut_at_commit` {sha} cannot be resolved in this checkout (shallow or "
+            "partial clone) — re-run with full history (`git fetch --unshallow`) to check it"
+        )
+    assert present is True, (
+        f"`cut_at_commit` {sha} is recorded in config/surface-manifest.yml but does not "
+        "resolve to a commit in this repository — re-cut at a published commit "
+        "(`cut --commit <sha>`), or correct the field explicitly"
+    )
 
 
 def test_the_render_refuses_instead_of_tracing(tmp_path, monkeypatch, capsys):

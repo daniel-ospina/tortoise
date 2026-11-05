@@ -83,6 +83,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import os
 import subprocess
 import types
 from pathlib import Path
@@ -310,6 +311,92 @@ def _refuse(exc: SurfaceEvidenceUnreadable) -> int:
     return 1
 
 
+def commit_present(sha: str, root: Path | None = None) -> bool | None:
+    """Whether `sha` resolves to a commit in THIS checkout — `None` when it cannot say.
+
+    Three answers, and the third is the one that matters: `True` (the object is here),
+    `False` (the object database is complete and does not have it) and `None` (this
+    checkout cannot answer — a SHALLOW clone only knows the commits inside its depth).
+
+    ⛔ `False` must never be reported for a shallow checkout. `actions/checkout@v4`
+    defaults to `fetch-depth: 1`, so every CI job that does not ask for history is
+    shallow by construction, and an ancestor commit is simply absent from it — reading
+    that absence as "the recorded commit does not exist" would red every PR for a
+    correct record. The remedy for `None` is a deeper checkout, not a verdict.
+
+    `GIT_NO_LAZY_FETCH` keeps a PARTIAL (promisor) clone from trying the network inside
+    a lint: without it, `git cat-file -e` on an absent object asks the remote and the
+    failure arrives as `fatal: remote error: upload-pack: not our ref` — a transport
+    error that would be read as a verdict about the record.
+    """
+    where = ROOT if root is None else root
+    env = dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+    try:
+        probe = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=where, capture_output=True, text=True, env=env,
+        )
+    except (OSError, ValueError):  # no git binary, or an unusable argument
+        return None
+    if probe.returncode == 0:
+        return True
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=where, capture_output=True, text=True, env=env,
+    )
+    if shallow.returncode != 0:
+        return None  # not a git work tree at all: this checkout cannot answer either
+    return None if shallow.stdout.strip() == "true" else False
+
+
+def provenance_report(doc: dict, *, resolve=None, strict: bool = False) -> tuple[list[str], str | None]:
+    """#11057 review P2: the recorded `cut_at_commit` must RESOLVE, and the verdict must
+    say which question it answered.
+
+    `cut_at_commit` is excluded from the drift comparison (`NON_DERIVABLE_DOC_KEYS`) and
+    `_read_manifest` only asserts it is a non-empty string, so a baseline whose recorded
+    commit exists NOWHERE passed every gate for eight review rounds while `cmd_render`
+    published the uncheckable sha to `docs/product/mcp-sdk-surface.md` and the owner read
+    it. Measured at `3a95ee6b9`: `9542024cb…` was absent from this object database AND
+    from the remote (`upload-pack: not our ref`), while the value it replaced resolved —
+    the mechanism is `cut` writing `git rev-parse HEAD` in a lane worktree whose head was
+    then rebased away (`cut` is the one documented human step).
+
+    Returns `(problems, unprovable)`: an unresolvable commit in a COMPLETE checkout is a
+    problem (red), and a checkout that cannot answer yields no problem plus the reason, so
+    the caller can print it as a remedy instead of pretending it checked (external
+    practice: a recorded generating commit is evidence only when independently
+    resolvable; truncated history is ambiguous, never proof of absence).
+
+    `strict=True` inverts the second arm: there, UNPROVABLE is itself the problem. That is
+    for a step that guarantees its own history, so it fails CLOSED — a gate that quietly
+    degrades to a notice when someone drops `fetch-depth: 0` is a no-op gate.
+    """
+    sha = str(doc.get("cut_at_commit") or "")
+    if not sha:
+        return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
+    probe = commit_present if resolve is None else resolve
+    present = probe(sha)
+    if present is True:
+        return [], None
+    if present is None:
+        unprovable = (
+            f"`cut_at_commit` {sha} is UNPROVABLE in this checkout (shallow or partial "
+            "clone): the object database cannot answer for a commit outside its depth. "
+            "Not a verdict on the record — re-run with full history "
+            "(`git fetch --unshallow`, or `fetch-depth: 0`) to check it"
+        )
+        if strict:
+            return [f"{unprovable} — and this step requires a checkout that CAN answer"], None
+        return [], unprovable
+    return [
+        f"`cut_at_commit` {sha} does not resolve to a commit in this repository — the "
+        "baseline records a provenance commit that does not exist, so no reader can "
+        "verify it. Re-cut at a published commit (`cut --commit <sha>`), or correct the "
+        "field explicitly to one that resolves"
+    ], None
+
+
 def _read_manifest(path: Path | None = None) -> dict:
     """Read the frozen baseline, or refuse. Never returns a partial document.
 
@@ -351,6 +438,10 @@ def _read_manifest(path: Path | None = None) -> dict:
             f"{path} records no `cut_at_commit`: it must name the commit the baseline was cut "
             "at, as a non-empty string. Re-cut the baseline."
         )
+    # Whether that commit RESOLVES is a separate question, asked by `provenance_report`
+    # from `cmd_check` — deliberately NOT here: a shallow CI checkout cannot answer it,
+    # and a refusal raised from the reader would red `render`/`guard` for a record they
+    # do not own (`check` is the lint that owns provenance).
     # A DUPLICATE NAME is unverified content, not a harmless repetition. Every comparison
     # in this file — here and in tools/surface-guard.py — keys rows by NAME, so a second
     # row with an existing name is silently DROPPED: a doctored duplicate inserted before
@@ -2259,8 +2350,14 @@ def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: eleven structural properties, a twelfth derived from the code, and a
-    thirteenth: the DECLARED surface is the approved one (#10034)."""
+    """AC13's lint: eleven structural properties, a twelfth derived from the code, a
+    thirteenth that the DECLARED surface is the approved one (#10034), and a fourteenth
+    that the recorded `cut_at_commit` RESOLVES (#11057).
+
+    The fourteenth is `--provenance-strict`-gated on purpose: `check` is documented as safe
+    to run anywhere, and a `fetch-depth: 1` checkout cannot answer it — so the default arm
+    reports the reason (`::notice::`) and the one step that owns its own git depth asks for
+    the strict verdict."""
     try:
         order = load_order()
         doc = _read_manifest()
@@ -2497,6 +2594,18 @@ def cmd_check(args: argparse.Namespace) -> int:
         "`uv run python tools/sdk_surface_declaration.py check`."
     )
 
+    # 14. the recorded `cut_at_commit` RESOLVES (#11057 review P2) ---------------
+    # Property 12 skips this key (it is provenance, not a derivation) and `_read_manifest`
+    # only asserts it is a non-empty string, so an unresolvable sha was green everywhere
+    # while `render` published it to the owner. Red where the object database can answer;
+    # say so loudly where it cannot (a shallow checkout is a remedy, not a red).
+    _prov_problems, _unprovable = provenance_report(
+        doc, strict=bool(getattr(args, "provenance_strict", False))
+    )
+    problems.extend(_prov_problems)
+    if _unprovable:
+        print(f"::notice::{_unprovable}")
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
@@ -2504,7 +2613,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
-        "thirteen properties hold (eleven structural, one derived-from-code, one declared-vs-approved)"
+        "fourteen properties hold (eleven structural, one derived-from-code, "
+        "one declared-vs-approved, one provenance)"
     )
     return 0
 
@@ -2588,7 +2698,18 @@ def main() -> int:
     )
     p_cut.set_defaults(func=cmd_cut)
     sub.add_parser("render").set_defaults(func=cmd_render)
-    sub.add_parser("check").set_defaults(func=cmd_check)
+    p_check = sub.add_parser("check")
+    # #11057 review P2: `strict` is for the ONE step that owns its own git depth (a
+    # `fetch-depth: 0` checkout, run BEFORE any `--depth` fetch can mark it shallow).
+    # Every other caller keeps the default, because `check` is documented as safe to
+    # run anywhere and a shallow clone cannot answer the question at all.
+    p_check.add_argument(
+        "--provenance-strict",
+        action="store_true",
+        help="red when the recorded `cut_at_commit` cannot be PROVEN to resolve in this "
+             "checkout (a shallow clone counts as unproven, not as a pass)",
+    )
+    p_check.set_defaults(func=cmd_check)
     args = parser.parse_args()
     return args.func(args)
 
