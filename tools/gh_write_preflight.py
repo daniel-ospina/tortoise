@@ -251,6 +251,22 @@ def _fetch_url(cwd: Path) -> str:
         return ""
 
 
+def _is_credential_target(url: str) -> bool:
+    """Does a push to `url` consult a credential at all?
+
+    ⛔ A LOCAL path, a `file://` URL, or a `url.<local>.insteadOf` rewrite pushes with NO credential, so
+    a probe against it can never say anything about the credential — yet it returned exit 0 with a
+    `repo=` naming the checkout's GitHub repo (measured round 18): a false pass, and the worst kind,
+    because the gate as documented is invoked without `--repo`. scp-like `user@host:path` is a real
+    remote and does consult one.
+    """
+    u = (url or "").strip()
+    low = u.lower()
+    if low.startswith(("http://", "https://", "ssh://", "git://", "git+ssh://")):
+        return True
+    return bool(re.match(r"^[^/@]+@[^/:]+:", u))
+
+
 def _repo_from_url(url: str) -> str:
     """`https://github.com/owner/name(.git)` or `git@github.com:owner/name.git` -> `owner/name`.
 
@@ -459,6 +475,11 @@ def _cleanup(cwd: Path, targets: list[str], ref: str, timeout: int = DEFAULT_TIM
                 + (f" ({rc_err})" if rc_err else "")
             )
     return ""
+
+
+def _split_failure_detail(detail: str, push_repos: list[str]) -> str:
+    """Name the push targets on a FAILURE without claiming they were confirmed."""
+    return f"{detail} (origin pushes to {', '.join(_scrub(p) for p in push_repos)})"
 
 
 def _cleanup_failure(verdict: Verdict, detail: str) -> Verdict:
@@ -699,6 +720,14 @@ def main(argv: list[str] | None = None) -> int:
         "make the probe stricter, never weaker — a probe that cannot finish is cannot-verify",
     )
     parser.add_argument(
+        "--allow-local-target",
+        action="store_true",
+        help="permit a push target that needs NO credential (a local path / file:// / insteadOf mirror). "
+        "The probe then measures REACHABILITY of that destination and says so "
+        "(credential=NOT-EXERCISED(local-target)) — it can no longer be read as a credential verdict. "
+        "Only for fixtures and mirror setups; a lane should never need it.",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="print nothing to stdout on success (the exit code is the answer); --json still prints",
@@ -734,7 +763,7 @@ def main(argv: list[str] | None = None) -> int:
         if not push_repos or all(p.lower() == origin_repo.lower() for p in push_repos)
         else " [origin pushes to "
         + ", ".join(_scrub(p) for p in push_repos)
-        + "; each of those targets was confirmed]"
+        + "]"
     )
 
     explicit = (args.repo or "").strip()
@@ -782,8 +811,25 @@ def main(argv: list[str] | None = None) -> int:
             )
         repo = origin_repo
 
+    local_only = bool(targets) and not any(_is_credential_target(t) for t in targets)
+    if local_only and not args.allow_local_target:
+        return _emit(
+            _fail(
+                "cannot-verify:credential-not-exercised",
+                f"every push target is local ({', '.join(_scrub(t) for t in targets)}) \u2014 a push there "
+                f"uses no credential, so nothing about the credential would be measured",
+                repo=repo,
+            ),
+            json_out=args.json,
+            quiet=args.quiet,
+            cannot_verify=True,
+        )
     try:
         verdict = probe(cwd, repo, targets, timeout)
+        if local_only:
+            # prefix, never replace: the fingerprint still shows WHICH credential would have been used,
+            # but the label can no longer be read as "this credential was measured"
+            verdict.credential = "NOT-EXERCISED(local-target) " + verdict.credential
     except subprocess.TimeoutExpired as exc:
         verdict = _fail(
             "cannot-verify:timeout", f"{exc.cmd} did not answer within {timeout}s"
@@ -796,8 +842,14 @@ def main(argv: list[str] | None = None) -> int:
         verdict.detail += split_note
         return _emit(verdict, json_out=args.json, quiet=args.quiet, cannot_verify=True)
 
-    if split_note and verdict.detail:
-        verdict.detail += split_note
+    # ⛔ ONLY ON A PASS. Appending the note to a failure produced "nothing was pushed [… each of those
+    # targets was confirmed]" — a lane grepping `confirmed` read a pass out of an exit-2 run (measured
+    # round 18). And the note never claims confirmation now: the detail already says what was measured.
+    if split_note:
+        if verdict.ok and verdict.detail:
+            verdict.detail += split_note
+        elif not verdict.ok:
+            verdict.detail = _split_failure_detail(verdict.detail, push_repos)
     return _emit(
         verdict,
         json_out=args.json,
@@ -805,7 +857,11 @@ def main(argv: list[str] | None = None) -> int:
         # ⛔ `cleanup-failed` belongs here, NOT in the measured-refusal bucket: its own detail says the
         # credential CAN write (the write was measured). Exiting 1 told a lane that CAN deliver
         # "do not start" — and because each run left another probe ref behind, it would say so forever.
-        cannot_verify=verdict.reason.startswith("cannot-verify") or verdict.reason == "cleanup-failed",
+        # ⛔ `ls-remote-mismatch` belongs here too: the push exited 0, so NO credential refusal was
+        # measured — the write simply was not observable everywhere. `cleanup-failed` likewise says the
+        # credential CAN write in its own detail.
+        cannot_verify=verdict.reason.startswith("cannot-verify")
+        or verdict.reason in ("cleanup-failed", "ls-remote-mismatch"),
     )
 
 
@@ -821,13 +877,30 @@ def _emit(verdict: Verdict, *, json_out: bool, quiet: bool, cannot_verify: bool 
             print(json.dumps(verdict.as_dict(), sort_keys=True))
         return 0
 
+    # ⛔ THE FOOTER MUST MATCH THE BUCKET. It always said "fix the credential" — including for
+    # `cannot-verify:git-push-form` (a `remote.origin.mirror` problem, decided before any credential is
+    # used) and for `cleanup-failed` (whose own detail says the credential CAN write). The last line an
+    # operator reads sent them to the token page for a repo-config problem (measured round 18).
+    # ⛔ `no-remote` too: a missing origin is a repo-config problem, and nothing about the credential
+    # was measured (measured round 19 — it still sent the operator to the token page).
+    not_a_credential_verdict = (
+        cannot_verify
+        or verdict.reason.startswith("cannot-verify")
+        or verdict.reason == "no-remote"
+    )
+    footer = (
+        "  this is NOT a credential verdict — nothing about the credential was measured or the "
+        "credential was measured as able to write. Fix the repo/target state named above, then re-run."
+        if not_a_credential_verdict
+        else "  a lane must NOT start work it cannot deliver: fix the credential "
+        "(gh resolves GH_TOKEN -> GITHUB_TOKEN -> $HOME/.config/gh/hosts.yml), grant the scope named "
+        "above, or unset the shadowing variable, then re-run."
+    )
     print(
         f"GH-WRITE-UNAVAILABLE({verdict.reason}) — {_scrub(verdict.detail)}\n"
         f"  repo={_scrub(verdict.repo) or '<unresolved>'} ref={_scrub(verdict.ref) or '<none>'} "
         f"credential={verdict.credential}\n"
-        f"  a lane must NOT start work it cannot deliver: fix the credential "
-        f"(gh resolves GH_TOKEN -> GITHUB_TOKEN -> $HOME/.config/gh/hosts.yml) or unset the "
-        f"shadowing variable, then re-run."
+        f"{footer}"
     )
     if json_out:
         print(json.dumps(verdict.as_dict(), sort_keys=True))

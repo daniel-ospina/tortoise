@@ -82,7 +82,7 @@ def _run(workdir: Path, *args: str, env: dict | None = None) -> subprocess.Compl
     if env:
         run_env.update(env)
     return subprocess.run(
-        [sys.executable, str(TOOL), "--workdir", str(workdir), *args],
+        [sys.executable, str(TOOL), "--workdir", str(workdir), "--allow-local-target", *args],
         capture_output=True,
         text=True,
         timeout=300,
@@ -111,7 +111,7 @@ def _with_path(bindir: Path) -> dict:
 
 def _run_with_path(workdir: Path, bindir: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(TOOL), "--workdir", str(workdir), *args],
+        [sys.executable, str(TOOL), "--workdir", str(workdir), "--allow-local-target", *args],
         capture_output=True,
         text=True,
         timeout=300,
@@ -1462,6 +1462,77 @@ exec {GIT} "$@"
         assert mod._classify_push_failure(message) == "workflow-scope-denied", message
 
 
+def test_a_local_only_push_target_is_cannot_verify_not_a_pass(tmp_path: Path) -> None:
+    """\u26d4 MEASURED ROUND 18, and the worst kind: a push to a LOCAL path, a `file://` URL or a
+    `url.<local>.insteadOf` mirror uses NO credential, so exit 0 said nothing about the credential \u2014
+    while `repo=` named the checkout's GitHub repo. The gate as documented is invoked WITHOUT `--repo`,
+    so nothing caught it. It is now `cannot-verify:credential-not-exercised`, and the documented opt-in
+    (`--allow-local-target`) still labels the run so it cannot be misread as a credential verdict.
+    """
+    clone = _make_remote_and_clone(tmp_path)  # origin is a local path: no credential is involved
+    res = subprocess.run(
+        [sys.executable, str(TOOL), "--workdir", str(clone)],  # NO --allow-local-target
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        env=_with_path(tmp_path / "nope"),
+    )
+    combined = res.stdout + res.stderr
+    assert res.returncode == 2, f"a target that needs no credential measures none: {combined}"
+    assert "GH-WRITE-UNAVAILABLE(cannot-verify:credential-not-exercised)" in combined, combined
+
+    # the opt-in keeps the run usable, and the label says the credential was NOT exercised
+    allowed = _run(clone)
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert "credential=NOT-EXERCISED(local-target)" in allowed.stdout, allowed.stdout
+
+
+def test_the_split_note_never_claims_confirmation_on_a_failure(tmp_path: Path) -> None:
+    """\u26d4 "nothing was pushed [\u2026 each of those targets was confirmed]" \u2014 one line contradicting
+    itself, and a lane grepping `confirmed` read a pass out of an exit-2 run (measured round 18).
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    first = tmp_path / "sp1.git"
+    _git("init", "--bare", "-q", str(first), cwd=tmp_path)
+    _git("remote", "set-url", "origin", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", "http://127.0.0.1:1/dead.git", cwd=clone)
+
+    res = _run(clone)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 2, f"an unreadable pushurl measures nothing: {combined}"
+    assert "each of those targets was confirmed" not in combined, combined
+    # it must still name them, so the operator knows where to look
+    assert "origin pushes to" in combined, combined
+
+
+def test_the_footer_matches_the_bucket(tmp_path: Path) -> None:
+    """\u26d4 The footer always said "fix the credential", including for `cannot-verify:git-push-form` (a
+    `remote.origin.mirror` problem, decided before any credential is used) and for `cleanup-failed`
+    (whose detail says the credential CAN write). The last line an operator reads sent them to the
+    token page for a repo-config problem.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    _git("config", "remote.origin.mirror", "true", cwd=clone)
+    res = _run(clone)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 2, combined
+    assert "fix the credential" not in combined, f"sent to the token page for a repo problem: {combined}"
+    assert "this is NOT a credential verdict" in combined, combined
+
+    # ⛔ and `no-remote`: a checkout with no origin is a repo-config problem too (round 19)
+    bare = tmp_path / "no-origin"
+    bare.mkdir()
+    _git("init", "-q", str(bare), cwd=tmp_path)
+    res2 = _run(bare)
+    out2 = res2.stdout + res2.stderr
+    assert res2.returncode == 1, out2
+    assert "no-remote" in out2, out2
+    assert "fix the credential" not in out2, f"a missing remote is not a credential problem: {out2}"
+    assert "this is NOT a credential verdict" in out2, out2
+
+
 def test_userinfo_origin_does_not_break_the_repo_assertion(tmp_path: Path) -> None:
     """Pins the `@`/`//` anchor in `_repo_from_url`: userinfo must not become part of the identity."""
     mod = _load_tool()
@@ -1491,6 +1562,27 @@ def test_probe_ref_and_json_payload(tmp_path: Path) -> None:
     }, payload
 
 
+def test_ls_remote_mismatch_is_cannot_verify_not_a_refusal(tmp_path: Path) -> None:
+    """⛔ The push exited 0, so NO credential refusal was measured — a mismatch is not "do not start"."""
+    clone = _make_remote_and_clone(tmp_path)
+    bindir = _stub_bin(
+        tmp_path,
+        f"""#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "push" ]; then
+    case "$*" in *--delete*) exec {GIT} "$@" ;; esac
+    exit 0
+  fi
+done
+exec {GIT} "$@"
+""",
+    )
+    res = _run_with_path(clone, bindir)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 2, f"a push that exited 0 measured no refusal: {combined}"
+    assert "ls-remote-mismatch" in combined, combined
+
+
 if __name__ == "__main__":
     import inspect
     import tempfile
@@ -1513,5 +1605,7 @@ if __name__ == "__main__":
             except Exception as exc:
                 failures += 1
                 print(f"ERROR {name}: {type(exc).__name__}: {exc}")
-    print(f"\n{'FAILED' if failures else 'OK'} — {failures} failure(s)")
+    ran = sum(1 for n in globals() if n.startswith("test_"))
+    verdict_word = "FAILED" if failures else "OK"
+    print(f"\n{verdict_word} — {failures} failure(s), {ran} tests run")
     sys.exit(1 if failures else 0)
