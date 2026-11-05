@@ -131,8 +131,10 @@ def test_mutable_key_is_refused_on_cached_lookup_too(tmp_path: Path) -> None:
 
     Otherwise a poached cache file would serve mutable state as invariant.
     """
-    blob = C._envelope("pr.state", SCOPE, b"stale-merge-state", now=1000.0, ttl_s=600)
-    _entry(tmp_path, "pr.state").write_bytes(blob)
+    # `pr.state` is deliberately NOT in the registry, so its identity needs an explicit projection.
+    blob = C._envelope("pr.state", SCOPE, b"stale-merge-state", now=1000.0, ttl_s=600,
+                       projection="{id}")
+    (tmp_path / C._cache_path("pr.state", SCOPE, projection="{id}").name).write_bytes(blob)
     r = Counter()
     with pytest.raises(C.MutableReadRefused):
         _read("pr.state", now=1000.0, reader=r, cache_dir=tmp_path)
@@ -339,13 +341,21 @@ def test_envelope_scope_must_match(tmp_path: Path) -> None:
 
 
 # ── 8b/8d (was P1/P2): no key may cache a WHOLE response body ─────────────────────────────────
-def test_every_registry_key_declares_a_jq_projection() -> None:
-    """⛔ Guard 2. `runners` returns status/busy beside name/labels; `repos/<r>` returns
-    pushed_at/open_issues_count. Caching the whole body replays the mutable fields — and no key-NAME
-    check can see that, because the mutability is in the PAYLOAD."""
+def test_every_registry_key_declares_a_REAL_jq_projection() -> None:
+    """⛔ Guard 2 — about the EXPRESSION, not the flag.
+
+    ⛔ THIS TEST WAS NON-DISCRIMINATING UNTIL CYCLE 2. It asserted `"--jq" in spec.argv`, which is
+    True for `("api", "repos/{repo}", "--jq", ".")` — an identity projection that caches the WHOLE
+    body. So changing `repo.metadata`'s projection to `.` kept the fence green, i.e. the fence could
+    not fail for the bug it was written for. Every key must now project something that is not the
+    identity, and the validation must REFUSE `.`.
+    """
     for key, spec in C.INVARIANTS.items():
-        assert "--jq" in spec.argv, (
-            f"{key!r} caches a whole response body; it must project the invariant fields"
+        expr = C._projection_of(spec.argv)
+        assert expr, f"{key!r} declares an empty projection"
+        assert expr.strip() != ".", (
+            f"{key!r} declares an IDENTITY projection (`--jq .`), which caches the whole response "
+            f"body including every mutable field beside the invariant ones"
         )
 
 
@@ -358,11 +368,17 @@ def test_runner_inventory_projects_away_status_and_busy() -> None:
 
 
 def test_repo_metadata_projects_away_volatile_counts() -> None:
-    """The specific P2: a 6h TTL must not sit over pushed_at / open_issues_count."""
-    argv = C.INVARIANTS["repo.metadata"].argv
-    jq = argv[argv.index("--jq") + 1]
+    """The specific P2, with POSITIVE assertions so an identity projection cannot pass.
+
+    ⛔ Negative-only assertions were the cycle-2 finding: `jq == "."` satisfies every
+    `assert volatile not in jq`, so the test passed on exactly the payload it exists to forbid.
+    """
+    jq = C._projection_of(C.INVARIANTS["repo.metadata"].argv)
     for volatile in ("pushed_at", "updated_at", "open_issues_count", "stargazers_count"):
         assert volatile not in jq, f"{volatile} changes every push; a 6h TTL over it is a stale read"
+    # ...and it must actually NAME the invariant fields it selects.
+    for wanted in ("default_branch", "full_name", "visibility"):
+        assert wanted in jq, f"the projection does not select {wanted}, so it is not the identity read"
 
 
 def test_declare_invariant_requires_a_projection() -> None:
@@ -426,8 +442,8 @@ def test_declare_invariant_cannot_widen_an_existing_ceiling() -> None:
 
 def test_declare_invariant_may_tighten() -> None:
     key = "repo.tightenable"
-    C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "."))
-    C.declare_invariant(key, ttl_s=60, argv=("api", "x", "--jq", "."))
+    C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
+    C.declare_invariant(key, ttl_s=60, argv=("api", "x", "--jq", "{id}"))
     assert C.ttl_for(key) == 60
     C.INVARIANTS.pop(key, None)
 
@@ -480,3 +496,147 @@ def test_store_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     leftovers = [p.name for p in tmp_path.iterdir() if ".tmp." in p.name]
     assert leftovers == [], f"staged temp files were not cleaned up: {leftovers}"
     assert len(list(tmp_path.iterdir())) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 9. REGRESSION FENCE FOR THE SECOND-DRAFT (CYCLE 2) REVIEW. Each fails against the second draft.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+# ── 9a (was P1): `--jq .` passed guard 2, since only the FLAG's presence was checked ─────────
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("api", "repos/{repo}", "--jq", "."),
+        ("api", "repos/{repo}", "--jq", "   "),
+        ("api", "repos/{repo}", "--jq"),                                  # dangling, no expression
+        ("api", "repos/{repo}", "--jq=."),
+        ("api", "repos/{repo}"),                                          # no projection at all
+    ],
+)
+def test_identity_or_missing_projection_is_refused(argv: tuple[str, ...]) -> None:
+    """⛔ Guard 2 is about the EXPRESSION. `--jq .` caches the whole body; a dangling `--jq`
+    projects nothing. Both were ACCEPTED by the second draft."""
+    with pytest.raises(C.TtlNotPermitted):
+        C.declare_invariant("repo.smuggled", ttl_s=600, argv=argv)
+
+
+def test_identity_projection_cannot_replace_a_shipped_keys_projection() -> None:
+    """The sharpest form: re-declare an EXISTING key with `--jq .` and the same ceiling.
+
+    The second draft's ceiling check compared only `ttl_s`, so a shipped key's projection could be
+    silently widened to the whole body while keeping its TTL.
+    """
+    before = C._projection_of(C.INVARIANTS["repo.metadata"].argv)
+    with pytest.raises(C.TtlNotPermitted):
+        C.declare_invariant("repo.metadata", ttl_s=C.ttl_for("repo.metadata"),
+                            argv=("api", "repos/{repo}", "--jq", "."))
+    assert C._projection_of(C.INVARIANTS["repo.metadata"].argv) == before
+
+
+def test_guard2_boundary_the_module_cannot_police_projection_CONTENTS() -> None:
+    """⛔ AN HONEST BOUNDARY, stated as a test rather than left as an implied guarantee.
+
+    Guard 2 mechanically refuses an IDENTITY or EMPTY projection (that is the whole-body class).
+    It CANNOT refuse a projection that explicitly names a mutable field, because the same word
+    means different things per endpoint: `{id, path, state}` over `actions/workflows` is INVARIANT
+    (a workflow definition's enabled/disabled state), while `state` on a PR is not. A mechanical
+    scan for "state" would refuse the registry's own `repo.workflows`.
+
+    So: a projection naming a mutable field is a CODE-REVIEW matter, not a mechanical one, and this
+    test pins that the boundary is where we say it is — rather than pretending the module catches it.
+    """
+    C.declare_invariant(
+        "runner.pool", ttl_s=600,
+        argv=("api", "repos/{repo}/actions/runners", "--paginate", "--slurp",
+              "--jq", "[.[].runners[] | {name, status, busy}]"),
+    )
+    C.INVARIANTS.pop("runner.pool", None)
+
+
+def test_the_shipped_registry_does_not_name_mutable_runner_fields() -> None:
+    """What GUARANTEES the runners read is safe: the shipped projection, which a test pins."""
+    jq = C._projection_of(C.INVARIANTS["runners.inventory"].argv)
+    assert "status" not in jq and "busy" not in jq
+
+
+# ── 9b (was P2): the projection was not part of the cache identity ───────────────────────────
+def test_changing_a_projection_invalidates_the_cached_entry(tmp_path: Path) -> None:
+    """⛔ A maintenance edit to a shipped `--jq` must not serve OLD-schema entries as fresh hits.
+
+    `repo.metadata` holds for 6 h; without this, adding a field to its projection would leave every
+    caller seeing `payload["default_branch"]` as missing for six hours.
+    """
+    key = "repo.projection_probe"
+    C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
+    try:
+        r1 = Counter()
+        _read(key, now=1000.0, reader=r1, cache_dir=tmp_path)
+        assert r1.n == 1
+
+        # A second, still-valid entry under the SAME key/scope but a DIFFERENT projection.
+        C.INVARIANTS[key] = C.Invariant(ttl_s=600, argv=("api", "x", "--jq", "{id, default_branch}"))
+        r2 = Counter()
+        got = _read(key, now=1000.0 + 1.0, reader=r2, cache_dir=tmp_path)
+        assert r2.n == 1, "an entry selected by the OLD projection was served as a fresh hit"
+        assert got == b"payload-1" != b"" and got is not None
+    finally:
+        C.INVARIANTS.pop(key, None)
+
+
+# ── 9c (was P2): `--paginate` without `--slurp` was accepted for any NEW key ─────────────────
+def test_new_paginated_key_without_slurp_is_refused() -> None:
+    """R7 was pinned only for the three shipped keys; the guard itself must refuse."""
+    with pytest.raises(C.TtlNotPermitted):
+        C.declare_invariant("repo.branches", ttl_s=600,
+                            argv=("api", "repos/{repo}/branches", "--paginate", "--jq", ".[] | .name"))
+
+
+# ── 9d (was P2): mutable false NEGATIVES in the vocabulary ───────────────────────────────────
+@pytest.mark.parametrize("key", ["repo.lastPush", "repo.headRefOid", "repo.issueTotal", "repo.prstate"])
+def test_more_mutable_spellings_are_refused(key: str) -> None:
+    """`push`/`oid`/`total` were absent, and `prstate` (one glued token) had no token match."""
+    assert C._is_mutable_name(key), f"{key!r} is mutable state but was labelled invariant"
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(key, ttl_s=600, argv=("api", "x", "--jq", "{id}"))
+
+
+# ── 9e (was P2): glued-phrase matching over-matched ACROSS word boundaries ───────────────────
+@pytest.mark.parametrize("key", ["x.accurateLimit", "repo.generateLimit", "corporate.limits"])
+def test_glued_phrase_does_not_match_across_a_word_boundary(key: str) -> None:
+    """⛔ The second draft scanned the WHOLE glued key for `ratelimit`, so `accurate`+`limit`
+    matched — the same over-match class as `"run" in "runners"`, in the other direction.
+
+    The phrase table is now matched against ADJACENT TOKEN PAIRS only.
+    """
+    assert not C._is_mutable_name(key), f"{key!r} is legitimate but was refused as mutable"
+
+
+def test_rate_limit_still_refused_after_pair_matching() -> None:
+    """The pair rule must not lose the case it was built for."""
+    assert C._is_mutable_name("rate_limit.buckets")
+    assert C._is_mutable_name("ratelimit")
+
+
+# ── 9f (was P2): a global key's scope ignored the CREDENTIAL that answers it ─────────────────
+def test_global_scope_is_scoped_by_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⛔ `api user` answers "which account is this?" — decided by GH_TOKEN, which the filename
+    digest could not see. Two credentials sharing a cache dir got each other's identity for 12 h."""
+    monkeypatch.setenv("GH_TOKEN", "token-alice")
+    a = C.scope_for("user.identity", "o/r", "main")
+    monkeypatch.setenv("GH_TOKEN", "token-bob")
+    b = C.scope_for("user.identity", "o/r", "main")
+    assert a != b, "two credentials share one identity entry — wrong subject, valid envelope"
+    assert "token-alice" not in a and "token-bob" not in b, "the raw token must never reach a filename"
+
+
+def test_credential_fingerprint_is_stable_and_not_the_raw_token(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "same-token-value")
+    one = C._credential_fingerprint()
+    two = C._credential_fingerprint()
+    assert one == two
+    assert "same-token-value" not in one
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert C._credential_fingerprint() == "no-token"

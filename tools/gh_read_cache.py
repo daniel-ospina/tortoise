@@ -83,6 +83,7 @@ import argparse
 import base64
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -237,15 +238,27 @@ _MUTABLE_TOKENS: frozenset[str] = frozenset(
         "counts",
         "open",
         "prs",
+        "push",
+        "pushes",
+        "oid",
+        "total",
     }
 )
 
-# Glued phrases that carry mutable meaning ACROSS a token boundary.
-_MUTABLE_PHRASES: tuple[str, ...] = (
+# Glued phrases formed by an ADJACENT TOKEN PAIR (`rate_limit` → `ratelimit`).
+# ⛔ PAIRS, NOT A SUBSTRING SCAN. Scanning the whole glued key for these refused
+# `x.accurateLimit` and `repo.generateLimit` as mutable, because "rate"+"limit" happens to appear
+# across a word boundary — the same failure mode as `"run" in "runners"`, in the other direction.
+# Comparing each adjacent PAIR against the set admits `accurateLimit` and still refuses `rate_limit`.
+_MUTABLE_PAIRS: tuple[str, ...] = (
     "ratelimit",
     "mergestatestatus",
     "statuscheckrollup",
 )
+
+# A single token that merely ENDS with a mutable word (`prstate` → `state`) is mutable too.
+# Only words of 4+ characters participate, so `run`/`tag`/`sha`/`job` cannot over-match (`runners`).
+_MIN_GLUED_WORD = 4
 
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+")
@@ -274,19 +287,44 @@ def _tokens(key: str) -> list[str]:
 
 
 def _is_mutable_name(key: str) -> bool:
-    """Token-exact match, plus a small set of glued phrases. Never a bare substring test."""
+    """Token-exact match, plus adjacent-PAIR phrases, plus a glued suffix/prefix test.
+
+    Never a bare substring scan over the whole key: that is what refused `accurateLimit`.
+    """
     tokens = _tokens(key)
     if any(t in _MUTABLE_TOKENS for t in tokens):
         return True
-    glued = "".join(tokens)
-    return any(p in glued for p in _MUTABLE_PHRASES)
+    # Adjacent-pair phrases (`rate` + `limit`).
+    if any((a + b) in _MUTABLE_PAIRS for a, b in itertools.pairwise(tokens)):
+        return True
+    # A token gluing a mutable word on either edge (`prstate`), for words long enough to be
+    # unambiguous — this is why `run` (3) can never over-match `runners`.
+    long_words = [w for w in _MUTABLE_TOKENS if len(w) >= _MIN_GLUED_WORD]
+    for t in tokens:
+        if t in _MUTABLE_TOKENS:
+            continue
+        # A single token that IS a glued phrase (`ratelimit`, `mergestatestatus`).
+        # ⛔ Per-TOKEN, never across the whole key: `accurate`+`limit` glue to the same string from
+        # two tokens, and a whole-key scan refused it. One token can only glue what it actually is.
+        if any(phrase in t for phrase in _MUTABLE_PAIRS):
+            return True
+        for w in long_words:
+            if t.endswith(w) or t.startswith(w):
+                return True
+    return False
 
 
 def _mutable_words_in(key: str) -> list[str]:
     """The words that made a name mutable — for the refusal message, never for the decision."""
-    hits = [t for t in _tokens(key) if t in _MUTABLE_TOKENS]
-    glued = "".join(_tokens(key))
-    hits += [p for p in _MUTABLE_PHRASES if p in glued]
+    tokens = _tokens(key)
+    hits = [t for t in tokens if t in _MUTABLE_TOKENS]
+    hits += [a + b for a, b in itertools.pairwise(tokens) if (a + b) in _MUTABLE_PAIRS]
+    long_words = [w for w in _MUTABLE_TOKENS if len(w) >= _MIN_GLUED_WORD]
+    for t in tokens:
+        if t in _MUTABLE_TOKENS:
+            continue
+        hits += [ph for ph in _MUTABLE_PAIRS if ph in t]
+        hits += [w for w in long_words if t.endswith(w) or t.startswith(w)]
     return sorted(set(hits))
 
 
@@ -332,10 +370,14 @@ def declare_invariant(key: str, *, ttl_s: int, argv: tuple[str, ...]) -> None:
         )
     if not isinstance(ttl_s, int) or isinstance(ttl_s, bool) or ttl_s <= 0:
         raise TtlNotPermitted(f"ttl_s must be a positive int, got {ttl_s!r}")
-    if "--jq" not in argv:
+    # Guard 2 — the EXPRESSION, not the flag. And R7: pagination requires --slurp, so a payload is
+    # always exactly one JSON document.
+    _projection_of(argv)
+    if "--paginate" in argv and "--slurp" not in argv:
         raise TtlNotPermitted(
-            f"{key!r} declares no `--jq` projection. Caching a WHOLE response body replays whatever "
-            f"mutable fields sit beside the invariant ones (guard 2) — project the invariant fields."
+            f"{key!r} paginates without `--slurp`. `gh api --paginate` then emits one JSON document "
+            f"PER PAGE, which json.loads cannot read — so the cache would hold an unparseable blob "
+            f"for the whole TTL, on exactly the large repos where the burn is worst."
         )
     existing = INVARIANTS.get(key)
     if existing is not None and ttl_s > existing.ttl_s:
@@ -346,13 +388,47 @@ def declare_invariant(key: str, *, ttl_s: int, argv: tuple[str, ...]) -> None:
     INVARIANTS[key] = Invariant(ttl_s=ttl_s, argv=tuple(argv))
 
 
+def _projection_of(argv: tuple[str, ...]) -> str:
+    """Extract and VALIDATE the `--jq` projection (guard 2).
+
+    ⛔ GUARD 2 IS ABOUT THE EXPRESSION, NOT THE FLAG. The second review found that
+    `if "--jq" not in argv` accepted `--jq .` — an identity projection, which caches the whole
+    response body including every mutable field beside the invariant ones. So the flag's PRESENCE
+    was being checked while its MEANING was what the guard needed. A dangling `--jq` (no expression)
+    was accepted too.
+    """
+    expr = None
+    for i, a in enumerate(argv):
+        if a == "--jq":
+            if i + 1 >= len(argv):
+                raise TtlNotPermitted("a dangling `--jq` has no expression, so nothing is projected")
+            expr = argv[i + 1]
+            break
+        if a.startswith("--jq="):
+            expr = a[len("--jq="):]
+            break
+    if expr is None:
+        raise TtlNotPermitted("no `--jq` projection: a whole response body would be cached")
+    expr = expr.strip()
+    if not expr:
+        raise TtlNotPermitted("an empty `--jq` expression projects nothing")
+    if expr == ".":
+        raise TtlNotPermitted(
+            "`--jq .` is an IDENTITY projection: it caches the whole response body, including every "
+            "mutable field beside the invariant ones (status/busy on the runners endpoint, "
+            "pushed_at/open_issues_count on repos/<r>). Project the invariant fields explicitly."
+        )
+    return expr
+
+
 def _assert_every_key_projects() -> None:
-    """Import-time guard (2): no key may cache a whole body."""
+    """Import-time guard (2): no key may cache a whole body, and pagination must be slupred."""
     for key, spec in INVARIANTS.items():
-        if "--jq" not in spec.argv:
+        _projection_of(spec.argv)
+        if "--paginate" in spec.argv and "--slurp" not in spec.argv:
             raise TtlNotPermitted(
-                f"registry invariant {key!r} has no `--jq` projection, so it would cache a whole "
-                f"response body — including any mutable fields beside the invariant ones."
+                f"registry invariant {key!r} paginates without `--slurp`, so its payload is one "
+                f"JSON document PER PAGE rather than one document — unparseable by json.loads."
             )
 
 
@@ -367,28 +443,52 @@ def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "-" for c in text)
 
 
-def _filename(key: str, scope: str) -> str:
-    """Deterministic, collision-resistant, readable — and SCOPED (guard 1)."""
-    digest = hashlib.sha1(f"{scope}\x00{key}".encode()).hexdigest()[:10]
-    return f"{_CACHE_PREFIX}{_slug(key)}-{_slug(scope)[:24]}-{digest}.json"
+def _projection_digest(projection: str) -> str:
+    return hashlib.sha1(projection.encode()).hexdigest()[:12]
 
 
-def _cache_path(key: str, scope: str) -> Path:
+def _filename(key: str, scope: str, projection: str | None = None) -> str:
+    """Deterministic, collision-resistant, readable — SCOPED (guard 1) and PROJECTION-KEYED (F3).
+
+    ⛔ THE PROJECTION IS PART OF THE IDENTITY. The second review found that a routine maintenance
+    edit — adding a field to a shipped `--jq` — served entries selected by the OLD projection as
+    fresh hits: envelope valid, digest valid, age fresh, SCHEMA stale. `repo.metadata`'s TTL is 6 h,
+    so a caller would see `payload["default_branch"]` as missing for six hours after the edit. An
+    entry is therefore keyed by the projection that produced it, at the filename AND in the envelope.
+    """
+    if projection is None:
+        projection = _projection_of(INVARIANTS[key].argv)
+    payload_id = hashlib.sha1(f"{scope}\x00{key}\x00{projection}".encode()).hexdigest()[:12]
+    return f"{_CACHE_PREFIX}{_slug(key)}-{_slug(scope)[:20]}-{payload_id}.json"
+
+
+def _cache_path(key: str, scope: str, projection: str | None = None) -> Path:
     """The entry's NAME (not joined to a directory — the caller supplies cache_dir)."""
-    return Path(_filename(key, scope))
+    return Path(_filename(key, scope, projection))
 
 
-def _envelope(key: str, scope: str, payload: bytes, *, now: float, ttl_s: int) -> bytes:
+def _envelope(
+    key: str,
+    scope: str,
+    payload: bytes,
+    *,
+    now: float,
+    ttl_s: int,
+    projection: str | None = None,
+) -> bytes:
     """The stored bytes: digest over the PAYLOAD ONLY, freshness in the metadata.
 
     The split is deliberate. The digest answers *"are these the bytes that were stored?"*;
     ``stored_at`` + ``ttl_s`` answer *"are they still fresh?"*. A digest over the metadata too would
     make a rewritten ``stored_at`` look intact, which is the failure :func:`_load` exists to catch.
     """
+    if projection is None:
+        projection = _projection_of(INVARIANTS[key].argv)
     return json.dumps(
         {
             "key": key,
             "scope": scope,
+            "projection": _projection_digest(projection),
             "stored_at": float(now),
             "ttl_s": int(ttl_s),
             "sha256": hashlib.sha256(payload).hexdigest(),
@@ -398,7 +498,15 @@ def _envelope(key: str, scope: str, payload: bytes, *, now: float, ttl_s: int) -
     ).encode("utf-8")
 
 
-def _load(path: Path, key: str, scope: str, *, now: float, ttl_s: int) -> bytes | None:
+def _load(
+    path: Path,
+    key: str,
+    scope: str,
+    *,
+    now: float,
+    ttl_s: int,
+    projection: str | None = None,
+) -> bytes | None:
     """Return the payload IFF freshness is provable. Any doubt → ``None`` (a MISS)."""
     # ⛔ GUARD 3. A non-finite clock makes every comparison below meaningless, and the first draft
     # let a NaN `now` satisfy `age < ttl` AND `age >= 0` by making both false. Refuse up front.
@@ -416,6 +524,10 @@ def _load(path: Path, key: str, scope: str, *, now: float, ttl_s: int) -> bytes 
         return None
     if env.get("key") != key or env.get("scope") != scope:
         return None  # guard 1: no cross-key, no cross-scope poaching
+    if projection is None:
+        projection = _projection_of(INVARIANTS[key].argv)
+    if env.get("projection") != _projection_digest(projection):
+        return None  # F3: an entry selected by a DIFFERENT projection is a stale SCHEMA
     try:
         payload = base64.b64decode(env["payload"], validate=True)
         digest = env["sha256"]
@@ -523,10 +635,29 @@ def default_cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "gh-read-cache"
 
 
+def _credential_fingerprint() -> str:
+    """A NON-REVERSIBLE fingerprint of the token that will answer a global read.
+
+    ⛔ THE CREDENTIAL IS PART OF A GLOBAL KEY'S IDENTITY (F7). `api user` answers "which account is
+    this?", and that is decided by `GH_TOKEN`/`GITHUB_TOKEN` — which the filename digest cannot see.
+    The second review showed a bot lane and a human sharing `GH_READ_CACHE_DIR` would get EACH
+    OTHER'S identity for up to 12 h, and on this module's own topic a caller asking "which account's
+    5,000-call pool am I spending?" would get the other account's answer.
+
+    Only a truncated SHA-256 is used: it is enough to separate two credentials, and it goes into the
+    filename AND the plaintext envelope, so the raw token must never be there — a cache directory is
+    a world-readable place to leak a secret.
+    """
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    if not token:
+        return "no-token"
+    return "tok:" + hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
 def scope_for(key: str, repo: str, branch: str) -> str:
-    """Global keys are not fragmented per branch; everything else is scoped by repo AND branch."""
+    """Global keys are scoped by CREDENTIAL (not branch); everything else by repo AND branch."""
     if key in GLOBAL_KEYS:
-        return "global"
+        return f"global@{_credential_fingerprint()}"
     return f"{repo}@{branch}"
 
 
