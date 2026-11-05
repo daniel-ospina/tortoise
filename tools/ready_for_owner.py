@@ -221,41 +221,114 @@ CLEAR_VERDICT_RE = re.compile(
     r"|\b(?:verdict|outcome|result|conclusion|review|reviewed|re-?review|final)\b"
     r"[\s:*_\u2014\u2013]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
 )
-#: ⛔ A CLEAR THAT IS IMMEDIATELY RETRACTED IS NOT A CLEAR. The cue arm above asks only for the
-#: SHAPE (`verdict: CLEAN`), and a STATUS comment that talks ABOUT a past verdict satisfies that
-#: shape while asserting the OPPOSITE: *"the previous verdict: CLEAN no longer holds"*, *"the
-#: earlier verdict: CLEAN is superseded by this comment"*, *"Previous review: CLEAN, but that
-#: predates the fix request below"*, *"the record … says verdict: clean, but the head has
-#: moved"*. Each read as a CLEAR and erased an open P1 — `READY-FOR-OWNER` over a live blocker,
-#: and none of them cleared under the pre-cue `CLEAR_RE`, so the arm above made them newly
-#: reachable. The clause that FOLLOWS the phrase is what separates an assertion from a
-#: retraction, so it decides; the closed-direction lookahead on `ONE_OPEN_CUE_BEFORE_COUNT_RE`
-#: below is the same symmetry applied to the other arm.
+#: ⛔ THE SUFFIX THAT FOLLOWS THE VERDICT DECIDES WHETHER IT WAS ASSERTED OR REPORTED — and
+#: it must be read as a WINDOW, not as the next byte. `.match(text, m.end())` anchors at the
+#: character straight after the phrase, so a single `—`, `.`, `;`, `:` or closing `**` between
+#: the verdict and its retraction made the retraction INVISIBLE: `**Verdict: CLEAN** — though
+#: only before the last three commits`, `**Verdict: CLEAN.** That was the previous head`,
+#: `verdict: CLEAN - no longer holds` and `**Verdict: NO ISSUES FOUND** — except the P1 below`
+#: all cleared an open P1. `CLEAR_VERDICT_RE` already tolerates an em dash in its OWN separator,
+#: so the file knows punctuation sits there. Read the REST OF THE LINE (`_retracted_from`).
 #:
-#: The separator class above also drops the ASCII hyphen: `reviewed-clean` is a COMPOUND
-#: ADJECTIVE describing a branch or a head (#10938's status comment: *"`efe6da47d` is that
-#: branch's reviewed-clean head"*), never a declaration — and it was matching as one.
-_CLEAR_RETRACTED_RE = re.compile(
-    r"(?is)\s*,?\s*(?:"
-    r"but\b|however\b|though\b|although\b|yet\b"
-    r"|(?:is|was|are|were|has|have|had)?\s*(?:now\s+)?(?:no\s+longer|not)\b"
-    r"|(?:is|was|are|were)\s+(?:superseded|stale|outdated|obsolete|invalid|wrong)\b"
-    r"|(?:superseded|stale|outdated|obsolete|invalid)\b"
-    r"|predat(?:e|es|ed|ing)\b"
-    r")"
+#: The categories, not the spellings — a guard written against one phrasing leaves its
+#: neighbours open:
+#:   1. the verdict is said to no longer hold / to be superseded;
+#:   2. it is attributed to a DIFFERENT artifact (a previous head, review, round, record);
+#:   3. it is qualified by a live exception (`except`, `apart from`, `unless`, `subject to`);
+#:   4. the suffix still declares an open severity — a bare `P0|P1|P2` token, which every one
+#:      of the reported false passes carried and no legitimate clear form in this repo's corpus
+#:      does unnegated (`no P1` / `without P1` / `none of the P1` are excluded).
+#:
+#: ⛔ AND DO NOT REJECT ON A BARE CONTRASTIVE (`but`, `however`, `though`, `yet`):
+#: `Verdict: CLEAN, but three P3 nits recorded.` and `Verdict: CLEAN though I noted two P3
+#: nits.` are CLEARS — a P3 is not a blocker — and an earlier draft of this guard refused both.
+_RETRACTION_RULES_1_TO_3 = (
+    # (1) no longer the case
+    r"no\s+longer\b"
+    r"|(?:is|was|are|were)\s+(?:now\s+)?not\b"
+    r"|(?:is|was|are|were)\s+(?:now\s+)?(?:superseded|stale|outdated|obsolete|invalid|wrong|moot)\b"
+    r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
+    r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
+    # (2) attributed to another artifact / a former state of this one
+    r"|(?:previous|earlier|prior|old)\s+(?:head|record|round|assessment|verdict|review)\b"
+    r"|that\s+(?:was|is)\s+the\s+(?:previous|earlier|prior|old)\b"
+    r"|only\s+(?:before|until|as\s+of)\b|before\s+the\s+(?:last|previous|latest)\b"
+    # (3) a live exception to the clear
+    r"|except\b|apart\s+from\b|other\s+than\b|aside\s+from\b|besides\b"
+    r"|unless\b|subject\s+to\b|provided\s+that\b"
+    # (4) a still-live finding, declared in words
+    r"|unfixed\b|unaddressed\b|still\s+open\b|remains?\s+open\b|not\s+fixed\b"
 )
+#: Rule (4)'s SEVERITY arm — kept separate because a negation word in the suffix has to exempt
+#: it (see `_NEGATED_SUFFIX_RE`), while rules (1)–(3) must keep applying in both cases.
+_RETRACTION_SEVERITY = r"|\bP[0-2]\b"
+#: ⛔ A NEGATION WORD OR A COMPLETION EXEMPTS THE SEVERITY ARM, NOT THE WHOLE GUARD. A severity
+#: token under a negation word is the CLEAR spelling (`no P0/P1/P2 findings; three P3 nits
+#: noted`, `without P1`), and so is one under a COMPLETION (`The two P2 findings are closed`,
+#: `all P1 findings were fixed`) — the tokens sit in SLASH LISTS and in plural sentences, so a
+#: per-token lookbehind cannot see the word that governs them. When either is present the
+#: severity arm stands down and rules (1)–(3) still decide, so `CLEAN. No blocking findings;
+#: the P1 remains open` is still caught by `remains open`.
+_SUFFIX_EXEMPTION_RE = re.compile(
+    r"(?i)(?:\b(?:no|without|zero|none)\b"
+    r"|(?:is|are|was|were|has|have|had)\s+(?:now\s+)?(?:closed|fixed|resolved|addressed)\b)"
+)
+_CLEAR_RETRACTED_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + _RETRACTION_SEVERITY + r")")
+_RETRACTION_NO_SEVERITY_RE = re.compile(r"(?i)(?:" + _RETRACTION_RULES_1_TO_3 + r")")
+#: ⛔ A VERDICT ATTRIBUTED TO ANOTHER ARTIFACT IS A CITATION, AND A CITATION MAY HAVE NO SUFFIX
+#: AT ALL: `Previous review: CLEAN.` reports a past verdict and stops, leaving the window above
+#: nothing to find — the PREAMBLE is then the only signal. Read the rest of the LINE before the
+#: match, so an honest clear elsewhere in the same body still counts (`asserts_a_clear` returns
+#: True on ANY unretracted match).
+_ATTRIBUTED_BEFORE_RE = re.compile(
+    r"(?i)(?:\b(?:previous|earlier|prior|last|old)\s+(?:review|verdict|round|record|head|assessment)\b"
+    r"|\bthe\s+record\b|\bsays?\b|\breturned\b|\bhad\s+been\b)"
+)
+
+
+def _retracted_from(text: str, end: int) -> bool:
+    """True when the REST OF THE LINE after ``end`` retracts, attributes or qualifies the clear."""
+    line_end = text.find("\n", end)
+    suffix = text[end : line_end if line_end != -1 else len(text)]
+    if _SUFFIX_EXEMPTION_RE.search(suffix):
+        # The severity arm stands down under a negation or a completion; rules (1)–(3) still decide.
+        return bool(_RETRACTION_NO_SEVERITY_RE.search(suffix))
+    return bool(_CLEAR_RETRACTED_RE.search(suffix))
+
+
+def _attributed_before(text: str, start: int, end: int) -> bool:
+    """True when the SAME LINE up to ``end`` attributes the verdict to another artifact.
+
+    The window ends at the MATCH'S END, not its start: `CLEAR_VERDICT_RE`'s cue arm matches
+    from the cue word, so `Previous review: CLEAN.` starts matching at `review` — a window
+    ending at `start` sees only `Previous ` and the attribution word is the very next token.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    return bool(_ATTRIBUTED_BEFORE_RE.search(text[max(line_start, end - 90) : end]))
 
 
 def asserts_a_clear(text: str) -> bool:
     """True when ``text`` ASSERTS a clean verdict — not when it cites, negates or supersedes one.
 
     Every match is checked, not just the first: a body may cite a retracted verdict in one
-    clause and assert its own in another, and the assertion is what counts.
+    clause and assert its own in another, and the assertion is what counts. Both directions are
+    graded — the suffix window (a retraction) and the same-line preamble (an attribution) —
+    because a citation can carry neither, one, or both.
+
+    ⛔ KNOWN RESIDUAL, deliberate: a verdict on its own line followed by a BLANK line and then a
+    retraction (`verdict: CLEAN\n\nthe head has since moved`) still clears — the suffix window
+    is one line, and widening it to the next paragraph refuses the real
+    `**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.`, which is the false-block direction with
+    measured history in this file (#10962). The realistic form of that status comment names its
+    source (`The record says verdict: CLEAN`), and the preamble arm catches it.
     """
-    return any(
-        not _CLEAR_RETRACTED_RE.match(text, m.end())
-        for m in CLEAR_VERDICT_RE.finditer(text)
-    )
+    for m in CLEAR_VERDICT_RE.finditer(text):
+        if _retracted_from(text, m.end()):
+            continue
+        if _attributed_before(text, m.start(), m.end()):
+            continue
+        return True
+    return False
 
 #: A CAPPED / ABORTED / DECLARED-NEGATIVE review exit. ⛔ THE VOCABULARY IS COPIED FROM
 #: `scripts/record-review.sh`, NOT INVENTED HERE: it is that script's arms (1) and (1b) —

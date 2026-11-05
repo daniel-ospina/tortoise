@@ -755,6 +755,30 @@ def test_a_status_comment_that_only_CITES_a_clean_verdict_cannot_close_an_open_P
     assert "last-clear=-" in check.raw, check.raw
 
 
+def test_the_clear_guard_grades_both_directions_on_its_own() -> None:
+    """The severity exemptions are only reachable on `asserts_a_clear` itself.
+
+    `check_blocking_finding` OR's `_grades_as_blocking` with the clear test and evaluates the
+    finding arm FIRST, so a body that names a severity is a finding however clean its verdict
+    is — `Reviewer verdict: NO ISSUES FOUND. The two P2 findings are closed.` can never reach
+    the clear test through the check. The completion/negation exemptions on the severity arm
+    therefore need a direct probe, or they are unexercised code.
+    """
+    # negative → the exemptions stand the severity arm down, and nothing else retracts
+    for body in (
+        "Reviewer verdict: NO ISSUES FOUND. The two P2 findings are closed.",
+        "Outcome: CLEAN — no P0/P1/P2 findings; three P3 nits noted.",
+    ):
+        assert rfo.asserts_a_clear(body) is True, body
+    # …and standing the severity arm down does NOT stand down the retraction rules (1)–(3)
+    for body in (
+        "**Verdict: CLEAN.** No blocking findings; the P1 remains open.",
+        "verdict: CLEAN, apart from the P2 in the guard.",
+        "**Verdict: CLEAN.** No P1 — the previous head is stale.",
+    ):
+        assert rfo.asserts_a_clear(body) is False, body
+
+
 def test_a_verdict_HEADER_still_closes_a_finding() -> None:
     """…and the fix must not over-correct: a verdict SHAPE still clears (the #10962 direction).
 
@@ -769,6 +793,17 @@ def test_a_verdict_HEADER_still_closes_a_finding() -> None:
         "Reviewer verdict: NO ISSUES FOUND",
         "Re-review: NO ISSUES FOUND at the new head.",
         "> NO ISSUES FOUND",
+        # ⛔ THE GUARD MUST NOT OVER-CORRECT — these are CLEARS, and each was wrongly refused
+        # by an earlier draft of the retraction guard. A P3 is not a blocker, so a bare
+        # CONTRASTIVE (`but`/`though`/`yet`) may not reject; a NEGATED severity list is the
+        # clear spelling; and a COMPLETION after the severity means the finding is gone.
+        "Verdict: CLEAN, but three P3 nits recorded.",
+        "Verdict: CLEAN though I noted two P3 nits.",
+        "Verdict: CLEAN, yet 2 P3 nits remain.",
+        "Outcome: CLEAN — no P0/P1/P2 findings; three P3 nits noted.",
+        "**Verdict: CLEAN — no blocking issue found.**",
+        "**Verdict: CLEAN.**\nFixed the P1 in 4f450ae81.",
+        "**Outcome: CLEAN.** remaining: 1 P1 was fixed and verified.",
     ):
         comments = [
             {
@@ -815,6 +850,29 @@ def test_a_verdict_that_is_RETRACTED_in_the_same_sentence_cannot_close_a_finding
         "…(`efe6da47d` is that branch's reviewed-clean head).",
         # E — a status comment ABOUT a stale record
         "The record at `4f450ae81` says verdict: clean, but the head has moved.",
+        # F1–F3 — PUNCTUATION between the verdict and its retraction. An earlier draft
+        # anchored the guard at the byte after the phrase, so `—`, `.`, `;`, `:` or a closing
+        # `**` made the retraction invisible; all three cleared an open P1.
+        "**Verdict: CLEAN** — though only before the last three commits.",
+        "**Verdict: CLEAN.** That was the previous head; the P1 below is unfixed.",
+        "verdict: CLEAN - no longer holds after the P1.",
+        "review: CLEAN; that assessment is now stale.",
+        # F4/F15 — a live EXCEPTION to the clear is not a clear
+        "**Verdict: NO ISSUES FOUND** — except the P1 below.",
+        "verdict: CLEAN, apart from the P2 in the guard.",
+        # F5/F6/F10/F14 — the verdict is ATTRIBUTED to another artifact, and may carry NO
+        # suffix at all (`Previous review: CLEAN.`), so the preamble is the only signal.
+        "Previous review: CLEAN.",
+        "the previous verdict: CLEAN (superseded below)",
+        "**Verdict: CLEAN** was returned at the previous head.",
+        "Previous round: NO ISSUES FOUND",
+        # F7/F9 — a conditional clear
+        "outcome: CLEAN, subject to the open P1",
+        "conclusion: CLEAN unless the P1 is unaddressed",
+        # F12 — a reported verdict plus a live severity
+        "the last review concluded: NO ISSUES FOUND, but a P1 landed since.",
+        # F13 — the negation word sits on the FINDING, not on the severity token
+        "**Verdict: CLEAN.** No blocking findings; the P1 remains open.",
     ):
         comments = [
             {

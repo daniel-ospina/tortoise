@@ -1242,13 +1242,15 @@ def cmd_pin(args: argparse.Namespace) -> int:
         # only thing telling that operator where to go instead is this message).
         #
         # ⛔ AND A LANE'S OWN SUBDIRECTORY NEVER REACHES THIS REFUSAL AT ALL: `_lane_root`
-        # (`:1175`) answers a LINKED worktree's subdirectory as that LANE, so `pin` from
-        # `<lane>/build` returns rc 0 above and never gets here. So the MAIN arm is the one
-        # that fires in practice, and the `else` is the DEFENSIVE branch (`not at_root`, or a
-        # future `_lane_root` shape) — not a second live remedy. The `_is_main_worktree` call
-        # repeats the answer `_lane_root` already computed; it is kept rather than threaded
-        # through because this path exits immediately (rc 2, or 3 on an unreadable answer),
-        # so a second `rev-parse` costs nothing and keeps `_lane_root`'s signature honest.
+        # answers a LINKED worktree's subdirectory as that LANE (its final
+        # `_is_main_worktree` return), so `pin` from `<lane>/build` returns rc 0 above and
+        # never gets here. So the MAIN arm is the one that fires in practice, and the `else` is
+        # the DEFENSIVE branch (`not at_root`, or a future `_lane_root` shape) — not a second
+        # live remedy. (The predicate is named, not cited by line: a line number here would rot
+        # on the next insertion above it.) The `_is_main_worktree` call repeats the answer
+        # `_lane_root` already computed; it is kept rather than threaded through because this
+        # path exits immediately (rc 2, or 3 on an unreadable answer), so a second `rev-parse`
+        # costs nothing and keeps `_lane_root`'s signature honest.
         if at_root and _is_main_worktree(Path(at_root).resolve()):
             whose = f"the MAIN worktree {at_root}"
             label = "a key of its own"
