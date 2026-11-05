@@ -3208,15 +3208,35 @@ class DuplicateManifestKeyError(ValueError):
     touched ``durations`` unions the two blocks as TEXT, so the map ends up
     holding a stale row beside the refreshed one and the parser keeps whichever
     came second (#10717). Measured 2026-11-03 on #10790: merging ``origin/main``
-    produced **24** duplicate keys, and ``--integrity`` still printed
-    ``✅ integrity: all test files classified`` — because the duplicates are
-    gone by the time any check sees a dict. One of them silently reverted the
-    PR's own ``test_mcp_bridge.py`` weight (23.8 -> 2.0), which is the exact
-    "false PASS" shape a gate exists to prevent.
+    produced **24** duplicate keys. One of them silently reverted the PR's own
+    ``test_mcp_bridge.py`` weight (23.8 -> 2.0) — the exact "false PASS" shape a
+    gate exists to prevent.
 
-    So the refusal belongs at the PARSE, not in a check composed onto a dict
-    that has already lost the information: every reader of this file gets it,
-    and no future entry point can be half-wired.
+    ⛔ What was green on that map is narrower than "the gate", and the two
+    guards that both see this shape are NOT redundant (state corrected after the
+    #10790 review, which measured it): the ``ci_selection.py --integrity``
+    STEP exited 0, and so did the ``mergify_config_guard`` step beside it. The
+    SAME ``manifest-integrity`` job also runs ``tools/registry_integrity.py``,
+    which reads with ``yaml.compose`` (BEFORE any constructor collapses the
+    keys) and **would have reddened those 24 keys** — ``.gitattributes:9-20``
+    names it as the validator the ``merge=union`` contract is paired with.
+
+    So this refusal is the SECOND verdict on one hazard, and it is deliberately
+    kept rather than deduplicated, because the two reach different readers:
+
+    * ``tools/registry_integrity.py`` (compose-level, any depth, both unioned
+      registries) is the authority for *"is the committed file legal"*, and it
+      is what catches a duplicate nobody parses in this process;
+    * this parse is the authority for *"what did the reader that CONSTRUCTS the
+      mapping actually get"* — every in-tool reader
+      (``load_manifest``/``--integrity``, ``ci_manifest._load``,
+      ``ci_timing._manifest_of``'s pre-write gate) reaches it by construction,
+      so it cannot be half-wired by a future entry point, and it is the only
+      one of the two that runs BEFORE an edit is written.
+
+    The cost of keeping both is one cheap check per parse; the cost of dropping
+    this one is that the pre-write gate validates a dict the packer will not
+    use.
     """
 
     def __init__(self, issues: list[str]) -> None:
@@ -3286,12 +3306,19 @@ def _duplicate_key_loader():
 def parse_manifest_text(text: str) -> dict:
     """The manifest text as a mapping, refusing a duplicate mapping key.
 
-    THE one place ``config/ci-surfaces.yml`` is parsed. Raising here rather
-    than returning issues is deliberate: an issue list is something a caller
-    must remember to compose (``ci_manifest.map_issues`` is hand-maintained for
-    exactly that reason, and its own docstring records the drift it has already
-    suffered), while an exception cannot be forgotten by a reader that was
-    never written.
+    The parse every IN-TOOL reader of ``config/ci-surfaces.yml`` goes through
+    (``load_manifest``/``--integrity``, ``ci_manifest._load``, and
+    ``ci_timing._manifest_of`` — the refresher's pre-write gate). It is not the
+    only place the file is read in CI: ``tools/registry_integrity.py`` reads it
+    with ``yaml.compose`` and is the authority for "is the committed file
+    legal"; see ``DuplicateManifestKeyError`` for which guard answers which
+    question and why both are kept.
+
+    Raising here rather than returning issues is deliberate: an issue list is
+    something a caller must remember to compose (``ci_manifest.map_issues`` is
+    hand-maintained for exactly that reason, and its own docstring records the
+    drift it has already suffered), while an exception cannot be forgotten by a
+    reader that was never written.
     """
     loader = _duplicate_key_loader()(text)
     try:
@@ -3865,9 +3892,14 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
 
 
 def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
-    """Load + register in one call (CLI entry)."""
-    import yaml
-    manifest = _normalize_surfaces(yaml.safe_load(manifest_path.read_text()))
+    """Load + register in one call (CLI entry).
+
+    The load is ``parse_manifest_text`` and not a bare ``yaml.safe_load``
+    (#10790 review 1): a manifest whose map already collapsed a duplicate must
+    refuse rather than be edited around a stale row, exactly as every other
+    in-tool reader does.
+    """
+    manifest = _normalize_surfaces(parse_manifest_text(manifest_path.read_text()))
     return register_tests(manifest_path, tests_dir, surface, manifest)
 
 

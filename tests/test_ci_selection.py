@@ -5561,25 +5561,36 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     assert "core: test_a.py" in capsys.readouterr().out
 
 
-# ── #10790: a duplicate YAML MAPPING key, the class #5373 cannot see ─────
+# ── #10790: a duplicate YAML MAPPING key at the PARSE ───────────────────
 # #5373 (above) reddens a file listed twice WITHIN one surface — a duplicate the
 # parsed dict still expresses. A duplicate *mapping key* is invisible by the
 # time any check holds a dict: `yaml.safe_load` keeps only the LAST value of a
 # repeated key (pyyaml 6.0.3 `BaseConstructor.construct_mapping` is
 # `mapping[key] = value`, and its own comment says it does not check duplicates
 # because that is "too CPU-expensive"), so the earlier row is gone before a
-# validator can ask about it. YAML itself forbids the shape (1.2.2 §3.2.1.3,
-# "each of the keys is unique"), and `yamllint` ships `key-duplicates: enable`
-# in its DEFAULT rule set for exactly this reason.
+# dict-level validator can ask about it. YAML itself forbids the shape (1.2.2
+# §3.2.1.3, "each of the keys is unique"), and `yamllint` ships
+# `key-duplicates: enable` in its DEFAULT rule set for exactly this reason.
+#
+# ⛔ This is NOT "the class #5373 cannot see", and the earlier wording here
+# claimed that wrongly (#10790 review 1, measured). `tools/registry_integrity.py`
+# IS the #5373 pair for `merge=union` and it reads with `yaml.compose`, i.e.
+# before any constructor collapses the keys, so it sees a duplicate mapping key
+# at ANY depth in both unioned registries. It runs in the SAME
+# `manifest-integrity` job as `ci_selection.py --integrity`, one step later, and
+# a duplicate `durations` key reddens it. What the arms below pin is the OTHER
+# half: the parse every in-tool reader constructs its dict through, including
+# the refresher's pre-write gate — the only one of the two that can refuse
+# BEFORE an edit is written. Both are kept deliberately; see
+# `DuplicateManifestKeyError`'s docstring for which answers which question.
 #
 # It is not a theoretical shape: `config/ci-surfaces.yml` carries
 # `merge=union`, and MEASURED 2026-11-03 on #10790, merging `origin/main` into
 # the branch produced TWENTY-FOUR duplicate `durations` keys — each a stale
-# pre-refresh row beside main's refreshed twin — while `--integrity` printed
-# `✅ integrity: all test files classified`. One of them silently reverted the
-# PR's own `test_mcp_bridge.py` weight from 23.8 to 2.0, because its stale
-# duplicate happened to be the LAST one. The gate was green on a map whose
-# weights were not the ones the packer would use.
+# pre-refresh row beside main's refreshed twin. One of them silently reverted
+# the PR's own `test_mcp_bridge.py` weight from 23.8 to 2.0, because its stale
+# duplicate happened to be the LAST one: the map every constructing reader built
+# from the merged file did not hold the weights the packer would have used.
 
 
 def _text_with_a_duplicated_durations_row(path: Path) -> tuple[str, str]:
@@ -5681,14 +5692,51 @@ def test_the_writer_refuses_to_render_a_duplicate_mapping_key():
 def test_the_real_manifest_has_no_duplicate_mapping_key():
     """The live pin: this file must parse under the strict loader.
 
-    At the #10790 merge head this was RED (24 duplicates) while `--integrity`
-    was green, so it is the arm that would have caught the union merge.
+    At the #10790 merge head this was RED (24 duplicates) while the
+    `ci_selection.py --integrity` step was green, so it is the arm that would
+    have caught the union merge at the parse.
     """
     from tools import ci_selection as cs
 
     manifest = cs.parse_manifest_text(cs.MANIFEST.read_text())
     assert manifest["durations"], "the durations map must not be empty"
 
+
+def test_both_duplicate_key_guards_see_it_and_the_registrar_reaches_one(
+        tmp_path):
+    """#10790 review 1: the two guards are PEERS, and neither is bypassed.
+
+    The docstrings used to claim this hazard was "the class #5373 cannot see"
+    and that this parse was "THE one place the file is parsed". Both were
+    false: `tools/registry_integrity.py` reads with `yaml.compose` and catches
+    the same duplicate in the SAME `manifest-integrity` job. This arm keeps the
+    corrected claim true in both directions — the sibling gate really does
+    catch it, and no CLI entry point (the registrar) loads around the strict
+    parse.
+
+    Non-vacuity: before `register()` used `parse_manifest_text`, the last block
+    below did not raise — `yaml.safe_load` accepted the collapsed map and the
+    registration proceeded against the wrong weights.
+    """
+    from tools import ci_selection as cs
+    from tools.registry_integrity import check_registry
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    path = tmp_path / "dup-ci-surfaces.yml"
+    path.write_text(poisoned)
+
+    # 1. the sibling gate (`manifest-integrity`, one step later in the job)
+    problems = check_registry(path)
+    assert problems, "registry_integrity must see a duplicate mapping key"
+    assert repr(key) in problems[0] or key in problems[0], problems
+
+    # 2. the parse every in-tool reader constructs its dict through
+    with pytest.raises(cs.DuplicateManifestKeyError):
+        cs.parse_manifest_text(poisoned)
+
+    # 3. the CLI registrar, which is an in-tool reader too
+    with pytest.raises(cs.DuplicateManifestKeyError):
+        cs.register(path, tmp_path, "core")
 
 # A YAML merge key (`<<:`) makes a key appear TWICE in the node pyyaml hands the
 # constructor: `flatten_mapping` PREPENDS the merged pairs, so the document's own
