@@ -598,10 +598,21 @@ def test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes(
     repository the operator stands in — could return through any call site, green.
 
     This runs the real `main()` end to end with `--repo` and asserts EVERY `gh` argv
-    it produced carries the flag. Non-vacuity: set any one call site's repo to
-    `None` and this reds naming that argv.
+    it produced carries the flag, plus the repo handed to the two seams that take it
+    as an argument rather than through `_gh` (`fetch_fold`, `constituent_refs`). The
+    LABEL-ONLY path is a separate call site reachable only under that flag, so it
+    gets its own run — without it, `--label-only --repo other/repo` could write the
+    entry-gate label into same-numbered PRs elsewhere, green.
+
+    Non-vacuity: set any one call site's repo to `None` and this reds.
     """
-    monkeypatch.setattr(bo, "fetch_fold", lambda n, repo=None: (0, "f" * 40, "fold-br", "body"))
+    seen_fold: list[str | None] = []
+
+    def _fetch_fold(n, repo=None):
+        seen_fold.append(repo)
+        return 0, "f" * 40, "fold-br", "body"
+
+    monkeypatch.setattr(bo, "fetch_fold", _fetch_fold)
     monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
     seen_refs: list[str | None] = []
 
@@ -625,6 +636,17 @@ def test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes(
                   "--apply", "--constituent", "101"])
     assert rc == 0, rc
     assert seen, "main() made no gh call at all, so the assertion below is vacuous"
+    apply_calls = len(seen)
+
+    # The `--label-only` arm hands `args.repo` to `_gh` through its OWN closure
+    # (`gh=lambda argv: _gh(argv, args.repo)`), so the close path above cannot
+    # observe it: only a label-only run reaches it.
+    rc = bo.main(["--fold", "900", "--repo", "other-org/other-repo",
+                  "--label-only", "--constituent", "101"])
+    assert rc == 0, rc
+    assert len(seen) > apply_calls, (
+        "--label-only made no gh call, so its call site is still unpinned")
+
     wrong = [argv for argv in seen if argv[-1] != repr("other-org/other-repo")]
     assert not wrong, (
         "a `gh` call under `--repo other-org/other-repo` was made against a "
@@ -632,6 +654,10 @@ def test_main_threads_a_named_repo_into_EVERY_gh_call_it_makes(
     )
     assert seen_refs and all(r == "other-org/other-repo" for r in seen_refs), (
         f"constituent_refs was not handed the named repo: {seen_refs}"
+    )
+    assert seen_fold == ["other-org/other-repo"] * len(seen_fold), (
+        "fetch_fold was not handed the named repo, so the fold body would be read "
+        f"from whatever repo the operator stands in: {seen_fold}"
     )
 
 
