@@ -229,9 +229,24 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured: 131 files for the STORAGE diff (`onboarding`), 60 for the
-    EXTRACTOR diff (empty surfaces, the early return); the gate is in the
-    selected set in both, and dropping the `tier1` row removes it from both.
+    Measured at this head: 150 files for the STORAGE diff, 73 for the EXTRACTOR
+    diff (empty surfaces, the early return); the gate is in the selected set in
+    both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
+    measurements, not constants, and they move for DIFFERENT reasons:
+
+    * the **150** is `onboarding` ∪ `tier1` **minus 14** — the union is 164 at
+      this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
+      `uri_requiring` files, so it is the union minus those, never the union;
+    * the **73** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool", which is 1094 here.
+      The `60` this sentence carried was that same `tier1` set **13 rows ago**
+      (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
+      and 73 here), i.e. the very "a past state quoted as a current one"
+      defect the line below warns about.
+
+    Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
+    trusting either — the assertions below are the pin, this
+    sentence is a note.
     """
     storage = _sel(["docs/architecture/STORAGE-ARCHITECTURE.md"])
     assert storage["surfaces"] == ["onboarding"], storage["surfaces"]
@@ -241,6 +256,21 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+    # #10980 review (P2): the §9.4/§12.1b source-vector pin lives in the
+    # narrative-home module, and it guards the SAME document — so a STORAGE-only
+    # diff must reach it. Before that row it reached the module in NO arm
+    # (`core`/`api` both need a Python path; this diff matches `onboarding`),
+    # i.e. the pin would have been green on every real question asked of it.
+    # Asserted here rather than trusted to the row's comment: a row that is
+    # present but no longer SELECTS is the failure #9778 measured.
+    assert "test_9555_narrative_carrier.py" in storage["test_files"], (
+        "a `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff no longer "
+        "selects `test_9555_narrative_carrier.py` — the §9.4/§12.1b "
+        "source-vector pin (and the §9.1 narrative-home pins beside it) would "
+        "be asleep on the only diff class that can re-scatter the claim "
+        "(#10980 review P2, the #4309 silent-drop class)"
+    )
 
 
 def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
@@ -14121,26 +14151,6 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
-def test_gh_write_preflight_runs_on_a_tools_only_change():
-    # #10930: `tests/test_gh_write_preflight.py` (registered `core`) pins
-    # `tools/gh_write_preflight.py` — the credential write-capability gate wired
-    # as a HARD RULE in AGENTS.md, whose weakening (adding 200 to `_WRITE_OK`,
-    # dropping `_validate_api_base`, deleting the contents probe) turns a refusal
-    # into a FALSE PASS. `tools/` is a flat NON_PYTHON_PREFIXES entry and the
-    # tool matches no SOURCE_PATTERNS row, so before the CORE_ALSO entry a
-    # preflight-only diff was filtered out BEFORE the "not matched -> core"
-    # fallback and selected NO surface at all: the gate's own pins never ran on
-    # the file they hold (the #1349/#3332/#3616 silent-drop class).
-    # Mutation check: removing the CORE_ALSO entry fails the arm below
-    # (surfaces == [] and the suite absent from test_files); dropping
-    # `test_gh_write_preflight.py` from the manifest's `core` test list fails the
-    # last arm.
-    r = _sel(["tools/gh_write_preflight.py"])
-    assert r["full"] is False, r
-    assert r["surfaces"] == ["core"], r
-    assert "test_gh_write_preflight.py" in r["test_files"], r
-
-
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
@@ -14173,6 +14183,25 @@ def test_purge_legacy_turns_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_10017_purge_guard.py" in r["test_files"], r
+
+
+def test_gh_write_preflight_runs_on_a_tools_only_change():
+    # #10930: `tests/test_gh_write_preflight.py` (registered `core`) pins the lane's
+    # credential-write gate — the three zero-side-effect probes, `_WRITE_OK = (422,)`
+    # alone, the one-item `not-permitted` allow-list, and every redaction arm. `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry and `tools/gh_write_preflight.py` matches no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entry a tools-only diff was filtered
+    # out BEFORE the "not matched -> core" fallback: a PR that added `200` to
+    # `_WRITE_OK`, dropped `_validate_api_base` or deleted the contents probe would run
+    # `python-ci-gate` GREEN with none of the gate's own pins (the #1349/#3332/#3616
+    # silent-drop class) — and the consequence of that one is a FALSE PASS of the
+    # credential gate, i.e. category A.
+    # Mutation check: removing the CORE_ALSO entry fails the arms below
+    # (surfaces == [] and the pin absent from test_files).
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
 
 
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():

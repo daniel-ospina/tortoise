@@ -461,11 +461,13 @@ def _token_from_hosts() -> tuple[str, str]:
 def resolve_credential() -> tuple[str, str]:
     """Return (token, source). `source` is a LABEL, never a value.
 
-    This is the credential **`gh`** resolves (the `objective.py` / `pr-doctor.py` chain). It is NOT
-    necessarily the credential `git` uses — `git` reads `credential.helper`, which can hold a
-    different or older PAT, or be unset. `exit 0` therefore means "this token can write", not
-    "this box's `git push` will be accepted"; see the module docstring's
-    "WHAT THE VERDICT DOES NOT COVER" note.
+    Residual, stated rather than implied (review finding P2-3): this resolves the credential **`gh`**
+    uses — `GH_TOKEN`, `GITHUB_TOKEN`, then the config file. It says nothing about the credential
+    **`git`** uses: a `credential.helper` of `store`/`osxkeychain`, or an unset one, can hold a
+    different (or no) token, so a pass here does not by itself prove the credential a `git push`
+    presents. AGENTS.md's rule carries the matching clause — "provided `git` resolves the same
+    credential" — rather than claiming more than this measures. See the module docstring's
+    "WHAT THE VERDICT DOES NOT COVER" note for the full shape of that gap.
     """
     host = (os.environ.get("GH_HOST") or "github.com").strip().lower()
     if host in ("github.com", "api.github.com"):
@@ -475,7 +477,7 @@ def resolve_credential() -> tuple[str, str]:
                 return tok, f"env:{var}"
     tok, _login = _token_from_hosts()
     if tok:
-        # ⛔ THE LABEL MUST NOT CARRY FILE CONTENT (review cycle 15). `login` is the depth-1 `user:` line —
+        # ⛔ THE LABEL MUST NOT CARRY FILE CONTENT (review cycle 15). `_login` is the depth-1 `user:` line —
         # arbitrary text in the file — so a prefix-less legacy value there survived both the value scrub
         # (it is not the resolved token) and the shape regex (no documented prefix) and was printed.
         # The depth-1 rule already guarantees WHICH account was read, so `active` loses no diagnostic
@@ -600,8 +602,17 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
             "status": status}
 
 
-def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
-    result: dict = {
+def _verdict_skeleton(repo: str, api_base: str, token: str, source: str) -> dict:
+    """The ONE shape of the verdict — every `--json` artifact, pass or refusal, at every tier.
+
+    ⛔ A CONSUMER MUST NOT HAVE TO BRANCH ON WHICH REFUSAL IT GOT (review finding I4). The argument
+    errors in `main()` used to serialise their own four-key payload, while every refusal out of
+    `preflight()` carried `credential_source`, `token_shape` and `surfaces` — so `res["surfaces"]`
+    raised `KeyError` **precisely on the "you typed the command wrong" path**, the path this branch
+    exists to make parseable, and the one a lane reaches first. Built here once, used by both tiers; a
+    key added later cannot land in one shape only.
+    """
+    return {
         # ⛔ THE REPO IS ECHOED TOO — scrub it by value, like api_base (review cycle 13): `--repo`
         # defaults to `$OR`, so a mis-set `$OR` (or a literal token) would otherwise be printed in the
         # `--json` artifact. Added to the sanitise key list as well, for any field added later.
@@ -623,6 +634,10 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         "detail": "",
         "surfaces": {},
     }
+
+
+def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
+    result: dict = _verdict_skeleton(repo, api_base, token, source)
 
     # ⛔ BEFORE THE TOKEN IS EVEN RESOLVED: a base we would refuse must never be sent a credential.
     # This is also the defence for callers that reach `preflight()` directly, not through `main()`.
@@ -860,10 +875,11 @@ def main(argv: list[str]) -> int:
     # control characters raise `UnicodeEncodeError` inside `http.client` (cycle 3). A missing `/` is the
     # same refusal class, so it serialises the same way instead of printing a human line at a JSON consumer.
     def _repo_refusal(detail: str) -> int:
-        print(json.dumps({"repo": _scrub(args.repo, token) if token else "<not echoed — no credential resolved>",
-                          "api_base": _scrub(_printable_base(args.api_base), token),
-                          "ok": False, "reason": "usage", "detail": detail},
-                         indent=2, sort_keys=True) if args.json
+        # ⛔ SAME SKELETON AS EVERY OTHER REFUSAL (review finding I4) — a JSON consumer keying on
+        # `surfaces` / `credential_source` must not hit `KeyError` on the bad-argument path.
+        payload = _verdict_skeleton(args.repo, args.api_base, token, source)
+        payload.update(reason="usage", detail=detail)
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json
               else f"GH-WRITE-UNAVAILABLE(usage) — {detail}")
         return 1
 

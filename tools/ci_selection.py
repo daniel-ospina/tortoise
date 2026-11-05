@@ -2761,9 +2761,12 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
            # surface and its suite would run only by luck — the same #1349/#3332/#3616 silent-drop
            # class above, on the one file whose weakening (adding 200 to `_WRITE_OK`, dropping
            # `_validate_api_base`, deleting the contents probe) turns a refusal into a FALSE PASS.
+           # No count is quoted here on purpose: the pin count IS the size of the suite, so any number
+           # written into this comment re-stales the next time a test is added (and this branch was
+           # already charged that twice).
            # MEASURED before this entry: `select(["tools/gh_write_preflight.py"], "pull_request",
-           # load_manifest())` -> surfaces=[], 72 files, own suite ABSENT. Pinned by
-           # tests/test_ci_selection.py::test_gh_write_preflight_runs_on_a_tools_only_change.
+           # load_manifest())` -> surfaces=[], 72 files, own suite ABSENT.
+           # Pinned by `tests/test_ci_selection.py::test_gh_write_preflight_runs_on_a_tools_only_change`.
            "tools/gh_write_preflight.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
@@ -3566,8 +3569,9 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # files hits the empty-shard branch at python-ci.yml:652 ('no selected files
     # for this shard - no manifest (guard skips)') and greys out green having run
     # nothing — honest only because a tier-2 selection cannot get that small
-    # (`tier1` is 31 files against `fast_shards: 9`), which is a margin, not a
-    # guarantee this comment should claim.
+    # (`tier1` is FAR larger than `fast_shards:` 9 — 73 rows at the commit that
+    # re-derived this, and re-derive it rather than trust that count), which is a
+    # margin, not a guarantee this comment should claim.
     #
     # Tier-2 ONLY: the `full` path returned above and keeps these files, because
     # a full leg HAS the URI.

@@ -8793,23 +8793,41 @@ def _gate_sdk_for(org: dict, resource: str):
 
     This mirrors the opener's TWO call forms rather than re-deriving one:
     a graph-bound key gets `graph_name=_data_graph_name(org)` (the value
-    `_data_sdk` passes verbatim), and an org-wide key gets exactly what
-    `_org_sdk_for_credential` builds — which is the SAME decision the #10180
-    promotion work put on this path, reused rather than restated: a moved
-    default opens `graph_name=<promoted namespace>`, and every other org opens
-    the historical `namespace=org_id`. Those two axes are ORTHOGONAL and both
-    were real — #10180 made an org-wide count follow a PROMOTION, #4051 makes a
-    graph-BOUND count follow the BINDING, and before the merge of the two each
-    fix left the other's lane vacuous.
+    `_data_sdk` passes verbatim), and an org-wide key gets
+    `_org_sdk_for_credential(org)` — byte-for-byte the SDK `_data_sdk`'s
+    org-wide branch builds. Mirroring the FORMS matters as much as the graph:
+    `_make_sdk` keys its embedded keepalive anchor on `graph_name if
+    graph_name is not None else namespace` (`_FALLBACK_KEEPALIVE`), and that dict
+    never evicts a HEALTHY anchor — it is only replaced when `_anchor_usable`
+    fails (#1502) and never to bound its size. Mirroring also preserves the
+    "identical connection" property `mcp_server._enforce_quota` states as the
+    rule.
 
-    Mirroring the FORMS matters as much as the graph: `_make_sdk` keys its
-    embedded keepalive anchor on `graph_name if graph_name is not None else
-    namespace` (`_FALLBACK_KEEPALIVE`), and that dict never evicts a HEALTHY
-    anchor — it is only replaced when `_anchor_usable` fails (#1502) and never to
-    bound its size — so `graph_name="org_team-001"` for an org-wide key would
-    park a SECOND anchor (`org_team-001` beside the write's `team-001`) for every
-    org in the process. Mirroring also preserves the "identical connection"
-    property `mcp_server._enforce_quota` states as the rule.
+    ⛔ THE ORG-WIDE ARM IS DELEGATED, NOT RE-DERIVED — #10180 (merge of that
+    branch with #4051). Writing `namespace=org["org_id"]` here was correct only
+    while nothing could MOVE an org's default; promotion
+    (`POST /v1/graphs/{id}/promote`) leaves the default living in the promoted
+    graph's namespace, and `_data_sdk`'s org-wide branch has opened it BY NAME
+    since #10180 (`_default_graph_name`). A literal `namespace=org_id` here would
+    therefore count the graph a promotion DEMOTED — a stale-low count admits an
+    org past its real cap (the money gate failing OPEN) and a stale-high one
+    402s writes the org is under. Delegating to `_org_sdk_for_credential` is
+    also byte-identical for every org that has NOT promoted anything (it answers
+    `_make_sdk(namespace=org_id)` there, because `_default_graph_name` is None),
+    so the non-promoted lane keeps the exact `namespace=` form and its anchor.
+    For a PROMOTED org the anchor key is `graph_name=<moved>`, which is the same
+    anchor the write's own SDK parks — one anchor, not a second.
+
+    ⚠️ The two arms answer DIFFERENT questions and must not be folded: THIS
+    function asks "which graph does this request OPEN" (so a graph-bound key
+    counts its bound graph — #4051), while `_org_sdk_for_credential` asks
+    "which graph is this org's DEFAULT" — the resolver it calls,
+    `_default_graph_name`, answers None for a graph-bound binding (that function
+    is the one that answers None there, NOT `_org_sdk_for_credential`, which
+    always builds an SDK), leaving the historical `namespace=org_id` fallback
+    this gate must NOT take for such a key (#10180). Delegating the org-wide arm
+    to it is safe precisely because a graph-bound credential never reaches it:
+    the `graph_id` arm above returns first.
 
     Two deliberate non-uses:
     - registry-scoped resources get `None`: their count is a control-plane read
@@ -8839,8 +8857,12 @@ def _gate_sdk_for(org: dict, resource: str):
         if graph is None:
             return None
         return _make_sdk(graph_name=graph)
-    if not org.get("org_id"):
+    org_id = org.get("org_id")
+    if not org_id:
         return None
+    # #10180: the org's DEFAULT graph, by name when a promotion moved it, else
+    # the historical `namespace=org_id` open. ONE owner for that decision —
+    # re-deriving it here is how the gate counted the demoted graph.
     return _org_sdk_for_credential(org)
 
 
@@ -14334,7 +14356,7 @@ async def email_signup(request: Request):
 # starter seed (/internal/starter-seed) instead, which files the signing-up
 # user + their Organization as connected anchor Subjects (never sample
 # Points). The demo seed below survives ONLY as an explicit opt-in sample
-# (/v1/demo + MCP tortoise_onboarding_demo_create) for callers who ask for
+# (/v1/demo) for callers who ask for
 # it — and every demo Point it writes is EXCLUDED from the count-of-record
 # surfaces (org.point_count — the Overview memory digest) so sample content
 # is never presented as the user's own filings. The id set is the single
@@ -36989,8 +37011,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         ).result_set
         if existing:
             return {"existing": True, "created": None}
-        # #1922: quota-gate the seed like the MCP twin
-        # (tortoise_onboarding_demo_create → _enforce_quota("points")). The
+        # #1922: quota-gate the seed. The
         # demo seed writes ~10 Points, so it must consume the points quota
         # like any other Point-creating write — the REST surface was the
         # 0-quota bypass (bug-hunt 2026-08-28 server P2-13). Idempotent
@@ -39012,8 +39033,7 @@ async def github_connect(body: GitHubConnectRequest | None = None,
     endpoints — the dashboard calls this with useSession: true."""
     # #2300: org-level control-plane surface (starts a ORG-wide OAuth +
     # registers org CSRF state) — graph-bound keys rejected (parity with
-    # the github index/reindex endpoints; MCP twin tortoise_onboarding_
-    # github_connect rejects graph-bound keys). A per-graph key must never
+    # the github index/reindex endpoints). A per-graph key must never
     # initiate the org's GitHub connection.
     _reject_graph_bound_org_surface(org, "github connect")
     import secrets
@@ -39825,8 +39845,8 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     selector's org is real.
     """
     # #2300: reads org-level GitHub credential state (control-plane) —
-    # graph-bound keys rejected (MCP twin tortoise_onboarding_github_status
-    # parity). A per-graph key must never observe the org's GitHub org.
+    # graph-bound keys rejected (org-level surface, C5). A per-graph key must
+    # never observe the org's GitHub org.
     _reject_graph_bound_org_surface(org, "github status")
     _org_id = org["org_id"]
     encrypted, gh_org = _github_credentials(_org_id)
