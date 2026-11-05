@@ -416,6 +416,15 @@ from pathlib import Path
 #: excluded rather than unparseable).
 _TURN_ID_RE = re.compile(r"^(?P<sid>.+)_t(?P<idx>[0-9]+)$")
 
+#: This artifact's OWN identity, emitted in every report. The census that consumes it
+#: (`tortoise/cache_eviction.py::load_parity_report`) REQUIRES the field, because a
+#: report naming nothing is attributable to whatever population the caller wants: a
+#: hand-written `{"verdict": "CLEAN", ...}` opened a gate that a real report with an
+#: unrecognised instrument name could not (#11004 review, gate-fail-open). A literal,
+#: not `__file__`-derived: the artifact must name the same instrument wherever it is
+#: copied to, and `PARITY_INSTRUMENTS` in the consumer keys on exactly this string.
+INSTRUMENT = "tools/turn_parity_census.py"
+
 #: Keyset page size for the graph leg. Must sit well UNDER FalkorDB's
 #: `RESULTSET_SIZE` (default 10_000) so a page is never truncated; the
 #: independent aggregate count below is the load-bearing guard (#5062's class).
@@ -1799,6 +1808,10 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
     anomaly_ids = sorted({a["id"] for entries in anomalies.values()
                           for a in entries})
     return {
+        # ⚠️ REQUIRED by the consumer (`load_parity_report` refuses a nameless report):
+        # emitting it here is what keeps the honest path open without making provenance
+        # a caller's assertion.
+        "instrument": INSTRUMENT,
         "compared_fields": compared_fields,
         "declared_absent": sorted(declared_absent),
         "population": {

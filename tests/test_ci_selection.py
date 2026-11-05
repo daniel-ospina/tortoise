@@ -238,7 +238,9 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
     * the **73** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1094 here.
+      selects. It is NOT "the whole `full`-less fast pool", which is 1097 at
+      this head (1094 on `main` before this fold's three new test files), and it
+      moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
       The `60` this sentence carried was that same `tier1` set **13 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
       and 73 here), i.e. the very "a past state quoted as a current one"
@@ -2932,6 +2934,98 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_gh_write_preflight_tool_change_selects_core_not_tier1():
+    """A change to the credential write preflight must run the cases pinning it (#11026).
+
+    `tests/test_gh_write_preflight.py` is registered on `core` and owns the write-proof's
+    guarantees: a read-only credential is REFUSED, the probe ref is created and confirmed and
+    deleted, cleanup is verified on the PUSH target, and no credential reaches argv or output. That
+    registration is INERT for a tool-only diff — `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    no SOURCE_PATTERNS row matches `tools/gh_write_preflight.py`, so `select()` returns NO surface,
+    takes the docs-only early return and falls back to the tier-1 smoke set, which does not contain
+    the file. The PR that weakens the proof would then be the one that never ran the cases pinning
+    it — the same silent-drop class as #10220's report, and worse here, because this tool exists
+    precisely to stop a silent pass (a 17-lane wave delivered nothing while every lane reported
+    "built, parked").
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields `full: False` with no pin,
+    so the later asserts pass unexercised.
+
+    ⛔ This case does NOT pin the entry's SHAPE: it exercises the exact path, which matches a prefix
+    and an exact entry alike, so it stays green if the prefix is narrowed back to
+    `"tools/gh_write_preflight.py"`. That half is owned by the NEXT case
+    (`tests/test_ci_selection.py::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped`), which is the
+    falsifier for it — one case per property, because a single case reported as pinning both is how
+    the second property went unpinned in the first place.
+    """
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped():
+    """The carve-out entry must be a PREFIX, not the exact path (#11027).
+
+    `_selection_relevant` claims a changed path with `path.startswith(CORE_ALSO)` — this entry's
+    tuple, NOT `TOOL_CARVEOUTS` — and `CORE_ALSO` membership is what forces `core` into the
+    selection: the `matched.add("core")` in `select()`'s `CORE_ALSO` branch. Cited by symbol, not
+    by line number, because on this entry the line number has already drifted twice.
+
+    Which tuple holds a `tools/` path is what decides its fate, and the two carve-out tuples do
+    different jobs:
+
+      * `CORE_ALSO` KEEPS the path (`_selection_relevant`) **and CLAIMS it** — `core` is forced in,
+        so this tool yields `core` only, `full=False`.
+      * `TOOL_CARVEOUTS` only KEEPS the path (`_keep_changed`) and claims no surface, so a kept
+        path that no `SOURCE_PATTERNS` row matches stays unknown and fails closed to the FULL
+        matrix — `tools/work_claim.py` -> all eight surfaces, `full=True`.
+      * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` -> `eval`,
+        `full=False`).
+      * in NEITHER tuple is the path kept at all -> `surfaces=[]`, `full=False`, the tier-1
+        smoke set, which does not carry this suite.
+
+    Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row matches, so the
+    tuple alone is what differs between them. Do not restate this as "the row decides" — that is
+    the mirror-image error and it sends a maintainer to the wrong lever.
+
+    Because the matcher is `startswith`, an entry naming `tools/gh_write_preflight.py` EXACTLY
+    claims only that spelling. One ordinary refactor then re-opens the silent drop the entry exists
+    to close — which, before this case existed, no test noticed:
+
+      * a split-out sibling (`tools/gh_write_preflight_urls.py`) — nothing claims it, so a diff to
+        the gate runs none of the gate's own arms. This is the realistic shape, because the tool's
+        URL parsing is already the most defect-dense part, and it is what this entry now covers.
+
+    ⛔ A rename (`tools/write_preflight.py`) is NOT covered, by the prefix or by the exact path:
+    neither claims a path that no longer carries the stem. It is named here only so the boundary is
+    explicit — this change buys the sibling shape, not rename survival, and a reader who assumes
+    both would be relying on a pin that does not exist. A rename-detection pin belongs with the
+    rename (in the diff that performs it), not here.
+
+    The test immediately above cannot catch this: it exercises the exact path, which matches a
+    prefix AND an exact entry, so it stays green under the regression. **This** case is the
+    falsifier that distinguishes them — reverting the entry to `"tools/gh_write_preflight.py"`
+    fails its FIRST assert and leaves that test green, which is the whole reason both exist.
+
+    Over-matching is the accepted cost, bounded here: `git ls-files 'tools/gh_write_preflight*'`
+    is one path today, so the prefix claims nothing that is not the tool.
+    """
+    for sibling in (
+        "tools/gh_write_preflight_urls.py",
+        "tools/gh_write_preflight_probe.py",
+    ):
+        r = _sel([sibling])
+        assert "core" in r["surfaces"], (sibling, r)
+        assert "test_gh_write_preflight.py" in r["test_files"], (sibling, r)
+
+    # The prefix is not a blanket: an unrelated tool under `tools/` stays unclaimed, so the
+    # entry's cost is bounded to the `gh_write_preflight*` family rather than all of `tools/`.
+    unrelated = _sel(["tools/other_tool.py"])
+    assert "test_gh_write_preflight.py" not in (unrelated["test_files"] or []), unrelated
+
+
 def test_worktree_report_tool_change_selects_core_not_tier1():
     """A change to the lane report must run the rules it pins (#10220).
 
@@ -5015,6 +5109,53 @@ def test_attest_census_tool_change_fails_closed_to_full():
         assert r["full"] is True, (sibling, r)
         assert r["test_files"] == "ALL", (sibling, r)
         assert "core" in r["surfaces"], (sibling, r)
+
+
+# ⛔ REMOVED HERE: `test_gh_write_preflight_tool_change_fails_closed_to_full` (#10930/#10947).
+# #11026 landed `tools/gh_write_preflight.py` on `main` with a DIFFERENT implementation (a throwaway
+# ref push on the real remote, not a three-surface API probe), and registered the tool in
+# `CORE_ALSO` rather than `TOOL_CARVEOUTS`. The removed pin asserted `full is True` / `test_files ==
+# "ALL"`; the landed registration makes a tool-only diff select `core` with `full is False`, which
+# is exactly what `test_gh_write_preflight_tool_change_selects_core_not_tier1` above pins. The two
+# are mutually exclusive, so keeping both leaves one of them permanently red. Superseded, not lost:
+# `git show 15c6d179e4f2:tests/test_ci_selection.py` has the removed case. (Same supersession applies
+# to the `TOOL_CARVEOUTS` entry in `tools/ci_selection.py` and the duplicate `ci-surfaces.yml` row.)
+
+
+def test_ready_for_owner_tool_change_fails_closed_to_full():
+    # #10962/#10968: tools/ready_for_owner.py owns tests/test_ready_for_owner.py — the arms that pin
+    # the owner-facing merge-readiness verdict. This is the same silent-drop class as
+    # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
+    # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
+    #
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 73 since #10980,
+    # so re-derive it rather than reading this as a current count):
+    #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
+    #       -> surfaces: []  full: False  tier-1 `test_files`,
+    #          with `test_ready_for_owner.py` ABSENT
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so
+    # the path was filtered out BEFORE the `if not matched: matched.add("core")` fallback and
+    # select() took the docs-only early return. A PR improving the merge gate would therefore have
+    # got a GREEN run in which essentially none of the gate's own tests ran. (Deliberately no
+    # count: it is the size of `test_ready_for_owner.py` and drifts with every test added.)
+    #
+    # It propagates into the tool as well: `ready_for_owner.py::_read_coverage` counts this shape as
+    # `core-smoke-only` and therefore COVERED, so the gate would certify its own untested edit as
+    # covered by CI. That is why this is a fail-closed entry and not merely a missing registration —
+    # registering `test_ready_for_owner.py` under `core` in ci-surfaces.yml covers edits of the TEST
+    # file, NOT of the tool.
+    #
+    # Mutation check: removing the TOOL_CARVEOUTS entry re-opens the docs-only early return, so the
+    # path is filtered out, `full` is False and `test_files` is the tier-1 list — every assert below
+    # fails.
+    r = _sel(["tools/ready_for_owner.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+    # NOT asserted here: that a renamed/split sibling (tools/ready_for_owner_extra.py) is also
+    # carved out — a `.py` TOOL_CARVEOUTS entry is a STRING prefix and does not cover a sibling (see
+    # the same note on the gh_write_preflight pin above; `tools/ci_check_repair_extra.py` measures
+    # `full=False`). Asserting it here would assert an accident, not a property.
 
 
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
@@ -14743,6 +14884,33 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
+def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
+    # #10976: `tests/test_cache_eviction_census.py` pins the egress census —
+    # `tortoise/cache_eviction.py` (an unproven population may not be swept) and its
+    # CLI `tools/cache_eviction_census.py` (the LICENCE exit split, the
+    # destructive-flag guard, `--graph`/`--parity-graph` disagreement, the report
+    # provenance rules).
+    #
+    # TWO arms, because the census has TWO subjects and they reach CI by different
+    # routes:
+    #  * the MODULE arm is the `core` surface row (`tortoise/cache_eviction.py`
+    #    matches no SOURCE_PATTERNS row, so it takes the `core` fallback). Mutation
+    #    check: dropping that row from `config/ci-surfaces.yml` fails arm 2.
+    #  * the CLI arm needs `CORE_ALSO`:
+    #    `tools/` is a flat NON_PYTHON_PREFIXES entry, so before that entry a
+    #    tool-only diff filtered to `changed == []` and took the docs-only early
+    #    return — `select(["tools/cache_eviction_census.py"])` returned
+    #    surfaces=[], 72 files, the suite ABSENT, i.e. the #1349/#3332/#3616
+    #    silent-drop class on the file that decides whether a population is swept.
+    #    Mutation check: removing the CORE_ALSO entry fails arm 1 (surfaces == []
+    #    and the suite absent from test_files).
+    for path in ("tools/cache_eviction_census.py", "tortoise/cache_eviction.py"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r["full"])
+        assert r["surfaces"] == ["core"], (path, r["surfaces"])
+        assert "test_cache_eviction_census.py" in r["test_files"], (path, r["test_files"])
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate
@@ -14899,3 +15067,131 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_session_events_seal.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def _pin_reference_scan(lines: list[str], root: Path) -> tuple[int, list[str]]:
+    r"""Resolve every `Pinned by tests/….py::name` citation in `lines`.
+
+    Returns `(refs_seen, violations)` — the count is what the caller's non-vacuity
+    floor reads, and each violation is a citation that names nothing.
+
+    #11004 review P2: a citation is written in THREE shapes in `tools/ci_selection.py`,
+    # and the first version of this scan checked only the first two. The third is the
+    # shape where the citation line ENDS at `::` and the whole name sits on the next
+    # comment line — 31 of the file's 104 citations at the #11004 head, so a fabricated
+    # name written that way read as verification while verifying NOTHING and the pin
+    # stayed green. The `(\w*)` group (not `(\w+)`) is what makes that shape reachable:
+    # with `(\w+)` the regex demanded a name character after `::` and matched nothing.
+
+      1. on one line — `…::test_x`
+      2. wrapped MID-name — `…::test_x_` / `# the_rest.`
+      3. `::` ends the line — `…::` / `# TestName`   <- the shape this closes
+
+    For 2 and 3 both the bare name and `name + <first word of the next comment line>`
+    are candidates; the citation resolves if EITHER names a real `def`/`class`, so a
+    wrap is not mistaken for a dangling reference (and vice versa). The next-line word
+    keeps its leading case because shape 3 also cites `class` names. A citation with
+    NO resolvable name at all (a bare `file::`) is a violation, never a skip.
+    """
+    refs: list[tuple[str, list[str]]] = []
+    for i, line in enumerate(lines):
+        for m in re.finditer(r"(tests/[\w./-]+\.py)::(\w*)", line):
+            relpath, name = m.group(1), m.group(2)
+            candidates = [name] if name else []
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if not line[m.end():].strip() and nxt.startswith("#"):
+                words = nxt.lstrip("#").strip().split()
+                first = words[0].rstrip(".,;:`)") if words else ""
+                if re.fullmatch(r"[A-Za-z_]\w*", first):
+                    candidates.append(name + first)
+            refs.append((relpath, candidates))
+
+    violations = []
+    for relpath, candidates in refs:
+        label = " | ".join(candidates) if candidates else "<no name after ::>"
+        path = root / relpath
+        if not path.exists():
+            violations.append(f"{relpath}::{label} (no such file)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        if not candidates or not any(
+            re.search(rf"^(?:def|class)\s+{re.escape(name)}\b", body, re.M)
+            for name in candidates
+        ):
+            violations.append(f"{relpath}::{label}")
+    return len(refs), violations
+
+
+def test_every_pin_reference_in_ci_selection_names_a_test_that_exists():
+    # #10976 / #11004 review P2: every `Pinned by tests/….py::name` citation is what
+    # makes "Pinned by" CHECKABLE — a reader greps the name and confirms the guard.
+    # A citation of a test that does not exist reads as verification while verifying
+    # nothing. Measured before this guard: the census CORE_ALSO entry cited
+    # `test_cache_eviction_census_tool_change_selects_core_not_tier1`, which existed
+    # only in that comment; the real pin is
+    # `test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it` (above).
+    root = Path(__file__).resolve().parents[1]
+    lines = (root / "tools/ci_selection.py").read_text(encoding="utf-8").splitlines()
+    refs_seen, violations = _pin_reference_scan(lines, root)
+
+    # Non-vacuity: the file really does cite its pins (a regex that matched nothing
+    # would pass this guard while checking nothing). Measured at the #11004 head:
+    # 104 citations in total — 73 named on the line, 31 named on the next comment
+    # line — so the floor sits well under the true count and cannot be satisfied by
+    # one shape alone. `test_pin_reference_scan_sees_the_colon_then_newline_
+    # citation_shape` is what pins the 31.
+    assert refs_seen > 50, refs_seen
+    assert not violations, f"pin reference(s) that name nothing: {violations}"
+
+
+def test_pin_reference_scan_sees_the_colon_then_newline_citation_shape():
+    # #11004 review P2, RED-FIRST: the guard above passed on the pre-fix matcher
+    # (`(\w+)`) while skipping 31 of 104 citations, because the citation line ended
+    # at `::` and the name sat wholly on the next comment line. Each case below is
+    # asserted against the real tree, so only the NAME is fabricated.
+    root = Path(__file__).resolve().parents[1]
+
+    # 1. The hole: a name that does not exist, in the `::`-then-newline form, is
+    #    REPORTED. Before the fix this scan matched nothing here and stayed silent —
+    #    which is exactly how a fabricated pin reads as verification.
+    refs_bad, violations_bad = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_no_such_pin_exists_xyzzy.",
+        ],
+        root,
+    )
+    assert refs_bad == 1, refs_bad
+    assert violations_bad, "the `::`-then-newline citation shape is not checked"
+    assert "test_no_such_pin_exists_xyzzy" in violations_bad[0], violations_bad
+
+    # 2. The resolving control — so case 1 cannot pass by refusing every line.
+    refs_ok, violations_ok = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_every_pin_reference_in_ci_selection_names_a_test_that_exists.",
+        ],
+        root,
+    )
+    assert refs_ok == 1, refs_ok
+    assert not violations_ok, violations_ok
+
+    # 3. A `class` name on the next line is the same shape (the file cites
+    #    `tests/test_website_static.py::` / `# TestMonospaceStackRendersAsAMonoFace`),
+    #    so the next-line word must keep its leading capital.
+    refs_cls, violations_cls = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# NoSuchTestCaseClass.",
+        ],
+        root,
+    )
+    assert refs_cls == 1 and violations_cls, (refs_cls, violations_cls)
+
+    # 4. A bare `file::` with nothing resolvable after it names nothing at all —
+    #    that is a defect to report, not a citation to skip.
+    refs_bare, violations_bare = _pin_reference_scan(
+        ["# see tests/test_ci_selection.py::"], root
+    )
+    assert refs_bare == 1, refs_bare
+    assert violations_bare, "a bare `file::` citation is silently skipped"

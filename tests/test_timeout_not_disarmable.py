@@ -40,6 +40,72 @@ pytestmark = pytest.mark.skipif(
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: A conftest that installs the repo's shared-temp scan guard (#3752) in the
+#: INNER run. The outer suite installs it from `tests/conftest.py`; writing it
+#: here is what makes the pins below environment-independent — see
+#: `_inner_pytest_cmd`.
+_GUARD_CONFTEST = '''\
+"""Reproduce the outer suite's shared-temp scan guard in this inner run."""
+
+from tests._tmpdir_hygiene import install_scan_guard
+
+install_scan_guard()
+'''
+
+
+def _inner_pytest_cmd(tmp_path: Path, test_file: Path) -> list[str]:
+    """argv for an inner pytest run over a fixture file written under `tmp_path`.
+
+    ⛔ ``--confcutdir`` is LOAD-BEARING, not tidiness. pytest does not collect
+    just the argument: it builds the path list from ``/`` down to it and
+    collects EVERY level (`_pytest/main.py::Session.collect`,
+    ``paths.insert(0, path)`` for each parent while ``_is_in_confcutdir``),
+    and each level's ``Dir.collect()`` is an ``os.scandir`` of that ancestor.
+    So an argument under the shared temp dir makes the child scan ``/tmp`` and
+    ``/`` — the O(whole-host) discovery (#3752) that
+    ``tests/_tmpdir_hygiene``'s scan guard exists to refuse. When the child
+    inherits that guard, the scan is refused and the run dies during
+    COLLECTION, before either pin below can observe what it was written to
+    observe: measured on the required `test (f)` leg of PR #11066, where the
+    inner run reported ``ERROR collecting .`` /
+    ``SharedTmpdirScanError: os.scandir('/tmp')`` instead of the `#7655`
+    refusal — the `#7655` signal guard was fine, the collection was not.
+
+    Pinning the cut to `tmp_path` bounds the walk to the ONE directory that is
+    this test's own, so only that directory is scanned (descendants are what
+    the guard allows) and no conftest above it can be imported — the sibling
+    half of the same hazard, already hit in `test-slow (d)` of #10636 where a
+    leaked `/tmp/conftest.py` was imported into an out-of-tree selection
+    (`tools/skip-guard.py::_selection_confcutdir` pins it for the same reason).
+    #11095 audits the remaining out-of-tree child runs for the same uncut
+    ancestor walk.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(test_file),
+        "-q",
+        "-p",
+        "tests._signal_hygiene",
+        "--timeout=5",
+        "--timeout-method=signal",
+        "-p",
+        "no:cacheprovider",
+        f"--confcutdir={tmp_path}",
+    ]
+
+
+def _install_inner_scan_guard(tmp_path: Path) -> None:
+    """Give the inner run the shared-temp scan guard, as the suite has it.
+
+    On the CI runner the child inherited the guard and died at collection
+    (#11066 `test (f)`); without this file the pin below is only red there, and
+    passes on a box whose `/tmp` happens to be harmless — i.e. the pin would
+    depend on an accident of the host instead of on the behaviour it names.
+    """
+    (tmp_path / "conftest.py").write_text(_GUARD_CONFTEST, encoding="utf-8")
+
 
 def test_guard_refuses_alarm_while_the_harness_owns_the_timer(monkeypatch):
     """`signal.alarm` must not be allowed to replace the harness timer."""
@@ -159,20 +225,9 @@ def test_the_reproducer_fails_fast_instead_of_stalling_the_run(tmp_path):
         ),
         encoding="utf-8",
     )
+    _install_inner_scan_guard(tmp_path)
     env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        str(test_file),
-        "-q",
-        "-p",
-        "tests._signal_hygiene",
-        "--timeout=5",
-        "--timeout-method=signal",
-        "-p",
-        "no:cacheprovider",
-    ]
+    cmd = _inner_pytest_cmd(tmp_path, test_file)
     try:
         proc = subprocess.run(
             cmd,
@@ -214,20 +269,9 @@ def test_a_normal_failure_is_not_an_internalerror(tmp_path):
         ),
         encoding="utf-8",
     )
+    _install_inner_scan_guard(tmp_path)
     env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        str(test_file),
-        "-q",
-        "-p",
-        "tests._signal_hygiene",
-        "--timeout=5",
-        "--timeout-method=signal",
-        "-p",
-        "no:cacheprovider",
-    ]
+    cmd = _inner_pytest_cmd(tmp_path, test_file)
     proc = subprocess.run(
         cmd,
         cwd=str(_REPO_ROOT),
