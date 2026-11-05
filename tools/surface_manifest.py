@@ -131,8 +131,20 @@ def _code_digest(code) -> str:
     for const in code.co_consts:
         # a nested code object must be recursed, never repr'd (its repr carries
         # a memory address and is not stable)
-        h.update(_code_digest(const).encode() if isinstance(const, types.CodeType)
-                 else repr(const).encode())
+        if isinstance(const, types.CodeType):
+            h.update(_code_digest(const).encode())
+        elif isinstance(const, (set, frozenset)):
+            # #10602: a SET's iteration order is `PYTHONHASHSEED`-dependent for str
+            # elements, so `repr(const)` differs between two runs over an UNCHANGED
+            # tree — the same instability as a nested code object's address, and it
+            # makes the frozen baseline un-pinnable: `served_from` flipped on every
+            # invocation, so `surface_manifest.py check` and this suite failed at
+            # random. Encode order-INDEPENDENTLY instead. (Measured: a tool whose
+            # body carries `frozenset({'kind','limit','skip'})` produced three
+            # different digests across three runs.)
+            h.update(b"{" + b",".join(sorted(repr(v).encode() for v in const)) + b"}")
+        else:
+            h.update(repr(const).encode())
     return h.hexdigest()[:16]
 
 

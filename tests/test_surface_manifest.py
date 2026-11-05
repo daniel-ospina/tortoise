@@ -1349,6 +1349,48 @@ def test_code_digest_is_move_invariant_and_constant_sensitive():
     assert guard._code_digest(g1["f"].__code__) == guard._code_digest(g2["f"].__code__)
 
 
+def test_code_digest_is_stable_across_PYTHONHASHSEED_for_a_set_constant():
+    """#10602: a `frozenset` constant made the fingerprint non-deterministic.
+
+    A set of strings iterates in an order that depends on `PYTHONHASHSEED`, so
+    `repr(const)` — the old encoding — differed between two runs over an UNCHANGED
+    tree. That is the same instability `_code_digest` already refused for a nested
+    code object (whose repr carries a memory address), and it made the frozen
+    baseline un-pinnable: `served_from` for a handler carrying
+    `frozenset({'kind','limit','skip'})` produced three different digests across
+    three runs, so `surface_manifest.py check` and this suite failed at random and a
+    re-cut could never settle.
+
+    Asserted with SUBPROCESSES at different hash seeds, not by calling the function
+    twice in-process — one process has one `PYTHONHASHSEED`, so an in-process double
+    call cannot observe the defect at all (which is why it reached a PR).
+    """
+    import subprocess
+    import sys
+
+    script = (
+        "import importlib.util\n"
+        "spec = importlib.util.spec_from_file_location('sg', 'tools/surface-guard.py')\n"
+        "sg = importlib.util.module_from_spec(spec); spec.loader.exec_module(sg)\n"
+        "def f(x):\n"
+        "    return x in frozenset({'kind', 'limit', 'skip', 'tag', 'offset'})\n"
+        "print(sg._code_digest(f.__code__))\n"
+    )
+    digests = set()
+    for seed in ("0", "1", "12345"):
+        out = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            env={**__import__("os").environ, "PYTHONHASHSEED": seed},
+            cwd=str(ROOT),
+        )
+        assert out.returncode == 0, out.stderr[-800:]
+        digests.add(out.stdout.strip())
+    assert len(digests) == 1, (
+        f"the served-identity digest depends on PYTHONHASHSEED: {sorted(digests)} — "
+        f"a set/frozenset constant must be encoded order-independently"
+    )
+
+
 # ── #4828: the two copies of the served-identity helpers are a CONTRACT ───────
 # `tools/surface_manifest.py` (the generator / `check` side) and `tools/surface-guard.py`
 # (the pinned expansion gate) each carry their OWN copy of the FOUR helpers that define the
