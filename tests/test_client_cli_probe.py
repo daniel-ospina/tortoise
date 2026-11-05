@@ -125,6 +125,12 @@ def test_a_missing_key_refusal_keeps_the_endpoint_it_probed(monkeypatch, capsys)
     recorded term set — only the two-outcome outage word needs `configured`.
     """
     monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    # ⛔ NON-VACUITY, stated rather than assumed (#10790 review, P3): with an endpoint still
+    # DECLARED by some other input, `configured` is True and the rewrite this test forbids never
+    # has a chance to fire — the assertions below would pass against the pre-fix code. Clearing
+    # the env var is the setup; this is the precondition.
+    monkeypatch.setattr(cli, "endpoint_declared", lambda: False)
+    assert cli.endpoint_declared() is False
     refusal = {
         "status": "unconfigured",
         "url": "http://localhost:8000/mcp/",

@@ -1241,11 +1241,15 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
     carries one. Appending there emitted `…&attempt_key=K&attempt_key=<minted>`: benign only while
     every reader takes the FIRST value, and a re-run of this very dead end the day one takes the
     last. A present-but-BLANK value counts as absent — it selects the bounce branch upstream, by
-    the same stripped predicate the bounce emits by — and so does a whitespace-only one.
+    the same stripped predicate the bounce judges ABSENT-vs-PRESENT by — and so does a whitespace-only one.
     """
     from urllib.parse import parse_qs, urlsplit
 
-    from tortoise.oauth import CONSENT_ATTEMPT_KEY_PARAM, consent_bounce_url
+    from tortoise.oauth import (
+        CONSENT_ATTEMPT_KEY_PARAM,
+        consent_bounce_url,
+        presented_consent_attempt_key,
+    )
 
     raw = f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=K-page"
     emitted = consent_bounce_url(APP_ORIGIN, raw)
@@ -1323,6 +1327,33 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
             f"FIRST non-blank value the caller presented ({expected!r}): got {dup_keys}. The "
             f"page reads the first value, so minting here instead of adopting puts the page and "
             f"`start.ts` on different keys and restores `403 flow_not_yours` after sign-in")
+
+    # ⛔ A PADDED-BUT-REAL KEY — the ONE shape where "all three readers see the same bytes" was
+    # FALSE (review P2 at 04c9d5256), and the arm that catches an emitter which normalises the
+    # value it adopts. The page's `attemptKey()` reads the CALLER's query, not the emitted URL —
+    # `new URLSearchParams(window.location.search).get(...)` (`tortoise/oauth.py:2361-2362`) — and
+    # `mint()` POSTs exactly that to `/api/consent/token` (`:2478`). Nothing on the TS side strips:
+    # `start.ts:255` is `url.searchParams.get(ATTEMPT_KEY_PARAM) ?? ""` and `token.ts` hashes what
+    # it is handed (`attemptKeyHash(attemptKey)`). So for `attempt_key=%20K%20` the page carries
+    # `" K "`, and an emitter that strips puts its sign-in link on `"K"`: `recordConsentAttempt`
+    # writes `attempt_key_hash` ONLY on INSERT (`_shared/auth/consent-bridge.ts:362-397`), so
+    # `owns_flow` is false for the second key and the signed-in visitor meets
+    # `403 flow_not_yours` — the dead end this hop exists to remove. PRE-FIX this input WORKED (the
+    # old emitter left the single-non-blank-key case BYTE-EXACT), so stripping here is a
+    # regression, not a hardening; the strip's job is the ABSENT test, and it still does it.
+    padded = f"client_id=c1&state=s1&{CONSENT_ATTEMPT_KEY_PARAM}=%20K%20"
+    assert presented_consent_attempt_key(padded) == "K", (
+        "a padded-but-real key must still count as PRESENT (stripped predicate) — otherwise this "
+        "arm is measuring the blank path instead of the page branch")
+    inner_padded = parse_qs(urlsplit(parse_qs(urlsplit(
+        consent_bounce_url(APP_ORIGIN, padded)).query)["next"][0]).query, keep_blank_values=True)
+    page_reads = parse_qs(padded, keep_blank_values=True)[CONSENT_ATTEMPT_KEY_PARAM][0]
+    assert inner_padded[CONSENT_ATTEMPT_KEY_PARAM] == [page_reads] == [" K "], (
+        "the emitted key must be the VALUE THE READERS HASH, not a normalised form of it: the "
+        "page POSTs what `attemptKey()` reads from the caller's query (first value, verbatim) and "
+        "`start.ts`/`token.ts` adopt and hash it verbatim. Emitting the stripped form splits one "
+        f"flow across two keys → `403 flow_not_yours`. emitted={inner_padded[
+            CONSENT_ATTEMPT_KEY_PARAM]!r} page_reads={page_reads!r}")
 
     # Every OTHER segment survives BYTE-EXACT — compared as bytes, not re-parsed, because the bug
     # this guards is a re-ENCODING (`+` vs `%20`) that `parse_qs` would normalise away.

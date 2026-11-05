@@ -45254,7 +45254,9 @@ async def oauth_authorize(request: Request):
 
     An attempt key is not a credential, and its PRESENCE proves nothing about
     who wrote this URL: the AS only tests that the parameter is non-BLANK (the
-    first value, stripped — the same predicate `consent_bounce_url` emits by),
+    first value, stripped — this is the BRANCH predicate; the emission in `consent_bounce_url`
+    judges ABSENT-vs-PRESENT on the same stripped form but emits the adopted value's OWN bytes,
+    because no reader on this hop strips),
     so a guessed one renders the page exactly like a real one. Presence selects
     the BRANCH — page vs. sign-in bounce — and nothing else. The ownership proof
     happens at the mint, on the session origin, which compares

@@ -2735,7 +2735,9 @@ def presented_consent_attempt_key(query: str) -> str:
     this first-value rule.
     What the page and `start.ts` DO receive is one non-blank token, because the
     emission is single-keyed whatever rule chose it — so they never need to
-    strip. Neither of them strips ON ITS OWN, though, so a whitespace
+    strip, and the emitter therefore keeps the adopted value's OWN bytes
+    (padding included): a stripped emit would put the page's POST and this
+    link's key on different bytes. Neither of them strips ON ITS OWN, though, so a whitespace
     `attempt_key` presented STRAIGHT to `/api/consent/start`, bypassing the AS,
     is still adopted verbatim there; that predates this hop and is recorded in
     #10487 rather than fixed silently here.
@@ -2864,7 +2866,18 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     # read the predicate's ⚠️ Scope paragraph before collapsing the two into one call. So: the
     # first non-blank value survives, every blank/whitespace/duplicate `attempt_key` segment is
     # DROPPED, and a minted key is emitted only where nothing survives. A surviving value is
-    # re-emitted from its STRIPPED form so all three readers see the same single bytes.
+    # re-emitted DECODED with its PADDING INTACT — the strip above decides only ABSENT-vs-PRESENT.
+    # ⛔ Do NOT "tidy" that into the stripped form. NO reader on this hop strips: the page's own
+    # `attemptKey()` returns the CALLER's first value verbatim (`URLSearchParams.get`) and POSTs
+    # exactly that to `/api/consent/token`, and `start.ts::presentedKey` / `token.ts` adopt and
+    # hash what they are handed verbatim. So emitting the stripped form splits one flow across
+    # two keys — the page's POST carries ` K ` while this sign-in link carries `K` — and
+    # `recordConsentAttempt` writes `attempt_key_hash` ONLY on INSERT, so `owns_flow` is false
+    # for the second and the signed-in visitor is answered `403 flow_not_yours`: the very dead
+    # end this function exists to remove. Measured on `attempt_key=%20K%20` (review P2 at
+    # 04c9d5256; the pre-fix emitter was byte-exact on exactly the single-non-blank-key case, so
+    # stripping there was a REGRESSION, not a hardening). Stripping was never the protection: the
+    # whitespace-only form is dropped by the blank TEST above, before the value is ever emitted.
     # Every OTHER segment is passed through verbatim and in order — see the `+`/`%20` note above;
     # only `attempt_key` is re-encoded, and its value is an opaque token, so `urlencode` is the
     # identity there.
@@ -2875,10 +2888,10 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
         if unquote_plus(name) != CONSENT_ATTEMPT_KEY_PARAM:
             out.append(segment)
             continue
-        stripped = unquote_plus(value).strip() if sep else ""
-        if presented or not stripped:
+        decoded = unquote_plus(value) if sep else ""
+        if presented or not decoded.strip():
             continue        # a duplicate, or the blank/whitespace form no reader can use
-        presented = stripped
+        presented = decoded
         out.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: presented}))
     if not presented:
         out.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)}))
