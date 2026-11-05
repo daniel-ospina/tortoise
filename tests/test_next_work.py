@@ -2515,6 +2515,45 @@ def test_a_wrong_typed_decision_input_is_incomplete(tmp_path: Path, field, bad):
     assert _run_main(["--from", str(path), "--repo", REPO]) == 2, (field, bad)
 
 
+def test_a_wrong_typed_issues_or_pulls_is_named_not_a_TypeError(tmp_path: Path):
+    """The CONTAINER is judged before its ELEMENTS are iterated, and the refusal NAMES it.
+
+    ⛔ THIS TEST ASSERTS THE MESSAGE, NOT THE EXIT CODE, and that is the whole point.
+    `test_a_wrong_typed_decision_input_is_incomplete` above parametrises `{}` and `""`
+    for `issues`/`pulls` — both iterate harmlessly, so both produced the field-named
+    refusal even BEFORE the guard, and the inputs that actually crashed (`5`, `None`,
+    `True`, `1.5`) reached the outer frame's `except (..., TypeError, ...)` handler,
+    which also returns 2. An exit-code assertion therefore passes on the buggy code
+    and cannot tell the fix from its absence — measured: removing the guard left the
+    whole suite green. So pin the two things only the fix produces: no `TypeError`,
+    and a message naming the field as not a list.
+
+    Measured before the fix (each raised out of `from_json`):
+        issues: 5 / null / true / 1.5 -> TypeError: '<type>' object is not iterable
+        pulls: 7                      -> TypeError: 'int' object is not iterable
+    After it, each is `unreadable` with e.g.
+        "issues: the snapshot's issues is int, not a list — that surface was never read"
+    and the CLI refuses (exit 2) carrying that message, not a traceback summary.
+    """
+    for field, bad, named in (
+        ("issues", 5, "issues is int, not a list"),
+        ("issues", None, "issues is NoneType, not a list"),
+        ("issues", True, "issues is bool, not a list"),
+        ("issues", 1.5, "issues is float, not a list"),
+        ("pulls", 7, "pulls is int, not a list"),
+        ("pulls", None, "pulls is NoneType, not a list"),
+    ):
+        raw = _rich_snapshot().to_json()
+        raw[field] = bad
+        # ⛔ The `TypeError` this replaced escaped HERE, before any refusal existed.
+        snap = Snapshot.from_json(raw)
+        assert any(named in u for u in snap.unreadable), (field, bad, snap.unreadable)
+        path = tmp_path / f"bad-{field}-{type(bad).__name__}.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        rc = _run_main(["--from", str(path), "--repo", REPO])
+        assert rc == 2, (field, bad)
+
+
 def test_a_claim_map_under_another_namespace_is_incomplete(tmp_path: Path):
     """`claim_ns` travels with the data; keys under a different prefix are not it."""
     raw = _rich_snapshot().to_json()
