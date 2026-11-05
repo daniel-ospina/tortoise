@@ -974,6 +974,20 @@ ROUND9_CORPUS: tuple[tuple[str, bool], ...] = (
     # …and the zero counts, in every spelling review-pr.sh exempts.
     ("**P1**: none.", False),
     ("**Outcome: CLEAN.**\n\n**P1**: none.", False),
+    # ROUND-13: the three cues `review-pr.sh` has and this module did not — the parenthesised
+    # label, the count WRITTEN BEFORE the token / spelled numeral, and the slot separator.
+    ("**Finding (P1)**: the guard returns 0 on a failed read", True),
+    ("Found a P1: the guard returns 0 on a failed read", True),
+    ("One P1 — the guard returns 0 on a failed read", True),
+    ("CLEAN — 2 P1 findings.", True),
+    ("CLEAN — one blocking finding remains, in a file outside this diff.", True),
+    ("- **F1 (P2)** — a claim mismatch\n- **F2 (P1)** — the guard returns 0", True),
+    # …and the two over-blocks that came with parity: a heading naming a FIXED severity in a
+    # clean-declaring body, and a reviewer's own severity TALLY table.
+    ("**Outcome: CLEAN.**\n### The P1 is fixed, and the fix is load-bearing", False),
+    ("**Outcome: CLEAN.**\n| 0 | 0 | 2 |", False),
+    ("| **P1** | 0 |", False),
+    ("| P0 | P1 | P2 |", False),
 )
 
 

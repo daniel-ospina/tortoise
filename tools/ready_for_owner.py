@@ -167,7 +167,11 @@ QUEUE_BLOCKING_LABELS = frozenset({"superseded-by-fold"})
 #: ⛔ QUOTING A FINDING (`> [P1] …`) MUST STILL BLOCK — answering a finding by quoting
 #: it is normal review behaviour, and a `>` prefix read NEUTRAL (round 9). So do nested
 #: bullets and bold brackets.
-BLOCKING_RE = re.compile(r"(?m)^\s*(?:[-*>]+\s*|\d+[.)]\s*)*\**`?\[?(P0|P1|P2)\]?\**`?\s*(?=\S|$)")
+#: `[P1]` OR `(P1)` — `scripts/review-pr.sh:1363` (`[\[(][Pp][0-2][\])]`) treats a
+#: parenthesised label as decorated, and a live body (#10902) writes `- **F1 (P2)**`.
+BLOCKING_RE = re.compile(
+    r"(?m)^\s*(?:[-*>]+\s*|\d+[.)]\s*)*\**`?(?:\[|\()?(P0|P1|P2)(?:\]|\))?\**`?\s*(?=\S|$)"
+)
 ISSUES_RE = re.compile(r"^\s*ISSUES\s+(\d+)\b", re.MULTILINE)
 #: A CLEAN outcome. ⛔ THE POSITIVE VOCABULARY IS THE RECORDER'S TOO: `Outcome: clean` is
 #: the declaration `scripts/record-review.sh` reads (its own suppress arm keys on it), and
@@ -287,24 +291,51 @@ TALLY_NONZERO_RE = re.compile(r"(?i)\bP([0-2])\s*:\s*([1-9]\d*)\b")
 LABEL_NOUN_RE = re.compile(
     r"(?i)(?:"
     r"\b(?:verdict|outcome|finding|findings|issue|issues|defect|defects|blocker|blockers)"
-    r"\s*\**\s*:(?:(?!clean)[^\n]){0,30}?\bP[0-2]\b"
-    r"|\b(?:finding|issue|defect)\s*\[P[0-2]\]"
+    # The gap must not cross a closing bracket or a sentence end: a count declaration's
+    # own "(0 blocking)." must not carry its severity into the NEXT sentence.
+    r"\s*\**\s*:(?:(?!clean)[^.\n)]){0,30}?\bP[0-2]\b"
+    r"|\b(?:finding|issue|defect)s?\s*[\[(]P[0-2][\])]"
+    # ⛔ THE SLOT-SEPARATOR CUE (`review-pr.sh` arm (b2), added there as a MEASURED P1):
+    # a bare severity token followed by a separator and a clause — `Found a P1: the guard
+    # returns 0`, `One P1 — the guard …`. A plain-English blocker with no location is the
+    # commonest shape a lane posts as a follow-up comment.
+    r"|\bP[0-2]\b\s*(?:[:\u2014\u2013]\s+(?!(?:0|none|nil|zero)\b)\S"
+    r"|\s+[\u2014\u2013]\s+(?!(?:0|none|nil|zero)\b)\S)"
     r"|\bblocking\s+(?:finding|issue|defect)s?\s*:\s*P[0-2]\b"
     # A BOLD severity token used as a noun mid-sentence (`There is a **P1** in the guard`),
     # unless it is a zero count (`**P1: 0**`, `**P1**: none.`).
-    r"|\*\*P[0-2]\*\*(?!\s*:?\s*(?:0|none|nil|zero)\b)"
+    r"|\*\*P[0-2]\*\*(?!\s*[:|]?\s*(?:0|none|nil|zero)\b)"
+    # A LABEL followed by a parenthesised severity — `- **F1 (P2)**`, `Finding (P1)`.
+    r"|\b[A-Za-z]\w{0,10}\s*\((P0|P1|P2)\)"
     # `Requires a fix: P1 …` / `Needs a P2 …`
     r"|\b(?:requires?|needs?)\b[^\n]{0,25}?\bP[0-2]\b"
     r")"
 )
 #: `1 blocking (P1)` / `2 blocking findings` — a stated NON-ZERO blocking count.
 BLOCKING_COUNT_RE = re.compile(r"(?i)(?<!no )\b[1-9]\d*[ \t]+blocking\b")
+#: ⛔ A COUNT WRITTEN BEFORE THE TOKEN, or spelled as a numeral — `review-pr.sh`'s
+#: `COUNT_SCAN_AWK` (:1761-1929) and arm (b4) flag both, and both are recorded there as
+#: MEASURED fail-opens ("`CLEAN — 2 P1 findings.` produced NO blocking line and a `clean`
+#: record"). `CLEAN — 2 P1 findings.` matches CLEAR_RE, so without this the body reads CLEAR.
+COUNT_BEFORE_TOKEN_RE = re.compile(
+    # DIGITS only for the count-before-token arm: a spelled numeral is an ARTICLE as often
+    # as a count ("One P2 was fixed" is not a finding), and the spelled form that DOES
+    # count is `one blocking finding`, covered below.
+    r"(?i)(?<![\w-])[1-9]\d*\s+"
+    r"(?:blocking\s+)?(?:findings?\s+)?P[0-2]\b"
+    r"|\b(?:one|two|three|four|five|six|several)\s+blocking\s+finding"
+)
 #: A bracketed severity token used as a NOUN in running text (`2 [P1] open blocking defects`).
 BRACKET_SEVERITY_RE = re.compile(
     r"(?i)\[P[0-2]\]\s*(?:open|blocking|defects?|issues?|findings?|remain|unresolved)"
 )
 #: A TABLE ROW whose severity cell is the token (`| **P1** | the guard returns 0 |`).
-SEVERITY_TABLE_RE = re.compile(r"(?i)\|\s*\**P[0-2]\**\s*\|")
+#: A table row blocks only when it carries a DESCRIPTION cell — `review-pr.sh`'s
+#: table-scaffold rule (:1565): `| **P1** | 0 |`, `| P0 | P1 | P2 |` and `| 0 | 0 | 2 |` are a
+#: reviewer's own tally and must not block.
+SEVERITY_TABLE_RE = re.compile(
+    r"(?im)^\s*\|[^\n]*?\**P[0-2]\**\s*\|[^\n]*?\|[^\n]*?[A-Za-z]{3,}[^\n]*\|"
+)
 #: A severity COUNT of zero in any spelling — `P1: 0`, `**P1**: none.`, `P1: nil`, `P1: zero`.
 #: `review-pr.sh:1221-1224` exempts exactly these ("`**P0**: none.` is a count").
 ZERO_SEVERITY_COUNT_RE = re.compile(r"(?i)\bP[0-2]\b\**\s*:\s*\**\s*(?:0|none|nil|zero)\b")
@@ -927,11 +958,12 @@ def _grades_as_blocking(text: str, item: Mapping[str, Any]) -> bool:
         or BRACKET_SEVERITY_RE.search(text)
         or SEVERITY_TABLE_RE.search(text)
         or BLOCKING_COUNT_RE.search(text)
+        or COUNT_BEFORE_TOKEN_RE.search(text)
         # A severity token beside an ISSUE-block SIBLING is a finding even when the body
         # never uses the word "severity" — `4 × `P2`, `check_type: bug`, `origin: diff``
         # is the dominant shape in the fold PRs (#10902/#10909/#10920).
         or (bool(SIBLING_FIELD_RE.search(text)) and bool(severities & {"0", "1", "2"}))
-        or SEVERITY_HEADING_RE.search(text)
+        or (SEVERITY_HEADING_RE.search(text) and not EXPLICIT_CLEAN_OUTCOME_RE.search(text))
         # The recorder's own unconditional arms (1) and (1b).
         or NON_CLEAN_RE.search(text)
         # Its arm (2): loose `not…clean`, suppressed by an explicit `Outcome: clean`.
@@ -1853,7 +1885,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # `READY-FOR-OWNER(1, )`.
             print(f"FIXTURE-MODE({args.fixture})", file=sys.stderr)
             probe = probe_from_dict(json.loads(Path(args.fixture).read_text()))
-            if len(probe.head or "") != 40:
+            if not re.fullmatch(r"[0-9a-f]{40}", probe.head or ""):
                 raise ReadError(
                     f"a --fixture probe must carry a full 40-hex head; got {probe.head!r}"
                 )
