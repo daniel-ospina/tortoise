@@ -1943,20 +1943,33 @@ is correspondingly stronger than it read. The design document now states the fou
 four-versus-one conclusion with no reference to the passage's previous wording.
 
 **§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
-45 MB index total, on 141 MB"*. Two independent problems: the ≈50 MB figure double-counted the one leg
-that IS indexed (retracted by `#5090`'s own 2026-10-08 comment), and the 141/45 MB pair is the dated
-2026-09-24 reading of a graph that has since grown 2.7× to 68,526 nodes. The row now carries the
-2026-11-04 reading of graph `live-v4` (`#10976`): **19.4 MB of stored vector payload (12,657 × 1,536 B),
-plus a 93 MB index total, on 195 MB**, with the 93 MB named as the TOTAL index size of which only part is
-HNSW. **No decision changed: V1 remains OPEN and the row says so.**
+45 MB index total, on 141 MB"*. Two independent problems: the 141/45 MB pair is the dated 2026-09-24
+reading of a graph that has since grown 2.7×, and the ≈50 MB payload is that same dated measurement's
+additive estimate over three labels — it was never a current payload reading either. The row now carries
+the **2026-11-04 graph reading** from `live-v4` (`#10976`): **93 MB of index total on a 195 MB graph**,
+with the 93 MB named as the TOTAL index size of which only part is HNSW; and it names the payload axis as
+§12.1b's **2026-09-24** measurement — **33,580 embeddings ≈ 51.6 MB**, of which the unindexed
+`Object`+`Event` population (**12,657 ≈ 19.4 MB, 38 % of every vector stored**) is the removable subset
+`#5090`'s 2026-10-08 arithmetic justifies. **No decision changed: V1 remains OPEN and the row says so.**
+
+**One figure of that first draft was wrong, and the correction is recorded here.** It quoted *"19.4 MB of
+stored vector payload (12,657 × 1,536 B)"* as a **2026-11-04** measurement of the live graph. It is
+neither: 12,657 is the **2026-09-24** count of the `:Object` 7,859 + `:Event` 4,798 embeddings — the
+**unindexed** population, 38 % of every vector stored — and `#5090`'s 2026-10-08 comment reaches it as a
+SCOPE correction (*"the 50 MB figure requires counting the `:Point` leg — the one leg that IS indexed"*),
+not as a re-measurement. `#10976`'s measured block carries no vector count and no 19.4 MB line, and
+`tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure *"is 2026-09-24 and is **not to be
+re-quoted**"* — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a
+2026-11-04 graph reading is exactly the mixing of readings this whole correction exists to stop.
 
 **And §12.1c no longer contradicts §14.3.** Before this correction the two disagreed *inside one
-register* — §12.1c's context line and its option table quoted 50 MB / 45 MB / 141 MB while the row this
-change rewrote said 19.4 MB / 93 MB / 195 MB, a 2× disagreement on the index quantity and 2.6× on the
-payload, in the exact section a lane reads to make the decision. The 2026-09-24 figures are **dated and
-kept** (they are a real measurement of a smaller graph, and deleting them would erase the evidence the
-$73/GiB cost argument rests on), with the superseding 2026-11-04 reading named beside them so the two
-sections can no longer be read as disagreeing about one graph.
+register* — §12.1c's context line and its option table quoted 50 MB / 45 MB / 141 MB while §14.3's V1
+row quoted 93 MB of indices on 195 MB, a 2× disagreement on the index quantity, in the exact section a
+lane reads to make the decision. The 2026-09-24 figures are **dated and kept** (they are a real
+measurement of a smaller graph, and deleting them would erase the evidence the $73/GiB cost argument
+rests on), with the 2026-11-04 graph reading named beside them so the two sections can no longer be read
+as disagreeing about one graph — and each figure now states WHICH reading it belongs to, including the
+payload, which only the 2026-09-24 measurement supplies.
 
 **Why the narration moved here.** The first draft wrote *"⚠️ Corrected 2026-11-04: this paragraph
 previously read …"* into both places. `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
@@ -1975,20 +1988,26 @@ on the index quantity and 2.6× on the payload, inside one register, in the sect
 the decision. This entry records the second pass that closed it, and why each figure was stale in the
 place it stood.
 
-**The figures, and what was wrong with them.** The ≈50 MB payload was an additive estimate:
-`Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. It attributed vectors to two labels
-that carry no vector index and therefore no vector DDL — only `Point` does — so two of its three legs do
-not exist. It also read §12.1b's `Point` line as *vector* bytes when that line is ALL `Point` attributes.
-The 2026-11-04 reading of `live-v4` (`#10976`) is **12,657 vectors × 1,536 B = 19.4 MB** with
-`indices_sz_mb` **93** on a **195 MB** graph.
+**The figures, and what was wrong with them.** The ≈50 MB payload figure is an additive estimate from the
+2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. Its
+`Point` leg reads that label's ALL-attributes line as vector bytes, so the estimate is not exact — but the
+`Object` and `Event` legs DO exist: those labels store 7,859 and 4,798 embeddings respectively, and the
+whole defect this epic exists for is that they store them with **no vector index behind them** (`Object`
+and `Event` carry no vector DDL — only `Point` does). The part of the ≈50 MB that is *removable* is
+therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B = 19.4 MB, 38 % of every
+vector stored**, which is `#5090`'s 2026-10-08 SCOPE correction — not a re-measurement, and not a
+2026-11-04 figure. The 2026-11-04 reading of `live-v4` (`#10976`) is a **graph** reading:
+`indices_sz_mb` **93** on a **195 MB** graph, with per-label attribute bytes and no vector count; the
+probe's own docstring says the 12,657 count *"is 2026-09-24 and is not to be re-quoted"*, and `--census`
+re-measures it per label on a named graph at a timestamp.
 
 **The places that still cited it, all now dated.** §0's bill summary; §12.1's *"45 MB of indices +
 51.6 MB of embeddings + 16 MB of text"*; §12.1b's derived *"Stored vector properties ≈ 50 MB"* sentence
-(now stating the 19.4 MB reading and naming why the additive estimate overcounts); §12.1d's per-node
-ratio; §12.3's *"≈50 MB … against 141 MB"*; §13's attribute-byte sentence; and two cross-references that
-would otherwise have gone stale in the other direction — §0's *"§2 and §12 state 141 MB and 45 MB"* (now
-`§12.1b's 2026-09-24 table`) and the cost model's *"on a ~141 MB graph"* (kept as that date's reading,
-with the 2026-11-04 reading named beside it).
+(now carrying that 2026-09-24 estimate, with the unindexed 19.4 MB named as the removable subset rather
+than as a current payload reading); §12.1d's per-node ratio; §12.3's *"≈50 MB … against 141 MB"*; §13's
+attribute-byte sentence; and two cross-references that would otherwise have gone stale in the other
+direction — §0's *"§2 and §12 state 141 MB and 45 MB"* (now `§12.1b's 2026-09-24 table`) and the cost
+model's *"on a ~141 MB graph"* (kept as that date's reading, with the 2026-11-04 reading named beside it).
 
 **What was deliberately NOT done: no per-node ratio from the new reading.** The 2026-09-24 ratio,
 1.34 embeddings per node, is over **capped** nodes (~25,000). The 2026-11-04 reading's node base is

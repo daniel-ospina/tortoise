@@ -42,7 +42,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 | epic body says | at `641e5f1b37` | how verified |
 |---|---|---|
 | 141 MB graph, 45 MB indices, 25k nodes | **195 MB, 93 MB indices (48 %), 68,526 nodes** | `#10976` body, measured 2026-11-04 on graph `live-v4`; same figures as the lane brief |
-| ≈50 MB of stored vector properties | **19.4 MB** (12,657 × 1,536 B = 19,441,152 B) — the 50 MB double-counted the one leg that *is* indexed | the epic's own 2026-10-08 comment |
+| ≈50 MB of stored vector properties | **19.4 MB removable** (12,657 × 1,536 B = 19,441,152 B) — the ≈50 MB is the whole vector class, including the `Point` leg that *is* indexed; the unindexed `Object`+`Event` subset is what removal can reclaim | the epic's own 2026-10-08 comment (a scope correction over the 2026-09-24 measurement, not a new reading) |
 | "no rule says what earns an embedding" | **the rule exists**; it is off by default | `embed_gate.RULE_SET is value_gate.RULES` → `True`; `embed_gate_enabled()` reads `TORTOISE_EMBED_GATE`, unset in the **4** shipped config surfaces that exist (the instrument walks 6; `docker-compose.yaml` and `Dockerfile` are *absent* from this tree) |
 | "12,657 embeddings stored and unindexed" | **still true in substance** — index creation covers `Point` only | `projection/__init__.py:19765` (`createNodeIndex('Point',…)`), `:19783` (`CREATE VECTOR INDEX FOR (p:Point)`); no other label's vector DDL in `tortoise/`, `graph-scripts/`, `tools/`. (`graph_key_restore.py:452` **replays** a dumped catalogue; it never decides.) |
 | a fallback query reports the fallback | **MET** | `#4999` / PR #5159 added `mechanism: index \| scan \| scan_fallback` |
@@ -308,6 +308,8 @@ correction changes a decision; **V1 stays open**. Delivered in this lane:
 - `docs/architecture/STORAGE-ARCHITECTURE.md` **§12.1c** — *"a SECOND … and a THIRD"* → **four**, because
 the served set is `{Event, Object, Point, Source, Subject}` and only `Point` is indexed.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` **§14.3 V1 row** — *"≈50 MB of stored vectors + a 45 MB
-  index total, on 141 MB"* → **19.4 MB of payload + a 93 MB index total, on 195 MB** (measured
-  2026-11-04, graph `live-v4`). The ≈50 MB figure was retracted by this epic's own 2026-10-08 comment and
-  survived in the register anyway.
+  index total, on 141 MB"* → **a 93 MB index total on a 195 MB graph** (measured 2026-11-04, graph
+  `live-v4`, `#10976`) **+ the payload axis as the 2026-09-24 measurement it belongs to: 33,580
+  embeddings ≈ 51.6 MB, of which the unindexed `Object`+`Event` 12,657 ≈ 19.4 MB is the removable
+  subset.** The ≈50 MB was carried as a current figure long after it was dated, and this epic's own
+  2026-10-08 comment had already narrowed what removal can claim to the 19.4 MB.
