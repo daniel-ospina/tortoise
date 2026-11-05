@@ -64,7 +64,7 @@ Safety
   Every string this tool echoes — including the resolved remote URL and the ``--repo`` argument — is
   passed through a userinfo scrubber first, because ``https://x-access-token:<TOKEN>@host/o/n.git``
   is a real remote shape and echoing it verbatim was a measured leak.
-* The probe ref is ``gh-write-preflight-<branch-slug>-<utc-stamp>`` — derived from the LANE's own
+* The probe ref is ``gh-write-preflight-<branch-slug>-<utc-stamp>-<pid>-<6 hex>`` — derived from the LANE's own
   branch, so a leftover is attributable to the lane that made it (and a reaper can find it).
 * A throwaway BRANCH is CI-safe **in this repo**: every ``push:`` workflow is filtered to
   ``branches: [main]`` or ``tags: ['v*']`` (verified — python-ci, main-lint, deploy-*, redis-guard,
@@ -80,6 +80,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -102,6 +103,7 @@ class Verdict:
         self.credential = "unknown"
         self.reason = ""
         self.detail = ""
+        self.target = ""
 
     def as_dict(self) -> dict:
         # ⛔ SCRUBBED HERE, NOT AT THE PRINT SITE: `--json` is the line a lane actually logs and greps,
@@ -218,7 +220,27 @@ def _git_available() -> bool:
         return False
 
 
-def _origin_url(cwd: Path) -> str:
+def _push_targets(cwd: Path) -> list[str]:
+    """EVERY url `git push origin` writes to — `remote.origin.pushurl` is multi-valued.
+
+    ⛔ `git push origin` writes to ALL pushurls and fails if any of them refuses, while `ls-remote`
+    reads one URL at a time. So the write goes through the NAME `origin` (git exercises every pushurl)
+    and each resolved target is confirmed separately. Addressing a single resolved URL instead was a
+    FALSE PASS: with a writable first pushurl and a refusing second one the tool said `GH-WRITE-OK`
+    while the real push exited 1 (measured, round 11).
+    """
+    try:
+        out = _git(cwd, "remote", "get-url", "--push", "--all", "origin", timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    targets = [u for u in out.split() if u]
+    if not targets:
+        fetch = _fetch_url(cwd)
+        targets = [fetch] if fetch else []
+    return targets
+
+
+def _fetch_url(cwd: Path) -> str:
     try:
         return _git(cwd, "remote", "get-url", "origin", timeout=30).stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -303,10 +325,12 @@ def _classify_push_failure(stderr: str) -> str:
     return "push-refused"
 
 
-def _remote_has_ref(cwd: Path, ref: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[str, bool]:
-    """`(sha, ok)` for `ref` on origin. ok=False means the read itself failed (not "absent")."""
+def _remote_has_ref(
+    cwd: Path, target: str, ref: str, timeout: int = DEFAULT_TIMEOUT_S
+) -> tuple[str, bool]:
+    """`(sha, ok)` for `ref` on `target`. ok=False means the read itself failed (not "absent")."""
     try:
-        res = _git(cwd, "ls-remote", "--heads", "origin", ref, timeout=timeout)
+        res = _git(cwd, "ls-remote", "--heads", target, ref, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return "", False
     if res.returncode != 0:
@@ -324,7 +348,48 @@ def _remote_has_ref(cwd: Path, ref: str, timeout: int = DEFAULT_TIMEOUT_S) -> tu
     return "", True
 
 
-def _cleanup(cwd: Path, ref: str, timeout: int = DEFAULT_TIMEOUT_S) -> str:
+def _exists_any(
+    cwd: Path, targets: list[str], ref: str, timeout: int = DEFAULT_TIMEOUT_S
+) -> tuple[str, bool]:
+    """`(sha, ok)` — the ref's sha if it is on ANY target, ok=False if any read failed.
+
+    The question a PRE-check asks: "would I be probing over something that already exists?" Any target
+    that has it means yes.
+    """
+    found = ""
+    for target in targets:
+        sha, ok = _remote_has_ref(cwd, target, ref, timeout)
+        if not ok:
+            return "", False
+        found = found or sha
+    return found, True
+
+
+def _confirmed_all(
+    cwd: Path, targets: list[str], ref: str, timeout: int = DEFAULT_TIMEOUT_S
+) -> tuple[str, bool]:
+    """`(sha, ok)` — the sha ONLY if EVERY target holds it; ok=False if any read failed.
+
+    ⛔ THE POST-PUSH QUESTION IS NOT THE PRE-CHECK ONE (measured, round 11). `found or sha` returned a
+    sha as soon as ONE target had it, so a second pushurl that received nothing was reported as
+    confirmed: `GH-WRITE-OK` for a destination the lane believes it pushed to that has no such ref.
+    Every target must agree on the same sha, which is what "the write landed" actually means when
+    `remote.origin.pushurl` is multi-valued.
+    """
+    agreed = ""
+    for target in targets:
+        sha, ok = _remote_has_ref(cwd, target, ref, timeout)
+        if not ok:
+            return "", False
+        if not sha:
+            return "", True  # absent on a target: the write did not land there
+        if agreed and sha != agreed:
+            return "", True  # the targets disagree: not one landed write
+        agreed = sha
+    return agreed, True
+
+
+def _cleanup(cwd: Path, targets: list[str], ref: str, timeout: int = DEFAULT_TIMEOUT_S) -> str:
     """Delete the probe ref. Returns '' when the ref is GONE, else a (scrubbed) failure detail.
 
     ⛔ THE REMOTE DECIDES, NEVER THE DELETE'S EXIT CODE — measured (round 6). Real git ERRORS on
@@ -337,17 +402,22 @@ def _cleanup(cwd: Path, ref: str, timeout: int = DEFAULT_TIMEOUT_S) -> str:
     """
     rc_err = ""
     try:
+        # ⛔ the NAME, not a target: a delete must reach every pushurl, exactly like a push does
         dele = _git(cwd, "push", "--no-verify", "origin", "--delete", ref, timeout=timeout)
         if dele.returncode != 0:
             rc_err = " ".join((dele.stderr or dele.stdout or "").split())[:200]
     except (OSError, subprocess.SubprocessError) as exc:
         # A timeout may still have deleted it — fall through to the confirmation.
         rc_err = f"{type(exc).__name__}: {exc}"
-    sha, ok = _remote_has_ref(cwd, ref, timeout)
-    if not ok:
-        return "could not confirm the delete (ls-remote failed)"
-    if sha:
-        return f"{ref} still present after delete" + (f" ({rc_err})" if rc_err else "")
+    for target in targets:
+        sha, ok = _remote_has_ref(cwd, target, ref, timeout)
+        if not ok:
+            return f"could not confirm the delete on {_scrub(target)} (ls-remote failed)"
+        if sha:
+            return (
+                f"{ref} still present on {_scrub(target)} after delete"
+                + (f" ({rc_err})" if rc_err else "")
+            )
     return ""
 
 
@@ -356,7 +426,10 @@ def _cleanup_failure(verdict: Verdict, detail: str) -> Verdict:
     verdict.reason = "cleanup-failed"
     verdict.detail = (
         f"the credential CAN write, but the probe ref {verdict.ref} could not be removed — "
-        f"delete it by hand: git push origin --delete {verdict.ref} ({detail})"
+        f"delete it by hand: git push origin --delete {verdict.ref} "
+        f"(origin pushes to {verdict.target or '<unresolved>'}) ({detail}). "
+        f"This is a REPO-STATE problem, not a credential problem: a ruleset that restricts deleting "
+        f"refs/heads/* produces it, and every run then leaves one more probe branch behind"
     )
     return verdict
 
@@ -364,6 +437,7 @@ def _cleanup_failure(verdict: Verdict, detail: str) -> Verdict:
 def _after_push_failure(
     v: Verdict,
     cwd: Path,
+    targets: list[str],
     ref: str,
     *,
     reason: str,
@@ -380,26 +454,29 @@ def _after_push_failure(
     """
     v.reason = reason
     v.detail = detail
-    landed, ok = _remote_has_ref(cwd, ref, timeout)
+    landed, ok = _exists_any(cwd, targets, ref, timeout)
     if not ok:
         # Cannot confirm whether the ref was created. Deleting would be the right attempt, but its
         # own post-delete confirmation would also fail and would mask `reason` with `cleanup-failed`,
         # so say what is unknown instead of guessing in either direction.
         v.detail = (
             f"{detail} — and whether {ref} was created could not be confirmed (ls-remote failed); "
-            f"check it and delete it if present: git ls-remote --heads origin {ref}"
+            f"check it and delete it if present: git ls-remote --heads <target> {ref}, where the "
+            f"target is {v.target or '<unresolved>'} (in a fork checkout `origin` is the FETCH url and "
+            f"would answer empty for a ref that IS on the push target)"
         )
         return v
     if landed:
-        cleanup_detail = _cleanup(cwd, ref, timeout)
+        cleanup_detail = _cleanup(cwd, targets, ref, timeout)
         if cleanup_detail:
             return _cleanup_failure(v, cleanup_detail)
     return v
 
 
-def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
+def probe(cwd: Path, repo: str, targets: list[str], timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
     v = Verdict()
     v.repo = repo
+    v.target = ", ".join(_scrub(t) for t in targets)
     v.credential = _credential_source(cwd)
 
     sha = _head_sha(cwd)
@@ -409,14 +486,21 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         return v
     v.sha = sha
 
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    # ⛔ UNIQUE PER RUN, not per second. A one-second stamp collided when two gates ran in the same
+    # checkout inside one second (parent + dispatched child, or the tool's own "re-run in a second"
+    # remedy) — measured 30 parallel runs: 9 false `push-refused` ("reference already exists" — a
+    # measured refusal for a credential that writes fine), 4 false `ls-remote-mismatch` caused by a peer
+    # deleting this run's ref, and 9 `probe-ref-exists`. pid + 6 random hex digits cannot collide.
+    stamp = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}-{secrets.token_hex(3)}"
     ref = f"{PROBE_PREFIX}-{_branch_slug(cwd)}-{stamp}"
     v.ref = ref
 
-    existing, ok = _remote_has_ref(cwd, ref, timeout)
+    existing, ok = _exists_any(cwd, targets, ref, timeout)
     if not ok:
         v.reason = "cannot-verify:ls-remote-failed"
-        v.detail = f"could not list refs on origin to check {ref} — nothing was pushed"
+        v.detail = (
+            f"could not list refs on {v.target or '<unresolved>'} to check {ref} — nothing was pushed"
+        )
         return v
     if existing:
         # ⛔ cannot-verify, NOT a measured refusal: nothing about the CREDENTIAL was measured here, and
@@ -427,6 +511,8 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
 
     # ── 1. the real write: a genuine push through the SAME credential path a lane uses ───────────
     try:
+        # ⛔ the NAME, so git exercises EVERY pushurl — a single resolved URL produced a
+        # FALSE PASS when a second pushurl refused (measured, round 11)
         push = _git(cwd, "push", "--no-verify", "origin", f"HEAD:refs/heads/{ref}", timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         # ⚠️ ORDER MATTERS: `TimeoutExpired` subclasses `SubprocessError`, so this arm must come
@@ -435,6 +521,7 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         return _after_push_failure(
             v,
             cwd,
+            targets,
             ref,
             reason="cannot-verify:timeout",
             detail=f"the push did not answer within {timeout}s ({exc})",
@@ -444,6 +531,7 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         return _after_push_failure(
             v,
             cwd,
+            targets,
             ref,
             reason="cannot-verify:probe-error",
             detail=f"{type(exc).__name__}: {exc}",
@@ -456,6 +544,7 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         return _after_push_failure(
             v,
             cwd,
+            targets,
             ref,
             reason=_classify_push_failure(stderr),
             detail=" ".join(stderr.split())[:400],
@@ -463,7 +552,7 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         )
 
     # ── 2. confirmed by ls-remote, not by the push's own exit code ──────────────────────────────
-    landed, ok = _remote_has_ref(cwd, ref, timeout)
+    landed, ok = _confirmed_all(cwd, targets, ref, timeout)
     if not ok:
         # ⛔ cannot-verify, NEVER `cleanup-failed`. Presence was never MEASURED on this path, so
         # "could not be removed" is an unknown — not a cleanup failure — and `cleanup-failed` asserts
@@ -471,7 +560,7 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         # exited 0 writing nothing plus an `ls-remote` exiting 128 produced exactly that false claim
         # about a ref that never existed). The `_after_push_failure` wording is the honest one: name
         # the ref, say where it may be, and let the operator check.
-        detail = _cleanup(cwd, ref, timeout)
+        detail = _cleanup(cwd, targets, ref, timeout)
         v.reason = "cannot-verify:ls-remote-failed"
         v.detail = (
             f"the push exited 0 but {ref} could not be confirmed on origin"
@@ -480,15 +569,27 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         )
         return v
     if not landed:
-        # ⛔ NOTHING LANDED, SO THERE IS NOTHING TO DELETE — and calling `_cleanup` here is what made
-        # this arm report `cleanup-failed` ("the credential CAN write") for a ref that never existed.
+        # ⛔ `_confirmed_all` ANSWERS "" FOR TWO DIFFERENT STATES, and only one of them means "nothing
+        # to delete": (i) absent on a target, (ii) PRESENT on every target with DISAGREEING shas.
+        # Treating both as absent left the probe ref on every pushurl (measured, round 12: two
+        # `LEFTOVER` refs from one run) — one branch per run, forever. Ask the presence question.
+        # This NO LONGER reports `cleanup-failed` for a ref that never existed: it reaches `_cleanup`
+        # only when a ref is measured PRESENT.
+        present, pok = _exists_any(cwd, targets, ref, timeout)
+        if pok and present:
+            detail = _cleanup(cwd, targets, ref, timeout)
+            if detail:
+                return _cleanup_failure(v, detail)
         v.reason = "ls-remote-mismatch"
-        v.detail = f"push exited 0 but {ref} is not on the remote — the write did not land"
+        v.detail = (
+            f"push exited 0 but {ref} is not on EVERY push target "
+            f"({v.target or '<unresolved>'}) — the write did not land everywhere it was sent"
+        )
         return v
     if landed != sha:
         # The ref EXISTS with a different sha, so it does have to go: a caller retries after a
         # mismatch, and leaving it would accumulate one branch per attempt.
-        detail = _cleanup(cwd, ref, timeout)
+        detail = _cleanup(cwd, targets, ref, timeout)
         if detail:
             return _cleanup_failure(v, detail)
         v.reason = "ls-remote-mismatch"
@@ -496,7 +597,7 @@ def probe(cwd: Path, repo: str, timeout: int = DEFAULT_TIMEOUT_S) -> Verdict:
         return v
 
     # ── 3. leave no trace ───────────────────────────────────────────────────────────────────────
-    detail = _cleanup(cwd, ref, timeout)
+    detail = _cleanup(cwd, targets, ref, timeout)
     if detail:
         return _cleanup_failure(v, detail)
 
@@ -564,10 +665,23 @@ def main(argv: list[str] | None = None) -> int:
             _fail("no-git-checkout", f"{cwd} is not a git work tree"),
             json_out=args.json,
             quiet=args.quiet,
+            cannot_verify=True,
         )
 
-    origin_url = _origin_url(cwd)
+    fetch_url = _fetch_url(cwd)
+    targets = _push_targets(cwd)
+    # the REPO IDENTITY is what the checkout is: the fetch url's slug. Every push target is verified
+    # separately, so a fork-style split is measured rather than mislabelled.
+    origin_url = fetch_url or (targets[0] if targets else "")
     origin_repo = _repo_from_url(origin_url)
+    push_repos = [_repo_from_url(t) for t in targets]
+    split_note = (
+        ""
+        if not push_repos or all(p.lower() == origin_repo.lower() for p in push_repos)
+        else " [origin pushes to "
+        + ", ".join(_scrub(p) for p in push_repos)
+        + "; each of those targets was confirmed]"
+    )
 
     explicit = (args.repo or "").strip()
     if explicit:
@@ -615,22 +729,29 @@ def main(argv: list[str] | None = None) -> int:
         repo = origin_repo
 
     try:
-        verdict = probe(cwd, repo, timeout)
+        verdict = probe(cwd, repo, targets, timeout)
     except subprocess.TimeoutExpired as exc:
         verdict = _fail(
             "cannot-verify:timeout", f"{exc.cmd} did not answer within {timeout}s"
         )
         verdict.repo = repo
+        verdict.detail += split_note
         return _emit(verdict, json_out=args.json, quiet=args.quiet, cannot_verify=True)
     except (OSError, subprocess.SubprocessError) as exc:
         verdict = _fail("cannot-verify:probe-error", f"{type(exc).__name__}: {exc}", repo=repo)
+        verdict.detail += split_note
         return _emit(verdict, json_out=args.json, quiet=args.quiet, cannot_verify=True)
 
+    if split_note and verdict.detail:
+        verdict.detail += split_note
     return _emit(
         verdict,
         json_out=args.json,
         quiet=args.quiet,
-        cannot_verify=verdict.reason.startswith("cannot-verify"),
+        # ⛔ `cleanup-failed` belongs here, NOT in the measured-refusal bucket: its own detail says the
+        # credential CAN write (the write was measured). Exiting 1 told a lane that CAN deliver
+        # "do not start" — and because each run left another probe ref behind, it would say so forever.
+        cannot_verify=verdict.reason.startswith("cannot-verify") or verdict.reason == "cleanup-failed",
     )
 
 

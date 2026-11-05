@@ -258,7 +258,7 @@ def test_push_reports_success_but_nothing_lands_is_a_mismatch_not_a_cleanup_fail
     """⛔ THE WRONG-DIAGNOSIS TEST. Measured pre-fix on a real remote:
 
         GH-WRITE-UNAVAILABLE(cleanup-failed) — the credential CAN write, but the probe ref
-        gh-write-preflight-… could not be removed — delete it by hand: git push origin --delete …
+        gh-write-preflight-… could not be removed — delete it by hand …
 
     for a ref that NEVER EXISTED — because real git ERRORS on `push --delete` of an absent ref
     (`error: unable to delete '…': remote ref does not exist`, rc 1) and `_cleanup` read that exit
@@ -332,7 +332,7 @@ exec {GIT} "$@"
     os.environ["PATH"] = f"{bindir}{os.pathsep}{old_path}"
     try:
         mod = importlib.import_module("gh_write_preflight")
-        detail = mod._cleanup(clone, "gh-write-preflight-never-existed", 30)
+        detail = mod._cleanup(clone, ["origin"], "gh-write-preflight-never-existed", 30)
     finally:
         os.environ["PATH"] = old_path
         sys.path.pop(0)
@@ -454,7 +454,7 @@ exec {GIT} "$@"
     assert res.returncode != 0, combined
     assert "GH-WRITE-UNAVAILABLE(cleanup-failed" in combined, combined
     assert "gh-write-preflight" in combined, f"the leftover ref must be named: {combined}"
-    assert "git push origin --delete" in combined, "the remedy must be spelled out"
+    assert "delete it by hand" in combined, "the remedy must be spelled out"
 
 
 # ── 7. secret hygiene, exact ───────────────────────────────────────────────────────────────────────
@@ -643,7 +643,7 @@ def test_post_push_failure_funnel_cleans_a_landed_ref(tmp_path: Path) -> None:
     v.ref = ref
     v.repo = "fixture"
     out = mod._after_push_failure(
-        v, clone, ref, reason="cannot-verify:timeout", detail="simulated stall"
+        v, clone, ["origin"], ref, reason="cannot-verify:timeout", detail="simulated stall"
     )
 
     assert out.ok is False
@@ -675,14 +675,14 @@ exec {GIT} "$@"
         v.ref = ref
         v.repo = "fixture"
         out = mod._after_push_failure(
-            v, clone, ref, reason="cannot-verify:timeout", detail="simulated stall"
+            v, clone, ["origin"], ref, reason="cannot-verify:timeout", detail="simulated stall"
         )
     finally:
         os.environ["PATH"] = real_path
 
     assert out.reason == "cleanup-failed", out.reason
     assert ref in out.detail, out.detail
-    assert "git push origin --delete" in out.detail, out.detail
+    assert "delete" in out.detail and ref in out.detail, out.detail
 
 
 # ── 13. INTEGRATION: the call sites, not just the funnel ───────────────────────────────────────
@@ -693,18 +693,28 @@ exec {GIT} "$@"
 
 
 def _stub_that_pushes_then(tmp_path: Path, tail: str, name: str = "stubbin") -> Path:
-    """A git stub that performs the REAL push, then runs `tail` (exit 1 / sleep) unconditionally."""
+    """A git stub that performs the REAL push, then runs `tail` (exit 1 / sleep) unconditionally.
+
+    It matches on the ARGUMENTS, not on the remote's spelling: the probe now addresses the resolved
+    PUSH URL rather than the name `origin`, so a stub keyed on the literal string `origin` would
+    silently stop intercepting \u2014 which is exactly what happened when the target was threaded through.
+    """
     bindir = tmp_path / name
     bindir.mkdir(exist_ok=True)
     stub = bindir / "git"
     stub.write_text(
         f"""#!/bin/sh
-case "$*" in
-  "push --no-verify origin HEAD:"*)
-    {GIT} "$@" || exit $?
-    {tail}
-    ;;
-esac
+is_push=0
+is_delete=0
+for a in "$@"; do
+  [ "$a" = "push" ] && is_push=1
+  [ "$a" = "--delete" ] && is_delete=1
+done
+if [ "$is_push" = 1 ] && [ "$is_delete" = 0 ]; then
+  {GIT} "$@" || exit $?
+  {tail}
+  exit 0
+fi
 exec {GIT} "$@"
 """,
         encoding="utf-8",
@@ -775,7 +785,7 @@ exec {GIT} "$@"
     stub.chmod(0o755)
     res = _run_with_path(clone, bindir)
     combined = res.stdout + res.stderr
-    assert res.returncode == 1, f"a ref that survives the delete is not a pass: {combined}"
+    assert res.returncode == 2, f"cleanup-failed is cannot-verify (the write was measured): {combined}"
     assert "GH-WRITE-UNAVAILABLE(cleanup-failed)" in combined, combined
     assert "GH-WRITE-OK" not in combined, combined
     assert "gh-write-preflight" in combined, f"the leftover must be named: {combined}"
@@ -952,8 +962,8 @@ def test_probe_ref_exists_is_cannot_verify_not_a_refusal(tmp_path: Path) -> None
     """A pre-existing probe ref is a re-run-in-a-second condition, not a credential verdict."""
     mod = _load_tool()
     clone = _make_remote_and_clone(tmp_path)  # needs a real HEAD: the ref check runs after it
-    mod._remote_has_ref = lambda _cwd, _ref, _t=30: ("a" * 40, True)  # type: ignore[assignment]
-    v = mod.probe(clone, "o/n")
+    mod._exists_any = lambda _cwd, _t, _ref, _t2=30: ("a" * 40, True)  # type: ignore[assignment]
+    v = mod.probe(clone, "o/n", ["origin"])
     assert v.ok is False
     assert v.reason == "cannot-verify:probe-ref-exists", v.reason
     assert v.reason.startswith("cannot-verify"), "this must map to exit 2, not 1"
@@ -962,15 +972,208 @@ def test_probe_ref_exists_is_cannot_verify_not_a_refusal(tmp_path: Path) -> None
 def test_after_push_failure_names_the_ref_when_it_cannot_confirm(tmp_path: Path) -> None:
     """Losing this branch made a possibly-created ref silently unfindable (measured as a mutant)."""
     mod = _load_tool()
-    mod._remote_has_ref = lambda _cwd, _ref, _t=30: ("", False)  # type: ignore[assignment]
+    mod._exists_any = lambda _cwd, _t, _ref, _t2=30: ("", False)  # type: ignore[assignment]
     v = mod.Verdict()
     v.ref = "gh-write-preflight-cannot-confirm"
     out = mod._after_push_failure(
-        v, tmp_path, v.ref, reason="push-refused", detail="boom"
+        v, tmp_path, ["origin"], v.ref, reason="push-refused", detail="boom"
     )
     assert out.reason == "push-refused", out.reason
     assert "gh-write-preflight-cannot-confirm" in out.detail, out.detail
     assert "git ls-remote" in out.detail, out.detail
+
+
+def test_a_pushurl_that_silently_receives_nothing_is_a_mismatch(tmp_path: Path) -> None:
+    """\u26d4 The OTHER multi-pushurl shape: the push succeeds, but a target the lane believes it reached
+    has nothing. A confirmation that checks only the FIRST target reports `GH-WRITE-OK` for a
+    destination that never received the ref, so every target is confirmed.
+
+    With real git a `pre-receive` hook that exits 0 always accepts the update, so this shape is built
+    with a git stub: the push is REAL (it exercises every pushurl, as a lane's does) and only the
+    `ls-remote` against the SECOND target is made to answer empty.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    first = tmp_path / "first2.git"
+    second = tmp_path / "second2.git"
+    _git("init", "--bare", "-q", str(first), cwd=tmp_path)
+    _git("init", "--bare", "-q", str(second), cwd=tmp_path)
+    _git("remote", "set-url", "origin", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(second), cwd=clone)
+    bindir = _stub_bin(
+        tmp_path,
+        f"""#!/bin/sh
+is_remote=0
+for a in "$@"; do
+  [ "$a" = "ls-remote" ] && is_remote=1
+done
+if [ "$is_remote" = 1 ]; then
+  case "$*" in
+    *second2.git*) exit 0 ;;   # this destination reports nothing
+  esac
+fi
+exec {GIT} "$@"
+""",
+    )
+    res = _run_with_path(clone, bindir)
+    combined = res.stdout + res.stderr
+    assert res.returncode != 0, f"a target that received nothing is not a pass: {combined}"
+    assert "GH-WRITE-OK" not in combined, combined
+
+
+def test_targets_that_disagree_still_clean_up(tmp_path: Path) -> None:
+    """\u26d4 `_confirmed_all` answers "" for TWO states: absent on a target, and PRESENT on every target
+    with DISAGREEING shas. The second one has something to delete, and treating it as "nothing landed"
+    left the probe ref on every pushurl \u2014 measured round 12: two `LEFTOVER` refs from ONE run, so one
+    branch accumulates per run. The arm must ask the presence question before deciding.
+
+    Built with a git stub for the read only: the push is REAL (it goes to every pushurl), and each
+    target is then made to report a DIFFERENT sha \u2014 the shape a server-side hook produces when it
+    rewrites the ref.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    first = tmp_path / "first3.git"
+    second = tmp_path / "second3.git"
+    _git("init", "--bare", "-q", str(first), cwd=tmp_path)
+    _git("init", "--bare", "-q", str(second), cwd=tmp_path)
+    _git("remote", "set-url", "origin", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(second), cwd=clone)
+    counter = tmp_path / "lsr.count"
+    bindir = _stub_bin(
+        tmp_path,
+        f"""#!/bin/sh
+is_remote=0
+for a in "$@"; do [ "$a" = "ls-remote" ] && is_remote=1; done
+if [ "$is_remote" = 1 ]; then
+  [ -f "{tmp_path}/gone.marker" ] && exit 0   # after a successful delete nothing is there
+  n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "{counter}"
+  # the first two reads are the PRE-check: nothing exists yet
+  [ "$n" -le 2 ] && exit 0
+  case "$*" in
+    *first3.git*)  printf '%s\\t%s\\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$(for r in "$@"; do case "$r" in gh-write-preflight-*) echo "refs/heads/$r";; esac; done)"; exit 0 ;;
+    *second3.git*) printf '%s\\t%s\\n' "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "$(for r in "$@"; do case "$r" in gh-write-preflight-*) echo "refs/heads/$r";; esac; done)"; exit 0 ;;
+  esac
+fi
+for a in "$@"; do
+  if [ "$a" = "push" ]; then
+    case "$*" in *"--delete"*) : > "{tmp_path}/gone.marker" ;; esac
+  fi
+done
+exec {GIT} "$@"
+""",
+    )
+    res = _run_with_path(clone, bindir)
+    combined = res.stdout + res.stderr
+    assert res.returncode != 0, combined
+    assert "ls-remote-mismatch" in combined, combined
+    # the delete MUST have been attempted: a ref is present on both targets
+    assert "gh-write-preflight" not in _git("ls-remote", "--heads", str(first), cwd=clone).stdout, (
+        f"a present ref was left behind: {combined}"
+    )
+    assert "gh-write-preflight" not in _git("ls-remote", "--heads", str(second), cwd=clone).stdout
+
+
+def test_a_second_refusing_pushurl_cannot_pass(tmp_path: Path) -> None:
+    """\u26d4 FALSE PASS, measured round 11. `remote.origin.pushurl` is MULTI-VALUED: `git push origin`
+    writes to every pushurl and fails if any refuses, while `ls-remote` reads one URL at a time. When the
+    probe addressed a single resolved URL it reported `GH-WRITE-OK` with a writable first pushurl and a
+    refusing second one, while the real push exited 1. The write must go through the NAME `origin` and
+    every target must be confirmed separately.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    first = tmp_path / "first.git"
+    second = tmp_path / "second.git"
+    _git("init", "--bare", "-q", str(first), cwd=tmp_path)
+    _git("init", "--bare", "-q", str(second), cwd=tmp_path)
+    hook = second / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'remote: Permission denied' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _git("remote", "set-url", "origin", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(first), cwd=clone)
+    _git("config", "--add", "remote.origin.pushurl", str(second), cwd=clone)
+
+    res = _run(clone)
+    combined = res.stdout + res.stderr
+    assert res.returncode != 0, f"a refusing pushurl means the lane CANNOT deliver: {combined}"
+    assert "GH-WRITE-OK" not in combined, combined
+    # ⛔ AND NO LEFTOVER: pushing to one resolved target instead of the name leaves the ref on the
+    # target that accepted, because git never reports the refusal and the mismatch arm
+    # (correctly) does not delete a ref it believes was never created.
+    assert "gh-write-preflight" not in _git("ls-remote", "--heads", str(first), cwd=clone).stdout
+
+
+# ── 21. round-10 merge-review findings: each one pinned ───────────────────────────────────────
+
+
+def test_probe_uses_and_labels_the_PUSH_url_not_the_fetch_url(tmp_path: Path) -> None:
+    """⛔ MEASURED. `git push origin` writes to `remote.origin.pushurl` when it is set, but the tool read
+    `remote get-url origin` (the FETCH url) and addressed every operation by the NAME `origin`. With a
+    fork-style pushurl the probe therefore confirmed the wrong repo and labelled `repo=` with the
+    upstream one — certifying a repo it never wrote to, the exact class `--repo` exists to prevent.
+    The push target is now resolved with `--push` and used for every git operation, so a lane that
+    writes to its fork measures the fork.
+    """
+    clone = _make_remote_and_clone(tmp_path)
+    other = tmp_path / "fork.git"
+    _git("init", "--bare", "-q", str(other), cwd=tmp_path)
+    _git("remote", "set-url", "origin", "https://github.com/daniel-ospina/upstream.git", cwd=clone)
+    _git("remote", "set-url", "--push", "origin", str(other), cwd=clone)
+
+    res = _run(clone)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 0, f"a lane that can push to its fork must pass: {combined}"
+    # the label is the checkout's own identity (the fetch url), and the split is stated explicitly
+    assert "origin pushes to" in combined, f"the split must be stated, not hidden: {combined}"
+    # the write really went to the pushurl target, and to nothing else
+    heads = _git("ls-remote", "--heads", str(other), cwd=clone).stdout
+    assert heads == "", f"the probe ref was left on the push target: {heads}"
+    upstream_refs = _git("ls-remote", "--heads", "origin", cwd=clone).stdout
+    assert "gh-write-preflight" not in upstream_refs, upstream_refs
+
+
+def test_probe_ref_is_unique_across_runs_in_the_same_second(tmp_path: Path) -> None:
+    """⛔ MEASURED. The ref was branch-slug + a ONE-SECOND stamp, so two gates in one checkout inside one
+    second collided: 30 parallel runs produced 9 false `push-refused` ("reference already exists"), 4
+    false `ls-remote-mismatch` (a peer deleted this run's ref), 9 `probe-ref-exists`. A credential that
+    writes fine was reported as a measured refusal, and one run deleted a peer's ref. Nothing pinned the
+    uniqueness — a mutant that hardcoded the stamp passed the whole suite.
+    """
+    mod = _load_tool()
+    clone = _make_remote_and_clone(tmp_path)
+    seen = set()
+    for _ in range(6):
+        v = mod.probe(clone, "o/n", ["origin"], 30)
+        assert v.ref.startswith("gh-write-preflight"), v.ref
+        assert v.ref not in seen, f"two probes in the same second shared the ref name {v.ref}"
+        seen.add(v.ref)
+    assert len(seen) == 6
+
+
+def test_not_a_git_checkout_is_cannot_verify_not_a_credential_refusal(tmp_path: Path) -> None:
+    """\u26d4 A wrong `--workdir` measured NOTHING about the credential, so it must exit 2 with the
+    cannot-verify wording. Exit 1 is the "do not start work" bucket and its message says "fix the
+    credential", which would send a lane to the wrong repair \u2014 the same mistake that made a missing
+    `git` binary a credential verdict.
+    """
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    res = _run(plain)
+    combined = res.stdout + res.stderr
+    assert res.returncode == 2, f"a non-checkout is cannot-verify (2), not a refusal: {combined}"
+    assert "GH-WRITE-UNAVAILABLE(no-git-checkout)" in combined, combined
+
+
+def test_cleanup_failure_is_cannot_verify_not_a_measured_refusal(tmp_path: Path) -> None:
+    """⛔ The write WAS measured, so a leftover ref is a REPO-STATE problem: exit 2, not the "do not
+    start" bucket of exit 1. Reachable on any repo whose ruleset restricts deleting `refs/heads/*`
+    — and because each run leaves another probe ref behind, exit 1 would refuse forever."""
+    mod = _load_tool()
+    v = mod.Verdict()
+    v.ref = "gh-write-preflight-leftover"
+    out = mod._cleanup_failure(v, "remote refused the delete")
+    assert out.reason == "cleanup-failed", out.reason
+    assert "the credential CAN write" in out.detail, out.detail
 
 
 # ── 20. round-5 findings: each one pinned ─────────────────────────────────────────────────────
@@ -1041,7 +1244,7 @@ exec {GIT} "$@"
     stub.chmod(0o755)
     res = _run_with_path(clone, bindir)
     combined = res.stdout + res.stderr
-    assert res.returncode == 1, f"an unconfirmed delete is not a pass: {combined}"
+    assert res.returncode == 2, f"an unconfirmed delete is cannot-verify (the write was measured): {combined}"
     assert "GH-WRITE-UNAVAILABLE(cleanup-failed)" in combined, combined
     assert "GH-WRITE-OK" not in combined, combined
 
@@ -1169,7 +1372,7 @@ exec {GIT} "$@"
     real = os.environ["PATH"]
     os.environ["PATH"] = f"{bindir}{os.pathsep}{real}"
     try:
-        sha, ok = mod._remote_has_ref(tmp_path, "gh-write-preflight-lane")
+        sha, ok = mod._remote_has_ref(tmp_path, "origin", "gh-write-preflight-lane")
     finally:
         os.environ["PATH"] = real
     assert ok is True
@@ -1206,15 +1409,20 @@ def test_probe_ref_and_json_payload(tmp_path: Path) -> None:
 
 
 if __name__ == "__main__":
+    import inspect
     import tempfile
 
     failures = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith("test_") or not callable(fn):
             continue
+        # ⛔ A test that takes no `tmp_path` must not be handed one — calling every test with a fixture
+        # made this advertised command print 4 ERRORs on a clean tree, so a lane could not tell signal
+        # from noise. Pass the fixture only when the signature asks for it.
+        takes_tmp = "tmp_path" in inspect.signature(fn).parameters
         with tempfile.TemporaryDirectory() as td:
             try:
-                fn(Path(td))
+                fn(Path(td)) if takes_tmp else fn()
                 print(f"PASS {name}")
             except AssertionError as exc:
                 failures += 1
