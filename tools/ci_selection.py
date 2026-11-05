@@ -6226,8 +6226,13 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     since been INHERITED rather than cut: `main` landed #10575 through #10704,
     so `config/ci-surfaces.yml`'s own manifest module carries it on both sides
     (`git rev-parse HEAD:tools/ci_manifest.py` == `git rev-parse
-    origin/main:tools/ci_manifest.py` == `7b5b6f2c6`, whose
+    6bfc8bc4d:tools/ci_manifest.py` == `7b5b6f2c6`, whose
     `grep -c 'def floor_issues'` is 1; at the merge base `641e5f1b3` it was 0).
+    ⛔ The right-hand ref in that equality is `6bfc8bc4d`, the main this fold was
+    last integrated with, NOT `origin/main` — the earlier text said `origin/main`
+    and its own printed command refuted it the moment main moved again (#10964
+    landed `d2708c506e`, which still carries `def floor_issues`; #10726 review
+    round 7). Pin an `origin/main`-relative claim to a sha or do not state it.
     This sentence read "cut on this branch rather than inherited" until the
     `f53eb5929` review found it, and the same correction was applied to the
     sibling comment in `main()` — a provenance note its own file refutes is the
