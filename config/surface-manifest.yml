@@ -57,7 +57,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 61af70a1ca
+cut_at_commit: 793a05f775923291b6f905ba8dfc74f4427a15fe
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1929,7 +1929,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_operator_action
 - name: tortoise_overview
-  served_from: tortoise/mcp_server.py:2c1311be31d70622
+  served_from: tortoise/mcp_server.py:0945043f9c76ceaf
   served_attributes: 057395375ee74063
   family: reasoning
   family_rank: 3

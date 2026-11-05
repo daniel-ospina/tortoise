@@ -1545,8 +1545,9 @@ class TestWriterContract(unittest.TestCase):
         # drift" (sticky: the prop was already written, so a rerun took the same
         # path). The fold now adopts this source as the survivor's creating
         # source, so the survivor IS under it and the batch reports it as `new`
-        # (the README's own definition: points under this source that were not
-        # there before) — never a drift error.
+        # (the README's own definition: a fold onto a survivor with no provenance
+        # of its own adopts this source, so it is reported as `new` rather than
+        # as a fold) — never a drift error.
         shared = f"sourceless contract fact {os.urandom(4).hex()}"
         from tortoise.sdk import TortoiseSDK
         pre = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
@@ -1599,6 +1600,87 @@ class TestWriterContract(unittest.TestCase):
         receipt = json.loads(out.strip().splitlines()[-1])
         self.assertEqual(receipt["folded_onto_existing"], 1)
         self.assertNotIn("ep", receipt)
+
+    def test_a_cross_source_fold_is_not_re_asserted_one_RUN_later(self):
+        # The fold exclusion must be DURABLE, not per-run. `_folded_ids` holds
+        # only THIS run's folds, but the state it has to excuse is PERSISTENT:
+        # a survivor folded onto by an earlier run stays under this source, and
+        # since #10063 the population read SEES it (the `:Source` edge arm,
+        # #3263). One rerun later — a changed claim set is the extractor's
+        # normal rerun, README's "*reworded* claim is new content" case — that
+        # survivor is in `pts` and NOT in `_folded_ids`, so a per-run exclusion
+        # asserted OUR domain on it and raised `read-back failed … the source
+        # URL is being reused with a different domain`. It is sticky (the
+        # survivor's claim is no longer in the batch to re-fold) and it names
+        # the wrong component — the #10010 review P2 class this guard exists to
+        # avoid, in the opposite direction.
+        #
+        # The survivor here is RETRACTED on purpose: the props leg (`domain`)
+        # is refused for a terminal survivor (#10368), so it keeps
+        # `other-domain` while the fold WIRES this source onto it — the wiring
+        # runs BEFORE the props leg (`_fold_source_evidence` at sdk.py:13024 /
+        # 13148-13152, "deliberately left applying"). Both halves are
+        # documented behaviour (`non_live_hits`, never force-promoted).
+        shared = f"sticky cross-source claim {os.urandom(4).hex()}"
+        from tortoise.sdk import TortoiseSDK
+        other = f"session://other-{os.urandom(4).hex()}"
+        pre = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            r = pre.create_point("statement", shared, extractedFrom=other,
+                                 domain="other-domain")
+            self.assertTrue(r.get("id"))
+            survivor = r["id"]
+            pre.retract_point(survivor)
+        finally:
+            pre.close()
+
+        # run 1 — the fold onto the non-live survivor. It fails LOUDLY at the
+        # write-path warning gate (#10368: our props are refused on a settled
+        # claim), which is intended; what matters for THIS pin is the state it
+        # leaves: the evidence edge IS wired, the domain is not applied.
+        with self.assertRaisesRegex(RuntimeError, "write-path SDK warnings"):
+            self._exec(self._payload([{"kind": "fact", "content": shared}]))
+        check = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            rows = {p["id"]: p for p in
+                    check.query(extractedFrom=self.source, include_retracted=True)}
+        finally:
+            check.close()
+        self.assertEqual(list(rows), [survivor],
+                         "guard: run 1 must leave the survivor readable under this "
+                         "source — the edge is wired before the props leg")
+        self.assertEqual(rows[survivor].get("domain"), "other-domain",
+                         "guard: the non-live survivor must keep its own domain — "
+                         "if the props leg promoted it this test proves nothing")
+        self.assertNotEqual(rows[survivor].get("extractedFrom"), self.source,
+                            "guard: the survivor's own creating ref must stay "
+                            "the other source — that is what makes it excusable")
+
+        # run 2 — SAME source, a DIFFERENT claim that mints (the extractor's
+        # normal rerun; README's "*reworded* claim is new content" case). The
+        # survivor is still under this source through the edge and still carries
+        # `other-domain`; it is not a fold of THIS run, so the per-run exclusion
+        # misses it and the read-back refuses a perfectly healthy graph.
+        code, out, _ = self._exec(self._payload(
+            [{"kind": "fact", "content": f"fresh claim {os.urandom(4).hex()}"}]))
+        self.assertEqual(code, 0, out + self.last_err)
+        receipt = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(receipt["new"], 1)
+        # the excused survivor is still visible to the population read — the
+        # exclusion must skip it, never hide it from the count
+        self.assertEqual(receipt["total_for_source"], 2)
+        check = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            rows = {p["id"]: p for p in
+                    check.query(extractedFrom=self.source, include_retracted=True)}
+        finally:
+            check.close()
+        self.assertEqual(rows[survivor].get("domain"), "other-domain",
+                         "guard: the non-live survivor must keep its own domain — "
+                         "if the props leg promoted it this test proves nothing")
+        self.assertNotEqual(rows[survivor].get("extractedFrom"), self.source,
+                            "guard: the survivor's own creating ref must stay "
+                            "the other source — that is what makes it excusable")
 
     def test_write_path_warning_fails_write_with_partial_receipt(self):
         # a WARNING on the real 'tortoise.sdk' logger mid-loop is fatal and

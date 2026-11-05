@@ -973,6 +973,17 @@ _handler.setLevel(logging.WARNING)   # collect WARNING+ only: an INFO-tuned
 logging.getLogger('tortoise').addHandler(_handler)
 _WRITE_PATH_LOGGERS = ('tortoise.sdk', 'tortoise.projection', 'tortoise.ingest')
 
+def _created_by_other_source(p):
+    # `extractedFrom` is the survivor's OWN creating ref (#7704 review P1) — the
+    # folded set rides `extractedFromAll` and the `:Source` edges. So a point
+    # that is readable under this source through a FOLD carries either a SCALAR
+    # naming another source or an ARRAY (a survivor born from a ref sequence);
+    # a mint of THIS writer always carries the scalar it passed. Only the first
+    # two shapes are somebody else's point, and only they are excused from the
+    # domain assertion above. None (no ref at all) is NOT excused.
+    _ref = p.get('extractedFrom')
+    return _ref is not None and _ref != source
+
 def _source_points():
     # public door: query() filters Points by property, terminal statuses included
     return sdk.query(extractedFrom=source, include_retracted=True)
@@ -1079,8 +1090,24 @@ try:
     # created with (someone else's) — asserting OUR domain on it would refuse a
     # healthy cross-source fold, which is the defect class this writer exists to
     # avoid, in the opposite direction.
+    #
+    # The exclusion is DURABLE — read off each row's OWN provenance, never off
+    # this run's fold list. `_folded_ids` is per-RUN, but the state it has to
+    # excuse is PERSISTENT: a survivor folded onto by an EARLIER run stays under
+    # this source, and since #10063 this read SEES it (`query(extractedFrom=…)`
+    # matches the authoritative `:Source` edge too, #3263). One rerun later it is
+    # in `pts` and NOT in `_folded_ids`, so a per-run exclusion asserted OUR
+    # domain on it and raised `read-back failed` — sticky (the survivor's claim
+    # is no longer in the batch to re-fold) and naming the wrong component (the
+    # #10010 review P2 false-failure class this guard exists to avoid). The
+    # shape that must be excused is a property of the POINT: its own creating
+    # ref is not ours.
+    #
+    # Fail closed on a missing ref: a row carrying NO `extractedFrom` is still
+    # asserted, so an upstream rename of the property reds here instead of
+    # silently emptying the guard.
     _bad = [p.get('id') for p in pts
-            if p.get('domain') != domain and p.get('id') not in _folded_ids]
+            if p.get('domain') != domain and not _created_by_other_source(p)]
     if _bad:
         raise RuntimeError('read-back failed: points under source missing domain '
                            f'{domain!r} (ids {_bad[:3]}) — SDK signature drift, or '
