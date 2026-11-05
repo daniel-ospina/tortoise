@@ -1267,9 +1267,19 @@ def _test_node_names(path: Path) -> set[str] | None:
             `condition=` keyword as conditions; a `cond=` keyword is IGNORED, so a
             call carrying only `cond=` (or only `reason=`, or nothing) has NO
             condition and pytest skips UNCONDITIONALLY — measured `SKIPPED` for
-            all of those. So: no conditions at all => cannot red; every condition
-            a non-string literal => cannot red iff ANY of them is truthy (pytest's
-            ANY-of rule); anything non-literal => unknowable, kept as a pin.
+            all of those. The arm is explicit in the library, not an emergent
+            consequence of the ANY-of rule: pytest 9.1.1 `_pytest/skipping.py:
+            177-180` reads `# Unconditional. / if not conditions: reason =
+            mark.kwargs.get("reason", "") / return Skip(reason)`, so an
+            `evaluate_skip_marks` reading that stopped at `any(conditions)`
+            (review @`70284375f`) would mis-predict it. Settled by execution on
+            this head: a probe file whose four nodes are
+            `skipif(reason=…)` ×2, `skipif(cond=True)` and bare `skipif()` —
+            each asserting `False` where it could — reported `4 skipped`, i.e.
+            none of them ran. So: no conditions at all => cannot red; every
+            condition a non-string literal => cannot red iff ANY of them is
+            truthy (pytest's ANY-of rule); anything non-literal => unknowable,
+            kept as a pin.
             """
             conditions: list[ast.expr] = []
             if isinstance(call, ast.Call):
