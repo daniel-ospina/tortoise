@@ -203,7 +203,7 @@ could, behind the mandated approval.
 
 The epic is **not** complete when these six merge. It is complete when:
 
-1. every DoD row is `MET`, or names an issue **OPEN at the closing head** owning its remainder;
+1. every DoD row is `MET`, or names **an OPEN issue or an open decision's own recorded home** owning its remainder;
 2. the capstone (C6) passes against a running system;
 3. the surface map (C1) covers every capability, and each surface was verified through its assigned layer.
 

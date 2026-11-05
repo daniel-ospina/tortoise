@@ -225,7 +225,7 @@ warning-vs-info **level** is the contract.
 | **R3** | Un-gating the inventory report makes setup noisy on every health probe. | medium | `tortoise_health` builds a request-scoped SDK per call; the existing **once-per-(process, graph)** warning latch is untouched, and the new pair is **INFO**, emitted per instance, not per request. |
 | **R4** | The census is mistaken for a licence to delete. | **high** | D10/D11 assert it **writes nothing** and refuses on an unreadable catalogue. The surface call is a request in the child, not an action. |
 | **R5** | A reader treats this epic as having decided where vectors live. | medium | Every artifact says otherwise; S3's reconciliation **fixes the two neighbour bodies that already assume an answer**. |
-| **R6** | The epic is closed while DoD row 4 (V1) is still `NOT MET`. | medium | Row 4 names **§14.3** as its owner; E2E-7 requires every unresolved row to name an **OPEN** issue at the closing head. |
+| **R6** | The epic is closed while DoD row 4 (V1) is still `NOT MET`. | medium | Row 4 names **§14.3** as its owner, which is an open decision's own recorded home — `05-decompose.md` §6 admits either **an OPEN issue or an open decision's own recorded home** at the closing head, so the two statements agree. |
 
 ### 8.3 Improvement opportunities (recorded, not scoped)
 
