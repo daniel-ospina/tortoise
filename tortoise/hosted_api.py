@@ -35371,10 +35371,21 @@ def _registry_probe_sdk() -> TortoiseSDK:
             pass
         raise
     # Re-read the identity AFTER the build: `_make_sdk` re-reads the env itself
-    # a line before it constructs, so this read is the one the handle was
-    # actually built against. Recording the pre-build read instead would let a
-    # drift DURING the build pair a NEW server's handle with the OLD identity,
-    # and a later caller still on the old identity would be served it.
+    # a line before it constructs, so a drift landing BEFORE that read is
+    # picked up by this read too — which is the drift a `monkeypatch` in this
+    # suite produces. Recording the PRE-build read instead would let such a
+    # drift pair a NEW server's handle with the OLD identity, and a later
+    # caller still on the old identity would be served it.
+    #
+    # ⚠️ Residual, stated rather than claimed away: a drift landing AFTER
+    # `_make_sdk`'s own read and BEFORE this one still pairs a handle built for
+    # the old URI with the new identity. That window is narrower and in the
+    # opposite direction from the pre-fix one (there the stale identity
+    # outlived the build entirely), and it is not reachable in production where
+    # the pin is constant — it takes an environment mutation mid-build, which
+    # only the test suite's `monkeypatch` does. Closing it would mean threading
+    # the identity `_make_sdk` actually read back out of it; not worth a
+    # signature change for a window no production caller can enter.
     installed = _registry_probe_identity()
     installed_uri, installed_path = installed
     retired = None
