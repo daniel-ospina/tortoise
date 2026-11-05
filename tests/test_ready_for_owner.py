@@ -263,6 +263,36 @@ def test_an_empty_config_is_unreadable_not_an_empty_pass(tmp_path):
     assert "no positive `check-success=`" in result.detail
 
 
+def test_an_empty_ENTRY_gate_is_unreadable_not_a_PASS_over_nothing(tmp_path):
+    """A set with no entry check leaves every row DEFERRED — nothing was evaluated.
+
+    `derive_from_config` only refuses an EMPTY UNION. A config that names one
+    merge-time check and no positive entry check therefore RESOLVES, and under
+    `branch_protection_injection_mode: merge` that is an empty ENTRY gate (every PR
+    enters unconditionally). Before this test's guard, the PASS arm accepted
+    `all(verdict in (PASS, DEFERRED))`, so a head with ZERO check-runs returned
+    PASS (exit 0) — a claim about nothing, the fail-open class this tool exists to
+    remove.
+    """
+    entryless = """\
+queue_rules:
+  - name: main
+    queue_conditions:
+      - base=main
+      - -draft
+    branch_protection_injection_mode: merge
+    merge_conditions:
+      - check-success=python-ci-gate
+"""
+    tree = _write_tree(tmp_path, mergify=entryless)
+    # Zero check-runs on the head: the merge-time row is DEFERRED and no entry row
+    # exists — the state that used to read PASS.
+    result = evaluate(tree, [])
+    assert result.verdict == rfo.FAIL_UNREADABLE, result.verdict
+    assert result.rows and all(row.verdict == rfo.DEFERRED for row in result.rows)
+    assert "nothing" in result.detail.lower()
+
+
 def test_a_config_error_does_NOT_fall_back_to_the_snapshot(tmp_path):
     """A config error is a verdict about the config; a snapshot must not mask it."""
     both = """\

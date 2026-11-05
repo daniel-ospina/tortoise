@@ -637,6 +637,7 @@ def evaluator_for(
             else:
                 rows.append(_evaluate_at_head(name, attempts, runs))
 
+    detail = ""
     reds = [r for r in rows if r.verdict == FAIL_RED]
     pending = [r for r in rows if r.verdict == FAIL_PENDING]
     missing = [r for r in rows if r.verdict == FAIL_MISSING]
@@ -647,10 +648,27 @@ def evaluator_for(
     elif missing:
         verdict = FAIL_MISSING
     elif rows and all(r.verdict in (PASS, DEFERRED) for r in rows):
-        verdict = PASS
+        # ⛔ `DEFERRED` is the one non-failure that is NOT a claim of greenness, so a
+        # row set in which NOTHING was decided at the head is not a pass — it means
+        # condition 2 was never evaluated. Reachable from configuration under
+        # `mode=merge`: a `queue_conditions` list carrying no positive
+        # `check-success=` is an EMPTY ENTRY GATE (every PR enters unconditionally),
+        # and `derive_from_config` refuses only an EMPTY UNION — so with one merge-time
+        # check named, the union is non-empty, every row is DEFERRED, and this arm
+        # returned PASS for a head whose check-runs had never been read. Under
+        # `mode=queue` it cannot arise: every required name is evaluated at the head.
+        if any(r.verdict != DEFERRED for r in rows):
+            verdict = PASS
+        else:
+            verdict = FAIL_UNREADABLE
+            detail = (
+                "cannot evaluate: not one required check was decided at the head "
+                "(every row is DEFERRED) — an empty entry gate means a PASS would "
+                "be a claim about nothing"
+            )
     else:
         verdict = FAIL_UNREADABLE
-    return ConditionResult(verdict=verdict, rows=rows, required=required)
+    return ConditionResult(verdict=verdict, rows=rows, required=required, detail=detail)
 
 
 def _ambiguous_names(
