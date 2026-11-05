@@ -9581,7 +9581,12 @@ durations:
   # entry exists because registering the file left the fast pool at 667/742
   # durations = 89.9%, one file below the DURATION_COVERAGE_MIN = 0.90 floor.
   test_capture_lane_3516.py: 15.0  # carried forward (not a full-file CI measurement) — on the docker lane — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (4.9s) is a LOWER bound; kept 15.0
-  test_3516_client_captured_at.py: 11.3  # measured 2026-10-08 on the docker lane (36 tests, 4 with graph round-trips) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.2
+  # #10610 review A1: the parenthetical quoted a count from the 2026-10-08 reading
+  # with no instrument named, so it could only drift — the file ships 43 at this
+  # head. The historical reading is kept AND the current count is re-derivable, so
+  # `_durations_rows_with_a_stale_case_count` (tests/test_ci_selection.py) now
+  # judges this row like every other row that cites the instrument.
+  test_3516_client_captured_at.py: 11.3  # measured 2026-10-08 on the docker lane (36 tests THEN, 4 with graph round-trips; the file ships 43 at this head — `grep -c '^def test_'` -> 43) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.2
   test_session_import_desktop.py: 0.1
   test_session_indexer_ollama.py: 0.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.2
   test_session_login_helpers.py: 0.1
