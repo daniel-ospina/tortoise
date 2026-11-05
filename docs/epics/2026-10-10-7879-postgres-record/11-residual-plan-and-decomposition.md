@@ -122,7 +122,8 @@ one, and it was truncated; recorded here so the next lane does not repeat it.
 | does this **compete with the epic's own earlier decomposition**? | **no — it updates it.** The 2026-10-31 pointer on #7879 recorded *"Gap = 0. No child filed, deliberately"*; five days later the epic's first blocker had no parent. This document is the delta from that state, not a second plan |
 
 **⇒ #11075 is not a peer.** No open or closed issue proposes a declared-type contract, and the only prior artifact
-of this class was the `_SCHEMA_DISAGREEMENTS` vocabulary **deleted with #9264** (§7.2).
+of this class was the `_SCHEMA_DISAGREEMENTS` vocabulary — #9264 cleared only its `capture_redactions` entry;
+the vocabulary went **empty** when its last entry (`search_keys`) closed in `a6e20f05b` / #10717 (§7.2).
 
 ---
 
@@ -371,9 +372,10 @@ form must be built**, the **type vocabulary must be widened** past its hardcoded
 
 ### 7.2 ⛔ Correction: this class-detector was deliberately deleted once
 
-`tests/test_9078_record_written_by_production_path.py` records that the `_SCHEMA_DISAGREEMENTS` vocabulary was
-made **empty and then "gone rather than parked"** when #9264 closed — the project's "a pin that outlives its
-defect" rule. #11075 must say so, and say why a **migration-derived** check differs from the deleted
+`tests/test_9078_record_written_by_production_path.py` records a **two-step** removal: #9264 closed having cleared
+only `capture_redactions`, the vocabulary still held `search_keys` at the commit before its deletion, and it
+became **empty and then "gone rather than parked"** only when that last entry closed — `a6e20f05b` (#10717),
+recorded in history under the misnumbered `#10620` — the project's "a pin that outlives its defect" rule. #11075 must say so, and say why a **migration-derived** check differs from the deleted
 **hand-maintained vocabulary**: a derived check cannot go empty (it is closed over the migration set), so it
 cannot outlive its defect in that way. Without that paragraph the next lane reads #11075 as re-litigating a
 recorded removal.

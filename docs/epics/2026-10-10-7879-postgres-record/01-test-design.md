@@ -302,8 +302,12 @@ column **name**. So #11075 must **capture** the declared type from that existing
 and reds on the current, correct tree.
 
 ⚠️ **And a detector of this class was deliberately removed once.**
-`tests/test_9078_record_written_by_production_path.py` records that `_SCHEMA_DISAGREEMENTS` was emptied and then
-made *"gone rather than parked"* when #9264 closed — the project's "a pin that outlives its defect" rule. The
+`tests/test_9078_record_written_by_production_path.py` records a TWO-step removal, not one: #9264 closed with only
+the `capture_redactions` entry gone (`:2366` — "#9264 closed `capture_redactions`"), the vocabulary was still
+holding `search_keys` at the commit before its deletion, and it became **empty** and *"gone rather than parked"*
+only when that **last** entry closed — `a6e20f05b` (#10717), the same fold that narrowed the column, recorded in
+history under the misnumbered `#10620` (`:132`, "now EMPTY (#10620 closed its last entry)"). That is the
+project's "a pin that outlives its defect" rule, applied at the LAST entry rather than the first. The
 difference that earns this one: a **derived** check cannot go empty, because it is closed over the migration set
 rather than over a hand-kept vocabulary.
 
