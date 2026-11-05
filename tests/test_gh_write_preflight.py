@@ -153,10 +153,12 @@ def _env(stub_base: str, token: str | None, **overrides: str) -> dict:
     # probe can be routed off the box and the stub then records NOTHING.
     # MEASURED for the `http://` stub bases this file uses: `http_proxy` (any case) → the probe goes to
     # the proxy and `seen` stays empty on a probe-everything mutant, i.e. an inert arm again, silently.
-    # `https_proxy` and `all_proxy` are stripped DEFENSIVELY, not because they were measured as vectors
-    # here: `OpenerDirector` consults `*_proxy` per URL SCHEME, so `https_proxy` cannot reroute an
-    # `http://` base and `all_proxy` is never read (measured: both leave `seen == 4`). Stripping them
-    # costs nothing and keeps this true for an `https://` base a future test might bind.
+    # `https_proxy` is not a vector for an `http://` base (it DOES reroute an `https://` one: measured,
+    # the proxy answered `CONNECT 127.0.0.1:1`), and `all_proxy` is read by `getproxies()` but never
+    # CONSULTED — `OpenerDirector` looks the `*_proxy` key up per URL scheme and nothing looks up `all`
+    # (measured: `ALL_PROXY` set → direct, stub recorded the request). Both are stripped defensively:
+    # it costs nothing, it covers an `https://` base a future test might bind, and the claim above
+    # stays true without needing an edit — but neither is a measured vector FOR THIS FILE's bases.
     for key in [k for k in env if k.lower() in ("http_proxy", "https_proxy", "all_proxy")]:
         env.pop(key, None)
     env["HOME"] = "/tmp/gh-preflight-no-home"          # keeps hosts.yml out of the picture
@@ -562,15 +564,21 @@ def test_the_child_env_carries_no_proxy():
     assert not [k for k in env_override if k.lower() in ("http_proxy", "https_proxy", "all_proxy")], \
         env_override
 
-    # ⛔ ONE CONSTRUCTION SITE, structurally: the strip lives in `_env`, so a test that builds its own
-    # child environment from `os.environ` is a hole this pin cannot see through. That is exactly how
-    # F2 arrived — three hand-built dicts that passed every test while losing the rule.
+    # ⛔ ONE CONSTRUCTION SITE, structurally — in every shape a child env can be built in this file, not
+    # just one spelling. The strip lives in `_env`, so a test that assembles its own child environment
+    # from the host env opts out of it silently; that is exactly how the review found this twice (four
+    # `os.environ`+`.items()` comprehension sites, then an `os.environ` SPREAD left behind them). The
+    # needles are assembled so the assertions cannot count themselves, and no comment in this file
+    # spells them literally for the same reason.
     src = Path(__file__).read_text(encoding="utf-8")
-    # …the needle is assembled rather than written literally, or this assertion would count ITSELF.
-    builders = src.count("os.environ" + ".items()")
-    assert builders == 1, (
-        f"{builders} places build a child environment from the host env — route them through `_env`, "
-        "or they silently opt out of the proxy/config-dir rules")
+    items_builders = src.count("os.environ" + ".items()")
+    assert items_builders == 1, (
+        f"{items_builders} places build a child environment from `os.environ`+`.items()` — route them "
+        "through `_env`, or they silently opt out of the proxy/config-dir rules")
+    for spelling in ("{**" + "os.environ", "os.environ" + ".copy()"):
+        assert src.count(spelling) == 0, (
+            f"a child environment is built with `{spelling}` — route it through `_env(…, **overrides)` "
+            "(the override leg exists for exactly this), or it silently opts out of the strip")
 
 
 def test_non_loopback_api_base_is_refused_before_anything_is_contacted():
@@ -877,8 +885,11 @@ def test_malformed_response_is_a_transport_verdict_not_a_traceback():
 
 
 def test_usage_requires_a_repo():
+    # ⛔ THROUGH `_env`, NOT A HAND-BUILT DICT (review finding F1 at `a18251648`): an `os.environ`
+    # SPREAD inherits the host's proxies AND the host's hosts.yml, so this arm's verdict depended on
+    # the box — MEASURED with `http_proxy` planted, a child built that way never reached a stub at all.
     p = subprocess.run([sys.executable, str(TOOL)], capture_output=True, text=True,
-                       env={**os.environ, "OR": "", "GH_TOKEN": "ghp_x"}, timeout=60)
+                       env=_env("http://127.0.0.1:9", "ghp_x", OR=""), timeout=60)
     assert p.returncode != 0
     assert "GH-WRITE-UNAVAILABLE(usage)" in p.stdout, p.stdout
 
