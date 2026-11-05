@@ -1645,44 +1645,32 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # §9.4 / §12.1b — WHAT THE SOURCE VECTOR EMBEDS (#10980 review, P2)
 # ════════════════════════════════════════════════════════════════════════════
 # ONE FILE, TWO ANSWERS. §9.4 says the source vector's text is the narrative in
-# `public.session_narrative`, NOT `:Source.summary`; 432 lines on, §12.1b's
-# `:Source` footnote — the section that decides WHERE vectors live — told a
-# designer that vector *"would be **indexing an existing field**"*, i.e. embed
-# the `summary` the Source already holds. `#10852` (OPEN at this head) would make
-# that field a topic lexicon — six content words behind a constant display prefix
-# — so the blurry section orders exactly the bag-of-words vector §9.4 forbids.
-# ⛔ FUTURE TENSE ON PURPOSE: at this head `tortoise/sdk.py::_session_source_metadata`
-# still derives the summary as "the first substantive utterance", and §9.4 states
-# it as *"`#10852` … WILL replace that derivation"*. A present-tense claim here
-# would be false on the tree it is committed to, and true only once `#10852`
-# merges — a falsehood with a delayed expiry. The reader who lands on §12.1b gets
-# the wrong instruction for the same vector, and nothing reds: both sentences are
-# prose, and the graph stays green while a designer embeds a word list and calls
-# it a summary.
+# `public.session_narrative`, not `:Source.summary`; a section later, §12.1b's
+# `:Source` footnote — the section that decides WHERE vectors live — used to tell
+# a designer that vector *"would be **indexing an existing field**"*, i.e. embed
+# the `summary` the Source already holds. Under `#10000` that field BECOMES a
+# topic lexicon once `#10852` lands (six content words behind a constant display
+# prefix), so the blurry section orders exactly the bag-of-words vector §9.4
+# forbids. The reader who lands on §12.1b gets the wrong instruction for the same
+# vector, and nothing reds: both sentences are prose, and the graph stays green
+# while a designer embeds a word list and calls it a summary.
 #
-# ⚠️ THE PROSE FIX LANDED WITHOUT A PIN, and that is what this test is.
-# `origin/main`'s `b748df7d0` (#10978) corrected SEVEN sites of this conflation
-# (§9.4, §12.1b, §9.1, §12.1, §14.3's V2 row, and two CHANGELOG rows) — and no
-# test reds if an eighth site re-scatters it, or if a later edit rewords one of
-# those seven back. #10978 could not have caught an eighth. So the pins below are
-# asserted against the LANDED wording, not against a wording this branch prefers:
-# after #10978 this file must not disagree with `origin/main` about it, it must
-# keep saying it.
-#
-# ⛔ BOTH DIRECTIONS, and the PREMISE IS DERIVED. The narrative's home is read
-# from `record_projection.NARRATIVE_TABLE` — the projection's own constant, the
-# same one the R7 upsert writes through — not restated here, so a move of that
-# home reds in this pin instead of leaving two paragraphs that agree with each
-# other and with nothing else. The retired phrasings are asserted ABSENT as well
-# as the corrected pointer PRESENT: a presence-only pin certifies whichever text
-# happens to be there (the #10244 review's P2, measured on a frozen `§11.1`).
-# The positive assertions are scoped to their OWN paragraph, because a pointer
-# that appears elsewhere in the file is not a pointer in the section that needs
-# it — the §9.4/§12.1b split is precisely a "present somewhere" failure.
+# ⛔ BOTH DIRECTIONS, BOTH SECTIONS SCOPED, and the PREMISE IS DERIVED. The
+# narrative's home is read from `record_projection.NARRATIVE_TABLE` — the
+# projection's own constant, the same one the R7 upsert writes through — not
+# restated here, so a move of that home reds in this pin instead of leaving two
+# paragraphs that agree with each other and with nothing else. Each half is
+# asserted INSIDE its own section (§9.4 by heading slice, §12.1b by its unique
+# footnote anchor): a whole-document `in` check would stay green while §9.4 itself
+# was reverted, as long as one copy of the correct sentence survived elsewhere in
+# 2,000 lines — the "presence-only pin certifies whichever text happens to be
+# there" failure the #10244 review measured on a frozen `§11.1`. The retired
+# phrasings are asserted ABSENT as well as the corrected pointer PRESENT.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
-_SOURCE_VECTOR_SECTION_94_ANCHOR = "it is one vector attached to the `:Source` node"
+_S94_HEADING = "### 9.4 "
+_S95_HEADING = "### 9.5 "
 
 
 def _storage_doc_text() -> str:
@@ -1690,68 +1678,52 @@ def _storage_doc_text() -> str:
     return _STORAGE_DOC.read_text(encoding="utf-8")
 
 
-def _anchored_line(text: str, anchor: str, where: str) -> str:
-    """The whole line carrying `anchor` — the line, not a window around it.
+def _source_vector_footnote(text: str) -> str:
+    """§12.1b's `:Source` footnote, whole — the line, not a window around it.
 
     Anchored, never positional: a line number would drift silently on the first
     paragraph added above it, and the failure would then be *"the sentence is
     fine"* reported about a different sentence.
     """
-    at = text.find(anchor)
+    at = text.find(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)
     assert at != -1, (
-        f"{_STORAGE_DOC.name} no longer carries {where} ({anchor!r}) — re-derive "
-        f"where it states what the source vector would index before freezing a "
-        f"pointer at it")
+        f"{_STORAGE_DOC.name} no longer carries §12.1b's `:Source` footnote "
+        f"({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) — re-derive where §12.1b states "
+        "what the source vector would index before freezing a pointer at it")
     start = text.rfind("\n", 0, at) + 1
     return text[start:].split("\n", 1)[0]
 
 
-def _source_vector_footnote(text: str) -> str:
-    """§12.1b's `:Source` footnote — the section that decides WHERE vectors live."""
-    return _anchored_line(text, _SOURCE_VECTOR_FOOTNOTE_ANCHOR,
-                          "§12.1b's `:Source` footnote")
-
-
-def _source_vector_section_94(text: str) -> str:
-    """§9.4's paragraph on the `:Source` vector — what the vector READS."""
-    return _anchored_line(text, _SOURCE_VECTOR_SECTION_94_ANCHOR,
-                          "§9.4's `:Source`-vector paragraph")
-
-
-def _ontology_section_of(field: str) -> str:
-    """The `### §x.y` section of `docs/ONTOLOGY.md` that owns `field`'s row.
-
-    DERIVED, not restated — the same rule the narrative home above follows. The
-    footnote asserts which ontology section a `:Source`'s `summary` is filed
-    under, and this PR's pre-rebase wording had that WRONG (`§4.4`, which is
-    `Document`). A hardcoded `§4.6` would go stale the moment the ontology
-    renumbers, and the pin would keep certifying the number it was born with.
-    """
-    section = None
-    for line in (REPO_ROOT / "docs/ONTOLOGY.md").read_text(
-            encoding="utf-8").split("\n"):
-        heading = re.match(r"^#{2,4}\s+(§\d+\.\d+)\b", line)
-        if heading:
-            section = heading.group(1)
-        elif section and line.startswith(f"| `{field}` |"):
-            return section
-    raise AssertionError(
-        f"`docs/ONTOLOGY.md` has no `| `{field}` |` property row under a "
-        f"numbered section heading — the ontology moved, so §12.1b's pointer at "
-        f"it must be re-derived rather than kept")
+def _section(text: str, start_heading: str, end_heading: str) -> str:
+    """One §-section's text, by heading — never by line number."""
+    assert start_heading in text, (
+        f"{_STORAGE_DOC.name} no longer carries the heading {start_heading!r} — "
+        "the section this pin reads has MOVED or been renamed; re-derive where "
+        "§9.4 states what the source vector reads")
+    assert end_heading in text, (
+        f"{_STORAGE_DOC.name} no longer carries the heading {end_heading!r} — "
+        "the section this pin brackets has MOVED or been renamed")
+    start = text.index(start_heading)
+    end = text.index(end_heading, start)
+    assert end > start, (
+        f"{end_heading!r} precedes {start_heading!r} in {_STORAGE_DOC.name} — "
+        "the section order changed and this pin is bracketing the wrong span")
+    return text[start:end]
 
 
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     """§9.4 and §12.1b may not disagree about what the source vector embeds.
 
-    *What value makes this test fail?* The pre-#10978 document, and any edit that
-    reinstates either retired phrasing. Measured against `b748df7d0^` (the tree
-    before #10978 corrected the prose): both retired strings are PRESENT there
-    and both positive pointers are ABSENT from their own paragraphs, so every
-    assertion below inverts — and #10978 landed the prose with no pin at all, so
-    before this test a re-scatter reddened nothing.
-    *Does the test reach it?* Yes — the document is read from the tree and the
-    home it must name is derived from the projection, not paraphrased here.
+    *What value makes this test fail?* The pre-fix tree, measured at
+    `71832318b` (the base before #10978 merged): §9.4 fails on
+    `_RETIRED_SUMMARY_BLUR` (present there, absent here) and §12.1b's footnote
+    fails on `_RETIRED_VECTOR_FOOTNOTE` (present there and, until this fix,
+    present here too). The sha is named because `origin/main` moves: once
+    #10978 merged, the retired strings were gone from `main` as well, so
+    "measured on origin/main" would have been FALSE within the hour.
+    *Does the test reach it?* Yes — the document is read from the tree, each half
+    is scoped to its own section, and the home it must name is derived from the
+    projection, not paraphrased here.
     """
     from tortoise import record_projection
 
@@ -1767,25 +1739,17 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"this pin must not keep naming the table the projection left behind")
 
     text = _storage_doc_text()
-    #: DERIVED once, used by BOTH messages below — a failure message that
-    #: restates a number this test derives re-stales on the same renumber the
-    #: assertion is here to catch (round-2 review P2, on the §9.4 message).
-    summary_section = _ontology_section_of("summary")
 
-    # ── §9.4: the corrected pointer PRESENT, the summary/ narrative blur GONE ──
-    paragraph = _source_vector_section_94(text)
-    assert f"read from `{home}`" in paragraph, (
-        f"§9.4 no longer states that the source vector's embedded text is read "
-        f"from `{home}` — that is what stops a design embedding the topic "
-        f"lexicon `:Source.summary` becomes under `#10852`. ⛔ The value §9.4 "
-        f"DOES index is the narrative, and ITS home is the record (§9.1), not a "
-        f"node field — `:Source.summary` itself stays on the node, as "
-        f"{summary_section} metadata")
-    assert "never from `:Source.summary`" in paragraph, (
-        "§9.4 no longer forbids `:Source.summary` as the vector's input IN THE "
-        "PARAGRAPH THAT CHOOSES THE INPUT — naming the record home without "
-        "naming what it must not read leaves the blurry reading open, which is "
-        "the whole P2 this pin answers")
+    # ── §9.4, SCOPED TO §9.4: the pointer PRESENT, the blur GONE ──
+    s94 = _section(text, _S94_HEADING, _S95_HEADING)
+    assert f"read from `{home}`" in s94, (
+        f"§9.4 no longer states that the source vector's text is read from "
+        f"`{home}` — that pointer is what stops a design embedding a topic "
+        f"lexicon under #10000 once `#10852` lands")
+    assert ":Source.summary" in s94, (
+        f"§9.4 no longer names `:Source.summary` as the field the vector must "
+        f"NOT read — naming the home without naming the trap leaves the "
+        f"*\"embed the summary already there\"* reading open")
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
         f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
@@ -1796,12 +1760,11 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     footnote = _source_vector_footnote(text)
     assert _RETIRED_VECTOR_FOOTNOTE not in footnote, (
         f"§12.1b's `:Source` footnote is back to *\"§9.4's summary vector "
-        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — `#10852` (OPEN at this head) would make "
-        f"an episodic `:Source.summary` a topic lexicon, so that sentence tells "
-        f"a designer to embed the one field §9.4 says the vector must not read. "
+        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — once `#10852` lands an episodic "
+        f"`:Source.summary` is a topic lexicon, so that sentence would tell a "
+        f"designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
-        f"`summary` the Source holds is {summary_section} "
-        f"metadata")
+        f"`summary` the Source holds is §4.6 metadata")
     assert home in footnote, (
         f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
         f"decides where vectors live must point at the narrative's real home, "
@@ -1812,15 +1775,3 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "§12.1b's `:Source` footnote no longer states §9.4 ③'s identity rule — "
         "the footnote's two halves are *what the vector reads* and *how identity "
         "is decided*; dropping the second re-opens `#3998`")
-    #: ...and the THIRD claim the footnote makes is which ontology section a
-    #: `summary` is filed under — the one this PR's pre-rebase wording got WRONG
-    #: (`§4.4`, which `docs/ONTOLOGY.md:454` assigns to `Document`, not `Source`).
-    #: `summary_section` is DERIVED from the ontology that defines it, so a
-    #: renumber reds here instead of leaving a footnote pointing at a different
-    #: type.
-    assert f"{summary_section} metadata" in footnote, (
-        f"§12.1b's `:Source` footnote no longer files `summary` as "
-        f"{summary_section} metadata — `docs/ONTOLOGY.md` puts `summary`'s row "
-        f"under `{summary_section}`, so a footnote citing any other section "
-        f"sends a reader to a different type (the pre-rebase wording here said "
-        f"§4.4, which is `Document`)")
