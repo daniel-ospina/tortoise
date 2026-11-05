@@ -73,8 +73,14 @@ Safety and soundness
   redirecting to https://…``); reading a "last line" out of a merged stream mistook a warning for a
   path and could invent a leftover ref.
 * The probe ref is namespaced (``gh-write-preflight/<utc>-<pid>-<rand>``) so it cannot collide with
-  a real branch, and it is **always** cleaned up — including when the push *reports* failure, since
-  a transport error can arrive after the remote applied the update. Cleanup is confirmed by
+  a real branch, and it is cleaned up on **every path that unwinds the interpreter** — the ordinary
+  path, a failed push that still applied the update (a transport error can arrive after the remote
+  took it), a Ctrl-C (``SIGINT`` → ``KeyboardInterrupt``) and any Python exception, all via one
+  ``try/finally``. ⛔ It is NOT covered when the process is killed by a signal Python does not
+  translate: ``SIGTERM`` (what a fleet watchdog sends) takes its default action and terminates
+  **without unwinding**, so no ``finally`` runs and the ref can be left behind. That is stated as a
+  residual below rather than claimed away, because a docstring a lane trusts is worse than a
+  residual it can see. Cleanup is confirmed by
   ``ls-remote`` and the result is **tri-state**: ``cleaned_up=True`` only on a positive
   "ref absent" read; a read that could not be performed sets ``cleaned_up=None`` rather than
   claiming verified-clean from an absence of evidence.
@@ -94,6 +100,14 @@ Safety and soundness
   prohibits") lands in the failing step's detail on stderr, next to an explicit `--repo`, so it is
   diagnosable rather than mysterious. No read-only credential can pass through this residual in the
   other direction. `--probe-ref-prefix` aims the probe at a namespace a constrained repo allows.
+* **STATED RESIDUAL — a probe killed by ``SIGTERM`` can leave the ref on the remote.** The cleanup
+  guarantee is `try/finally`, and Python installs default handlers for only `SIGPIPE` (ignored) and
+  `SIGINT` (→ `KeyboardInterrupt`); `SIGTERM` therefore terminates the process without unwinding,
+  so the delete never issues. The outcome is **litter, not a false verdict** — nothing on the
+  verdict path changes and no read-only credential passes through it — and the ref is namespaced
+  and unique per run (`<utc>-<pid>-<rand>`), so it cannot collide with a later probe. `#11053`
+  item 2 records the same residual for the sibling implementation; closing it needs a handler or
+  a pre-run sweep, not a docstring edit.
 
 Usage
 -----
@@ -1045,10 +1059,12 @@ def _check_writable(
     # `--porcelain` is REQUIRED: a push that is "Everything up-to-date" exits 0 having written
     # NOTHING, so an exit code alone does not prove a write happened. The ref flag must be `*`
     # (new) or `+` (updated).
-    # ⛔ CLEANUP RUNS ON EVERY PATH. Steps (6)-(8) live in a helper so the caller can wrap them
-    # in try/finally: a Ctrl-C, a fleet SIGTERM or any exception AFTER the push has landed would
-    # otherwise leave the probe ref on a REMOTE every lane shares. The module promises the ref is
-    # always cleaned up, and a `finally` is what makes that true rather than aspirational.
+    # ⛔ CLEANUP RUNS ON EVERY PATH THAT UNWINDS. Steps (6)-(8) live in a helper so the caller can
+    # wrap them in try/finally: a Ctrl-C (`SIGINT` -> `KeyboardInterrupt`) or any exception AFTER
+    # the push has landed would otherwise leave the probe ref on a REMOTE every lane shares.
+    # ⛔ NOT a fleet `SIGTERM`: Python translates only `SIGINT` into an exception, so `SIGTERM`
+    # terminates without unwinding and this `finally` never runs — stated as a residual in the
+    # module docstring, not claimed away here.
     try:
         _push_verify_cleanup(
             runner, root, remote, read_targets, read_env, verdict, head, keep_ref, step

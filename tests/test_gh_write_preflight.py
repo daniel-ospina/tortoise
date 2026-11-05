@@ -1698,8 +1698,21 @@ def test_scp_like_userinfo_is_REDACTED_in_output(tmp_path: Path, capsys):
 
 
 def test_scp_like_lone_userinfo_is_redacted_but_git_user_is_not():
-    """The scp exemption is by USER, not by shape: `git@host:` must survive intact."""
-    assert "hunter2" not in redact("1b2c3d4e5f@example.invalid:repo.git")
+    """The scp exemption is by USER, not by shape: `git@host:` must survive intact.
+
+    Measured before: this line asserted `"hunter2" not in redact("1b2c3d4e5f@example.invalid:…")`
+    — but `hunter2` is a token BLED IN from the neighbouring cases, and it is not in the input
+    string at all, so no implementation that does not *invent* a token could fail it. The lone,
+    non-exempt userinfo is the only shape that enters `_redact_scp_userinfo`'s exemption branch
+    (`if ":" not in userinfo and user.lower() in _NON_SECRET_USERINFO`) WITHOUT being exempt, and
+    nothing else in this suite reached it — so a regression that returned that userinfo verbatim
+    shipped green. Assert on the input's OWN secret, and assert the host SURVIVES so the check
+    cannot be satisfied by a `redact()` that masks everything.
+    """
+    lone = "1b2c3d4e5f@example.invalid:repo.git"
+    masked = redact(lone)
+    assert "1b2c3d4e5f" not in masked, f"a lone non-exempt scp userinfo leaked: {masked!r}"
+    assert masked == "<userinfo-redacted>@example.invalid:repo.git"
     assert redact("git@github.com:o/r.git") == "git@github.com:o/r.git"
     assert "git@" not in redact("ssh://git@example.invalid/x.git")
 
@@ -1780,11 +1793,18 @@ def test_bad_prefix_at_the_API_seam_is_a_usage_error_not_a_credential_verdict(tm
 
 
 def test_an_exception_after_the_push_still_deletes_the_probe_ref(tmp_path: Path):
-    """A Ctrl-C / SIGTERM after the push has landed must not leave the ref on a shared remote.
+    """A Ctrl-C (`SIGINT`) after the push has landed must not leave the ref on a shared remote.
 
     Measured before: `KeyboardInterrupt` raised on the verify read escaped `check_writable` and the
     remote still held `refs/heads/gh-write-preflight/…`, while the module promises it is always
     cleaned up.
+
+    ⛔ The name is deliberately `SIGINT`, not `SIGTERM`: this case raises `KeyboardInterrupt`, which
+    is what Python's `SIGINT` handler produces. `SIGTERM` has no default handler in Python, so it
+    terminates WITHOUT unwinding and the `finally` under test never runs — that residual is stated
+    in the module docstring and pinned by
+    `test_the_cleanup_contract_does_not_claim_SIGTERM_coverage`, so a reader does not infer coverage
+    this case cannot show.
     """
     work, remote = _make_pair(tmp_path)
     deleted = []
@@ -1808,6 +1828,37 @@ def test_an_exception_after_the_push_still_deletes_the_probe_ref(tmp_path: Path)
         check_writable(work, runner=Interrupted())
     assert deleted, "the probe ref was NOT deleted after an interrupt"
     assert "gh-write-preflight" not in _remote_refs(remote)
+
+
+def test_the_cleanup_contract_does_not_claim_SIGTERM_coverage():
+    """The cleanup prose must claim `SIGINT` only, and STATE the `SIGTERM` residual.
+
+    The contract said the probe ref "is **always** cleaned up" and named "a Ctrl-C, a fleet SIGTERM
+    or any exception" as covered, while the mechanism is a `try/finally`. Python installs default
+    handlers for only `SIGPIPE` (ignored) and `SIGINT` (→ `KeyboardInterrupt`), so a `SIGTERM` — what
+    a fleet watchdog sends — terminates WITHOUT unwinding: no `finally`, no delete, no output, and
+    the probe ref stays on a remote every lane shares. The code cannot show that alongside the fix
+    (a test would have to kill its own process), so the CLAIM is pinned at the source, exactly as
+    the known-survivor Contract sentence is pinned above: the defect is the prose, and nothing
+    behavioural reds on a relapse of it.
+    """
+    source = (Path(__file__).resolve().parent.parent / "tools" / "gh_write_preflight.py").read_text()
+    flat = " ".join(source.split())
+    assert "a Ctrl-C, a fleet SIGTERM or any exception" not in flat, (
+        "the cleanup comment must not claim SIGTERM coverage — a try/finally cannot deliver it"
+    )
+    assert "**always** cleaned up" not in flat, (
+        "the contract must not say the ref is ALWAYS cleaned up while SIGTERM escapes the finally"
+    )
+    # The safe side: the narrowing is stated, and the residual is visible to a lane reading the
+    # docstring — never merely deleted, which would leave the gap silent.
+    assert "every path that unwinds the interpreter" in flat, (
+        "the cleanup guarantee must be narrowed to the paths a finally can actually cover"
+    )
+    assert "STATED RESIDUAL" in flat and "a probe killed by" in flat, (
+        "the SIGTERM hole must be a STATED RESIDUAL, not an unstated one"
+    )
+    assert "SIGTERM" in flat, "the residual must NAME the signal that escapes the finally"
 
 
 def test_ambient_GIT_CONFIG_slots_are_NOT_clobbered(tmp_path: Path):
