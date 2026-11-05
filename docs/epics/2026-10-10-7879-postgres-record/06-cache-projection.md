@@ -272,9 +272,16 @@ bounds, both deliberate:
   every agreement leg ran on the one ordering real rows do not have; the pin now
   has a legs pair that builds the row in `SELECT *` order and one that builds the
   same record both ways and requires the SAME node map;
-* **only the KIND can travel**, because `url` is the label's CONTRACT KEY —
-  `node_from_row` refuses a NULL one (`UnprojectableRecord`, the schema's own
-  CHECK), so the tail never decides the `session:` arm.
+* **only the KIND can travel _for a row that can become a node_**, because `url` is the
+  label's CONTRACT KEY — `node_from_row` refuses a NULL one (`UnprojectableRecord`, and
+  the schema's own CHECK `chk_source_node_key_is_contract_key` — `url IS NOT NULL AND
+  node_key = url`), so the tail's `url` is **unreachable**, never **absent**. ⚠️ The
+  bound is REACHABILITY, not the predicate: `_row_identity_view` does fill a NULL `url`
+  from the tail, so on the predicate alone `url=None` + `props={"url": "session:abc"}`
+  **is** episodic and the tail decides the arm. Pinned by
+  `test_a_tail_only_url_DOES_decide_the_arm_but_never_reaches_a_node`
+  (`tests/test_10853_session_source_prose.py`) so a later audit cannot read this bullet
+  as "the predicate cannot answer that way" and skip the shape.
 
 ### Three costs, named rather than implied
 

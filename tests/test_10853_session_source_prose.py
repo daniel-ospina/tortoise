@@ -535,11 +535,15 @@ def test_the_row_and_node_predicates_agree_when_the_tail_carries_the_identity():
     put those two functions on opposite answers — a permanently suppressed
     divergence on one side or a stripped document on the other.
 
-    ⚠️ ONLY THE KIND CAN TRAVEL: `url` is the label's CONTRACT KEY, so
-    `node_from_row` refuses a row whose `url` column is NULL
-    (`UnprojectableRecord` — the schema's own CHECK would refuse it too). A
-    `url` in the tail therefore never decides the arm, and the COLUMN wins where
-    the two carry the same coordinate — which is what the third case pins.
+    ⚠️ ONLY THE KIND CAN TRAVEL — for a row that can BECOME A NODE. The bound is
+    REACHABILITY, not the predicate: `url` is the label's CONTRACT KEY, `node_from_row`
+    refuses a row whose `url` column is NULL (`UnprojectableRecord` — the schema's own
+    CHECK `url IS NOT NULL AND node_key = url` would refuse it too), so a tail-carried
+    `url` can never reach a projected node. `_row_identity_view` DOES fill a NULL column
+    from the tail, though (`if merged.get("url") is None`), so on the PREDICATE alone a
+    row with `url=None` and `props={"url": "session:abc"}` is episodic — the tail decides
+    the arm. That shape is pinned separately, below; the COLUMN still wins wherever the
+    two carry the same coordinate, which is what the third case here pins.
     """
     from tortoise import cache_projection as cp
 
@@ -587,6 +591,36 @@ def test_only_a_NULL_column_is_silence_an_empty_url_is_a_VALUE():
         "the identity view filled an EMPTY column from the tail, which the node "
         "map does not do — the two readings of the same row disagreed"
     )
+
+
+def test_a_tail_only_url_DOES_decide_the_arm_but_never_reaches_a_node():
+    """The TRUE bound is reachability, not the predicate (#10867 review, P3).
+
+    The epic doc and this file's neighbour above used to say *"a `url` in the tail
+    therefore never decides the arm"*. **False as a statement about
+    `_is_episodic_source_row`**: `_row_identity_view` fills a NULL `url` column from
+    the tail, so this row is episodic and the tail alone decided it.
+
+    What actually bounds it is that no such row can be PROJECTED: `url` is
+    `Source`'s contract key, the schema refuses a NULL one
+    (`20261012000001_record_event_stream.sql:197`,
+    `CHECK (url IS NOT NULL AND node_key = url)`), and `node_from_row` refuses the
+    row (`UnprojectableRecord`) before `_props_from_row` runs. So the tail can
+    decide the arm and can never reach a node — unreachable, not absent.
+
+    Pinned because the false wording is the reasoning the column-wins rule rests
+    on: a lane that believed "the tail can never decide the arm" would skip this
+    shape, which is the one that would break it if the contract key ever relaxed.
+    """
+    from tortoise import cache_projection as cp
+
+    row = _source_row(url=None, source_kind=None, props='{"url": "session:abc"}')
+    assert cp._is_episodic_source_row(row) is True, (
+        "the identity view is supposed to fill a NULL url from the tail — if this "
+        "answer changed, the doc bullet about what the tail can decide is stale again"
+    )
+    with pytest.raises(cp.UnprojectableRecord):
+        node_from_row("Source", row)
 
 
 def test_a_column_value_wins_the_tail_on_a_real_SELECT_star_row():
