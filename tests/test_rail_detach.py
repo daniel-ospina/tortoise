@@ -66,7 +66,27 @@ def launch(state_dir, co, pr=7, **kw):
     return rd.launch(pr, cwd=co, state_dir=state_dir, repo="o/r", **kw)
 
 
-def wait_state(state_dir, pr, want, timeout=15.0):
+#: How long a rail STUB may take to reach the state under test.
+#:
+#: This bounds SPAWN LATENCY (fork + exec + `bash` startup on a shared pool
+#: box), never a rail invariant: every assertion below is about the STATE the
+#: artifact records, so a wider deadline cannot make a defect green — only a
+#: loaded box is prevented from making correct code red. 15 s was measured on
+#: an idle host against a stub that sleeps 1 s; on a nine-shard sweep the same
+#: wait has missed. Evidence: `test (e)` on run 42006117288 (2026-11-05, head
+#: `192de3b5f`, PR #10610) reported
+#: `test_merged_state_names_the_sha_the_rail_printed` FAILED on
+#: `pi-runner-x64-4` while the run's other seven shards were green, and that
+#: shard carries NO changed test file from the diff — the leg was killed by its
+#: 21-minute WATCHDOG at 73% progress, i.e. the box, not the rail.
+#:
+#: The detached worker's bounds elsewhere in this file (`lane.wait(timeout=10)`,
+#: `_assert_no_worker_spawned`'s settle window) are untouched: those are
+#: process-exit and negative windows, not state-arrival bounds.
+_STATE_DEADLINE_S = 60.0
+
+
+def wait_state(state_dir, pr, want, timeout=_STATE_DEADLINE_S):
     end = time.time() + timeout
     st = None
     while time.time() < end:
@@ -89,7 +109,7 @@ def test_start_returns_immediately_and_collect_sees_it_waiting(tmp_path, monkeyp
     st = wait_state(sd, 7, rd.WAITING)
     assert st.state == rd.WAITING, st.as_dict()
     assert st.line().startswith("RAIL(#7, waiting,")
-    assert wait_state(sd, 7, rd.MERGED, timeout=20).state == rd.MERGED
+    assert wait_state(sd, 7, rd.MERGED, timeout=_STATE_DEADLINE_S).state == rd.MERGED
 
 
 def test_merged_state_names_the_sha_the_rail_printed(tmp_path):
@@ -450,7 +470,7 @@ def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path
     ln = launch(sd, co, pr=21)
     assert ln.pid > 0, "the rail did not start without `gh`"
     assert ln.head == "unreadable", ln.head
-    assert wait_state(sd, 21, rd.MERGED, timeout=20).state == rd.MERGED
+    assert wait_state(sd, 21, rd.MERGED, timeout=_STATE_DEADLINE_S).state == rd.MERGED
 
 
 def test_child_invokes_only_the_one_lander(tmp_path):
@@ -566,7 +586,7 @@ def test_detachment_is_what_survives_the_lane(tmp_path, no_detach, expect):
     os.killpg(os.getpgid(lane.pid), signal.SIGKILL)   # the harness kills the lane + its group
     lane.wait(timeout=10)
 
-    st = wait_state(sd, pr, expect, timeout=25)
+    st = wait_state(sd, pr, expect, timeout=_STATE_DEADLINE_S)
     assert st.state == expect, (
         f"expected {expect} (no_detach={no_detach}): {st.as_dict()}\n{LANE_ENV_DOC}"
     )
@@ -611,7 +631,7 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     assert capsys.readouterr().out.strip() == "RAIL(#777, absent, -, -)"
     co = make_checkout(tmp_path)
     rd.main(["start", "42", "--repo", "o/r", "--cwd", str(co), "--state-dir", str(sd)])
-    wait_state(sd, 42, rd.MERGED, timeout=20)
+    wait_state(sd, 42, rd.MERGED, timeout=_STATE_DEADLINE_S)
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd)]) == 0
     # --assert-merged is the next fleet beat's gate: 0 only on a real merge
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),
