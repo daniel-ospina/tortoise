@@ -75,20 +75,26 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 | Ontology | **high** | a mention/entity distinction the canonical document does not yet name, plus `hasPart`'s two declared topologies (Point→Point in §3.1, Object→Object in §3.7) — **and, since the 2026-11-05 rulings: a new pack kind (`dev:initiative`) with a near-miss reshuffle, an `ownedBy` topology widening (Entity → Subject **or** Object), two `SEMANTICS_VALUES` additions (one needing a `<-` direction no table value has ever produced), and two `SEMANTICS_TRANSITION` removals that reverse `#7848`** |
 | Accessibility | **n/a** | no UI surface in scope |
 
-**### Axis Research Notes** *(issue #231 D11 — required for each `medium+` axis)*
+### Axis Research Notes
+
+*(issue #231 D11 — required for each `medium+` axis)*
+
 > **Findings date:** 2026-11-05. **Source:** `02-research-brief.md` §Workflow Pattern Research and §Tech Stack Research (rung-2 external pass + the in-repo comparables record), plus §Assumptions Register.
+
 - **Architecture (high):** covered by the brief's *Workflow Pattern Research* — the field's pipeline shape, the missing mention step, and the `c/ r` ordering rule that fixes CLASSIFY-before-RESOLVE. Boundary question (what the epic must and must not change) is answered there and needs no further query.
 - **Ontology (high):** covered by *Workflow Pattern Research* (NIL / `NEW_ENTITY` / stoplist) and *Tech Stack Research* (where a mention can live). The one genuinely open boundary question — **where a mention is stored** — is a data-model decision carried by `#11021`'s `### Research Needed`, not an epic-boundary question.
 
 ## High-Level E2E Test Cases
 
 ### E2E-1: a turn of phrase does not become a thing
+
 **Given:** a capture whose narrative says *"timeout is not on macOS"*
 **When:** the pipeline runs end to end
 **Then:** no `:Object` named `the timeout command` exists
 **And:** the claim that carried it is still retrievable, with the mention recorded against it
 
 ### E2E-2: the same thing, twice, is one thing — a CONTROL
+
 **Given:** two sessions that each mention `the parity harness`, and a graph that already holds one
 **When:** the second capture resolves the **exact** name
 **Then:** the second capture attaches to the existing node
@@ -96,12 +102,14 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 ⚠️ **This case passes on today's code and is kept deliberately as a control** — it proves the fix does not break the attach path. Its discriminating sibling is E2E-8 (the partial prior set), and E2E-5 (the unresolved lookup).
 
 ### E2E-3: one session's claims argue with each other
+
 **Given:** a session whose narrative states that A changed because of B
 **When:** the batch is committed
 **Then:** an edge **of the pack-declared class** exists between A and B (operator vs structural is not interchangeable, and its recorded `direction` must run A→B as the story states — an inverted edge is a wrong claim, not a cosmetic one)
 **And:** the planted operator edges for that session are wired and persisted, scored on a **real-extraction** receipt
 
 ### E2E-4: the pack's map is walkable
+
 **Given:** a graph built from the frozen corpus with the dev pack installed
 **When:** a user walks from a theme
 **Then:** they reach its **initiatives**, each initiative's epics, and each epic's issues — the four-level path the 2026-11-05 ruling fixed (theme → initiative → epic → issue, `docs/epics/2026-11-05-5087-extractor-v4/06-pack-logic-decisions.md` §KIN-1)
@@ -109,12 +117,14 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 **And:** a pair the packs do **not** declare — including a direct theme → epic hop, which the new level makes illegal — produces no edge
 
 ### E2E-5: a failed lookup does not become a new belief
+
 **Given:** a lookup that returns `unresolved` (degraded, or a partial prior set)
 **When:** the run commits
 **Then:** the affected candidates are held, not minted
 **And:** a later run against the same graph commits them once the lookup resolves
 
 ### E2E-8: an unchecked item is not committed
+
 **Given:** an item whose against-graph check did **not** complete (a partial Job-2 pass)
 **When:** the run commits
 **Then:** that item is **held**, not committed
@@ -122,12 +132,14 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 *(Scope item 4. It previously had no case of its own — E2E-5 was doing both jobs with two different assertions.)*
 
 ### E2E-6: the graph can be asked what its doors write
+
 **Given:** the frozen corpus
 **When:** the census runs
 **Then:** each write door reports its counts per step
 **And:** a door nothing measured reads `UNMEASURED`, never zero
 
 ### E2E-7: the packs' declared business logic is the one we construct
+
 **Given:** all **seven** shipped packs (`agent-ops`, `dev`, `investment-portfolio-manager`, `marketing`, `product-strategy`, `project-management`, `venture`), and their **two** declaration surfaces — `relations` and `hierarchies` (the four that declare hierarchy paths are `dev`, `marketing`, `product-strategy`, `venture`; `pm` contributes the four unwritable relations)
 **When:** the pack census runs
 **Then:** every declared connection reports **declared → writable → written**, and any declared connection the writer cannot produce is named rather than totalled away

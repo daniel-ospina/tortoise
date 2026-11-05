@@ -14,6 +14,7 @@ aboutObjects: "#5087, #11083, packs/, ONTOLOGY.md"
 **What this is.** The audit behind `#11083` found three classes of problem in the shipped packs. Each is a **granular decision for the owner**, because each either edits a pack's declared business meaning or edits canonical ontology — and both are owner-gated. Every option is stated with the canonical document's own words, and where the mechanical fix is **wrong**, that is said.
 
 **What I checked against, so the verdicts are not opinion:**
+
 - `docs/ONTOLOGY.md` §5 (the core kind vocabulary, incl. the commitment-state family) and §3.6 / §3.7 (the allowed edge topology);
 - `tortoise/pack_registry.py` — `SEMANTICS_VALUES`, `SEMANTICS_DIRECTIONS`, `relation_write_verdict`;
 - the packs themselves, verbatim.
@@ -25,25 +26,33 @@ aboutObjects: "#5087, #11083, packs/, ONTOLOGY.md"
 All four are declared in the legacy `from`/`to` shape, so they carry **no `mechanism`** and `relation_write_verdict` returns `predicate-not-in-allowlist`. The registry warns on each at load. **The content is not junk** — each names a real project-management relation — but the question the owner asked is the right one: *add the missing mechanism, or is this ontology drift?* Verdict per row:
 
 ### PM-1 · `partOfSprint` — **drift. Retire.**
+
 `card → Object`, declared as "part of a sprint". ONTOLOGY §3.7 states: *"`hasPart` … Inverse traversal (`<-[:hasPart]-`) covers 'part of' — **no separate `partOf` edge**."* A domain-specific "part of" predicate is exactly what the canonical model forbids, and `partOfSprint` cannot be validated because both endpoints are the unconstrained `Object`.
+
 - **Option A:** retire it; composition is `hasPart` (`sprint --hasPart--> card`), inverse-traversed as "in sprint".
 - **Option B:** keep the verb and constrain it (`fromKind: pm:sprint, toKind: pm:card`, semantics `hasPart`, mechanism `IMPL`).
 - **Recommended: A.** The specificity belongs in the endpoint kinds, not the verb — the canonical doc says so in as many words, and a second "part of" spelling creates two answers to one question.
 
 ### PM-2 · `onBoard` — **drift. Retire, or mark declaration-only.**
+
 `card → Object`, "card is on a board". A kanban board is a **view** over cards, not a container of them: the card's state is already carried by `cardMoved` events and the board is derived. Storing `card → board` writes a projection into the durable layer, and it goes stale the moment a card moves.
+
 - **Option A:** retire — the board is recomputed from card state + `cardMoved`.
 - **Option B:** keep as `declarationOnly: true` with that reason, so the word survives in the vocabulary without pretending to be writable.
 - **Recommended: A**, with B as the fallback if a capture is ever observed asserting it.
 
 ### PM-3 · `assignedTo` — **real relation, wrong spelling. Map to `managedBy`.**
+
 §3.6 has the canonical pair: `managedBy` (Entity → Subject, *operational responsibility*, RACI Responsible) and `ownedBy` (Entity → Subject, *accountability*). "Assigned to" is operational responsibility, i.e. `managedBy`.
+
 - **Option A:** declare `managedBy` (predicate `managedBy`, fromKind `pm:card`, toKind `Subject`, mechanism `IMPL`, direction `->`).
 - **Option B:** keep the word `assignedTo` as the predicate with semantics `managedBy`.
 - **Recommended: A.** One spelling per meaning; `assignedTo` stays a *synonym* in the kind's vocabulary, not a second edge predicate.
 
 ### PM-4 · `blocks` — **real relation, inverted direction. Do not simply add a mechanism.**
+
 `card → card`. Blocking is not a meaning in `SEMANTICS_VALUES`; the nearest is `dependsOn` (direction `->`, source→target). ⚠️ **A blocks B means B depends on A** — so declaring `blocks` with semantics `dependsOn` would propagate confidence from blocker to blocked, the opposite of the truth.
+
 - **Option A:** model the dependency from the dependent side: `pm:card --dependsOn--> pm:card` ("this card depends on that one"). No new vocabulary, direction correct.
 - **Option B:** keep the verb `blocks`, declare `declarationOnly: true` and record that the canonical vocabulary has no inverse relation — the graph then holds the words without asserting a direction it cannot defend.
 - **Option C:** add an inverse/`blocks` meaning to `SEMANTICS_VALUES` with direction `<-`. That is an ONTOLOGY §8 change — the vocabulary is **closed** by rule, so this needs owner approval and a direction argument.
@@ -82,11 +91,13 @@ Warn-not-block, which is why they survived. **The mechanical replacement is safe
 **Research (converged):** SAFe calls strategic themes *"portfolio-level business objectives"* and portfolio epics *"large enterprise initiatives"*; open-okr separates objectives (qualitative, owned, time-bounded), key results (verifiable), and initiatives (planned work **linked to** key results, many-to-many); Viva Goals models the same three. Our vocabulary maps as **goal ≈ objective**, **indicator ≈ key result**, **epic ≈ initiative** — with one inconsistency the sources do not support: **`initiative` as a synonym of `theme`**. An initiative is *work*; a theme is an *objective*.
 
 ### KIN-1 · Where does the word "initiative" belong?
+
 - **Option A (recommended):** move the `initiative` synonym from `dev:theme` to `dev:epic` — an initiative is a body of work, and `epic` is the work-bundle kind. `theme` keeps `strategic theme` / `workstream` / `pillar`.
 - **Option B:** leave it on `theme`, accepting that the same word then names an objective in our graph and a work-bundle in SAFe/OKR tools — the exact class of drift this audit is fixing.
 - **Option C:** both, as a declared `equivalentTo`.
 
 ### KIN-2 · Add the missing connections (no new kinds, no new vocabulary)
+
 The spine the owner described can be built from **canonical predicates that already exist**, with zero ontology additions:
 
 | relation | why it is canonical | direction |
@@ -97,6 +108,7 @@ The spine the owner described can be built from **canonical predicates that alre
 | *(existing)* `dev:theme --hasPart--> dev:epic`, `dev:epic --decomposesInto--> dev:issue`, `dev:issue --implements--> product-strategy:feature` | already declared and writable | — |
 
 That closes **company → goal → epic → issue → feature** — the spine the sixth acceptance row measures — using only words the canonical document already rules. **Option B** is to add `goal`/`objective` as *pack* kinds with relationships declared by the pack that owns the business vocabulary; **Option C** is to leave it and let the row stay red.
+
 - **Recommended: Option A** for KIN-2 — because it adds three declarations and no vocabulary, which is the smallest change that makes the owner's goal measurable. Option B is defensible if the intent is that packs (not core) own commitment state, but it is a larger change and it duplicates `goal`.
 
 ---
@@ -109,11 +121,11 @@ That closes **company → goal → epic → issue → feature** — the spine th
 
 ---
 
-# Round 2 — the owner's rulings, and what the research changed
+## Round 2 — the owner's rulings, and what the research changed
 
 Five answers came back, four of which asked for research. The research **changed three verdicts** and found one gap in the census itself.
 
-## SEM-1 · "we need something to denote movement of funds … maybe `funds` comes back"
+### SEM-1 · "we need something to denote movement of funds … maybe `funds` comes back"
 
 **Research (REA2 formalisation; a core ontology for economic exchanges):** money movement is modelled as an **event** — a *transfer* — with `from` / `to` agents, `provide` / `receive` participation relations, and `inflow` / `outflow` resource flows. The sender's and recipient's perspectives are *cash-disbursement* and *cash-receipt*.
 
@@ -158,16 +170,17 @@ So **the movement of funds has a home**; what is missing is the *durable provisi
 - **If the intended subject is the COMPANY the fund backs** — then `toKind: Subject` is the *target of the stake*, not the owner, and  `ownedBy` would be wrong in substance (not just direction). That link needs its own relation: §3.8's `produces` is Event-only, so the Object→Subject options are `ownedBy` (accountable), `managedBy` (responsible), or `transacts` (`-`).
 
 **Granular question, and it is one word: is `venture:investment --ownedBy--> Subject` the fund that owns the investment, or the company it invests in?**
+
 - **DECIDED 2026-11-05 — left deliberately OPEN:** *"ownedBy Subject or Object, we leave it open because it can be quite varied (a person can own something, or a person can own a company that owns something)."* So the **target may be a Subject or an Object**, and the pack does not have to pick one.
 - **What that requires of the canonical document (ONTOLOGY §3.6/§3.7):** `ownedBy` today is defined as **Entity → Subject** only. The ruling widens it to **Entity → (Subject | Object)**, which is a topology change and therefore needs exactly the approval just given.
 - **How the ambiguity is resolved mechanically — the edge's own `direction`, not the predicate:** `->` means the **target** owns the source (`investment --ownedBy--> fund` = the fund owns the investment); `<-` means the **source** owns the target (`investment --ownedBy--> company` with `<-` reads *the investment has an ownership stake in the company*). The value `ownedBy` therefore stays single-direction-agnostic at the table level and the per-edge direction carries the meaning.
 - ⚠️ **The risk this accepts, stated so it is not discovered later:** with an open target and a per-edge direction, `ownedBy` no longer distinguishes *"A owns B"* from *"A is a stake in B"* by its predicate alone — a reader must read the direction field. `venture:holds` therefore maps onto `ownedBy` **with the direction inverted** (`<-`, the investment has an ownership stake in the company) rather than staying a separate word — the direction carries the sense. ⚠️ **Round 2 had said "keep `holds` as its own predicate"; the owner's ruling supersedes that** ("ownedBy is the right one, we just need the proper direction"), so it is recorded here rather than left as two answers. The census reports direction per row so a mis-signed edge is visible rather than plausible.
 
-## KIN-1 · "is theme bigger than epic?" — **yes, and the level in between is what is missing**
+### KIN-1 · "is theme bigger than epic?" — **yes, and the level in between is what is missing**
 
 **Research (Atlassian's own scaling-agile material, Jira Align/Portfolio docs, Tempo's comparison):** the common chain is
 
-```
+```text
 Strategic theme  →  Initiative / Portfolio epic  →  Epic  →  Feature  →  Story
 ```
 
@@ -193,11 +206,11 @@ Strategic theme  →  Initiative / Portfolio epic  →  Epic  →  Feature  → 
 
 **KIN-2 stays approved and unblocked** — the three canonical connections (`goal --ownedBy--> Subject`, `epic --addresses--> goal`, `indicator --addresses--> goal`) work under either KIN-1 answer; only option B adds `initiative` into the middle of that path.
 
-## 🔺 Gap found while doing this research — and it affects the census (#11083's own scope)
+### 🔺 Gap found while doing this research — and it affects the census (#11083's own scope)
 
 **`hierarchies:` is a second declaration surface, and the census only counted `relations`.** **Four** packs declare hierarchy paths the relations list does not contain (`agent-ops`, `portfolio` and `pm` declare none):
 
-```
+```text
 dev               Theme → Epic, Epic → Issue                        (hasPart)
 marketing         Campaign → Content                                 (hasPart)
 product-strategy  Product → Feature                                  (hasPart)
@@ -208,7 +221,7 @@ venture           Investment → Program, Program → Asset              (hasPar
 
 ---
 
-# Round 3 — what the plan review found *behind* the rulings
+## Round 3 — what the plan review found *behind* the rulings
 
 **`funds` and `produces` are not missing from the vocabulary — they are RETIRED from it.** `tortoise/pack_registry.py`'s `SEMANTICS_TRANSITION` maps `funds → transacts` and `produces → causes`, and `sdk.py` applies the rename **before** resolving direction, so a write declaring `funds` lands as `transacts` (direction `-`, no mechanism), and `produces` lands as `causes` (`->`). Both shipped declarations are therefore *currently warned as retired* on every load.
 
@@ -220,4 +233,3 @@ venture           Investment → Program, Program → Asset              (hasPar
 - ⚠️ **`ownedBy` + `IMPL` and `transacts` + `IMPL` are NOT errors.** **ONTOLOGY §8's mechanism column** gives those four values (`related`, `transacts`, `ownedBy`, `managedBy`) **no** mechanism (`—`), so *either* spelling is permitted over them — `SEMANTICS_MECHANISMS` omits them by design — and the registry **compares and warns, never gates** (#1934). A census that flagged them would red on correct behaviour. The genuine inversion is `IMPL` over `refutes` or `NAND` over `addresses` (#9963).
 
 **Not affected:** `#1026`'s "no name patterns" ruling. That one is about manifest filter keys, and nothing here touches it.
-

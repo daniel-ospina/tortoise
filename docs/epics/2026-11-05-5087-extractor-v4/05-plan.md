@@ -74,6 +74,7 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 ```
 
 **States, at two levels — they are not the same vocabulary:**
+
 - **run-level disposition:** `committed` · `held` (something was held; the run continues) · `degraded` (a step recorded a reason; the run continues) · `failed` (journal unchanged for the run) · **`committed-nothing`** (every candidate decided `discarded`; a legal terminal — it is not `failed`, because the journal *did* change by design).
 - **candidate-level:** `committed` · `held` · `discarded` (by rule, with `rule_id` + `counterfactual`) · `unclassified` (S2.3 kept it in the census without a kind).
 
@@ -169,6 +170,7 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 ## §8 — Coherence Review + Risk Analysis
 
 **Cross-substep drift check.**
+
 - Journeys → Workflows: J1/J2 → W1/W2; J3/J4 are served by the read path (out of scope) but depend on SF5/SF6; J5 → W3; J6 → W4; **J7 → W3's census surface and W4's sixth row**. No journey is unserved by an in-scope workflow; J3/J4 are served *indirectly*, and that is stated.
 - Workflows → Data model: every workflow state in §2 has a shape in §4 (`held` → DM3; mention → DM1/DM2; kinds → DM4; hierarchy → DM5; census → DM6). No orphan shape.
 - Data model → Interfaces: every shape has a contract in §6 — **including DM3**, whose held-set row (and the drain contract T4b proves) is the one that was missing when that sentence was first written.

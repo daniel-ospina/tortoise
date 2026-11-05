@@ -16,6 +16,7 @@ aboutObjects: "#5087, #7949, EXTRACTOR-V4-ARCHITECTURE.md"
 **Feature:** epic #5087 — the extractor decides what deserves to be in the graph *before* writing it (S0→S6), so the graph holds a map of the business instead of a flat catalogue of Objects.
 
 **Two dated facts, kept apart because they were measured on different populations:**
+
 - **5,314 Objects** as of **2026-11-04**, hosted `live-v4` — a **lane-brief reading with no committed artifact**.
 - **62.3% of Objects are `^(the )<X>`, measured as 4,900 / 7,859 Objects**, enumerated **2026-09-24** (re-derived 4,901 / 7,870 in `PRE-REGISTRATION.md` and in `#5333`'s census).
 
@@ -23,7 +24,7 @@ aboutObjects: "#5087, #7949, EXTRACTOR-V4-ARCHITECTURE.md"
 
 **Decision: PROCEED — with one sequencing correction (see Alternative 3).**
 
-**Alternatives considered**
+### Alternatives considered
 
 1. **Re-ingest / rebuild the graph from raw (the architecture doc's "Option D").** *Rejected.* It repairs the corpus without repairing the writer, so the defect returns with the next capture, and it destroys the only before-arm the capstone can pair against. The store is not rebuilt to fix this class.
 2. **Retire the volume bar (E1) and close the epic on E2–E5.** *Rejected — and it was right to test, because it is what I first proposed.* Research (2026-11-05, #5087 comment 6648010176) found a **mechanism that can move the row** — a mention is not an entity, which is the field's converged treatment (entity-linking NIL clustering; Graphiti's `NEW_ENTITY`; FalkorDB's own GraphRAG-SDK generic-reference stoplist; Microsoft GraphRAG's named-entity prompt) — and it acts **before** the node exists, so it is selection, not deletion. ⚠️ **Reachable ≠ reached:** E1's frozen bar is **undecided on committed evidence** (one of its two before-arm pairings fails its bound), so retiring it was wrong *and* claiming it will pass would be wrong. `#11021` carries the mechanism; the row's verdict stays `#7949`'s.
@@ -35,11 +36,12 @@ aboutObjects: "#5087, #7949, EXTRACTOR-V4-ARCHITECTURE.md"
 `selection at the mint` → fewer non-referents in the Object layer → (a) recall returns referents rather than anaphora, so the answer surface stops citing `the plan doc` as an entity; (b) EP confidence propagates over claims that are actually about something; (c) the vector class — roughly half the graph — stops growing on rows no semantic query wants (`STORAGE-ARCHITECTURE.md` §12.1b, §12.2). That chain is **testable at E1/E4** and **not** a revenue motion: this epic is a **beta gate**, and what it protects is retention on the product's core promise. Order of magnitude: **not applicable to revenue**; the cost side is a **step function, not a per-GB figure** — at one tenant the dogfood instance pays **$73/month** (1 GB STARTUP) whether the graph is 143 MB or 700 MB (`STORAGE-ARCHITECTURE.md` §17.4.3; the per-GB arithmetic elsewhere is a *rate*, not a bill).
 
 **Eisenhower placement: Important + Urgent → Do now.** ⚠️ **The honest grounds, because two easier ones do not hold:**
+
 - **Important:** `#5087` carries `P0-blocker`, and its capstone **#7949** is `P0-blocker` and **0 of 6 green** (E6, the pack-logic row, was added by owner ruling on 2026-11-05 and starts red by construction). (Not the parent `#5086` — that is **CLOSED** and labelled `not-launch-relevant`.)
 - **Urgent:** the beta date, **plus** the fact that the cheapest deciding measurement is **one 25-row scoring run** — so *starting now* is urgent even though the epic's own discriminator is unvalidated. ⚠️ **The "blocked on decisions, not work" ground is wrong and is withdrawn:** E1 is blocked on an owner ruling (`#5333`) **and** on a second arm per arm (n ≥ 2); E2 is blocked on **work** — `#10360` (*no mechanical enforcement of the verbatim state-value guarantee; retention is prompt-only at 49.4% vs a 54.4% baseline*) — not on a decision.
 - ⚠️ **The accumulation ground is also withdrawn:** "every week adds more of the class that must be selected out later" assumes a later removal that this document's own assumption 4 says is **not available** without a `#5333` ruling. The rows accumulating now are, on this epic's account, **not recoverable later** — which makes selection urgent for a different reason: it is the only door that stops the class at all.
 
-**Key assumptions**
+### Key assumptions
 
 - *The capture door is the fleet's arrow, and it is `extractor_v2`.* Confidence: **high** — measured (`hosted_api.capture_session` → `sdk.capture_session` → `_extract_session_v2`); the only alternative is the `TORTOISE_SESSION_EXTRACTOR=m2` branch (`sdk.py:14656`), which is test-only. The brief's "legacy rule extractor" claim was **false** and is corrected in the decomposition.
 - *A non-referential noun phrase can be told apart from a referent well enough to act on.* Confidence: **medium** — the field converges on the treatment, but **our arbiter has never been scored**; the 25-row owner-labelled set is the first measurement, and it is all-negative (specificity only). **This is the epic's top risk.**
