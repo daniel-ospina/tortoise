@@ -87,6 +87,16 @@ from tortoise.quota import count_org_usage
 #: A per-graph key with write access (``_require_scope`` needs graphs:write).
 _WRITE_SCOPES = ["graphs:read", "graphs:write"]
 
+#: The transport wait bound, pinned OUT of the `/v1/sessions` capture arm so a
+#: latency budget cannot decide an assertion about WHICH sdk handle the gate
+#: receives (#10296/#10289: `assert 504 in (200, 201)` on a self-hosted shard).
+#: Named rather than inlined so the assertion below can state its relationship to
+#: the product's own bound: it must exceed it by a WIDE factor, because the arm
+#: also carries a full offline extraction, and the factor is what makes this a
+#: "pinned out" value rather than a barely-wider one.
+_WAIT_BOUND_PINNED_OUT_S = 300.0
+_WAIT_BOUND_PINNED_OUT_FACTOR = 10.0
+
 
 class _Env:
     """One seeded registry + tenant graph pair on a shared temp embedded DB."""
@@ -461,7 +471,14 @@ def test_capture_sessions_gate_is_handed_the_capture_handle(env, monkeypatch):
     # `_TRANSPORT_WAIT_BOUND_S == 10.0` and drives the refusal at 0.05 s — so
     # widening it for THIS test weakens nothing: a gate called without
     # `sdk=sdk` still fails the two assertions below.
-    monkeypatch.setattr(ha_mod._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 300.0)
+    assert ha_mod._mcp_auth._TRANSPORT_WAIT_BOUND_S * _WAIT_BOUND_PINNED_OUT_FACTOR <= _WAIT_BOUND_PINNED_OUT_S, (
+        f"the pinned-out bound ({_WAIT_BOUND_PINNED_OUT_S}s) must clear the "
+        f"product's own bound by at least {_WAIT_BOUND_PINNED_OUT_FACTOR}x — "
+        f"it is now {ha_mod._mcp_auth._TRANSPORT_WAIT_BOUND_S}s, so the pin has "
+        f"drifted back into the range where a slow shard reds an assertion "
+        f"about WHICH handle the gate receives (#10296/#10289)")
+    monkeypatch.setattr(ha_mod._mcp_auth, "_TRANSPORT_WAIT_BOUND_S",
+                        _WAIT_BOUND_PINNED_OUT_S)
 
     e = env(max_points=100)
     seen: dict[str, object] = {}

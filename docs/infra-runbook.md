@@ -756,9 +756,23 @@ HTTP 504  {"error":{"code":-32009,"message":"The server's wait budget for this
 ```
 
 `status` is **not** the field that reports this, and that is a recorded decision
-rather than an oversight: `degraded` is reserved for an observed probe *failure*,
-so a slow-but-reachable store must not flip it (`monitoring.metrics`). Do not
-"fix" the miss by deriving `status` from latency — that reverses the decision.
+rather than an oversight: `degraded` is tied to an observed *failure*, never to a
+latency reading, so a slow-but-reachable store must not flip it. Do not "fix" the
+miss by deriving `status` from latency — that reverses the decision.
+
+⚠️ What `degraded` folds differs by surface, and reading this section as if it
+did not is how an operator debugs the wrong thing:
+
+- on the MCP health report (`monitoring.metrics`) it is the data-plane probe
+alone;
+- on the hosted `/health` body this section's `curl` reads, `status` is `ok`
+only when `db.ok` **and** `backup_watcher.ok` **and** `record.ok` are all true
+(`tortoise/hosted_api.py`'s `health()`; the same fact is stated in §4.1
+above and in the `record` counters' own section). So `degraded` with
+`db.ok: true` there means the backup watcher or the `record` leg — not the probe.
+
+The `wait_bound_breaches` counter below feeds **neither**: it is additive, and it
+never rewrites `status` on either surface.
 
 **Read this field instead.** The health body carries
 
@@ -808,7 +822,16 @@ false reassurance:
 
 The same field is on the MCP health tool (`tortoise_health`, or
 `tortoise_overview(section="health")`) — the surface `#10602` itself was
-measured on — and on `monitoring.serve_health`'s `/metrics` families.
+measured on — and in `monitoring.serve_health`'s **`/health`** body.
+
+⛔ Do not go looking for this JSON shape on `serve_health`'s **`/metrics`**: that
+endpoint is the Prometheus exposition (`generate_latest`), not the health report.
+It carries the family `tortoise_wait_bound_breaches_total{surface="mcp"|"rest"}`,
+with both children declared at import so a scrape never reads "absent" — but it
+has **no** `total`, `by_surface` or `error` member, so the "check `error` before
+trusting a `0`" rule above has no carrier there, and a failed in-process read is
+not expressible on that surface. Read `/health` for the abstention; read
+`/metrics` for the rate.
 
 **What its absence used to cost.** Breaches were emitted to exactly one place —
 a best-effort external analytics write, swallowed at `debug` on failure — so

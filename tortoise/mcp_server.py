@@ -526,7 +526,8 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
     # here would replace that legible refusal with a bare tool error — the
     # observation destroying the thing it observes (#3834/#10602).
     try:
-        monitoring.record_wait_bound_breach("mcp")
+        monitoring.record_wait_bound_breach(
+            monitoring.WAIT_BOUND_SURFACE_MCP)
     except Exception:  # measurement must never break a refusal
         _log.debug("mcp wait-bound count failed", exc_info=True)
 

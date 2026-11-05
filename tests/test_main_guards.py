@@ -37,6 +37,18 @@ def test_m0_main():
         shutil.rmtree(d, ignore_errors=True)
 
 
+#: The INGEST work allowance added to the product's declared cold-load bound.
+#: It is an ALLOWANCE, not a measurement: the ingest that follows the cold load
+#: ran past the pre-fix flat 120 s budget on a host where the load alone
+#: approached its own bound (#3349). Naming it is what lets the pin below assert
+#: the SHAPE of the derivation from a declared value instead of re-stating a
+#: literal nothing sources.
+_INGEST_WORK_ALLOWANCE_S = 180.0
+#: The budget this derivation replaced. Kept as a named value, not a literal, so
+#: the "must clear the old one" assertion below cannot drift from it.
+_PREFIX_FLAT_BUDGET_S = 120.0
+
+
 def _guard_subprocess_budget() -> float:
     """The subprocess budget: the embedder's OWN declared cold-load bound + work.
 
@@ -63,8 +75,9 @@ def _guard_subprocess_budget() -> float:
     except Exception:  # pragma: no cover — a missing bound must not SHRINK it
         pass
     # The work allowance: the ingest itself, on a host slow enough that the
-    # cold load alone approached its bound.
-    return load_bound + 180.0
+    # cold load alone approached its bound. Named at module level so the pin
+    # below derives from the same value instead of re-stating it.
+    return load_bound + _INGEST_WORK_ALLOWANCE_S
 
 
 def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
@@ -84,13 +97,16 @@ def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
     assert budget > declared, (
         f"a {budget}s subprocess budget cannot absorb a {declared}s cold load "
         "plus the ingest work (#3349)")
-    assert budget > 120.0, (
-        "the pre-fix 120 s budget is what redded the shard (#3349) — a "
-        "derivation that lands at or below it is the same defect")
+    assert budget > _PREFIX_FLAT_BUDGET_S, (
+        f"the pre-fix {_PREFIX_FLAT_BUDGET_S}s budget is what redded the shard "
+        "(#3349) — a derivation that lands at or below it is the same defect")
     assert hasattr(EmbeddingModel, "_LOAD_TIMEOUT_S"), (
         "the cold-load bound moved; re-point the derivation before the "
         "fallback silently pins a second number (#3349)")
-    assert budget == declared + 180.0, (
+    assert _INGEST_WORK_ALLOWANCE_S > 0, (
+        "a zero allowance makes the budget the cold-load bound alone — the "
+        "ingest that follows it would then have no headroom (#3349)")
+    assert budget == declared + _INGEST_WORK_ALLOWANCE_S, (
         "the budget must BE the declared bound plus the work allowance, so "
         "raising the bound moves it (#3349)")
 

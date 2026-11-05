@@ -816,9 +816,19 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
 #: inside a scheduled closure, which the pool may drop under exactly the
 #: overload that causes breaches (the inert-enforcer shape `#10602` must not
 #: recreate).
-#: The two surfaces the wait bound is enforced on, spelled once so the health
-#: report's zero-padding and the writers cannot drift apart.
-_WAIT_BOUND_SURFACES = ("mcp", "rest")
+#: The two surfaces the wait bound is enforced on, spelled ONCE as importable
+#: constants. Every writer imports these rather than re-typing the literal, and
+#: `record_wait_bound_breach` REFUSES anything else — the docstring's "cannot
+#: drift apart" claim is only true if it is enforced, and a writer that spelled
+#: its own third literal would otherwise be counted while `/health` kept
+#: zero-padding the two it knows, reporting a correct `total` beside a
+#: per-surface map that silently omits it (the absent-vs-zero reading this whole
+#: channel exists to remove, reproduced one layer down). Both call sites wrap
+#: the write in `try/except`, so the refusal below cannot become a new failure
+#: mode of the request it measures — the same rule the count write follows.
+WAIT_BOUND_SURFACE_MCP = "mcp"
+WAIT_BOUND_SURFACE_REST = "rest"
+_WAIT_BOUND_SURFACES = (WAIT_BOUND_SURFACE_MCP, WAIT_BOUND_SURFACE_REST)
 WAIT_BOUND_BREACH_COUNT = Counter(
     "tortoise_wait_bound_breaches_total",
     "Requests refused because the transport wait bound expired (#10602)",
@@ -1618,15 +1628,31 @@ def record_non_journal_skip_counts() -> dict[str, int]:
 def record_wait_bound_breach(surface: str) -> None:
     """Count one request the transport wait bound REFUSED (#10602).
 
-    ``surface`` is ``"mcp"`` or ``"rest"``. Called from each arm's breach
+    ``surface`` is one of :data:`WAIT_BOUND_SURFACE_MCP` /
+    :data:`WAIT_BOUND_SURFACE_REST`. Called from each arm's breach
     decision point BEFORE its analytics emit is scheduled: the emit is
     best-effort and may be dropped by the telemetry pool's bounded backlog, and
     a breach counter that goes quiet precisely during a breach storm would be
     the opposite of what it is for.
 
+    An unrecognised surface raises ``ValueError`` rather than minting a new
+    label. The label set is what makes the import-time child initialisation
+    legal, so an unknown value is a PROGRAMMING error, not data: counting it
+    would grow the label set without bound and leave `/health` zero-padding a
+    map that no longer covers the counter. Raising is safe by construction
+    here — both call sites (``hosted_api.WaitBoundMiddleware`` and
+    ``mcp_server``) invoke this inside ``try/except``, and
+    ``test_a_failing_counter_write_does_not_replace_the_refusal`` pins that a
+    raise from this family cannot replace the legible ``-32009`` refusal.
+
     Cheap and synchronous on purpose (a single labelled counter increment, no
     I/O), so the refusal path does not pay for its own observation.
     """
+    if surface not in _WAIT_BOUND_SURFACES:
+        raise ValueError(
+            f"#10602: unknown wait-bound surface {surface!r}; the label set is "
+            f"bounded to {_WAIT_BOUND_SURFACES} so the health report's "
+            f"zero-padding cannot omit a counted surface")
     WAIT_BOUND_BREACH_COUNT.labels(surface=surface).inc()
 
 

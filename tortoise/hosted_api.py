@@ -5357,7 +5357,9 @@ class WaitBoundMiddleware:
         # exist to remove, produced by the observation meant to expose it.
         try:
             _monitoring.record_wait_bound_breach(
-                "mcp" if _is_jsonrpc_surface(route_path) else "rest")
+                _monitoring.WAIT_BOUND_SURFACE_MCP
+                if _is_jsonrpc_surface(route_path)
+                else _monitoring.WAIT_BOUND_SURFACE_REST)
         except Exception:
             _logger.debug("wait-bound count failed", exc_info=True)
         _emit_wait_bound_breach(org_id or "", safe_route_path,
@@ -6706,9 +6708,11 @@ async def health():
             # surface an operator curls FIRST, and on 2026-11-02T15:44Z it read
             # `status: "ok"` while 6/6 searches were refused with `-32009`.
             # Same rule as `change_feed` / `build` above: it is REPORTED, never
-            # folded into `status` — `degraded` stays reserved for an observed
-            # probe failure, and a cumulative counter would pin the deployment
-            # degraded for the life of the process.
+            # folded into `status`. A cumulative counter must never pin the
+            # deployment degraded for the life of the process; `status` stays
+            # tied to a failure that is observable NOW — which on THIS body
+            # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
+            # terms in the `status` expression above), not the counter.
             "wait_bound_breaches": _monitoring.wait_bound_breach_counts(),
             "record": record, "build": _build_identity()}
 

@@ -448,3 +448,39 @@ def test_the_mcp_count_write_is_guarded(monkeypatch):
     # Must not raise: the emit is scheduled after the count, so a surviving
     # call proves the count did not abort it.
     mcp_server._emit_mcp_wait_bound_breach_off_loop("org", 1250, "tortoise_search")
+
+
+def test_an_unknown_surface_is_refused_rather_than_counted():
+    """#10602: the label set is BOUNDED, and the writer is what enforces it.
+
+    The import-time child initialisation is only legal because `surface` has two
+    literal values, and the health report zero-pads exactly those two. So a
+    writer that minted a third label would be counted while `/health` kept
+    padding the two it knows — a correct `total` beside a per-surface map that
+    silently omits the counted surface, which is the absent-vs-zero reading this
+    whole channel exists to remove, reproduced one layer down.
+
+    The refusal is safe by construction: both call sites invoke the writer
+    inside `try/except` (pinned by `test_a_failing_counter_write_does_not_
+    replace_the_refusal` and `test_the_mcp_count_write_is_guarded`).
+    """
+    import pytest
+
+    for bad in ("rest2", "", "MCP", None):
+        with pytest.raises(ValueError):
+            monitoring.record_wait_bound_breach(bad)
+
+    # …and the two the channel knows still count, so the guard is not a blanket
+    # refusal that would silently zero the channel.
+    monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_MCP)
+    monitoring.record_wait_bound_breach(monitoring.WAIT_BOUND_SURFACE_REST)
+
+    # The zero-padding set and the constants the writers import are the SAME
+    # objects, so a new surface cannot be added to one without the other.
+    assert set(monitoring._WAIT_BOUND_SURFACES) == {
+        monitoring.WAIT_BOUND_SURFACE_MCP,
+        monitoring.WAIT_BOUND_SURFACE_REST,
+    }
+    counts = monitoring.wait_bound_breach_counts()
+    assert set(counts["by_surface"]) == set(monitoring._WAIT_BOUND_SURFACES), (
+        "the health report must pad exactly the surfaces the writer accepts")
