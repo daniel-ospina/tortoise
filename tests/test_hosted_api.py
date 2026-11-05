@@ -7752,6 +7752,36 @@ def test_a_TORN_cache_publication_cannot_pair_a_new_handle_with_the_OUTGOING_ide
         ha._reset_registry_probe_sdk()
 
 
+def test_the_reset_clears_the_atomic_tuple_BEFORE_the_scalars():
+    """The ORDER of the reset's stores is the fix, and it is not observable at
+    close time — every ordering clears before `sdk.close()` — so a post-
+    condition assertion cannot discriminate it (round 8, P3: the earlier one was
+    green against the buggy ordering).
+
+    Pin it where it lives. Clearing the tuple LAST (round 7's defect) leaves a
+    lock-free reader being served the handle the reset is about to close: the
+    fast path reads only the tuple, so the tuple's store must come FIRST.
+    """
+    import dis
+
+    import tortoise.hosted_api as ha_mod
+
+    def first_store(name):
+        for ins in dis.get_instructions(ha_mod._reset_registry_probe_sdk):
+            if ins.opname == "STORE_GLOBAL" and ins.argval == name:
+                return ins.offset
+        raise AssertionError(
+            f"_reset_registry_probe_sdk never stores {name} — the teardown no "
+            "longer clears it")
+
+    tuple_at = first_store("_REGISTRY_PROBE_CACHE")
+    sdk_at = first_store("_REGISTRY_PROBE_SDK")
+    assert tuple_at < sdk_at, (
+        "the reset stores the sdk mirror BEFORE clearing the atomic tuple "
+        f"(tuple@{tuple_at} must precede sdk@{sdk_at}) — a lock-free reader "
+        "keeps being served the handle this call is about to CLOSE")
+
+
 def test_the_registry_probe_retry_is_BOUNDED_and_it_is_not_a_spin(
         monkeypatch):
     """The retry constant is a bound, not a slider: the rebuild exists for a
@@ -11163,6 +11193,11 @@ class TestUriRegistryProbeConnectionReuse:
             "the reset dropped the cached handle WITHOUT closing it — a "
             "connection leak per test in the URI lane")
         assert ha_mod._REGISTRY_PROBE_SDK is None
+        # The post-condition below guards "the tuple is never cleared" only —
+        # every ordering clears it before the close, so the ORDER itself is
+        # pinned by its own leg (`test_the_reset_clears_the_atomic_tuple_BEFORE_
+        # the_scalars`). Stated here so a green assertion is not mistaken for an
+        # order guard (round 8, P3).
         assert ha_mod._REGISTRY_PROBE_CACHE is None, (
             "the reset left the ATOMIC publication in place — the fast path reads "
             "that tuple (not the mirror) and would keep serving the handle this "

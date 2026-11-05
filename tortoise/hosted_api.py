@@ -35298,15 +35298,17 @@ _REGISTRY_PROBE_PATH: str | None = None
 #: exists to prevent, on the auth path.
 #: Publishing `(identity, sdk)` as one tuple makes the switch atomic: a reader
 #: reads it once and either matches the identity it holds or misses and builds.
-#: ⛔ THE SAME RULE APPLIES TO CLEARING IT, IN THE OPPOSITE DIRECTION: `_reset_
-#: registry_probe_sdk` drops the tuple **first**, before the mirrors and before
-#: the close, so a lock-free reader stops being served the handle that call is
-#: about to close (a reader that already took the tuple before the clear can
-#: still race the close — that residue needs refcounting and is not load-
+#: ⛔ THE SAME RULE APPLIES TO CLEARING IT, IN THE OPPOSITE DIRECTION:
+#: `_reset_registry_probe_sdk` drops the tuple **first**, before the mirrors and
+#: before the close, so a lock-free reader stops being served the handle that
+#: call is about to close (a reader that already took the tuple before the clear
+#: can still race the close — that residue needs refcounting and is not load-
 #: bearing: reset is a teardown/isolation hook, not a request path).
-#: The three scalars are kept as MIRRORS (written under the lock, read under it
-#: and by tests) so nothing that introspects them breaks; the fast path reads
-#: ONLY this tuple, never them, and the in-lock decision reads it too.
+#: The three scalars are kept as MIRRORS so nothing that introspects them breaks.
+#: They are written under the lock; the fast path never reads them, and the only
+#: lock-free reads of them are the reset's gate and the retire target, where they
+#: can never SERVE a handle — a stale read there only decides whether there is
+#: something to close, so it falls through to a close, never to a wrong handle.
 _REGISTRY_PROBE_CACHE: tuple[tuple[str, str], TortoiseSDK] | None = None
 
 #: How many times `_registry_probe_sdk` will rebuild a handle whose identity did
