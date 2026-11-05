@@ -219,7 +219,14 @@ CLEAR_VERDICT_RE = re.compile(
     r"(?im)(?:^[ \t>*_]*CLEAN\b"
     r"|^[ \t>*_]*NO ISSUES FOUND\b"
     r"|\b(?:verdict|outcome|result|conclusion|review|reviewed|re-?review|final)\b"
-    r"[\s:*_\u2014\u2013]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
+    # ⛔ THE CUE ARM ACCEPTS A BACKTICK SEPARATOR; the two LINE-START arms above do NOT.
+    # A code-formatted verdict is how the fleet actually posts them — `## Fresh-context review
+    # — `NO ISSUES FOUND` at `ab60fa6a3`` and `### Verdict\n\n`CLEAN` — at `d6f5d3f3c`` — and
+    # 2 of the 6 real clean reviews on PR #10975 are in that shape, so they read NEUTRAL and
+    # could never close a finding. It is deliberately NOT added to `^[ \t>*_]*`: the cited
+    # form pinned by `test_a_quoted_verdict_is_not_a_verdict` starts a line with `**`NO ISSUES
+    # FOUND`**` and MUST stay a citation, which that arm is the only thing refusing.
+    r"[\s:*_\u2014\u2013`]{0,4}(?:NO ISSUES FOUND|CLEAN)\b)"
 )
 #: ⛔ THE SUFFIX THAT FOLLOWS THE VERDICT DECIDES WHETHER IT WAS ASSERTED OR REPORTED — and
 #: it must be read as a WINDOW, not as the next byte. `.match(text, m.end())` anchors at the
@@ -245,13 +252,35 @@ CLEAR_VERDICT_RE = re.compile(
 _RETRACTION_RULES_1_TO_3 = (
     # (1) no longer the case
     r"no\s+longer\b"
-    r"|(?:is|was|are|were)\s+(?:now\s+)?not\b"
+    # ⛔ THE NEGATED COPULA IS SCOPED TO A PREDICATE, NOT LEFT BARE (review, PR #10975).
+    # A bare `(?:is|was|are|were)\s+(?:now\s+)?not\b` graded body-wide is ordinary English
+    # about something OTHER than the verdict: `**Verdict: CLEAN.** The pin is not vacuous.`,
+    # `… This is not a blocking problem.` and `Reviewer is read-only: no test suite was
+    # executed.` all RETRACTED their own clear, so condition 6 could never close a finding —
+    # the permanent false NOT-READY class the module's own CLEAR_RE docstring exists to
+    # prevent (#10962), re-created one level down. The predicate is what makes the negation
+    # speak about the finding's DISPOSITION; `clean` is deliberately NOT in the list, because
+    # `The tree is not clean of debt, but nothing blocks here` is a real clear (`tests/
+    # test_ready_for_owner.py::test_the_recorders_loose_arm2_still_honours_its_outcome_clean_
+    # suppression`).
+    r"|(?:is|was|are|were)\s+(?:now\s+)?not\s+(?:yet\s+)?"
+    r"(?:fixed|resolved|addressed|closed|cleared|done|sound|valid|accurate|true|satisfied"
+    r"|complete|a\s+clear|the\s+verdict)\b"
     r"|(?:is|was|are|were)\s+(?:now\s+)?(?:superseded|stale|outdated|obsolete|invalid|wrong|moot)\b"
     r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
     r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
     # (1b) the finding is said to be ABSENT, not fixed — `no evidence the P1 was resolved`
     # otherwise reads as a COMPLETION (`was resolved`) and the severity arm stands down.
-    r"|\bno\s+(?:evidence|proof|test|sign|indication|mention|attempt)\b"
+    # ⛔ `test` IS NOT A BARE NOUN HERE ANY MORE — same over-block, same measurement:
+    # `Reviewer is read-only: no test suite was executed.` retracted a clean verdict. The
+    # noun has to REFER TO THE FINDING (`no test for the P1`), which is what the second arm
+    # grades. A coverage note that names no severity token (`No test pins it.`) is thereby
+    # PROSE, not a declared blocking finding — pinned in
+    # `test_a_coverage_note_without_a_severity_token_is_prose_not_a_blocker`, and on the
+    # #10962 side of the trade on purpose: a false NOT-READY blocks every real merge.
+    r"|\bno\s+(?:evidence|proof|sign|indication|mention|attempt)\b"
+    r"|\bno\s+test\s+(?:for|of|covering|covers|on)\b"
+    r"|\bno\s+test\s+(?:that|which)\s+(?:covers|exercises|tests?|asserts|pins)\b"
     r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
     # (2) attributed to another artifact / a former state of this one
     r"|(?:previous|earlier|prior|old)\s+(?:head|record|round|assessment|verdict|review)\b"
@@ -269,11 +298,18 @@ _RETRACTION_RULES_1_TO_3 = (
 #: regex that must agree is exactly how one of them rots unnoticed.
 _R1_NO_LONGER = (
     r"no\s+longer\b"
-    r"|(?:is|was|are|were)\s+(?:now\s+)?not\b"
+    # SCOPED COPULA (see `_RETRACTION_RULES_1_TO_3`, which must stay byte-identical): the
+    # bare form fired on ordinary prose about something other than the verdict.
+    r"|(?:is|was|are|were)\s+(?:now\s+)?not\s+(?:yet\s+)?"
+    r"(?:fixed|resolved|addressed|closed|cleared|done|sound|valid|accurate|true|satisfied"
+    r"|complete|a\s+clear|the\s+verdict)\b"
     r"|(?:is|was|are|were)\s+(?:now\s+)?(?:superseded|stale|outdated|obsolete|invalid|wrong|moot)\b"
     r"|superseded\b|stale\b|outdated\b|obsolete\b|invalid\b|moot\b"
     r"|predat(?:e|es|ed|ing)\b|was\s+returned\b|had\s+been\b"
-    r"|\bno\s+(?:evidence|proof|test|sign|indication|mention|attempt)\b"
+    # `test` is finding-scoped here too — `no test suite was executed` is not a retraction.
+    r"|\bno\s+(?:evidence|proof|sign|indication|mention|attempt)\b"
+    r"|\bno\s+test\s+(?:for|of|covering|covers|on)\b"
+    r"|\bno\s+test\s+(?:that|which)\s+(?:covers|exercises|tests?|asserts|pins)\b"
     r"|\bno\s+one\s+(?:has|have|did)\b|\bhas\s+since\b|\bhas\s+moved\b|\bsince\s+moved\b"
 )
 _R2_ATTRIBUTED = (

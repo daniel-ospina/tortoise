@@ -984,6 +984,163 @@ def test_a_verdict_that_is_RETRACTED_in_the_same_sentence_cannot_close_a_finding
         assert "last-clear=-" in check.raw, f"{body!r} counted as a CLEAR: {check.raw}"
 
 
+def test_ordinary_prose_about_the_review_does_not_retract_its_own_clear() -> None:
+    r"""REVIEW #10975 (P1): a clean review's OWN prose retracted its verdict.
+
+    `_R1_NO_LONGER` carried a BARE copula negation (`(?:is|was|are|were)\s+(?:now\s+)?not\b`)
+    graded over the rest of the body, and rule (1b) carried a bare `test` noun. So ordinary
+    English about something other than the finding — `the pin is not vacuous`, `this is not a
+    blocking problem`, `no test suite was executed` — matched, the clear was graded RETRACTED,
+    and condition 6 could NEVER close an open finding. That is the permanent false NOT-READY
+    class #10962 exists to prevent, re-created one level down, and it was measured on this
+    PR's own thread: all 6 real non-blocking clean comments graded `last-clear=-`.
+
+    Each body below is followed by a real `[P1]`, so a passing assertion means the comment
+    COUNTED AS A CLEAR — which is the direction that was broken.
+    """
+    for body in (
+        "**Verdict: CLEAN.**\n\nThe guard is sound; the pin is not vacuous.",
+        "**Verdict: CLEAN.** No issues found. This is not a blocking problem.",
+        "**Verdict: CLEAN.**\n\nReviewer is read-only: no test suite was executed.",
+        "**Verdict: CLEAN.**\n\nReviewer is read-only: no tests were run on this box.",
+        "NO ISSUES FOUND\n\nThe reviewer is read-only: no test suite was executed.",
+    ):
+        comments = [
+            {
+                "id": 1,
+                "created_at": "2026-11-05T09:00:00Z",
+                "kind": "review",
+                "body": "[P1] tools/x.py:5 — the guard returns 0 on a failed read",
+            },
+            {
+                "id": 2,
+                "created_at": "2026-11-05T10:00:00Z",
+                "kind": "comment",
+                "body": body,
+            },
+        ]
+        check = _check("blocking-finding", comments=comments)
+        assert check.passed is True, f"{body!r} was retracted: {check.raw}"
+        assert "last-clear=2" in check.raw, f"{body!r}: {check.raw}"
+
+
+def test_the_narrowed_copula_still_retracts_when_the_negation_is_about_the_finding() -> None:
+    """The other half of the trade above: scoping the copula to a DISPOSITION predicate must
+    not turn `the P1 is not resolved` into a clear. A false PASS here is the failure this
+    whole guard exists to stop, so the narrowing is pinned in both directions."""
+    for body in (
+        "**Verdict: CLEAN.**\n\nThe P1 is not resolved.",
+        "**Verdict: CLEAN.**\n\nThe finding is not fixed.",
+        "**Verdict: CLEAN.**\n\nThat condition is not satisfied.",
+        "**Verdict: CLEAN.**\n\nThis is not a clear.",
+        "**Verdict: CLEAN.**\n\nI found no test for the P1.",
+        "**Verdict: CLEAN.**\n\nThere is no evidence the P1 was resolved.",
+        "**Verdict: CLEAN.**\n\nNo test exercises the P1 path.",
+    ):
+        comments = [
+            {
+                "id": 1,
+                "created_at": "2026-11-05T09:00:00Z",
+                "kind": "review",
+                "body": "[P1] tools/x.py:5 — the guard returns 0 on a failed read",
+            },
+            {
+                "id": 2,
+                "created_at": "2026-11-05T10:00:00Z",
+                "kind": "comment",
+                "body": body,
+            },
+        ]
+        check = _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+        assert "last-clear=-" in check.raw, f"{body!r} counted as a CLEAR: {check.raw}"
+
+
+def test_a_coverage_note_without_a_severity_token_is_prose_not_a_blocker() -> None:
+    """The documented residual of the `no test` narrowing, pinned so it is a DECISION and not
+    an accident.
+
+    `no test` used to retract a clear wherever it appeared, which is how
+    `no test suite was executed` became a permanent false NOT-READY. It is now finding-scoped
+    (`no test for the P1` still blocks — see the arm above). A coverage note that names NO
+    severity token is therefore prose: it declares no blocking finding, and #10962's recorded
+    trade puts the false NOT-READY (which blocks every real merge) ahead of it. Anything that
+    DOES name P0–P2 is still graded by the severity arm, unchanged.
+    """
+    for body in (
+        "**Verdict: CLEAN.** No test pins it, but nothing blocking.",
+        "**Verdict: CLEAN.**\n\nThe change is not exercised end to end.",
+    ):
+        comments = [
+            {
+                "id": 1,
+                "created_at": "2026-11-05T09:00:00Z",
+                "kind": "review",
+                "body": "[P1] tools/x.py:5 — the guard returns 0 on a failed read",
+            },
+            {
+                "id": 2,
+                "created_at": "2026-11-05T10:00:00Z",
+                "kind": "comment",
+                "body": body,
+            },
+        ]
+        assert _check("blocking-finding", comments=comments).passed is True, body
+    # …AND the boundary, so a later widening cannot quietly reintroduce the bare noun: a `no
+    # test` that DOES refer to a finding still retracts.
+    for body in (
+        "**Verdict: CLEAN.** There is no test that covers the P1.",
+        "**Verdict: CLEAN.** I found no test of the P1 path.",
+    ):
+        comments = [
+            {
+                "id": 1,
+                "created_at": "2026-11-05T09:00:00Z",
+                "kind": "review",
+                "body": "[P1] tools/x.py:5 — the guard returns 0 on a failed read",
+            },
+            {
+                "id": 2,
+                "created_at": "2026-11-05T10:00:00Z",
+                "kind": "comment",
+                "body": body,
+            },
+        ]
+        _assert_fails("blocking-finding", "open-blocking-finding", comments=comments)
+
+
+def test_a_code_formatted_verdict_is_a_verdict() -> None:
+    """REVIEW #10975 (P2): the cue arm's separator class omitted the backtick, so a
+    code-formatted verdict read NEUTRAL and could never close a finding.
+
+    Both bodies below are VERBATIM from real reviews on this PR, and they are 2 of the 6
+    clean verdicts on it — roughly 1 in 3 of the fleet's. The backtick is added to the CUE arm
+    only: the two line-start arms must keep refusing the cited form, which is
+    `test_a_quoted_verdict_is_not_a_verdict`'s pin.
+    """
+    for body in (
+        "## Fresh-context review — `NO ISSUES FOUND` at `ab60fa6a3`",
+        "### Verdict\n\n`CLEAN` — at `d6f5d3f3c`",
+    ):
+        comments = [
+            {
+                "id": 1,
+                "created_at": "2026-11-05T09:00:00Z",
+                "kind": "review",
+                "body": "[P1] tools/x.py:5 — the guard returns 0 on a failed read",
+            },
+            {
+                "id": 2,
+                "created_at": "2026-11-05T10:00:00Z",
+                "kind": "comment",
+                "body": body,
+            },
+        ]
+        check = _check("blocking-finding", comments=comments)
+        assert check.passed is True, f"{body!r} still read NEUTRAL: {check.raw}"
+        assert "last-clear=2" in check.raw, f"{body!r}: {check.raw}"
+
+
+
 def test_issues_verdict_is_a_blocking_record() -> None:
     comments = [
         {
@@ -2679,7 +2836,11 @@ def test_the_word_arm_declares_its_own_gap_rather_than_carrying_it_silently() ->
     ⛔ SO THIS ARM IS A TRIPWIRE: fixing the gap means changing it ON PURPOSE. When #11048
     lands, flip every assertion below and delete this docstring. It exists so the gap cannot be
     re-derived as a fresh P1 finding, and so it cannot be "fixed" only in the over-block
-    direction, which no test above would catch.
+    direction: the naive `|remains?` addition to `_R4_WORDS` makes `_NEXT_PARA_RETRACTION_RE`
+    match `remain` in the clear pinned at `tests/test_ready_for_owner.py:801`
+    (`**Verdict: CLEAN.**\n\nNo P0, P1 or P2 findings remain.`), which reds that arm — so the
+    over-block direction is caught ABOVE, not uncaught as an earlier draft of this docstring
+    claimed (review #10975, P3).
     """
     for body in (
         "**Verdict: CLEAN.** A critical finding remains.",
