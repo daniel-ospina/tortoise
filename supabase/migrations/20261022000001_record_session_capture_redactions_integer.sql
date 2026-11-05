@@ -63,19 +63,12 @@
 -- The `DO` guard makes it idempotent on re-apply: the ALTER is a no-op once the
 -- column is no longer `jsonb`.
 --
--- The schema readers that must see the narrowed type: `jsonb_columns()` in
--- `record_projection` DOES parse `ALTER COLUMN … TYPE` (`_ALTER_COLUMN_TYPE_RE`)
--- and must, because this migration is exactly how `capture_redactions` leaves
--- the jsonb set — a reader that skipped narrowing migrations would encode a
--- value for a column that is no longer `jsonb`. The sibling readers that pin
--- the COLUMN SET still read `CREATE TABLE` / `ADD COLUMN` only
--- (`record_projection.table_columns()` and
--- `tests/test_record_schema_placement.parse_sql_columns()`), which is correct
--- for them: they answer "does this column exist", not "what type is it".
--- ⚠️ `_jsonb_or_scalar` no longer passes a `str` through unchanged on a jsonb
--- column (it `json.dumps`-es it, #9548), so a future narrowing like this one
--- changes behaviour and not merely a type annotation. The file is listed in
--- `RECORD_MIGRATIONS` and in
+-- The schema readers that must see the narrowed type: none of them parse
+-- `ALTER COLUMN … TYPE` (`record_projection.table_columns()` and
+-- `tests/test_record_schema_placement.parse_sql_columns()` both read
+-- `CREATE TABLE` / `ADD COLUMN`), and nothing else needs to — the projection
+-- passes a non-`dict`/`list` value through unchanged, so the column's type was
+-- the only thing disagreeing. The file is listed in `RECORD_MIGRATIONS` and in
 -- `tools/ci_selection.py`'s `CORE_ALSO` (it sorts outside the `2026101200000`
 -- prefix), so a change to it ALONE still selects `core` and runs both pins.
 -- ============================================================================
