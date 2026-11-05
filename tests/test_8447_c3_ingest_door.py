@@ -15,16 +15,31 @@ on every arm — so ``tortoise-ingest --upgrade <not-a-document>`` printed a
 refusal and exited **0**, and an idempotency skip fell through to the
 completion summary as if the run had ingested something.
 
-Three properties are pinned here, one class each:
+Six properties are pinned here, and the classes below are the ONLY ones — a
+name in this paragraph that does not resolve is worse than no paragraph, because
+the next lane auditing #8447 greps it in `BOUNDED-OPERATION-CONTRACT.md` §2,
+finds nothing, and has to decide whether the pin was deleted:
 
+* ``TestTheExitContractIsOneMapping`` — the mapping itself: a refusal is `1`,
+  an already-satisfied ask is `0`, `PARTIAL` is `1`, every enum member has a
+  DECIDED status, and `cli()` dereferences `.returncode` so the installed
+  entry point cannot hand `sys.exit` a `StrEnum`.
 * ``TestARefusalIsNotSuccess`` — the mutant: revert any refusal to a
   success-shaped return and the arm reds.
-* ``TestASkipIsNotARefusal`` — the opposite failure: collapsing an already-
-  satisfied ask into an error would break every idempotent re-run, so the skip
-  arms assert ``0`` explicitly. A test that only pinned "refusals are non-zero"
-  would pass on a fix that made every run red.
-* ``TestTheSkipArmWritesNothing`` — a skip must not emit a completion summary
-  or a ``--resolution`` Point for work it never did.
+* The opposite failure — collapsing an already-satisfied ask into an error
+  would break every idempotent re-run — is pinned by
+  ``TestTheExitContractIsOneMapping::test_an_already_satisfied_ask_exits_zero``
+  (the skip members are `0`) and by ``TestTheSkipArmWritesNothing`` (a skip
+  emits no completion summary and writes no ``--resolution`` Point for work it
+  never did). A test that only pinned "refusals are non-zero" would pass on a
+  fix that made every run red.
+* ``TestTheSweepReportsOutstandingWork`` and
+  ``TestTheSweepDoesNotRedOnItsOwnIdempotency`` — the ``--upgrade-all`` sweep:
+  leftover work is `PARTIAL`, an empty sweep and the `already claimed` bucket
+  are `0`, and an unreadable or not-a-Document candidate is `PARTIAL`.
+* ``TestAPartialExtractionIsNotDone`` — an extraction that failed sections is
+  not a completed ingest, on all three arms (the sweep, ``--upgrade``, the
+  full ingest).
 """
 from __future__ import annotations
 
@@ -186,25 +201,55 @@ class TestTheExitContractIsOneMapping:
         These three raise inside `main` (before any outcome exists), so they
         prove the entry point is wired, not the outcome mapping — that is
         `test_cli_turns_the_outcome_into_the_process_status` above.
+
+        ⛔ Each arm asserts the guard's OWN message, not only the SIGN of the
+        status. `--db` is `required=True` (`ingest.py:1034`) and `parse_args`
+        (`:1099`) runs BEFORE both mode guards (`:1104`, `:1108`), so an arm
+        that omits `--db` is refused by ARGPARSE with exit 2 and its `!= 0`
+        assertion holds without either guard being reached — MEASURED before
+        this was fixed:
+
+            $ python -c 'from tortoise.ingest import cli; cli()' --include-unstamped
+            error: the following arguments are required: --db   → exit 2
+
+        Both arms were therefore byte-identically green on the PRE-FIX tree
+        (`from tortoise.ingest import cli` raised ImportError, also non-zero)
+        and stayed green under the mutant that deletes both guards — they
+        pinned nothing. Passing `--db` makes the GUARD what fires, and the
+        message assertion makes the arm red if the guard is deleted and some
+        LATER `SystemExit` takes its place.
         """
         import subprocess
         root = Path(__file__).resolve().parent.parent
+        # Never connected: with `--db` present the mode guard raises before any
+        # projection is opened, so this string only has to be parseable.
+        db = "docker://:f@localhost:6379/x"
         # These are the module's PRE-EXISTING argument refusals (they already
         # raised SystemExit before this change); the arms pinned here are the
         # ones this change owns — a refusal must be non-zero, never 0.
-        for argv, want in (
-            (["--help"], 0),
-            (["--include-unstamped"], "nonzero"),   # needs --upgrade-all
-            (["--upgrade"], "nonzero"),             # needs a transcript
+        for argv, want, message in (
+            (["--help"], 0, "usage:"),
+            # `--db` present → the GUARD fires, not the parser.
+            (["--include-unstamped", "--db", db],
+             "nonzero", "--include-unstamped requires --upgrade-all"),
+            (["--upgrade", "--db", db],
+             "nonzero", "--upgrade requires a transcript file to upgrade"),
         ):
             proc = subprocess.run(
                 [sys.executable, "-c",
                  "import sys; from tortoise.ingest import cli; cli()", *argv],
                 cwd=root, capture_output=True, text=True, timeout=120)
+            seen = proc.stdout + proc.stderr
             ok = (proc.returncode == want) if want != "nonzero" \
                 else (proc.returncode != 0)
             assert ok, (
                 f"{argv} -> exit {proc.returncode}, wanted {want}\n"
+                f"stdout={proc.stdout[-500:]}\nstderr={proc.stderr[-500:]}")
+            assert message in seen, (
+                f"{argv} exited non-zero but NOT because of the guard this arm "
+                f"names: {message!r} is absent. Something else refused first "
+                "(argparse's required-argument error is the shape to suspect), "
+                "so the arm does not falsify the guard:\n"
                 f"stdout={proc.stdout[-500:]}\nstderr={proc.stderr[-500:]}")
 
 
