@@ -363,9 +363,10 @@ instant, on top of 11 singleton jobs.
 
 ⛔ **Scope of that claim: `python-ci`'s three shard matrices.** It is not a repo-wide audit, and
 reading it as one would be wrong — `.github/workflows/mirror-images.yml` still declares a
-`matrix` with no cap. That one is out of scope rather than overlooked: it is a
-`workflow_dispatch` job, so it has no per-PR fan-out to bound, and its `matrix` is a static
-3-target list (mirroring registry images), not a shard set that grows with the suite. It is
+`matrix` with no cap. That one is out of scope rather than overlooked: it is not PR-triggered
+(`workflow_dispatch` plus a nightly `schedule`), so it has no per-PR fan-out to bound, and its
+`matrix` is a static 3-target `include:` list (mirroring registry images), not a shard set that
+grows with the suite. It is
 recorded here only so a later reader does not mistake this section for "every matrix in the repo
 is bounded".
 
@@ -451,6 +452,14 @@ pins rather than two — the caps are a different property from the two false-re
 repos/<owner>/<repo>/actions/runners`), the per-shard wall and the start stagger with §2's
 command. If the pool grows, invariant 2 permits a larger cap; if a shard's wall grows past
 `4 × cap × wall` catching the carve-out, invariant 1 is the one that moves.
+
+⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**
+`tests/test_ci_selection.py` holds `measured_pool = 12` as a **literal** and asserts
+`sum(caps) <= measured_pool - reserved_for_others`. The test pins the INVARIANTS; the pool they
+are measured against is the one number in it that is measured rather than derived, so it has to
+move **in the same change as the caps**. Landing a permitted re-tune without it (4/4/4 against a
+16-runner pool, say) satisfies both invariants and still reds the required check on the stale
+constant.
 
 ⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** Section 2
 measures a job's wait as `created_at → started_at`, but a job held back by `max-parallel` is
