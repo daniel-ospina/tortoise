@@ -861,6 +861,18 @@ def test_a_digit_only_transcript_still_derives_and_is_findable(sdk):
     # …and the framing labels are still gone from a digit-only transcript.
     assert not ({"user", "assistant"} & set(topics)), topics
 
+    # ⛔ THE REACHABLE TRANSCRIPT SHAPE — the live leg below depends on it, so it
+    # is pinned here rather than discovered by a failure. `_session_llm_transcript`
+    # drops a turn whose marker-free body carries no >=3-char extractable
+    # sentence, so the bare `42` turn in the capture below never reaches this
+    # function: the transcript the writer actually derives from is the second
+    # turn alone. Asserted directly so a future change to that upstream predicate
+    # shows up HERE rather than silently moving the live leg's coverage onto a
+    # shape the builder can no longer emit.
+    reachable = _session_source_metadata("Assistant: 100 200")
+    assert reachable[1] == ["100", "200"], reachable
+    assert reachable[0] == DISPLAY_PREFIX + "100, 200", reachable
+
     # ⛔ The CONTENT arm keeps its letter class: numbers do not RANK against the
     # session's words. Without this leg the presence fix could be "solved" by
     # putting digits in the ranking pool, which would let an ID crowd a word

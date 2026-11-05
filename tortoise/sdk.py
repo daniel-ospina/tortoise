@@ -4218,7 +4218,13 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     (``"User: 42\\nAssistant: 100 200"`` — an ID/number-only session) therefore
     had NO word tokens, took the ``("", [])`` arm, and was written
     ``summary=''`` with ``_searchText`` NULL: silent on the node and absent from
-    the Source FTS index. Against ``main`` that is a genuine REGRESSION, not
+    the Source FTS index. ⛔ The REACHABLE production shape is
+    ``"Assistant: 100 200"``: ``_session_llm_transcript`` drops a turn whose
+    marker-free body carries no >=3-char extractable sentence, so the shorter
+    numeric turns never reach here (that is the shape the live leg in
+    ``tests/test_10000_source_prose.py`` captures; the two-turn form above is a
+    unit-level input, not a transcript this builder can emit).
+    Against ``main`` that is a genuine REGRESSION, not
     only a doc inaccuracy — the pre-#10000 derivation fell back to
     ``transcript.strip()[:200]``, so those digits DID reach the index (as prose,
     the §9.1/D1 violation this change removes — but the findability was real),
