@@ -3182,8 +3182,9 @@ async def run_control_plane_call(fn, *, op: str,
             #   2. the pool refused the submit      -> `_WorkerBacklogFull`, fail closed
             #   3. `wait_for`'s bound expired first -> fail closed, EXCEPT that the
             #      timer's cancel can win the `_ready` batch after the callable
-            #      answered INSIDE its deadline — that is a success (see the stamp
-            #      arm below), not a fail-closed bound miss
+            #      answered INSIDE its deadline — then the callable's answer is the
+            #      verdict (its RESULT, or its own ERROR on the failure polarity),
+            #      not a fail-closed bound miss (see the stamp arm below)
             future_exc = (future.exception()
                           if future.done() and not future.cancelled() else None)
             # ⛔ BOTH halves are required (#10941), on BOTH polarities. The
