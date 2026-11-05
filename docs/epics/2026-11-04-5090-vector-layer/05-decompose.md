@@ -92,7 +92,7 @@ assertion:
 - **O:** make which labels the vector leg searches and which the store indexes a fact the system states,
   instead of one reconstructed by hand.
 - **I:** `_record_vector_index_inventory` (`projection/__init__.py:18491`) emits the pair for **every** served
-  label; today `:18579` gates all output on `if gap:`.
+  label; today `if gap:` (`:18577`) gates the **warning only**, and the served set is never retained.
 - **T:** a store with **no** gap reports the pair; a store **with** a gap still warns; a raising/malformed
   catalogue leaves `Projection.__init__` healthy (fail-open preserved); **no second label declaration** —
   the served set stays `security.ENTITY_TYPE_LABELS`.

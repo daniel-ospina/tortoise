@@ -138,7 +138,7 @@ across 8 modules, a cross-store join, two-boundary erasure, a mandatory offline 
 **Justified skip, stated as a skip:** for V1's evidence, `02-research.md` carries the external pass (graph
 filters post-filter ⇒ recall@10 **0.942 → 0.401 at 10 % selectivity**; `iterative_scan` recovering **0.847**
 at CPU/tail-latency cost; at **0.1 %** selectivity with *correlated* filters — ours are correlated — **0 rows
-in 683 ms** against a btree's 3.6 ms; **SIFT-128, 128-dim**, ours are 1,536-dim). It is parked with V1,
+in 683 ms** against a btree's 3.6 ms; **SIFT-128, 128-dim**, ours are **384-dim** — 1,536 is the stored *byte* width). It is parked with V1,
 where it will be used.
 
 ---

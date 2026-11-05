@@ -14,7 +14,8 @@ aboutObjects: "epic #5090, the vector layer, decision V1, embed gate, STORAGE-AR
 
 **Stage:** 1 of 6 (`epic-workflow` → `epic-align`). **Epic:** #5090 — *the vector layer — what earns an
 embedding, and where it lives.* **Measured at head `641e5f1b37`.** **Review gate:** verifier (fresh
-context), cycle 1 returned 1 P0 + 4 P1 + 3 P2 + 1 P3 — all incorporated below; verdict log in §6.
+context) — **two cycles**, and **cycle 2 changed the decision from PROCEED to REPOINT**. The verdict log,
+which supersedes this line, is **§6**.
 
 > ⛔ **READ §8 FIRST.** It records the decisions the repo and the graph had **already settled** before this
 > lane derived anything, and the three things this lane proposed that were **already refuted or on a
@@ -108,11 +109,17 @@ why this epic does not hold the critical path.
 
 ## 3. Profit-growth alignment
 
-**Causal chain.** Vector bytes sit in RAM-priced, no-eviction storage at `billing.cost_basis.falkordb_per_gb
-= 73.0` (`product/pricing.json`) → every stored vector is **permanent** rent → the per-tenant storage
-allowance is consumed by data that is either identifier-only (no retrieval value) or index overhead
-(48 % of the graph) → the free/pro working set is artificially small → a customer reaches the allowance
-before the product has earned the price.
+**Causal chain — recorded so it can be REFUTED, which it is.** The chain the epic assumed runs: vector
+bytes sit in RAM-priced, no-eviction storage at `billing.cost_basis.falkordb_per_gb = 73.0`
+(`product/pricing.json`) → every stored vector is **permanent** rent → the per-tenant storage allowance is
+consumed by data that is either identifier-only (no retrieval value) or index overhead (48 % of the graph)
+→ the free/pro working set is artificially small → a customer reaches the allowance before the product has
+earned the price.
+
+**⛔ Every arrow in that chain is broken on our stack, and §16.1 says so:** the bill is **provisioned** RAM,
+so removing a byte changes it by **$0.00**; and under the 2026-10-08 billing ruling retained bytes are
+**REVENUE**, so "store less" is not a cost strategy at all. The table below is kept **because the refutation
+is the finding**, not because the chain is the justification.
 
 **Order of magnitude — computed from the REMOVABLE figure, per tenant, not from the whole graph.**
 

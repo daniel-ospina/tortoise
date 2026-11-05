@@ -209,7 +209,7 @@ real.
 ### P2-b — the benchmark's dataset was unnamed
 It is **SIFT-128-euclidean** (ann-benchmarks), **128-dim**. **Our embeddings are 384-dim** (`tortoise/embeddings.py` `EMBEDDING_DIM = 384`); **1,536 is the stored BYTE width** (384 × float32), not the dimension — so the dimensional gap is **3×**, not 12×, and the distinction matters because HNSW's recall and build cost are functions of dimension, not of stored bytes. The
 benchmark's own caveat is dimensional (*"do not substitute random vectors … in 128 dimensions"*), so its
-distances must not be read as ours — and at 1,536 dims HNSW behaves differently in both recall and build
+distances must not be read as ours — and at 384 dims HNSW behaves differently in both recall and build
 cost. Also noted: the *AI Engineering Playbook* row is the only citation that is neither fetchable nor a
 repo artefact.
 
