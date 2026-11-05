@@ -937,12 +937,18 @@ def test_projection_over_multiple_pages_concatenates() -> None:
     assert spec.project([[{"name": "a"}], [{"name": "b"}, {"name": "c"}]]) == ["a", "b", "c"]
 
 
-def test_gh_reader_APPLIES_the_projection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """⛔ GUARD 2'S HOLE, CLOSED. Every other projection test calls `spec.project` DIRECTLY, so a
-    `_gh_reader` that returned `proc.stdout` unprojected would cache the whole body and stay green.
+def test_the_shipped_runners_projection_drops_status_and_busy_and_the_argv_carries_no_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ WHAT THE SHIPPED CODE ACTUALLY DOES (R2), pinned as such: `_gh_reader` returns the WHOLE
+    body and `read()` applies the PROJECTION — the layering is deliberate, so a caller supplying
+    its own reader is protected too (see `_gh_reader`, "RAW BYTES. The PROJECTION is applied by
+    `read()`, never here").
 
-    This drives the real reader with a stubbed `subprocess.run` (no network) and asserts the stored
-    bytes are the PROJECTION, and that the argv `gh` would receive carries no `--jq`/`--slurp`.
+    This drives the real reader with a stubbed `subprocess.run` (no network) and asserts it hands
+    back the UNPROJECTED bytes (`status`/`busy` still present — so the projection's effect below is
+    the projection's), that the projection drops those volatile fields, and that the argv `gh`
+    would receive carries no `--jq`/`--slurp`.
     """
     seen: list[list[str]] = []
 
@@ -974,6 +980,13 @@ def test_gh_reader_APPLIES_the_projection(monkeypatch: pytest.MonkeyPatch) -> No
     # ⛔ The reader returns RAW bytes on purpose: the projection belongs to `read()`, so that a
     # caller supplying its own reader is protected too. Projecting here would leave the library
     # path caching whole bodies (measured: `pushed_at` served for a 6-hour TTL).
+    # ⛔ THE LAYERING ITSELF, observed rather than assumed: the reader hands back the WHOLE body.
+    # Without this arm the test cannot support its name — it would only show that the TEST's own
+    # `_project(...)` call drops the fields, not that `_gh_reader` leaves them for `read()`.
+    assert b"status" in raw and b"busy" in raw, (
+        "the reader projected; R2 puts the projection in read(), never in _gh_reader"
+    )
+
     stored = json.loads(C._project("runners.inventory", raw))
     assert stored == [{"name": "r1", "labels": ["self-hosted"]}], (
         f"the projection let volatile fields through: {stored!r}"
@@ -1778,9 +1791,17 @@ def test_a_runner_naming_nothing_with_an_EMPTY_STRING_is_refused(entry) -> None:
 
     Non-vacuous against the pre-fix code: the old check was `isinstance(r.get("name"), str)`, and
     `""` satisfies it, so both arms below projected an answer instead of raising.
+
+    The MESSAGE is pinned too: this text is the entire operator-facing detail on a refused live
+    read (`gh_read_cache: REFUSED — …`, exit 1), and it used to state the SUCCESS condition —
+    "entry has a non-null, non-empty-string `name`" — on the branch that fires because the entry
+    does NOT have one. A lane triaging that was told the opposite of the fault.
     """
-    with pytest.raises(C.Unreadable):
+    with pytest.raises(C.Unreadable) as excinfo:
         C.INVARIANTS["runners.inventory"].project([{"runners": [entry]}])
+    msg = str(excinfo.value)
+    assert "is not a non-empty string" in msg, msg
+    assert repr(entry["name"]) in msg, f"the message does not name the offending value: {msg}"
 
 
 @pytest.mark.parametrize("entry", [{"name": "cmux"}, {"name": "cmux", "os": "linux"}])

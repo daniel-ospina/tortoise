@@ -404,8 +404,13 @@ def _project_runners_inventory(docs: Sequence[Any]) -> Any:
         # `_pick_last` (identity fields), `_project_workflows` and `_project_labels` in this same
         # module all refuse it; this projection was the one that did not.
         if not isinstance(r.get("name"), str) or not r["name"]:
+            # ⛔ THE MESSAGE NAMES THE FAULT AND THE OFFENDING VALUE, like every sibling here
+            # (`repo.workflows: {f!r} is not a non-empty string`). It used to read "entry HAS a
+            # non-null, non-empty-string `name`" — the SUCCESS condition — on the branch that
+            # fires because the entry does NOT have one, so the one operator-facing line on a
+            # REFUSED live read told a triaging lane the opposite of the actual fault.
             raise Unreadable(
-                "runners.inventory: entry has a non-null, non-empty-string `name` — not a runner"
+                f"runners.inventory: entry name {r.get('name')!r} is not a non-empty string"
             )
         # ⛔ ABSENCE IS NOT AN EMPTY LABEL SET. A missing `labels` key read as "this runner carries
         # no labels" and cached that "no" for 30 minutes — the last spelling of the failure the
