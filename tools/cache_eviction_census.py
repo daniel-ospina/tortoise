@@ -120,15 +120,30 @@ def _parse_uri(uri: str) -> tuple[str, int, str | None, str]:
 
 
 def _connection(host: str, port: int, password: str | None, graph_name: str):
-    """A redis client and a FalkorDB graph handle for an already-parsed URI."""
+    """A redis client and a FalkorDB graph handle for an already-parsed URI.
+
+    ⛔ BOTH clients take their socket bounds from the product's ONE resolver
+    (``_bounded_server_socket_kwargs``), never from kwargs spelled here.
+    ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands that to
+    redis-py explicitly, so an unbounded handle parks this census in ``recv()``
+    forever against a stalled engine — alive, 0% CPU, printing nothing — which
+    for a tool whose whole contract is *measure the cache and change nothing*
+    is indistinguishable from a cache that answered slowly (#3065, #8118).
+    The literals this replaced (10s connect / 60s read) were bounded but
+    knob-blind: ``TORTOISE_DB_SOCKET_TIMEOUT`` — the operator's own bound —
+    never reached them, which is the same defect one step milder.
+    """
     import redis
     from falkordb import FalkorDB
 
+    from tortoise.projection import _bounded_server_socket_kwargs
+
     client = redis.Redis(
-        host=host, port=port, password=password,
-        decode_responses=True, socket_connect_timeout=10, socket_timeout=60,
+        host=host, port=port, password=password, decode_responses=True,
+        **_bounded_server_socket_kwargs(),
     )
-    db = FalkorDB(host=host, port=port, password=password)
+    db = FalkorDB(host=host, port=port, password=password,
+                  **_bounded_server_socket_kwargs())
     return client, db.select_graph(graph_name)
 
 

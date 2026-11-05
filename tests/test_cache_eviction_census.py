@@ -1248,3 +1248,88 @@ def test_a_readable_documented_report_DOES_reach_the_connection(tmp_path, capsys
     assert seen == [("localhost", 6379, "falkordb", "tortoise")], (command, seen)
     assert "verdict: CLEAN" in err, (command, err)
     assert code == 0, (command, code, err)
+
+
+# --------------------------------------------------------------------------- #
+# #8118 / #3065: the census's OWN clients carry the product's READ BOUND.
+# --------------------------------------------------------------------------- #
+
+def _capture_client_kwargs(monkeypatch, cli) -> dict[str, dict]:
+    """Drive `_connection` with stand-in constructors and return their kwargs."""
+    import falkordb
+    import redis
+
+    captured: dict[str, dict] = {}
+
+    class _RecordingRedis:
+        def __init__(self, **kwargs):
+            captured["redis"] = kwargs
+
+    class _RecordingFalkorDB:
+        def __init__(self, **kwargs):
+            captured["falkordb"] = kwargs
+
+        def select_graph(self, name):
+            captured["graph"] = {"name": name}
+            return object()
+
+    monkeypatch.setattr(redis, "Redis", _RecordingRedis)
+    monkeypatch.setattr(falkordb, "FalkorDB", _RecordingFalkorDB)
+
+    client, graph = cli._connection("localhost", 6379, "falkordb", "tortoise")
+
+    assert captured["graph"] == {"name": "tortoise"}, "the handle must name the graph"
+    assert graph is not None
+    assert client is not None
+    return captured
+
+
+def test_both_census_clients_carry_the_products_read_bound(monkeypatch):
+    """An UNBOUNDED client parks this census in ``recv()`` forever — it does not read slowly.
+
+    ``falkordb.FalkorDB`` defaults ``socket_timeout=None`` and hands that to
+    redis-py EXPLICITLY, so the handle this tool measures through is unbounded
+    unless it is given a bound. Against a stalled engine (the #2969 defrag loop,
+    the #2838 MERGE lock) the process then stays alive at 0% CPU and prints
+    nothing — which a caller deciding an EVICTION from this census cannot tell
+    apart from "still measuring" (#3065, #8118). The pre-fix code passed NO
+    bound to ``FalkorDB(...)`` at all, so the assertions below fail on it.
+    """
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_TIMEOUT", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", raising=False)
+
+    captured = _capture_client_kwargs(monkeypatch, _cli())
+    expected = _bounded_server_socket_kwargs()
+
+    for name in ("redis", "falkordb"):
+        kwargs = captured[name]
+        read_to = kwargs["socket_timeout"]
+        assert isinstance(read_to, (int, float)) and read_to > 0, (
+            f"the {name} client was constructed with NO read bound "
+            f"(socket_timeout={read_to!r}) — an unbounded recv() that a stalled "
+            f"engine parks forever (#3065/#8118)")
+        assert kwargs["socket_connect_timeout"] > 0, name
+        # The bound comes from the ONE resolver, not from a copy of its defaults.
+        assert read_to == expected["socket_timeout"], name
+        assert kwargs["socket_connect_timeout"] == expected["socket_connect_timeout"], name
+
+
+def test_the_operators_socket_knob_reaches_BOTH_census_clients(monkeypatch):
+    """Bounded-but-knob-blind literals are the same defect one step milder (#3065).
+
+    The pre-fix code spelled ``socket_connect_timeout=10, socket_timeout=60`` at
+    the ``redis.Redis`` site, so an operator who set
+    ``TORTOISE_DB_SOCKET_TIMEOUT`` for a loaded server got 60s anyway, and the
+    ``FalkorDB`` site ignored the knob entirely. Both clients must resolve it.
+    """
+    monkeypatch.setenv("TORTOISE_DB_SOCKET_TIMEOUT", "3")
+    monkeypatch.delenv("TORTOISE_DB_SOCKET_CONNECT_TIMEOUT", raising=False)
+
+    captured = _capture_client_kwargs(monkeypatch, _cli())
+
+    for name in ("redis", "falkordb"):
+        assert captured[name]["socket_timeout"] == 3.0, (
+            f"the operator's TORTOISE_DB_SOCKET_TIMEOUT did not reach the {name} "
+            f"client: {captured[name].get('socket_timeout')!r}")
