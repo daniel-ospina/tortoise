@@ -1298,6 +1298,13 @@ def test_known_survivor_exits_nonzero_with_delete_failed_marker(tmp_path: Path, 
 
     Red-first: a revision that "fixes" the contradiction by making the code exit 0 on a known
     survivor (the false-PASS direction) fails the first assertion.
+
+    ⛔ THE PROSE NEEDS ITS OWN PIN. Every other assertion in this case is about BEHAVIOUR, and the
+    behaviour was never the defect — `_push_verify_cleanup` always forced `writable=False`. Measured
+    on this head: putting the pre-fix Contract sentence back left the suite GREEN (5 passed, 88
+    deselected), i.e. the one paragraph a lane's preamble is written from could regress with nothing
+    red. That is the "false rationale" class this PR already fixed by hand twice (`5f4bf4bbc`,
+    `1fe6f6f4b`), so the sentence is pinned at the source.
     """
     work, remote = _make_pair(tmp_path)
     hook = remote / "hooks" / "pre-receive"
@@ -1327,6 +1334,20 @@ def test_known_survivor_exits_nonzero_with_delete_failed_marker(tmp_path: Path, 
         "the REASONS gloss must clear the credential: the write already happened"
     )
     assert "cannot write" not in REASONS["delete-failed"]
+
+    # The CONTRACT sentence that produced the false block must not come back. Asserted on the
+    # module source rather than on behaviour because the defect WAS the prose: the code already
+    # answered 1, so nothing behavioural can red on a relapse of the sentence alone.
+    source = (Path(__file__).resolve().parent.parent / "tools" / "gh_write_preflight.py").read_text()
+    # Whitespace-normalised so a harmless re-wrap is not a false block: only rewriting the CLAIM
+    # (which is exactly what a reviewer must re-check) reds here.
+    flat = " ".join(source.split())
+    assert "does not change the exit code either, but it is not a" not in flat, (
+        "the Contract must not claim a known survivor keeps exit 0 — the code returns 1"
+    )
+    assert (
+        "UNREQUESTED known survivor is the one cleanup outcome that DOES change the exit code" in flat
+    ), "the Contract must say plainly that an unrequested survivor DOES change the exit code"
 
 
 def test_push_refused_but_remote_accepted_reports_leftover_without_erasing_the_cause(tmp_path: Path):
