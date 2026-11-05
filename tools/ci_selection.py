@@ -3193,9 +3193,105 @@ def _normalize_surfaces(manifest: dict) -> dict:
     return manifest
 
 
-def load_manifest() -> dict:
+class DuplicateManifestKeyError(ValueError):
+    """A manifest mapping repeats a key, so the loader silently collapsed it.
+
+    YAML requires a mapping's keys to be unique (YAML 1.2.2 §3.2.1.3: "each of
+    the keys is unique"), but **PyYAML does not enforce it**: its own
+    ``BaseConstructor.construct_mapping`` is ``mapping[key] = value`` and the
+    module carries the comment *"we do not check for duplicate keys, because
+    it's too CPU-expensive"* (pyyaml 6.0.3, ``yaml/constructor.py``). So a
+    repeated key is not an error to the parser — it is a **silent overwrite**,
+    and the LAST row wins.
+
+    That is not hypothetical here. A ``git merge`` of two branches that both
+    touched ``durations`` unions the two blocks as TEXT, so the map ends up
+    holding a stale row beside the refreshed one and the parser keeps whichever
+    came second (#10717). Measured 2026-11-03 on #10790: merging ``origin/main``
+    produced **24** duplicate keys, and ``--integrity`` still printed
+    ``✅ integrity: all test files classified`` — because the duplicates are
+    gone by the time any check sees a dict. One of them silently reverted the
+    PR's own ``test_mcp_bridge.py`` weight (23.8 -> 2.0), which is the exact
+    "false PASS" shape a gate exists to prevent.
+
+    So the refusal belongs at the PARSE, not in a check composed onto a dict
+    that has already lost the information: every reader of this file gets it,
+    and no future entry point can be half-wired.
+    """
+
+    def __init__(self, issues: list[str]) -> None:
+        self.issues = issues
+        super().__init__("; ".join(issues))
+
+
+_DUP_KEY_LOADER: object = None
+
+
+def _duplicate_key_loader():
+    """A ``yaml.SafeLoader`` subclass that RECORDS a repeated mapping key.
+
+    Built lazily and cached, because this module imports its third-party
+    dependencies locally (``uv`` supplies pyyaml via the dev group). A
+    subclass rather than a re-implementation: it inherits the same type
+    resolution the whole manifest depends on (``166.0`` stays a ``float``, a
+    quoted stamp stays a ``str``) and overrides only the mapping constructor.
+    """
+    global _DUP_KEY_LOADER
+    if _DUP_KEY_LOADER is not None:
+        return _DUP_KEY_LOADER
     import yaml  # local import (uv provides pyyaml via the dev group)
-    return _normalize_surfaces(yaml.safe_load(MANIFEST.read_text()))
+
+    class _NoDuplicateKeyLoader(yaml.SafeLoader):
+        def __init__(self, stream) -> None:
+            super().__init__(stream)
+            self.duplicate_keys: list[tuple[str, int, int]] = []
+
+        def construct_mapping(self, node, deep=False):
+            if isinstance(node, yaml.MappingNode):
+                self.flatten_mapping(node)
+            seen: dict[object, int] = {}
+            mapping = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                line = key_node.start_mark.line + 1
+                if key in seen:
+                    self.duplicate_keys.append((str(key), seen[key], line))
+                else:
+                    seen[key] = line
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
+
+    _DUP_KEY_LOADER = _NoDuplicateKeyLoader
+    return _DUP_KEY_LOADER
+
+
+def parse_manifest_text(text: str) -> dict:
+    """The manifest text as a mapping, refusing a duplicate mapping key.
+
+    THE one place ``config/ci-surfaces.yml`` is parsed. Raising here rather
+    than returning issues is deliberate: an issue list is something a caller
+    must remember to compose (``ci_manifest.map_issues`` is hand-maintained for
+    exactly that reason, and its own docstring records the drift it has already
+    suffered), while an exception cannot be forgotten by a reader that was
+    never written.
+    """
+    loader = _duplicate_key_loader()(text)
+    try:
+        parsed = loader.get_single_data()
+    finally:
+        loader.dispose()
+    if loader.duplicate_keys:
+        raise DuplicateManifestKeyError([
+            f"duplicate mapping key {key!r}: line {line} repeats line {first} "
+            f"— a YAML loader keeps only the LAST value, so one of the two rows "
+            f"(usually a stale union-merge copy) is silently discarded"
+            for key, first, line in loader.duplicate_keys
+        ])
+    return parsed
+
+
+def load_manifest() -> dict:
+    return _normalize_surfaces(parse_manifest_text(MANIFEST.read_text()))
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
@@ -6588,7 +6684,16 @@ def main() -> int:
                          "pytest")
     args = ap.parse_args()
 
-    manifest = load_manifest()
+    # #10790: a duplicate mapping key is an OBSERVED defect, so it must be a
+    # named RED (exit 1) rather than the traceback (also non-zero, but with no
+    # diagnosis) that an uncaught raise would leave. See
+    # `DuplicateManifestKeyError` for why the refusal lives at the parse.
+    try:
+        manifest = load_manifest()
+    except DuplicateManifestKeyError as exc:
+        for issue in exc.issues:
+            print(f"x {issue}", file=sys.stderr)
+        return 1
 
     if args.integrity:
         missing = integrity(manifest)

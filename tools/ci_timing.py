@@ -3169,7 +3169,17 @@ def _manifest_of(manifest_text: str) -> dict:
     # callers must therefore MAP this to exit 2, which they do at the CLI
     # boundary — see `refresh_durations` and `paid_vs_selected_cli`.
     try:
-        parsed = yaml.safe_load(manifest_text)
+        # #10790: the SELECTOR's parse, not a bare `safe_load` — it refuses a
+        # duplicate mapping key, which `safe_load` silently collapses to its
+        # last value. This is the refresh's PRE-WRITE gate, so a render that
+        # emitted a second row for a file must be refused HERE rather than
+        # landing on main for `manifest-integrity` to red later.
+        parsed = cs.parse_manifest_text(manifest_text)
+    except cs.DuplicateManifestKeyError as exc:
+        raise DurationsBridgeError(
+            "the rendered manifest repeats a mapping key, so a loader would "
+            "silently keep only one of the rows: " + "; ".join(exc.issues)
+        ) from exc
     except yaml.YAMLError as exc:
         raise DurationsBridgeError(
             f"the manifest is not readable as YAML "

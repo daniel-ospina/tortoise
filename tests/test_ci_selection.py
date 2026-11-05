@@ -5561,6 +5561,132 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     assert "core: test_a.py" in capsys.readouterr().out
 
 
+# ── #10790: a duplicate YAML MAPPING key, the class #5373 cannot see ─────
+# #5373 (above) reddens a file listed twice WITHIN one surface — a duplicate the
+# parsed dict still expresses. A duplicate *mapping key* is invisible by the
+# time any check holds a dict: `yaml.safe_load` keeps only the LAST value of a
+# repeated key (pyyaml 6.0.3 `BaseConstructor.construct_mapping` is
+# `mapping[key] = value`, and its own comment says it does not check duplicates
+# because that is "too CPU-expensive"), so the earlier row is gone before a
+# validator can ask about it. YAML itself forbids the shape (1.2.2 §3.2.1.3,
+# "each of the keys is unique"), and `yamllint` ships `key-duplicates: enable`
+# in its DEFAULT rule set for exactly this reason.
+#
+# It is not a theoretical shape: `config/ci-surfaces.yml` carries
+# `merge=union`, and MEASURED 2026-11-03 on #10790, merging `origin/main` into
+# the branch produced TWENTY-FOUR duplicate `durations` keys — each a stale
+# pre-refresh row beside main's refreshed twin — while `--integrity` printed
+# `✅ integrity: all test files classified`. One of them silently reverted the
+# PR's own `test_mcp_bridge.py` weight from 23.8 to 2.0, because its stale
+# duplicate happened to be the LAST one. The gate was green on a map whose
+# weights were not the ones the packer would use.
+
+
+def _text_with_a_duplicated_durations_row(path: Path) -> tuple[str, str]:
+    """The real manifest with one `durations` row repeated verbatim.
+
+    Built from the file's own TEXT, not from a parsed dict re-dumped: a
+    ``yaml.safe_dump`` of a dict cannot emit a duplicate key at all, so the
+    reproduction has to start from text — which is also how the union merge
+    produced the real one (it concatenated both sides' rows).
+    """
+    lines = path.read_text().splitlines(keepends=True)
+    start = lines.index("durations:\n")
+    row = lines[start + 1]
+    assert re.match(r"^  [A-Za-z0-9_.\-]+\.py: ", row), row
+    return path.read_text().replace(row, row + row, 1), row.split(":", 1)[0].strip()
+
+
+def test_a_duplicate_mapping_key_is_refused_at_the_parse():
+    """The refusal is at the PARSE, so no reader can be half-wired."""
+    from tools import ci_selection as cs
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    # The PRE-FIX behaviour, stated as a fact about the library this repo uses:
+    # the plain loader ACCEPTS the shape and silently keeps the last row. If a
+    # future pyyaml starts refusing it, this arm is what says so.
+    assert yaml.safe_load(poisoned)["durations"][key] is not None
+
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.parse_manifest_text(poisoned)
+    issues = excinfo.value.issues
+    assert len(issues) == 1, issues
+    assert repr(key) in issues[0]
+    # Both lines are named: a reader must be able to find the pair, since the
+    # whole defect is that one of them is unreachable through the dict.
+    assert re.search(r"line \d+ repeats line \d+", issues[0]), issues[0]
+
+
+def test_integrity_cli_reds_on_a_duplicate_mapping_key(tmp_path, monkeypatch, capsys):
+    """The REQUIRED `manifest-integrity` check must not print green on one.
+
+    Pre-fix this exited 0 (silently collapsing the duplicate). Driven through
+    the real `main()` + the module-level `MANIFEST`, which is exactly what the
+    workflow runs (`python3 tools/ci_selection.py --integrity`).
+    """
+    from tools import ci_selection as cs
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    path = tmp_path / "dup-ci-surfaces.yml"
+    path.write_text(poisoned)
+    monkeypatch.setattr(cs, "MANIFEST", path)
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+
+    rc = cs.main()
+    err = capsys.readouterr().err
+    assert rc == 1, "a duplicate mapping key must redden --integrity, not collapse"
+    assert repr(key) in err, err
+    assert "duplicate mapping key" in err, err
+
+
+def test_the_manifest_validator_calls_a_duplicate_RED_not_UNKNOWN(tmp_path, capsys):
+    """#10790: an observed duplicate is RED (1), not "could not evaluate" (2).
+
+    `ci_manifest.main()`'s catch-all returns 2 for anything it cannot evaluate,
+    which is right for a broken shape and WRONG for this one: the map was
+    evaluated, and what it says is that a row was thrown away.
+    """
+    from tools import ci_manifest
+    from tools import ci_selection as cs
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    path = tmp_path / "dup-ci-surfaces.yml"
+    path.write_text(poisoned)
+
+    rc = ci_manifest.main(["--manifest", str(path)])
+    err = capsys.readouterr().err
+    assert rc == 1, f"a duplicate mapping key must be RED (1), got rc={rc}"
+    assert repr(key) in err, err
+
+
+def test_the_writer_refuses_to_render_a_duplicate_mapping_key():
+    """The refresher's PRE-WRITE gate must refuse the render, not publish it.
+
+    `ci_timing._manifest_of` is what `refresh_durations` parses its own output
+    through before writing `config/ci-surfaces.yml`. A writer that can emit a
+    second row for a file is how a duplicate reaches main at all.
+    """
+    from tools import ci_selection as cs
+    from tools import ci_timing
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    with pytest.raises(ci_timing.DurationsBridgeError) as excinfo:
+        ci_timing._manifest_of(poisoned)
+    assert repr(key) in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_real_manifest_has_no_duplicate_mapping_key():
+    """The live pin: this file must parse under the strict loader.
+
+    At the #10790 merge head this was RED (24 duplicates) while `--integrity`
+    was green, so it is the arm that would have caught the union merge.
+    """
+    from tools import ci_selection as cs
+
+    manifest = cs.parse_manifest_text(cs.MANIFEST.read_text())
+    assert manifest["durations"], "the durations map must not be empty"
+
+
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
 # The test (a)/(b) halves in python-ci.yml are a second source of truth next
 # to config/ci-surfaces.yml. The #1262 integrity gate only covers manifest
