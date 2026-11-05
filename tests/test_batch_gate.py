@@ -733,6 +733,56 @@ def test_parse_constituents_refuses_a_line_it_cannot_read_unambiguously() -> Non
         assert bo.parse_constituents(line, fold=900) == [], line
 
 
+def test_the_ARGV_fold_self_inclusion_is_dropped_before_it_can_close_the_fold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """(b2) The `--constituent <fold>` drop is a SEPARATE site from the parser guard.
+
+    `parse_constituents` excludes the fold from a `fold-constituents:` line and has
+    its own test above, but `--constituent` argv never goes through the parser: it
+    rejoins at
+
+        constituents = [n for n in dict.fromkeys(requested) if n != args.fold]
+
+    and nothing pinned that comprehension. Deleting it leaves this file 54/54 green
+    (measured) while `main` closes the FOLD itself: `is_ancestor(fold_head,
+    fold_head)` is vacuously true, so the fold is classified CONTAINED-ANCESTOR and
+    `apply` posts `closure_comment(fold, fold_head, fold)` ON the fold — a
+    self-referential record asserting the fold's work is contained in the fold —
+    then closes it, leaving nothing that carries the validated tree. Closing a PR
+    is the one irreversible action this tool takes, so the arm needs a pin, not
+    just the comment above it.
+
+    The second constituent is the CONTROL: it must still be closed, so this cannot
+    pass by the run refusing to do anything.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bo, "fetch_fold", lambda n, repo=None: (0, "f" * 40, "fold-br", "body"))
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    monkeypatch.setattr(bo, "constituent_refs", lambda n, repo=None: ("a" * 40, "b" * 40))
+    monkeypatch.setattr(
+        bo, "verdict_for", lambda n, h, b, f, cwd: _verdict(n, "CONTAINED-ANCESTOR", "")
+    )
+
+    def _gh(argv, repo=None):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(bo, "_gh", _gh)
+
+    rc = bo.main(["--fold", "900", "--constituent", "900", "--constituent", "101", "--apply"])
+    err = capsys.readouterr().err
+
+    assert rc == 0, f"expected a normal run, got {rc}: {err}"
+    closed = [int(argv[2]) for argv in calls if argv[:2] == ["pr", "close"]]
+    assert 900 not in closed, f"the FOLD was closed by its own run: closed={closed}"
+    assert not [a for a in calls if a[:2] == ["pr", "close"] and a[2] == "900"], calls
+    assert 101 in closed, f"the control constituent was not closed, so nothing was proven: {calls}"
+    assert not [a for a in calls if a[:2] == ["pr", "comment"] and a[2] == "900"], (
+        f"a closure comment was posted ON the fold: {calls}"
+    )
+
+
 def test_an_unmeasurable_constituent_is_NOT_reported_as_a_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

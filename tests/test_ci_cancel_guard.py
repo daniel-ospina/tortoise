@@ -494,6 +494,49 @@ def test_a_reported_age_from_the_seam_is_not_attested_as_measured(fixture):
     assert "comparison age: 5.000s" not in r.stdout
 
 
+def test_a_capped_open_PR_list_is_fail_closed(fixture):
+    """The `len(prs) >= PR_LIMIT` refusal — the third member of the partial-read family.
+
+    `read_pr_map` asks `gh pr list --limit 500`. A list AT the cap is not a complete
+    list: with more than 500 open PRs the second PR of a branch pair falls off the
+    end, so `decide`'s duplicate-branch refusal (`len(rows) > 1`) cannot see it and
+    the surviving row's head comparison reads as "the head moved on" → PERMIT → a
+    real `POST /cancel` on a run that IS an open PR's current head. That is the
+    CURRENT-HEAD class (5 of the 42 in the 2026-11-04 audit) arrived at from the
+    other direction — a truncated read treated as a complete one.
+
+    Nothing pinned this arm: deleting it left the whole file green (51 passed). It
+    is the same shape as the two arms cycle 1 pinned (`total > len(jobs)`, an absent
+    `total_count`), in the same reader layer, so it gets the same treatment.
+
+    ⚠️ Reachability stated honestly: this needs 500 open PRs, and the repo has ~34
+    today. It is a regression detector, not a live bypass — which is why it is a
+    missing pin and not a defect in the code.
+
+    The `PR_LIMIT - 1` control matters: without it a blanket refusal (rc 2 for every
+    list) would satisfy the pin and prove nothing.
+    """
+    wide = [{"number": n, "headRefName": f"branch-{n}", "headRefOid": "a" * 40,
+             "headRepository": {"nameWithOwner": "daniel-ospina/tortoise"}}
+            for n in range(1, 501)]
+    assert len(wide) == 500, "the fixture must sit exactly AT the cap"
+
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", wide)
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "cap" in (r.stdout + r.stderr).lower()
+    assert fixture.cancelled() == [], "a truncated PR list was read as a complete one"
+
+    # Control: one below the cap is a list the tool may reason about.
+    fixture.apply("prs.json", wide[:499])
+    rc = guard(fixture, "41840910128", "--apply")
+    assert rc.returncode != 2, (
+        "a 499-row list was refused as though it had hit the cap: " + rc.stdout + rc.stderr
+    )
+
+
 def test_an_absent_total_count_is_fail_closed(fixture):
     """Review cycle 1, R5: the field defaulted to `len(jobs)`, asserting a complete list."""
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
