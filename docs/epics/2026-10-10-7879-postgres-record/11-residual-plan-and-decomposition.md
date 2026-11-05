@@ -21,10 +21,10 @@ system of record for every layer; FalkorDB is a derived hot cache.** The one exc
 **Measured at:** `origin/main@3ac6b1636` on 2026-11-05, after review cycle 1. This lane's first reading was at
 `641e5f1b3`, twelve commits earlier, and **three of its load-bearing rows turned out stale** — #10185 closed
 inside that window (2026-11-05T04:54Z), while **#10671 was already closed and the `search_keys` narrowing had
-already landed in the batch fold `a6e20f05b` when the first reading was taken** (2026-11-03), so two were stale
-before the window opened, not during it. Two more were **simply wrong** (#10620 is an unrelated docs PR; the detection machinery this plan first called "existing" does
-not exist in code). §9's log, with §1.1 and §7.1–7.2, records every correction **to this plan's claims** so the
-next lane does not re-derive them.
+already landed in the batch fold `a6e20f05b` when the first reading was taken** (both 2026-11-03), so two were
+stale before the window opened, not during it. Two more were **simply wrong** (#10620 is an unrelated docs PR;
+the detection machinery this plan first called "existing" does not exist in code). §9's log, with §1.1 and
+§7.1–7.2, records every correction **to this plan's claims** so the next lane does not re-derive them.
 
 ---
 
@@ -97,9 +97,8 @@ half)"* — the primary artifact a reader of this fix opens. The sites named so 
 epic's own `08-hosted-prerequisites.md`, including the line the **302** figure in §1 is quoted from — are
 **examples, not a census**: `git grep -l 10620` matches **23 files on this head** — **21 at the measurement
 commit**, the difference being these two documents, which match because they discuss the number — and the two
-that matter most were not on
-that list. `tortoise/record_projection.py` carries it on **18 lines** (`:265` reads *"#10620 — R4's remaining
-half: `public.point.search_keys` NARROWED to …"*), and
+that matter most were not on that list. `tortoise/record_projection.py` carries it on **18 lines** (`:265` reads
+*"#10620 — R4's remaining half: `public.point.search_keys` NARROWED to …"*), and
 `tests/test_9078_record_written_by_production_path.py` carries it inside the **assertion message** at `:2367`
 (*"… #10620 closed `search_keys`"*) — the text a future failing pin prints, and the very file this document
 quotes at §7.2. `tortoise/hosted_api.py` (4 lines) and `config/ci-surfaces.yml` (`:606`, plus the *"#10620: same dual
@@ -379,7 +378,8 @@ form must be built**, the **type vocabulary must be widened** past its hardcoded
 `tests/test_9078_record_written_by_production_path.py` records a **two-step** removal: #9264 closed having cleared
 only `capture_redactions`, the vocabulary still held `search_keys` at the commit before its deletion, and it
 became **empty and then "gone rather than parked"** only when that last entry closed — `a6e20f05b` (#10717),
-recorded in history under the misnumbered `#10620` — the project's "a pin that outlives its defect" rule. #11075 must say so, and say why a **migration-derived** check differs from the deleted
+recorded in history under the misnumbered `#10620` — the project's "a pin that outlives its defect" rule, applied
+at the LAST entry. #11075 must say so, and say why a **migration-derived** check differs from the deleted
 **hand-maintained vocabulary**: a derived check cannot go empty (it is closed over the migration set), so it
 cannot outlive its defect in that way. Without that paragraph the next lane reads #11075 as re-litigating a
 recorded removal.
