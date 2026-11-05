@@ -880,11 +880,19 @@ def _do_upgrade_all(proj, api, args):
               "fail-closed), "
               f"{not_document} not a document (no ## sections), "
               f"{already_claimed} already claimed at this extractor version "
-              "(re-run with --force to reprocess). ⛔ The `unreadable` bucket "
-              "cannot be cleared by THIS command — widen or set "
-              "TORTOISE_INGEST_BASE_DIR, restore the file, or delete the "
-              "Source; until one of those, every sweep reports it and exits "
-              "non-zero (#8447 C3 review round 3, P3)")
+              "(re-run with --force to reprocess)")
+        # #8447 C3 (review round 5, P3): this sentence used to ride the block
+        # above, so a sweep whose ONLY skip was `already claimed` printed
+        # "exits non-zero" and then exited 0 — the door's own output misstating
+        # its verdict, which is the class this issue exists to kill. It is
+        # emitted only where it is TRUE.
+        if unresolved or not_document:
+            print("  ⛔ this sweep exits NON-ZERO: the bucket(s) above other "
+                  "than `already claimed` are outstanding work. Neither can be "
+                  "cleared by a flag of this command — for `unreadable` widen "
+                  "or set TORTOISE_INGEST_BASE_DIR, restore the file, or delete "
+                  "the Source; for `not a document` add `##` sections or delete "
+                  "the Source")
         # #8447 C3: outstanding work after a sweep is NOT a completed ask. A
         # sweep that left candidates unreadable or un-extractable used to exit
         # 0 — the caller read "success" over a corpus that was never touched.

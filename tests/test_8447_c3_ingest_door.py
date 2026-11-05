@@ -200,15 +200,6 @@ class TestARefusalIsNotSuccess:
             "as the ask having been performed")
         assert outcome.returncode == 1
 
-        # The sweep is graph-global: a Source left pending here would make every
-        # LATER sweep in this file read `unresolved` and return PARTIAL. Drop it.
-        from tortoise.projection import FalkorProjection
-        proj = FalkorProjection.from_uri(_DB_URI)
-        try:
-            proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
-                         params={"id": doc.name})
-        finally:
-            proj.close()
 
 
 # --------------------------------------------------------------------------
@@ -273,15 +264,6 @@ class TestTheSkipArmWritesNothing:
             "caller reads that as a capture that happened")
         assert outcome.returncode == 1
 
-        # The sweep is graph-global: a Source left pending here would make every
-        # LATER sweep in this file read `unresolved` and return PARTIAL. Drop it.
-        from tortoise.projection import FalkorProjection
-        proj = FalkorProjection.from_uri(_DB_URI)
-        try:
-            proj.g.query("MATCH (s:Source {url: $id}) DETACH DELETE s",
-                         params={"id": doc.name})
-        finally:
-            proj.close()
         assert "refused" in out, out
 
     def test_a_skipped_ingest_does_not_write_a_resolution_point(self, tmp_path):
@@ -387,7 +369,6 @@ class TestTheSweepReportsOutstandingWork:
             proj.close()
 
 
-@pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
 class TestTheSweepDoesNotRedOnItsOwnIdempotency:
     """The sweep's DECISION, driven through `_do_upgrade_all` with a stubbed population.
 
@@ -436,17 +417,25 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
                                   include_unstamped=False,
                                   point_model="mock:cheap",
                                   relation_model="mock:reason")
-        return ingest_mod._do_upgrade_all(_Proj(), _API(), args)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            outcome = ingest_mod._do_upgrade_all(_Proj(), _API(), args)
+        return outcome, buf.getvalue()
 
     def test_only_the_already_claimed_bucket_is_green(self, tmp_path, monkeypatch):
         doc = tmp_path / "sweep-note.md"
         doc.write_text("## Section one\n\nSomething true.\n", encoding="utf-8")
-        outcome = self._sweep(tmp_path, monkeypatch,
-                              [(doc.name, str(doc), True, None)], begin_skip=True)
+        outcome, out = self._sweep(tmp_path, monkeypatch,
+                                   [(doc.name, str(doc), True, None)],
+                                   begin_skip=True)
         assert outcome is IngestOutcome.DONE, (
             "a sweep whose ONLY skip is 'already claimed at this extractor "
             f"version' returned {outcome!r} (exit {outcome.returncode}) — a "
             "benign idempotent re-sweep must stay green")
+        # The door's own output must not misstate the verdict it just produced.
+        assert "exits NON-ZERO" not in out, (
+            "a sweep that exited 0 printed the 'this sweep exits NON-ZERO' "
+            "sentence:\n" + out)
 
     def test_a_not_document_candidate_is_partial(self, tmp_path, monkeypatch):
         """The `not_document` half of the predicate, in ISOLATION.
@@ -459,8 +448,10 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
         """
         doc = tmp_path / "plain.md"
         doc.write_text("just prose, no ## headers\n", encoding="utf-8")
-        outcome = self._sweep(tmp_path, monkeypatch,
-                              [(doc.name, str(doc), True, None)], begin_skip=False)
+        outcome, out = self._sweep(
+            tmp_path, monkeypatch,
+            [(doc.name, str(doc), True, None)], begin_skip=False)
+        assert "exits NON-ZERO" in out, out
         assert outcome is IngestOutcome.PARTIAL, (
             "a sweep whose only candidate has no ## sections returned "
             f"{outcome!r}; `not_document` is outstanding work")
@@ -468,9 +459,9 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
 
     def test_an_unreadable_candidate_is_partial(self, tmp_path, monkeypatch):
         """The `unresolved` bucket — the arm a `pass` mutant used to survive."""
-        outcome = self._sweep(tmp_path, monkeypatch,
-                              [("gone.md", str(tmp_path / "gone.md"), True, None)],
-                              begin_skip=False)
+        outcome, _out = self._sweep(
+            tmp_path, monkeypatch,
+            [("gone.md", str(tmp_path / "gone.md"), True, None)], begin_skip=False)
         assert outcome is IngestOutcome.PARTIAL, (
             "a sweep that could not read its only candidate returned "
             f"{outcome!r} (exit {outcome.returncode}); a caller reads that as done")
