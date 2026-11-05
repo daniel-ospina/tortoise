@@ -324,8 +324,8 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_probe_uri\)",
         r"from_uri\(\s*uri\s*\)",
     ],
-    # #8447 C3: the ingest door's live arms. Both `from_uri(uri)` sites are the
-    # file's OWN verification handles — the "did the door write it?" read-back —
+    # #8447 C3: the ingest door's live arms. EVERY `from_uri(uri)` site is the
+    # file's OWN verification handle — the "did the door write it?" read-back —
     # and every `uri` they receive comes from `_fresh_graph(...)`, which swaps the
     # env URI's graph path for a per-run `test_8447_<stem>_<hex>`
     # (`_graph_uri`, the same shape as `test_ingest.py::_live_uri`). SAFETY IS NOT
@@ -335,7 +335,9 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # path that delete could reach a peer file's `Source {url: "note.md"}`. The
     # per-run graph is what makes both the sweep's verdict and the delete local to
     # this test. The regex is deliberately narrow to the one shape that exists
-    # today so a second one reds instead.
+    # today so a second one reds instead — which is why round 8's seeding handle
+    # (the already-extracted arm) names its variable `uri` rather than widening
+    # this pattern.
     "test_8447_c3_ingest_door.py": [r"from_uri\(\s*uri\s*\)"],
     # #10135 review (post-rebase): `test_5140_d10_relabel_migration.py` is
     # deliberately ABSENT here. Main's #10164 gave both of that file's

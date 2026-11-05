@@ -10530,9 +10530,10 @@ durations:
   # `--capture-metadata`, `--upgrade-all`, a skipped re-ingest and its resolution-Point control), so the
   # docker lane / carve-out split decides whether they run (the class-level `skipif` on `TORTOISE_DB_URI`).
   # The ungated arms are pure enum/entry-point assertions and run everywhere. Context for a human, NOT the
-  # weight: 16 passed / 11-17 s wall on this host in the private lane. ⛔ The CASE COUNT is deliberately not
-  # quoted — a hand-written count re-stales on every case a round adds, and a VGATE caught exactly that in
-  # this lane's own doc row. `tools/ci_timing.py --refresh-durations` replaces this from junit once a
+  # weight: 11-17 s wall on this host in the private lane. ⛔ NO wall time figure beyond that and NO CASE
+  # COUNT — a hand-written count re-stales on every case a round adds (round 8 measured 21 collected against
+  # a quoted 16), and a VGATE already caught exactly that in this lane's own doc row.
+  # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   test_8447_truncation_marker.py: 21.0
   test_9555_narrative_cache_rebuild.py: 0.3

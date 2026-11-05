@@ -902,6 +902,13 @@ def _do_upgrade_all(proj, api, args):
         _run_ep_propagation(proj, api)
 
     print(f"upgrade-all complete: {upgraded} upgraded, {skipped} skipped")
+    # #8447 C3 (review round 8, P3): the two blocks below each used to print
+    # their OWN "this sweep exits NON-ZERO" sentence, so a population holding a
+    # partially-extracted document AND an unreadable one reached both and the
+    # door printed its verdict TWICE. Hoisting the predicate means the sentence
+    # is emitted once, from one place, and only where it is TRUE — the same
+    # class as round 5's P3 (the door's own output misstating its verdict).
+    outstanding = bool(unresolved or not_document or partial_sections)
     if partial_sections:
         # ⛔ Deliberately OUTSIDE `if skipped:` — a partially-extracted document
         # IS `upgraded` (so `skipped` stays 0 and the block below never runs),
@@ -910,7 +917,6 @@ def _do_upgrade_all(proj, api, args):
         print(f"  ⚠️ {partial_sections} upgraded document(s) extracted only "
               "PARTIALLY (the sections listed above failed) — their revisit "
               "marker was cleared, so no later sweep retries them")
-        print("  ⛔ this sweep exits NON-ZERO: part of the ask was not performed")
     if skipped:
         # Never let "0 upgraded" read as "nothing outstanding": the buckets name
         # the work that is still pending, and each one keeps its marker.
@@ -923,15 +929,17 @@ def _do_upgrade_all(proj, api, args):
         # #8447 C3 (review round 5, P3): this sentence used to ride the block
         # above, so a sweep whose ONLY skip was `already claimed` printed
         # "exits non-zero" and then exited 0 — the door's own output misstating
-        # its verdict, which is the class this issue exists to kill. It is
-        # emitted only where it is TRUE.
+        # its verdict, which is the class this issue exists to kill. The GUIDANCE
+        # now rides the condition that makes it relevant; the VERDICT itself is
+        # emitted once, below.
         if unresolved or not_document:
-            print("  ⛔ this sweep exits NON-ZERO: the bucket(s) above other "
-                  "than `already claimed` are outstanding work. Neither can be "
-                  "cleared by a flag of this command — for `unreadable` widen "
-                  "or set TORTOISE_INGEST_BASE_DIR, restore the file, or delete "
-                  "the Source; for `not a document` add `##` sections or delete "
+            print("  ⛔ neither bucket above is cleared by a flag of this "
+                  "command — for `unreadable` widen or set "
+                  "TORTOISE_INGEST_BASE_DIR, restore the file, or delete the "
+                  "Source; for `not a document` add `##` sections or delete "
                   "the Source")
+    if outstanding:
+        print("  ⛔ this sweep exits NON-ZERO: part of the ask was not performed")
     # #8447 C3: outstanding work after a sweep is NOT a completed ask. A sweep
     # that left candidates unreadable or un-extractable used to exit 0 — the
     # caller read "success" over a corpus that was never touched. PARTIAL is
@@ -946,6 +954,8 @@ def _do_upgrade_all(proj, api, args):
     # that were upgraded with sections missing (they had their marker cleared,
     # so nothing else can report them).
     if unresolved or not_document or partial_sections:
+        # Same predicate as `outstanding` above, kept as the single return site
+        # so the exit status and the printed verdict cannot drift apart.
         return IngestOutcome.PARTIAL
     return IngestOutcome.DONE
 

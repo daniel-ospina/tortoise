@@ -278,16 +278,20 @@ class TestARefusalIsNotSuccess:
         # The refusal must not leave a COMPLETION artifact behind either: a
         # caller that ignores `$?` reads the render, and an `--out` written by a
         # run that did nothing is the same success-shaped lie one layer down.
-        # (Round-6 review: the record claimed this assertion and the tree did
-        # not have it — the docstring's "Measured before: `--out` written" is
-        # what this pins the absence of.)
+        # (Round-6 review flagged a claim that these two assertions were added
+        # when the tree did not have them; round 8 measured the OTHER error —
+        # they are present but NON-DISCRIMINATING on this arm: `--upgrade` has
+        # been terminal on main since #133 (`main` returns before the completion
+        # block), so both pass against the UNFIXED module. They are kept as
+        # regression pins, NOT as mutant-killers. The arm where they DO
+        # discriminate is `test_a_capture_metadata_run_on_a_non_document_is_refused`
+        # below, which fell through to the summary until this PR.)
         assert not (tmp_path / "g.html").exists(), (
             "a REFUSED --upgrade wrote the --out render, so the refusal is "
             "success-shaped on disk as well as absent from the exit status")
         # The summary line is the OTHER half of the same tail (`render` + `points :`
-        # are written together), and the census row claims BOTH are pinned absent
-        # here, so pin both: a future refusal that returns after printing the
-        # summary but before the render write would otherwise be unguarded.
+        # are written together). Same caveat as the assertion above: pinned as a
+        # regression, not as a kill of the un-fixed code.
         assert "points :" not in out, (
             "a REFUSED --upgrade printed the completion summary, so its stdout "
             "is byte-indistinguishable from a completed run's:\n" + out)
@@ -336,6 +340,54 @@ class TestTheSkipArmWritesNothing:
         assert render.stat().st_mtime_ns == before, (
             "a SKIPPED ingest rewrote the --out render, contradicting the row's "
             "'a skip writes nothing either'")
+
+    def test_an_already_extracted_document_answers_the_named_skip(
+            self, tmp_path):
+        """Round 8 P3: `SKIPPED_ALREADY_EXTRACTED`'s `return` was undriven.
+
+        `tests/test_ingest.py::test_upgrade_on_already_extracted_is_noop` and
+        `tests/test_5140_pending_extraction.py` assert the *printed* line
+        (``doc already extracted, skipped``), which survives deleting the
+        `return` — the run then falls through to step 2 and re-extracts, calling
+        `begin_ingest` and superseding the Source's Points for work nobody asked
+        for. The exit status would also silently become `DONE`/`PARTIAL`.
+        Pinning the OUTCOME reds on that deletion.
+        """
+        doc = tmp_path / "already.md"
+        doc.write_text(
+            "---\ntitle: X\n---\n\n## User\nhello\n", encoding="utf-8")
+        uri = _fresh_graph("already_extracted")
+        # Seed the document as ALREADY extracted: D10's signal is
+        # needs_extraction=false. `source_id` is the file BASENAME (ingest.py
+        # sets `source_id = args.transcript.name`), so `url`/`id` carry the name.
+        # The variable is named `uri` on purpose: it is the shape
+        # `tests/test_derived_names.py` declares for this file, and a per-test
+        # `test_8447_*` graph is what keeps the seed off the shared lane path.
+        from tortoise.projection import FalkorProjection
+        proj = FalkorProjection.from_uri(uri)
+        try:
+            proj.g.query(
+                "CREATE (s:Source {url:$id, id:$id, title:'X', "
+                "documentKind:'document', needs_extraction:false, sourcePath:$sp})",
+                params={"id": doc.name, "sp": str(doc)},
+            )
+        finally:
+            proj.close()
+
+        outcome, out = _run([
+            str(doc), "--upgrade", "--db", uri,
+            "--log", str(tmp_path / "e.jsonl"),
+            "--out", str(tmp_path / "g.html"),
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason",
+        ])
+        assert "doc already extracted, skipped" in out, out
+        assert outcome is IngestOutcome.SKIPPED_ALREADY_EXTRACTED, (
+            f"an already-extracted --upgrade returned {outcome!r} while printing "
+            "the skip line; the `return` that names this outcome is gone, so the "
+            "run fell through and re-extracted a document nobody asked it to "
+            "touch")
+        assert outcome.returncode == 0, (
+            "a skip is the ask's own answer, so it must stay green")
 
     def test_a_capture_metadata_run_on_a_non_document_is_refused(self, tmp_path):
         """Round 3's P1: --capture-metadata fell through to a success summary.
@@ -661,6 +713,35 @@ class TestAPartialExtractionIsNotDone:
         # The verdict sentence must be emitted where it is TRUE (round 5 pinned
         # the both-ways direction for the other buckets).
         assert "exits NON-ZERO" in out, out
+
+    def test_the_verdict_sentence_is_printed_once_for_two_outstanding_kinds(
+            self, tmp_path, monkeypatch):
+        """Round 8 P3: a partial upgrade PLUS an unreadable candidate printed the
+        door's verdict TWICE.
+
+        The partial block and the still-pending block each carried their own
+        "this sweep exits NON-ZERO" sentence, and this population reaches both
+        (the partial document IS `upgraded`, so it lands in the first block; the
+        missing file lands in `skipped`/`unresolved` in the second). A door that
+        states its verdict twice reads as two separate problems, and the second
+        reading is wrong. Pinned as a COUNT so re-introducing a second emission
+        site reds regardless of wording.
+        """
+        doc = tmp_path / "sweep-partial-and-unreadable.md"
+        doc.write_text("## Section one\n\nSomething true.\n", encoding="utf-8")
+        _stub_partial_extractor(monkeypatch)
+        outcome, out = TestTheSweepDoesNotRedOnItsOwnIdempotency._sweep(
+            tmp_path, monkeypatch,
+            [(doc.name, str(doc), True, None),
+             ("gone.md", str(tmp_path / "gone.md"), True, None)],
+            begin_skip=False)
+        assert outcome is IngestOutcome.PARTIAL, out
+        assert "failed extraction" in out, out   # the partial half is present
+        assert "unreadable" in out, out           # the pending half is present
+        assert out.count("this sweep exits NON-ZERO") == 1, (
+            "the sweep stated its verdict "
+            f"{out.count('this sweep exits NON-ZERO')} times for TWO outstanding "
+            "kinds; it must be ONE line, emitted from one place:\n" + out)
 
     @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
     def test_an_upgrade_that_extracted_only_some_sections_is_partial(
