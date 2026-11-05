@@ -460,15 +460,22 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
                 return _Result() if begin_skip else None
 
             def add_document(self, *_a, **_k):
-                raise AssertionError("a skip must not write a document")
+                if begin_skip:
+                    raise AssertionError("a skip must not write a document")
+                return None
 
         monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(tmp_path))
         monkeypatch.setattr(ingest_mod, "_discover_pending_documents",
                             lambda proj, **k: rows)
+        # `semantic_extract` / `capture_metadata` are read by the S7 gate
+        # (`_s7_document_entities`) on any arm that reaches EXTRACTION; the
+        # skip / not-document arms never get there, so they were absent before.
         args = argparse.Namespace(force=False, max_utterances=0, domain=None,
                                   include_unstamped=False,
                                   point_model="mock:cheap",
-                                  relation_model="mock:reason")
+                                  relation_model="mock:reason",
+                                  semantic_extract=False,
+                                  capture_metadata=False)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             outcome = ingest_mod._do_upgrade_all(_Proj(), _API(), args)
@@ -535,3 +542,107 @@ class TestTheSweepDoesNotRedOnItsOwnIdempotency:
             "a sweep that could not read its only candidate returned "
             f"{outcome!r} (exit {outcome.returncode}); a caller reads that as done")
         assert outcome.returncode == 1
+
+
+# --------------------------------------------------------------------------
+# A partial extraction is not a completed ask — on all THREE arms (§1a).
+# --------------------------------------------------------------------------
+
+_PARTIAL_STATS = {"points": 1, "operators": 0, "sections": 2,
+                  "point_ids": ["p1"], "failed_sections": ["Section two"]}
+
+
+def _stub_partial_extractor(monkeypatch) -> None:
+    """Make the document stage report ONE failed section.
+
+    ⚠️ Why a stub rather than a fixture: `extract_from_document` returns a
+    non-empty `failed_sections` ONLY under `skip_on_failure=True`
+    (`tortoise/extractor.py::_run_document` re-raises otherwise), and `ingest`
+    never passes it — so no real document can produce this state today. The
+    outcome is still wired to it (review P2, both rounds: the door printed
+    `warning: N sections failed extraction` and returned `DONE` → exit 0), and
+    a comment claiming a behaviour nothing can falsify is exactly what this file
+    exists to prevent. The stub is the falsifier.
+    """
+    monkeypatch.setattr("tortoise.extractor.extract_from_document",
+                        lambda *_a, **_k: dict(_PARTIAL_STATS))
+
+
+class TestAPartialExtractionIsNotDone:
+    def test_the_sweep_does_not_report_a_partial_upgrade_as_complete(
+            self, tmp_path, monkeypatch):
+        """The `--upgrade-all` arm, through the stubbed population.
+
+        Pre-fix this returns `DONE` → exit 0 with the `warning:` line as the only
+        record — and the revisit marker cleared, so no later sweep retries the
+        document and nothing else can ever report the shortfall.
+
+        ⛔ The report must also sit OUTSIDE `if skipped:`: a partially-extracted
+        document IS `upgraded`, so `skipped` stays 0 and a predicate riding that
+        block would be the same wrong-condition shape round 5 fixed for the
+        verdict sentence.
+        """
+        doc = tmp_path / "sweep-partial.md"
+        doc.write_text("## Section one\n\nSomething true.\n", encoding="utf-8")
+        _stub_partial_extractor(monkeypatch)
+        outcome, out = TestTheSweepDoesNotRedOnItsOwnIdempotency._sweep(
+            tmp_path, monkeypatch, [(doc.name, str(doc), True, None)],
+            begin_skip=False)
+        assert "failed extraction" in out, out
+        assert outcome is IngestOutcome.PARTIAL, (
+            "a sweep that upgraded a document only PARTIALLY returned "
+            f"{outcome!r} (exit {outcome.returncode}); its warning went to "
+            f"stdout and its revisit marker was cleared:\n{out}")
+        assert outcome.returncode == 1
+        # The verdict sentence must be emitted where it is TRUE (round 5 pinned
+        # the both-ways direction for the other buckets).
+        assert "exits NON-ZERO" in out, out
+
+    @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
+    def test_an_upgrade_that_extracted_only_some_sections_is_partial(
+            self, tmp_path, monkeypatch):
+        """The `--upgrade` arm: `_do_upgrade` returned `DONE` after the warning."""
+        doc = tmp_path / "partial.md"
+        doc.write_text("---\ntitle: Partial\n---\n\n## Section one\n\n"
+                       "Something true.\n", encoding="utf-8")
+        base = ["--db", _fresh_graph("upgrade_partial"),
+                "--log", str(tmp_path / "e.jsonl"),
+                "--out", str(tmp_path / "g.html"),
+                "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+        assert _run([str(doc), "--capture-metadata", *base])[0] is IngestOutcome.DONE
+
+        _stub_partial_extractor(monkeypatch)
+        outcome, out = _run(["--upgrade", str(doc), *base])
+        assert "failed extraction" in out, out
+        assert outcome is IngestOutcome.PARTIAL, (
+            "an --upgrade that extracted only some sections returned "
+            f"{outcome!r} (exit {outcome.returncode}); the shortfall exists only "
+            f"in its stdout:\n{out}")
+        assert outcome.returncode == 1
+
+    @pytest.mark.skipif(not _DB_URI, reason="needs TORTOISE_DB_URI (docker lane)")
+    def test_a_full_ingest_that_extracted_only_some_sections_is_partial(
+            self, tmp_path, monkeypatch):
+        """The full-ingest arm — and `PARTIAL` is NOT a refusal.
+
+        The completion artifacts ARE written (most of the ask was performed);
+        the exit status is what carries the shortfall. Asserting that keeps a
+        future "make PARTIAL exit before the artifacts" change from silently
+        becoming a regression in the other direction.
+        """
+        doc = tmp_path / "full.md"
+        doc.write_text("---\ntitle: Full\n---\n\n## Section one\n\nSomething "
+                       "true.\n", encoding="utf-8")
+        _stub_partial_extractor(monkeypatch)
+        outcome, out = _run([
+            str(doc), "--db", _fresh_graph("full_partial"),
+            "--log", str(tmp_path / "e.jsonl"), "--out", str(tmp_path / "g.html"),
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason",
+        ])
+        assert "failed extraction" in out, out
+        assert outcome is IngestOutcome.PARTIAL, (
+            "a full ingest that extracted only some sections returned "
+            f"{outcome!r} (exit {outcome.returncode}):\n{out}")
+        assert outcome.returncode == 1
+        assert "points :" in out, out
+        assert (tmp_path / "g.html").exists()

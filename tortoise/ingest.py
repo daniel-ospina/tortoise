@@ -461,6 +461,18 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     #    transition for a no-sections document (step 4): the operator named this
     #    document, pre-D10 `--upgrade` flipped it unconditionally, and leaving
     #    the marker would re-report it on every run.
+    # #8447 C3 (review P2, both review rounds): a PARTIAL extraction must not
+    # come back DONE. `extract_from_document` reports per-SECTION failures in
+    # `failed_sections` only under `skip_on_failure=True`, which this module
+    # does not pass — so the list is empty on every arm today and the warning
+    # below cannot print (verified against `tortoise/extractor.py::_run_document`:
+    # the `except` re-raises unless that flag is set). The outcome is wired
+    # anyway so the two channels can never disagree: the day a caller opts into
+    # tolerating a bad section, the exit status says PARTIAL instead of
+    # recording a truncated document as a completed ask (§1a). Pinned by a
+    # stubbed arm in tests/test_8447_c3_ingest_door.py, so this is not a
+    # comment-shaped promise.
+    failed_sections: list[str] = []
     is_doc, _ = _document_sections(text)
     if is_doc:
         from .idempotency import document_key
@@ -518,8 +530,10 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
         )
         print(f"  extracted {stats['points']} Points, {stats['operators']} operators "
               f"from {stats['sections']} sections")
-        if stats.get("failed_sections"):
-            print(f"  warning: {len(stats['failed_sections'])} sections failed extraction")
+        failed_sections = list(stats.get("failed_sections") or [])
+        if failed_sections:
+            print(f"  warning: {len(failed_sections)} sections failed extraction — "
+                  "those sections' Points are missing")
     else:
         print(f"  warning: {source_id} is not a Document (no ## headers) — "
               f"extraction skipped (no claim made)")
@@ -545,6 +559,13 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
 
     # 5. Lazy EP re-propagation on affected subgraph (#133 Task 3)
     _run_ep_propagation(proj, api)
+    # PARTIAL, not DONE: the ask was performed for the sections that extracted
+    # and left work behind for the rest — the enum's own definition. The marker
+    # is still cleared (pre-D10 parity, stated in `_do_upgrade_all`'s docstring),
+    # which is exactly why the exit status has to carry the shortfall: nothing
+    # else will.
+    if failed_sections:
+        return IngestOutcome.PARTIAL
     return IngestOutcome.DONE
 
 
@@ -759,6 +780,12 @@ def _do_upgrade_all(proj, api, args):
     unresolved = 0
     not_document = 0
     already_claimed = 0
+    # A second kind of "left work behind": the document WAS extracted, but some
+    # of its sections were not (see the `failed_sections` note in
+    # `_do_upgrade` — unreachable today, wired so the verdict cannot lie if it
+    # ever becomes reachable). Counted apart from the three pending buckets
+    # because those keep their revisit marker and this one does not.
+    partial_sections = 0
     for doc_id, source_path, needs_ext, doc_status in rows:
         # #329: resolve the candidate (sourcePath OR s.url — BOTH are
         # tenant-mutable) strictly under the configured base. Fail-closed:
@@ -852,8 +879,11 @@ def _do_upgrade_all(proj, api, args):
             domain=args.domain,
         )
         print(f"    extracted {stats['points']} Points, {stats['operators']} operators")
-        if stats.get("failed_sections"):
-            print(f"    warning: {len(stats['failed_sections'])} sections failed extraction")
+        failed_sections = list(stats.get("failed_sections") or [])
+        if failed_sections:
+            print(f"    warning: {len(failed_sections)} sections failed extraction — "
+                  "those sections' Points are missing")
+            partial_sections += 1
         # Mark extracted: clear the live signal AND retire the legacy marker
         # (the pre-D10 flip is recorded by clearing, not by writing a retired
         # property — see `_do_upgrade`).
@@ -872,6 +902,15 @@ def _do_upgrade_all(proj, api, args):
         _run_ep_propagation(proj, api)
 
     print(f"upgrade-all complete: {upgraded} upgraded, {skipped} skipped")
+    if partial_sections:
+        # ⛔ Deliberately OUTSIDE `if skipped:` — a partially-extracted document
+        # IS `upgraded` (so `skipped` stays 0 and the block below never runs),
+        # which is exactly how this arm used to report a truncated document as
+        # a completed sweep: the `warning:` line printed and the exit said 0.
+        print(f"  ⚠️ {partial_sections} upgraded document(s) extracted only "
+              "PARTIALLY (the sections listed above failed) — their revisit "
+              "marker was cleared, so no later sweep retries them")
+        print("  ⛔ this sweep exits NON-ZERO: part of the ask was not performed")
     if skipped:
         # Never let "0 upgraded" read as "nothing outstanding": the buckets name
         # the work that is still pending, and each one keeps its marker.
@@ -893,19 +932,21 @@ def _do_upgrade_all(proj, api, args):
                   "or set TORTOISE_INGEST_BASE_DIR, restore the file, or delete "
                   "the Source; for `not a document` add `##` sections or delete "
                   "the Source")
-        # #8447 C3: outstanding work after a sweep is NOT a completed ask. A
-        # sweep that left candidates unreadable or un-extractable used to exit
-        # 0 — the caller read "success" over a corpus that was never touched.
-        # PARTIAL is the marker; the buckets above say which kind.
-        #
-        # ⛔ `already_claimed` is deliberately NOT in this predicate. It is the
-        # sweep's idempotency bucket — the same ask `_do_upgrade` answers with
-        # SKIPPED_ALREADY_PROCESSED (0) — so counting it would red a
-        # steady-state corpus on every re-sweep and train operators to ignore
-        # the exit status, which destroys the marker. `not_document` keeps its
-        # pending marker (see the docstring) and IS outstanding.
-        if unresolved or not_document:
-            return IngestOutcome.PARTIAL
+    # #8447 C3: outstanding work after a sweep is NOT a completed ask. A sweep
+    # that left candidates unreadable or un-extractable used to exit 0 — the
+    # caller read "success" over a corpus that was never touched. PARTIAL is
+    # the marker; the output above says which kind.
+    #
+    # ⛔ `already_claimed` is deliberately NOT in this predicate. It is the
+    # sweep's idempotency bucket — the same ask `_do_upgrade` answers with
+    # SKIPPED_ALREADY_PROCESSED (0) — so counting it would red a steady-state
+    # corpus on every re-sweep and train operators to ignore the exit status,
+    # which destroys the marker. `not_document` keeps its pending marker (see
+    # the docstring) and IS outstanding; `partial_sections` counts documents
+    # that were upgraded with sections missing (they had their marker cleared,
+    # so nothing else can report them).
+    if unresolved or not_document or partial_sections:
+        return IngestOutcome.PARTIAL
     return IngestOutcome.DONE
 
 
@@ -1099,6 +1140,11 @@ def main(argv=None) -> IngestOutcome:
         proj = FalkorProjection(args.db)
     api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
                    projection=proj)
+    # The document stage's per-section failures, hoisted so the final return can
+    # answer PARTIAL (see the note in `_do_upgrade` — unreachable today because
+    # `skip_on_failure` is not passed, wired so the exit status can never report
+    # a truncated document as a completed ask).
+    failed_sections: list[str] = []
     try:
         # #133 --upgrade: re-run extraction on a captured document Source.
         # D10 (ONTOLOGY §4.4): the extraction signal is needs_extraction (the
@@ -1274,8 +1320,10 @@ def main(argv=None) -> IngestOutcome:
                 )
                 print(f"extracted {stats['points']} Points, {stats['operators']} operators "
                       f"from {stats['sections']} sections")
-                if stats.get("failed_sections"):
-                    print(f"warning: {len(stats['failed_sections'])} sections failed extraction")
+                failed_sections = list(stats.get("failed_sections") or [])
+                if failed_sections:
+                    print(f"warning: {len(failed_sections)} sections failed extraction — "
+                          "those sections' Points are missing")
                 # Post-extraction: propagate confidence using factor-graph EP
                 # (replaces BFS propagate_shock — bidirectional, quadrature-based).
                 # #1157: shared helper — priors from stored confidence only;
@@ -1303,6 +1351,12 @@ def main(argv=None) -> IngestOutcome:
         print(f"points : {len(statements)} statements, {len(operators)} operators")
         print(f"graph  : {args.db}  (Cypher-queryable)")
         print(f"render : {args.out}")
+        # PARTIAL is NOT a refusal: the completion artifacts above were written,
+        # because most of the ask WAS performed. What the caller must still be
+        # able to see is that some sections produced nothing — the `warning:`
+        # line alone is a channel a script reading `$?` never reads (§1a).
+        if failed_sections:
+            return IngestOutcome.PARTIAL
         return IngestOutcome.DONE
     finally:
         proj.close()
