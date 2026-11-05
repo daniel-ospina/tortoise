@@ -20314,7 +20314,12 @@ class TortoiseSDK:
                 # (unreachable from a graph read — neither FalkorDB nor a JSON
                 # projection can yield one). ⛔ Do NOT reintroduce a per-value
                 # branch here: a second copy of the policy is what let this door
-                # publish its own token as ``judged`` in the refusal below.
+                # publish its own token as ``judged`` in the refusal below, and it
+                # is behaviour-invisible (it verdicts identically by design), so
+                # the SHAPE is what is pinned —
+                # ``tests/test_2351_claim_class.py::
+                # test_the_repoint_door_carries_no_door_local_direction_filter``
+                # is the mechanical guard a comment cannot be.
                 # ⛔ Scope of "ONE reader": the 2a-OPERATOR pre-flight above DOES
                 # still screen a stored direction (``_d if isinstance(_d, str)
                 # else ("<->" if _d is not None else None)``) — that is a
