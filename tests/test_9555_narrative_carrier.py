@@ -1713,6 +1713,29 @@ def _source_vector_section_94(text: str) -> str:
                           "§9.4's `:Source`-vector paragraph")
 
 
+def _ontology_section_of(field: str) -> str:
+    """The `### §x.y` section of `docs/ONTOLOGY.md` that owns `field`'s row.
+
+    DERIVED, not restated — the same rule the narrative home above follows. The
+    footnote asserts which ontology section a `:Source`'s `summary` is filed
+    under, and this PR's pre-rebase wording had that WRONG (`§4.4`, which is
+    `Document`). A hardcoded `§4.6` would go stale the moment the ontology
+    renumbers, and the pin would keep certifying the number it was born with.
+    """
+    section = None
+    for line in (REPO_ROOT / "docs/ONTOLOGY.md").read_text(
+            encoding="utf-8").split("\n"):
+        heading = re.match(r"^#{2,4}\s+(§\d+\.\d+)\b", line)
+        if heading:
+            section = heading.group(1)
+        elif section and line.startswith(f"| `{field}` |"):
+            return section
+    raise AssertionError(
+        f"`docs/ONTOLOGY.md` has no `| `{field}` |` property row under a "
+        f"numbered section heading — the ontology moved, so §12.1b's pointer at "
+        f"it must be re-derived rather than kept")
+
+
 def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     """§9.4 and §12.1b may not disagree about what the source vector embeds.
 
@@ -1777,3 +1800,15 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "§12.1b's `:Source` footnote no longer states §9.4 ③'s identity rule — "
         "the footnote's two halves are *what the vector reads* and *how identity "
         "is decided*; dropping the second re-opens `#3998`")
+    #: ...and the THIRD claim the footnote makes is which ontology section a
+    #: `summary` is filed under — the one this PR's pre-rebase wording got WRONG
+    #: (`§4.4`, which `docs/ONTOLOGY.md:454` assigns to `Document`, not `Source`).
+    #: §4.6 is DERIVED from the ontology that defines it, so a renumber reds here
+    #: instead of leaving a footnote pointing at a different type.
+    summary_section = _ontology_section_of("summary")
+    assert f"{summary_section} metadata" in footnote, (
+        f"§12.1b's `:Source` footnote no longer files `summary` as "
+        f"{summary_section} metadata — `docs/ONTOLOGY.md` puts `summary`'s row "
+        f"under `{summary_section}`, so a footnote citing any other section "
+        f"sends a reader to a different type (the pre-rebase wording here said "
+        f"§4.4, which is `Document`)")
