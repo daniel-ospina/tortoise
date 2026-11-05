@@ -902,6 +902,57 @@ exit 0
         self.assertIn("OPEN PULL REQUEST", out)
         self.assertNotIn("unexpected", out)
 
+    def test_a_pr_number_resolves_to_its_work_item_and_answers(self):
+        """#9976: the PR-number shape ANSWERS instead of abstaining.
+
+        The gate resolves an OPEN pull request to the work item(s) it serves
+        (#9957); this verb used to stop at `ANSWER INCOMPLETE: … is an OPEN PULL
+        REQUEST`, so the two verbs disagreed about the same number — which
+        AGENTS.md says they cannot, because this verb reuses the gate's own
+        enumeration. Here the PR's closing reference names ISSUE, so the answer
+        for ISSUE is computed and printed under its own heading, at rc 0.
+        """
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([{
+            "number": 9999,
+            "title": "fix: something unrelated in its title",
+            "body": "",
+            "state": "open",
+            "url": "https://example.invalid/pulls/9999",
+            "headRefName": "feat/some-pr",
+            "mergedAt": None,
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }]))
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("is an OPEN PULL REQUEST — resolved via", out)
+        self.assertIn(f"to #{ISSUE}", out)
+        self.assertIn(f"who is on #{ISSUE}?", out)
+        # It answers — it does not abstain with the old refusal.
+        self.assertNotIn("not a work item", out)
+        self.assertNotIn("INCOMPLETE", out)
+        # …and the resolution is REPORTED, so a reader knows which item answered.
+        self.assertIn("the same resolution the pre-flight uses", out)
+
+    def test_a_pr_number_whose_work_items_cannot_be_resolved_still_refuses(self):
+        """The fail-closed half: no resolvable work item is rc 2, never `nobody`.
+
+        `release_pull_request_work_items` is the gate's own resolver; when it
+        finds nothing there is no work item to answer for, and a half-answer
+        would be worse than the refusal. The gate's own sentence stays first so
+        the shape is recognisable.
+        """
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([{
+            "number": 9999, "title": "fix: nothing names the issue", "body": "",
+            "state": "open", "url": "https://example.invalid/pulls/9999",
+            "headRefName": "feat/some-pr", "mergedAt": None,
+            "closingIssuesReferences": [],
+        }]))
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("OPEN PULL REQUEST", out)
+        self.assertIn("This is NOT", out)
+        self.assertNotIn("ANSWER: nobody", out)
+
     def test_a_control_sequence_in_a_refname_cannot_reach_the_output(self):
         """Ref names are untrusted input and this report NAMES them, so a
         control sequence in one can rewrite the ANSWER line the tool exists to
