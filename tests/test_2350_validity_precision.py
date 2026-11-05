@@ -657,6 +657,187 @@ def test_reader_marker_omits_a_start_that_names_no_instant():
             "[valid → 2026-06-12]"
 
 
+def test_reader_marker_states_an_end_only_window():
+    """#8067: a window with an END and NO START still renders its end.
+
+    ``_validity_marker``'s whole window block was gated on a STORED start
+    (``_bound_present(valid_from)``), but ``invalidate_point`` deliberately
+    stamps only the END — ``validTo`` + ``expiredAt`` and no ``validFrom``,
+    because the start of the invalidated claim's window is its create-time
+    fact and a ``now`` start would be a fabricated instant. So the single most
+    common terminal transition produced exactly the shape that gate dropped: a
+    claim created with no window, once invalidated, rendered NO window at all,
+    and the reader was told the claim was superseded but not WHEN it stopped
+    being true — even though the graph records the instant.
+
+    The rendered form is NOT new vocabulary. ``[valid → <to>]`` is the
+    marker's existing "the start is not nameable" window (#9730), already
+    pinned below for a PRESENT-but-unorderable start; a start that was never
+    stored is the same reader-facing fact (no start to state — the #6140 owner
+    ruling), so it states the same window. Nothing is invented and no
+    fabricated "since" is asserted.
+
+    RED on the pre-fix head (measured at ``e0a3873cb``): the three end-only
+    assertions below all returned ``''`` — no marker whatsoever.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    # (1) THE DEFECT: an end-only window renders its end, not silence.
+    assert _validity_marker({"valid_to": "2026-09-01",
+                             "expired_at": "2026-09-01"}) == \
+        "[valid → 2026-09-01; expired 2026-09-01]"
+    # …and the validity end alone, without the transaction expiry.
+    assert _validity_marker({"valid_to": "2026-09-01"}) == \
+        "[valid → 2026-09-01]"
+    # no fabricated start: the absent start never becomes a "since" clause.
+    assert "since" not in _validity_marker({"valid_to": "2026-09-01"})
+
+    # (2) ONE STORED FACT, ONE ANSWER: an ABSENT start and a PRESENT but
+    #     unorderable one are the same reader-facing fact, so the window is
+    #     byte-identical either way (the #9730 form, now shared by both
+    #     spellings of "no start").
+    expected = _validity_marker({"valid_from": "TBD",
+                                 "valid_to": "2026-06-12"})
+    assert expected == "[valid → 2026-06-12]"
+    for absent in (None, "", "   "):
+        assert _validity_marker({"valid_from": absent,
+                                 "valid_to": "2026-06-12",
+                                 "end_state": "known"}) == expected, absent
+
+    # an END-ONLY window whose end the state calls un-datable states the
+    # #9202 vocabulary's own form instead of going silent.
+    assert _validity_marker({"expired_at": "2026-09-01",
+                             "end_state": "unknown"}) == \
+        "[valid; expired 2026-09-01; end unknown]"
+
+    # (3) CONTROL — a FULL window is byte-identical: the gate is widened, the
+    #     rendered window is not rewritten (no double marker).
+    assert _validity_marker({"valid_from": "2026-08-01",
+                             "valid_to": "2026-09-01",
+                             "expired_at": "2026-09-01"}) == \
+        "[valid 2026-08-01 → 2026-09-01; expired 2026-09-01]"
+    assert _validity_marker({"valid_from": "2026-08-01",
+                             "valid_to": "2026-09-01",
+                             "end_state": "known"}) == \
+        "[valid 2026-08-01 → 2026-09-01]"
+
+    # (4) CONTROL — an UNDATED hit still renders NO window (the D8 additive
+    #     rule: byte-identical output for undated graphs), and the
+    #     supersession marker it does carry is untouched.
+    assert _validity_marker({}) == ""
+    assert _validity_marker({"superseded_by": {"content_snippet": "new"}}) \
+        == "[SUPERSEDED BY: new]"
+    # …and a bare readable expiry with NO validity end stays where the #9741
+    #     residual left it (out of scope here, stated so the widening is
+    #     bounded by a pin rather than by a wish).
+    assert _validity_marker({"expired_at": "2026-09-01"}) == ""
+
+
+def test_an_end_only_window_is_claim_text_for_the_2978_skip():
+    """#8067 widening, pinned so it is a DECISION rather than a side effect.
+
+    ``_has_claim_text`` is the #2978 admission gate on the ask lane, and the
+    validity marker IS one of the two claim-text sources it admits. Widening
+    the marker therefore widens what that gate admits: a CONTENT-LESS hit
+    carrying an end-only window used to be skipped (its marker was ``''``) and
+    is now admitted as a decorations-only block.
+
+    Deliberate, and deliberately NOT repaired here: the shape is a content-less
+    Point, which ``create_point`` accepts — no blank-content guard, a
+    pre-existing gap of its own — and the widening is ALREADY true of every
+    ``valid_from``-bearing hit, so narrowing it would be a #2978 change to the
+    admission rule rather than a rendering one. Pinned so the next lane sees the
+    frontier instead of discovering it.
+    """
+    from tortoise.retrieval import _has_claim_text
+
+    contentless = {"id": "p1"}
+    # the #2978 skip itself: no content, no marker → nothing for the reader.
+    assert _has_claim_text(contentless) is False
+    assert _has_claim_text({**contentless, "valid_from": "",
+                            "end_state": "open"}) is False
+    # the PRE-EXISTING kind: a start-only window already admits it.
+    assert _has_claim_text({**contentless, "valid_from": "2024-01-01",
+                            "end_state": "open"}) is True
+    # THE #8067 WIDENING: an end-only window admits it too (it was False while
+    # the start-only gate dropped the window entirely).
+    assert _has_claim_text({**contentless, "valid_to": "2026-09-01"}) is True
+    # …and undated content-less hits are still skipped, so the widening did not
+    # move the ordinary case.
+    assert _has_claim_text({**contentless, "session_date": "2026-08-01"}) \
+        is False
+
+
+def test_reader_marker_states_the_end_only_window_invalidate_point_writes(lane):
+    """#8067 end-to-end: the shape the WRITER produces renders a dated window.
+
+    The pure-function pin above builds the hit itself, so it would still pass
+    if ``invalidate_point`` ever started stamping a start (the issue's own
+    forbidden "fix") or if the scan stopped promoting ``valid_to`` /
+    ``expired_at``. This drives the public write and the live scan decoration —
+    the path the ask lane renders.
+
+    RED on the pre-fix head: ``marker`` was ``'[SUPERSEDED BY: …]'`` only — the
+    window half was absent for a claim the graph had just dated.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+    old = sdk.create_point("statement", "the gym is open at 6pm")
+    new = sdk.create_point("statement", "the gym is open at 5pm")
+    sdk.invalidate_point(old["id"], new["id"])
+
+    # non-vacuous premise: the writer stamps BOTH end columns and NO start, and
+    # the promotion carries them to the hit the renderer consumes. (No equality
+    # between the two columns is asserted: they coincide here only because one
+    # ``now`` is stamped into both, which is a fact about this call, not about
+    # window rendering.)
+    props = _props(sdk, old["id"])
+    assert props.get("validFrom") is None, props
+    assert props.get("validTo") is not None, props
+    assert props.get("expiredAt") is not None, props
+
+    hit = next(r for r in _scan(sdk) if r["id"] == old["id"])
+    # ``valid_from`` is ABSENT from the promoted hit (additive-only promotion,
+    # #1353 D8) — not ``None`` — so read absence as absence.
+    assert hit.get("valid_from") is None, hit
+    assert hit.get("valid_to") is not None, hit
+    assert hit.get("expired_at") is not None, hit
+
+    marker = _validity_marker(hit)
+    assert "[SUPERSEDED BY: " in marker, marker     # unchanged by the fix
+    assert "[valid → " in marker, marker            # THE FIX: a dated end
+    assert f"→ {str(hit['valid_to'])[:10]}" in marker, marker  # the END date
+    assert f"expired {str(hit['expired_at'])[:10]}" in marker, marker
+    assert "since" not in marker, marker            # still no fabricated start
+
+
+def test_reader_marker_states_the_end_only_window_closed_unknown(lane):
+    """#8067: the same gate, on the closed-UNKNOWN end (#2350's E-prec).
+
+    ``invalidate_point(valid_to_precision='unknown')`` writes NO ``validTo``
+    and no start, so a start-less claim closed that way ALSO rendered nothing —
+    the same silence, one spelling over. The fix must state the #9202 form for
+    it rather than inventing a third reading; this pins it on the public
+    writer, so the two spellings of "ended" cannot drift apart again.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+    old = sdk.create_point("statement", "the gym is open at 6pm")
+    new = sdk.create_point("statement", "the gym is open at 5pm")
+    sdk.invalidate_point(old["id"], new["id"], valid_to_precision="unknown")
+
+    hit = next(r for r in _scan(sdk) if r["id"] == old["id"])
+    assert hit.get("valid_from") is None, hit
+    assert hit["end_state"] == "unknown", hit
+    assert "valid_to" not in hit, hit
+
+    marker = _validity_marker(hit)
+    assert "[SUPERSEDED BY: " in marker, marker
+    assert marker.endswith("; end unknown]"), marker
+
+
 #: Every spelling #9202's 2026-10-25 owner ruling names as an UN-DATABLE end —
 #: the ruling's own enumeration, not a sample of it (the same six
 #: ``tests/test_validity_windows.py`` sweeps for the READ half). They disagree
@@ -787,7 +968,8 @@ def test_reader_marker_control_keeps_an_orderable_start_byte_identical():
     assert _validity_marker({"valid_from": "2024-01-01",
                              "end_state": "unknown"}) == \
         "[valid since 2024-01-01; end unknown]"
-    # an ABSENT start still emits no window marker at all.
+    # an ABSENT start with NO END COLUMN emits no window marker at all. (⚠️ With
+    # an end column it DOES render — an end-only window states its end, #8067.)
     assert _validity_marker({"valid_from": "", "end_state": "open"}) == ""
 
 
@@ -1255,7 +1437,8 @@ def test_an_unreadable_start_does_not_discard_a_readable_end():
                                  "end_state": "open"}) == \
             _validity_marker({"valid_from": "TBD", "end_state": "open"}) == \
             "[valid]", unreadable
-    # an ABSENT start is still no marker at all — the distinction this keeps
+    # an ABSENT start with NO END COLUMN is still no marker at all — the
+    # distinction this keeps. (With an end column it renders the end: #8067.)
     assert _validity_marker({"valid_from": ""}) == ""
     assert _validity_marker({"valid_from": None}) == ""
 def test_an_unreadable_end_never_reads_as_an_open_window():

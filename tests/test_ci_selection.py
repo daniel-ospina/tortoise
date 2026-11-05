@@ -229,9 +229,24 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured: 131 files for the STORAGE diff (`onboarding`), 60 for the
-    EXTRACTOR diff (empty surfaces, the early return); the gate is in the
-    selected set in both, and dropping the `tier1` row removes it from both.
+    Measured at this head: 150 files for the STORAGE diff, 73 for the EXTRACTOR
+    diff (empty surfaces, the early return); the gate is in the selected set in
+    both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
+    measurements, not constants, and they move for DIFFERENT reasons:
+
+    * the **150** is `onboarding` ∪ `tier1` **minus 14** — the union is 164 at
+      this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
+      `uri_requiring` files, so it is the union minus those, never the union;
+    * the **73** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool", which is 1094 here.
+      The `60` this sentence carried was that same `tier1` set **13 rows ago**
+      (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
+      and 73 here), i.e. the very "a past state quoted as a current one"
+      defect the line below warns about.
+
+    Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
+    trusting either — the assertions below are the pin, this
+    sentence is a note.
     """
     storage = _sel(["docs/architecture/STORAGE-ARCHITECTURE.md"])
     assert storage["surfaces"] == ["onboarding"], storage["surfaces"]
@@ -241,6 +256,21 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+    # #10980 review (P2): the §9.4/§12.1b source-vector pin lives in the
+    # narrative-home module, and it guards the SAME document — so a STORAGE-only
+    # diff must reach it. Before that row it reached the module in NO arm
+    # (`core`/`api` both need a Python path; this diff matches `onboarding`),
+    # i.e. the pin would have been green on every real question asked of it.
+    # Asserted here rather than trusted to the row's comment: a row that is
+    # present but no longer SELECTS is the failure #9778 measured.
+    assert "test_9555_narrative_carrier.py" in storage["test_files"], (
+        "a `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff no longer "
+        "selects `test_9555_narrative_carrier.py` — the §9.4/§12.1b "
+        "source-vector pin (and the §9.1 narrative-home pins beside it) would "
+        "be asleep on the only diff class that can re-scatter the claim "
+        "(#10980 review P2, the #4309 silent-drop class)"
+    )
 
 
 def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
