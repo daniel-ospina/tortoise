@@ -318,3 +318,7 @@ docker leg, so an entry there would *remove* the pin from those legs rather than
 well". Every one of the manifest's 57 carve-out files is also in a surface (`carve_only: 0`), which is why the
 precedent above is a surface registration and `tests/test_record_searchkeys_10620.py` is registered as
 `api` + `core` with a `durations:` row — not as a carve-out.
+⚠️ **`#11075`'s body still orders the opposite** ("must be registered in `config/ci-surfaces.yml`'s
+`carve_out:` list or it never rides the URI-unset leg (#10648 needed the same registration)") — on a
+precedent this section measures as false, since #10648's file rides as `api` + `core`. **This section is
+authoritative**; a lane must not act on the issue body alone, and the correction belongs posted on `#11075`.
