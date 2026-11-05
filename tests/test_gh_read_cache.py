@@ -12,9 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 73 mutation rows have now been run
-(**70 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **72 are KILLED**; M49 survives ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. 76 mutation rows have now been run
+(**73 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **75 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -37,7 +37,8 @@ M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly
   M66 required_set fabricates `contexts` again ....... KILLED   M67 `repo.labels` empty name allowed ......... KILLED
   M68 workflow `id` type check removed ............... KILLED   M69 `node_id` no longer required .............. KILLED
   M70 OverflowError dropped from ttl coercion ........ KILLED   M71 OverflowError dropped from now coercion .. KILLED
-  M72 runner `name`/label EMPTY string allowed ....... KILLED
+  M72 runner/label EMPTY string allowed .............. KILLED   M73 endpoint check removed from the door ..... KILLED
+  M74 decode denylist restored ....................... KILLED   M75 empty-repo scope "@main" accepted ....... KILLED
 ⛔ M67 SURVIVED on its first test, which passed a DICT page where a LIST page is required — the
 SHAPE guard satisfied it and the empty-name check was unreachable. Fixed, then KILLED.
 ⛔ M67's EMPTY-STRING sibling (M72, cycle-16 review) reached the same blocker from the other side:
@@ -1230,7 +1231,6 @@ class _Out:
 
 
 def test_cli_list_prints_the_registry() -> None:
-    out = _Out()
     import io
     import sys as _sys
 
@@ -1242,9 +1242,10 @@ def test_cli_list_prints_the_registry() -> None:
     finally:
         _sys.stdout = old
     assert rc == 0
+    # ⛔ VACUOUS ASSERTION REMOVED: `assert out is not None` read a variable that was never
+    # installed as stdout, so it proved nothing about the listing.
     for key in C.INVARIANTS:
         assert key in buf.getvalue()
-    assert out is not None
 
 
 def test_cli_purge_removes_entries(tmp_path: Path) -> None:
@@ -1449,15 +1450,17 @@ def test_odd_envelopes_never_escape_load(raw: bytes, tmp_path: Path) -> None:
 def test_a_reader_returning_non_bytes_is_Unreadable(payload, tmp_path: Path) -> None:
     """`bytes("str")` raises TypeError out of `read()` — uncaught, where the contract promises
     `Unreadable`."""
-    r = Counter()
-    r.fail = None
+    # ⛔ VACUOUS ASSERTION FIXED: this used to allocate an unused `Counter()` and then pass a
+    # DIFFERENT reader, so `assert r.n == 0` could not fail. The probe is the reader now.
+    called: list[str] = []
 
     def bad_reader(key: str):
+        called.append(key)
         return payload
 
     with pytest.raises(C.Unreadable):
         _read("repo.metadata", now=1000.0, reader=bad_reader, cache_dir=tmp_path)
-    assert r.n == 0
+    assert called == ["repo.metadata"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -2171,3 +2174,80 @@ def test_a_non_finite_clock_is_a_MISS_not_a_refusal(nonfinite, tmp_path: Path) -
     out = _read("repo.metadata", now=nonfinite, reader=r, cache_dir=tmp_path)
     assert json.loads(out)["id"] == 1
     assert r.n == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# CYCLE-16 — the DOOR checks the ENDPOINT; the decode denylist is a latch; empty inputs
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("api", "repos/{repo}/pulls/9"),
+        ("api", "repos/{repo}/issues/9"),
+        ("api", "repos/{repo}/actions/runs"),
+        ("api", "repos/{repo}/commits/main/status"),
+        ("api", "repos/{repo}/commits/abc/check-runs"),
+    ],
+)
+def test_declare_invariant_REFUSES_a_mutable_ENDPOINT(argv) -> None:
+    """⛔ `_is_mutable_name` reads the KEY. `declare_invariant("repo.identity",
+    argv=("api","repos/{repo}/pulls/9"))` was ACCEPTED — an invariant-sounding name over a mutable
+    endpoint — and cached a PR's `state` for an hour, served as a fresh hit after it closed. An
+    invariant-sounding NAME is not an invariant READ."""
+    with pytest.raises(C.MutableReadRefused):
+        C.declare_invariant(
+            "repo.identity",
+            ttl_s=3600,
+            argv=argv,
+            projection="pr-state-v1",
+            project=lambda d: {"state": d[-1]["state"]},
+        )
+    assert "repo.identity" not in C.INVARIANTS
+
+
+def test_declare_invariant_still_accepts_the_registrys_own_endpoints() -> None:
+    """The refusal must not be a blanket ban: `/branches/{branch}/protection` (required_set),
+    `/labels`, `/actions/workflows`, `/actions/runners` and `user` are all in the registry."""
+    for spec in C.INVARIANTS.values():
+        C._validate_spec("probe", spec.argv, spec.projection, spec.project)  # must not raise
+
+
+@pytest.mark.parametrize("payload", [b"[" * 20000 + b"]" * 20000, b"["])
+def test_a_decode_that_raises_anything_is_a_MISS_not_a_latch(payload, tmp_path: Path) -> None:
+    """⛔ The decode block caught `(OSError, ValueError, UnicodeDecodeError)` — a DENYLIST — while
+    the coercion block below it was fixed to `except Exception:` for exactly this reason.
+    `json.loads` on ~20 000 nested arrays raises RecursionError, which escaped `_load`, `read()`
+    and `main()`; and because the read never reached the reader the poison entry was never
+    rewritten, so EVERY later read raised until `--purge`."""
+    scope = C.scope_for("repo.metadata", "o/r", "main")
+    # ⛔ a REAL read first: the poisoned file must be at the exact path the cache looks for, or the
+    # test proves nothing about `_load` (it would just be an ordinary MISS).
+    _read("repo.metadata", scope=scope, now=1000.0, reader=Counter(), cache_dir=tmp_path)
+    entries = sorted(tmp_path.rglob("*.json"))
+    assert len(entries) == 1, entries
+    entries[0].write_bytes(payload)
+    r = Counter()
+    # ⛔ THREE reads, and all three must SUCCEED. Under the denylist the first one raises and — never
+    # having reached the reader — never rewrites the entry, so the second and third raise too: a
+    # latch. `r.n == 1` is the PROOF of self-healing, not a weak assertion: the first read MISSes
+    # and overwrites, so reads two and three are HITS that require no reader at all.
+    for _ in range(3):
+        out = _read("repo.metadata", scope=scope, now=2000.0, reader=r, cache_dir=tmp_path)
+        assert json.loads(out)["id"] == 1
+    assert r.n == 1
+
+
+def test_a_runner_naming_nothing_is_not_an_inventory_row() -> None:
+    """`{"name": ""}` projected to `[{"name": "", "labels": []}]` and cached 30 min — every sibling
+    list projection requires a non-empty string, and this one did not."""
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS["runners.inventory"].project([{"runners": [{"name": "", "labels": []}]}])
+
+
+def test_an_empty_repo_is_refused_rather_than_spending_a_call(tmp_path: Path) -> None:
+    """A repo-scoped key with no repo derives `"@main"`, which passes the non-empty-scope test and
+    spends one call from the pool this module protects, on `gh api repos/` (a guaranteed 404)."""
+    r = Counter()
+    with pytest.raises(C.TtlNotPermitted):
+        _read("repo.metadata", scope="@main", now=1000.0, reader=r, cache_dir=tmp_path)
+    assert r.n == 0

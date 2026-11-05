@@ -752,6 +752,37 @@ def ttl_for(key: str) -> int:
     return INVARIANTS[key].ttl_s
 
 
+# ⛔ ENDPOINTS WHOSE ANSWER IS MUTABLE BY CONSTRUCTION. `_is_mutable_name` reads the KEY, so
+# `declare_invariant("repo.identity", argv=("api", "repos/{repo}/pulls/9"))` was ACCEPTED — an
+# invariant-sounding name over a mutable endpoint, which cached a PR's `state` for an hour and
+# served it as a fresh hit after the PR closed. The door must check what is being READ, not only
+# what it is called. These are the families where a cached answer is a LIE rather than a wait;
+# the registry's own endpoints (`repos/{repo}`, `/labels`, `/actions/workflows`,
+# `/actions/runners`, `/branches/{branch}/protection`, `user`) are deliberately absent.
+_MUTABLE_ENDPOINTS = (
+    "/pulls",
+    "/issues",
+    "/actions/runs",
+    "/commits",
+    "/check-runs",
+    "/status",
+    "/comments",
+    "/releases",
+    "/tags",
+    "/merges",
+)
+
+
+def _mutable_endpoint_in(argv: Sequence[str]) -> str | None:
+    """The first mutable-endpoint marker in an argv, or None. Segment-bounded so `repo.labels`
+    (`/labels`) is not caught by a `...` prefix accident."""
+    for a in argv:
+        for marker in _MUTABLE_ENDPOINTS:
+            if marker in a:
+                return marker
+    return None
+
+
 def _validate_spec(key: str, argv: Sequence[str], projection: str, project: Any) -> None:
     """Guard 2, at whichever door the spec came through."""
     if not callable(project):
@@ -763,6 +794,14 @@ def _validate_spec(key: str, argv: Sequence[str], projection: str, project: Any)
         raise TtlNotPermitted(
             f"{key!r} declares no usable projection id ({projection!r}). It is the cache-identity "
             f"stamp, so it must name the projection's SHAPE."
+        )
+    marker = _mutable_endpoint_in(argv)
+    if marker is not None:
+        raise MutableReadRefused(
+            f"{key!r} reads an endpoint carrying {marker!r}. That answer is MUTABLE by "
+            f"construction: caching it replays a PR/run/commit state as if it were fresh. An "
+            f"invariant-sounding KEY is not an invariant READ — declare it only if the endpoint "
+            f"it names genuinely cannot change."
         )
     for a in argv:
         if a in _FORBIDDEN_ARGV_FLAGS or a.startswith(("--jq=", "--template=", "-q=")):
@@ -955,7 +994,12 @@ def _load(
     # it did not provide. `test_non_finite_now_never_serves_a_hit` holds this line's behaviour.
     try:
         env = json.loads(path.read_bytes())
-    except (OSError, ValueError, UnicodeDecodeError):
+    # ⛔ CATCH BROADLY, ON PURPOSE — the SAME reasoning as the coercion block below, which this
+    # one contradicted. A DENYLIST here is how a latch happens: `json.loads` on ~20 000 nested
+    # arrays raises RecursionError, which is neither OSError nor ValueError, so it escaped
+    # `_load`, `read()`'s contract and `main()`'s handler — and because the read never reached the
+    # reader, the poison entry was never rewritten: every later read raised until `--purge`.
+    except Exception:
         return None  # a killed writer's half entry, or corruption. It proves nothing.
     if not isinstance(env, dict):
         return None
@@ -1113,6 +1157,13 @@ def read(
     # with no projection at all. Cheap, and it makes guard 2 hold on the path that actually runs.
     _spec = INVARIANTS[key]
     _validate_spec(key, _spec.argv, _spec.projection, _spec.project)
+    # ⛔ A repo-scoped key derived from an EMPTY repo yields `"@main"`, which passes the
+    # non-empty-scope test and then spends one call from the very pool this module exists to
+    # protect, on `gh api repos/` (a guaranteed 404) reported as a GitHub fault.
+    if isinstance(scope, str) and scope.startswith("@"):
+        raise TtlNotPermitted(
+            f"{key!r} was given the scope {scope!r}: no repo. Pass --repo owner/name (or GH_REPO)."
+        )
     if not isinstance(scope, str) or not scope.strip():
         raise TtlNotPermitted(
             f"{key!r} requires a non-empty scope (e.g. 'owner/repo@main'); without one, one repo's "
