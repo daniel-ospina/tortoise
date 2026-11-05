@@ -18,7 +18,9 @@ says, and the launcher never resolves a repo it was given.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
+import errno
 import json
 import os
 import re
@@ -107,6 +109,13 @@ def launch(state_dir, co, pr=7, **kw):
 #: while the run's other seven shards were green, and that shard carries NO
 #: changed test file from the diff — the leg was killed by its 21-minute WATCHDOG
 #: at 73% progress, i.e. the box, not the rail.
+#:
+#: ⛔ RE-APPLIED ON MAIN'S TREE (PR #10610's conflicted head, 2026-11-05).
+#: `origin/main` rewrote this file independently (#10777 → #10975): the `gh`-absent
+#: family was re-cut and one helper moved. The merge takes main's rewrite WHOLESALE
+#: and re-applies only this bound, because it is the one change here that is not
+#: main's to own — `timeout=15.0`/`10.0` at the call sites below is the *value the
+#: flake was measured against*, not a decision main has since revisited.
 #:
 #: The process-exit bounds elsewhere in this file (`lane.wait(timeout=10)`,
 #: `a.wait(timeout=40)`, `_assert_no_worker_spawned`'s settle window) are
@@ -1909,106 +1918,610 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
         rd.launch(3, cwd=bare, state_dir=tmp_path / "state", repo="o/r")
 
 
-# ── a box with NO `gh` on PATH ──────────────────────────────────────────────
+# ── a missing `gh` binary is an UNREADABLE answer, never a traceback ──────────
 #
 # `subprocess.run(["gh", …])` raises `FileNotFoundError` when the BINARY is
-# absent, and that killed every case in this module on the fleet's self-hosted
-# pool (measured 2026-11-03: `test (h)` on pi-runner-vm-6/Linux-ARM64, run
-# 41732583553 — 20 of 20 here, `FileNotFoundError: [Errno 2] … 'gh'`). The two
-# callers already have a documented degradation for "this checkout cannot tell
-# me" (`Refused` for the repo, `unreadable` for the head) — a missing binary is
-# that case, not a different one — so these pin both arms on a PATH that has the
-# shell tools the child needs and no `gh` at all.
+# absent. That killed every case in this module on the fleet's pool, measured
+# TWICE before anyone believed it — on `pi-runner-vm-2` (2026-11-03, shard
+# `test (d)` by this branch's record, `test (a)` by main's, 21 arms vs 20;
+# neither job log is retrievable here, so the root is what is asserted and not
+# the integer) and on `pi-runner-vm-6`/Linux-ARM64, run `41732583553`, where all
+# 20 were killed. Both pool measurements are kept: each is the provenance a
+# reader needs to know this is a real pool condition, not a local quirk.
 #
-# ⚠️ `main` landed the SAME fix independently at `f422799c` (`_gh` returns
-# `CompletedProcess(argv, 127, "", "gh: command not found")`, never `None`) and
-# its own CLI-level pair for the same defect — see `_path_without_gh` below and
-# `test_launch_without_the_gh_cli_starts_and_stamps_an_unreadable_head` /
-# `test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking`. The
-# two arms here are therefore kept as the UNIT-level pair the merge kept from
-# the other side (`_resolve_repo`'s refusal text, and `Launch.head`); the CLI
-# pair below is the end-to-end one. Five tests, one root, three layers — recorded
-# rather than deduplicated, because each layer asserts something the other does
-# not (the `_gh` return contract is `None`-never with rc=127; the "installed"
-# remedy in the refusal text; `HEAD=unreadable` stamped in the artifact).
+# The tool's own contract already names the degraded answer (`_head_sha` →
+# "unreadable", `_resolve_repo` → `Refused`); only the spawn was unguarded, so
+# the missing binary escaped as an exception the callers never see in
+# production.
+#
+# ⚠️ `origin/main` landed the SAME fix independently (`_gh` introduced by
+# `f422799c4`, #10724; its lines edited later by `815a9495b`, #10622) and arrived
+# here as a content conflict. The merge keeps
+# ONE helper and ONE arm per layer rather than both sides' copies: the duplicate
+# owner is the shape #10777 exists to remove (the merge left two copies of this
+# very helper once, and the second binding silently shadowed the first —
+# `test_this_module_defines_no_helper_twice` pins that class of defect). Where
+# the two sides overlapped, the surviving arm asserts the UNION — "not on PATH"
+# (this branch's precision) *and* "gh repo view" / "install" (main's remedy
+# text); `HEAD=unreadable` in the artifact (this branch, the persistent record)
+# *and* the rail reaching MERGED (main, the end-to-end outcome).
 #
 # ⛔ The CONTRACT layer is not redundant with either: `test_gh_never_returns_None_for_a_missing_binary`
-# is the only arm that reds when `_gh` is changed to return `None` — the state in
-# which BOTH callers crash at `out.returncode`. It is what makes dropping the two
-# `out is not None` guards the merge kept safe (#10622 round 9), instead of tidy.
+# is the only arm that reds when `_gh` stops answering (returns `None`) — the
+# state in which BOTH callers crash at `out.returncode`. It is what makes the
+# absence of an `out is not None` guard safe rather than lucky.
+def _path_without_gh(tmp_path: Path, *needed: str) -> str:
+    """A `PATH` holding just the binaries the rail/child need, never `gh`.
 
-def no_gh_on_path(tmp_path, monkeypatch):
-    """A PATH with the child's shell tools but NOT `gh`."""
-    d = tmp_path / "bin-nogh"
-    d.mkdir()
-    for name in ("bash", "date", "env", "sh", "sleep"):
-        real = shutil.which(name)
-        assert real, f"{name} is missing from this test box"
-        (d / name).symlink_to(real)
-    monkeypatch.setenv("PATH", str(d))
-    return d
+    `*needed` stages extra tools: the detached child stamps its artifact with
+    `date -u`, so a `PATH` without `date` makes the launch under test fail for a
+    reason the arm is not about.
+
+    #9018: `runs-on: ubuntu-latest` names a GitHub-hosted IMAGE, but the fallback
+    pool carries that same label on a bare runner whose service PATH is a minimal
+    non-login one — where `gh` is simply absent. Absence is SIMULATED here rather
+    than inherited, so the arm means the same thing on every runner.
+
+    ⛔ ONE DEFINITION, and `*needed` is load-bearing: a merge once left two
+    top-level definitions of this helper, the later one-argument binding
+    shadowing the first. Two top-level definitions of one name is SILENT
+    SHADOWING — python binds the last, and ruff's F811 stays quiet because the
+    earlier one is still referenced — so the `*needed` form went unreachable and
+    any `_path_without_gh(tmp_path, "date")` call became a `TypeError`.
+    `test_this_module_defines_no_helper_twice` and
+    `test_the_ghless_path_helper_stages_the_tools_it_is_asked_for` pin it, and
+    `test_the_ghless_path_helper_is_reusable_on_one_tmp_path` pins that a SECOND
+    call is additive rather than an `FileExistsError`.
+    """
+    bin_dir = tmp_path / "nogh-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("bash", "sleep", "date", "sh", "env", *needed):
+        src = shutil.which(name)
+        assert src, f"the fixture needs {name} on the host PATH"
+        dst = bin_dir / name
+        # BOTH halves of the reuse hazard: the directory (`exist_ok=True`) AND
+        # the staged symlinks. `is_symlink` rather than `exists` so this asks
+        # about OUR staging, not about the host binary the link resolves to.
+        if not dst.is_symlink():
+            dst.symlink_to(src)
+    assert not (bin_dir / "gh").exists()
+    return str(bin_dir)
 
 
 def test_gh_never_returns_None_for_a_missing_binary(tmp_path, monkeypatch):
     """`_gh`'s annotation is a CONTRACT the callers may rely on, not a hint.
 
-    `-> subprocess.CompletedProcess` means the missing-binary case is ANSWERED
-    (`rc=127`), never signalled by `None` — so a caller needs no
-    `out is not None` guard, and one that carries a guard is describing a
-    return type this function does not have. Two such guards arrived on the
-    branch side of the #10622 merge (where `_gh` *could* return `None`) and sat
-    unreachable under main's `_gh` until a fresh-context review read the
-    annotation against them.
+    `-> _GhRun` means the missing-binary case is ANSWERED (`rc=127`, with a
+    `cause`), never signalled by `None` — so a caller needs no `out is not None`
+    guard, and one that carries a guard is describing a return type this
+    function does not have.
 
-    This arm is the invariant that keeps that deletion safe: a `None`-returning
-    `_gh` reds the assertion below, before a guard can rot into a second
-    description of the function. NON-VACUOUS — proved twice, because the two
-    senses differ and only one of them is a test against history:
-
-    * **Against a mutant of THIS tree** (`return None` in the `except` arm):
-      `1 failed` at the `out is not None` assertion, and both callers would
-      then crash at `out.returncode` — the guards were not protecting them.
-    * **Against the true pre-fix head** (`cbefdcbe^`, before #2148): `_gh` does
-      not exist there at all — the absent binary was an UNGUARDED
-      `subprocess.run(["gh", ...])` inside `_resolve_repo`/`_head_sha` — so
-      this arm reds with `AttributeError`, not with a behaviour claim. Said
-      plainly: the "before" side of this test is the function's absence, and
-      the invariant it pins is the one #2148 introduced.
+    This arm is the invariant that keeps the absence of such guards safe: a
+    `None`-returning `_gh` reds the assertion below, before a guard can rot into
+    a second, wrong description of the function. NON-VACUOUS — proved against a
+    mutant of THIS tree (`return None` in the `except` arm): the arm fails at
+    `out is not None`, and both callers would then crash at `out.returncode`.
     """
     co = make_checkout(tmp_path)
-    no_gh_on_path(tmp_path, monkeypatch)
-    out = rd._gh(["gh", "repo", "view"], co)
+    monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
+    out = rd._gh(["repo", "view"], co)
     assert out is not None, "`_gh` returned None; its annotation says it cannot"
-    assert out.returncode == 127, out
+    assert out.returncode == 127, out.returncode
     assert "command not found" in (out.stderr or ""), out.stderr
+    # `getattr` on the CAUSE too, not just on the message: the pre-fix module
+    # returns a bare `CompletedProcess`, so a direct `out.cause` reds with
+    # `AttributeError` while EVALUATING the assertion — a proof that reds for the
+    # wrong reason is not one (review, #10777; same guard as the chdir arm).
+    assert "not on PATH" in (getattr(out, "cause", "") or ""), getattr(out, "cause", "")
 
 
-def test_a_missing_gh_is_a_REFUSAL_not_a_traceback(tmp_path, monkeypatch):
-    """`gh` absent is a precondition the launcher enforces, never a crash."""
+def test_a_missing_gh_is_a_REFUSAL_that_says_what_to_fix(tmp_path, monkeypatch):
+    """`gh` absent is a precondition the launcher enforces, never a crash.
+
+    The refusal has to carry all three facts a lane needs to act: the COMMAND
+    that failed (`gh repo view`), the CAUSE (`not on PATH` — not "auth expired",
+    not "no remote"), and the REMEDY (`install`, or `--repo` to name the target
+    itself). Any one of them missing sends the operator guessing.
+
+    ⛔ THIS ARM IS THE FOLD OF TWO (`#10622` merge, then `#10975`). Main's
+    `test_a_missing_gh_is_a_REFUSAL_not_a_traceback` asserted the same refusal
+    and the word `installed`; this branch's arm asserts the same message with
+    two MORE facts (`not on PATH`, `pass --repo`). Keeping both would be two
+    arms for one message, so the surviving arm asserts the UNION — and
+    `installed` is pinned here rather than dropped, because it is the only word
+    that says the CLI may ALREADY be there (the branch-side wording reads as
+    "install it" at a binary that might be installed and misconfigured).
+    """
     co = make_checkout(tmp_path)
-    no_gh_on_path(tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
     with pytest.raises(rd.Refused) as exc:
         rd._resolve_repo(co)
-    assert "gh repo view" in str(exc.value)
-    assert "installed" in str(exc.value), (
-        "the refusal does not say WHAT to fix — a lane reading it has to guess "
-        f"whether the checkout or the tool is wrong: {exc.value}")
+    msg = str(exc.value)
+    assert "gh repo view" in msg, msg
+    assert "not on PATH" in msg, msg
+    # ⛔ NOT REDUNDANT with `install`: `"install" in "installed"` is True, so
+    # deleting the longer word leaves the shorter assertion green. This one is
+    # what reds when main's half of the union is dropped in a future merge.
+    assert "installed" in msg, msg
+    assert "install" in msg, msg
+    assert "pass --repo" in msg, msg
 
 
 def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path, monkeypatch):
-    """The rail must outlive the lane on a box that has no `gh` too.
+    """`launch()` degrades instead of crashing, and the record says so.
 
     A caller that passes `repo=` has already settled the one thing `gh` was
     needed for, and the head is recorded as `unreadable` — the same value
-    `_head_sha` returns when `gh` runs and fails. Neither may become a crash.
+    `_head_sha` returns when `gh` runs and fails. Pre-fix this raised
+    `FileNotFoundError` out of `launch()`, so the launcher died instead of
+    stamping its artifact and the rail never outlived the lane.
     """
     co = make_checkout(tmp_path)
     sd = tmp_path / "state"
-    no_gh_on_path(tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", _path_without_gh(tmp_path))
     ln = launch(sd, co, pr=21)
     assert ln.pid > 0, "the rail did not start without `gh`"
     assert ln.head == "unreadable", ln.head
+    assert "HEAD=unreadable" in Path(ln.artifact).read_text(encoding="utf-8")
     assert wait_state(sd, 21, rd.MERGED, timeout=_STATE_DEADLINE_S).state == rd.MERGED
+
+
+def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypatch):
+    """Two spawn failures, two answers (review, #10777).
+
+    A `gh` that is PRESENT but not executable raises `PermissionError` — not the
+    `FileNotFoundError` of a PATH miss — and its remedy is `chmod +x`, never
+    "install the GitHub CLI" (a binary that is present is not a binary that is
+    missing). ⛔ Before the split that failure escaped `launch()` entirely, as a
+    `PermissionError` traceback, and no version of `_gh` ever answered it with
+    `127`: the mutant that folds `except OSError` into the 127 arm is what tells
+    the operator to install a binary they already have, and this arm is what reds
+    on that mutant.
+
+    `EAGAIN`/`ENOMEM` from `fork` under cell load is a THIRD cause with its own
+    remedy ("retry when it is not loaded"), asserted in
+    `test_the_spawn_remedy_is_keyed_by_errno` — deliberately not a `chmod`.
+
+    ⛔ AND THE REMEDY IS ASSERTED, not just the cause (review, `#10777`): this
+    docstring once claimed a `chmod` remedy that no path in the code printed, so
+    the claim was unfalsifiable from the artifact it describes. The `OSError` arm
+    is keyed by errno now, and this arm pins the word it promises.
+    """
+    bin_dir = tmp_path / "unejecutable-bin"
+    bin_dir.mkdir()
+    # A real file named `gh` on PATH, deliberately not executable.
+    (bin_dir / "gh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "is not on PATH" not in msg, msg
+    assert "pass --repo" in msg, msg
+    assert "chmod" in msg, (
+        f"the remedy must match the cause (it is present, just not executable): {msg}")
+
+    # And the same call answers `unreadable` rather than raising on this arm.
+    assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable"
+
+
+def test_the_spawn_remedy_is_keyed_by_errno(tmp_path):
+    """Every branch of `_oserror_remedy` names ITS OWN repair (review, `#10777`).
+
+    Deleting a branch used to leave the suite green: only the EACCES and ENOTDIR
+    arms were reachable from a test, so the `EAGAIN`/`ENOMEM` and generic
+    fallbacks could be re-collapsed onto another cause's advice with nothing to
+    notice. This arm calls the helper directly, which is the only way to reach a
+    fork failure without inducing one.
+    """
+    denied = rd._oserror_remedy(PermissionError(errno.EACCES, "denied"))
+    assert "chmod" in denied, denied
+    # ⛔ BOTH OBJECTS, because this errno cannot say which one (review, `#10777`):
+    # an untraversable `PATH` directory and a non-executable file both arrive as
+    # `PermissionError(13, filename='gh')`, so a `chmod +x`-only remedy is wrong
+    # advice for one of them. Pinned, or the directory half can be deleted unseen.
+    assert "traversable" in denied, denied
+    assert "chmod" in rd._oserror_remedy(PermissionError(errno.EPERM, "denied"))
+
+    # ⛔ AND THE CWD IS BLAMED ONLY FOR AN ERRNO A `chdir` CAN RAISE (review,
+    # `#10777`): otherwise the gate is unpinned, because every cwd-side arm uses
+    # EACCES and gated/ungated code answer it identically. EIO cannot come from a
+    # chdir, so it must not be reported as a working-directory fault.
+    not_a_chdir_errno = rd._oserror_remedy(OSError(errno.EIO, "i/o error", "/some/cwd"))
+    # The generic fallback legitimately mentions the cwd as ONE thing to check; what
+    # is forbidden is CLAIMING it is the fault.
+    assert "could not be used" not in not_a_chdir_errno, not_a_chdir_errno
+    assert "is not a directory" not in not_a_chdir_errno, not_a_chdir_errno
+    eagain = rd._oserror_remedy(OSError(errno.EAGAIN, "try again"))
+    assert "loaded" in eagain, eagain
+    assert "chmod" not in eagain, eagain
+    assert "loaded" in rd._oserror_remedy(OSError(errno.ENOMEM, "out of memory"))
+    assert "not a directory" in rd._oserror_remedy(OSError(errno.ENOTDIR, "nope", str(tmp_path)))
+    generic = rd._oserror_remedy(OSError(errno.E2BIG, "too big"))
+    assert "check the working directory" in generic, generic
+
+    # ⛔ THE OBJECT GATES THE CHDIR-SIDE ERRNO TOO (review, `#10777`): a PATH entry
+    # that is a regular FILE raises `ENOTDIR` with `filename='gh'`, and answering it
+    # "the working directory is not a directory" blames a cwd that is fine.
+    exec_side_enotdir = rd._oserror_remedy(
+        NotADirectoryError(errno.ENOTDIR, "not a directory", "gh"))
+    # The generic fallback mentions the cwd as ONE of two things to check; what is
+    # forbidden is CLAIMING it is the fault.
+    assert "is not a directory" not in exec_side_enotdir, exec_side_enotdir
+    assert "could not be used" not in exec_side_enotdir, exec_side_enotdir
+
+    # ⛔ THE ERRNO IS NOT THE CAUSE ON ITS OWN (review, `#10777`): an `EACCES` on
+    # the WORKING DIRECTORY must not be answered with `chmod +x` on a `gh` that is
+    # fine. `filename` carries which object failed, and it must decide first.
+    cwd_denied = rd._oserror_remedy(PermissionError(errno.EACCES, "denied", str(tmp_path)))
+    assert "chmod" not in cwd_denied, cwd_denied
+    assert "working directory" in cwd_denied, cwd_denied
+
+
+def test_an_exec_side_failure_does_not_blame_the_working_directory(tmp_path, monkeypatch):
+    """A `PATH` entry that is a regular FILE is an EXEC failure, not a cwd failure.
+
+    Review, `#10777`: `ENOTDIR` was checked before the failing object, so this
+    shape was answered "the working directory is not a directory" about a cwd that
+    is perfectly good — `filename` is `'gh'` here, because CPython sets it to
+    `argv[0]` on the exec side. The object has to gate the errno, not the reverse.
+    """
+    a_file = tmp_path / "a-file"
+    a_file.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(a_file))
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "is not a directory" not in out.remedy, out.remedy
+    assert "could not be used" not in out.remedy, out.remedy
+
+
+def test_an_unreadable_cwd_is_not_a_broken_gh_install(tmp_path):
+    """`EACCES` on the CWD is a directory problem, never a `gh` problem.
+
+    Review, `#10777`: keying the remedy on errno alone re-created the defect this
+    helper exists to prevent — `chmod 000` on a directory used as `cwd` raises
+    `PermissionError(errno=13, filename=<cwd>)`, and the operator was told to
+    `chmod +x` a binary that is fine. The exception already carries which object
+    failed, so the object decides before the errno.
+    """
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        out = rd._gh(["repo", "view"], locked)
+    finally:
+        locked.chmod(0o700)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "chmod" not in out.remedy, out.remedy
+    assert "working directory" in out.remedy, out.remedy
+    assert str(locked) in out.cause, out.cause
+
+
+def test_a_real_gh_that_exits_127_is_not_reported_as_missing(tmp_path, monkeypatch):
+    """`gh` exiting 127 is a REFUSAL BY the binary, never evidence it is absent.
+
+    Review, `#10777`: `_gh` answers 127 for two unrelated conditions — a fabricated
+    PATH miss (which carries a `cause`) and a REAL process that exited 127 (which
+    never does) — and the refusal collapsed them, so an operator whose `gh` shim
+    refused (`gh-shim: REFUSING to exec … — unset AGENT_GH_REAL`, the fleet's own
+    shim does exactly this) was told the binary was not installed.
+    """
+    bin_dir = tmp_path / "gh-127-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "gh-shim: refusing to exec an unresolvable gh" >&2\n'
+        "exit 127\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    # `getattr` in the message AND in the assertion, so the pre-fix module (whose
+    # `_gh` returns a bare `CompletedProcess` with no `cause`) reds on the
+    # BEHAVIOUR it is accused of, not on an `AttributeError` raised while
+    # formatting the proof (review, #10777).
+    assert out.returncode == 127, (out.returncode, getattr(out, "cause", ""))
+    assert getattr(out, "cause", "") == "", (
+        "a real process's exit code must not be given a fabricated cause: "
+        f"{getattr(out, 'cause', '')!r}")
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "not on PATH" not in msg, msg
+    assert "install the GitHub CLI" not in msg, msg
+    assert "ran and refused" in msg, msg
+    assert "unresolvable gh" in msg, msg
+
+
+def test_a_real_gh_that_exits_124_is_not_told_to_install_the_cli(tmp_path, monkeypatch):
+    """`gh` exiting 124 is a process that RAN and timed out, not a missing install.
+
+    Review cycle 5, finding 2. The 124 arm is gated on `cause` (fabricated by the
+    `GH_PROBE_TIMEOUT_S` bound), so a REAL process exiting 124 skipped it and fell
+    through to the generic arm, whose remedy is "is `gh` installed and
+    authenticated? … or install the `gh` CLI" — advice that is provably wrong for a
+    binary that just produced an exit status. Same defect the 126 and 127 real arms
+    fix, one code over; `124` is what a wrapper around `gh` returns on its own
+    timeout (`timeout(1)`'s convention), so it is reachable in practice.
+    """
+    bin_dir = tmp_path / "gh-124-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "gh-wrapper: gave up waiting for the API" >&2\n'
+        "exit 124\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 124, (out.returncode, out.cause)
+    assert out.cause == "", f"a real process's exit code must not be given a cause: {out.cause!r}"
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "install the `gh` CLI" not in msg, msg
+    assert "installed and authenticated" not in msg, msg
+    assert "exited 124" in msg, msg
+    assert "hit its own timeout" in msg, msg
+    assert "gave up waiting" in msg, msg
+
+
+def test_a_real_gh_that_exits_126_is_not_reported_as_unexecutable(tmp_path, monkeypatch):
+    """`gh` exiting 126 is a FAILURE of a process that ran, never "cannot execute".
+
+    Review, `#10777`: the sibling 127 pair already separates a fabricated PATH
+    miss (which carries a `cause`) from a real process's own exit code, but the
+    126 arm was NOT gated on `cause` — so a real `gh` that exited 126 was told it
+    "could not be executed", which its own exit proves false, and `out.stderr`
+    (the only thing that says why) was dropped on the floor. Same defect class as
+    the 127 collapse this PR exists to fix.
+    """
+    bin_dir = tmp_path / "gh-126-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "gh: 126 from a binary that ran" >&2\n'
+        "exit 126\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 126, (out.returncode, getattr(out, "cause", ""))
+    assert getattr(out, "cause", "") == "", (
+        "a real process's exit code must not be given a fabricated cause: "
+        f"{getattr(out, 'cause', '')!r}")
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "could not be executed" not in msg, msg
+    assert "exited 126" in msg, msg
+    # The stderr detail must survive: it is the only thing that says WHY.
+    assert "126 from a binary that ran" in msg, msg
+
+
+def test_a_gh_that_exits_zero_with_no_repo_is_not_an_install_problem(tmp_path, monkeypatch):
+    """rc=0 with EMPTY stdout reaches the refusal too, and it is not an install fault.
+
+    Review, `#10777`: the success guard requires `returncode == 0 AND stdout.strip()`,
+    so a `gh` that exited 0 and printed nothing fell through the 127/126 pairs into
+    the generic arm — which told the operator "`gh repo view` failed … is `gh`
+    installed and authenticated? … install the `gh` CLI" about a binary that exited
+    0, i.e. demonstrably ran. Same dishonesty as the 126 collapse, one branch down.
+    """
+    bin_dir = tmp_path / "gh-silent-bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "gh"
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    assert out.returncode == 0, (out.returncode, getattr(out, "cause", ""))
+    assert out.stdout == "", repr(out.stdout)
+
+    # ⛔ THE OTHER HALF OF THE SAME SEAM (review, `#10777`): `_resolve_repo` refuses
+    # by name here, but `_head_sha`'s bare `returncode == 0` guard let the same
+    # silent `gh` through as `""` — which `launch()` stamps as `HEAD=` (blank), a
+    # value indistinguishable from a field never written. Both call sites read the
+    # same surface, so both must answer a NAMED state. This assertion fails on
+    # `return ... if out.returncode == 0 else "unreadable"`.
+    assert rd._head_sha(tmp_path, "o/r", 5) == "unreadable", (
+        "an empty head must read as `unreadable`, not as an empty string")
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    # The claim that must NOT survive: a 0-exit binary is not a broken install.
+    assert "install the `gh` CLI" not in msg, msg
+    assert "is `gh` installed and authenticated" not in msg, msg
+    assert "exited 0" in msg, msg
+    assert "pass `--repo" in msg, msg
+
+
+def test_a_cwd_that_is_not_a_directory_is_not_a_broken_gh_install(tmp_path):
+    """An `ENOTDIR` cwd is ALSO an `OSError`, and "repair the install" is wrong for it.
+
+    Review, `#10777`: the chdir remedy was made per-cause, but only for the
+    `FileNotFoundError` arm — a cwd that is present-but-a-FILE lands on
+    `NotADirectoryError` and was still told to repair a `gh` install that is fine.
+    Same defect one branch over, so the `OSError` arm is keyed by errno too.
+    """
+    not_a_dir = tmp_path / "not-a-dir"
+    not_a_dir.write_text("x", encoding="utf-8")
+    out = rd._gh(["repo", "view"], not_a_dir)
+    assert out.returncode == 126, (out.returncode, out.cause)
+    assert "repair the `gh` install" not in out.remedy, out.remedy
+    assert "not a directory" in out.remedy, out.remedy
+    assert str(not_a_dir) in out.cause, out.cause
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(not_a_dir)
+    assert "repair the `gh` install" not in str(exc.value), str(exc.value)
+
+
+def test_a_failed_chdir_is_not_reported_as_a_missing_binary(tmp_path):
+    """A `chdir` failure is ALSO a `FileNotFoundError`, but the missing thing is the CWD.
+
+    CPython 3.12 `subprocess.py:1940-1955`: a failed `chdir` sets
+    `err_filename = cwd`, while a failed exec sets it to the executable. So the
+    `filename == "gh"` discrimination in `_gh` is load-bearing — without it the
+    two failures collapse and the operator is told that a binary they have is
+    absent, sending them to install the wrong thing.
+
+    ⛔ WHY THIS ARM EXISTS (rail review, P2 on `f25cda23d`): the refusal arm above
+    is a `PermissionError`, which takes the `except OSError` branch and NEVER
+    reaches the discrimination — so before this arm existed the whole suite stayed
+    GREEN with the discrimination mutated.
+
+    ⛔ AND THE MUTANT IS NAMED EXACTLY (review, #10777 — a false measurement in a
+    docstring is the defect this file exists to refuse): this arm reddens on
+    `if False:` — the discrimination COLLAPSED to 127, so a `chdir` miss answers
+    "`gh` is not on PATH". Measured at head `32ad7fbe9`: `if False:` → 1 failed,
+    and it is THIS arm. It does NOT redden on `if True:` (that mutant forces every
+    `FileNotFoundError` down the cwd branch and this arm still gets its 126);
+    `if True:` is owned by the absence arms —
+    `test_gh_never_returns_None_for_a_missing_binary`,
+    `test_a_missing_gh_is_a_REFUSAL_that_says_what_to_fix`,
+    `test_a_gh_on_path_with_a_dead_shebang_is_not_reported_as_missing` and
+    `test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking`
+    (measured: 4 failed) — so the pair of mutants together pin both directions.
+    """
+    missing = tmp_path / "this-cwd-does-not-exist"
+    out = rd._gh(["repo", "view"], missing)
+    # `getattr` on the MESSAGE, so the pre-fix module (whose `_gh` returns a bare
+    # `CompletedProcess` with no `cause`) fails on the BEHAVIOUR — rc 127 for a
+    # chdir miss — instead of on an `AttributeError` raised while formatting this
+    # assertion. Review, #10777: a proof that reds for the wrong reason is not one.
+    assert out.returncode == 126, (out.returncode, getattr(out, "cause", ""))
+    assert "is not on PATH" not in out.cause, out.cause
+    assert str(missing) in out.cause, (
+        f"the cause must name the CWD that could not be entered: {out.cause}")
+
+    # ⛔ THE REMEDY IS PINNED TOO, not just the returncode (review, #10777): the
+    # 126 arm used to append one hard-coded "fix the `gh` install" for every cause,
+    # which is wrong advice for a reaped worktree — there is nothing wrong with the
+    # `gh` install. Nothing asserted the message half, so it stayed wrong.
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(missing)
+    msg = str(exc.value)
+    assert str(missing) in msg, msg
+    assert "fix the `gh` install" not in msg, (
+        f"a missing CWD is not a broken `gh` install: {msg}")
+    assert "live checkout" in msg, msg
+
+
+def test_a_gh_on_path_with_a_dead_shebang_is_not_reported_as_missing(tmp_path, monkeypatch):
+    """`filename == "gh"` is NOT evidence the binary is absent (review, #10777).
+
+    CPython passes the literal argv[0] for ANY exec failure of a bare name, so a
+    `gh` that IS on `PATH` but whose shebang interpreter is gone raises the same
+    `FileNotFoundError(filename="gh")` as a PATH miss. Measured 2026-11-04 with the
+    broken candidate as the SOLE `PATH` entry: `shutil.which("gh")` resolves it and
+    `subprocess` still will not run it, so the predicate alone answered 127 "not on
+    PATH — install the GitHub CLI" for a binary the operator already had, which is
+    the misdiagnosis the 126 arm exists to prevent.
+
+    ⚠️ With a WORKING `gh` later on `PATH`, CPython's own walk silently skips this
+    candidate and runs the later one (`executable_list` is built from
+    `os.get_exec_path` at `subprocess.py:1880-1882`; no `execvp` is called on this path) — so this arm must own `PATH` completely or it
+    pins nothing.
+    """
+    bin_dir = tmp_path / "dead-shebang-bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text("#!/nonexistent/interp\necho hi\n", encoding="utf-8")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert shutil.which("gh") == str(gh), (
+        "precondition: the binary IS on PATH, or this arm tests the PATH-miss case")
+
+    out = rd._gh(["repo", "view"], tmp_path)
+    # `getattr` on the cause, so the pre-fix module reds on the BEHAVIOUR ("a live
+    # binary on PATH is not a missing one") rather than on an `AttributeError`
+    # raised while formatting the assertion (review, #10777).
+    assert out.returncode == 126, (out.returncode, getattr(out, "cause", ""))
+    cause = getattr(out, "cause", "")
+    assert "is not on PATH" not in cause, cause
+    assert str(gh) in cause, cause
+
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(tmp_path)
+    msg = str(exc.value)
+    assert "not on PATH" not in msg, msg
+    assert "install the GitHub CLI" not in msg, msg
+
+
+def test_the_ghless_path_helper_stages_the_tools_it_is_asked_for(tmp_path):
+    """`_path_without_gh(tmp, "cat")` must stage `cat` — a shadowed form raised TypeError.
+
+    A merge left TWO top-level definitions of this helper: the `*needed` form
+    first, then a one-argument form, which python bound last. The base set covers
+    what the detached child's `date -u` stamp needs, and `*needed` is how an arm
+    stages anything further; the shadowed form made that whole form unreachable,
+    so this call raised `TypeError: _path_without_gh() takes 1 positional
+    argument but 2 were given`.
+    """
+    path = _path_without_gh(tmp_path, "cat")
+    assert (Path(path) / "cat").exists(), "the requested tool was not staged"
+    assert not (Path(path) / "gh").exists(), "the helper must never stage `gh`"
+
+
+def test_the_ghless_path_helper_is_reusable_on_one_tmp_path(tmp_path):
+    """A SECOND call must ADD tools, not raise `FileExistsError`.
+
+    `main`'s copy of this helper staged its base set with `mkdir(exist_ok=True)`;
+    this branch's copy used a bare `mkdir()`, and the merge kept the stricter form
+    with no reason stated (review, #10777). Nothing reddens today only because no
+    arm calls the helper twice on one `tmp_path` — so the next arm that needs two
+    different PATHs in one test would get a bare `FileExistsError` instead of a
+    staged PATH, and the failure would name the fixture, not the arm.
+
+    ⛔ THE HAZARD HAS TWO HALVES, and fixing only the first is why the arm below
+    was written: `mkdir(exist_ok=True)` alone still reds, because the second call
+    then dies on `dst.symlink_to(src)` for every base tool already staged. BOTH
+    are idempotent here.
+
+    Non-vacuity, measured on each half SEPARATELY (this arm, `-k
+    is_reusable_on_one_tmp_path`, one mutation at a time):
+
+      bare `mkdir()`                         -> 1 failed  (FileExistsError at `bin_dir.mkdir()`)
+      `mkdir(exist_ok=True)`, no `is_symlink` -> 1 failed  (FileExistsError at `dst.symlink_to(src)`)
+      both in place                           -> 1 passed
+
+    ⛔ THE CALL SITES, NOT `pathlib.py` LINE NUMBERS (review, `#10777`). These cited
+    `:1313` / `:1388` are `pathlib`'s own positions, not this branch's file: they are
+    the `os.mkdir()` inside `Path.mkdir` and the `os.symlink()` inside
+    `Path.symlink_to`, version-dependent, so they would rot at the next CPython.
+    Naming the raising call makes the measurement re-runnable against any interpreter.
+    """
+    first = _path_without_gh(tmp_path)
+    second = _path_without_gh(tmp_path, "cat")
+    assert first == second, "the helper must reuse one staged directory"
+    assert (Path(second) / "cat").exists(), "the second call staged nothing new"
+    assert (Path(second) / "date").exists(), "the base set was lost on reuse"
+    assert not (Path(second) / "gh").exists(), "the helper must never stage `gh`"
+
+
+def test_this_module_defines_no_helper_twice():
+    """A duplicate top-level definition is SILENT SHADOWING, not dead code.
+
+    `ruff`'s F811 stays quiet when the first binding is still referenced (both
+    were, from different arms), so nothing in CI could see #10777's duplicated
+    `_path_without_gh`. Standalone: `python3 -m pytest tests/test_rail_detach.py`.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    names = [n.name for n in tree.body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, f"shadowed top-level definition(s): {dupes}"
 
 
 def test_child_invokes_only_the_one_lander(tmp_path):
@@ -2027,25 +2540,6 @@ def test_child_invokes_only_the_one_lander(tmp_path):
 
 
 # ── the runner's TOOL CONTRACT: `gh` ABSENT is a failed query, not a crash ───
-def _path_without_gh(tmp_path: Path) -> str:
-    """A PATH that resolves what the rail needs but has NO `gh` on it.
-
-    #9018: `runs-on: ubuntu-latest` names a GitHub-hosted IMAGE, but the
-    fallback pool carries that same label on a bare runner whose service PATH is
-    a minimal non-login one — where `gh` is simply absent (measured 2026-11-03:
-    `test (a)` on `pi-runner-vm-2`, `FileNotFoundError: 'gh'`, 20 arms red on a
-    PR that touches neither this tool nor this file). Absence is SIMULATED here
-    rather than inherited, so the arm means the same thing on every runner.
-    """
-    b = tmp_path / "bin-no-gh"
-    b.mkdir(exist_ok=True)
-    for tool in ("bash", "sleep"):
-        src = shutil.which(tool)
-        assert src, f"{tool} must exist for this arm to mean anything"
-        (b / tool).symlink_to(src)
-    return str(b)
-
-
 def _cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items()
            if k not in rd.FORBIDDEN_ENV}   # the launcher refuses a carried bypass
