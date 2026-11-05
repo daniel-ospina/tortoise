@@ -68,7 +68,7 @@ Doors: **D1** hosted `POST /v1/sessions` · **D2** SDK `capture_session` · **D3
 
 ## Test-layer allocation — the CI budget, decided here and not at implementation time
 
-**The rule: no test in this epic may add a real-model call, or a full-corpus run, to the gating path.** The repo already carries 41,842 tests, a 72-file slow set, and a per-PR selection driven by `config/ci-surfaces.yml` (a *serialization point*, not a file). An epic about extraction quality is exactly the kind that would otherwise bolt a 7-session LLM replay onto every PR.
+**The rule: no test in this epic may add a real-model call, or a full-corpus run, to the gating path.** The repo already carries **46,173 collected tests** (`uv run pytest tests/ --collect-only -q`, measured 2026-11-05) and a **74-file slow set** in `config/ci-surfaces.yml`, of which **60** gate a PR — the remainder are carve-out and eval-lane entries (`tools.ci_selection.slow_gating_files`). The per-PR selection is driven by that same file, a *serialization point*, not a file list. An epic about extraction quality is exactly the kind that would otherwise bolt a 7-session LLM replay onto every PR.
 
 | layer | what lives there | runs when | needs | budget |
 |---|---|---|---|---|
