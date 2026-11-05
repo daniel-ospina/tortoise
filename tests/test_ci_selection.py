@@ -2949,11 +2949,26 @@ def test_gh_write_preflight_tool_change_selects_core_not_tier1():
     Mutation check: removing the CORE_ALSO entry fails the FIRST assert
     (`"core" in r["surfaces"]`); the docs-only early return then yields `full: False` with no pin,
     so the later asserts pass unexercised.
+
+    #11027 adds the SIBLING half. The `CORE_ALSO` entry is a PREFIX (`"tools/gh_write_preflight"`),
+    because `_selection_relevant` matches with `path.startswith(CORE_ALSO)` — so an EXACT path claims
+    only the file as spelled today and silently re-opens this same drop for a rename or a split-out
+    sibling, which is the one shape that makes the gate a diff that runs none of its own arms. That
+    property is pinned by the second block below: it is a REAL falsifier, measured by reverting the
+    entry to the exact path, at which point it is the assert that reds.
     """
     r = _sel(["tools/gh_write_preflight.py"])
     assert "core" in r["surfaces"], r
     assert "test_gh_write_preflight.py" in r["test_files"], r
     assert r["full"] is False, r
+
+    # The PREFIX property: a split-out sibling must still claim the surface. Under the exact-path
+    # entry this returns `surfaces=[]` and the tier-1 smoke fallback (measured), i.e. a rename would
+    # silently stop running the 96 arms that pin the write proof.
+    sibling = _sel(["tools/gh_write_preflight_extra.py"])
+    assert "core" in sibling["surfaces"], sibling
+    assert "test_gh_write_preflight.py" in sibling["test_files"], sibling
+    assert sibling["full"] is False, sibling
 
 
 def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped():
