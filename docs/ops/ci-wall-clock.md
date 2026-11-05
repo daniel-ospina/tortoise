@@ -357,9 +357,17 @@ same step with the same tail is the investigation.
 
 ## 7. Matrix fan-out: how many slots one run may hold (`max-parallel`)
 
-`strategy.max-parallel` was unset on every matrix in this repo until #6744, so a single PR
-enqueued its whole shard set — 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — at the same
+No matrix in this repo declared `strategy.max-parallel` before #6744, so a single PR enqueued
+`python-ci`'s whole shard set — 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — at the same
 instant, on top of 11 singleton jobs.
+
+⛔ **Scope of that claim: `python-ci`'s three shard matrices.** It is not a repo-wide audit, and
+reading it as one would be wrong — `.github/workflows/mirror-images.yml` still declares a
+`matrix` with no cap. That one is out of scope rather than overlooked: it is a
+`workflow_dispatch` job, so it has no per-PR fan-out to bound, and its `matrix` is a static
+3-target list (mirroring registry images), not a shard set that grows with the suite. It is
+recorded here only so a later reader does not mistake this section for "every matrix in the repo
+is bounded".
 
 **Measured 2026-10-31, ~03:30Z**, 9 `python-ci` runs (`pull_request`, 2026-10-30T21:48Z ..
 10-31T02:54Z), jobs API `filter=all`, completed jobs only:
@@ -424,9 +432,15 @@ these jobs is measured from runner pickup — the in-step watchdog is started IN
 start delayed by the cap cannot consume a shard's budget. The matrix itself is untouched (the
 shard set is still the selector's `fast_matrix` / `slow_matrix` / `carve_matrix`), and a `needs:`
 on a matrix job waits for **every** leg regardless of ordering (#5219) — so `python-ci-gate`
-cannot conclude before a shard it needs has run. Both halves are pinned by
-`tests/test_ci_selection.py::test_every_matrix_bounds_its_fan_out_below_the_measured_pool` and
-`::test_no_required_check_names_a_fast_leg`.
+cannot conclude before a shard it needs has run. Both halves are pinned, and by three separate
+pins rather than two — the caps are a different property from the two false-red halves:
+
+- the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
+  than a workflow literal →
+  `tests/test_ci_selection.py::test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard`;
+- the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
+- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) →
+  `::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`.
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
 repos/<owner>/<repo>/actions/runners`), the per-shard wall and the start stagger with §2's
