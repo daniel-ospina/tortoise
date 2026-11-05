@@ -496,7 +496,9 @@ It proves the write by **doing** it: push the commit already at `HEAD` onto a na
 ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (never trusting
 `git push`'s own exit code), delete it, confirm the delete the same way. ⚠️ A probe killed by
 `SIGTERM` (what a fleet watchdog sends) runs no cleanup, so it can leave the ref behind and print
-no verdict: after a killed run, check `git ls-remote origin 'refs/heads/gh-write-preflight/*'`.
+no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefix>/*'` — using the
+`--remote` and `--probe-ref-prefix` you actually ran with, which default to `origin` and
+`gh-write-preflight`.
 
 - `exit 0` = `GH-WRITE-OK(<remote>) — push confirmed by ls-remote; <cleanup>` — the credential can
   write **repository contents**, measured by the one operation that needs it: a throwaway ref was
@@ -515,19 +517,22 @@ no verdict: after a killed run, check `git ls-remote origin 'refs/heads/gh-write
   NO-VERDICT and environment tokens below are cleared by re-running or by fixing the invocation.
   `REASONS` is a **closed set of ten** and the module docstring publishes all of it. **Ten tokens,
   three groupings — plus one token that reads like a refusal and is not:**
-  - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network),
-    `remote-unreachable`. If the failure detail carries git's own protection evidence — `protected
-    branch`, `policy prohibits`, or a `GH006`/`GH013` rule violation — rather than a credential
-    refusal, re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before concluding
-    the credential is read-only; otherwise a constrained repo parks deliverable work.
+  - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network).
+    If the failure detail carries git's own protection evidence — `protected branch`, `policy
+    prohibits`, or a `GH006`/`GH013` rule violation — rather than a credential refusal, re-run once
+    with `--probe-ref-prefix <a namespace the ruleset allows>` before concluding the credential is
+    read-only; otherwise a constrained repo parks deliverable work.
   - **NO VERDICT, re-run — never "read-only"** — `push-unknown` (the push did not COMPLETE: timed
-    out, signalled, no output), `internal-error` (the probe itself failed), and `verify-mismatch`
-    (the push claimed success but the confirming `ls-remote` did not show the ref **at our sha** —
-    which also covers a read that could not be performed, since an unreadable target is not a
-    proven one). Folding any of these into `push-refused` parks deliverable work on a slow or
-    OOM-killed push; the closed set is pinned by
-    `test_the_contract_publishes_the_closed_reason_set`. ⛔ If either unwound AFTER its push, a
-    probe ref may be sitting on the remote — the detail names it; delete it (see `delete-failed`).
+    out, signalled, no output), `internal-error` (the probe itself failed), `remote-unreachable` (the
+    reachability read itself failed — transport, DNS, a wrong remote URL, or read-side auth; the
+    tool's own suite calls a `remote-unreachable` on a credential that CAN write "a false block, the
+    one failure mode this tool must never add"), and `verify-mismatch` (the push claimed success but
+    the confirming `ls-remote` did not show the ref **at our sha** — which also covers a read that
+    could not be performed, since an unreadable target is not a proven one). Folding any of these
+    into `push-refused` parks deliverable work on a slow, unreachable or OOM-killed push; the closed
+    set is pinned by `test_the_contract_publishes_the_closed_reason_set`. ⛔ If any of them unwound
+    AFTER its push, a probe ref may be sitting on the remote — the detail names it; delete it (see
+    `delete-failed`).
   - **environment, not the credential** — `git-absent`, `not-a-repo` (`--repo` is a CHECKOUT PATH,
     never `owner/name`), `no-remote` (no remote of that name), `no-head` (`HEAD` does not resolve).
   - `delete-failed` is **litter, not capability** — the push already succeeded. ⛔ **A RE-RUN DOES NOT
