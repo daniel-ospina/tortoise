@@ -216,22 +216,33 @@ def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, mon
     naming the duplicate. Remove the `duplicate_mapping_key_issues()` term from
     the composition and the message disappears from the output.
 
-    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE (0.9) FROM THE REAL ONE (0.1),
-    and that is load-bearing (#10648 review P3). Planted with the SAME value the
-    assertion below held under EITHER resolution order, so it pinned only "the
-    key parses" and would have stayed green if the loader flipped to first-wins
-    — the arm that matters, because a `merge=union` duplicate leaves the STALE
+    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE FROM THE REAL ONE, and that is
+    load-bearing (#10648 review P3). Planted with the SAME value the assertion
+    below held under EITHER resolution order, so it pinned only "the key
+    parses" and would have stayed green if the loader flipped to first-wins —
+    the arm that matters, because a `merge=union` duplicate leaves the STALE
     row in the file and only the resolution order decides whether the shard
-    packer reads the fresh weight or the superseded one. With 0.9 planted ahead
-    of the real 0.1 row, `safe_load` returning 0.1 IS last-wins and any
-    first-wins loader returns 0.9 and reds here.
+    packer reads the fresh weight or the superseded one. With a different value
+    planted ahead of the real row, `safe_load` returning the real weight IS
+    last-wins and any first-wins loader returns the planted one and reds here.
+
+    The planted value is DERIVED from the real one instead of hard-coded, the
+    shape `tests/test_ci_timing.py` uses for the same property (#10726 review
+    P3). The row this test shadows is an ADOPTED CI reading — its note ends
+    "ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0" — so
+    the next `--refresh-durations` sweep may rewrite its weight, and a
+    hard-coded figure would then red here as a complaint about this FIXTURE
+    rather than about the duplicate the test exists to catch.
     """
     from tools import ci_selection
 
     text = ci_selection.MANIFEST.read_text(encoding="utf-8")
-    # 0.9, deliberately != the real row's 0.1 — see the docstring.
-    dup = "  test_7818_plan_record_5362.py: 0.9  # duplicate planted by this test\n"
-    anchor = "  test_7818_plan_record_5362.py: "
+    key = "test_7818_plan_record_5362.py"
+    anchor = f"  {key}: "
+    real_value = yaml.safe_load(text)["durations"][key]
+    # derive a value that provably DIFFERS from the real one, whatever it is
+    other_value = 0.9 if real_value != 0.9 else 0.8
+    dup = f"  {key}: {other_value}  # duplicate planted by this test\n"
     at = text.index(anchor)
     planted = text[:at] + dup + text[at:]
     victim = tmp_path / "ci-surfaces.yml"
@@ -240,11 +251,15 @@ def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, mon
     # the loader the gate uses cannot see it …
     assert sum(1 for line in planted.splitlines()
                if line.startswith(anchor)) == 2
-    assert yaml.safe_load(planted)["durations"]["test_7818_plan_record_5362.py"] == 0.1
+    assert yaml.safe_load(planted)["durations"][key] == real_value
+    assert real_value != other_value, (
+        "the planted value must differ from the row it shadows, otherwise "
+        "last-wins and first-wins are indistinguishable here and the "
+        "assertion above proves nothing")
 
     # … but the composed `--integrity` does, by name.
-    assert any("duplicate mapping key 'test_7818_plan_record_5362.py'"
-               in problem for problem in ci_selection.duplicate_mapping_key_issues(victim))
+    assert any(f"duplicate mapping key '{key}'" in problem
+               for problem in ci_selection.duplicate_mapping_key_issues(victim))
 
     import contextlib
     import io
@@ -263,7 +278,7 @@ def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, mon
     monkeypatch.setattr(ci_selection, "MANIFEST", victim)
     rc, seen = _run_integrity()          # … and the planted one is not
     assert rc == 1, seen
-    assert "duplicate mapping key 'test_7818_plan_record_5362.py'" in seen
+    assert f"duplicate mapping key '{key}'" in seen
 
 
 def test_the_integrity_entry_point_is_clean_on_the_real_manifests() -> None:
