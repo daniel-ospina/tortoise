@@ -86,18 +86,20 @@ Deliberately NOT declared:
   - the Actions runner list (autoscale changes it), every PR/run/check read (all mutable),
     and `.mergify.yml` (a file read, not an API read — no quota to save).
 
-Cache identity is (key, host, account, repo, base, effective argv). `host` and `account`
-are which SERVER and which CREDENTIAL answered — load-bearing for `/rate_limit` (whose
-buckets are per instance and per token) and threaded into the request itself as
-`--hostname`, so a host-prefixed `--repo` cannot fetch the default instance and file the
-answer under another. `repo`/`base` participate ONLY
+Cache identity is (key, host, account, repo, base, effective argv). `host` is which SERVER
+answered: it participates for EVERY route and is threaded into the request itself (`gh api`'s
+`--hostname`, or the `host/owner/repo` argument for a porcelain verb), so a host-prefixed
+`--repo` can neither fetch the default instance nor file the answer under another. `account`
+is which CREDENTIAL answered: it participates only for an ACCOUNT-SCOPED route
+(`/rate_limit`, whose buckets are per instance and per token), because keying the `repo`
+projection by credential would cost every lane in the fleet a call for one unchanged answer.
+`repo`/`base` participate ONLY
 when the declared route actually references `{repo}`/`{base}`: keying them unconditionally
 fragmented the cache per branch/per repo for routes that do not vary by either, spending
 two calls for one answer; and omitting `base` when it IS used once served `main`'s policy
-as `release/1.0`'s. `host` participates ALWAYS — it is which server answered, and the
-`/rate_limit` buckets are per instance — so it is canonicalised (`GH_HOST`, else
-`github.com`) rather than left blank, which would have made `o/n` and `github.com/o/n` two
-entries for one repository.
+as `release/1.0`'s. `host` is canonicalised (`GH_HOST`, else `github.com` — case, scheme and
+a trailing slash folded) rather than left blank, which would have made `o/n` and
+`github.com/o/n` two entries for one repository.
 
 Usage
 -----
@@ -128,6 +130,9 @@ Seams
                                  it reads a different cache than one that does not —
                                  undocumented it was invisible (a reviewer greped for the
                                  env vars this tool reads and found only two).
+             GH_CONFIG_DIR       read for `hosts.yml` to resolve the CREDENTIAL for an
+                                 account-scoped route when no token is in the environment.
+                                 No token is ever written to the cache; only its digest.
              --gh / --cache-dir  the same as the first two, per invocation
 """
 from __future__ import annotations
@@ -146,7 +151,7 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA = 3
+SCHEMA = 4
 
 # Provenance tolerance. A stamp further into the future than this cannot have its
 # age computed, so it cannot be proven fresh.
@@ -159,6 +164,12 @@ class Invariant:
     argv: tuple[str, ...]
     ttl: int
     why: str
+    # ⛔ TRUE ONLY WHERE THE ANSWER DEPENDS ON WHO ASKED. `/rate_limit` is per CREDENTIAL,
+    # so a second token must not be served the first's counters. The `repo` projection is
+    # a property of the REPOSITORY (`full_name`, `default_branch`, `visibility`, ...), so
+    # keying it by credential would cost one call PER LANE for one unchanged answer — the
+    # quota regression this tool exists to remove, reintroduced by an over-broad fix.
+    account_scoped: bool = False
 
 
 INVARIANTS: dict[str, Invariant] = {
@@ -184,6 +195,7 @@ INVARIANTS: dict[str, Invariant] = {
         key="rate_limit",
         argv=("api", "rate_limit"),
         ttl=30,
+        account_scoped=True,
         why="⛔ NOT AN INVARIANT — a declared LATENCY cache. The counters move on every other "
             "lane's call, and the route is EXEMPT from the quota, so this saves round trips, "
             "never budget. `fresh` means 'fetched ≤30 s ago', never 'the budget is this'",
@@ -281,7 +293,20 @@ def _repo_slug(repo: str) -> tuple[str, str]:
         # `test_no_unresolved_placeholder_ever_reaches_gh`). No real slug carries braces.
         if not piece or piece in (".", "..") or any(ch in piece for ch in " \t\n?#{},"):
             raise Usage(f"--repo segment {piece!r} is not a valid repository component")
-    return host, "/".join(parts)
+    # ⛔ THE SPELLED HOST IS CANONICALISED TOO. `_default_host` folded case/scheme/slash but
+    # a host from the `HOST/OWNER/REPO` prefix was used verbatim, so `ghe.example.com/o/n` and
+    # `GHE.example.com/o/n` were two entries and two calls for one answer - the fragmentation
+    # the canonicalisation exists to prevent, one spelling over.
+    return _canonical_host(host), "/".join(parts)
+
+
+def _canonical_host(raw: str) -> str:
+    """Lower-case, scheme-stripped, slash-trimmed host; blank stays blank."""
+    raw = (raw or "").strip().lower()
+    for scheme in ("https://", "http://"):
+        if raw.startswith(scheme):
+            raw = raw[len(scheme):]
+    return raw.rstrip("/")
 
 
 def _default_host() -> str:
@@ -292,11 +317,7 @@ def _default_host() -> str:
     for the other and reported `present: false`, and the next `get` spent a call to fetch
     what was already on disk. That is the same fragmentation the `base` gate was fixed for.
     """
-    raw = (os.environ.get("GH_HOST", "") or "").strip().lower()
-    for scheme in ("https://", "http://"):
-        if raw.startswith(scheme):
-            raw = raw[len(scheme):]
-    return (raw.rstrip("/") or "github.com")
+    return _canonical_host(os.environ.get("GH_HOST", "")) or "github.com"
 
 
 def _resolve_repo(repo: str) -> tuple[str, str]:
@@ -316,8 +337,8 @@ def _gh_bin(override: str | None = None) -> str:
     return override or os.environ.get("GH_READ_CACHE_GH", "gh")
 
 
-def _account_fingerprint() -> str:
-    """A short digest of WHICH CREDENTIAL will answer.
+def _account_fingerprint(host: str = "") -> tuple[str, bool]:
+    """A short digest of WHICH CREDENTIAL will answer, and whether it is KNOWABLE.
 
     ⛔ `/rate_limit` IS ACCOUNT-SCOPED, NOT JUST INSTANCE-SCOPED. The host dimension was
     added in one cycle and the account was then the same bug one axis over: two tokens on
@@ -326,17 +347,71 @@ def _account_fingerprint() -> str:
     docstring's own `--ttl 1` advice cannot help — a one-second-old other account's number
     is still the wrong question's answer.
 
-    Only a DIGEST is stored and logged: the token never reaches the cache file, the
-    filename, or stderr. An absent token is a legal, distinct value (it is the anonymous
-    bucket).
+    ⛔ THERE ARE TWO CREDENTIAL SOURCES, AND THE ENV ONE IS THE RARER. Reading only the env
+    vars was itself the same defect once more: a box authenticated with `gh auth login`
+    (or `gh auth switch`, or a second `GH_CONFIG_DIR`) has NO token in the environment, so
+    every such account collapsed into one digest. Both documented spellings of each variable
+    are read (`GH_ENTERPRISE_TOKEN` **and** `GITHUB_ENTERPRISE_TOKEN`), and when neither is
+    set the `oauth_token` is read from gh's own `hosts.yml` — the file gh reads — for the
+    resolved host.
 
-    ⛔ THE CREDENTIAL ONLY — NOT the `gh` binary path. Quota is held per TOKEN, so two
-    binaries reading one token share one bucket; folding `--gh` in would make
-    `get --gh /p/gh` and a later `status` (which defaults to `gh`) two different accounts
-    and break the ordinary "write with get, read with status" pair.
+    ⛔ READ THE FILE, DO NOT SHELL OUT TO `gh auth token`. A subprocess buys nothing here (the
+    token is in a plain file) and it made the tool's own call-counting tests unusable, since
+    every read of a cached value would have invoked `gh` — the exact cost this tool exists
+    to remove.
+
+    Returns `(digest, resolvable)`. `resolvable=False` means NOTHING could be learned about
+    the credential, and the caller must then refuse to cache an account-scoped route rather
+    than pool every unknown account together (see `cmd_get`) — serving an unknown account
+    another's quota is worse than spending an exempt call.
+
+    Only a DIGEST is stored or logged: the token never reaches the cache file, the filename,
+    or stderr. The `gh` binary path is deliberately NOT in the digest — quota is held per
+    token, so folding `--gh` in would make `get --gh /p/gh` and a later `status` (default
+    `gh`) two different accounts and break the write-then-read pair.
     """
-    tokens = "\x00".join(os.environ.get(k, "") for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"))
-    return hashlib.sha256(tokens.encode()).hexdigest()[:16]
+    env_vars = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    secret = "\x00".join(os.environ.get(k, "") for k in env_vars)
+    if secret.strip("\x00"):
+        return hashlib.sha256(secret.encode()).hexdigest()[:16], True
+
+    token = _config_token(host)
+    if not token:
+        return "", False
+    return hashlib.sha256(token.encode()).hexdigest()[:16], True
+
+
+def _config_token(host: str) -> str:
+    """gh's `hosts.yml` credential for `host` — the token gh itself would send.
+
+    `hosts.yml` is small, flat YAML (`<host>:\n    oauth_token: …\n    user: …`), so the
+    host's block is found by its own line and the token by an indented key. When no block
+    matches exactly, a SINGLE `oauth_token` in the file is taken (the common one-account
+    case); two or more is ambiguous and reported as unresolvable rather than guessed.
+    """
+    config_dir = os.environ.get("GH_CONFIG_DIR") or str(Path.home() / ".config" / "gh")
+    try:
+        text = Path(config_dir, "hosts.yml").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+    wanted = (host or "github.com").lower()
+    block: str | None = None
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        if line and not line[0].isspace():
+            block = line.rstrip().rstrip(":").strip().strip("'\"").lower()
+            continue
+        stripped = line.strip()
+        if stripped.startswith("oauth_token:") and block:
+            value = stripped.split(":", 1)[1].strip().strip("'\"")
+            if value:
+                found[block] = value
+    if wanted in found:
+        return found[wanted]
+    if len(found) == 1:
+        return next(iter(found.values()))
+    return ""
 
 
 def _identity(
@@ -347,17 +422,21 @@ def _identity(
     template: tuple[str, ...],
     host: str = "",
     account: str = "",
+    account_scoped: bool = False,
 ) -> dict:
     """Everything that makes two cached answers DIFFERENT questions.
 
-    `repo`/`host`/`base` participate ONLY when the declared route references them. Keying
+    `repo`/`base` participate ONLY when the declared route references them. Keying
     them unconditionally fragmented the cache for routes that do not vary by either (the
     account-scoped `/rate_limit` was split per repo, and a `{base}`-free route per branch)
     — two calls for one answer. Omitting `base` when it IS used once served `main`'s
     protection policy as `release/1.0`'s, so the rule is "when used".
 
-    `host` accompanies `repo` because the same `owner/name` on two GitHub instances is two
-    different repositories; dropping it served one instance's metadata for another.
+    `host` and `account` are NOT gated on "when used": the host is which SERVER answered and
+    the account is which CREDENTIAL answered, so both are true of every route. `account` is
+    gated on the ROUTE BEING ACCOUNT-SCOPED instead — per-credential for `/rate_limit`, out
+    of `repo` (whose projection does not vary by who asked, and keying it per token would
+    cost every lane in the fleet one call for one unchanged answer).
     """
     uses_repo = any("{repo}" in a for a in template)
     uses_base = any("{base}" in a for a in template)
@@ -370,10 +449,11 @@ def _identity(
         # `/rate_limit`, whose buckets are per instance. Gating it on `uses_repo` blanked
         # it for `rate_limit` and served one GHES instance's counters as another's, fresh.
         "host": host,
-        # ⛔ THE CREDENTIAL DECIDES WHOSE QUOTA `/rate_limit` REPORTS (see
-        # `_account_fingerprint`). Unconditional for the same reason as `host`: the account
-        # is which ANSWERING AUTHORITY replied, not a property of the route.
-        "account": account,
+        # ⛔ THE ACCOUNT IS GATED ON THE ROUTE, NOT UNCONDITIONAL. `/rate_limit` is per
+        # credential, so a second token must MISS. The `repo` projection is a property of the
+        # REPOSITORY, so keying it per credential cost one call PER LANE for one unchanged
+        # answer - reintroducing the exact quota regression this tool exists to remove.
+        "account": account if account_scoped else "",
         "base": base if uses_base else "",
         "argv": list(argv),
     }
@@ -632,6 +712,17 @@ def _format_argv(argv: tuple[str, ...], repo: str, base: str) -> list[str]:
 
 
 # ── fetch ────────────────────────────────────────────────────────────────────
+def _accepts_hostname(argv: list[str]) -> bool:
+    """`--hostname` is a flag of `gh api` ONLY — appending it elsewhere is a parse error.
+
+    The two declared routes are both `api`, so the caching path was safe; an `--argv`
+    pass-through of a porcelain verb (`repo view {repo}`) got the flag appended and died at
+    flag parsing (`unknown flag: --hostname`) instead of being served — a call that used to
+    run now failed, without ever asking the right server.
+    """
+    return bool(argv) and argv[0] == "api"
+
+
 def fetch(argv: list[str], gh: str | None = None, host: str = "") -> tuple[str, bool]:
     """Run gh; return (stdout, ok). Stderr is captured, never merged into stdout.
 
@@ -648,7 +739,8 @@ def fetch(argv: list[str], gh: str | None = None, host: str = "") -> tuple[str, 
     """
     child_env = dict(os.environ)
     run_argv = [*argv]
-    if host and host != _default_host() and "--hostname" not in argv:
+    supplied_host = any(t == "--hostname" or t.startswith("--hostname=") for t in argv)
+    if host and host != _default_host() and not supplied_host and _accepts_hostname(argv):
         # `api <route> --hostname <host>` — the flag is global, so appending is safe, and
         # the argv stored in the identity already carries `host` separately.
         run_argv = [*argv, "--hostname", host]
@@ -723,14 +815,45 @@ def cmd_get(args: argparse.Namespace) -> int:
         if not args.argv:
             sys.stderr.write("gh_read_cache: --argv given with no command tokens\n")
             return 2
-        body, ok = fetch(argv, args.gh, host)
+        # ⛔ A PORCELAIN VERB HAS NO `--hostname`. `--hostname` is a flag of `gh api` alone, so
+        # appending it to `repo view {repo}` died at flag parsing (`unknown flag: --hostname`)
+        # — a call that used to run now failed, and the host was still not expressed. For those
+        # verbs the host is spelled INSIDE the local-repo argument, which `{repo}` already
+        # occupies, so it is re-formatted as `host/owner/name` (the form gh's own `-R` and
+        # positional parsing accept).
+        pass_argv = argv
+        if host and host != _default_host() and not _accepts_hostname(template) and repo:
+            pass_argv = _format_argv(template, f"{host}/{repo}", args.base)
+        body, ok = fetch(pass_argv, args.gh, host)
         if not ok:
             sys.stderr.write("gh_read_cache: --argv pass-through fetch failed — no value emitted\n")
             return 4
         sys.stdout.write(body)
         return 0
 
-    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host, _account_fingerprint())
+    account, account_known = _account_fingerprint(host)
+    if decl.account_scoped and not account_known:
+        # AN UNKNOWABLE CREDENTIAL MUST NOT BE POOLED WITH EVERY OTHER UNKNOWABLE ONE.
+        # `gh auth token` failing (no login, broken config, stripped PATH) used to collapse
+        # into one shared digest, so any two unlogged-in accounts shared an entry - the very
+        # defect the digest exists to close. Serving an unknown account another's remaining
+        # quota is worse than spending one call, and `/rate_limit` is quota-EXEMPT, so this
+        # costs latency, never budget. Fetch live and store NOTHING.
+        sys.stderr.write(
+            "gh_read_cache: the credential behind this account-scoped read could not be "
+            "resolved (no token in the environment and `gh auth token` failed) - reading "
+            "live without a cache rather than pooling unknown accounts\n"
+        )
+        body, ok = fetch(argv, args.gh, host)
+        if not ok:
+            sys.stderr.write("gh_read_cache: FAIL-CLOSED - the refresh failed and no value will be emitted\n")
+            return 4
+        sys.stdout.write(body)
+        return 0
+
+    ident = _identity(
+        decl.key, repo, args.base, argv, decl.argv, host, account, decl.account_scoped
+    )
     try:
         cache_dir = _cache_dir(args.cache_dir)
     except OSError as exc:
@@ -808,7 +931,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 2
 
     argv = _format_argv(decl.argv, repo, args.base)
-    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host, _account_fingerprint())
+    account, account_known = _account_fingerprint(host)
+    ident = _identity(
+        decl.key, repo, args.base, argv, decl.argv, host, account, decl.account_scoped
+    )
     try:
         cache_dir: Path | None = _cache_dir(args.cache_dir)
     except OSError as exc:

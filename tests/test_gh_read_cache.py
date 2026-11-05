@@ -623,6 +623,117 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(self.calls(), 2, "GH_HOST must participate in the cache identity")
         self.assertIn("dotcom", second.stdout)
 
+    def test_every_documented_credential_spelling_is_a_distinct_account(self) -> None:
+        """gh documents FOUR token variables; reading three merged two real accounts.
+
+        `GITHUB_ENTERPRISE_TOKEN` is the documented alias of `GH_ENTERPRISE_TOKEN`, and it was
+        absent from the digest - so on a GHES box using the second spelling every credential
+        collapsed into the EMPTY digest and account B was handed account A's remaining quota
+        with rc=0 and `fresh: true`.
+        """
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        first = self.run_tool("get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(first.returncode, 0, first.stderr)
+
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 7}}}')
+        clean = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
+        no_cfg = str(Path(self.tmp) / "no-config")
+        for var in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+            env = dict(clean, **{var: f"token-via-{var}", "GH_STUB_DIR": str(self.stubdir), "GH_CONFIG_DIR": no_cfg})
+            before = self.calls()
+            results = []
+            for _ in range(2):
+                results.append(subprocess.run(
+                    [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+                    capture_output=True, text=True, env=env,
+                ))
+            for r in results:
+                self.assertEqual(r.returncode, 0, f"{var}: {r.stderr}")
+                self.assertIn("7", r.stdout)
+            # ⛔ ACROSS TWO IDENTICAL READS, ONE CALL — the second must be a HIT. Asserting a
+            # single read costs exactly one call does NOT discriminate: the unresolvable path
+            # (credential unknown, so nothing is cached) also costs exactly one. Only a HIT
+            # proves the variable was read AND produced a resolvable account.
+            self.assertEqual(
+                self.calls(), before + 1,
+                f"{var} must be a recognised credential: two identical reads, one call",
+            )
+
+    def test_a_config_file_credential_is_an_account_too(self) -> None:
+        """`gh auth login` puts the token in `hosts.yml`, NOT the environment.
+
+        Reading only env vars meant every config-file account collapsed into the EMPTY digest,
+        so two `GH_CONFIG_DIR`s holding different `oauth_token`s shared one entry and account
+        B was served account A's counters - the same defect, on the auth path most boxes use.
+        """
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        clean = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
+        cfg_a = Path(self.tmp) / "cfg-a"
+        cfg_a.mkdir()
+        (cfg_a / "hosts.yml").write_text("github.com:\n    oauth_token: cfg-token-A\n    user: a\n")
+        env_a = dict(clean, GH_STUB_DIR=str(self.stubdir), GH_CONFIG_DIR=str(cfg_a))
+        a = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env_a,
+        )
+        self.assertEqual(a.returncode, 0, a.stderr)
+
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 3}}}')
+        cfg_b = Path(self.tmp) / "cfg-b"
+        cfg_b.mkdir()
+        (cfg_b / "hosts.yml").write_text("github.com:\n    oauth_token: cfg-token-B\n")
+        b = subprocess.run(
+            [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=dict(env_a, GH_CONFIG_DIR=str(cfg_b)),
+        )
+        self.assertEqual(b.returncode, 0, b.stderr)
+        self.assertEqual(self.calls(), 2, "a second config-file credential must be a MISS")
+        self.assertIn("3", b.stdout)
+        self.assertNotIn("4990", b.stdout)
+
+    def test_an_unresolvable_credential_is_never_cached(self) -> None:
+        """An UNKNOWABLE credential must not be pooled with every other unknowable one.
+
+        With no env token and no readable `hosts.yml`, the account-scoped route must be read
+        live and stored nowhere. `/rate_limit` is quota-exempt, so the cost is one round trip
+        - never a wrong number.
+        """
+        empty_cfg = Path(self.tmp) / "empty-cfg"
+        empty_cfg.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")}
+        env.update({"GH_STUB_DIR": str(self.stubdir), "GH_CONFIG_DIR": str(empty_cfg)})
+        for _ in range(2):
+            r = subprocess.run(
+                [sys.executable, str(TOOL), "get", "rate_limit", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("1296269", r.stdout, "the value must still be emitted")
+        self.assertEqual(self.calls(), 2, "an unresolvable credential must never produce a HIT")
+        self.assertEqual(list(self.cachedir.glob("rate_limit*.json")), [], "and must never be stored")
+
+    def test_the_repo_projection_is_not_keyed_by_credential(self) -> None:
+        """The projection is a property of the REPOSITORY; keying it per token cost a call/lane.
+
+        `full_name`/`default_branch`/`visibility`/... do not vary by who asked, so making
+        `account` unconditional made every lane in the fleet pay one call for one unchanged
+        answer - the quota regression this tool exists to remove. `rate_limit` is per
+        credential; `repo` must not be.
+        """
+        self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(self.calls(), 1)
+        env = dict(os.environ, GH_STUB_DIR=str(self.stubdir), GH_TOKEN="another-lane-token")
+        r = subprocess.run(
+            [sys.executable, str(TOOL), "get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls(), 1, "a second credential must still HIT the repo projection")
+        self.assertEqual(len(list(self.cachedir.glob("repo*.json"))), 1)
+
     def test_rate_limit_is_keyed_by_instance_too(self) -> None:
         """The host is WHICH SERVER ANSWERED — true of `/rate_limit` as much as of `repo`.
 
@@ -669,6 +780,44 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(self.calls(), 1, "the unspelled spelling must be a HIT, not a second call")
         self.assertEqual(len(list(self.cachedir.glob("repo*.json"))), 1, "one repository, one entry")
+
+    def test_a_porcelain_pass_through_spells_the_host_where_gh_accepts_it(self) -> None:
+        """`--hostname` is a flag of `gh api` ONLY; appending it to `repo view` is a parse error.
+
+        The declared routes are both `api`, so the caching path was safe — but a pass-through
+        of a porcelain verb got the flag appended and died (`unknown flag: --hostname`) while
+        the host was still not expressed: a call that used to run failed, and it never asked
+        the right server. The host now goes inside the local-repo argument instead.
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir), "--argv", "repo", "view", "{repo}")
+        self.assertEqual(r.returncode, 0, f"a porcelain pass-through must still run: {r.stderr}")
+        sent = (self.stubdir / "argv.log").read_text()
+        self.assertNotIn("--hostname", sent, f"a porcelain verb must not receive --hostname: {sent!r}")
+        self.assertIn("ghe.example.com/o/n", sent, f"the host must be spelled in the repo argument: {sent!r}")
+
+    def test_a_caller_supplied_hostname_is_never_doubled(self) -> None:
+        """`--hostname=<h>` is the same flag; testing only the bare spelling overrode it.
+
+        gh takes the LAST occurrence, so appending after a caller's attached form silently sent
+        a different host than the one the caller spelled.
+        """
+        r = self.run_tool("get", "repo", "--repo", "ghe2.example.com/o/n", "--gh", str(self.stub),
+                          "--cache-dir", str(self.cachedir),
+                          "--argv", "api", "repos/{repo}", "--hostname=ghe.example.com")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent = (self.stubdir / "argv.log").read_text()
+        self.assertEqual(sent.count("--hostname"), 1, f"exactly one host must reach gh: {sent!r}")
+        self.assertIn("--hostname=ghe.example.com", sent, "the caller's explicit choice must win")
+
+    def test_a_spelled_host_is_canonicalised_like_an_env_one(self) -> None:
+        """`GHE.example.com/o/n` and `ghe.example.com/o/n` are one instance, so one entry."""
+        self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(self.calls(), 1)
+        r = self.run_tool("get", "repo", "--repo", "GHE.example.com/o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls(), 1, "a differently-cased host must be the same entry, not a second call")
+        self.assertEqual(len(list(self.cachedir.glob("repo*.json"))), 1)
 
     def test_host_spelling_variants_collapse_to_one_entry(self) -> None:
         """`GH_HOST=GHE.example.com` and `ghe.example.com` are one instance, so one entry.
@@ -864,7 +1013,8 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.calls(), 1)
 
-        for field, value in (("repo", "ATTACKER/other"), ("host", "ghe.attacker.example"), ("argv", ["api", "repos/x/y"])):
+        for field, value in (("repo", "ATTACKER/other"), ("host", "ghe.attacker.example"),
+                             ("account", "0000000000000000"), ("argv", ["api", "repos/x/y"])):
             p = self.entry_path("repo")
             d = json.loads(p.read_text())
             d["fetched_at"] = time.time()
@@ -897,6 +1047,41 @@ class CacheTest(unittest.TestCase):
         out = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.calls(), 2, "a foreign schema must be re-fetched, never served")
+
+    def test_the_previous_schema_is_invalidated_by_the_bump(self) -> None:
+        """A schema bump is the ONLY thing that invalidates entries an older build wrote.
+
+        The identity gain its new fields while the entry format did not change, so an entry
+        written before the host/account axes existed would otherwise keep its (wrong-server,
+        wrong-account) bytes and stay `fresh` for the rest of its hour. Writing `SCHEMA - 1`
+        is the mutation-detecting form: with the bump left at the old value, this entry WOULD
+        be served, and the suite would not notice.
+        """
+        import re as _re
+
+        # Read the constant from the source rather than importing: the module uses
+        # `from __future__ import annotations` + dataclasses, which a spec-only import
+        # (absent from sys.modules) cannot resolve.
+        found = _re.findall(r"^SCHEMA = (\d+)$", TOOL.read_text(), _re.M)
+        self.assertEqual(len(found), 1, "the module must declare exactly one SCHEMA")
+        schema = int(found[0])
+        # ⛔ A LITERAL TRIPWIRE, ON PURPOSE. Deriving the expected value from the source made
+        # this vacuous (lowering the constant to 3 left the suite green). Any change to the
+        # identity tuple or the entry format is exactly when this number must move.
+        self.assertEqual(schema, 4, "SCHEMA records the identity shape — bump it with any identity change")
+
+        r = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        p = self.entry_path("repo")
+        d = json.loads(p.read_text())
+        d["schema"] = schema - 1
+        d["fetched_at"] = time.time()
+        d["body"] = '{"body": "WRITTEN-BY-AN-OLDER-BUILD"}'
+        p.write_text(json.dumps(d))
+        out = self.run_tool("get", "repo", "--repo", "o/n", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("WRITTEN-BY-AN-OLDER-BUILD", out.stdout, "a previous schema's bytes must never be served")
+        self.assertEqual(self.calls(), 2, "and the entry must be re-fetched")
 
     def test_oversized_integer_stamp_is_a_miss_not_a_crash(self) -> None:
         """C4 finding: a `10**400` stamp made `math.isfinite` raise -> rc=1 traceback.
