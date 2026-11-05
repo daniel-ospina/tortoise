@@ -376,8 +376,9 @@ def test_a_raw_written_non_scalar_EDGE_direction_reads_as_ABSENT(sdk):
 
     What this pins is the ONE read-side normalizer over a value that lives on an
     edge: junk ⇒ ``None`` ⇒ ``direction_flows == (True, True)``. ⛔ It does NOT
-    pin a write door: ``create_direct_edge`` and ``invalidate_point`` read the
-    CALLER's ``direction`` and never a stored one, and ``_connections_conflict``
+    pin a write door: ``create_direct_edge`` reads the CALLER's ``direction`` and
+    never a stored one, ``invalidate_point`` reads none of any kind (it has no
+    ``direction`` parameter and transfers no edges), and ``_connections_conflict``
     compares two BUNDLE dicts (``_find_operator``'s exactly-once dedup is the one
     path that does compare a stored token, but inside a Cypher predicate, so no
     Python reader touches it) — so the crash this docstring used to attribute to

@@ -20306,6 +20306,15 @@ class TortoiseSDK:
                 # frozenset membership test. ⛔ Do NOT reintroduce a per-value
                 # branch here: a second copy of the policy is what let this door
                 # publish its own token as ``judged`` in the refusal below.
+                # ⛔ Scope of "ONE reader": the 2a-OPERATOR pre-flight above DOES
+                # still screen a stored direction (``_d if isinstance(_d, str)
+                # else ("<->" if _d is not None else None)``) — that is a
+                # HASHABILITY screen, not a copy of this policy: the value becomes
+                # a SET KEY there, and an unhashable list/map aborted the whole
+                # pre-flight (#10559). Its ``<->`` stand-in yields the same verdict
+                # as this door's reading; what it does NOT do is name the stored
+                # value in its refusal, which is #11033's residue, not this
+                # door's.
                 _raw_dir = _rdict.get("direction")
                 _eff_dir = self._canonical_direction(_rtype, _raw_dir)
                 if _direction == "out":
@@ -24443,7 +24452,11 @@ class TortoiseSDK:
                 # exists to return. The ``to`` arm above screens its items the
                 # same way, for the same reason (#9173 review): the contract's job
                 # is to NAME the bad field, and a traceback names nothing a caller
-                # can act on.
+                # can act on. ⛔ Scope: this closes the class for ``direction``
+                # ONLY. The sibling ``operator`` and ``relation`` keys are still
+                # raw frozenset membership tests, and a non-scalar there still
+                # raises ``TypeError`` — pre-existing, tracked by #11031, and
+                # deliberately not widened here.
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] 'direction' must "

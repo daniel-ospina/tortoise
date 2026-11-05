@@ -1625,8 +1625,10 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     assert "judged 'bidirectional'" not in _msg, (
         "the door substituted its OWN token for the stored value — a second "
         f"copy of the direction policy ({_msg})")
-    # The refusal landed before every mutation, as it must.
-    assert _props(lane, new).get("status") == "live"
+    # The refusal landed before every mutation, as it must: the PREDECESSOR is
+    # the only node ``supersede_point`` writes a status on (and it re-points
+    # edges off it), so a successor-status assertion would pass either way.
+    assert _props(lane, old).get("status") == "live"
     assert _direct_rows(lane, old)[0][0] == old
 
     # …and the HASHABLE half of the same rule, so the pin is not keyed on
@@ -1645,7 +1647,7 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     with pytest.raises(ValueError, match="re-pointing the NAND edge") as _hexc:
         lane.supersede_point(h_old, h_new)
     _hmsg = str(_hexc.value)
-    assert "judged 3" in _hmsg, _hmsg
+    assert "(judged 3)" in _hmsg, _hmsg
     assert "judged 'bidirectional'" not in _hmsg, _hmsg
 
 
