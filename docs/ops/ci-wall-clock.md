@@ -399,10 +399,11 @@ one run owns the pool, so every other PR waits for that run's shard set to drain
    stagger (4.0–23.9 m against a p50 10.5 m wall) says the pool already runs these shards in 2–4
    waves, so a cap needing more than 4 is strictly added wall. `C >= 3`.
 2. **No single PR may hold the pool.** The three matrices start after `changes` and overlap, so a
-   PR's maximum **matrix** hold is `C_fast + C_slow + C_carve`; reserving 3 of the 12 runners so
-   three other PRs can always make progress gives `sum <= 12 - 3 = 9`, i.e. `C <= 3` with equal
-   caps. This bounds MATRIX slots only — the non-matrix jobs below are bounded by the pool, not by
-   this invariant (see "What the cap does NOT bound: the total").
+   PR's maximum **matrix** hold is `C_fast + C_slow + C_carve`; keeping 3 of the 12 measured
+   runners outside any one PR's matrix bound gives `sum <= 12 - 3 = 9`, i.e. `C <= 3` with equal
+   caps. This reserves MATRIX headroom only — the same PR's eligible non-matrix jobs can still take
+   those runners, so it bounds one PR's matrix fan-out and is not a guarantee that three other PRs
+   always get a runner (see "What the cap does NOT bound: the total").
 
 Only `C = 3` satisfies both. An interval simulation over the same 9 runs — each job keeps its own
 observed start as an earliest bound, so the delta is an **upper** bound: it does not credit back
@@ -442,8 +443,13 @@ and `test-concurrency-falkor`, `packs-compile`, `test-track-b`, `test-d14-hosted
 (`changes` is itself a fourth `needs:`-less job and is excluded from the 8 deliberately: the
 matrices wait on it, so it cannot overlap them.) On a full selection a PR therefore **requests 28
 jobs** (17 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-gated), of which at
-most **17 can run concurrently** (9 matrix slots + the 8 eligible non-matrix), and only **the pool
-— 12 — bounds that**. Not the cap, and not 9. The cap is a fairness bound on the FAN-OUT (which is
+most **17 can be in flight at once** (9 capped matrix slots + the 8 eligible non-matrix). **The
+pool does not bound that** — it bounds only the subset that lands on it. `test` and
+`test-carve-out` ask for `ubuntu-latest`, which is NOT a hosted-only label on this repo
+(`scripts/ci_runner_gate.sh` attaches it to the self-hosted pool as a fallback, so those legs can
+be answered by the pool), while `test-slow` pins `ubuntu-24.04`, which is hosted-only. That is how
+a run was measured at **18 simultaneous jobs against a 12-runner pool** (table above): the overflow
+is answered outside the pool. The cap is a fairness bound on the FAN-OUT (which is
 what was unbounded, and what made one PR own the pool); it is not a total concurrency budget, and
 reading 9 as one would understate the hold by nearly half (it is 9 of 17).
 

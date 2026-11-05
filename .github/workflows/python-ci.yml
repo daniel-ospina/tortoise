@@ -771,8 +771,9 @@ jobs:
       #       `ceil(9/C) <= 4  =>  C >= 3`.
       #   (b) NO SINGLE PR MAY HOLD THE POOL. The three matrices all start after
       #       `changes` and overlap, so a PR's maximum MATRIX hold is
-      #       `C_fast + C_slow + C_carve`. Reserving 3 of the 12 measured
-      #       runners so three other PRs can always make progress:
+      #       `C_fast + C_slow + C_carve`. Keeping 3 of the 12 measured
+      #       runners outside any one PR's matrix bound so three other PRs can
+      #       make progress on their matrix legs:
       #       `sum <= pool - 3 = 9`, i.e. with equal caps `C <= 3`. This bounds
       #       MATRIX slots only; the concurrent non-matrix jobs are bounded by
       #       the pool, not by this invariant (see WHAT THIS DOES NOT DO).
@@ -792,8 +793,13 @@ jobs:
       # `changes`, which the matrices wait on and so cannot overlap them; 5 need
       # only `changes`). On a full selection a PR REQUESTS 28 jobs (17 matrix
       # legs + 11 non-matrix; `canary-streak` is push-gated), at most 17 of them
-      # CONCURRENTLY (9 matrix slots + the 8 eligible non-matrix) -- and only
-      # the POOL (12) bounds that. The cap bounds the FAN-OUT, not the total.
+      # in flight at once (9 capped matrix slots + the 8 eligible non-matrix).
+      # The POOL does not bound that -- it bounds only the subset that lands on
+      # it: `test` and `test-carve-out` ask for `ubuntu-latest`, which is NOT
+      # hosted-only here (`scripts/ci_runner_gate.sh` attaches it to the pool as
+      # a fallback), while `test-slow` pins the hosted-only `ubuntu-24.04`. That
+      # is how one run was measured at 18 simultaneous jobs over a 12-runner
+      # pool. The cap bounds the FAN-OUT, not the total.
       # ⛔ AND WHAT IT CANNOT DO: `max-parallel` limits START order only. Every
       # bound in this job is measured from runner pickup (the in-step watchdog
       # is started INSIDE the job), so a start delayed by the cap can never
@@ -3195,7 +3201,10 @@ jobs:
       # the per-PR hold bound (`C_fast + C_slow + C_carve <= pool - 3`) holds
       # here by construction instead of by accident, and so a future rise in
       # `carve_shards` cannot silently reinstate unbounded fan-out on this band.
-      # Removing this key is a complete rollback of the carve-out half only.
+      # Removing this key is NOT a one-line rollback: the pin in
+      # `tests/test_ci_selection.py` derives every matrix-bearing job id and
+      # requires each to declare an integer `max-parallel`, so deleting this
+      # line reds that test. The rollback is this line AND the pin, in one change.
       max-parallel: 3
       matrix: ${{ fromJSON(needs.changes.outputs.carve_matrix) }}
     # ⛔ The BARE `test-carve-out` is shard 0's name (`suffix == ''`), NOT

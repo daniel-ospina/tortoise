@@ -6407,8 +6407,12 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     the matrices (3 with no `needs:`; the fourth `needs:`-less job is `changes`,
     which the matrices wait on and so cannot overlap them; 5 need only
     `changes`), so on a full selection a PR requests 28 jobs (17 matrix legs +
-    11 non-matrix; `canary-streak` is push-gated), at most 17 of them
-    concurrently, and only the POOL bounds that at 12. The invariants below
+    11 non-matrix; `canary-streak` is push-gated), at most 17 of them in flight
+    at once. The POOL does not bound that — it bounds only the subset that lands
+    on it (`test`/`test-carve-out` ask for `ubuntu-latest`, which the runner gate
+    attaches to the pool as a fallback; `test-slow` pins hosted-only
+    `ubuntu-24.04`), which is how one run measured 18 simultaneous jobs over a
+    12-runner pool. The invariants below
     hold the three CAPS, and must never be read as "a PR holds 9 jobs".
 
     This pins the INVARIANTS, not the chosen number, so a re-tune from a fresh
