@@ -624,13 +624,20 @@ def test_a_widened_comparison_window_may_not_authorise_a_post(fixture):
 
 
 def test_evaluate_itself_refuses_a_widened_window(fixture):
-    """#10963 review, P2: the ceiling lived ONLY at the CLI boundary.
+    """#10963 review, P2: the ceiling lived ONLY at the CLI boundary, and it was ONE-SIDED.
 
     `main` refuses `--max-age > 60`, but `evaluate` is where the window is CONSUMED and
     the module's doctrine is stated in in-process terms ("no caller can skip the check by
-    calling `decide` directly"). Driven directly at the pre-fix head, `evaluate(..., 10**6)`
-    returned the identical widened `PERMIT` the pre-fix CLI produced, so the guarantee held
-    for argv and not for a caller. The bound now lives with the measurement.
+    calling `decide` directly"). Driven directly, `evaluate(..., 10**6)` returned the
+    identical widened `PERMIT` the pre-fix CLI produced, so the guarantee held for argv
+    and not for a caller.
+
+    ⛔ AND `nan` WAS A HOLE IN THE FIX: `nan > 60` is False, so a NaN window passed the
+    ceiling, and then `elapsed < nan` and `elapsed >= nan` are both False — every
+    staleness expression became vacuous and the verdict fell through to PERMIT. This is
+    the same mechanism the module documents for the AGE seam (`nan >= 60` is False), so
+    the window predicate is written as a positive range (`0 < max_age <= 60`) and these
+    cases pin it. Restore `max_age > MAX_COMPARISON_AGE_S` and `nan` returns PERMIT.
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
@@ -643,26 +650,27 @@ def test_evaluate_itself_refuses_a_widened_window(fixture):
         "import importlib.util, sys;"
         "spec = importlib.util.spec_from_file_location('g', sys.argv[1]);"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
-        "print(m.evaluate('daniel-ospina/tortoise', 41840910128, int(sys.argv[2]))[0])"
+        "print(m.evaluate('daniel-ospina/tortoise', 41840910128, float(sys.argv[2]))[0])"
     )
 
     def drive(window):
         return subprocess.run([sys.executable, "-c", script, str(TOOL), window],
                               capture_output=True, text=True, env=env, timeout=120)
 
-    at_contract = drive(str(60))
+    at_contract = drive("60")
     assert at_contract.returncode == 0, at_contract.stderr
     assert at_contract.stdout.strip() == "PERMIT", at_contract.stdout
 
-    widened = drive("1000000")
-    assert widened.returncode != 0, widened.stdout + widened.stderr
     # ⛔ `ValueError`, not `Unreadable`: nothing was read and no surface is at fault —
     # the caller's contract is violated, and reporting it as "a surface could not be
     # read" would be the argv-vs-surface conflation this module already fixed for a
     # typo'd `--fake-elapsed` (review of #10963). Pinned by TYPE, not just a non-zero
     # exit, so a revert to `Unreadable` reds here.
-    assert "ValueError" in widened.stderr, widened.stderr
-    assert "wider than" in widened.stderr, widened.stderr
+    for bad in ("1000000", "nan", "inf", "-5", "0"):
+        r = drive(bad)
+        assert r.returncode != 0, bad + ": " + r.stdout + r.stderr
+        assert "ValueError" in r.stderr, bad + ": " + r.stderr
+        assert "usable window" in r.stderr, bad + ": " + r.stderr
     assert fixture.cancelled() == []
 
 

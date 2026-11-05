@@ -411,7 +411,17 @@ def evaluate(repo: str, run_id: int, max_age: int,
     measurement of the same kind). Only `act` issues the POST, so no caller can
     skip the check by calling `decide` directly.
     """
-    if max_age > MAX_COMPARISON_AGE_S:
+    if not (0 < max_age <= MAX_COMPARISON_AGE_S):
+        # ⛔ THE PREDICATE MUST BE TOTAL, AND `max_age > MAX_COMPARISON_AGE_S` IS NOT.
+        # `nan > 60` is False, so a NaN window sailed through the ceiling; `elapsed <
+        # nan` is False and `elapsed >= nan` is False, so EVERY staleness expression
+        # downstream became vacuous and the verdict fell through to PERMIT (review of
+        # #10963, measured in-process). That is precisely the mechanism this module
+        # already documents for the age seam (`nan >= 60` is False, so an unvalidated
+        # seam made the ONLY staleness check vacuous) — it was just left open on the
+        # window side. Written as a positive range, `0 < max_age <= 60`, so NaN and a
+        # negative window are rejected by the same clause rather than by luck.
+        #
         # ⛔ THE BOUND LIVES WITH THE MEASUREMENT, NOT WITH ONE CALLER. THE WINDOW IS
         # THE ONLY GATE BETWEEN A VERDICT AND THE POST, so a caller-supplied window may
         # no more widen it than a caller-supplied age may satisfy it. `main` refuses a
@@ -428,9 +438,10 @@ def evaluate(repo: str, run_id: int, max_age: int,
         # conflation this module fixed for the typo'd `--fake-elapsed` (review of
         # #10963). A programming error should be loud.
         raise ValueError(
-            f"max_age {max_age}s is wider than the {MAX_COMPARISON_AGE_S}s window "
-            "this guard is built on — a caller-supplied window may not widen the "
-            "staleness check")
+            f"max_age {max_age!r} is not a usable window — this guard acts only on a "
+            f"measurement taken less than {MAX_COMPARISON_AGE_S}s ago, so the window "
+            "must be a number in (0, 60]. A caller-supplied window may neither widen "
+            "nor neutralise the staleness check")
     fake = _elapsed_override(fake_elapsed)
     if fake is not None:
         verdict, detail = decide(repo, run_id)
