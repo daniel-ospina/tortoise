@@ -3243,6 +3243,12 @@ class DuplicateManifestKeyError(ValueError):
     current mapping, **unless the key already exists in it**"
     (https://yaml.org/type/merge.html, Example 1's ``# Override``), so the
     document's own pair deliberately wins and both gates must accept it.
+
+    "Own pair" is decided by OBJECT IDENTITY, never by position or count (see
+    ``_NoDuplicateKeyLoader.flatten_mapping``): a count is short by one per
+    ``<<:`` entry and misreads a mapping that arrived already flattened through
+    a merge chain, so either counting scheme false-REDs legal documents (#10790
+    review r3 P2).
     """
 
     def __init__(self, issues: list[str]) -> None:
@@ -3262,7 +3268,10 @@ def _duplicate_key_loader():
     resolution the whole manifest depends on (``166.0`` stays a ``float``, a
     quoted stamp stays a ``str``) and overrides only the mapping constructor.
     A repeat is recorded only among a mapping's OWN pairs, so a ``<<:`` merge
-    override — legal by the YAML merge type — is not reported.
+    override — legal by the YAML merge type — is not reported. "Own" is
+    recorded by object identity in ``flatten_mapping``, because after that call
+    the inherited and document-written pairs sit side by side and no count can
+    tell them apart.
     """
     global _DUP_KEY_LOADER
     if _DUP_KEY_LOADER is not None:
@@ -3273,28 +3282,60 @@ def _duplicate_key_loader():
         def __init__(self, stream) -> None:
             super().__init__(stream)
             self.duplicate_keys: list[tuple[str, int, int]] = []
+            # id(MappingNode) -> the pair objects a `<<:` merge inserted into it.
+            self.inherited_pairs: dict[int, list[tuple]] = {}
+
+        def flatten_mapping(self, node):
+            """Record WHICH pairs a `<<:` merge inserted — by object identity.
+
+            `SafeConstructor.flatten_mapping` deletes the `<<` entry (or
+            entries) and PREPENDS the merged pairs into `node.value`, so
+            afterwards the inherited and document-written pairs sit side by side
+            in one list. Neither of the two obvious ways to separate them works:
+
+            * a COUNT taken before the call is short by one per `<<:` entry
+              (`len(node.value) - own_pairs == len(merge) - n_merge_keys`), so
+              the LAST merged pair(s) are classified as document-written and a
+              legal override of that key is refused (#10790 review r3 P2);
+            * a count is also wrong for a mapping reached through a merge CHAIN:
+              the parent's `flatten_mapping` recurses into the merged value
+              node and flattens it THERE, so by the time that node is
+              constructed its `<<` is already gone and every inherited pair
+              looks document-written.
+
+            Identity is the property that survives both: `merge.extend(
+            value_node.value)` copies the tuple REFERENCES, so an inherited pair
+            is the very object the anchor's node holds. `before` keeps the
+            document's own pairs alive across the call, so no `id` can be
+            recycled.
+
+            Only a document-written pair can be a duplicate: a `<<:` key the
+            document then overrides is the merge type's documented purpose
+            (yaml.org/type/merge.html, "unless the key already exists in it",
+            Example 1 `# Override`), and `yaml.safe_load` resolves it to the
+            document's own value — which is exactly what this loader must keep
+            doing. A duplicate INSIDE an anchored mapping is still caught: that
+            MappingNode is constructed on its own, with no merge in play.
+            """
+            before = list(node.value)
+            before_ids = {id(pair) for pair in before}
+            super().flatten_mapping(node)
+            self.inherited_pairs.setdefault(id(node), []).extend(
+                pair for pair in node.value if id(pair) not in before_ids
+            )
 
         def construct_mapping(self, node, deep=False):
             if isinstance(node, yaml.MappingNode):
-                # #10790 review r2 P2: count the pairs the DOCUMENT wrote
-                # BEFORE `flatten_mapping` prepends the merge-sourced ones. Only
-                # a document-written pair can be a duplicate: a `<<:` key the
-                # document then overrides is the merge type's documented purpose
-                # (yaml.org/type/merge.html, "unless the key already exists in
-                # it", Example 1 `# Override`), and `yaml.safe_load` resolves it
-                # to the document's own value — which is exactly what this loader
-                # must keep doing. A duplicate INSIDE an anchored mapping is
-                # still caught: that MappingNode is constructed on its own, with
-                # no merge in play.
-                own_pairs = len(node.value)
                 self.flatten_mapping(node)
-                first_own = len(node.value) - own_pairs
+                inherited = {
+                    id(pair) for pair in self.inherited_pairs.get(id(node), ())}
             else:  # pragma: no cover - SafeConstructor only maps MappingNodes
-                first_own = 0
+                inherited = set()
             seen: dict[object, int] = {}
             mapping = {}
-            for index, (key_node, value_node) in enumerate(node.value):
-                if index < first_own:
+            for pair in node.value:
+                key_node, value_node = pair
+                if id(pair) in inherited:
                     # Introduced by `<<:`: an inherited pair, never a repeat of
                     # one this document wrote, so it cannot be data loss.
                     mapping[self.construct_object(key_node, deep=deep)] = (

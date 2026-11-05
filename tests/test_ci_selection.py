@@ -5765,17 +5765,20 @@ def test_the_two_duplicate_key_guards_agree_on_a_merge_override(tmp_path):
 
     Measured pre-fix: `parse_manifest_text` raised on `MERGE_KEY_OVERRIDE_DOC`
     while `registry_integrity.check_registry` accepted it — one hazard, two
-    verdicts, in one required job.
+    verdicts, in one required job. Every SHAPE of a legal override is checked,
+    not just the ordering that happens to work: the anchor's key order is
+    irrelevant to the spec, so a pair of guards that agree on one ordering and
+    disagree on the other is one hazard with two verdicts again.
     """
     from tools import ci_selection as cs
     from tools import registry_integrity
 
-    path = tmp_path / "merge-override.yml"
-    path.write_text(MERGE_KEY_OVERRIDE_DOC)
-    assert registry_integrity.check_registry(path) == [], (
-        "registry_integrity reads the node graph and accepts a merge override")
-    assert cs.parse_manifest_text(MERGE_KEY_OVERRIDE_DOC) == yaml.safe_load(
-        MERGE_KEY_OVERRIDE_DOC)
+    for name, doc in LEGAL_MERGE_DOCS.items():
+        path = tmp_path / f"merge-override-{name}.yml"
+        path.write_text(doc)
+        assert registry_integrity.check_registry(path) == [], (
+            f"registry_integrity reads the node graph and accepts {name}")
+        assert cs.parse_manifest_text(doc) == yaml.safe_load(doc), name
 
 
 def test_the_registrar_loads_through_the_strict_parse(tmp_path):
@@ -5826,19 +5829,83 @@ fresh:
   weight: 9.5
 """
 
+# The SAME document and the SAME spec semantics (`yaml.safe_load` resolves both
+# identically) with only the anchor's key ORDER changed, so the overridden key is
+# the anchor's LAST pair. This is the ordering the first arm above cannot
+# express, and it is where a positional carve-out breaks: `flatten_mapping`
+# deletes the `<<` entry and PREPENDS the merged pairs, so a carve-out counted as
+# `len(node.value) - own_pairs` is short by one per merge key and classifies the
+# LAST inherited pair as document-written. Measured pre-fix (required
+# `manifest-integrity` step, #10790 review r3 P2): `DuplicateManifestKeyError:
+# duplicate mapping key 'weight': line 6 repeats line 3` — naming the pair inside
+# the anchor, which `fresh` did not write.
+MERGE_KEY_OVERRIDE_LAST_DOC = """\
+defaults: &defaults
+  note: carried
+  weight: 2.0
+fresh:
+  <<: *defaults
+  weight: 9.5
+"""
 
-def test_a_merge_key_override_is_NOT_a_duplicate():
-    """`<<:` overriding an inherited key is the spec's purpose, not data loss."""
+# A two-level merge chain: `top` merges `mid`, which merges `base`. The parent's
+# `flatten_mapping` recurses into the merged node and flattens it THERE, so by the
+# time `mid` is constructed its `<<` is gone and every positional count sees an
+# already-collapsed list. Measured pre-fix: `duplicate mapping key 'x': line 5
+# repeats line 2`, while `yaml.safe_load` accepts the document and resolves
+# `mid` to `{'x': 2}` (its own pair overrides the inherited one).
+MERGE_CHAIN_DOC = """\
+base: &b
+  x: 1
+mid: &m
+  <<: *b
+  x: 2
+top:
+  <<: *m
+  y: 3
+"""
+
+#: Every legal `<<:` override shape, keyed by a name for the failure message.
+LEGAL_MERGE_DOCS = {
+    "anchor-first": MERGE_KEY_OVERRIDE_DOC,
+    "anchor-last": MERGE_KEY_OVERRIDE_LAST_DOC,
+    "two-level-chain": MERGE_CHAIN_DOC,
+}
+
+
+@pytest.mark.parametrize("doc", LEGAL_MERGE_DOCS.values(), ids=LEGAL_MERGE_DOCS)
+def test_a_merge_key_override_is_NOT_a_duplicate(doc):
+    """`<<:` overriding an inherited key is the spec's purpose, not data loss.
+
+    Non-vacuity: the `anchor-last` and `two-level-chain` parameters RAISE
+    `DuplicateManifestKeyError` with the pre-fix carve-out (measured, quoted at
+    each document above); the `anchor-first` parameter is the ordering that
+    passed, so this arm subsumes rather than replaces it.
+    """
     from tools import ci_selection as cs
 
     # The authority: what the library (and every plain reader) resolves this to.
-    expected = yaml.safe_load(MERGE_KEY_OVERRIDE_DOC)
-    assert expected["fresh"] == {"weight": 9.5, "note": "carried"}, expected
-
-    assert cs.parse_manifest_text(MERGE_KEY_OVERRIDE_DOC) == expected, (
+    expected = yaml.safe_load(doc)
+    assert cs.parse_manifest_text(doc) == expected, (
         "the strict loader must resolve a merge-key override exactly as "
         "`yaml.safe_load` does — the document's own pair wins"
     )
+
+
+def test_a_merge_key_override_resolves_to_the_documents_own_value():
+    """The resolved VALUE, not just "no exception" — the override really wins.
+
+    A carve-out that skipped the document's own pair along with the inherited one
+    would also stop raising, while handing readers the anchor's stale value. Both
+    orderings are checked so the value is pinned independently of the shape.
+    """
+    from tools import ci_selection as cs
+
+    for name in ("anchor-first", "anchor-last"):
+        parsed = cs.parse_manifest_text(LEGAL_MERGE_DOCS[name])
+        assert parsed["fresh"] == {"weight": 9.5, "note": "carried"}, name
+    assert cs.parse_manifest_text(MERGE_CHAIN_DOC)["mid"] == {"x": 2}
+    assert cs.parse_manifest_text(MERGE_CHAIN_DOC)["top"] == {"x": 2, "y": 3}
 
 
 def test_a_real_duplicate_beside_a_merge_key_is_still_refused():
