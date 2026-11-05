@@ -494,7 +494,9 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
 
 It proves the write by **doing** it: push the commit already at `HEAD` onto a namespaced throwaway
 ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (never trusting
-`git push`'s own exit code), delete it, confirm the delete the same way.
+`git push`'s own exit code), delete it, confirm the delete the same way. ⚠️ A probe killed by
+`SIGTERM` (what a fleet watchdog sends) runs no cleanup, so it can leave the ref behind and print
+no verdict: after a killed run, check `git ls-remote origin 'refs/heads/gh-write-preflight/*'`.
 
 - `exit 0` = `GH-WRITE-OK(<remote>) — push confirmed by ls-remote; <cleanup>` — the credential can
   write **repository contents**, measured by the one operation that needs it: a throwaway ref was
@@ -503,19 +505,24 @@ ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (
   later step needs a remote ref for. Read the `cleanup` clause rather than assuming the remote is
   clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked for), or `deletion UNCONFIRMED` (the delete
   or its read-back failed — the credential still wrote; check the remote).
-- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` on **stderr** (stdout stays clean/JSON) — do NOT start
-  the work yet, EXCEPT on `delete-failed` (litter, see below: the credential already wrote — re-run);
-  name the reason in your report. `REASONS` is a **closed set of ten** and the module
-  docstring publishes all of it. **Ten tokens, three groupings — plus one token that reads like a
-  refusal and is not:**
+  ⛔ Under `--json` **no OK line is printed at all** — stdout is pure JSON and the verdict lives in
+  its `writable` / `cleaned_up` fields, so a caller that greps for the marker must not pass `--json`.
+- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — the MARKER goes to **stderr** (stdout carries the
+  human render, or pure JSON under `--json`). Do **not** start the work until the reason is
+  resolved, but the resolution differs by class and only the refusal class means "park": the
+  NO-VERDICT and environment tokens below are cleared by re-running or by fixing the invocation.
+  `REASONS` is a **closed set of ten** and the module docstring publishes all of it. **Ten tokens,
+  three groupings — plus one token that reads like a refusal and is not:**
   - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network),
-    `remote-unreachable`, `verify-mismatch` (the push claimed success and `ls-remote` disagrees).
-    If the run's own detail names a branch protection / ruleset rather than a credential refusal,
-    re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before concluding the
-    credential is read-only — otherwise a constrained repo parks deliverable work.
+    `remote-unreachable`. If the run's own detail names a branch protection / ruleset rather than a
+    credential refusal, re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before
+    concluding the credential is read-only — otherwise a constrained repo parks deliverable work.
   - **NO VERDICT, re-run — never "read-only"** — `push-unknown` (the push did not COMPLETE: timed
-    out, signalled, no output) and `internal-error` (the probe itself failed). Folding either into
-    `push-refused` parks deliverable work on a slow or OOM-killed push; that split is pinned by
+    out, signalled, no output), `internal-error` (the probe itself failed), and `verify-mismatch`
+    (the push claimed success but the confirming `ls-remote` did not show the ref **at our sha** —
+    which also covers a read that could not be performed, since an unreadable target is not a
+    proven one). Folding any of these into `push-refused` parks deliverable work on a slow or
+    OOM-killed push; the closed set is pinned by
     `test_the_contract_publishes_the_closed_reason_set`.
   - **environment, not the credential** — `git-absent`, `not-a-repo` (`--repo` is a CHECKOUT PATH,
     never `owner/name`), `no-remote` (no remote of that name), `no-head` (`HEAD` does not resolve).
@@ -539,16 +546,18 @@ had asked whether the credential could push at all.
   permissions the **authenticated USER** holds, not the ones the **token was granted**. A
   fine-grained PAT with `contents: read` authenticates AS THE USER, so it reads `{"admin":true,
   "push":true,…}` while every push it makes is refused. On a fine-grained PAT, `Issues: write`,
-  `Pull requests: write` and `Contents: write` are **three independent grants** — `issues=write` can
+  `Pull requests: write` and `Contents: write` are **separately granted** — `issues=write` can
   be present while the PR surface 403s on the same token in the same minute (#10930).
 
 ⛔ **THE CLAIM IS NO WIDER THAN THE MEASUREMENT — this proves `Contents: write` and nothing else.**
 It does **not** probe `Issues: write` or `Pull requests: write`, so `exit 0` does **not** promise a PR
-create, a PR comment, a constituent-PR close, or an issue close — every one of those 403s on a token
-whose contents half is fine, and vice versa (#10930 records the requirement: a landing lane performs
-three writes, not one, and the grants are independent). It also proves the credential **`git`**
-resolves for this checkout's push URL; `--repo` is a CHECKOUT PATH that is asserted, not a redirect,
-so pass the checkout you will push from.
+create, a PR comment, a constituent-PR close, or an issue close — any of those can 403 on a token
+whose contents half is fine, and vice versa. #10930 records the requirement exactly: a **landing**
+lane's preflight must prove **three grants** — `Contents`, `Pull requests`, `Issues` — **not two**,
+because #10945's two-leg probe passed tokens that then died at the issue-close step. This gate
+proves one of the three. It also proves the credential **`git`** resolves for this checkout's push
+URL; `--repo` is a CHECKOUT PATH that is asserted, not a redirect, so pass the checkout you will
+push from.
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
