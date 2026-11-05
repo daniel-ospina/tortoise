@@ -390,65 +390,83 @@ def test_a_callable_raised_timeout_error_is_a_domain_error():
     )
 
 
-def test_a_callable_failure_landing_with_the_bound_keeps_its_own_type(
-        monkeypatch):
-    """RED before the fix: the BOUND's ``TimeoutError`` replaced the callable's.
+def _stalled_delivery(monkeypatch):
+    """Make the bound's expiry arrive AFTER the callable's own outcome (#10941).
 
-    The ``except TimeoutError`` arm discriminates THREE sources by reading the
-    future (the class cannot tell them apart). The callable's own
-    ``TimeoutError`` reaches it through ``wrap_future``; a bound expiry is
-    minted by ``wait_for``. But a THIRD state exists between them, and it is
-    reachable without any exotic timing: ``concurrent.futures.Future`` is
-    settled by the WORKER thread — no event-loop hand-off — so a callable that
-    fails can have ``future.done()`` true by the time this arm reads it, while
-    the exception in hand is still ``wait_for``'s. The arm's domain-error
-    branch is right that the work RAN and failed; its bare ``raise`` was wrong,
-    because it re-raised ``wait_for``'s ``TimeoutError`` and REPLACED the
-    callable's failure with a seam-generated one.
-
-    Measured consequence (the reason this pin exists): a
-    ``_ProjectionOpenError`` from the graph CONSTRUCTION lane reached
-    ``/v1/topics/{t}/summary`` as a bare ``TimeoutError`` — a type no hosted
-    route maps — so it escaped the ASGI app instead of the route's own 500, and
-    reddened `test (g)` of CI run 41937419070 on a file this seam's PR does not
-    touch.
-
-    The seam is patched to the state the race produces rather than raced: a
-    real-time coin-flip cannot be pinned, and the branch under test is exactly
-    "the future is settled with its own exception AND the bound's
-    ``TimeoutError`` is the one in hand".
+    The shape a STALLED event loop produces, and the one the pool cannot be
+    asked to reproduce on demand: a loop that cannot run ``wait_for``'s timer on
+    schedule lets the callable finish (and publish its exception) first, so the
+    bound's ``TimeoutError`` reaches ``run_control_plane_call`` with the future
+    already DONE — the timer's cancel winning the same ``_ready`` batch.
+    ``_await_future`` is the seam's single await primitive, so stubbing it is
+    the same coupling the sibling re-await test uses on ``wrap_future``.
     """
-    class _ProjectionOpenError(RuntimeError):
-        """Stands in for ``hosted_api._ProjectionOpenError``."""
+    real = monitoring._await_future
 
-    def _boom():
-        raise _ProjectionOpenError("graph unavailable")
+    async def _await_then_expire(future, *, timeout, cancel_on_timeout=True):
+        with contextlib.suppress(Exception):
+            await real(future, timeout=None, cancel_on_timeout=cancel_on_timeout)
+        raise TimeoutError("the bound expired")
 
-    async def _settled_at_the_bound(future, *, timeout, cancel_on_timeout=True):
-        while not future.done():
-            await asyncio.sleep(0)
-        if not future.cancelled():
-            # Retrieve it, as an abandoned await would, so the callable's
-            # failure is a SETTLED future state and not a logged warning.
-            future.exception()
-        raise TimeoutError(f"control-plane call exceeded its {timeout}s bound")
+    monkeypatch.setattr(monitoring, "_await_future", _await_then_expire)
 
-    monkeypatch.setattr(monitoring, "_await_future", _settled_at_the_bound)
+
+def test_a_callable_failing_after_its_bound_is_a_bound_miss(monkeypatch):
+    """#10941: a callable's LATE failure is not a capacity verdict for it.
+
+    RED before the fix, and for the reason the CI check went red: with the
+    future DONE the seam re-raised its OWN bound ``TimeoutError``, so an
+    over-bound submission was answered with a bare ``TimeoutError`` — an error
+    no route can classify (the graph lane maps ``ControlPlaneOffloadError`` to
+    503 ``graph_unavailable`` and the callable's failure to its own arm, and
+    neither maps the look-alike). The deadline is what the caller bought; work
+    that answered after it did not answer in time.
+    """
+    _stalled_delivery(monkeypatch)
+
+    def _slow_failure():
+        time.sleep(0.2)
+        raise RuntimeError("store said no")
 
     async def _run():
         await monitoring.run_control_plane_call(
-            _boom, op="settled-at-bound", timeout=0.05)
+            _slow_failure, op="late-failure", pool="graph", timeout=0.05)
 
-    with pytest.raises(_ProjectionOpenError) as excinfo:
+    with pytest.raises(monitoring.ControlPlaneOffloadError) as excinfo:
         asyncio.run(_run())
-    assert not isinstance(excinfo.value, TimeoutError), (
-        "the callable's own failure was replaced by the seam's bound-miss "
-        "TimeoutError — a type no hosted route maps to a status")
+    assert "exceeded its 0.05s bound" in str(excinfo.value), excinfo.value
     last = monitoring.control_plane_offload_records()[-1]
-    assert last[0] == "settled-at-bound", last
+    assert last[0] == "late-failure", last
+    assert last[2] == "bound_miss_running", (
+        f"an over-bound submission recorded {last[2]!r} — the bound did expire "
+        "first, so this is the saturation/running child, not a domain error"
+    )
+
+
+def test_a_callable_failing_inside_its_bound_keeps_its_own_error(monkeypatch):
+    """The other direction, so "never surface the callable" cannot pass above.
+
+    A callable that answered WITHIN its deadline owns the verdict: its own
+    exception must reach the caller unchanged. Pre-fix this test reds with the
+    seam's ``TimeoutError`` — the same swap, in the direction that also
+    destroys the diagnosis an operator needs.
+    """
+    _stalled_delivery(monkeypatch)
+
+    def _fast_failure():
+        raise RuntimeError("store said no")
+
+    async def _run():
+        await monitoring.run_control_plane_call(
+            _fast_failure, op="in-time-failure", pool="graph", timeout=5.0)
+
+    with pytest.raises(RuntimeError, match="store said no"):
+        asyncio.run(_run())
+    last = monitoring.control_plane_offload_records()[-1]
     assert last[2] == "domain_error", (
-        f"the callable's failure was recorded as {last[2]!r} — it is a DOMAIN "
-        "error, not a pool saturation event")
+        f"a callable failure inside its bound recorded {last[2]!r} — the pool "
+        "was never saturated"
+    )
 
 
 def test_a_cancelled_await_is_recorded_as_cancelled():
@@ -1712,47 +1730,37 @@ def test_a_re_await_reports_a_callable_timeout_as_a_domain_error():
         "SATURATION child, and this lane was never saturated (#10602 review P2)")
 
 
-def test_a_re_await_does_not_rewrite_a_settled_failure_as_a_timeout(
-        monkeypatch):
-    """The sibling arm of the ``run_control_plane_call`` pin, one seam over.
+def test_a_re_await_keeps_the_callable_error_it_found(monkeypatch):
+    """#10941: the re-await arm must not swap the callable's failure for its own.
 
-    ``reawait_control_plane_call`` carries the same bare ``raise`` in its
-    domain-error branch, so the same rewrite is reachable: a re-awaited
-    submission that fails with its OWN exception as the re-armed bound expires
-    had that exception replaced by the bound's ``TimeoutError``. Called only
-    on the cold-setup re-arm path, so the rewrite would surface as an unmapped
-    ``TimeoutError`` on a read route — the same signature, on a narrower path.
+    Same look-alike as the sibling arm, reached the same way (a stalled loop
+    delivers the bound's expiry after the work failed): with the future DONE, a
+    bare ``raise`` re-raised the seam's ``TimeoutError`` and DISCARDED the
+    callable's real exception, so the caller lost the diagnosis and every route's
+    failure arm missed it. RED before the fix — this arm's ``raise`` was the
+    second copy of that bug.
     """
     import concurrent.futures as _cf
 
-    class _ProjectionOpenError(RuntimeError):
-        """Stands in for ``hosted_api._ProjectionOpenError``."""
+    _stalled_delivery(monkeypatch)
+    future: _cf.Future = _cf.Future()
+    assert future.set_running_or_notify_cancel() is True
 
-    settled: _cf.Future = _cf.Future()
-    settled.set_exception(_ProjectionOpenError("graph unavailable"))
+    def _fail_late() -> None:
+        time.sleep(0.2)
+        future.set_exception(RuntimeError("driver exploded"))
 
-    async def _settled_at_the_bound(future, *, timeout, cancel_on_timeout=True):
-        while not future.done():
-            await asyncio.sleep(0)
-        if not future.cancelled():
-            future.exception()
-        raise TimeoutError(f"re-armed bound exceeded its {timeout}s")
-
-    monkeypatch.setattr(monitoring, "_await_future", _settled_at_the_bound)
+    threading.Thread(target=_fail_late, daemon=True).start()
 
     async def _run():
         return await monitoring.reawait_control_plane_call(
-            settled, op="reawait-settled-at-bound", timeout=5.0)
+            future, op="reawait-late-failure", timeout=0.05)
 
-    with pytest.raises(_ProjectionOpenError) as excinfo:
+    with pytest.raises(RuntimeError, match="driver exploded"):
         asyncio.run(_run())
-    assert not isinstance(excinfo.value, TimeoutError), (
-        "the re-awaited callable's own failure was replaced by the bound's "
-        "TimeoutError")
     records = [r for r in monitoring.control_plane_offload_records()
-               if r[0] == "reawait-settled-at-bound"]
-    assert [r[2] for r in records] == ["domain_error"], (
-        f"a settled domain error was recorded as {[r[2] for r in records]!r}")
+               if r[0] == "reawait-late-failure"]
+    assert [r[2] for r in records] == ["domain_error"], records
 
 
 def test_a_genuine_re_armed_bound_miss_still_refuses_and_counts_running():

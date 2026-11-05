@@ -3116,6 +3116,21 @@ async def run_control_plane_call(fn, *, op: str,
     ``fn`` ITSELF is a DOMAIN error and propagates unchanged — the three cases
     are disambiguated by inspecting the future, not conflated (#3498 review).
 
+    ⛔ #10941: the WITNESS is not enough for this arm — the CLOCK is. A future
+    that is DONE when the bound's ``TimeoutError`` arrives proves only that the
+    callable ANSWERED, never that it answered IN TIME: a stalled event loop
+    cannot run the bound's timer on schedule, so a callable that failed AFTER
+    its deadline completes before the expiry is delivered, and both land in one
+    ``_ready`` batch with the timer's cancel winning. Judging on
+    ``future.done()`` alone re-raised THIS seam's ``TimeoutError`` in place of
+    the callable's real failure — an unlabelled error no route can map
+    (measured: a graph-lane bound miss on PR #10941's `test (g)` surfaced as a
+    bare ``TimeoutError`` instead of the 503 ``graph_unavailable`` the capacity
+    contract promises). So the worker stamps when the CALLABLE finished and the
+    deadline is judged on that stamp; the sibling
+    ``reawait_control_plane_call`` keeps the witness rule on purpose (its work
+    has already run, and its diagnosis must never be replaced).
+
     ``cancel_on_timeout`` (#4456) selects the bound-miss semantics. ``True``
     (default) is fail-closed: the bound cancels the submission, so a QUEUED
     callable is dropped. ``False`` is DELIVERY-preserving: the bound abandons
@@ -3125,8 +3140,19 @@ async def run_control_plane_call(fn, *, op: str,
     tells the two apart.
     """
     bound = CONTROL_PLANE_OFFLOAD_TIMEOUT_S if timeout is None else timeout
-    future = control_plane_worker(pool).submit(fn)
     started = time.monotonic()
+    # #10941: stamp the CALLABLE's own completion, worker-side and BEFORE the
+    # future publishes its outcome — the only clock a stalled loop cannot
+    # distort. See the arm below for why the witness alone is not enough.
+    completed_at: list[float] = []
+
+    def _stamped():
+        try:
+            return fn()
+        finally:
+            completed_at.append(time.monotonic())
+
+    future = control_plane_worker(pool).submit(_stamped)
     # #5840: exactly ONE record per terminal state, on EVERY path. ``outcome``
     # is assigned before each exit and read by the ``finally``, so a future
     # early return or raise cannot silently reopen the success-only hole this
@@ -3138,29 +3164,37 @@ async def run_control_plane_call(fn, *, op: str,
                                          cancel_on_timeout=cancel_on_timeout)
         except TimeoutError as exc:
             # Distinguish the three sources of TimeoutError that meet here:
-            #   1. `fn` raised it              -> a domain error, propagate
-            #   2. the pool refused the submit -> `_WorkerBacklogFull`, fail closed
-            #   3. `wait_for`'s bound expired  -> fail closed
+            #   1. `fn` raised it, WITHIN its bound -> a domain error, propagate
+            #   2. the pool refused the submit      -> `_WorkerBacklogFull`, fail closed
+            #   3. `wait_for`'s bound expired first -> fail closed
             future_exc = (future.exception()
                           if future.done() and not future.cancelled() else None)
-            if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
-                # The callable RAN and failed on its own: propagate ITS
-                # exception. ⛔ NOT a bare ``raise`` — that re-raises the
-                # ``TimeoutError`` THIS arm caught, i.e. ``wait_for``'s bound,
-                # and silently REWRITES the callable's failure into a
-                # seam-generated ``TimeoutError`` whenever the worker settles
-                # the future in the same tick the bound expires (the state is
-                # reachable because ``concurrent.futures.Future`` is settled by
-                # the WORKER thread, with no event-loop hand-off in between).
-                # Measured consequence: a ``_ProjectionOpenError`` from the
-                # graph CONSTRUCTION lane reached the route as a bare
-                # ``TimeoutError``, which is an `except` arm no hosted route
-                # maps — it escaped the ASGI app instead of the route's own
-                # 500 (CI run 41937419070, `test (g)`).
-                # ``from None``: the bound's expiry is a CONCURRENT event, not
-                # this failure's cause, so chaining it would mislabel the
-                # traceback in the same way the rewrite mislabelled the type.
-                raise future_exc from None
+            # ⛔ BOTH halves are required (#10941). The witness says the callable
+            # ANSWERED; the stamp says it answered INSIDE the deadline. With the
+            # witness alone, a completed-but-LATE failure fell into this branch
+            # and `raise` re-raised `exc` — the seam's own bound ``TimeoutError``
+            # — DISCARDING the callable's real exception. Nothing downstream can
+            # classify that look-alike: every route's failure arms (503
+            # ``graph_unavailable``, its 500, its degraded body) map the CALLABLE's
+            # error, so a bare ``TimeoutError`` escaped them all as an unlabelled
+            # 500. The stamp also keeps #5840's rule intact — a callable's own
+            # ``TimeoutError`` raised in time still propagates UNCHANGED, because
+            # it is re-raised through ``future_exc`` rather than discarded.
+            answered_in_time = (
+                future_exc is not None
+                and not isinstance(future_exc, _WorkerBacklogFull)
+                and bool(completed_at)
+                and completed_at[0] - started < bound
+            )
+            if answered_in_time:
+                # ``future_exc is exc`` is the callable's OWN ``TimeoutError``
+                # arriving unchanged — re-raise it untouched, so the caller sees
+                # exactly what ``fn`` raised (#5840). Any other failure is
+                # independent of the expiry it raced, so it is chained
+                # EXPLICITLY rather than by accident (B904).
+                if future_exc is exc:
+                    raise
+                raise future_exc from exc
             reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                       else f"exceeded its {bound}s bound")
             if not future.done():
@@ -3247,17 +3281,25 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
             # ``bound_miss_running`` — the saturation child — for a pool that was
             # never saturated (a ``socket.timeout`` escaping the graph driver is
             # the plausible route: it IS builtin ``TimeoutError`` since 3.10).
+            #
+            # ⛔ Raise ``future_exc``, never a bare ``raise`` (#10941): a bare
+            # re-raise re-raises THIS seam's ``TimeoutError`` — the look-alike
+            # the witness just proved is NOT the callable's failure — discarding
+            # the real diagnosis an operator needs (the sibling arm measured
+            # this on a graph-lane bound miss). This arm keeps the WITNESS rule
+            # and deliberately does NOT add the sibling's clock: the work here
+            # has already been submitted and may have finished, and throwing a
+            # FINISHED result away as a bound miss would waste the one re-await
+            # this lane allows (there is no third attempt).
             future_exc = (future.exception()
                           if future.done() and not future.cancelled() else None)
             if future_exc is not None and not isinstance(
                     future_exc, _WorkerBacklogFull):
-                # The callable RAN and failed on its own — propagate ITS
-                # exception, never the re-armed bound's ``TimeoutError`` this
-                # arm caught (see the sibling arm in
-                # ``run_control_plane_call`` for the measured rewrite this
-                # avoids: the worker settles the future without an event-loop
-                # hand-off, so it can land in the same tick the bound expires).
-                raise future_exc from None
+                # As in the sibling arm: the callable's own ``TimeoutError``
+                # arrives unchanged; anything else is chained explicitly.
+                if future_exc is exc:
+                    raise
+                raise future_exc from exc
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"
