@@ -12,9 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 72 mutation rows have now been run
-(**69 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
-re-labelled). **71 are KILLED**; M49 survives ALONE by the documented layering:
+fail for the bug they named — a green suite proving nothing. 73 mutation rows have now been run
+(**70 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **72 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -31,13 +31,22 @@ re-labelled). **71 are KILLED**; M49 survives ALONE by the documented layering:
 Cycle-9/10/11 added M47-M52, cycle-12 added M53-M56, cycle-13 added M57-M60, cycle-14 added M61-M63.
 The fixer lane then added M64-M65 (its own numbering) and cycle-15 added M66-M71 — ⛔ TWO LANES
 NUMBERED INDEPENDENTLY, so the cycle-15 ids were renumbered from their first run (M64-M69) to
-M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly one mutation:
+M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly one mutation
+(the cycle-16 review then added M72):
   M64 `_warn_write_failed` print unguarded ........... KILLED   M65 `_mutable_words_in` forks the vocabulary ... KILLED
   M66 required_set fabricates `contexts` again ....... KILLED   M67 `repo.labels` empty name allowed ......... KILLED
   M68 workflow `id` type check removed ............... KILLED   M69 `node_id` no longer required .............. KILLED
   M70 OverflowError dropped from ttl coercion ........ KILLED   M71 OverflowError dropped from now coercion .. KILLED
+  M72 runner `name`/label EMPTY string allowed ....... KILLED
 ⛔ M67 SURVIVED on its first test, which passed a DICT page where a LIST page is required — the
 SHAPE guard satisfied it and the empty-name check was unreachable. Fixed, then KILLED.
+⛔ M67's EMPTY-STRING sibling (M72, cycle-16 review) reached the same blocker from the other side:
+`_project_runners_inventory` REQUIRES a `labels` key, so the arm for the runner-NAME check has to
+carry one — `{"name": ""}` ALONE dies at the ABSENCE guard first and leaves the empty-name check
+unreachable, which is why the pinned arm is `{"name": "", "labels": []}`. Both M72 arms were
+MEASURED against the `8edc371f3` code: `{"name": "", "labels": []}` projected cleanly to
+`[{"name": "", "labels": []}]` and `[{"name": ""}]` was cached as a named label, instead of
+raising. Both now red.
 
   M52 runner `labels` ABSENT read as empty ..... KILLED   M51 `visibility` cached again ......... KILLED
 
@@ -1714,14 +1723,32 @@ def test_empty_lists_are_still_the_legitimate_no_checks_answer() -> None:
 
 @pytest.mark.parametrize(
     "labels",
-    [[None], ["self-hosted"], [{}], [{"name": None}], [{"name": 5}], "x64"],
+    [[None], ["self-hosted"], [{}], [{"name": None}], [{"name": 5}], [{"name": ""}], "x64"],
 )
 def test_a_runner_label_entry_the_projection_does_not_understand_is_refused(labels) -> None:
     """⛔ `if isinstance(lbl, dict)` was a SILENT FILTER, so a lane asking "is there a runner with
     label X" got a cached "no" (``labels: []``) from a body the projection did not understand, for
-    30 minutes. `_project_labels` type-checks; this now does too."""
+    30 minutes. `_project_labels` type-checks; this now does too.
+
+    `[{"name": ""}]` (mutation M72) is the EMPTY spelling of the same thing: `""` is a `str`, so
+    the type check alone passed it and the entry cached as a named label for 30 minutes. Every
+    sibling projection tightened in the same round already refused it.
+    """
     with pytest.raises(C.Unreadable):
         C.INVARIANTS["runners.inventory"].project([{"runners": [{"name": "r1", "labels": labels}]}])
+
+
+@pytest.mark.parametrize("entry", [{"name": ""}, {"name": "", "labels": []}])
+def test_a_runner_naming_nothing_with_an_EMPTY_STRING_is_refused(entry) -> None:
+    """⛔ MUTATION M72. `{"name": ""}` projected cleanly to ``[{"name": "", "labels": []}]`` and
+    was cached for 30 minutes — the third spelling of "an inventory entry naming no runner", after
+    `[{}]` and `[{"name": null}]` which this function already refuses.
+
+    Non-vacuous against the pre-fix code: the old check was `isinstance(r.get("name"), str)`, and
+    `""` satisfies it, so both arms below projected an answer instead of raising.
+    """
+    with pytest.raises(C.Unreadable):
+        C.INVARIANTS["runners.inventory"].project([{"runners": [entry]}])
 
 
 @pytest.mark.parametrize("entry", [{"name": "cmux"}, {"name": "cmux", "os": "linux"}])

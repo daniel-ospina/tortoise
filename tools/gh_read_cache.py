@@ -389,10 +389,15 @@ def _project_runners_inventory(docs: Sequence[Any]) -> Any:
     for r in _expand(docs, "runners.inventory", "runners"):
         if not isinstance(r, dict):
             raise Unreadable(f"runners.inventory: entry {r!r} is not a runner")
-        if not isinstance(r.get("name"), str):
-            # `[{}]` AND `[{"name": null}]` both used to project to an inventory entry naming no
-            # runner, cached for 30 minutes.
-            raise Unreadable("runners.inventory: entry has a non-null-string `name` — not a runner")
+        # ⛔ TYPE **AND EMPTINESS**. `[{}]` and `[{"name": null}]` both used to project to an
+        # inventory entry naming no runner, cached for 30 minutes; `{"name": ""}` is the THIRD
+        # spelling of "names nothing" and `""` IS a `str`, so the type check alone let it through.
+        # `_pick_last` (identity fields), `_project_workflows` and `_project_labels` in this same
+        # module all refuse it; this projection was the one that did not.
+        if not isinstance(r.get("name"), str) or not r["name"]:
+            raise Unreadable(
+                "runners.inventory: entry has a non-null, non-empty-string `name` — not a runner"
+            )
         # ⛔ ABSENCE IS NOT AN EMPTY LABEL SET. A missing `labels` key read as "this runner carries
         # no labels" and cached that "no" for 30 minutes — the last spelling of the failure the
         # comment below closes, and the same rule `_expand` and `_project_required_set` already
@@ -406,7 +411,12 @@ def _project_runners_inventory(docs: Sequence[Any]) -> Any:
         # projection did not understand. `_project_labels` type-checks; so does this.
         labels = []
         for lbl in r["labels"]:
-            if not isinstance(lbl, dict) or not isinstance(lbl.get("name"), str):
+            # Type AND emptiness, for the reason the runner-name check above states: a label
+            # naming `""` is a label naming nothing, and a lane asking "is there a runner with
+            # label X" must not be answered from a body this projection did not understand.
+            if not isinstance(lbl, dict) or not (
+                isinstance(lbl.get("name"), str) and lbl["name"]
+            ):
                 raise Unreadable(f"runners.inventory: label entry {lbl!r} is not a named label")
             labels.append(lbl["name"])
         out.append({"name": r["name"], "labels": labels})
