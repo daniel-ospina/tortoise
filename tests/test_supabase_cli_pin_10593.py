@@ -49,8 +49,12 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "supabase-deploy.yml"
 CONFIG = ROOT / "supabase" / "config.toml"
 
-#: A pin is an exact x.y.z. `latest`, `v3`, `3`, `3.x`, `^3.0.0` and `>=3` all float the MAJOR,
-#: which is the defect: the major is what changed the config schema under this repo.
+#: A pin is an exact x.y.z. `latest`, `v2`, `2`, `2.x` all float the MAJOR, which is the defect;
+#: a major-bounded range (`^2.122.1`, `~2.122`) cannot cross the major, but it still takes PATCH
+#: upgrades that no diff records — and this workflow is the only door to production migrations.
+#: (`v2.stable` was considered for exactly that reason and rejected: it is the same unrecorded-
+#: patch-uptake trade, on a line this repo does not own. If a later lane prefers it, change this
+#: regex deliberately rather than discovering it as a red in the deploy pin.)
 _EXACT_PIN = re.compile(r"^\d+\.\d+\.\d+$")
 
 #: The CLI major that raises `DbConfigLoadError` on a config still carrying `[inbucket]`.
@@ -75,14 +79,23 @@ def _setup_cli_step(workflow_text: str) -> dict:
 def _requested_version(workflow_text: str) -> str:
     step = _setup_cli_step(workflow_text)
     version = (step.get("with") or {}).get("version")
-    assert version is not None, "the setup-cli step no longer names a version: `latest` is implied"
+    assert version is not None, (
+        "the setup-cli step no longer names a version — the action then falls back to its own "
+        "default (the root lockfile's version, else `latest`), which is the float this pin exists "
+        "to remove"
+    )
     return str(version).strip()
 
 
 def _config_declares_inbucket(config_text: str) -> bool:
-    """True when `supabase/config.toml` still carries an `[inbucket]` table."""
+    """True when `supabase/config.toml` still carries an `[inbucket]` table.
+
+    The trailing-comment arm is load-bearing: TOML reads `[inbucket]   # local email` as the same
+    table, and so does the CLI — a detector that missed it would green-light a major-3 pin while
+    the deploy still dies at config load, which is the false PASS this file exists to prevent.
+    """
     return any(
-        re.match(r"^\s*\[inbucket\]\s*$", line)
+        re.match(r"^\s*\[inbucket\]\s*(?:#.*)?$", line)
         for line in config_text.splitlines()
     )
 
@@ -93,8 +106,9 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
     version = _requested_version(workflow_text)
     if not _EXACT_PIN.match(version):
         found.append(
-            f"setup-cli `version: {version}` is not an exact x.y.z pin — a floating reference "
-            "can change MAJOR under the deploy, which is how #10593's apply was lost"
+            f"setup-cli `version: {version}` is not an exact x.y.z pin — a reference that floats "
+            "the MAJOR can change the config schema under the deploy, and one that floats only "
+            "the PATCH takes upgrades no diff records; this is how #10593's apply was lost"
         )
     elif _config_declares_inbucket(config_text):
         major = int(version.split(".", 1)[0])
@@ -168,5 +182,9 @@ def test_the_coupling_disappears_once_the_config_leaves_inbucket() -> None:
     not a permanent ban on 3.x."""
     workflow = WORKFLOW.read_text(encoding="utf-8")
     mutated_workflow = re.sub(r"(?m)^(\s*version:\s*).*$", r"\g<1>3.0.0", workflow, count=1)
+    # Without this the arm can pass VACUOUSLY: a `version:` key added earlier in the workflow would
+    # absorb the substitution, the real pin would stay put, and the assertion below would be true
+    # while proving nothing about the coupling. The sibling arms already assert their mutation.
+    assert "version: 3.0.0" in mutated_workflow, "mutation did not apply — this test would be vacuous"
     migrated_config = re.sub(r"(?m)^\[inbucket\]\s*$", "[local_smtp]", CONFIG.read_text("utf-8"))
     assert not _violations(mutated_workflow, migrated_config)

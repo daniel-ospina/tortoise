@@ -200,23 +200,31 @@ jobs:
       - uses: supabase/setup-cli@v1
         # ⛔ PINNED, NOT `latest` (#10593). The CLI is not an ordinary dependency here: its
         # MAJOR versions change the `supabase/config.toml` schema, and this workflow is the ONLY
-        # door that applies migrations to production. `latest` floated to 3.0.0 on 2026-11-05,
-        # which refuses to load a config still declaring `[inbucket]` (`DbConfigLoadError` ⇒
-        # exit 1 at CONFIG LOAD, before `db push` contacts the database):
+        # door that applies migrations to production. 3.0.0 was published 2026-11-02T12:18Z; the
+        # first and only apply attempted after that — run 42091073635, 2026-11-05T19:45:57Z —
+        # refused to load this repo's config, which still declares `[inbucket]`
+        # (`DbConfigLoadError` => exit 1 at CONFIG LOAD, before `db push` contacts the database):
         #
         #   [inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.
         #   ##[error]Process completed with exit code 1.          -- run 42091073635, 19:45:57Z
         #
-        # Every apply between 2026-11-03T02:53:49Z and this pin died there, which is why
-        # `deploy-hosted`'s drift gate stayed red naming `20261102000001`/`20261102000002` while
-        # its own prescribed remedy (`gh workflow run supabase-deploy.yml --ref main`) could
-        # never succeed. 2.122.1 is `v2.stable`; measured at the same moment, it LOADS this
-        # config and fails only for want of the access token CI supplies.
+        # Every apply between 2026-11-03T02:53:49Z and this pin died there — that window held no
+        # other apply (no migration was pending until 20261102000001/2 landed on 11-03), which is
+        # why `deploy-hosted`'s drift gate stayed red naming those versions while its own
+        # prescribed remedy (`gh workflow run supabase-deploy.yml --ref main`) could never succeed.
+        # 2.122.1 is `v2.stable`; measured at the same moment, it LOADS this config and fails only
+        # for want of the access token CI supplies.
         #
         # Moving to 3.x is a deliberate change, not a version bump: it must first migrate
         # `config.toml` to v3's schema (and validate `supabase start`/`db reset` + the local-auth
         # harnesses under it). `tests/test_supabase_cli_pin_10593.py` enforces the coupling — an
         # exact pin, and no major-3 pin while the config still declares `[inbucket]`.
+        #
+        # The exact pin buys schema stability at the cost of MANUAL patch uptake: an `x.y.z` inside
+        # a `with:` input is invisible to Dependabot, so a v2-line security patch will not arrive
+        # on its own. That trade is deliberate (a major that moves itself is what cost the applies
+        # above); if you are here to relax the pin, read the test first — and if you decide to,
+        # change the test deliberately rather than reading its red as a bug.
         with:
           version: 2.122.1
         env:
