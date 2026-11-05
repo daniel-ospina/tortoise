@@ -593,11 +593,12 @@ def main(argv: list[str] | None = None) -> int:
         return 64
     if args.fake_elapsed is not None:
         # ⛔ A TYPO'D SEAM IS A USAGE ERROR (64), NOT AN UNREADABLE SURFACE (2).
-        # `_elapsed_override` raises `Unreadable`, and the only catch around it is the
-        # one below — which reports the GITHUB SURFACE as unreadable when the argv is
-        # what is wrong, contradicting this tool's own exit table (`2` = a surface could
-        # not be read) and `--max-age`'s identical typo, which already exits 64
-        # (review of #10963, P2). Validated HERE, before any read, for the same reason.
+        # `_elapsed_override` raises `ValueError`; without this arm it escapes `evaluate`
+        # uncaught and the tool dies on a traceback (exit 1, nothing cancelled), so the
+        # operator gets neither a usage message nor a verdict. Validated HERE, before any
+        # read, so the 64 names the ARGV instead of a surface that nothing read — the
+        # conflation this tool already refuses for `--max-age`'s identical typo
+        # (review of #10963). Measured, not assumed: the mutation exits 1.
         try:
             _elapsed_override(args.fake_elapsed)
         except ValueError as exc:
