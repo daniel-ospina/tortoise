@@ -1832,7 +1832,7 @@ carrying `story_arc` lands in `public.session_narrative`), whose production prod
 `SessionNarrated` carrier (`#9555`), unchanged. MEASURED live on
 a FalkorDB, one commit with a 167-char narrative: `sum(size(n.story_arc))` = **334 bytes** before the
 removal (`:Source` 167 + `:Event` 167), **0 bytes** after it, with `public.session_narrative` holding
-the same 167 chars. `summary`/`title` deliberately stay on the node (§4.6 metadata, not the S1 narrative — ⚠️ **refs corrected 2026-11-05:** this entry read "§4.4" (the ontology's Document section) and "the prose" (an unnamed stand-in for §9.1's narrative, which is what the corrected text now names); `docs/ONTOLOGY.md` §4.6 is **Source**, which declares `summary`/`title`).
+the same 167 chars. `summary`/`title` deliberately stay on the node (§4.6 metadata, not the S1 narrative — ⚠️ **refs corrected 2026-11-04 (`#10000`, #10978):** this entry read "§4.4" (the ontology's Document section) and "the prose" (an unnamed stand-in for §9.1's narrative, which is what the corrected text now names); `docs/ONTOLOGY.md` §4.6 is **Source**, which declares `summary`/`title`).
 
 **The re-entry routes, and where each one stood.** The key stays DECLARED in `_SOURCE_NODE_PROPS`
 so legacy nodes read back, and the declaration is what makes a route possible at all. The list is per

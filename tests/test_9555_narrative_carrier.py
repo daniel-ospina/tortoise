@@ -1704,10 +1704,14 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
         f"{_STORAGE_DOC.name} no longer carries the heading {end_heading!r} — "
         "the section this pin brackets has MOVED or been renamed")
     start = text.index(start_heading)
-    end = text.index(end_heading, start)
+    # `find`, not `index`: an ABSENT or REORDERED end heading must reach the
+    # assertion below with its diagnosis, not raise an anonymous ValueError
+    # naming a substring the reader never chose.
+    end = text.find(end_heading, start)
     assert end > start, (
-        f"{end_heading!r} precedes {start_heading!r} in {_STORAGE_DOC.name} — "
-        "the section order changed and this pin is bracketing the wrong span")
+        f"{end_heading!r} does not follow {start_heading!r} in "
+        f"{_STORAGE_DOC.name} — the section order changed (or the end heading "
+        "was renamed or removed) and this pin is bracketing the wrong span")
     return text[start:end]
 
 
@@ -1733,10 +1737,14 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
 
     # ── the premise: §9.1's narrative home, from the projection that writes it ──
     home = f"public.{record_projection.NARRATIVE_TABLE}"
-    migration = (REPO_ROOT / "supabase/migrations"
-                 / "20261023000001_record_session_narrative.sql").read_text(
-                     encoding="utf-8")
-    assert f"CREATE TABLE IF NOT EXISTS {home} (" in migration, (
+    # Derived, not named: a hardcoded migration FILENAME makes this leg red on a
+    # rename or a squash of a tree where the claim is still true — and it would
+    # red with "the home MOVED", a false diagnosis. The module runs on every
+    # docs-only PR (`tier1`), so that false block would not stay local.
+    migrations = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((REPO_ROOT / "supabase/migrations").glob("*.sql")))
+    assert f"CREATE TABLE IF NOT EXISTS {home} (" in migrations, (
         f"`record_projection.NARRATIVE_TABLE` names `{home}`, but the migration "
         f"that creates §9.1's narrative home does not create that table — the "
         f"home MOVED, so §9.4's pointer (and §12.1b's) must move with it, and "
@@ -1750,10 +1758,17 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"§9.4 no longer states that the source vector's text is read from "
         f"`{home}` — that pointer is what stops a design embedding a topic "
         f"lexicon under #10000 once `#10852` lands")
-    assert ":Source.summary" in s94, (
-        "§9.4 no longer names `:Source.summary` as the field the vector must "
-        "NOT read — naming the home without naming the trap leaves the "
-        "*\"embed the summary already there\"* reading open")
+    assert s94.count(":Source.summary") == 1, (
+        f"§9.4 names `:Source.summary` {s94.count(':Source.summary')} times — "
+        f"§9.4 is the paragraph that says which field the vector must NOT "
+        f"read, and it must name that trap exactly once. An ADDED occurrence "
+        f"is how the retired \"we already write the summary\" reading comes "
+        f"back in ADDITIVE form: the correct pointer stays, and the forbidden "
+        f"instruction appears beside it — which a presence-only check misses")
+    assert "never from `:Source.summary`" in s94, (
+        "§9.4 no longer states the NEGATION — naming `:Source.summary` beside "
+        "the narrative's home without saying which one the vector must not "
+        "read leaves the *\"embed the summary already there\"* reading open")
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
         f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
