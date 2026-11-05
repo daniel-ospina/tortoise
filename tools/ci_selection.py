@@ -3208,15 +3208,41 @@ class DuplicateManifestKeyError(ValueError):
     touched ``durations`` unions the two blocks as TEXT, so the map ends up
     holding a stale row beside the refreshed one and the parser keeps whichever
     came second (#10717). Measured 2026-11-03 on #10790: merging ``origin/main``
-    produced **24** duplicate keys, and ``--integrity`` still printed
-    ``✅ integrity: all test files classified`` — because the duplicates are
-    gone by the time any check sees a dict. One of them silently reverted the
-    PR's own ``test_mcp_bridge.py`` weight (23.8 -> 2.0), which is the exact
-    "false PASS" shape a gate exists to prevent.
+    produced **24** duplicate keys, and ``python3 tools/ci_selection.py
+    --integrity`` printed ``✅ integrity: all test files classified`` — the
+    duplicates are gone by the time that check holds a dict. One of them
+    silently reverted the PR's own ``test_mcp_bridge.py`` weight (23.8 -> 2.0),
+    which is the exact "false PASS" shape a gate exists to prevent.
 
-    So the refusal belongs at the PARSE, not in a check composed onto a dict
-    that has already lost the information: every reader of this file gets it,
-    and no future entry point can be half-wired.
+    ``--integrity`` was not the only guard on that file, and this is **not** the
+    first check to see the shape: ``tools/registry_integrity.py`` reads the
+    registry through ``yaml.compose`` (the raw node graph, before any
+    constructor) and already refuses a duplicate mapping key at any depth; it
+    runs as a step of the SAME ``manifest-integrity`` job
+    (``.github/workflows/python-ci.yml``), so that merge would have reddened
+    there. The two are complements, and which is authoritative for what is a
+    deliberate split rather than an accident of two lanes:
+
+    * ``tools/registry_integrity.py`` is authoritative for the FILE AS TEXT —
+      the unioned document, its duplicate sequence entries and its malformed
+      shapes. It is the validator ``.gitattributes`` pairs with ``merge=union``
+      (#5373).
+    * this refusal is authoritative for READERS — it is the one parse every
+      consumer of the manifest reaches (``load_manifest``/``--integrity``,
+      ``ci_manifest._load``, ``ci_timing._manifest_of``), so a consumer that
+      never passes through the CI job still refuses the shape instead of
+      packing by a silently collapsed map.
+
+    So the refusal belongs at the PARSE *as well*, not only in a check composed
+    onto a dict that has already lost the information: every reader of this
+    file gets it, and no future entry point can be half-wired.
+
+    What this refuses is a repeat among a mapping's OWN pairs. A ``<<:`` merge
+    key that overrides an inherited key is **not** a duplicate: the YAML merge
+    type is defined as "each of its key/value pairs is inserted into the
+    current mapping, **unless the key already exists in it**"
+    (https://yaml.org/type/merge.html, Example 1's ``# Override``), so the
+    document's own pair deliberately wins and both gates must accept it.
     """
 
     def __init__(self, issues: list[str]) -> None:
@@ -3235,6 +3261,8 @@ def _duplicate_key_loader():
     subclass rather than a re-implementation: it inherits the same type
     resolution the whole manifest depends on (``166.0`` stays a ``float``, a
     quoted stamp stays a ``str``) and overrides only the mapping constructor.
+    A repeat is recorded only among a mapping's OWN pairs, so a ``<<:`` merge
+    override — legal by the YAML merge type — is not reported.
     """
     global _DUP_KEY_LOADER
     if _DUP_KEY_LOADER is not None:
@@ -3247,17 +3275,30 @@ def _duplicate_key_loader():
             self.duplicate_keys: list[tuple[str, int, int]] = []
 
         def construct_mapping(self, node, deep=False):
+            # `flatten_mapping` PREPENDS the pairs a `<<:` merge brings in, so
+            # the mapping's OWN pairs are the ones it started with — at the
+            # tail of `node.value` afterwards. Count only those: a merged pair
+            # the document overrides is the YAML merge type's documented
+            # purpose, not data loss (#10790 review r2 P2,
+            # https://yaml.org/type/merge.html — "inserted into the current
+            # mapping, unless the key already exists in it"). A duplicate
+            # INSIDE an anchored mapping is still caught: the anchor's own
+            # MappingNode is constructed on its own, with no merge in play.
+            own_pairs_from = 0
             if isinstance(node, yaml.MappingNode):
+                own_pairs_from = len(node.value)
                 self.flatten_mapping(node)
+                own_pairs_from = len(node.value) - own_pairs_from
             seen: dict[object, int] = {}
             mapping = {}
-            for key_node, value_node in node.value:
+            for index, (key_node, value_node) in enumerate(node.value):
                 key = self.construct_object(key_node, deep=deep)
                 line = key_node.start_mark.line + 1
-                if key in seen:
-                    self.duplicate_keys.append((str(key), seen[key], line))
-                else:
-                    seen[key] = line
+                if index >= own_pairs_from:
+                    if key in seen:
+                        self.duplicate_keys.append((str(key), seen[key], line))
+                    else:
+                        seen[key] = line
                 mapping[key] = self.construct_object(value_node, deep=deep)
             return mapping
 
@@ -3268,12 +3309,22 @@ def _duplicate_key_loader():
 def parse_manifest_text(text: str) -> dict:
     """The manifest text as a mapping, refusing a duplicate mapping key.
 
-    THE one place ``config/ci-surfaces.yml`` is parsed. Raising here rather
-    than returning issues is deliberate: an issue list is something a caller
-    must remember to compose (``ci_manifest.map_issues`` is hand-maintained for
-    exactly that reason, and its own docstring records the drift it has already
-    suffered), while an exception cannot be forgotten by a reader that was
-    never written.
+    The one parse of ``config/ci-surfaces.yml`` into a mapping — the path every
+    READER of this file takes (``load_manifest``/``--integrity``,
+    ``ci_manifest._load``, ``ci_timing._manifest_of``). It is not the only
+    guard on the file: ``tools/registry_integrity.py`` reads the same text with
+    ``yaml.compose`` (the raw node graph, no constructor) and is the
+    authoritative validator for the union-merge shape that ``.gitattributes``
+    pairs with ``merge=union`` (#5373). This one exists so that a reader which
+    never passes through that CI step still gets the same refusal by
+    construction rather than packing by a silently collapsed map (see
+    ``DuplicateManifestKeyError`` for the division of labour).
+
+    Raising here rather than returning issues is deliberate: an issue list is
+    something a caller must remember to compose (``ci_manifest.map_issues`` is
+    hand-maintained for exactly that reason, and its own docstring records the
+    drift it has already suffered), while an exception cannot be forgotten by a
+    reader that was never written.
     """
     loader = _duplicate_key_loader()(text)
     try:
