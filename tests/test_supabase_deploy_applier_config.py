@@ -106,6 +106,25 @@ def _applier_steps() -> list[dict]:
     return steps
 
 
+def _applier_commands() -> list[str]:
+    """The Supabase CLI commands the workflow actually RUNS, one string per invocation.
+
+    Selected by *invocation*, not by mention: a `run:` body's command lines are the ones whose
+    stripped text starts with `supabase ` (shell line-continuations are joined first). A comment
+    or a `echo "… db push …"` fallback note is documentation — the same class that false-reds a
+    correct file when a matcher is broad enough to read prose as a command, which is why the seam
+    is the command position rather than a substring anywhere in the body.
+    """
+    commands: list[str] = []
+    for step in _applier_steps():
+        body = str(step.get("run") or "").replace("\\\n", " ")
+        for line in body.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("supabase "):
+                commands.append(stripped)
+    return commands
+
+
 def test_the_production_applier_is_version_pinned() -> None:
     """`version: latest` let an upstream major release disable prod migration with no repo change."""
     installers = [s for s in _applier_steps() if "supabase/setup-cli" in str(s.get("uses", ""))]
@@ -121,6 +140,18 @@ def test_the_production_applier_is_version_pinned() -> None:
         assert re.match(r"^v?\d+\.\d+\.\d+$", pin), (
             f"expected an exact release version for the DDL applier, got {pin!r} (#10896)"
         )
+        # An exact pin is not enough: the commands and the config this same module pins are v3
+        # requirements. v2 rejects both (`--yes` → unknown flag; `[db.migrations].enabled` /
+        # `[storage].vector` → invalid keys) and v4 removes `--linked`, which every command here
+        # passes. Asserting only `x.y.z` greens a downgrade to a CLI that cannot run the applier —
+        # a false PASS on the axis this test exists to guard, so the MAJOR is pinned too.
+        major = int(re.match(r"^v?(\d+)", pin).group(1))
+        assert major == 3, (
+            f"the applier's CLI pin must stay on major 3, got {pin!r}: v2 rejects `--yes` and the "
+            f"v3 config keys this workflow and config.toml now require, and v4 removes `--linked`, "
+            f"which every command below passes. A major bump is a deliberate change that must "
+            f"update these guards with it (#10896)"
+        )
 
 
 def test_the_apply_and_function_steps_pass_yes() -> None:
@@ -129,11 +160,11 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
     v3.0.0 consent-gates every hosted mutation and CANNOT prompt in CI, so a missing `--yes`
     turns the applier into a no-op with a different error string — the exact failure class this
     module exists to catch. An earlier fix added the pin and the schema rename but omitted
-    `--yes`, so this asserts the flags on the parsed `run:` body (not a file substring, which a
-    commented-out line would satisfy).
+    `--yes`, so this asserts the flags on the commands the workflow actually RUNS (selected by
+    command position, not by mention: see `_applier_commands`).
     """
-    runs = [str(s.get("run", "")) for s in _applier_steps()]
-    push = [r for r in runs if "db push" in r]
+    commands = _applier_commands()
+    push = [c for c in commands if c.startswith("supabase db push")]
     assert push, "the apply step must still run `supabase db push` (#10896)"
     for cmd in push:
         assert "--include-all" in cmd, "the apply step must keep `--include-all` (#10896)"
@@ -141,7 +172,7 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             "`supabase db push` on a hosted target is consent-gated in CLI v3 and cannot prompt "
             "in CI: without `--yes` it applies ZERO migrations (#10896)"
         )
-    fn_deploys = [r for r in runs if "functions deploy" in r]
+    fn_deploys = [c for c in commands if c.startswith("supabase functions deploy")]
     assert fn_deploys, "the edge-function deploy steps must still exist (#3627 co-move)"
     for cmd in fn_deploys:
         assert "--yes" in cmd, (
@@ -158,23 +189,39 @@ def test_printed_remediations_pass_yes_too() -> None:
     `--yes`, so the option it offered an operator failed exactly like the bug being closed.
     Both are consent-gated hosted mutations in CLI v3, and no existing test pins them (the
     drift-gate suite asserts substrings that pass either way).
+
+    Asserted PER OCCURRENCE, not as a whole-file substring: a substring assertion is satisfied by
+    any one site, so reverting `--yes` at one of several printed remedies passed the whole-file
+    form — a false PASS in the guard whose doctrine is that a printed remedy must be runnable.
+    The window is the token immediately after the remedy (`--status applied <version>`), which
+    prose cannot accidentally enter and a line reflow cannot split.
     """
-    script = (REPO_ROOT / ".github" / "scripts" / "check-migration-drift").read_text(
-        encoding="utf-8"
-    )
-    # Anchored on the exact remedy strings rather than a line classifier: this script also
-    # PRINTS prose about `db push` ("the deploy runs `supabase db push --include-all`",
-    # "DDL applied outside 'supabase db push'"), and a matcher broad enough to treat prose as a
-    # command false-reds on any wording edit — a fragile guard is worse than none.
-    for command in (
-        "supabase db push --linked --include-all --yes",
-        "--status applied <version> --yes",
-    ):
-        assert command in script, (
-            f"the drift gate's printed remediation must carry `--yes` ({command!r}): it offers an "
-            f"operator a hosted mutation that CLI v3 rejects in any run that cannot prompt "
-            f"(#10896)"
+    governed = {
+        ".github/scripts/check-migration-drift": (REPO_ROOT / ".github" / "scripts" / "check-migration-drift"),
+        ".github/scripts/check-migration-append-only": (
+            REPO_ROOT / ".github" / "scripts" / "check-migration-append-only"
+        ),
+    }
+    for name, path in governed.items():
+        text = path.read_text(encoding="utf-8")
+        sites = re.findall(r"--status applied <version>(\s+--yes)?", text)
+        assert sites, (
+            f"{name} must still print a `migration repair --status applied <version>` remedy: an "
+            f"operator shown OUT OF ORDER versions needs a command to run (#1095). A silent "
+            f"disappearance of the remedy must not pass vacuously."
         )
+        missing = sites.count("")
+        assert missing == 0, (
+            f"{name}: {missing} of {len(sites)} printed `--status applied <version>` remedies still "
+            f"lack `--yes` — CLI v3 consent-gates `migration repair` and cannot prompt, so the "
+            f"copy-paste remedy an operator takes from the gate output repairs nothing and says "
+            f"nothing (#10896, #2240)"
+        )
+    # The printed manual fallback for the apply itself (drift gate, remediation (a)).
+    drift = governed[".github/scripts/check-migration-drift"].read_text(encoding="utf-8")
+    assert "supabase db push --linked --include-all --yes" in drift, (
+        "the drift gate's printed manual apply must carry `--yes` (#10896)"
+    )
 
 
 def test_the_drift_banner_remedy_passes_yes_too() -> None:
