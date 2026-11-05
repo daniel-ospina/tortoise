@@ -1206,20 +1206,28 @@ def _test_node_names(path: Path) -> set[str] | None:
     def _decorator_never_reds(decorator: ast.expr) -> bool:
         """An UNCONDITIONAL skip/xfail decorator — it removes the node's red.
 
-        `xfail` has exactly two ways to stay able to FAIL, and both keep the node
-        as a pin:
-          * `xfail(strict=True)` REDS on an unexpected pass — it carries a red; and
+        `xfail` has THREE ways to stay able to FAIL, and each keeps the node as
+        a pin:
+          * `xfail(strict=True)` REDS on an unexpected pass — it carries a red;
           * `xfail(cond, …)` with a condition that may be FALSY runs the test
             normally, so it can red: EVERY positional argument is a condition
             (pytest applies the mark when ANY of them is true), and a
             `condition=` keyword is one too — it REPLACES the positional args
             rather than joining them (`_pytest/skipping.py::
-            evaluate_xfail_marks`).
+            evaluate_xfail_marks`); and
+          * `xfail(raises=…)`, which narrows only WHICH outcome becomes
+            `xfailed`: a different exception stays a true FAILURE (`_pytest/
+            skipping.py::pytest_runtest_makereport` — `if raises is None or
+            isinstance(call.excinfo.value, raises): skipped … else: failed`).
+            Measured on pytest 9.1.1: `xfail(raises=ValueError)` raising
+            `TypeError` reports **failed** (review cycle 15, P2).
         Everything else cannot red, and is therefore not a watch: a bare `xfail()`
-        / `xfail(reason=…)`; a condition that is a literal TRUTHY constant,
-        `xfail(True)` / `xfail(1)` / `xfail(condition=True)`, which pytest xfails
-        unconditionally (real pytest: `2 xfailed`); and `xfail(strict=True,
-        run=False)`, whose body is not even run (measured: `[NOTRUN]`, exit 0).
+        / `xfail(reason=…)` / `xfail(raises=None)` (pytest's "no restriction"
+        value, so the same bare mark); a condition that is a literal TRUTHY
+        constant, `xfail(True)` / `xfail(1)` / `xfail(condition=True)`, which
+        pytest xfails unconditionally (real pytest: `2 xfailed`); and
+        `xfail(…, run=False)` with no falsifiable condition, whose body is not
+        even run (measured: `[NOTRUN]`, exit 0).
         ⚠️ xfail remaps the OUTCOME, it does not skip execution — the body still
         RUNS (measured with side-effect markers); the RUN is what cannot go red.
         That is the difference from a skip, and it is the sentence a maintainer
@@ -1340,10 +1348,35 @@ def _test_node_names(path: Path) -> set[str] | None:
                 return (False, None)
             truths = [_literal_condition_truth(expr) for expr in conditions]
             if any(truth is True for truth in truths):
-                return (True, True)  # always applied: nothing can red
+                # always applied: only `strict=` / `raises=` can still red
+                return (True, True)
             if all(truth is False for truth in truths):
                 return (True, False)  # never applied: the body runs, so it can red
             return (True, None)  # one unknowable condition: keep the pin
+
+        def _has_raises(call: ast.expr) -> bool:
+            """Whether the mark narrows xfail by exception (`raises=`).
+
+            `raises=None` is exactly the value pytest reads as "no restriction"
+            (`mark.kwargs.get("raises", None)`), and a literal None leaves the
+            bare-`xfail()` reading intact (measured: `xfail(raises=None)` on a
+            failing body is xfailed, not failed). EVERY other spelling — an
+            exception class, a tuple, `pytest.raises(...)`, or a name this gate
+            cannot resolve — can reject the raised exception and let the failure
+            stand, so it keeps the pin.
+            """
+            if not isinstance(call, ast.Call):
+                return False
+            for keyword in call.keywords:
+                if keyword.arg != "raises":
+                    continue
+                if (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is None
+                ):
+                    continue
+                return True
+            return False
 
         name = _dotted_decorator(decorator)
         if name in never_red_skips:
@@ -1368,19 +1401,38 @@ def _test_node_names(path: Path) -> set[str] | None:
         # (measured: `xfail(False, strict=True, run=False)` FAILS).
         if truth is False:
             return False
+        # An UNKNOWABLE condition may be FALSY, and when it is, `evaluate_xfail_
+        # marks` returns `None` — no mark applies at all — so the body RUNS and
+        # `run=False` is inert (measured: `xfail(COND, run=False)` with `COND =
+        # False` reports **failed**). Keeping the pin here, ahead of `run=False`,
+        # is the same verdict the unknowable arm reaches below; the earlier
+        # placement refused a node that really does red (review cycle 15, P2).
+        # `present` is what separates this from a BARE `xfail()` / `xfail(raises=
+        # None)`, which `_xfail_condition` also reports as `truth=None` but which
+        # applies unconditionally and can never red.
+        if present and truth is None:
+            return False
+        # From here the mark ALWAYS applies: `truth is True`, or no condition at
+        # all (a call carrying none is applied unconditionally).
         # `run=False` disables execution outright, so nothing can red even with
-        # `strict=True` (measured `[NOTRUN]`, exit 0).
+        # `strict=True` or `raises=` (measured `[NOTRUN]`, exit 0).
         if run_false:
             return True
         # `strict=True` carries a red: an unexpected PASS fails, and that includes
         # the always-applied condition case `xfail(True, strict=True)`.
         if strict:
             return False
+        # `raises=` narrows WHICH outcome becomes `xfailed`: a different
+        # exception is a true failure, so a non-strict `xfail(raises=…)` CAN red
+        # and is a watch. This arm sits BELOW `run=False` because the body is not
+        # run at all there (measured `[NOTRUN]`), which is why the answer is not a
+        # blanket "raises ⇒ pin" (review cycle 15, P2).
+        if _has_raises(decorator):
+            return False
         if not present:
             return True  # bare `xfail()` / `xfail(reason=…)`: cannot red
         # Always applied AND non-strict: XPASS is not a failure, so it cannot
-        # red. Otherwise the condition is unknowable (a variable or an
-        # expression string): keep the pin.
+        # red.
         return truth is True
     def _never_reds(node: ast.AST) -> bool:
         """Collected, but it can never FAIL — so it is not a watch."""
@@ -6888,6 +6940,80 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "test_conditionally_skipped",
         "test_skips_in_body",
         "TestGroup::test_kept",
+    }
+
+
+def test_an_xfail_raises_mark_is_a_watch_when_it_can_still_fail(tmp_path):
+    """`xfail(raises=…)` narrows the OUTCOME; it does not guarantee one.
+
+    pytest converts a call to `xfailed` only when the raised exception MATCHES
+    `raises`; anything else keeps `rep.outcome = "failed"` (`_pytest/skipping.py
+    ::pytest_runtest_makereport` — `if raises is None or isinstance(call.excinfo
+    .value, raises): skipped … else: failed`). So a non-strict `xfail(raises=
+    ValueError)` whose body raises `TypeError` reports a REAL failure — it can
+    red, so it IS a watch, and refusing a `pins:` row that cites it was wrong
+    (review cycle 15, P2).
+
+    MEASURED on pytest 9.1.1 before this arm existed, one probe node per shape,
+    which is what makes each verdict below a measurement and not a reading
+    (`4 failed, 1 xfailed` over these spellings):
+
+        xfail(raises=ValueError)           raise TypeError   -> FAILED
+        xfail(True, raises=ValueError)     raise TypeError   -> FAILED
+        xfail(raises=pytest.raises(…))     raise TypeError   -> FAILED
+        xfail(CONDITION, run=False)        CONDITION=False   -> FAILED (no mark)
+        xfail(raises=None)                 assert False      -> XFAILED
+        xfail(True, run=False, raises=…)   raise TypeError   -> [NOTRUN]
+
+    The boundary is the same one the conditional arm draws: the answer is what
+    pytest DOES with the spelling, not whether the keyword is present.
+    `raises=None` is pytest's "no restriction" value (bare-`xfail()` semantics),
+    and `run=False` disables execution outright — neither can red, so neither is
+    a pin. A falsifiable condition is the third case: when it is falsy NO mark
+    applies, so `run=False` is inert and the body runs (`review cycle 15, P2`:
+    the old order returned `run=False ⇒ cannot red` before that check).
+    """
+    module = tmp_path / "test_raises_shapes.py"
+    module.write_text(
+        "import pytest\n"
+        "CONDITION = False\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError)\n"
+        "def test_raises_only():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError, reason='expected')\n"
+        "def test_raises_and_reason():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(raises=pytest.raises(ValueError))\n"
+        "def test_raises_with_abstract_raises():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(True, raises=ValueError, reason='always applied')\n"
+        "def test_literal_true_with_raises():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION, run=False, reason='the condition may be falsy')\n"
+        "def test_unknown_condition_with_run_false():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(raises=None)\n"
+        "def test_raises_none_is_a_bare_xfail():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(True, run=False, raises=ValueError, reason='notrun')\n"
+        "def test_notrun_wins_over_raises():\n"
+        "    raise TypeError('other')\n"
+    )
+    assert _test_node_names(module) == {
+        "test_raises_only",  # a DIFFERENT exception is a true failure
+        "test_raises_and_reason",
+        "test_raises_with_abstract_raises",  # pytest.raises(...) matches too
+        "test_literal_true_with_raises",  # always applied, but still falsifiable
+        "test_unknown_condition_with_run_false",  # falsy ⇒ no mark ⇒ the body runs
+        # NOT `test_raises_none_is_a_bare_xfail`: raises=None IS the bare xfail
+        # NOT `test_notrun_wins_over_raises`: run=False never runs the body
     }
 
 
