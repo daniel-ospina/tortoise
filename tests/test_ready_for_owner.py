@@ -849,6 +849,68 @@ def test_required_set_json_on_a_snapshot_only_tree_is_parsable_and_unevaluable(t
     assert doc["injection_mode"] is None  # never claim a config read that did not happen
 
 
+def test_required_set_json_on_an_unreadable_tree_is_parsable(tmp_path, capsys):
+    code = rfo.main(["--required-set", "--json", "--root", str(tmp_path)])
+    doc = json.loads(capsys.readouterr().out)
+    assert code == rfo.EXIT_UNREADABLE
+    assert doc["verdict"] == rfo.FAIL_UNREADABLE
+    assert doc["evaluable"] is False
+    assert doc["injection_mode"] is None
+
+
+def test_required_set_json_on_a_config_error_is_parsable(tmp_path, capsys):
+    both = """\
+queue_rules:
+  - name: main
+    branch_protection_injection_mode: merge
+    queue_conditions:
+      - check-success=docs
+    merge_conditions:
+      - check-success=docs
+"""
+    tree = _write_tree(tmp_path, mergify=both)
+    code = rfo.main(["--required-set", "--json", "--root", str(tree)])
+    doc = json.loads(capsys.readouterr().out)
+    assert code == rfo.EXIT_FAIL
+    assert doc["verdict"] == rfo.FAIL_CONFIG
+    assert doc["injection_mode"] is None  # no invented mode on an unreadable set
+
+
+# ── 6i. Malformed FIELD types are verdicts, not tracebacks ────────────────
+
+
+@pytest.mark.parametrize("bad_status", [1, ["completed"], {"a": 1}])
+def test_a_non_string_status_does_not_traceback(tmp_path, bad_status):
+    runs = [run("docs"), _replacement("ai-review-gate")]
+    runs[1]["status"] = bad_status
+    result = evaluate(_write_tree(tmp_path, mergify=_mergify()), runs)
+    assert result.verdict in {rfo.FAIL_PENDING, rfo.FAIL_RED, rfo.FAIL_MISSING}
+    assert result.verdict != rfo.PASS
+
+
+@pytest.mark.parametrize("bad_conclusion", [["success"], {"a": 1}, 7])
+def test_a_non_string_conclusion_is_never_green(tmp_path, bad_conclusion):
+    runs = [run("docs"), _replacement("ai-review-gate")]
+    runs[1]["conclusion"] = bad_conclusion
+    result = evaluate(_write_tree(tmp_path, mergify=_mergify()), runs)
+    assert result.verdict == rfo.FAIL_RED
+    assert result.verdict != rfo.PASS
+
+
+def test_a_non_integer_check_run_id_is_unreadable_not_a_guess(tmp_path):
+    """Two attempts of ONE check, unorderable ids: refuse rather than keep the first."""
+    runs = [run("docs"), _replacement("ai-review-gate", run_id=200)]
+    bad = _replacement("ai-review-gate", run_id=300)
+    bad["id"] = "900"
+    runs.append(bad)
+    result = rfo.evaluator_for(
+        rfo.resolve_required_set(_write_tree(tmp_path, mergify=_mergify())),
+        runs, {200: 1, 300: 1},
+    )
+    assert result.verdict == rfo.FAIL_UNREADABLE
+    assert "cannot be ordered" in result.detail
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 

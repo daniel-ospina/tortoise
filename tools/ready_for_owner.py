@@ -540,7 +540,19 @@ def _newest_per_group(
         identity = workflow if workflow is not None else run_id
         key = (app, identity if identity is not None else id(run), name)
         current = groups.get(key)
-        if current is None or (run.get("id") or 0) > (current.get("id") or 0):
+        if current is None:
+            groups[key] = run
+            continue
+        cur_id, new_id = current.get("id"), run.get("id")
+        # A non-int id cannot be ORDERED. Silently keeping the first attempt would
+        # be a guess — and the guess decides whether a retry's newest (possibly
+        # green) attempt or its older (possibly red) one is read.
+        if not isinstance(cur_id, int) or not isinstance(new_id, int):
+            raise RequiredSetUnreadable(
+                f"check-run {name!r} carries a non-integer id ({cur_id!r}/{new_id!r}) — "
+                "attempts cannot be ordered"
+            )
+        if new_id > cur_id:
             groups[key] = run
 
     by_name: dict[str, list[dict]] = {}
@@ -596,7 +608,12 @@ def evaluator_for(
             ),
         )
 
-    by_name = _newest_per_group(runs, workflow_of)
+    try:
+        by_name = _newest_per_group(runs, workflow_of)
+    except RequiredSetUnreadable as exc:
+        # `evaluator_for` returns a verdict on every path; a malformed payload is
+        # a verdict, never an exception that escapes to the caller.
+        return ConditionResult(verdict=FAIL_UNREADABLE, required=required, detail=str(exc))
     rows: list[ContextResult] = []
 
     if required.mode == "queue":
@@ -674,8 +691,10 @@ def _evaluate_at_head(name: str, attempts: list[dict], all_runs: list[dict]) -> 
             "no check-run at this head",
         )
 
-    statuses = [(r.get("status") or "").lower() for r in attempts]
-    conclusions = [r.get("conclusion") for r in attempts]
+    statuses = [(s.lower() if isinstance(s := r.get("status"), str) else "") for r in attempts]
+    # A non-string `conclusion` is NOT green: normalise it to None so it reds
+    # rather than raising `TypeError: unhashable type` on the set membership test.
+    conclusions = [(c if isinstance(c := r.get("conclusion"), str) else None) for r in attempts]
 
     # RED wins over in-flight: a completed non-success is final and nothing
     # still running can un-fail it. This also covers `cancelled`, `neutral`,
@@ -811,13 +830,36 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
 
     if args.required_set:
+        def _json_set(rs: "RequiredSet | None", *, verdict: str, error: str | None) -> None:
+            """`--json` must be JSON on EVERY path, including the failures."""
+            print(json.dumps({
+                "names": list(rs.names) if rs else [],
+                "source": rs.source if rs else None,
+                "queue_names": list(rs.queue_names) if rs else [],
+                "merge_names": list(rs.merge_names) if rs else [],
+                "overlap": list(rs.overlap) if rs else [],
+                "injection_mode": rs.mode if rs else None,
+                "snapshot_agrees": rs.snapshot_agrees if rs else None,
+                "notes": list(rs.notes) if rs else [],
+                "entry_merge_split": rs.entry_merge_split if rs else False,
+                "evaluable": bool(rs.entry_merge_split) if rs else False,
+                "verdict": verdict,
+                "error": error,
+            }, indent=2))
+
         try:
             rs = resolve_required_set(root)
         except RequiredSetConfigError as exc:
-            print(f"{FAIL_CONFIG}: {exc}")
+            if args.json:
+                _json_set(None, verdict=FAIL_CONFIG, error=str(exc))
+            else:
+                print(f"{FAIL_CONFIG}: {exc}")
             return EXIT_FAIL
         except RequiredSetUnreadable as exc:
-            print(f"{FAIL_UNREADABLE}: {exc}")
+            if args.json:
+                _json_set(None, verdict=FAIL_UNREADABLE, error=str(exc))
+            else:
+                print(f"{FAIL_UNREADABLE}: {exc}")
             return EXIT_UNREADABLE
         if args.json:
             # `--json` promises machine-readable stdout; a human report here
@@ -833,6 +875,8 @@ def main(argv: list[str] | None = None) -> int:
                 "notes": list(rs.notes),
                 "entry_merge_split": rs.entry_merge_split,
                 "evaluable": rs.entry_merge_split,
+                "verdict": PASS if rs.entry_merge_split else FAIL_UNREADABLE,
+                "error": None,
             }, indent=2))
             return EXIT_PASS if rs.entry_merge_split else EXIT_UNREADABLE
         print(f"source: {rs.source}")
