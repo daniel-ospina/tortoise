@@ -831,7 +831,9 @@ with both children declared at import so a scrape never reads "absent" — but i
 has **no** `total`, `by_surface` or `error` member, so the "check `error` before
 trusting a `0`" rule above has no carrier there, and a failed in-process read is
 not expressible on that surface. Read `/health` for the abstention; read
-`/metrics` for the rate.
+`/metrics` for the scrape **series** — `rate()` across two scrapes gives the
+rate, but ONE sample is still a since-boot total, the same misread the bullet
+above forbids for this field.
 
 **What its absence used to cost.** Breaches were emitted to exactly one place —
 a best-effort external analytics write, swallowed at `debug` on failure — so
