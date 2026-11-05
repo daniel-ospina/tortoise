@@ -109,8 +109,15 @@ def _with_tail_at(row: dict[str, object], position: str) -> dict[str, object]:
         items.insert(0, tail)
     elif position == "middle":
         items.insert(len(items) // 2, tail)
-    else:
+    elif position == "last":
         items.append(tail)
+    else:
+        # ⛔ NOT `else: append` — that fails OPEN: a new member of
+        # `TAIL_POSITIONS` ("second", say) would silently collapse to the
+        # `last` leg, so the parametrization would report N legs of which two
+        # are the same row (coverage that reads as new and is not).
+        raise ValueError(
+            f"unknown tail position {position!r}; known: {TAIL_POSITIONS}")
     return dict(items)
 
 
@@ -714,16 +721,32 @@ def test_the_projection_does_not_depend_on_the_row_mapping_order():
             is False)
 
 
+def test_the_tail_position_helper_REFUSES_an_unknown_position():
+    """The helper must not fold an unknown position into the `last` leg.
+
+    Non-vacuous: pre-fix the `else:` branch appended the tail, so an unknown
+    position produced a row indistinguishable from `last` and this raise never
+    happened — a growing `TAIL_POSITIONS` would have reported duplicate legs as
+    new coverage.
+    """
+    with pytest.raises(ValueError, match="unknown tail position 'second'"):
+        _with_tail_at(_row_in_select_star_order(), "second")
+
+
 @pytest.mark.parametrize("tail_position", TAIL_POSITIONS)
 def test_the_column_wins_at_every_position_the_tail_can_sit(tail_position):
     """The precedence is a RULE, not an effect of `props` being declared last.
 
     ⛔ "`props` is the last column" holds for `public.source` and NOT for every
-    record table: `public.point` gained five columns by `ALTER TABLE … ADD
-    COLUMN` AFTER `props`, and Postgres numbers added attributes upward, so
-    `SELECT *` on such a row yields the tail in the MIDDLE. Scoping the rule to
-    the one layout is how the same defect comes back on the next table that
-    migrates a column in — so the collision is pinned at every position.
+    record table: `public.point` gained SIX columns by `ALTER TABLE … ADD
+    COLUMN` AFTER `props` — five in
+    `20261018000001_record_point_money_value_2782.sql` and one in
+    `20261029000001_record_point_cache_tier.sql` (the same two migrations
+    `cache_projection.py` names) — and Postgres numbers added attributes
+    upward, so `SELECT *` on such a row yields the tail in the MIDDLE. Scoping
+    the rule to the one layout is how the same defect comes back on the next
+    table that migrates a column in — so the collision is pinned at every
+    position.
 
     Non-vacuous: on the pre-fix code (the tail written with `out.update`
     wherever the `props` column happens to sit) the `last` leg below reds with
