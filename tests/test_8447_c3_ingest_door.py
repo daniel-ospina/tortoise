@@ -9,7 +9,8 @@
 
 The four doors that clause names are *record write*, *session read*, *capture*
 and *ingest*. The first two are pinned elsewhere; the **ingest** door is
-``tortoise ingest`` (``tortoise/ingest.py``), whose only machine-readable
+``tortoise-ingest`` / ``python -m tortoise.ingest`` (``tortoise/ingest.py``),
+whose only machine-readable
 output is the process exit status. Before this file, ``main`` returned ``None``
 on every arm — so ``tortoise-ingest --upgrade <not-a-document>`` printed a
 refusal and exited **0**, and an idempotency skip fell through to the
@@ -377,9 +378,8 @@ class TestTheSkipArmWritesNothing:
         first, _ = _run([str(doc), *base])
         assert first is IngestOutcome.DONE, first
 
-        # A SECOND, untouched --out path. Both runs in this test write this same
-        # path, so its existence attributes nothing to the skip — only its mtime,
-        # asserted below, can.
+        # The ``--out`` path BOTH runs write: its existence attributes nothing to
+        # the skip — only its mtime, asserted below, can.
         # Same argv as the first run (that is what makes the idempotency
         # key match). The render is rewritten on every non-skip run, so an
         # unchanged mtime after the skip is proof the SKIP wrote nothing.
@@ -1070,9 +1070,10 @@ class TestThisFilesEvidencePointersCannotGoStale:
         The DOTTED host:port is here because the third alternative made it the
         live risk: an extension-agnostic arm would read ``api.example.com:8080``
         as a citation. What prevents it is the EXTENSION LIST — not the shape —
-        so this pins only the TLDs that list excludes: ``.sh``, ``.md``, ``.ts``
-        and ``.js`` ARE ccTLDs and DO match as citations, which is accepted
-        because a false positive here reds a docstring, never a gate.
+        so this pins only the TLDs that list excludes: ``.sh`` and ``.md`` ARE
+        ccTLDs (``.ts``/``.js`` are not, but both are in the extension list) and
+        all four DO match as citations, which is accepted because a false
+        positive here reds a docstring, never a gate.
         """
         assert _coordinate_citations("docker://:f@localhost:6379/x") == []
         assert _coordinate_citations(

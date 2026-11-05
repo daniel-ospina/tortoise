@@ -636,7 +636,8 @@ class IngestOutcome(StrEnum):
     #: metadata capture the caller asked for is unperformable.
     REFUSED_NOT_A_DOCUMENT = "refused-not-a-document"
     #: The door did part of the ask and left work behind — the ``--upgrade-all``
-    #: sweep, when a candidate was unreadable or not a document. ⛔ It is NOT set
+    #: sweep when a candidate was unreadable or not a document, and ``--upgrade`` /
+    #: the full ingest when the extraction reported failed sections. ⛔ It is NOT set
     #: by "already claimed at this extractor version": that is the sweep's own
     #: idempotency skip, i.e. work that is DONE, and reddening a steady-state
     #: corpus on every re-sweep would make the marker noise.
