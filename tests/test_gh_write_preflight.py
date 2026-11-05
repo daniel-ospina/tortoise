@@ -702,7 +702,11 @@ def test_nested_users_entry_does_not_lend_a_peer_token():
                                capture_output=True, text=True, env=env, timeout=120)
     assert p.returncode != 0, f"the peer's write-capable token produced a PASS: {p.stdout}"
     assert "token-read-only" in p.stdout, p.stdout
-    assert "hosts.yml:active-user" in p.stderr, p.stderr
+    # ⛔ THE LABEL IS NOW THE DEPTH-1 FACT, NOT THE FILE'S `user:` TEXT (review cycle 16): a shape
+    # allowlist admits a 32-hex secret, so no value from the file is echoed. The security property this
+    # test exists for is the PEER token, which is still refused above.
+    assert "hosts.yml:active" in p.stderr, p.stderr
+    assert "ghp_peer_writecapable" not in (p.stdout + p.stderr), p.stdout + p.stderr
 
 
 def test_github_token_env_leg_is_honoured():
@@ -1161,6 +1165,46 @@ def test_a_login_shaped_value_is_kept_but_file_content_never_becomes_the_label()
     assert not_a_login not in blob, f"the hosts.yml user: line was echoed: {blob!r}"
     res = json.loads(p.stdout)
     assert res["credential_source"] == "hosts.yml:active", res["credential_source"]
+
+
+def test_inputs_that_are_not_credentials_are_still_never_echoed_as_one():
+    """Three echo sites could print a credential that was NOT the resolved token (review cycle 16):
+    `GH_HOST` on the wrong-host path (where the env-token leg never runs, so nothing was scrubbed),
+    `repo` on the no-credential path (nothing to scrub by value), and the hosts.yml `user:` label (a
+    shape allowlist still admits a 32-hex secret)."""
+    secret = "fedcba9876543210fedcba9876543210"          # 32 hex — passes a naive "login shape" allowlist
+
+    # (a) GH_HOST on the wrong-host path
+    with _Stub() as s:
+        env = _env(s.base, None)
+        env["GH_HOST"] = secret
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    assert p.returncode == 1 and "wrong-host" in blob, blob
+    assert secret not in blob, f"GH_HOST echoed a credential: {blob!r}"
+
+    # (b) no credential resolved: the repo value must not be echoed
+    with _Stub() as s:
+        env = _env(s.base, None)
+        env["HOME"] = "/tmp/gh-preflight-no-home-2"
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/" + secret, "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    assert secret not in blob, f"a no-credential refusal echoed the repo: {blob!r}"
+
+    # (c) the hosts.yml label carries no file content at all
+    import tempfile, os as _os
+    with tempfile.TemporaryDirectory() as d:
+        with open(_os.path.join(d, "hosts.yml"), "w", encoding="utf-8") as fh:
+            fh.write(f"github.com:\n    user: {secret}\n    oauth_token: 0123456789abcdef0123456789abcdef01234567\n    git_protocol: https\n")
+        env = {k: v for k, v in _os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")}
+        env.update({"GH_CONFIG_DIR": d, "GH_WRITE_PREFLIGHT_API": "http://127.0.0.1:9",
+                    "HOME": "/tmp/gh-preflight-no-home-3"})
+        p = subprocess.run([sys.executable, str(TOOL), "--repo", "o/r", "--json"],
+                           capture_output=True, text=True, env=env, timeout=120)
+    blob = p.stdout + p.stderr
+    assert secret not in blob, f"the hosts.yml user: line was echoed: {blob!r}"
 
 
 if __name__ == "__main__":

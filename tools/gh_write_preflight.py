@@ -454,8 +454,9 @@ def resolve_credential() -> tuple[str, str]:
         # (it is not the resolved token) and the shape regex (no documented prefix) and was printed.
         # The depth-1 rule already guarantees WHICH account was read, so `active` loses no diagnostic
         # value; a real GitHub login is kept because it is useful and cannot be a credential.
-        if login and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login):
-            return tok, f"hosts.yml:{login}"
+        # ⛔ NO VALUE FROM THE FILE, NOT EVEN A "LOGIN-SHAPED" ONE (review cycle 16): a shape allowlist is
+        # still a guess, and a 32-hex secret is a common secret shape that passes it. The depth-1 read
+        # already says WHICH account answered, so the label carries only that fact.
         return tok, "hosts.yml:active"
     return "", "none"
 
@@ -513,8 +514,11 @@ def _classify_403(headers: dict, body: str, secret: str = "") -> tuple[str, str]
         # validated numerically, so a responder could put a newline + `GH-WRITE-OK(...)` in it (measured
         # against a stub: stdout then carried a line beginning with the pass string). Scrubbed and
         # `!r`-escaped like the bodies, and bounded so a hostile header cannot flood the line either.
-        return "rate-limited", (f"no quota left (x-ratelimit-remaining={_scrub(remaining or '?', secret)[:32]!r}, "
-                                f"retry-after={_scrub(retry_after or '?', secret)[:32]!r})")
+        # ⛔ HEADER VALUES ARE NOT ECHOED EITHER (review cycle 17). Scrubbing them by the RESOLVED token
+        # could not cover a DIFFERENT credential reflected there, and a shape allowlist is a guess — the
+        # only total fix is to report the FACT and the size, never the text.
+        return "rate-limited", (f"no quota left (x-ratelimit-remaining present={bool(remaining)}, "
+                                f"retry-after present={bool(retry_after)})")
     if "saml" in low or "sso" in low:
         return "sso-unauthorized", "the refusal names SAML/SSO — the token is not authorised for the org"
     # The exact wording GitHub uses when a FINE-GRAINED token lacks a resource permission.
@@ -527,7 +531,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
     """Run one write-surface probe. Returns {'ok': bool, 'reason': str, 'detail': str, 'status': int}."""
     status, headers, payload = _request(url, token, method="POST", body=body)
     if status == 0:
-        return {"ok": False, "reason": "transport", "detail": f"could not reach {url!r}: {_scrub(payload, token)[:160]!r}",
+        return {"ok": False, "reason": "transport", "detail": f"could not reach {url!r}: transport failure ({len(payload)} bytes of response text, not echoed)",
                 "status": 0}
     if status in _WRITE_OK:
         return {"ok": True, "reason": "permitted",
@@ -563,7 +567,7 @@ def _write_probe(url: str, token: str, body: bytes) -> dict:
         return {"ok": False, "reason": "server-error",
                 "detail": f"HTTP {status} from GitHub — a service fault, not a verdict about the token",
                 "status": status}
-    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {_scrub(payload, token)[:200]!r}",
+    return {"ok": False, "reason": "forbidden", "detail": f"unexpected HTTP {status}: {len(payload)} bytes of response text, not echoed",
             "status": status}
 
 
@@ -572,7 +576,10 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
         # ⛔ THE REPO IS ECHOED TOO — scrub it by value, like api_base (review cycle 13): `--repo`
         # defaults to `$OR`, so a mis-set `$OR` (or a literal token) would otherwise be printed in the
         # `--json` artifact. Added to the sanitise key list as well, for any field added later.
-        "repo": _scrub(repo, token or ""),
+        # ⛔ WITH NO RESOLVED CREDENTIAL THERE IS NOTHING TO SCRUB BY VALUE, so a `$OR` holding one would
+        # be printed verbatim (review cycle 16). Withhold the echo in that case; a repo identifier is not
+        # load-bearing for a refusal that already names the reason.
+        "repo": _scrub(repo, token) if token else "<not echoed — no credential resolved>",
         # ⛔ WHICH ENDPOINT ANSWERED IS PART OF THE VERDICT. Without this key a consumer holding the
         # `--json` artifact cannot tell a measurement of GitHub from a measurement of anything else.
         # ⛔ REDACTED, because this dict IS the `--json` output: see `_printable_base`.
@@ -597,8 +604,15 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
 
     gh_host = (os.environ.get("GH_HOST") or "").strip().lower()
     if gh_host and gh_host not in ("github.com", "api.github.com"):
+        # ⛔ `GH_HOST` IS ECHOED INPUT, AND ON THIS PATH NOTHING ELSE WAS SCRUBBED (review cycle 16): the
+        # env-token leg is skipped for a non-github host, so `token` can be "" and a credential placed in
+        # GH_HOST printed verbatim. Echo it only when it is hostname-shaped; the refusal needs the FACT
+        # that it is not github.com, not the value.
+        # ⛔ NOT EVEN A "HOSTNAME-SHAPED" ECHO: a 32-hex secret IS hostname-shaped, so a shape allowlist
+        # leaks it (measured). The value adds nothing the reader needs — the verdict is "not github.com".
+        _host_echo = "GH_HOST is set to a value that is not github.com (not echoed)"
         result.update(reason="wrong-host",
-                      detail=f"GH_HOST={gh_host!r} — this preflight, and the rail it protects, speak github.com")
+                      detail=f"{_host_echo} — this preflight, and the rail it protects, speak github.com")
         return result
 
     # ⛔ THE REPO SHAPE IS VALIDATED HERE, NOT ONLY IN `main` (review cycle 11). The CLI guard is the
@@ -637,7 +651,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # ── 1. READ: the disambiguator for any 404 that follows, and the source of default_branch.
     status, headers, body = _request(f"{api_base}/repos/{repo}", token)
     if status == 0:
-        result.update(reason="transport", detail=f"could not reach {_printable_base(api_base)!r}: {_scrub(body, token)[:160]!r}")
+        result.update(reason="transport", detail=f"could not reach {_printable_base(api_base)!r}: transport failure ({len(body)} bytes of response text, not echoed)")
         return result
     if status == 401:
         result.update(reason="bad-credentials", detail="the API returned 401 — expired, revoked, or mistyped")
@@ -666,7 +680,7 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
                       detail=f"HTTP {status} on the READ probe — a GitHub service fault, not a verdict about the token")
         return result
     if status != 200:
-        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {_scrub(body, token)[:160]!r}")
+        result.update(reason="forbidden", detail=f"unexpected HTTP {status} on the read probe: {len(body)} bytes of response text, not echoed")
         return result
 
     result["read_ok"] = True
@@ -679,14 +693,16 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # was already truncated, so a credential longer than the bound survived as its first N characters —
     # the guarantee is "never printed … not even truncated". The token is in scope here, so each echoed
     # header/body is value-scrubbed at the SOURCE and only then cut to size.
-    result["scopes"] = _scrub(headers.get("x-oauth-scopes", ""), token)[:64]   # classic/OAuth ONLY
+    # ⛔ NOT ECHOED: the scope header is response text, and a response can reflect the request's
+    # Authorization header back. The presence of scopes is the useful, safe fact.
+    result["scopes"] = "<present — not echoed>" if headers.get("x-oauth-scopes") else ""   # classic/OAuth ONLY
     result["ratelimit_remaining"] = _scrub(headers.get("x-ratelimit-remaining") or "", token).strip()[:32]
 
     # ── 2. RATE LIMIT pre-check: never spend a write probe on an exhausted account, and never
     #      report a permission defect for a bucket that will refill.
     if result["ratelimit_remaining"] == "0":
         result.update(reason="rate-limited",
-                      detail=f"x-ratelimit-remaining=0 on the read (reset={_scrub(headers.get('x-ratelimit-reset') or '?', token)[:32]!r}); "
+                      detail=f"x-ratelimit-remaining=0 on the read (reset header present={bool(headers.get('x-ratelimit-reset'))}); "
                              f"the token may be perfectly good — shared-account exhaustion, not a permission defect")
         return result
 
