@@ -566,6 +566,14 @@ def _stub_partial_extractor(monkeypatch) -> None:
     """
     monkeypatch.setattr("tortoise.extractor.extract_from_document",
                         lambda *_a, **_k: dict(_PARTIAL_STATS))
+    # ⛔ BOTH names. The `--upgrade` and `--upgrade-all` arms import it INSIDE
+    # the function (`from .extractor import extract_from_document`), but `main`
+    # uses the module-level alias bound at import time
+    # (`tortoise/ingest.py:31`), so patching only the source module leaves the
+    # full-ingest arm driving the real extractor — measured: the arm asserted
+    # on a `warning:` line the real stage never printed.
+    monkeypatch.setattr("tortoise.ingest.extract_from_document",
+                        lambda *_a, **_k: dict(_PARTIAL_STATS))
 
 
 class TestAPartialExtractionIsNotDone:
