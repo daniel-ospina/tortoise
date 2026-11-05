@@ -14151,6 +14151,24 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
+def test_ready_for_owner_tool_change_selects_core_not_tier1():
+    # #10991: `tests/test_ready_for_owner.py` (registered `core`) pins condition 2 of
+    # the ready-for-owner gate — strict polarity (only `success` is green), grouping
+    # by `(app, workflow_id, name)`, the entry/merge split, and the `total_count`
+    # completeness refusal. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # `tools/ready_for_owner.py` matches no SOURCE_PATTERNS row, so a tool-only diff
+    # was filtered out BEFORE the "not matched -> core" fallback: widening
+    # `GREEN_CONCLUSIONS` (the exact mutation the suite exists to catch) would have
+    # merged with none of its own pins running — the #1349/#3332/#3616 silent-drop
+    # class. MEASURED before the CORE_ALSO entry: `select(["tools/ready_for_owner.py"],
+    # "pull_request", load_manifest())` -> surfaces=[], full=False, 72 files, the pin
+    # absent. Mutation check: removing the CORE_ALSO entry fails both arms below.
+    r = _sel(["tools/ready_for_owner.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_ready_for_owner.py" in r["test_files"], r
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate

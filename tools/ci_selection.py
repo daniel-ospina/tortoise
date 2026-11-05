@@ -2755,7 +2755,28 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # load_manifest())` -> surfaces=[], 72 files, the pin ABSENT. CORE_ALSO (not
              # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
              # graph, no URI, no network) and `core` is where its suite is registered.
-             "tools/ci_runner_labels.py")
+             "tools/ci_runner_labels.py",
+             # #10991: the ready-for-owner instrument's own suite. `tests/
+             # test_ready_for_owner.py` (registered `core`, the row added for #10991's
+             # `manifest-integrity` failure) pins condition 2 of the readiness gate —
+             # the strict polarity, the `(app, workflow_id, name)` grouping, the
+             # entry/merge split and the `total_count` completeness refusal. Without
+             # this entry a TOOL-ONLY change filtered to `changed == []` BEFORE the
+             # "not matched -> core" fallback and took the docs-only early return, so
+             # a change that widened `GREEN_CONCLUSIONS` or dropped the ambiguity
+             # guard would merge with none of its own pins running — the
+             # #1349/#3332/#3616 silent-drop class, on the file that decides which
+             # required checks a PR is certified against. `core` registration of the
+             # test file is CLASSIFICATION only (#4348): it runs only once a surface
+             # is already selected. MEASURED before this entry:
+             # `select(["tools/ready_for_owner.py"], "pull_request",
+             # load_manifest())` -> surfaces=[], full=False, 72 files, the pin ABSENT.
+             # CORE_ALSO (not TOOL_CARVEOUTS) because the suite is hermetic (every
+             # `gh` surface injected; tmp_path trees, no DB, no network) and `core`
+             # is where it is registered. Pinned by
+             # tests/test_ci_selection.py::
+             # test_ready_for_owner_tool_change_selects_core_not_tier1.
+             "tools/ready_for_owner.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
