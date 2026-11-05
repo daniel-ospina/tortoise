@@ -2040,11 +2040,19 @@ surfaces:
   # columns take a JSON DOCUMENT, the journal carries the graph's space-joined
   # STRING, and `_jsonb_or_scalar` passed a `str` through as raw JSON text, so
   # Postgres refused each row with `22P02` (302 measured) while the receipt said
-  # `ok: true`. `core` because the fix lives in
+  # `ok: true`. The column WAS `jsonb` when #9548 was measured — #10620's
+  # `20261102000002` has since narrowed it to `text` (the
+  # `test_record_searchkeys_10620.py` block in the `api` list states the same
+  # fact in the same tense) — and the graph, with every `PointAdded`/
+  # `PointPromoted` journal snapshot (which carries the NODE's own value), holds
+  # the space-joined STRING FalkorDB's Point FULLTEXT index needs
+  # (`projection/entities.py::flatten_search_keys_prop` — a list-valued property
+  # is never indexed, #5482). `core` because the fix lives in
   # `tortoise/record_projection.py` (`_jsonb_or_scalar`, `jsonb_columns`, the
   # `Statement.param_columns`/`value_types` attribution) and
   # `tortoise/record_writer.py` (the error that no longer discards the driver's
-  # cause) — NEITHER matches a `SOURCE_PATTERN`, so both fall through to `core`
+  # cause) — NEITHER matches a `SOURCE_PATTERN`, and neither does
+  # `tortoise/monitoring.py`, so all three fall through to `core`
   # and this arm is the load-bearing one for exactly the diff class it guards.
   # The DB-free legs are the ones that run on the fast lane (the bound value, the
   # read-side decode, the param/column alignment, the per-parameter memo, the
@@ -2067,7 +2075,10 @@ surfaces:
   # selected pool at all — without it `--integrity` reds the required
   # `manifest-integrity` job (measured: `manifest drift:
   # ['test_9548_record_search_keys_shape.py']`) and no leg runs the DB-free pins,
-  # not even a push (its fast pool is built from this manifest).
+  # not even a push (its fast pool is built from this manifest). ⚠️ It must NOT
+  # be "fixed" into `on_demand:` below: that lane is for files whose COST keeps
+  # them off the merge gate (wall-clock SLOs), and this file GATES — its DB-free
+  # legs are the ones that red on the pre-fix code on the PR path.
   - test_9548_record_search_keys_shape.py
   # #9325/#9326: the record's schema ships as a MAPPED package
   # (`pyproject.toml` `package-dir` -> `supabase/migrations`), so BOTH Dockerfiles
@@ -2874,36 +2885,6 @@ surfaces:
   # `supabase/tests/20261022000001_record_tenancy_posture.sql`, registered in
   # `supabase/tests/pglite/validate.mjs`.
   - test_record_tenancy_guc.py
-  # #9548 — the record DROPPED every Point carrying `search_keys`. The column
-  # WAS `jsonb` when #9548 was measured (#10620's `20261102000002` has since
-  # narrowed it to `text` — the `test_record_searchkeys_10620.py` block in the
-  # `api` list above states the same fact in the same tense); the graph (and
-  # every `PointAdded`/`PointPromoted` journal snapshot,
-  # which carries the NODE's own value) holds the space-joined STRING FalkorDB's
-  # Point FULLTEXT index needs (`projection/entities.py::flatten_search_keys_prop`
-  # — a list-valued property is never indexed, #5482). `_jsonb_or_scalar`
-  # serialised only `dict`/`list` and passed a `str` through as TEXT, so Postgres
-  # refused EVERY such record with `22P02` and `write_live_record` counted one
-  # `write_failed` and dropped the row — measured live: 302 Points silently absent
-  # from the record while the receipt said `ok: true`. Registered against `core`
-  # for the reason the three entries above give: EVERY input this file drives is
-  # `core`-selected — `tortoise/record_projection.py`, `tortoise/record_writer.py`
-  # and `tortoise/monitoring.py` match no named SOURCE_PATTERN (the `core`
-  # fallback), and the record migrations under `supabase/migrations/` carry their
-  # own `CORE_ALSO` rows in `tools/ci_selection.py`. So a projection-only,
-  # writer-only or migration-only diff selects `core` and this guard runs with it.
-  # ⛔ THIS ROW IS LOAD-BEARING TWICE, exactly as the #9836 row above: without it
-  # the file is in NO surface, so `classify_test_file` returns `None` for it and
-  # the REQUIRED `manifest-integrity` job reds with
-  # `manifest drift: ['test_9548_record_search_keys_shape.py']`
-  # (`tools/ci_selection.py::integrity`) — AND, once the gate is green, the row is
-  # still the only thing that makes the file RUN, since an unregistered file is
-  # selected by no surface even though the diffs above select exactly the surface
-  # that needs it. ⚠️ It must NOT be "fixed" into `on_demand:` below: that lane is
-  # for files whose COST keeps them off the merge gate (wall-clock SLOs), and this
-  # file gates — its DB-free legs are the ones that red on the pre-fix code on the
-  # PR path. Its DB legs need `TEST_RECORD_DB_URI` (the #9551 job) and SKIP when it
-  # is unset, so it needs no carve-out registration and no URI in the fast lane.
   # #7970 (epic #7879, interface D) — the record-served ANCHORED read
   # (`tortoise/record_serve.py`) and the two test files that pin it. `core` is
   # the arm that carries the mechanism: `record_serve.py` matches no named
@@ -9622,17 +9603,16 @@ durations:
   # #9551 job arms it, not this leg). ⛔ A LOCAL wall-clock reading is deliberately
   # NOT stated, and this note carried one until the #10726 review: `"7.31 s wall"`
   # (2026-11-04), which re-measured the same file at **2.5 s / ~3.9 s wall** on
-  # 2026-11-05 (three consecutive runs, all `13 passed, 1 skipped`). It moved by
-  # ~1.8x with nothing but the host and the day — a frozen reading of exactly the
-  # class this row's FIRST paragraph exists to end, and the reason
+  # 2026-11-05 (three consecutive runs, each reporting an identical outcome — the
+  # counts are deliberately NOT restated here, for the reason given above). It
+  # moved by ~1.8x with nothing but the host and the day — a frozen reading of
+  # exactly the class this row's FIRST paragraph exists to end, and the reason
   # `test_rail_detach.py`'s row states none either. What the 2.0 IS: the flat
   # `DEFAULT_FAST_WEIGHT`, deliberately, because #2818/#3419 forbid a local reading
   # as a shard-layout input for a PR-added file — so the point of the row is
   # existence + coverage, not an accurate shard weight (the
   # `test_state_value_verbatim_10360.py` precedent), and
   # `tools/ci_timing.py --refresh-durations` replaces it from junit once a
-  # push-to-main sweep includes it.
-  # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   # #9078's guard, added by a PR: a new fast-pool file can never have a CI
   # duration at PR time (`tools/ci_timing.py --refresh-durations` samples
