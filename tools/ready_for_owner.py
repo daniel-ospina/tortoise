@@ -246,8 +246,23 @@ PR_REF_RE = re.compile(r"^#?(\d+)$")
 
 REVIEW_OK_TOKENS = frozenset({"head", "carry"})
 
-GH_TIMEOUT = int(os.environ.get("READY_GATE_GH_TIMEOUT", "60"))
-GIT_TIMEOUT = int(os.environ.get("READY_GATE_GIT_TIMEOUT", "180"))
+def _env_int(name: str, default: int) -> int:
+    """An int from the environment — the DEFAULT when it does not parse.
+
+    ⛔ Parsed at import, a malformed value (``READY_GATE_GH_TIMEOUT=1m``) raised
+    ``ValueError`` before ``main``'s backstop, so the process died with a traceback and
+    printed NEITHER verdict line — the one outcome this tool's contract forbids, and
+    indistinguishable from a gate that never ran (#review). A bad knob is an operator
+    mistake, not a reason to lose the verdict.
+    """
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+GH_TIMEOUT = _env_int("READY_GATE_GH_TIMEOUT", 60)
+GIT_TIMEOUT = _env_int("READY_GATE_GIT_TIMEOUT", 180)
 
 
 class ReadError(RuntimeError):
@@ -406,8 +421,21 @@ def check_tree(probe: Probe) -> Check:
             f"base={probe.base} head={probe.head[:12]} {flag}",
             f"base-not-main:{probe.base}",
         )
-    if not probe.tree:
-        return Check("tree", False, probe.tree_raw or "dirty", "dirty")
+    # ⛔ `is not True`, never truthiness: `probe.tree` arrives uncoerced from a fixture or
+    # any other Mapping-shaped input, so a STRING like "false" (or "no", or "1") is
+    # truthy and would have printed PASS for condition 1 over a tree nothing measured —
+    # the exact polarity inversion this module exists to prevent (#review).
+    if probe.tree is not True:
+        if isinstance(probe.tree, bool):
+            return Check("tree", False, probe.tree_raw or "dirty", "dirty")
+        detail = f"tree={probe.tree!r} is not a verdict"
+        return Check(
+            "tree",
+            False,
+            f"{probe.tree_raw} — {detail}" if probe.tree_raw else detail,
+            "unreadable",
+            unreadable=True,
+        )
     return Check("tree", True, f"{probe.tree_raw} {flag}".strip())
 
 

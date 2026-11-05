@@ -353,6 +353,32 @@ def test_unreadable_surface_refuses_the_pick(tmp_path: Path):
     assert "REFUSED" in text
 
 
+def test_a_malformed_pace_env_never_reads_as_an_empty_queue(monkeypatch: pytest.MonkeyPatch):
+    """⛔ `NEXT_WORK_PACE=0.2s` must not turn into "the queue is empty".
+
+    `PACE_SECONDS` was parsed by `float()` at MODULE level, so a malformed knob raised
+    `ValueError` at import and the process exited **1** with a traceback. This tool
+    documents 1 as "the queue was read and NO unit is pickable — that is an answer, not
+    an error", so a consumer keying on 1 concluded the queue was EMPTY and stopped —
+    the mis-grade every other path in the file (its `_repo_slug`, `--from`, snapshot
+    reads) is written to avoid. Restoring the module-level parse makes the import raise
+    and this test error out before any assertion.
+    """
+    from tools import next_work
+
+    monkeypatch.setenv("NEXT_WORK_PACE", "0.2s")
+    assert next_work._pace_seconds() == next_work.PACE_DEFAULT_SECONDS
+    next_work._pace()  # must not raise, and must not print a traceback
+
+
+def test_a_well_formed_pace_env_is_honoured(monkeypatch: pytest.MonkeyPatch):
+    from tools import next_work
+
+    monkeypatch.setenv("NEXT_WORK_PACE", "0")
+    assert next_work._pace_seconds() == 0.0
+    next_work._pace()  # zero means no sleep, and no crash
+
+
 def test_ahead_by_zero_branch_is_not_a_holder(tmp_path: Path):
     """#8175 restated: a branch with 0 commits ahead produced nothing and must not block.
 

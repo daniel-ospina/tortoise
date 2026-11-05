@@ -1059,12 +1059,27 @@ def next_action(unit: Unit, repo: str) -> str | None:
 
 #: Seconds between GitHub calls. The API throttles per-call and a queue sweep
 #: makes ~50 of them, so the sweep is PACED rather than fanned out.
-PACE_SECONDS = float(os.environ.get("NEXT_WORK_PACE", "0.2"))
+#: ⛔ Parsed LAZILY (#review): at module level a malformed value (`NEXT_WORK_PACE=0.2s`)
+#: raised `ValueError` at import and the process exited 1 with a traceback — which this
+#: tool documents as "the queue was read and NO unit is pickable", so a consumer keying
+#: on 1 concluded the queue was EMPTY and stopped. A bad knob must not be an answer.
+PACE_DEFAULT_SECONDS = 0.2
+
+
+def _pace_seconds() -> float:
+    raw = os.environ.get("NEXT_WORK_PACE")
+    if raw is None:
+        return PACE_DEFAULT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return PACE_DEFAULT_SECONDS
 
 
 def _pace() -> None:
-    if PACE_SECONDS > 0:
-        time.sleep(PACE_SECONDS)
+    seconds = _pace_seconds()
+    if seconds > 0:
+        time.sleep(seconds)
 
 
 def _unreadable(snap: Snapshot, what: str, detail: object) -> None:

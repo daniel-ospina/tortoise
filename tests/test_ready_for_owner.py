@@ -29,6 +29,7 @@ The modes, one test each:
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 import sys
@@ -331,6 +332,50 @@ def test_unreadable_tree_is_unreadable_not_clean() -> None:
 def test_non_main_base_is_not_ready() -> None:
     """#10597: a `Closes` merged into a sibling branch neither lands nor closes."""
     _assert_fails("tree", "base-not-main:", base="act-10465")
+
+
+@pytest.mark.parametrize("not_a_verdict", ["false", "no", "1", "clean", "True"])
+def test_a_non_boolean_tree_is_never_a_measured_clean_verdict(not_a_verdict: str) -> None:
+    """⛔ A truthy NON-BOOL must not print PASS for condition 1.
+
+    `check_tree` read `if not probe.tree:` while the field is `bool | None` and
+    `probe_from_dict` hands it to the model UNCOERCED, so a fixture carrying the string
+    `"false"` (or `1`, or `"clean"`) printed `[1/6] tree PASS` and let the whole gate
+    reach READY — over a tree nothing had measured. That is the polarity inversion this
+    module exists to prevent, in the one condition whose contract is "merge-tree, never
+    the flag". Reverting to `if not probe.tree` makes this test print PASS and fail here.
+    """
+    check = _check("tree", tree=not_a_verdict)
+    assert check.passed is False, f"tree={not_a_verdict!r} must not pass: {check.status}"
+    assert check.unreadable is True, check.status
+    assert "is not a verdict" in check.raw, check.raw
+
+
+def test_a_boolean_false_tree_is_still_the_dirty_reason() -> None:
+    """The measured-clean distinction must not swallow the ordinary dirty case."""
+    check = _check("tree", tree=False)
+    assert check.passed is False
+    assert check.unreadable is False
+    assert check.reason == "dirty"
+
+
+def test_a_malformed_timeout_env_still_prints_a_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⛔ `READY_GATE_GH_TIMEOUT=1m` must not kill the process before its verdict line.
+
+    Both timeouts were parsed by `int()` at MODULE level, so a malformed knob raised
+    `ValueError` at import — before `main`'s `except Exception` backstop — and the tool
+    died with a traceback and printed NEITHER `READY-FOR-OWNER` nor `NOT-READY`, which
+    its own contract forbids ("a crashed gate is indistinguishable from an unrun one").
+    """
+    monkeypatch.setenv("READY_GATE_GH_TIMEOUT", "1m")
+    monkeypatch.setenv("READY_GATE_GIT_TIMEOUT", "fast")
+    try:
+        reloaded = importlib.reload(rfo)
+        assert reloaded.GH_TIMEOUT == 60
+        assert reloaded.GIT_TIMEOUT == 180
+    finally:
+        monkeypatch.undo()
+        importlib.reload(rfo)
 
 
 # ── condition 3: the review record, bound to the LIVE head ─────────────────
