@@ -791,6 +791,42 @@ def test_json_mode_reports_the_same_verdict_and_never_leaks_the_credential():
     assert secret not in p.stdout and secret not in p.stderr, "the credential leaked into the output"
 
 
+# ── TOKEN HYGIENE — the guard must be PROVEN, not merely present (review cycle 2) ────────────────
+# ⛔ BOTH TESTS BELOW EXIST BECAUSE THE GUARD SHIPPED UNPINNED: a mutation deleting the refusal block
+# left 38/38 GREEN, so a regression would silently restore the token-printing traceback. Each asserts
+# the three things that made the original defect invisible: a VERDICT (not a traceback), exit 1, and
+# no fragment of the credential in stdout+stderr.
+def test_wrapped_token_is_named_not_thrown():
+    """A token with an interior newline must be REFUSED, never reach `putheader`.
+
+    MEASURED before the guard: `http.client.putheader` raises
+    `ValueError("Invalid header value b'Bearer <TOKEN>'")` — a message that CONTAINS the credential —
+    and `_request` does not catch `ValueError`, so it escaped as a traceback on stderr with EMPTY
+    stdout (breaking the `GH-WRITE-UNAVAILABLE(<reason>)` and `--json` contracts at once).
+    """
+    with _Stub() as s:            # a base that WOULD answer OK — the refusal must preempt it
+        rc, out, err = _run(s.base, token="ghp_dummySECRET\ndumped")
+    assert rc == 1, f"a header-unsafe token must exit 1, got {rc}: {out}{err}"
+    assert out.startswith("GH-WRITE-UNAVAILABLE(bad-credentials)"), out
+    blob = out + err
+    assert "dumped" not in blob and "SECRET" not in blob, f"the credential reached the output: {blob}"
+    assert "Traceback" not in err, err
+
+
+def test_non_ascii_token_is_named_not_thrown():
+    """A non-latin-1 token must be REFUSED too — `UnicodeEncodeError` is a `ValueError` subclass.
+
+    Reachable from the tool's OWN reader: `_token_from_hosts` opens with `errors="replace"`, so a
+    corrupt hosts.yml yields `U+FFFD`; `putheader` then raises `UnicodeEncodeError`, which the
+    whitespace/control-character predicate alone does NOT catch.
+    """
+    with _Stub() as s:
+        rc, out, err = _run(s.base, token="ghp_bad\ufffdbyte")
+    assert rc == 1, f"a non-ASCII token must exit 1, got {rc}: {out}{err}"
+    assert out.startswith("GH-WRITE-UNAVAILABLE(bad-credentials)"), out
+    assert "Traceback" not in err, err
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

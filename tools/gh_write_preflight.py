@@ -138,7 +138,7 @@ USAGE
   GH_WRITE_PREFLIGHT_API=http://127.0.0.1:PORT uv run python tools/gh_write_preflight.py …   # test seam
                                                                        (loopback only; anything else is refused as `usage`)
 
-  exit 0 = GH-WRITE-OK(issues+pull-requests+contents writable)
+  exit 0 = GH-WRITE-OK(issues+pull-requests+contents writable @ <api_base>)
   exit 1 = GH-WRITE-UNAVAILABLE(<reason>)
 
 The credential is NEVER printed, logged, or included in any output — not even truncated.
@@ -521,10 +521,11 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # returns `str(e)` into `detail`, which IS printed — a traceback leak would become a first-class
     # printed one. So it is refused HERE, before the value is ever interpolated, and the reason never
     # echoes it (not even truncated).
-    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in token):
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in token) or not token.isascii():
         result.update(reason="bad-credentials",
-                      detail="the resolved credential carries whitespace or a control character (a "
-                             "severed or wrapped secret) — re-source it; the value is deliberately not echoed")
+                      detail="the resolved credential carries whitespace, a control character or a non-ASCII "
+                             "byte (a severed, wrapped or corrupt secret) — re-source it; the value is "
+                             "deliberately not echoed")
         return result
 
     # ── 1. READ: the disambiguator for any 404 that follows, and the source of default_branch.
