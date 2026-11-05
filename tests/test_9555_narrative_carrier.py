@@ -1878,11 +1878,21 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool) -> bool
 
     ⚠️ Declared limit: a cue that follows the object, in the SAME clause, with
     nothing but a copula/article after it, is read as negating this object even
-    when the prose meant something else (*"…read from `home` and it is not
-    stored on the node"*). That is fail-CLOSED on purpose — the direction this
-    pin exists to close was fail-OPEN (an inverted instruction certified green) —
-    and a clause boundary anywhere between object and cue keeps the sentence
-    accepted.
+    when the negation belongs to SOMETHING ELSE on the line — *"the vector
+    embeds the S1 narrative read from `home` and it is not the summary"* is
+    CORRECT prose (it states §9.4's claim and negates a bare `summary`, which no
+    backtick marks as another object) and it is REFUSED. That is fail-CLOSED on
+    purpose — the direction this pin exists to close was fail-OPEN (an inverted
+    instruction certified green) — and a clause boundary anywhere between object
+    and cue keeps the sentence accepted.
+
+    ⛔ The example above is MEASURED, not illustrative, and it is pinned by
+    `_DECLARED_OVER_BLOCK` / `test_the_declared_fail_CLOSED_over_block_is_the_
+    documented_one`. The first draft of this paragraph cited
+    *"…read from `home` and it is not stored on the node"*, which the guard
+    ACCEPTS (`stored` is neither a copula nor an article, so
+    `_NEG_TRAILING_SUBJECT` does not fire) — a docstring naming a check the code
+    does not perform, the class this file has already corrected four times.
     """
     spans = rf"{_NEG_CLAUSE_SAFE}{{0,40}}"
     leading = _NEGATION_CUE + spans
@@ -2175,8 +2185,8 @@ _VECTOR_INVERSIONS: list[tuple[str, str]] = [
     # ⚠️ The DIRECTION, not the vocabulary and not the span. Every case above
     # puts the cue BEFORE the object, so a guard that reads only that order
     # ACCEPTED the same inverted claim written the other way round — all three
-    # below were measured GREEN at `9d0e75d70` — the pin certified the exact
-    # inverse of §9.4 `.
+    # below were measured GREEN at `9d0e75d70`, i.e. the pin certified the exact
+    # inverse of §9.4.
     ("the pointer's own negation, the cue AFTER the object",
      "the S1 narrative read from `{home}` is never what the vector embeds"),
     ("the pointer's own negation, cue after the object, copula form",
@@ -2243,8 +2253,15 @@ def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
     ⛔ The three `cue-after-object` cases are the one direction this list was
     missing for four cycles, and its absence is not theoretical: on the pre-fix
     guards all three were ACCEPTED, so the pin stayed green while certifying
-    the exact inverse of §9.4 (`measured at 9d0e75d70`; re-measured by replaying
-    this file against the pre-fix helpers — 7 of the cases here red there).
+    the exact inverse of §9.4.
+
+    Re-measured by replaying this list against the pre-fix helpers extracted
+    from `9d0e75d70` (`_negates_the_home` / `_namespaces_a_column`): **5 of the
+    8 lines are refused there, so 3 of the 8 cases here red there** — exactly
+    the three `cue-after-object` lines. (An earlier draft of this docstring said
+    *7*; it counted neither the refused lines nor the red cases, which is the
+    *"comment states a number the code does not produce"* class this file has
+    corrected four times.)
     """
     formatted = line.format(home=_HOME)
     try:
@@ -2256,6 +2273,65 @@ def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
         f"the pin ACCEPTED a line that inverts or re-specifies the claim "
         f"({why}): {formatted!r} — the guards must be OBJECT-BOUND, never "
         f"removed to stop them misfiring on a correct re-wording")
+
+
+#: The ONE fail-CLOSED over-block this pin DECLARES on `_negation_bound_to`: a
+#: cue that follows the object in the SAME clause with nothing but a copula or
+#: article after it is read as negating `{home}` even when the negation belongs
+#: to something else on the line. The line below is CORRECT prose — it states
+#: §9.4's claim and negates a bare `summary`, which no backtick marks as another
+#: object — and the guard REFUSES it, deliberately: the direction being closed is
+#: fail-OPEN (an inverted instruction certified green), so an over-block is the
+#: cheaper error.
+#:
+#: ⛔ It is PINNED rather than merely described because the docstring's first
+#: example (*"…read from `{home}` and it is not stored on the node"*) was
+#: measured ACCEPTED — `stored` is neither a copula nor an article, so
+#: `_NEG_TRAILING_SUBJECT` does not fire, and the paragraph named a check the
+#: code does not perform (the class this file has corrected four times).
+#:
+#: A future cycle that makes this line ACCEPTED is tightening the trailing rule,
+#: which is a SCOPE decision on the pin (it touches cycle-2 **F4**: the pin stays
+#: rendering-agnostic over merged prose) — not a regression: update this case and
+#: `_negation_bound_to`'s docstring TOGETHER, and record the scope change.
+_DECLARED_OVER_BLOCK = (
+    "the vector embeds the S1 narrative read from `{home}` and it is not the "
+    "summary")
+
+
+def test_the_declared_fail_CLOSED_over_block_is_the_documented_one():
+    """*What value makes this test fail?* A docstring with no code behind it.
+
+    The declared limit is a claim about a CHECK, so it is asserted, not narrated:
+    `_negation_bound_to`'s docstring says this line is refused, and the F3 review
+    finding was that its previous example was ACCEPTED. Three sides, all needed:
+
+      • the phrase assert PASSES on this line (so the refusal is the negation
+        guard's, not the pointer's);
+      • `_negates_the_home` is TRUE — the over-block happens;
+      • `_assert_vector_reads_the_narrative` REFUSES it — i.e. the over-block
+        reaches the pin, which is what makes it a limit worth declaring.
+
+    GREEN on the pre-fix guards too, deliberately: this is not a non-vacuity pin
+    for a fix, it is the documentation-drift guard for the declared boundary.
+    """
+    line = _DECLARED_OVER_BLOCK.format(home=_HOME)
+    assert f"the S1 narrative read from `{_HOME}`" in line, (
+        f"the declared over-block case no longer carries the pointer phrase, so "
+        f"it would be refused for the WRONG reason and the declared limit would "
+        f"read as measured when it is not: {line!r}")
+    assert _negates_the_home(line, _HOME), (
+        f"`_negation_bound_to`'s docstring declares that this CORRECT sentence "
+        f"is refused by the trailing-cue rule, and it is ACCEPTED: {line!r}. "
+        f"Either the trailing rule was tightened (a SCOPE change that must "
+        f"update the docstring and this case together — see `_DECLARED_OVER_"
+        f"BLOCK`) or the docstring names a check the code does not perform")
+    with pytest.raises(AssertionError) as refused:
+        _assert_vector_reads_the_narrative(line, "the declared over-block", _HOME)
+    assert "NEGATES the pointer" in str(refused.value), (
+        f"the declared over-block was refused for an unexpected reason — the "
+        f"docstring attributes it to the NEGATION guard, and the pin said: "
+        f"{refused.value}")
 
 
 #: The §9.4 NEGATION re-written WITHOUT changing the claim — every one applies a
