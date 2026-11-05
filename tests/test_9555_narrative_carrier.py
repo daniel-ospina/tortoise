@@ -1827,6 +1827,73 @@ _NEGATION_CUE = (
     r"|\w+n['’]t\b)"
 )
 
+#: What a negation may NOT cross on its way to the object it negates: another
+#: backticked name, or a clause boundary (`. , ; : ( — –`). The BACKTICK half
+#: keeps a negation of a DIFFERENT name from reaching this one — in *"never from
+#: `:Source.summary`"* the next backtick opens another object, so the match cannot
+#: continue on to `public.session_narrative`; the CLAUSE half keeps a negation in
+#: a NEIGHBOURING clause from binding to this one.
+_NEG_CLAUSE_SAFE = r"[^`;:,.—–(]"
+#: The read/embed/index verbs that make a clause a claim about what the vector
+#: EMBEDS (the leading direction only — see `_negation_bound_to`).
+_NEG_READ_VERB = (
+    r"(?:read|reads|reading|embed|embeds|embedding|index|indexes|"
+    r"indexing|come|comes)"
+)
+#: What must follow the cue in the TRAILING direction — *"…read from `home` is
+#: never what the vector embeds"*, *"…`home` cannot be what gets embedded"*.
+#: Requiring a copula/article here is what keeps a cue that introduces ANOTHER
+#: backticked name from binding to this object: in *"…read from `home` never
+#: `:Source.summary`"* the cue is followed by a backtick, not by one of these, so
+#: that negation belongs to the other name and this object is not negated.
+_NEG_TRAILING_SUBJECT = r"(?:\s+(?:be|is|was|were|the|what|it|this|that)\b)"
+
+
+def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool) -> bool:
+    r"""Is a negation cue bound to `object_regex` — in EITHER direction?
+
+    ⛔ **DIRECTION IS HALF THE CLAIM, and it was missing.** Both object-bound
+    guards used to match ONE word order — cue → span → verb/object → object —
+    which is the order every phrasing in the corpus happens to use. The mirror
+    order, a cue placed AFTER the object it negates, was not covered at all, so
+    the SAME inverted claim written the other way round was ACCEPTED (measured
+    at `9d0e75d70`: all three lines in `_VECTOR_INVERSIONS` marked "cue AFTER
+    the object" kept the pin GREEN while stating the exact inverse of §9.4).
+
+    So the cue is bound to the object from either side, each side carrying the
+    stop set that makes the binding mean something:
+
+      • **LEADING** — cue, then `_NEG_CLAUSE_SAFE{0,40}`, then (for `home`) a
+        read/embed verb and a further `_NEG_CLAUSE_SAFE{0,30}`, then the object.
+      • **TRAILING** — the object, then `_NEG_CLAUSE_SAFE{0,30}`, then the cue,
+        then `_NEG_TRAILING_SUBJECT` (so a cue introducing ANOTHER backticked
+        name is that name's negation, not this object's).
+
+    ⚠️ The SECOND span is clause-stopped too. It used to be `[^`;]{0,30}`, which
+    admitted `. , : —`, so a cue in one clause reached an object in the NEXT one
+    and refused CORRECT prose with the inverted diagnosis *"NEGATES the
+    pointer"* — *"the vector's text is not read. Later the design indexes
+    `home`"* (measured at `9d0e75d70`). Both shapes are CONTROL cases in
+    `_VECTOR_REWORDINGS`.
+
+    ⚠️ Declared limit: a cue that follows the object, in the SAME clause, with
+    nothing but a copula/article after it, is read as negating this object even
+    when the prose meant something else (*"…read from `home` and it is not
+    stored on the node"*). That is fail-CLOSED on purpose — the direction this
+    pin exists to close was fail-OPEN (an inverted instruction certified green) —
+    and a clause boundary anywhere between object and cue keeps the sentence
+    accepted.
+    """
+    spans = rf"{_NEG_CLAUSE_SAFE}{{0,40}}"
+    leading = _NEGATION_CUE + spans
+    if read_verb:
+        leading += rf"{_NEG_READ_VERB}\b{_NEG_CLAUSE_SAFE}{{0,30}}"
+    return re.search(
+        f"(?:{leading}{object_regex})"
+        f"|(?:{object_regex}{_NEG_CLAUSE_SAFE}{{0,30}}"
+        f"{_NEGATION_CUE}{_NEG_TRAILING_SUBJECT})",
+        line, re.IGNORECASE) is not None
+
 
 def _negates_the_home(line: str, home: str) -> bool:
     r"""Does a negation cue apply to the READ of `home` — the claim, not the line?
@@ -1835,21 +1902,10 @@ def _negates_the_home(line: str, home: str) -> bool:
     "from" in line` refuses *every* negation, including the one §9.4 requires
     (*"…that text is not read from `:Source.summary`"*), and then reports that
     the sentence negates `home` — the inverse of what it says. So the cue is
-    bound to the object by three anchored parts, in order: a negation CUE, a
-    span that carries no other claim, a READ/EMBED/INDEX verb, then at most 30
-    characters with NO backtick in them, then the backticked home.
-
-    ⛔ BOTH SPANS CARRY A STOP SET, and each stop closes a different hole:
-
-      • **NO BACKTICK** keeps a negation of a DIFFERENT backticked object from
-        reaching `home`: in *"never from `:Source.summary`"* the next backtick
-        opens another name, so the match cannot continue on to
-        `public.session_narrative`;
-      • **NO CLAUSE BOUNDARY** (`. , ; : ( — –`) keeps a negation belonging to
-        ANOTHER CLAUSE from binding to this one — *"it is not stored on the
-        node; the text is read from `public.session_narrative`"* says the
-        vector is not stored there, and it must not red as *"NEGATES the
-        pointer"*. Those two lines are CONTROL cases in `_VECTOR_REWORDINGS`.
+    bound to the object, in EITHER direction (`_negation_bound_to`): a negation
+    CUE, a span that carries no other claim, a READ/EMBED/INDEX verb, then at
+    most 30 characters with no backtick in them, then the backticked home —
+    **or** the home first, then a span, then the cue.
 
     ⚠️ The cue→verb span is `{0,40}` characters and not "two filler words":
     the earlier `(?:\w+\s+){0,2}` refused *"it is not read from `home`"* but
@@ -1859,12 +1915,7 @@ def _negates_the_home(line: str, home: str) -> bool:
     `_VECTOR_INVERSIONS`. The span is bounded, and its stop set is what keeps it
     from reaching across a clause boundary or another backticked name.
     """
-    return re.search(
-        _NEGATION_CUE +
-        rf"[^`;:,.—–(]{{0,40}}"
-        rf"(?:read|reads|reading|embed|embeds|embedding|index|indexes|"
-        rf"indexing|come|comes)\b[^`;]{{0,30}}`{re.escape(home)}`",
-        line, re.IGNORECASE) is not None
+    return _negation_bound_to(line, rf"`{re.escape(home)}`", read_verb=True)
 
 
 def _negates_the_summary(line: str) -> bool:
@@ -1880,15 +1931,22 @@ def _negates_the_summary(line: str) -> bool:
     and it never got the same treatment (measured: both re-wordings RED before
     this helper existed).
 
-    Same shape as `_negates_the_home`, with the trap as the object: a cue from
-    `_NEGATION_CUE`, at most 40 characters carrying NO backtick and NO clause
-    boundary (`. , ; : ( — –`), then the backticked `:Source.summary`.
+    Same shape as `_negates_the_home`, with the trap as the object, and bound in
+    EITHER direction because a negation is a claim about an object, not about a
+    word order: a cue from `_NEGATION_CUE` then at most 40 characters carrying NO
+    backtick and NO clause boundary (`. , ; : ( — –`) then the backticked
+    `:Source.summary` — **or** the object, a span, then the cue. The trailing
+    direction is not decoration: *"`:Source.summary` is never what the vector
+    reads"* states §9.4's ruling as plainly as *"never from `:Source.summary`"*,
+    and a guard that reads only the first order REFUSES it (measured).
 
       • **NO BACKTICK** keeps a negation of a DIFFERENT backticked name from
         reaching the summary — *"it is not `public.session_narrative`; it is
         `:Source.summary`"* negates the other name;
       • **NO CLAUSE BOUNDARY** keeps a negation in a neighbouring clause from
-        binding to this one.
+        binding to this one;
+      • **TRAILING SUBJECT** (`_NEG_TRAILING_SUBJECT`) keeps a cue that follows
+        the object and introduces ANOTHER backticked name from binding here.
 
     ⚠️ It does NOT accept a line that merely NAMES the trap: *"⛔ read from
     `:Source.summary`"* carries the object and no cue, and is REFUSED — that is
@@ -1896,10 +1954,8 @@ def _negates_the_summary(line: str) -> bool:
     `_SUMMARY_NEGATION_INVERSIONS`, so a future loosening reds a test rather than
     a docs-only PR.
     """
-    return re.search(
-        _NEGATION_CUE + r"[^`;:,.—–(]{0,40}" +
-        rf"`{re.escape(_SUMMARY_OBJECT)}`",
-        line, re.IGNORECASE) is not None
+    return _negation_bound_to(
+        line, rf"`{re.escape(_SUMMARY_OBJECT)}`", read_verb=False)
 
 
 def _namespaces_a_column(line: str, home: str) -> bool:
@@ -2075,6 +2131,21 @@ _VECTOR_REWORDINGS: list[tuple[str, str]] = [
     ("a negation of ANOTHER clause (em-dash stop)",
      "the text is not stored on the node — it is the S1 narrative read from "
      "`{home}`"),
+    #: CONTROLS for the SECOND span's clause stop set. That span (read verb →
+    #: object) was `[^`;]{0,30}`, which admits `. , : —`, so a cue in ONE clause
+    #: reached an object in the NEXT one and refused correct prose with the
+    #: inverted diagnosis *"NEGATES the pointer"* (measured at `9d0e75d70`).
+    ("the negation ends its clause before the object (comma stop)",
+     "the text is not read, the S1 narrative read from `{home}` is what the "
+     "vector embeds"),
+    ("the negation ends its clause before the object (em-dash stop)",
+     "the text is not read — the S1 narrative read from `{home}` is what the "
+     "vector embeds"),
+    #: CONTROL for the TRAILING direction: a cue that follows the object and
+    #: introduces ANOTHER backticked name negates THAT name, not the home — so
+    #: binding every trailing cue to `home` would refuse this correct line.
+    ("a cue after the home that introduces ANOTHER backticked name",
+     "the S1 narrative read from `{home}` is never `:Source.summary`"),
 ]
 
 #: Lines that carry the correct PHRASE and still invert or re-specify the claim
@@ -2101,6 +2172,17 @@ _VECTOR_INVERSIONS: list[tuple[str, str]] = [
     # (measured). It is refused now that `_NEGATION_CUE` carries it.
     ("the pointer's own negation, through a cue the first set did not carry",
      "the vector's text cannot be the S1 narrative read from `{home}`"),
+    # ⚠️ The DIRECTION, not the vocabulary and not the span. Every case above
+    # puts the cue BEFORE the object, so a guard that reads only that order
+    # ACCEPTED the same inverted claim written the other way round — all three
+    # below were measured GREEN at `9d0e75d70` — the pin certified the exact
+    # inverse of §9.4 `.
+    ("the pointer's own negation, the cue AFTER the object",
+     "the S1 narrative read from `{home}` is never what the vector embeds"),
+    ("the pointer's own negation, cue after the object, copula form",
+     "the S1 narrative read from `{home}` is not the vector's text"),
+    ("the pointer's own negation, cue after the object, cannot form",
+     "the S1 narrative read from `{home}` cannot be what gets embedded"),
 ]
 
 
@@ -2108,7 +2190,9 @@ _VECTOR_INVERSIONS: list[tuple[str, str]] = [
     "why,line", _VECTOR_REWORDINGS,
     ids=["negation-of-the-summary", "ends-on-the-backticked-home",
          "head-document-wording", "other-clause-semicolon",
-         "other-clause-em-dash"])
+         "other-clause-em-dash", "clause-end-after-read-verb-comma",
+         "clause-end-after-read-verb-em-dash",
+         "cue-after-home-other-name"])
 def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
     """*What value makes this test fail?* The pre-fix guards, on cases 1 and 2.
 
@@ -2142,16 +2226,25 @@ def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
     "why,line", _VECTOR_INVERSIONS,
     ids=["negated-pointer", "negated-pointer-three-content-words",
          "column-dot-form", "column-possessive-form",
-         "negated-pointer-cannot-cue"])
+         "negated-pointer-cannot-cue", "negated-pointer-cue-after-object",
+         "negated-pointer-cue-after-object-copula",
+         "negated-pointer-cue-after-object-cannot"])
 def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
     """*What value makes this test fail?* A fix that DROPS the two guards.
 
     Binding them to their object is the fix; removing them also silences the
     misfires, and that is the regression this list exists to catch. Each line
     carries the correct phrase — so the phrase assert cannot be what refuses it
-    — and inverts the claim about `{home}` in one of the three shapes the
-    helper's docstring names: a negation applied to the READ of the home, and
-    the home used as a namespace for a column (dot and possessive forms).
+    — and inverts the claim about `{home}` in one of the shapes the helper's
+    docstring names: a negation applied to the READ of the home (with the cue
+    BEFORE **or** AFTER the object), and the home used as a namespace for a
+    column (dot and possessive forms).
+
+    ⛔ The three `cue-after-object` cases are the one direction this list was
+    missing for four cycles, and its absence is not theoretical: on the pre-fix
+    guards all three were ACCEPTED, so the pin stayed green while certifying
+    the exact inverse of §9.4 (`measured at 9d0e75d70`; re-measured by replaying
+    this file against the pre-fix helpers — 7 of the cases here red there).
     """
     formatted = line.format(home=_HOME)
     try:
@@ -2176,6 +2269,10 @@ _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     ("and not from", "and not from `:Source.summary`"),
     ("must not be", "which must not be `:Source.summary`"),
     ("never the field", "never the field `:Source.summary`"),
+    #: The TRAILING direction: the trap named first and negated second. Exactly
+    #: the same ruling, and the leading-only guard REFUSED it (measured).
+    ("the trap as the subject of the negation",
+     "`:Source.summary` is never what the vector reads"),
 ]
 
 #: Lines that NAME the trap with NO negation cue applied to it, or apply one to
@@ -2195,7 +2292,7 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 @pytest.mark.parametrize(
     "why,clause", _SUMMARY_NEGATION_REWORDINGS,
     ids=["head-document-wording", "and-not-from", "must-not-be",
-         "never-the-field"])
+         "never-the-field", "trap-as-negated-subject"])
 def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str):
     """*What value makes this test fail?* The phrase lock the object-bound helper
     replaced — on every case but the first.
