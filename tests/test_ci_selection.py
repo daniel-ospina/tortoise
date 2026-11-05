@@ -5663,8 +5663,11 @@ def test_the_writer_refuses_to_render_a_duplicate_mapping_key():
     """The refresher's PRE-WRITE gate must refuse the render, not publish it.
 
     `ci_timing._manifest_of` is what `refresh_durations` parses its own output
-    through before writing `config/ci-surfaces.yml`. A writer that can emit a
-    second row for a file is how a duplicate reaches main at all.
+    through before writing `config/ci-surfaces.yml`. #10855 records that the
+    writer already refused a duplicate INSIDE `durations:` — that is
+    `_locate_durations_block`, which runs when it RENDERS — but this gate parsed
+    with a bare `safe_load`, so an input whose rows were already collapsed (or
+    a duplicate outside `durations:` at all) reached it unseen.
     """
     from tools import ci_selection as cs
     from tools import ci_timing

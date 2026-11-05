@@ -3171,9 +3171,13 @@ def _manifest_of(manifest_text: str) -> dict:
     try:
         # #10790: the SELECTOR's parse, not a bare `safe_load` — it refuses a
         # duplicate mapping key, which `safe_load` silently collapses to its
-        # last value. This is the refresh's PRE-WRITE gate, so a render that
-        # emitted a second row for a file must be refused HERE rather than
-        # landing on main for `manifest-integrity` to red later.
+        # last value. This is the refresh's PRE-WRITE gate, and it was the one
+        # half of the writer that could not see a duplicate: `_locate_durations_block`
+        # already refused a repeat INSIDE the `durations:` block when it RENDERS
+        # (that is #10855's "the sole writer refuses them"), but this gate
+        # parsed with `safe_load`, so a hand-edited or union-merged input could
+        # still be rendered from a map whose rows were already collapsed — and
+        # a duplicate OUTSIDE `durations:` was invisible to both.
         parsed = cs.parse_manifest_text(manifest_text)
     except cs.DuplicateManifestKeyError as exc:
         raise DurationsBridgeError(
