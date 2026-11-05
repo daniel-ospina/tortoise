@@ -1648,12 +1648,17 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # `public.session_narrative`, NOT `:Source.summary`; 432 lines on, §12.1b's
 # `:Source` footnote — the section that decides WHERE vectors live — told a
 # designer that vector *"would be **indexing an existing field**"*, i.e. embed
-# the `summary` the Source already holds. Under `#10000` that field is a topic
-# lexicon (six content words behind a constant display prefix, `#10852`), so the
-# blurry section ordered exactly the bag-of-words vector §9.4 forbids. The reader
-# who lands on §12.1b gets the wrong instruction for the same vector, and nothing
-# reds: both sentences are prose, and the graph stays green while a designer
-# embeds a word list and calls it a summary.
+# the `summary` the Source already holds. `#10852` (OPEN at this head) would make
+# that field a topic lexicon — six content words behind a constant display prefix
+# — so the blurry section orders exactly the bag-of-words vector §9.4 forbids.
+# ⛔ FUTURE TENSE ON PURPOSE: at this head `tortoise/sdk.py::_session_source_metadata`
+# still derives the summary as "the first substantive utterance", and §9.4 states
+# it as *"`#10852` … WILL replace that derivation"*. A present-tense claim here
+# would be false on the tree it is committed to, and true only once `#10852`
+# merges — a falsehood with a delayed expiry. The reader who lands on §12.1b gets
+# the wrong instruction for the same vector, and nothing reds: both sentences are
+# prose, and the graph stays green while a designer embeds a word list and calls
+# it a summary.
 #
 # ⚠️ THE PROSE FIX LANDED WITHOUT A PIN, and that is what this test is.
 # `origin/main`'s `b748df7d0` (#10978) corrected SEVEN sites of this conflation
@@ -1768,13 +1773,15 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     assert f"read from `{home}`" in paragraph, (
         f"§9.4 no longer states that the source vector's embedded text is read "
         f"from `{home}` — that is what stops a design embedding the topic "
-        f"lexicon `:Source.summary` becomes under #10000 (which lives in the "
-        f"record, §9.1, and is not a node field at all)")
+        f"lexicon `:Source.summary` becomes under `#10852`. ⛔ The value §9.4 "
+        f"DOES index is the narrative, and ITS home is the record (§9.1), not a "
+        f"node field — `:Source.summary` itself stays on the node, as §4.6 "
+        f"metadata")
     assert "never from `:Source.summary`" in paragraph, (
-        f"§9.4 no longer forbids `:Source.summary` as the vector's input IN THE "
-        f"PARAGRAPH THAT CHOOSES THE INPUT — naming the record home without "
-        f"naming what it must not read leaves the blurry reading open, which is "
-        f"the whole P2 this pin answers")
+        "§9.4 no longer forbids `:Source.summary` as the vector's input IN THE "
+        "PARAGRAPH THAT CHOOSES THE INPUT — naming the record home without "
+        "naming what it must not read leaves the blurry reading open, which is "
+        "the whole P2 this pin answers")
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
         f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
@@ -1785,11 +1792,12 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     footnote = _source_vector_footnote(text)
     assert _RETIRED_VECTOR_FOOTNOTE not in footnote, (
         f"§12.1b's `:Source` footnote is back to *\"§9.4's summary vector "
-        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — under #10000 an episodic "
-        f"`:Source.summary` is a topic lexicon, so that sentence tells a "
-        f"designer to embed the one field §9.4 says the vector must not read. "
+        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — `#10852` (OPEN at this head) would make "
+        f"an episodic `:Source.summary` a topic lexicon, so that sentence tells "
+        f"a designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
-        f"`summary` the Source holds is §4.6 metadata")
+        f"`summary` the Source holds is {_ontology_section_of('summary')} "
+        f"metadata")
     assert home in footnote, (
         f"§12.1b's `:Source` footnote does not name `{home}` — the section that "
         f"decides where vectors live must point at the narrative's real home, "
