@@ -11163,6 +11163,10 @@ class TestUriRegistryProbeConnectionReuse:
             "the reset dropped the cached handle WITHOUT closing it — a "
             "connection leak per test in the URI lane")
         assert ha_mod._REGISTRY_PROBE_SDK is None
+        assert ha_mod._REGISTRY_PROBE_CACHE is None, (
+            "the reset left the ATOMIC publication in place — the fast path reads "
+            "that tuple (not the mirror) and would keep serving the handle this "
+            "call just closed")
         assert ha_mod._registry_existing_graphs() == {"org_a"}
         assert len(constructed) == 2, "the reset did not clear the cache"
 
