@@ -185,6 +185,33 @@ def test_the_unterminated_fence_note_survives_a_sweep(monkeypatch, capsys):
     assert "#7" in out
 
 
+def test_the_unterminated_fence_note_survives_every_issue_mode(monkeypatch, capsys, tmp_path):
+    """The note was collected for PRs and silently dropped for the SAME content read as an issue.
+
+    A body the scan cannot see the tail of is one of two things (a quoted example that never closed,
+    or an author's unfinished edit), and BOTH are the caller's business. Reporting it for
+    `--body-file`/`--pr`/`--sweep` while `--issue-body-file`/`--issue`/`--sweep-issues` swallowed it
+    is the same one-population-two-measurements shape as the discarded issue body: whichever side
+    a human happens to run decides whether the gap is visible.
+    """
+    hidden_body = IN_FLIGHT + "\n\n- ```markdown\n  never closed\n"
+    body = tmp_path / "issue.md"
+    body.write_text(hidden_body, encoding="utf-8")
+    # 1. offline
+    assert "unterminated fence" in _run("--issue-body-file", str(body)).stdout
+    # 2. live single issue
+    monkeypatch.setattr(L, "resolve_repo", lambda repo: "daniel-ospina/tortoise")
+    monkeypatch.setattr(L, "fetch_issue", lambda number, repo: (hidden_body, []))
+    assert L.main(["--issue", "4282"]) == L.RC_FINDINGS
+    assert "unterminated fence" in capsys.readouterr().out
+    # 3. live population
+    monkeypatch.setattr(L, "sweep_issues", lambda repo, limit, label: [(9, [hidden_body])])
+    assert L.main(["--sweep-issues"]) == L.RC_FINDINGS
+    out = capsys.readouterr().out
+    assert "unterminated fence" in out
+    assert "#9" in out
+
+
 # --- arm 2: an issue with WIP and no `## Satisfies` checklist -----------------------------
 SATISFIES = """## Satisfies
 
