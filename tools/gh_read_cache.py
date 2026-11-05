@@ -333,6 +333,23 @@ def _cache_dir(override: str | None = None) -> Path:
     return base
 
 
+def _names_host(token: str, host: str) -> bool:
+    """Does this template token already name `host`?
+
+    ⛔ CASE-FOLDED, AND `-R`/`-r` PREFIXES STRIPPED. gh resolves
+    `repo view GHE.example.com/o/n` and `-Rghe.example.com/o/n` to the same server, so
+    comparing the raw token refused a working invocation while serving its lowercase spelling
+    - the same false refusal, one case over. The `-R`/`-r` forms are the flag spellings gh
+    documents for the repo argument.
+    """
+    t = token.lower()
+    for prefix in ("--repo=", "-r=", "-r"):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+            break
+    return t == host or t.startswith(f"{host}/")
+
+
 def _gh_bin(override: str | None = None) -> str:
     return override or os.environ.get("GH_READ_CACHE_GH", "gh")
 
@@ -386,8 +403,9 @@ def _env_token(host: str) -> str:
     *any* exported enterprise token label *every* host — so a box exporting
     `GH_ENTERPRISE_TOKEN` for its GHES instance keyed its `github.com` reads by that token,
     and two real `github.com` accounts in one `hosts.yml` pooled. gh's own rule (its help
-    text, and `gh auth token` empirically): `GH_TOKEN`/`GITHUB_TOKEN` apply to github.com and
-    to a subdomain of `ghe.com`; `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` apply when
+    text, and `gh auth token` empirically): `GH_TOKEN`/`GITHUB_TOKEN` apply to `github.com`,
+    `github.localhost`, and subdomains of `github.com`, `github.localhost` and `ghe.com`;
+    `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN` apply when
     the command targets a GH Enterprise SERVER host — and when the variable for the OTHER
     family is the only one set, gh ignores it and falls back to `hosts.yml`.
     """
@@ -878,7 +896,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         # `host/owner/name` token, or via `-R host/owner/name`. Refusing on "no `{repo}`" alone
         # rejected working invocations (`--argv repo view ghe.example.com/o/n`), and it fired
         # for any lane exporting `GH_REPO=<host>/<owner>/<repo>` without typing `--repo`.
-        host_expressed = any(t == host or t.startswith(f"{host}/") for t in template)
+        host_expressed = any(_names_host(t, host) for t in template)
         if named_host and not _accepts_hostname(template) and repo:
             pass_argv = _format_argv(template, f"{host}/{repo}", args.base)
         elif named_host and not _accepts_hostname(template) and not host_expressed:
@@ -1004,6 +1022,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         # `{repo}`, so on a route without one it reported `host: github.com` and `present:
         # false` for an entry the very next `get --repo ghe.example.com/...` served: a hit
         # could not be attributed to a server, which is exactly what this report exists for.
+        if uses_repo and not args.repo:
+            # Mirror `cmd_get`: a `{repo}` route without a repo is a usage error, not a
+            # truthful "nothing cached" for a question that cannot be asked.
+            raise Usage("--repo is required for this key")
         host, repo = _resolve_repo(args.repo) if args.repo else (_default_host(), "")
         if not uses_repo:
             repo = ""

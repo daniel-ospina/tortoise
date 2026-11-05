@@ -917,6 +917,77 @@ class CacheTest(unittest.TestCase):
             self.assertIn("12", out, f"{host}: a GH_TOKEN change is a different account")
             self.assertNotIn("4990", out)
 
+    def _account_sequence(self, host: str, var: str, tokens: tuple[str, str]) -> list[str]:
+        """Two reads as the first token, then one as the second; assert HIT then MISS."""
+        repo = f"{host}/o/n"
+        clean = {k: v for k, v in os.environ.items() if k not in (
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+            "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")}
+
+        def read(token: str) -> str:
+            env = dict(clean, **{var: token, "GH_STUB_DIR": str(self.stubdir),
+                                 "GH_CONFIG_DIR": str(Path(self.tmp) / "no-config")})
+            r = subprocess.run(
+                [sys.executable, str(TOOL), "get", "rate_limit", "--repo", repo,
+                 "--gh", str(self.stub), "--cache-dir", str(self.cachedir)],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r.returncode, 0, f"{host}/{var}: {r.stderr}")
+            return r.stdout
+
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 4990}}}')
+        read(tokens[0])
+        settled = self.calls()
+        read(tokens[0])
+        # A HIT proves the credential was RESOLVED; the wrong family leaves it unresolvable,
+        # and the unresolvable path also costs exactly one call, so a call count alone cannot
+        # discriminate.
+        self.assertEqual(self.calls(), settled, f"{host}: a repeat read must HIT")
+        (self.stubdir / "body").write_text('{"resources": {"core": {"remaining": 11}}}')
+        before = self.calls()
+        out = read(tokens[1])
+        self.assertEqual(self.calls(), before + 1, f"{host}: a credential change must MISS")
+        self.assertNotIn("4990", out, f"{host}: another account's quota must never be served")
+        return [out]
+
+    def test_a_localhost_subdomain_is_the_dotcom_family_too(self) -> None:
+        """`*.github.localhost` folds to `github.localhost`, so it uses GH_TOKEN.
+
+        Dropping that clause left the suite green while `foo.github.localhost` sent a different
+        credential: both accounts collapsed onto the single `hosts.yml` token and account B was
+        served account A's `/rate_limit`, rc=0, one call.
+        """
+        self._account_sequence("foo.github.localhost", "GH_TOKEN", ("account-A", "account-B"))
+
+    def test_host_families_match_by_suffix_not_by_substring(self) -> None:
+        """`x.github.com.evil.io` is NOT github.com — gh sends the enterprise token.
+
+        A substring test classified such a host as the dotcom family, so the tool digested a
+        credential gh does not send; with only `GH_ENTERPRISE_TOKEN` set the account is then
+        unresolvable and two live accounts share one answer.
+        """
+        self._account_sequence(
+            "x.github.com.evil.io", "GH_ENTERPRISE_TOKEN", ("ghes-account-A", "ghes-account-B")
+        )
+
+    def test_status_requires_repo_for_a_repo_route_like_get(self) -> None:
+        """`status repo` without `--repo` must be usage (rc=2), as `get repo` is.
+
+        It answered rc=0 `present:false` after the host-resolution fix, replacing a usage error
+        with a truthful "nothing cached" for a question that cannot be asked.
+        """
+        g = self.run_tool("get", "repo", "--gh", str(self.stub), "--cache-dir", str(self.cachedir))
+        self.assertEqual(g.returncode, 2, f"get must be usage: {g.stderr}")
+        st = self.run_tool("status", "repo", "--cache-dir", str(self.cachedir))
+        self.assertEqual(st.returncode, 2, f"status must agree with get: rc={st.returncode} {st.stderr}")
+
+    def test_a_uppercase_or_R_spelled_host_is_recognised(self) -> None:
+        """gh resolves these to the named server, so the refusal must not fire on them."""
+        for argv in (("repo", "view", "GHE.example.com/o/n"), ("repo", "view", "-Rghe.example.com/o/n")):
+            r = self.run_tool("get", "repo", "--repo", "ghe.example.com/o/n", "--gh", str(self.stub),
+                              "--cache-dir", str(self.cachedir), "--argv", *argv)
+            self.assertEqual(r.returncode, 0, f"{' '.join(argv)} names the host: {r.stderr}")
+
     def test_the_documented_token_order_is_kept(self) -> None:
         """With both spellings set, gh sends `GH_TOKEN`; the digest must follow that one.
 
