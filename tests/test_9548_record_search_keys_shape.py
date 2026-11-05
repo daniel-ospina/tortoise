@@ -732,6 +732,55 @@ def test_a_message_string_with_a_cause_degrades_instead_of_raising():
         f"a bare message string must still name its subject: {text}")
 
 
+def test_a_none_pairing_cannot_make_the_reporter_raise():
+    """`Statement(sql, params, None)` must not turn the reporter into the fault.
+
+    ⛔ WHY (#10726 review P3). On `main` the third positional field WAS
+    `columns`, so `Statement(<UPDATE sql>, <params>, None)` was the real spelling
+    of "this statement declines to state its pairing" — and an in-tree test
+    still writes it that way (`tests/test_record_searchkeys_10620.py::
+    test_an_unattributed_update_names_every_set_column`). After the fold put
+    `param_columns` third, that `None` landed in `param_columns`, which
+    `value_types()` iterated unguarded: a `RecordStatementError` built around
+    such a statement raised
+
+        TypeError: 'NoneType' object is not iterable
+
+    from INSIDE the reporter, replacing the driver's real cause with a traceback
+    from the diagnostic. That is the "lost row nobody can attribute" failure the
+    cause form exists to end, and the class's own docstring claims "no call shape
+    is a trap". It is reachable by exactly the caller the form is designed for (a
+    repair script, a backfill), so it is pinned here.
+
+    Non-vacuous: drop `Statement.__post_init__`'s normalization AND the `or ()`
+    in `value_types()` and this test reds on the `TypeError` above — not on an
+    assertion, on the construction of the error itself.
+    """
+    cause = ValueError("invalid input syntax for type json")
+    statement = record_projection.Statement(
+        "UPDATE public.point SET content = %s WHERE org_id = %s",
+        ("c", "o"),
+        None,  # `main`'s spelling: the pairing is declined
+    )
+
+    # The field is normalized, so no reader — this one included — can trip.
+    assert statement.param_columns == (), (
+        "a declined pairing must normalize to the empty tuple, not stay `None`: "
+        f"{statement.param_columns!r}")
+    assert statement.value_types() == "", (
+        "a statement that names no columns has no value types to report: "
+        f"{statement.value_types()!r}")
+
+    error = record_projection.RecordStatementError(
+        statement, cause, index=0, total=1)
+    text = str(error)
+    assert "statement 1/1" in text, text
+    assert "ValueError: invalid input syntax for type json" in text, (
+        f"the driver's cause is the half the reporter must never replace: {text}")
+    assert "UPDATE public.point" in text, (
+        f"the failing statement must still be named: {text}")
+
+
 def test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand(
         monkeypatch):
     """`value_types()` is READABLE in all three shapes, incl. the map MISS.
