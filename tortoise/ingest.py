@@ -598,10 +598,15 @@ class IngestOutcome(StrEnum):
     #: The sweep found nothing awaiting extraction. The ask's own answer.
     SKIPPED_NOTHING_PENDING = "skipped-nothing-pending"
     #: REFUSED — the named target is not there: no ``:Document`` Source holds it.
-    #: (There is NO separate "exists but is not a Document" arm: ``_do_upgrade``
-    #: cannot tell those apart — both are a miss on its ``MATCH (s:Source {url})``
-    #: — so the enum does not claim a distinction the door cannot make.)
+    #: (``_do_upgrade`` cannot tell "absent" from "present but not a Document" —
+    #: both are a miss on its ``MATCH (s:Source {url})`` — so its arm reports
+    #: this one, and the enum does not claim a distinction that door cannot
+    #: make. ``REFUSED_NOT_A_DOCUMENT`` is produced by the ONE arm that CAN tell:
+    #: ``--capture-metadata``, which holds the content and parses it.)
     REFUSED_NOT_FOUND = "refused-not-found"
+    #: REFUSED — the content is not a Document (no ``##`` sections), so the
+    #: metadata capture the caller asked for is unperformable.
+    REFUSED_NOT_A_DOCUMENT = "refused-not-a-document"
     #: The door did part of the ask and left work behind — the ``--upgrade-all``
     #: sweep, when a candidate was unreadable or not a document. ⛔ It is NOT set
     #: by "already claimed at this extractor version": that is the sweep's own
@@ -612,7 +617,8 @@ class IngestOutcome(StrEnum):
     @property
     def refused(self) -> bool:
         """True iff the door DECLINED — never True for an already-satisfied ask."""
-        return self is IngestOutcome.REFUSED_NOT_FOUND
+        return self in (IngestOutcome.REFUSED_NOT_FOUND,
+                        IngestOutcome.REFUSED_NOT_A_DOCUMENT)
 
     @property
     def returncode(self) -> int:
@@ -874,7 +880,11 @@ def _do_upgrade_all(proj, api, args):
               "fail-closed), "
               f"{not_document} not a document (no ## sections), "
               f"{already_claimed} already claimed at this extractor version "
-              "(re-run with --force to reprocess)")
+              "(re-run with --force to reprocess). ⛔ The `unreadable` bucket "
+              "cannot be cleared by THIS command — widen or set "
+              "TORTOISE_INGEST_BASE_DIR, restore the file, or delete the "
+              "Source; until one of those, every sweep reports it and exits "
+              "non-zero (#8447 C3 review round 3, P3)")
         # #8447 C3: outstanding work after a sweep is NOT a completed ask. A
         # sweep that left candidates unreadable or un-extractable used to exit
         # 0 — the caller read "success" over a corpus that was never touched.
@@ -1128,6 +1138,18 @@ def main(argv=None) -> IngestOutcome:
 
             # S8: Extract document metadata from frontmatter → DocumentCreated event
             is_doc, _ = _document_sections(text)
+            # #8447 C3 (review round 3, P1): --capture-metadata's ask — emit the
+            # document Source + sessionCaptured Event — is UNPERFORMABLE for
+            # content with no `##` sections, and this arm used to fall straight
+            # through to the completion summary with no capture written at all:
+            # `points : 0 statements`, exit 0, `--out` written, zero `:Source`
+            # rows. REFUSE it visibly. (Do NOT "fix" it by letting the arm reach
+            # `extractor.run` — that was round 2's P2, where the door printed
+            # "extraction skipped" and then extracted.)
+            if not is_doc and args.capture_metadata:
+                print(f"[capture-metadata] refused: {source_id} is not a "
+                      f"Document (no ## sections) — nothing was captured")
+                return IngestOutcome.REFUSED_NOT_A_DOCUMENT
             if is_doc:
                 fm = _parse_frontmatter(text)
                 # Determine domain: frontmatter first, then directory_map fallback (#6883)
