@@ -1949,6 +1949,21 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     assert "e1_min_before_share 0.35" in render(moved)
 
 
+def _record_matches(produced, committed: bytes) -> tuple[bool, bool]:
+    """The committed-record pin's comparison, factored — ``(VALUE, BYTES)``.
+
+    Factored out so the non-vacuity arm inside the pin below drives the SAME
+    expression the pin does. ⛔ An arm that re-states the comparison (a
+    ``json.dumps``/``json.loads`` round-trip beside it) is evidence about the
+    ``json`` module, not about this pin: the review at `8bc8be1e7` found exactly
+    that — the arm could not fail if the byte half were deleted (#10610).
+    """
+    return (
+        produced == json.loads(committed),
+        (json.dumps(produced, indent=1) + "\n").encode() == committed,
+    )
+
+
 def test_the_committed_score_record_is_what_the_probe_produces(tmp_path):
     """P2-10: the committed record may not drift from its own inputs.
 
@@ -1976,20 +1991,24 @@ def test_the_committed_score_record_is_what_the_probe_produces(tmp_path):
     """
     produced = scores_probe.score(_REPO)
     committed = SCORES.read_bytes()
-    assert produced == json.loads(committed)
-    assert (json.dumps(produced, indent=1) + "\n").encode() == committed, (
+    value_matches, bytes_match = _record_matches(produced, committed)
+    assert value_matches
+    assert bytes_match, (
         "the committed record is value-equal but NOT byte-equal to what the "
         "probe writes — its serialization (indent=1, one trailing newline) "
-        "drifted, which the value assertion above cannot see")
+        "drifted, which the value half cannot see")
 
-    # Non-vacuity, measured: a VALUE-equal / BYTE-different form of the same
-    # record is exactly what the value half cannot refuse (a reformat to
-    # `indent=2`), and the byte half does. Without this the two assertions above
-    # would be indistinguishable from one, which is the state the review found.
+    # Non-vacuity, measured through the SAME expression the pin uses: a
+    # VALUE-equal / BYTE-different copy is exactly what the value half cannot
+    # refuse (a reformat to `indent=2`), and the byte half can. Deleting the
+    # byte half of `_record_matches` reds THIS assertion — an arm that re-stated
+    # the comparison could not, which is the state the review found (#10610).
     reformatted = tmp_path / SCORES.name
     reformatted.write_text(json.dumps(produced, indent=2) + "\n")
-    assert json.loads(reformatted.read_bytes()) == produced  # value: accepts
-    assert reformatted.read_bytes() != (json.dumps(produced, indent=1) + "\n").encode()
+    assert _record_matches(produced, reformatted.read_bytes()) == (True, False), (
+        "the byte half of the pin accepts a record the producer would not have "
+        "written — the `indent=1` + single-trailing-newline serialization claim "
+        "is then unprotected, however green the value half looks")
 
 
 def test_the_e1b_note_claims_only_the_arm_the_record_carries():
