@@ -54,7 +54,7 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    graph property `_searchText`) onto its node **when the row holds the
    pre-#10000 derivation**, because §9.1/D1 places captured turn text in the
    record and never on a graph node. The decision is per ROW, from the row's own
-   values (#10000's rows carry the topic lexicon there, not prose) — see that
+   values (#10000's rows carry the topic lexicon there — token-shaped, not a copy of the row's prose, though a space-less CJK run arrives whole and a Thai one fragments) — see that
    table for the rule, its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
@@ -1226,11 +1226,11 @@ def _scalar(value: Any) -> Any:
 #: (already redacted) transcript — and writes `summary` = a display DESCRIPTOR
 #: over it and `_searchText` = `", ".join(topics)`, both from the SAME list in ONE
 #: statement (`sdk._materialize_session_source`). So on a post-#10000 row
-#: `_search_text` is **not prose**: it is the lexicon, and it is the ONLY field
-#: the Source FTS index is declared on (`_FULLTEXT_INDEX_LABEL_FIELDS`), i.e. the
-#: field #3518's findability depends on. Dropping it by column NAME on such a row
-#: removes no prose and silently UN-INDEXES the session on the recovery door —
-#: the door whose entire purpose is that the value survives (#10965).
+#: `_search_text` is **not a quoted utterance**: it is the lexicon — TOKEN-shaped, so
+#: a space-less CJK run arrives WHOLE and a Thai one FRAGMENTS at its combining marks
+#: (the residual in `sdk._session_source_metadata`) — and it is the ONLY field the Source
+#: FTS index is declared on (`_FULLTEXT_INDEX_LABEL_FIELDS`), i.e. #3518's findability.
+#: Dropping it by column NAME on such a row silently UN-INDEXES the session on the recovery door (#10965).
 #:
 #: ⛔ SO THE DROP IS DECIDED PER ROW, FROM THE ROW — and the test is EXACT, never a
 #: shape heuristic: the value IS `", ".join(topics)`, the join the capture computes

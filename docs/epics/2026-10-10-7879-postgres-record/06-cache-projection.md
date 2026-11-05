@@ -185,7 +185,7 @@ to have none.
 * **No migration-safety surface** (owner scope ruling, 2026-10-10).
 * **No public surface change.**
 
-## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853)
+## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853), except the space-less-run residual named below
 
 **A declared narrowing** of the field set — the only one — in the opposite
 direction from the three widening exceptions the module names
@@ -202,7 +202,7 @@ word lexicon — still projects.
 replaced the derivation: the capture now writes `summary` = a display DESCRIPTOR
 over the session's topic lexicon and `_searchText` = `", ".join(topics)`, both
 from the SAME list in one statement. So on a post-#10000 row `_search_text` is not
-prose — it is the lexicon (for a word-delimited script; a space-less run can reach it whole, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
+a quoted utterance — it is the token lexicon (for a word-delimited script; a space-less CJK run can reach it whole, while a Thai run fragments at its combining marks, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
 declared on, which makes dropping it an UN-INDEXING of every restored session on
 the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
 projected when the row proves the derivation, and declined otherwise — and the
