@@ -22,6 +22,7 @@ import json
 import math
 import os  # noqa: F401
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,7 +40,7 @@ from tests.eval.metrics import (  # noqa: E402
     compute_metrics,
     kappa,
 )
-from tests.eval.types import Label, MetricsReport, RelationLabel, Window  # noqa: E402
+from tests.eval.eval_types import Label, MetricsReport, RelationLabel, Window  # noqa: E402
 from tools import kappa as tools_kappa  # noqa: E402
 
 
@@ -1051,3 +1052,66 @@ def test_duplicate_edu_index_rejected():
     bad_rel[1].gold_labels[0].relations.append(RelationLabel("BOGUS", 0, 1))
     with pytest.raises(ValueError):
         compute_metrics([bad_rel[0]], [bad_rel[1]])
+
+
+# ── #10060: no module under tests/ may shadow a stdlib top-level name ────────
+
+
+def test_no_test_module_shadows_a_stdlib_top_level_name():
+    """A file under `tests/` named after a stdlib module shadows it for any FRESH
+    interpreter given its directory on `sys.path` (#10060).
+
+    Why this cannot be caught by merely importing here: this process NEVER sees
+    the shadow, because the stdlib module is already in `sys.modules`. A CHILD
+    does see it, and resolves it during `site` initialisation
+    (`site` -> `importlib.util` -> `types`), so it dies before running a line of
+    its own code. Measured at `main` before the fix, with
+    `tests/eval/types.py` present:
+
+        PYTHONPATH=repo:repo/tests/eval python3 -c "import yaml"
+        ImportError: cannot import name 'GenericAlias' from partially
+        initialized module 'types' (.../tests/eval/types.py)
+
+    and the same command WITHOUT the shadow root succeeded — so the directory,
+    not the interpreter, was the cause. `tests/eval` has no `__init__.py`, so
+    pytest inserts it verbatim onto `sys.path` at collection time: the defect is
+    live for any child a test spawns, and it greens in a single-file run and
+    reds only in the full suite.
+
+    Two assertions on purpose. The structural one names every offending file, so
+    a second shadow cannot be introduced quietly. The behavioural one proves the
+    harm on a real child interpreter instead of asserting the theory.
+    """
+    tests_root = Path(__file__).resolve().parent
+
+    shadowing = sorted(
+        str(path.relative_to(tests_root.parent))
+        for path in tests_root.rglob("*.py")
+        if path.name != "__init__.py" and path.stem in sys.stdlib_module_names
+    )
+    assert not shadowing, (
+        f"module(s) under tests/ shadow a stdlib top-level name: {shadowing}. "
+        f"pytest puts a directory without __init__.py verbatim on sys.path, so a "
+        f"child interpreter resolves the shadow during site init and dies before "
+        f"running its own code (#10060). Rename the file (e.g. "
+        f"tests/eval/types.py -> tests/eval/eval_types.py)."
+    )
+
+    # The behavioural half: the exact child that used to die. Kept after the
+    # structural check so a future shadow reports the file that caused it; kept
+    # at all so the guard cannot be satisfied by merely renaming this test.
+    child = subprocess.run(
+        [sys.executable, "-c", "import types; types.GenericAlias"],
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                [str(tests_root.parent), str(tests_root / "eval")]
+            ),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert child.returncode == 0, (
+        "a fresh interpreter given tests/eval on PYTHONPATH cannot import stdlib "
+        f"`types`: {child.stderr.strip()[-500:]}"
+    )
