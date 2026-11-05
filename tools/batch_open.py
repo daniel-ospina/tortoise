@@ -120,13 +120,13 @@ import sys
 # raises ImportError on an old interpreter before any LATER-placed guard could
 # run. This file imports no `datetime` today; the guard is hoisted anyway so the
 # rule holds uniformly instead of being re-litigated per import list.
-# ⛔ The invocation named below is the SCRIPT form, which is the one the pin DERIVES
-# and ASSERTS: `tests/test_entry_point_python_guard.py` treats a top-level
-# `tools/<x>.py` as a loose script (`_package_module` returns None below a directory
-# chain under `tools/`), so `_expected_invocation` yields the path form and the
-# refusal must NAME it. The `-m tools.batch_open` form also resolves — `tools/`
-# carries an `__init__.py` — but it is not the form the pin derives, so it is not the
-# one this refusal names.
+# ⛔ The invocation named below is the SCRIPT form, which is what the pin DERIVES and
+# ASSERTS: `_package_module` returns None for a `tools/<x>.py` (`len(parts) < 3` — only
+# a path UNDER a chain of `__init__.py`-carrying directories is addressed by `-m`), so
+# `_expected_invocation` yields the path form and the pin asserts the refusal NAMES it.
+# `-m tools.batch_open` does resolve too — a namespace package is enough, measured with
+# `tools/__init__.py` removed, still exit 0 — but it is not the form the pin derives, so
+# it is not the one this refusal names.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "
