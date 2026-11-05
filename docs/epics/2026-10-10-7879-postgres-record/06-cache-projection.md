@@ -270,8 +270,10 @@ bounds, both deliberate:
   MAPPING ORDER, and the DDL declares `props` **last**, so on a real `SELECT *`
   row the TAIL won `sourceKind` while the predicate read the COLUMN — the two
   functions disagreed and R1 failed open exactly on the conflicting shape
-  (#10867 review ISSUE 1). `_source_row`'s `sorted()` keys put `props` first, so
-  every agreement leg ran on the one ordering real rows do not have; the pin now
+  (#10867 review ISSUE 1). `_source_row`'s `sorted()` keys put `props` BEFORE the
+  identity columns it can collide with (`source_kind`, `title`, `url` — indices
+  27, 33, 39, 42 of 45), so every agreement leg ran on the one ordering real rows
+  do not have; the pin now
   has a legs pair that builds the row in `SELECT *` order and one that builds the
   same record both ways and requires the SAME node map;
 * **only the KIND can travel *for a row that can become a node***, because `url` is the
@@ -305,7 +307,15 @@ bounds, both deliberate:
   under its own `graph_only` bucket: visible, and not a divergence against a
   record that is correct. The graph side is repaired by a record-sourced
   re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
-  through this projector), then by #10000's capture change.
+  through this projector) — **for a node the projection CREATES**. The write is
+  additive (`MERGE … SET n += $props`, `cache_projection.node_statement`), so a
+  node that ALREADY carries the pair keeps it across a re-projection; the
+  narrowing stops the pair being written, it does not clear an existing one.
+  Both verbs are also **test-graph only**: `rebuild_from_record` runs
+  `_assert_test_graph`, which refuses every production graph name
+  (`org_<org_id>`), so neither is a production repair path at all. Clearing a
+  populated cache's stale pair needs an explicit property clear, and the sweep is
+  #10000's capture change.
 
 ### Obligation: `#10852` DELETES this rule, it does not converge with it
 

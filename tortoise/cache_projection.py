@@ -110,7 +110,14 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      bucket — visible, and not a divergence against a record that is correct.
      The graph side is repaired by a record-sourced re-projection
      (`record-restore` / `rebuild_from_record`, which re-materialise through this
-     projector), then by #10000's capture change.
+     projector) — **for a node the projection CREATES**. The write is additive
+     (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
+     carries the pair keeps it across a re-projection; this arm stops the pair
+     being written, it does not clear an existing one. Both verbs are also
+     TEST-GRAPH ONLY: `rebuild_from_record` runs `_assert_test_graph`, which
+     refuses every production graph name (`org_<org_id>`), so neither is a
+     production repair path at all. Clearing a populated cache's stale pair needs
+     an explicit property clear, and the sweep is #10000's capture change.
 
    ⛔ **OBLIGATION `#10852` OWES — named, not assumed (#10867 review, P1).**
    `#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
@@ -121,8 +128,8 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    strip that descriptor too — on the record→cache door only, while the live
    journal fold keeps it — and the reconciler is told not to judge the pair, so
    nothing reds. It is correct for a pre-fix row and WRONG for a post-`#10852`
-   one, and it must not outlive it: `#10852` DELEGATES to this table, it does
-   not merely "converge" with it. `#10852` therefore deletes
+   one, and it must not outlive it: `#10852` DELETES this narrowing rather than
+   converging with it. `#10852` therefore deletes
    :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
    :func:`_props_from_row`, :func:`episodic_source_prose_properties`,
    :func:`episodic_source_declined_properties` (a CALLER of that last one —

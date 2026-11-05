@@ -75,7 +75,8 @@ def _row_in_select_star_order(**overrides: object) -> dict[str, object]:
     every collision it carried.
 
     ⛔ This ordering is the whole point of the legs that use it: `_source_row`'s
-    `sorted()` keys put `props` first, so a column overwrote the tail and the row
+    `sorted()` keys put `props` BEFORE the identity columns it can collide with
+    (`source_kind`, `title`, `url`), so a column overwrote the tail and the row
     predicate and the node map AGREED on the one ordering real rows do not have
     (#10867 review ISSUE 1).
     """
@@ -646,7 +647,8 @@ def test_a_column_value_wins_the_tail_on_a_real_SELECT_star_row():
     `field_mismatches` nor `graph_only`.
 
     The three existing agreement legs could not see it: they build `_source_row`,
-    whose `sorted()` keys put `props` first, i.e. the one ordering in which the
+    whose `sorted()` keys put `props` BEFORE the identity columns it can collide
+    with, i.e. the one ordering in which the
     column wins the node map too.
     """
     from tortoise import cache_projection as cp
