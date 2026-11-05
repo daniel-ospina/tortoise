@@ -4267,11 +4267,11 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     findable through the fallback without ranking against the session's words.
 
     ⚠️ Stated residual: a script that does not delimit words with spaces (CJK,
-    Thai) yields ONE run per script run, so such a transcript's descriptor can
-    carry that run whole. Splitting it needs a segmenter (RediSearch ships one
-    for Chinese via Friso), not a regex — and the alternative here, returning
-    ``("", [])``, is the unfindability this function exists to prevent. Named
-    rather than silently traded.
+    not Thai) yields ONE run per script run, so the descriptor can carry that
+    run whole. Splitting it needs a segmenter (RediSearch ships one for Chinese
+    via Friso), not a regex — and the alternative here, returning ``("", [])``,
+    is the unfindability this function exists to prevent. ⛔ Thai is NOT that
+    case: ``\\w`` drops its combining marks, so its runs FRAGMENT — named, not traded.
 
     ⛔ The descriptor is a function of the word MULTISET — frequency order, ties
     broken by the token itself (``_session_source_lexicon``), so it does NOT

@@ -202,7 +202,7 @@ word lexicon — still projects.
 replaced the derivation: the capture now writes `summary` = a display DESCRIPTOR
 over the session's topic lexicon and `_searchText` = `", ".join(topics)`, both
 from the SAME list in one statement. So on a post-#10000 row `_search_text` is not
-prose — it is the lexicon, and it is the only field the Source FTS index is
+prose — it is the lexicon (for a word-delimited script; a space-less run can reach it whole, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
 declared on, which makes dropping it an UN-INDEXING of every restored session on
 the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
 projected when the row proves the derivation, and declined otherwise — and the
