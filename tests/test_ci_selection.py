@@ -2968,7 +2968,8 @@ def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped(
 
     `_selection_relevant` claims a changed path with `path.startswith(CORE_ALSO)` — this entry's
     tuple, NOT `TOOL_CARVEOUTS` — and `CORE_ALSO` membership is what forces `core` into the
-    selection (`tools/ci_selection.py:3518`, `matched.add("core")`).
+    selection: the `matched.add("core")` in `select()`'s `CORE_ALSO` branch. Cited by symbol, not
+    by line number, because on this entry the line number has already drifted twice.
 
     Which tuple holds a `tools/` path is what decides its fate, and the two carve-out tuples do
     different jobs:

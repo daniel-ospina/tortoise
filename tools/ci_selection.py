@@ -1660,8 +1660,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # NOTE THE TUPLE — which tuple holds a `tools/` path is what decides its fate, and
              # that is why this entry is in `CORE_ALSO` rather than `TOOL_CARVEOUTS`:
              #   * `CORE_ALSO` membership KEEPS the path (`_selection_relevant`) AND CLAIMS it, so
-             #     `core` is forced into the selection (`:3518`, `matched.add("core")`) -> this
-             #     entry yields `core` only, `full=False`.
+             #     `core` is forced into the selection — the `matched.add("core")` in `select()`'s
+             #     `CORE_ALSO` branch — hence this entry yields `core` only, `full=False`. Cited by
+             #     SYMBOL, not by line: a line number here has already drifted twice on this entry.
              #   * `TOOL_CARVEOUTS` membership only KEEPS the path (`_keep_changed`); it claims no
              #     surface, so a kept path that no `SOURCE_PATTERNS` row matches stays unknown and
              #     fails closed to the FULL matrix — `tools/work_claim.py` -> all eight surfaces,
