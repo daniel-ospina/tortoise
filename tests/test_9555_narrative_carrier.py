@@ -1695,10 +1695,12 @@ def _source_vector_footnote(text: str) -> str:
         f"{_STORAGE_DOC.name} carries "
         f"{text.count(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)} occurrences of "
         f"{_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r} — this pin binds to the FIRST "
-        "occurrence, so the anchor must appear on exactly one line; a duplicate "
-        "placed ABOVE §12.1b's footnote would rebind all three §12.1b "
-        "assertions to it, which is how the pin starts certifying a sentence "
-        "§12.1b does not own")
+        "occurrence, so the anchor must occur exactly ONCE in the document (a "
+        "same-line or below-placement duplicate reds this count too, though "
+        "only an ABOVE one unseats §12.1b's footnote); a duplicate placed "
+        "ABOVE §12.1b's footnote would rebind all three §12.1b assertions to "
+        "it, which is how the pin starts certifying a sentence §12.1b does not "
+        "own")
     start = text.rfind("\n", 0, at) + 1
     return text[start:].split("\n", 1)[0]
 
