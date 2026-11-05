@@ -1855,15 +1855,14 @@ _PRIOR_BASIS_RE = re.compile(
 # …and the same span WITHOUT the end-of-note anchor, for the MID-NOTE case, where
 # the suffix has to be BOUNDED (the closing `; was N` / `; kept N`) instead of
 # running to `$`. A re-emitted note is ONE PARAGRAPH (`_joined_note_tail`), so a
-# prior basis can sit in the MIDDLE of its text; HOW MANY rows do is a property of
-# the LIVE map and is therefore DERIVED by `_prior_basis_spans` below, never stated
-# here — and a missed mid-note basis is one refresh away from the stale-provenance
-# shape #9134's P2 forbids: the 2026-11-02 refresh appended the basis to
-# `test_source_staleness_sweep_5038.py`'s ROW LINE while the rest of that note
-# continued on wrap lines, so the joined note reads `… 34 tests — ci-timing …
-# 2026-11-02 …; was 3.2 embedded (…) lane …`. The end-anchored pattern above cannot
-# see that basis, so a re-base kept it AND appended this sample's — two bases in
-# one note, one of them from two refreshes ago (#10575 review, P3).
+# prior basis can sit in the middle of its text — on the committed map exactly one
+# row does, and it is one refresh away from the stale-provenance shape #9134's P2
+# forbids: the 2026-11-02 refresh appended the basis to `test_source_staleness_
+# sweep_5038.py`'s ROW LINE while the rest of that note continued on five wrap
+# lines, so the joined note reads `… 34 tests — ci-timing … 2026-11-02 …; was 3.2
+# embedded (…) lane …`. The end-anchored pattern above cannot see that basis, so a
+# re-base kept it AND appended this sample's — two bases in one note, one of them
+# from two refreshes ago (#10575 review, P3).
 #
 # The separator ` — ` is REQUIRED here, and that is deliberate: the renderer only
 # ever appends a basis behind one, so requiring it keeps this pattern away from a
@@ -1905,7 +1904,15 @@ def _prior_basis_spans(tail: str) -> list[tuple[int, int, str]]:
 # set with NO space, because the text it re-joins was adjacent before a basis was
 # injected between the two halves. `…` is in the set because the map's notes use it
 # as a sentence-final mark.
-_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}\"'…")
+#
+# ⛔ THE QUOTES ARE DELIBERATELY ABSENT. `"` and `'` are BOTH opening and closing
+# marks, so the set cannot tell `… "quoted clause"` (where the mark OPENS a word and
+# the space before it is a word separator the fix must preserve) from a fragment that
+# stopped mid-quote (where glue would be right). Gluing them destroyed the separator:
+# `word — SPAN "quoted clause"` came out `word"quoted clause"` (#10704 review round
+# 2). Of the two errors, a spurious SPACE is harmless and a destroyed separator is
+# not, so the ambiguous marks are left to the space arm.
+_ATTACHING_PUNCTUATION = frozenset(",.;:!?)]}…")
 
 
 def _without_span(tail: str, start: int, end: int) -> str:
@@ -1917,16 +1924,15 @@ def _without_span(tail: str, start: int, end: int) -> str:
     the single space the ` — ` separator it consumed used to occupy.
 
     ⛔ THAT SPACE IS NOT UNCONDITIONAL. The dash a mid-note span consumes is the
-    RENDERER's separator, not the note's: the pre-fix writer appended its basis to
-    the row-line FRAGMENT, which can end mid-sentence, so the note's own remainder
+    RENDERER's separator, not the note's: the writer appends its basis to the
+    row-line FRAGMENT, which can end mid-sentence, so the note's own remainder
     starts wherever the fragment stopped. `#5256`'s row is that shape — the
     fragment ends `… not carve_out-registered` and the continuation opens
-    `. The count is re-derived …` — so joining with a space emitted
+    `. The count is re-derived …` — so joining with a space emits
     `… carve_out-registered . The count …`, a space before a sentence period that
-    nothing catches (the map carries zero such occurrences, and the guard on the
-    wrapped row asserts surviving WORDS, which a spurious space does not change).
-    An attaching mark therefore joins WITHOUT a space; every other continuation
-    keeps the single space the dash occupied.
+    nothing catches (the guard on the wrapped row asserts surviving WORDS, which a
+    spurious space does not change). An attaching mark therefore joins WITHOUT a
+    space; every other continuation keeps the single space the dash occupied.
     """
     before, after = tail[:start].rstrip(), tail[end:]
     if not after.strip():
@@ -2155,21 +2161,11 @@ def _balance_cut_parens(text: str) -> str:
 # ── a row's NOTE is one paragraph, WRAPPED across physical lines ──────────
 #
 # `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but a
-# note CAN wrap: an indented `#` line under a row can continue THAT row's note.
-# ⛔ How many rows wrap is DERIVED, never stated here as an absolute. The writer
-# FLATTENS a wrapped note on any adopting re-render, so one weekly sweep can take
-# this map to ZERO wraps, and the row count grows with every file the census
-# measures — a frozen figure would describe neither state, and this file is not
-# one the sweep (`tortoise-ci[bot]`, three paths under `docs/` and `config/`) can
-# edit. ⛔ A count in WORDS is the same frozen figure as a count in digits —
-# spelling it out does not make it a shape claim, it only moves the figure out of
-# reach of a digit-shaped guard, and this file has already had that happen once
-# (#10575 review, P3). So NO figure is stated here at all, in either form: the
-# pair is COMPUTED where it can be —
-# `tests/test_ci_timing.py::test_the_maps_indented_blocks_are_preamble_shaped_
-# not_wrap_shaped` derives it (and re-runs it on a swept map), and
-# `::test_the_rationales_map_counts_stay_DERIVED_not_frozen_in_prose` keeps this
-# prose from freezing it again. The guard that judges the written map joins a
+# note CAN wrap: an indented `#` line under a row can continue THAT row's note
+# (measured at `a91123c76`, the sha this paragraph was written at: 1 row of 1222
+# did — `test_source_staleness_sweep_5038.py` — and re-derive it AT YOUR HEAD, do
+# not trust the figure, because a refresh re-emits notes and moves it: the map
+# held 1236 rows at `7e6d1d8da`). The guard that judges the written map joins a
 # row's tail with its continuations before it judges a note
 # (`tests/test_ci_selection.py::_durations_row_comments`).
 #
@@ -2251,10 +2247,11 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        associated with a particular node", so *nothing* in the file says which row
        an indented block documents. This map's DOMINANT convention is the opposite
        of the one the previous two conditions imply — an indented block PRECEDES
-       the row it documents — with this module's own predicates, the OVERWHELMING
-       majority of such blocks open a new note of their own, and the ones sampled
-       document the row BELOW —
-       `# #4071: …` sits
+       the row it documents (measured with this module's own predicates: almost
+       every such block opens a new note — ⚠️ re-derive the ratio at the head you
+       are reading rather than trusting one here, because a refresh re-emits notes
+       and moves it — and the ones sampled
+       document the row BELOW — `# #4071: …` sits
        above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
        `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block
        above `test_lane_stash.py` while lying directly under `test_work_claim.py`).
@@ -2537,23 +2534,57 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
       the very reading its note says must not become the weight — the hand-edit a
       human had already made once, done silently by the sweep instead.
 
-    Absent or unreadable → no declarations, so every caller and fixture that
-    carries no such key keeps its output.
+    Absent → no declarations, so every caller and fixture that carries no such key
+    keeps its output. UNREADABLE → `DurationsBridgeError`, NEVER "no declarations":
+    that fail-open reading is the #10575 P1 this mechanism exists to prevent. The
+    refused shapes are enumerated in the body below — ALL EIGHT of them, and the count
+    is stated so this list cannot silently fall behind the code again (it under-counted
+    by two, the unparseable document and the non-string row name, until #10704 review
+    round 6): an unparseable document, a `null` block, an EMPTY mapping, a non-mapping
+    container, a row name that is not a string, a per-row non-numeric value, an unknown
+    declaration key, and a non-boolean `pinned`.
     """
     import yaml
     try:
         data = yaml.safe_load(manifest_text) or {}
-    except yaml.YAMLError:
-        return {}
+    except yaml.YAMLError as exc:
+        # The UNPARSEABLE document — the outermost face of this container, and the
+        # one that made the paragraph above a lie. It used to `return {}`, i.e. read
+        # an unreadable document as "no declarations", the same fail-open the
+        # `null`, the empty mapping and the list container are refused for (#10704
+        # review round 4, P3). It is not reachable from `render_refreshed_manifest`
+        # today — `_classified_test_keys` parses the whole document first, inside
+        # the try that converts `YAMLError` (`:2713-2718`) — so this was a latent
+        # trap AND a false contract rather than an active revert. It is refused now
+        # so the contract holds on every path, including any future caller that
+        # hands this function text it has not already validated.
+        raise DurationsBridgeError(
+            "the manifest text is not parseable as YAML, so `durations_floors` "
+            f"cannot be read at all ({exc}) — an unreadable declaration block must "
+            "be REFUSED rather than silently treated as absent, or every declared "
+            "cap reverts on the next sweep (repair the YAML, #9172)"
+        ) from None
     floors = data.get("durations_floors") if isinstance(data, dict) else None
+    if isinstance(floors, dict) and not floors:
+        # The EMPTY MAPPING — the third face of this container, and the one a
+        # YAML-aware editor / `safe_dump` round-trip produces when a block is
+        # emptied. Parsed to no declarations, so it must be refused for the same
+        # reason `null` is (#10704 review round 2): reading it as "absent" reverts
+        # every declared cap on the next sweep with nothing red anywhere.
+        raise DurationsBridgeError(
+            "`durations_floors` is present but declares nothing (an empty mapping) "
+            "— a declaration block the writer cannot honour must be REFUSED rather "
+            "than silently treated as absent, or every declared cap reverts on the "
+            "next sweep (state the declaration or drop the key, #9172)"
+        )
     if floors is None:
         if isinstance(data, dict) and "durations_floors" in data:
             # PRESENT but NULL. Absent is legal (every fixture that carries no such
             # key keeps its output); a key that is THERE and declares nothing is a
             # block the writer cannot read, and reading it as "absent" reverted every
             # cap on the next sweep with no signal on either side. Same fail-closed
-            # rule the LIST shape got (#10575 review, F2), applied to the other face
-            # of the same container (#10575 review, P3).
+            # rule the non-mapping container got (#10575 review, F2), applied to the
+            # other face of the same container (#10575 review, P3).
             raise DurationsBridgeError(
                 "`durations_floors` is present but declares nothing (null) — a "
                 "declaration block the writer cannot read must be REFUSED rather "
@@ -2577,7 +2608,25 @@ def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     out: dict[str, DeclaredFloor] = {}
     for row, declaration in floors.items():
         if not isinstance(row, str):
-            continue
+            # The ROW-NAME face of the same defect the unknown-key branch below
+            # refuses (#10704 review round 5, P3). `_declared_floors` used to
+            # `continue` here while `ci_manifest.floor_issues` iterated the same
+            # keys unfiltered and red them — so `durations_floors: {355.0: 400.0}`
+            # (a row name typed as a number, or `on:`/`yes:`, which YAML keys as
+            # `True`) was a declaration the writer silently dropped and the reader
+            # reported, on the same document, from the same repo. Bounded today —
+            # `refresh_durations`'s pre-write `integrity_problems` gate turns it into
+            # a `refusing to write` rather than a silent cap revert — but it is the
+            # same "a declaration this reader cannot honour is one it must refuse"
+            # rule, and the writer must not be the lenient half of a two-sided
+            # contract.
+            raise DurationsBridgeError(
+                f"`durations_floors` declares the row name {row!r}, which is not a "
+                f"string (a {type(row).__name__}) — a declaration this reader cannot "
+                "key onto a `durations` row is one it must refuse rather than "
+                "silently drop, or the cap reverts on the next sweep with the "
+                "reader redding a document the writer accepted (#9172)"
+            ) from None
         if isinstance(declaration, dict):
             unknown = sorted(set(declaration) - {"value", "pinned"})
             if unknown:
@@ -3234,8 +3283,12 @@ def integrity_problems(manifest_text: str) -> list[str]:
     checks through `ci_manifest.map_issues`, which ALSO carries main's two
     newer manifest checks (`fast_shard_issues` for the top-level `fast_shards`
     declaration and `duplicate_entries` for the same-surface `merge=union`
-    gate) — so when main added them beside this change they were folded into
-    the same one place instead of being re-added at this call site. The one
+    gate) AND this branch's own `floor_issues` (a weight declared as a floor or a
+    pinned cap rather than a reading — ⚠️ `origin/main` has no `floor_issues` at
+    all, so it is not one of main's) — so when main added its two beside this
+    change they were folded into the same one place instead of being re-added at
+    this call site, and the third is composed there for exactly the same reason.
+    The one
     UNKNOWN class the
     enforcing gate promotes to RED — a capture stamp that is PRESENT but
     unparseable — is likewise one shared decision,

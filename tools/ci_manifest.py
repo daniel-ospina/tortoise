@@ -422,14 +422,29 @@ def floor_issues(manifest: dict) -> list[str]:
     refuses a map whose floor it could not honour instead of shipping it.
     """
     floors = manifest.get("durations_floors")
+    if isinstance(floors, dict) and not floors:
+        # The EMPTY MAPPING is the third face of the same container, and the one a
+        # YAML-aware editor or a `safe_dump` round-trip actually produces when a
+        # block is emptied. It parsed to no declarations, so it is the same silent
+        # revert the `null` face was fixed for: "a declaration block that parses to
+        # no declarations means no row in this map is declared at all, so every cap
+        # it states silently reverts" — that sentence applies to `{}` verbatim
+        # (#10704 review round 2).
+        return [
+            "``durations_floors`` is present but declares nothing (an empty "
+            "mapping) — a declaration block that parses to no declarations means "
+            "no row in this map is declared at all, so every cap it states "
+            "silently reverts; state the declaration or drop the key (#9172)"
+        ]
     if floors is None:
         # ABSENT is legal (a fixture manifest declares no floors); PRESENT but NULL is
         # not. `durations_floors:` written with its entries deleted — a plausible
         # merge-resolution "tidy", and exactly how duplicate twins get dropped in this
-        # repo — used to read as "no declarations" on BOTH sides at once, so every
-        # declared cap reverted on the next sweep with nothing red anywhere. That is
-        # the same silent revert the LIST shape was fixed for (#10575 review, F2); the
-        # container shape must fail closed on either face (#10575 review, P3).
+        # repo — used to read as "no declarations" on BOTH sides at once (this check
+        # and the writer's `_declared_floors`), so every declared cap reverted on the
+        # next sweep with nothing red anywhere. That is the same silent revert the
+        # non-mapping container was fixed for (#10575 review, F2); the container shape
+        # must fail closed on EITHER face (#10575 review, P3).
         if "durations_floors" in manifest:
             return [
                 "``durations_floors`` is present but declares nothing (`null`) — a "
@@ -505,14 +520,13 @@ def floor_issues(manifest: dict) -> list[str]:
             continue  # the wrong TYPE is `duration_issues`' diagnostic, not this one
         if float(value) < float(floor):
             # The DECLARATION decides the sentence, not the direction of the
-            # disagreement (the writer-side mirror of `kept_at_declared_cap` vs
-            # `kept_as_lower_bound`, `tools/ci_timing.py`). A `pinned` row is a CAP:
-            # the writer holds it AT the declared value in BOTH directions, and the
-            # key's own header forbids "lower the declared floor" as a repair —
+            # disagreement (the reader-side mirror of the writer's
+            # `kept_at_declared_cap` vs `kept_as_lower_bound`). A `pinned` row is a
+            # CAP: the writer holds it AT the declared value in BOTH directions, and
+            # the key's own header forbids "lower the declared floor" as a repair —
             # raising or lowering a cap is a CI-budget decision recorded on #9172,
-            # never a sweep's side effect (`config/ci-surfaces.yml`,
-            # `durations_floors`). Naming the wrong mechanism here sent a reader to
-            # the one action the declaration forbids (#10575 review, P3).
+            # never a sweep's side effect. Naming the wrong mechanism sent a reader
+            # to the one action the declaration forbids (#10575 review, P3).
             if pinned:
                 issues.append(
                     f"{name} is declared with a ``durations_floors`` CAP of "
@@ -555,9 +569,8 @@ def map_issues(manifest: dict) -> list[str]:
     This is the ONE composition both enforcing entry points reach
     (``ci_selection --integrity`` and ``ci_timing.integrity_problems``, via
     :func:`check`), so a check added here cannot be half-wired. ``#6135``'s
-    ``fast_shard_issues``, ``#2913/#5373``'s ``duplicate_entries`` and this
-    module's own ``floor_issues`` are
-    carried here for exactly that reason: the first two landed on main beside the
+    ``fast_shard_issues`` and ``#2913/#5373``'s ``duplicate_entries`` are
+    carried here for exactly that reason: both landed on main beside the
     #5050 validator, and leaving them at a call site would have made them
     reachable from one entry point only — the half-wired state this
     composition exists to prevent. Order follows main's own composition
