@@ -10530,12 +10530,13 @@ durations:
   # `--upgrade`, a skipped re-ingest, the already-extracted skip, the `--capture-metadata` refusal, the
   # resolution-Point control, a sweep that leaves a document behind, and the partial-extraction arms on
   # `--upgrade` and full ingest), so the
-  # docker lane / carve-out split decides whether they run (the class-level `skipif` on `TORTOISE_DB_URI`).
+  # docker lane / carve-out split decides whether they run (the `skipif` on `TORTOISE_DB_URI`: class-level on
+  # two of the classes, per-method on the rest — do not say "class-level" for the whole set).
   # The ungated arms are pure enum/entry-point assertions and run everywhere. Context for a human, NOT the
-  # weight: 11-17 s wall on this host in the private lane. ⛔ NO CASE COUNT and NO past-count anecdote —
-  # a hand-written count re-stales on every case a round adds, and quoting one as history ("N against a
-  # quoted M") re-stales the same way one step removed. A VGATE caught exactly that in this lane's own
-  # doc row, and a round-8 review caught this row repeating it.
+  # weight, and NOT a per-file reading this file consumes: 11-17 s wall on ONE host in the private lane.
+  # ⛔ NO CASE COUNT and NO past-count anecdote — a hand-written count re-stales on every case a round adds,
+  # and quoting one as history ("N against a quoted M") re-stales the same way one step removed. A VGATE
+  # caught exactly that in this lane's own doc row, and a round-8 review caught this row repeating it.
   # `tools/ci_timing.py --refresh-durations` replaces this from junit once a
   # push-to-main sweep includes it.
   test_8447_truncation_marker.py: 21.0

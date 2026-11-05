@@ -109,7 +109,11 @@ class TestTheExitContractIsOneMapping:
     def test_a_refusal_exits_non_zero(self):
         for outcome in (IngestOutcome.REFUSED_NOT_FOUND,):
             assert outcome.refused is True, outcome
-            assert outcome.returncode == 1
+            # ⛔ ONE assertion, with the message. Round 10 found a bare
+            # `assert outcome.returncode == 1` duplicated directly above this
+            # one: it fired first, so the diagnostic message written for
+            # exactly this failure was unreachable — an assertion that could
+            # not fail. The mutant is still killed; the DIAGNOSIS was dead.
             assert outcome.returncode == 1, (
                 f"{outcome} is a REFUSAL but maps to exit {outcome.returncode}; "
                 "a caller cannot tell it from a completed ingest")
