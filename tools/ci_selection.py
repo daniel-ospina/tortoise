@@ -1714,7 +1714,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # NO surface, took the docs-only early return and landed on tier-1
              # smoke, where that file is not registered. The very PR that can weaken
              # the refusal denylist, drop the `--jq` projection or drop an identity
-             # field would then be the one that never ran the 76 cases pinning them.
+             # field would then be the one that never ran the 82 cases pinning them
+             # (a SNAPSHOT at 94a1992d5b — the count grows with the suite, so
+             # re-measure rather than trusting it, exactly as for n_test_files below).
              # MEASURED before this entry: `select(["tools/gh_read_cache.py"],
              # "pull_request", load_manifest())` -> surfaces=[], full=False,
              # test_gh_read_cache.py ABSENT; after -> surfaces=['core'], present.
