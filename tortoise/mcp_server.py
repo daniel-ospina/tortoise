@@ -909,6 +909,15 @@ def _declared_dry_run_default(name: str):
 #: ONLY the TRUE half is used below — see ``_coerces_to_true`` for why.
 _COERCES_TO_TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
 
+#: #10602: the `limit` the RETIRED `tortoise_query_points_by_tag` alias passes, so the new
+#: bound in `tortoise_query` cannot silently truncate it. Set to the ceiling the SDK's own
+#: `limit` validation accepts (1-10000), i.e. "the whole realistic population" rather than
+#: an arbitrary page: that alias's contract is the RAW, complete tag result set and its
+#: signature offers no `offset`/`page` with which to walk a truncation, so a smaller default
+#: would turn a complete answer into an incomplete one that looks complete. The alias is
+#: removed next release; this constant goes with it.
+_TAG_ALIAS_LIMIT = 10_000
+
 
 def _coerces_to_true(value) -> bool:
     """Whether FastMCP will coerce this raw argument to ``True`` — and only that.
@@ -3736,11 +3745,12 @@ def tortoise_query(kind: str | None = None,
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
     if tag is not None:
-        # #7983: record what this call SERVES — the post-filter population for an
-        # unpaginated caller, the one page for a paginated one. Never inside the
-        # accessor: it runs BEFORE the retracted filter below, so it would count
-        # Points the caller never receives (f HIGH, the direction that must not
-        # happen), and the two tag modes would measure different things.
+        # #7983: record what this call SERVES — the page delivered from the
+        # post-filter list (at most `limit`), for a paginated or un-paginated
+        # caller alike. Never inside the accessor: it runs BEFORE the retracted
+        # filter below, so it would count Points the caller never receives
+        # (f HIGH, the direction that must not happen), and the two tag modes
+        # would measure different things.
         rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
@@ -4003,8 +4013,16 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     Note: passes include_retracted=True to preserve this tool's pre-#888 behavior
     (raw tag results incl. tombstones); the new tortoise_query(tag=...) default
     excludes retracted points.
+
+    #10602: `limit` is passed explicitly because this alias's whole purpose is the
+    RAW, complete tag result set. Without it the new bound in `tortoise_query`
+    would silently truncate this tool to the un-paginated default (100), turning
+    an answer this signature cannot page into an incomplete one that looks
+    complete. The value is `_TAG_ALIAS_LIMIT`, the same ceiling the SDK's own
+    `limit` validation accepts, so it restores the pre-bound behaviour exactly
+    rather than approximating it.
     """
-    return tortoise_query(tag=tag, include_retracted=True)
+    return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 
 
 def tortoise_get_point(id: str) -> dict:

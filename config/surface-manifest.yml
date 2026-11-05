@@ -57,7 +57,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 43a5e3837b3afeaad8a3b4bef3a380ed679cc706
+cut_at_commit: 0aa403d91a976fe7a649e619ecec069f50e2fec0
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -823,10 +823,12 @@ rows:
   canonical: true
   job: 'Query points by pointKind and/or property filters — structural exact-match retrieval for known shapes (Epic
     #888: paginated_query + query_points_by_tag merged in). BOTH the structural read and the `tag=` arm return at
-    most `limit` rows (default 100) — they are BOUNDED, not a full-population scan, so a truncated answer is not
-    distinguishable from a complete one; walk offset=/limit= (or 1-based page=) until hasMore is false when you
-    need every row (a bare `limit=` bounds the answer but gives you no hasMore/total). include_retracted=True surfaces
-    tombstones. For semantic relevance use tortoise_search; for a single known ID use tortoise_get_point.'
+    most `limit` rows — default 100, or 20 when you page (`offset=`/`page=`) without an explicit `limit`. The RESPONSE
+    is what is bounded (and a truncated answer is not distinguishable from a complete one, so walk offset=/limit=
+    — or 1-based page= — until hasMore is false when you need every row; a bare `limit=` bounds the answer but gives
+    you no hasMore/total). The `tag=` read itself still scans the whole tagged population before slicing, so a very
+    large tag can still be slow. include_retracted=True surfaces tombstones. For semantic relevance use tortoise_search;
+    for a single known ID use tortoise_get_point.'
   dependency: declares TortoiseSDK.paginated_query (resolves)
   lifecycle: active
   used_by: agents, tooling, docs

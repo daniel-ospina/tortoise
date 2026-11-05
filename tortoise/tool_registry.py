@@ -297,10 +297,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Query points by pointKind and/or property filters — structural exact-match "
                     "retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag "
                     "merged in). BOTH the structural read and the `tag=` arm return at most `limit` "
-                    "rows (default 100) — they are BOUNDED, not a full-population scan, so a "
-                    "truncated answer is not distinguishable from a complete one; walk "
-                    "offset=/limit= (or 1-based page=) until hasMore is false when you need every "
-                    "row (a bare `limit=` bounds the answer but gives you no hasMore/total). "
+                    "rows — default 100, or 20 when you page (`offset=`/`page=`) without an explicit "
+                    "`limit`. The RESPONSE is what is bounded (and a truncated answer is not "
+                    "distinguishable from a complete one, so walk offset=/limit= — or 1-based "
+                    "page= — until hasMore is false when you need every row; a bare `limit=` "
+                    "bounds the answer but gives you no hasMore/total). The `tag=` read itself "
+                    "still scans the whole tagged population before slicing, so a very large tag "
+                    "can still be slow. "
                     "include_retracted=True surfaces tombstones. For "
                     "semantic relevance use tortoise_search; for a single known ID use "
                     "tortoise_get_point.",
@@ -464,6 +467,8 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_query_points_by_tag",
         id="surface.query_points_by_tag",
         description="DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). "
+                    "Returns the raw, complete tag result set (incl. tombstones); it takes no "
+                    "offset/page, so it cannot be walked, and is internally capped at 10000 rows. "
                     "Kept for one release; will be removed in the next release — migrate now.",
         risk="read",
         http_policy=True,

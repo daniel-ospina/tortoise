@@ -1394,10 +1394,15 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
         named_tokens = [m for m in matched if m in qtok]
         if not named_tokens:
             row_members = a["homes_detail"][0].get("members") or []
-            # …excluding the home's OWN name, or the line degenerates into
-            # "`list_knowledge` is absorbed by `list_knowledge`".
-            named_tokens = [m for m in sorted(row_members)
-                            if m in qtok and m != a["home"]][:1]
+            # Prefer the row member a MATCHED token CONTAINS — the doc's own shorthand
+            # for that method (`query` inside `paginated_query`). Alphabetical order is
+            # NOT a relation: on a home row carrying several quote-visible members it
+            # would attribute one of them to a tool that does not carry it, and the
+            # owner verifying the line would confirm a mis-attribution (review round 4).
+            related = [m for m in row_members
+                       if m in qtok and m != a["home"]
+                       and any(m != tok and (m in tok or tok in m) for tok in matched)]
+            named_tokens = sorted(related)[:1]
         named = ", ".join(f"`{m}`" for m in named_tokens)
         sdk = (f" (SDK `{a['method']}`)"
                if a["method"] and a["method"] not in named_tokens else "")

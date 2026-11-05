@@ -248,20 +248,44 @@ def test_the_served_description_discloses_the_bound():
     low = desc.lower()
 
     # the bound is stated, and stated as a bound — not its antonym
-    assert "not a full-population scan" in low, f"bound not disclosed: {desc}"
+    assert "not a full-population scan" not in low, (
+        f"the description over-claims a full-scan-free read: {desc}")
     assert "unbounded" not in low, f"the description contradicts itself: {desc}"
-    # the number the code actually applies (eff_limit's non-paginated default)
+    # the number the code actually applies — BOTH defaults, because `eff_limit` has two
+    # (`20 if paginated else 100`) and the walk the same sentence recommends is the
+    # paged one, so naming only 100 mis-states what a paging caller gets.
     assert "default 100" in low, f"the default cap is not named: {desc}"
+    assert "20 when you page" in low, f"the paged default is not named: {desc}"
     # the way to see the rest — `hasMore` is the signal a walk terminates on
     assert "hasmore" in low, f"no terminating signal named: {desc}"
     assert "offset" in low, f"no way to page the population: {desc}"
-    # BOTH arms are bounded (review round 3: the `tag=` clause round 2 added said it
-    # was "NOT capped … unless you pass offset=/limit=", but a lone `limit=` was ignored
-    # on that arm — so following the disclosure produced the unbounded read). The text
-    # may no longer split the arms apart.
+    # The `tag=` arm: its RESPONSE is bounded, its READ is not — `query_points_by_tag`
+    # has no LIMIT, so the whole tagged population is materialised and then sliced
+    # (tortoise/sdk.py). That distinction is the one review round 4 found mis-stated in
+    # the opposite direction (round 2 under-claimed "not capped", round 3's fix then
+    # over-claimed "not a full-population scan"). Pin the ACCURATE sentence, and pin the
+    # SDK fact it rests on, so a future edit cannot restore either error silently.
     assert "tag=" in low, f"the tag= arm is not addressed at all: {desc}"
     assert "not capped" not in low, (
         f"the description still claims one arm is uncapped: {desc}")
+    assert "still scans the whole tagged population" in low, (
+        f"the tag= arm's unbounded READ is not disclosed: {desc}")
+
+
+def test_the_tag_alias_is_not_silently_truncated_by_the_new_bound(stub_factory):
+    """Review round 4, finding 2 — a retirement alias must not start lying.
+
+    `tortoise_query_points_by_tag` forwards to `tortoise_query(tag=...)` and its
+    signature takes only `tag`, so it cannot page. Once `tortoise_query` bounded the
+    un-paginated tag arm at 100, the alias would have returned an incomplete set with
+    no way to see the rest — and no way to tell. It now passes an explicit limit.
+    """
+    from tortoise.mcp_server import _TAG_ALIAS_LIMIT, tortoise_query_points_by_tag
+    assert _TAG_ALIAS_LIMIT == 10_000, "the alias's ceiling is the SDK's own max limit"
+    stub_factory(n_points=5, n_tag_points=250)
+    result = tortoise_query_points_by_tag("pricing")
+    assert len(result) == 250, (
+        f"the alias truncated a 250-row tag to {len(result)} with no way to page")
 
 
 def test_the_tag_arm_honours_a_lone_limit_like_the_structural_arm(stub_factory):
