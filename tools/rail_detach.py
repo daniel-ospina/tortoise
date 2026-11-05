@@ -1132,13 +1132,63 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
         return None
 
 
+def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | None:
+    """This PR's artifact, whether it was written under `repo`'s CURRENT name or
+    an OLDER one. `None` when no record for `pr` names this repo.
+
+    ⛔ CANONICALISING `_slug` RENAMED EVERY RECORD THAT ALREADY EXISTED, AND A
+    RENAME THE GUARD CANNOT SEE IS THE GUARD BEING BYPASSED. Before this module
+    keyed on `_repo_key`, `_slug` was `repo.replace("/", "-")` on the RAW string,
+    so a record written then lives at `rail-github.com-o-r-7.md`. Reading only
+    `artifact_path(...)` would miss it — and the miss is not cosmetic, it is BOTH
+    halves of the #3061 collision this module exists to refuse:
+
+      * `launch` calls `collect` for its duplicate-rail guard, so a miss means a
+        SECOND rail on one PR (`collect` answers `absent`);
+      * `collect --assert-merged` — the fleet's MACHINE GATE — would answer 3/1
+        about a rail whose record is sitting on disk with a LIVE pid in it.
+
+    The trigger is a version boundary, not an exotic spelling: the state dir is
+    shared and long-lived, rail processes legitimately outlive a code update, and
+    a peer lane can still be running an older copy of this tool (farm drift is
+    routine — see AGENTS.md). So the read is spelling-INSENSITIVE even though
+    every new write is canonical.
+
+    ⛔ AND THE SCAN IS ANCHORED ON `REPO=`, NOT ON THE FILENAME. Matching the file
+    name would re-derive the identity from the thing that was wrong; the record
+    already carries the repo it rails, and `_repo_key` is the module's ONE way to
+    decide two spellings are one repo. A candidate whose `REPO=` cannot be read,
+    or names a different repo, is not this PR's record and is skipped.
+    """
+    art = artifact_path(state_dir, repo, pr)
+    if art.exists():
+        return art
+    key = _repo_key(repo or "")
+    sd = Path(state_dir)
+    if not key or not sd.exists():
+        return None
+    for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
+        try:
+            text = cand.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _repo_key(read_field(text, "REPO") or "") == key:
+            return cand
+    return None
+
+
 def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
     """The read itself (see `collect` for the contract, the two passes and the
     attempt-scoping rationale)."""
-    art = artifact_path(state_dir, repo, pr)
-    if not art.exists():
+    art = _artifact_for_any_spelling(state_dir, repo, pr)
+    if art is None:
         return None
-    logp_default = log_path(state_dir, repo, pr)
+    # ⛔ DERIVED FROM THE RECORD, NOT RE-SLUGGED FROM `repo`: a record written under
+    # an older spelling has its log under that spelling too (`rail-<slug>-<pr>.log`
+    # is the artifact's path with `.md` → `.log`), so re-slugging would pair a legacy
+    # record with a canonical log that does not exist — the rail's own output
+    # unreadable, which reads as `lost`/`refused` with no reason.
+    logp_default = art.with_suffix(".log")
     # ⛔ TWO PASSES, AND THE SECOND IS NOT A RETRY OF A FAILURE — it closes a
     # STALE READ. The artifact is read BEFORE the liveness probe, so a rail that
     # writes `EXIT=` and exits *while* that probe runs is seen as GONE holding a

@@ -944,6 +944,71 @@ def test_one_record_is_readable_under_any_spelling_of_its_repo(tmp_path, monkeyp
         kill_group(ln.pid)
 
 
+def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
+    """⛔ A RECORD THE NEW NAME CANNOT SEE IS THE DUPLICATE-RAIL GUARD BYPASSED.
+
+    `_slug` used to be the RAW repo string, so records written before this module
+    keyed on `_repo_key` live under names like `rail-github.com-o-r-7.md`. Reading
+    only `artifact_path(...)` misses them: `collect` answers `absent` (3) and
+    `launch`'s duplicate guard therefore sees a free PR and starts a SECOND rail —
+    the #3061 collision, moved to a version boundary rather than closed. `collect
+    --assert-merged` is the fleet's MACHINE GATE and would answer 3/1 about a rail
+    whose record sits on disk with a live pid in it.
+
+    Non-vacuity: the canonical path is asserted ABSENT, so this cannot pass by the
+    record happening to sit where the new code already looks. Revert
+    `_artifact_for_any_spelling` to a bare `artifact_path` and every assert here
+    fails (the first one on `None`).
+
+    ⛔ THE SCAN IS ANCHORED ON `REPO=`, NOT ON THE FILENAME — the second half pins
+    that a legacy-named record for a DIFFERENT repo is NOT adopted, so "same PR
+    number" alone never resurrects someone else's rail.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    legacy = sd / "rail-github.com-o-r-771.md"
+    legacy_other = sd / "rail-someone-else-772.md"
+    # a session leader stands in for the wrapper: `ps -p <pid>` answers it, which is
+    # the read that keeps the record `waiting` rather than `lost`.
+    live = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"LOG={sd}/rail-github.com-o-r-771.log\nPID={live.pid}\n",
+                          encoding="utf-8")
+        legacy_other.write_text(f"PR=772\nREPO=someone/else\nSTARTED_AT={rd._iso_now()}\n"
+                                f"PID={live.pid}\n", encoding="utf-8")
+
+        assert not rd.artifact_path(sd, "o/r", 771).exists(), \
+            "fixture is not the legacy-spelling shape: the canonical path exists"
+
+        # collect reads it under EITHER spelling of the query.
+        for spelling in ("o/r", "github.com/o/r", "git@github.com:o/r.git"):
+            st = rd.collect(sd, spelling, 771)
+            assert st is not None, f"collect lost the record for {spelling!r}"
+            assert st.state == rd.WAITING, (spelling, st.as_dict())
+            assert st.artifact == str(legacy), (spelling, st.artifact)
+
+        # …and the duplicate-rail guard REFUSES a second launch on that PR.
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(771, cwd=co, state_dir=sd, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value)
+        assert str(legacy) in str(exc.value), "the refusal must name the record it read"
+        assert not rd.artifact_path(sd, "o/r", 771).exists(), \
+            "the refused launch wrote a second record for one PR"
+
+        # The REPO= anchor: same PR number, different repo, is NOT this repo's rail.
+        assert rd.collect(sd, "o/r", 772) is None
+        other = rd.collect(sd, "someone/else", 772)
+        assert other is not None and other.artifact == str(legacy_other)
+    finally:
+        live.kill()
+        live.wait()
+
+
 def test_an_announced_merge_outranks_a_recycled_child_pid(tmp_path):
     """⛔ ANNOUNCED BEATS `lost` — INCLUDING THE `lost` A RECYCLED PID DRAWS.
 
