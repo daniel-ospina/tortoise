@@ -36,6 +36,12 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+#: The CLI MAJOR this workflow deliberately pins. A bump is a deliberate change (#10593 / #11100):
+#: it must move this constant in the same commit, so the decision is visible in the diff instead of
+#: arriving as a routine upstream release. Both v2 and v3 are MEASURED to load the committed config
+#: (and both accept `--yes`) — see the argument at `test_the_production_applier_is_version_pinned`.
+_PINNED_CLI_MAJOR = 2
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "supabase-deploy.yml"
 CONFIG = REPO_ROOT / "supabase" / "config.toml"
 
@@ -149,17 +155,31 @@ def test_the_production_applier_is_version_pinned() -> None:
         assert re.match(r"^v?\d+\.\d+\.\d+$", pin), (
             f"expected an exact release version for the DDL applier, got {pin!r} (#10896)"
         )
-        # An exact pin is not enough: the commands and the config this same module pins are v3
-        # requirements. v2 rejects both (`--yes` → unknown flag; `[db.migrations].enabled` /
-        # `[storage].vector` → invalid keys) and v4 removes `--linked`, which every command here
-        # passes. Asserting only `x.y.z` greens a downgrade to a CLI that cannot run the applier —
-        # a false PASS on the axis this test exists to guard, so the MAJOR is pinned too.
+        # An exact pin is not enough — the MAJOR must also be a deliberate choice, so a downgrade
+        # OR an upgrade moves the constant in the same commit and shows up in the diff. ⛔ Do NOT
+        # "correct" the reasons below back into a claim about flag or config incompatibility: they
+        # were MEASURED on this exact tree (2026-11-05), running the workflow's own command shape
+        # `db push --linked --include-all --yes` under `--dry-run`:
+        #
+        #   npx supabase@2.122.1 … -> AccessTokenRequiredError   (config LOADED, all flags accepted)
+        #   npx supabase@3.0.0   … -> AccessTokenRequiredError   (config LOADED, all flags accepted)
+        #
+        # So BOTH majors load this config and BOTH accept `--yes`: `--yes` is a GLOBAL flag in
+        # v2.122.1 too ("answer yes to all prompts"), and the only config change #10896 makes is
+        # `[inbucket]` → `[local_smtp]`, which v2.108.0+ already reads. `[db.migrations]` /
+        # `[storage.vector]` predate this PR and load fine under v2. The reason to stay on v2 is
+        # therefore NOT incompatibility — it is #11100's ruling that the major moves in its own PR
+        # with a full local run (`supabase start` / `db reset` + the local-auth harnesses), because
+        # this config is not yet v3-NATIVE: v3 emits `auth.email.enable_signup` and
+        # `auth.sms.enable_signup` deprecations against it.
         major = int(re.match(r"^v?(\d+)", pin).group(1))
-        assert major == 3, (
-            f"the applier's CLI pin must stay on major 3, got {pin!r}: v2 rejects `--yes` and the "
-            f"v3 config keys this workflow and config.toml now require, and v4 removes `--linked`, "
-            f"which every command below passes. A major bump is a deliberate change that must "
-            f"update these guards with it (#10896)"
+        assert major == _PINNED_CLI_MAJOR, (
+            f"the applier's CLI pin is on major {major} ({pin!r}) but _PINNED_CLI_MAJOR is "
+            f"{_PINNED_CLI_MAJOR} — a CLI major changes the `supabase/config.toml` schema and the "
+            f"consent behaviour of every hosted mutation, on the ONLY door that applies production "
+            f"DDL. If you are moving it deliberately, change _PINNED_CLI_MAJOR in this commit and "
+            f"validate the new schema locally (`supabase start` / `db reset` + the local-auth "
+            f"harnesses) — see #10593 / #11100 / #10896."
         )
 
 
