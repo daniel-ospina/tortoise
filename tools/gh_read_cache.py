@@ -499,7 +499,17 @@ INVARIANTS: dict[str, Invariant] = {
         projection="workflow-defs-v1",
         project=_project_workflows,
     ),
-    # The runner INVENTORY: name + LABEL NAMES only.
+    # The runner INVENTORY: name + LABEL NAMES only. ⛔ This is the ONE entry whose trigger is NOT
+    # human-paced: the fleet's own autoscaler registers and deregisters runners
+    # (`tools/runner_autoscale.py` — "not in the pool" is the ORPHANED classification, which
+    # RE-REGISTERS), so 30 min bounds how stale a MEMBERSHIP answer may be; it does not make
+    # membership invariant. What the projection may therefore be asked is a LABEL question — "which
+    # runner names and label names the inventory carried at read time" — whose vocabulary only a
+    # runner-config change adds to. ⛔ It must NEVER answer "is runner X present NOW" / "is the pool
+    # empty NOW": a cached NO on membership is the absence inference `_project_required_set` and
+    # this projection's own `labels`-absence guard both refuse, and a caller deciding whether to
+    # SPAWN must read live. Membership is pinned OUT of the answer by the projection, not by this
+    # note: see `test_the_shipped_runners_projection_drops_status_and_busy_and_the_argv_carries_no_flag`.
     "runners.inventory": Invariant(
         ttl_s=30 * 60,
         argv=("api", "repos/{repo}/actions/runners", "--paginate"),

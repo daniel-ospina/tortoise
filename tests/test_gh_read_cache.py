@@ -526,9 +526,15 @@ def test_undeclared_key_is_refused(tmp_path: Path) -> None:
 
 
 def test_registry_cannot_admit_a_mutable_name() -> None:
+    # ⛔ `argv` must be one the ENDPOINT door accepts, or this pin asserts nothing: with
+    # `("api", "x")` the refusal it catches is `_endpoint_refusal`'s, which raises the SAME
+    # `MutableReadRefused` class from `_validate_spec` — so the pin stayed GREEN with the
+    # mutable-name DECISION disabled entirely (measured: 36 pins red, this one green). `OK_ARGV`
+    # leaves the name check as the only thing that can refuse, so the pin reds when it is
+    # weakened. Re-measured after the fix: GREEN clean, RED under the same mutation.
     with pytest.raises(C.MutableReadRefused):
         C.declare_invariant(
-            "pr.mergeStateStatus", ttl_s=600, argv=("api", "x"), projection="p", project=lambda d: d
+            "pr.mergeStateStatus", ttl_s=600, argv=OK_ARGV, projection="p", project=lambda d: d
         )
 
 
