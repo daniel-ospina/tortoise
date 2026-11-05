@@ -65,6 +65,19 @@ Usage:
                  to make a slow read pass — re-measure instead)
   --self-test    run tests/test_ci_cancel_guard.py
 
+  --json         print the verdict as ONE machine-readable JSON document on stdout
+                 and move the human report to stderr. ⛔ This is a contract, not a
+                 formatting choice: a consumer parses stdout with `json.loads` and
+                 `--json | jq .` must work, so stdout carries exactly one document on
+                 EVERY path that reaches a verdict — including the fail-closed one,
+                 which emits `{"verdict": "FAIL-CLOSED", "error": …}` rather than
+                 nothing at all. Printing the human report first (what this file used
+                 to do) is the defect recorded and fixed in
+                 `tools/check_pages_bindings.py:369-373` ("stdout must be exactly one
+                 document") and `tools/session_retrofit_audit.py:835-838`, and it is
+                 https://clig.dev/#output verbatim: machine readable output goes to
+                 stdout, "log messages, errors, and so on" go to stderr.
+
 Exit: 0 = permitted (and, with --apply, the cancel landed)
       3 = REFUSED (the run may not be cancelled; the reason names which clause)
       2 = FAIL-CLOSED (a surface could not be read; nothing was cancelled)
@@ -578,6 +591,18 @@ def main(argv: list[str] | None = None) -> int:
     except Unreadable as exc:
         print(f"ci_cancel_guard: FAIL-CLOSED for run {run_id}: {exc} — cancelling NOTHING",
               file=sys.stderr)
+        if args.json:
+            # ⛔ A refusal is a RESULT, not the absence of one. Returning before the
+            # document is emitted left a `--json` consumer of a refusal with an EMPTY
+            # stdout, so it had to switch on the exit code to learn anything — the
+            # same shape `tools/ci_check_repair.py::_could_not_measure` emits
+            # `{"error": …}` to avoid (review round 8, F1).
+            print(json.dumps({"run": run_id, "verdict": "FAIL-CLOSED",
+                              "error": str(exc),
+                              # nothing was cancelled on this path, and nothing else
+                              # was measured either: never attest a value the tool
+                              # does not have.
+                              "applied": False, "post_rc": None}))
         return 2
 
     if verdict == "PERMIT" and elapsed >= max_age:
@@ -594,8 +619,13 @@ def main(argv: list[str] | None = None) -> int:
 
     text = render(run_id, verdict, detail, elapsed, args.apply, post_rc, post_detail,
                   max_age, measured)
-    print(text)
     if args.json:
+        # ⛔ stdout must be EXACTLY one document under `--json`, so the human report is
+        # diagnostics and goes to stderr. Emitting it first (what this file used to do)
+        # made `json.loads(stdout)` fail on the leading prose and `--json | jq .` fail
+        # outright — the defect already recorded and fixed in the two siblings cited in
+        # the docstring above (review round 8, F1).
+        print(text, file=sys.stderr)
         print(json.dumps({"run": run_id, "verdict": verdict,
                           # `applied` means the cancel LANDED, not that --apply was passed.
                           "applied": post_rc == 0,
@@ -603,6 +633,8 @@ def main(argv: list[str] | None = None) -> int:
                           # never attest an age the tool did not measure
                           "elapsed_s": round(elapsed, 3) if measured else None,
                           **detail}))
+    else:
+        print(text)
 
     if post_rc is not None:
         return post_rc

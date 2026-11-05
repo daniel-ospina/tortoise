@@ -494,13 +494,16 @@ def test_an_undocumented_job_status_reads_as_started(fixture):
 
 
 def test_json_does_not_attest_an_unmeasured_age_or_a_false_applied(fixture):
-    """Review round 2, findings 2 and 8: the machine-readable record claimed both."""
+    """Review round 2, findings 2 and 8: the machine-readable record claimed both.
+
+    Round 8, F1: and the document is the ONLY thing on stdout, so it is parsed here with
+    a bare `json.loads(r.stdout)` rather than by fishing an object out of the stream.
+    """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--json", "--fake-elapsed", "5")
-    payload = [line for line in r.stdout.splitlines() if line.startswith("{")][-1]
-    rec = json.loads(payload)
+    rec = json.loads(r.stdout)
     assert rec["elapsed_s"] is None
     assert rec["applied"] is False
 
@@ -572,10 +575,71 @@ def test_a_landed_cancel_is_attested_as_applied(fixture):
     fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
     r = guard(fixture, "41840910128", "--json", "--apply", "--fake-elapsed", "5")
     assert r.returncode == 0, r.stdout + r.stderr
-    rec = json.loads([line for line in r.stdout.splitlines() if line.startswith("{")][-1])
+    rec = json.loads(r.stdout)  # round 8, F1: no line filtering — stdout is ONE document
     assert rec["applied"] is True
     assert rec["post_rc"] == 0
     assert fixture.cancelled() == ["41840910128"]
+
+
+# ------------------------------------------- the `--json` stdout contract (round 8, F1)
+# ⛔ `--json` is a machine-readable mode, so stdout is the PAYLOAD and the human report
+# is diagnostics. Emitting both on stdout made `json.loads(stdout)` fail with "Extra
+# data" and `--json | jq .` fail on the leading prose — the same defect already fixed in
+# `tools/check_pages_bindings.py:369-373` and `tools/session_retrofit_audit.py:835-838`,
+# and https://clig.dev/#output verbatim (machine readable -> stdout, messaging ->
+# stderr). The three cases below pin the contract on every path that reaches a verdict:
+# a PERMIT, a CURRENT-HEAD refusal, and the fail-closed arm. Each parses the stream with
+# a BARE `json.loads(r.stdout)`, which is exactly what the flag exists to make possible.
+def test_json_stdout_is_exactly_one_document_on_a_permit(fixture):
+    """Pre-fix: the human report precedes the object on stdout, so `json.loads` raises
+    `Extra data: line N column 1` — and a consumer that skips to the object still has
+    to know to skip. `--json | jq .` fails outright."""
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--json", "--fake-elapsed", "5")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rec = json.loads(r.stdout)
+    assert rec["verdict"] == "PERMIT"
+    # The report did not vanish — it moved to the diagnostics stream, where a reader (and
+    # a log collector) still gets the auditable line.
+    assert "SUPERSEDED" in r.stderr, r.stderr
+    assert "SUPERSEDED" not in r.stdout, r.stdout
+
+
+def test_json_stdout_is_exactly_one_document_on_a_current_head_refusal(fixture):
+    """The refusal is the case the guard exists for, so its machine-readable record is
+    the one a consumer most needs to parse. Pre-fix this stream is prose-then-object."""
+    fixture.apply("run.json", _run_meta(sha=HEAD_CURRENT))
+    fixture.apply("prs.json", pr(PR_HEAD_CURRENT))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": []})
+    r = guard(fixture, "41840910128", "--json")
+    assert r.returncode == 3, r.stdout + r.stderr
+    rec = json.loads(r.stdout)
+    assert rec["verdict"] == "CURRENT-HEAD"
+    assert rec["run_sha"] == rec["pr_head"] == HEAD_CURRENT
+    assert "REFUSED" in r.stderr, r.stderr
+    assert fixture.cancelled() == []
+
+
+def test_json_fail_closed_still_emits_one_error_document(fixture):
+    """⛔ A refusal is a RESULT, not the absence of one. Pre-fix the fail-closed arm
+    printed to stderr and returned 2 BEFORE any document was emitted, so a `--json`
+    consumer of a refusal got an EMPTY stdout and could only switch on the exit code.
+    `tools/ci_check_repair.py::_could_not_measure` is the sibling shape: `{"error": …}`
+    on the exit-2 path."""
+    fixture.touch("run.unreadable")
+    r = guard(fixture, "41840910128", "--json", "--apply")
+    assert r.returncode == 2, r.stdout + r.stderr
+    rec = json.loads(r.stdout)
+    assert rec["verdict"] == "FAIL-CLOSED"
+    assert rec["error"], rec
+    assert rec["applied"] is False
+    assert rec["post_rc"] is None
+    # The empty-stdout half is what a consumer could not distinguish from "no verdict".
+    assert r.stdout.strip(), "a --json refusal must document itself on stdout"
+    assert "FAIL-CLOSED" in r.stderr, r.stderr
+    assert fixture.cancelled() == []
 
 
 def test_a_non_object_job_status_is_fail_closed(fixture):
