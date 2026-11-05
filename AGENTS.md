@@ -589,16 +589,18 @@ closes delivered issues — `exit 0` proves none of that, so prove those two sur
 itself before you start. ⛔ **The route selects the grant, but not always uniquely** — which is why a
 naive two-route proof false-PASSes a token of #10945's shape (`Contents` + `Pull requests`, no
 `Issues`):
-  - `PATCH /repos/{o}/{r}/pulls/{n}` (no-op title) needs `Pull requests` write and nothing else, so it
-    is a valid leg. #10930 measured it **residue-free** on a PR number.
-  - `PATCH /repos/{o}/{r}/issues/{n}` is documented as **at least one of** `Issues` **or** `Pull
-    requests` write — so it CANNOT prove `Issues: write`: a token holding `Pull requests` and no
-    `Issues` passes it, which is #10945's two-leg shape exactly.
-  - The Issues leg needs an endpoint whose permission set is Issues-only. `POST /repos/{o}/{r}/issues`
-    is, but it creates a real issue — close it, or record the residue rather than leaving it.
-  If neither leg can be proven without residue, **escalate rather than build**; do not record a surface
-  as proven because a proxy for it passed. It also
-proves the credential **`git`** resolves for this checkout's push URL (normally the same token `gh`
+
+- `PATCH /repos/{o}/{r}/pulls/{n}` (no-op title) needs `Pull requests` write and nothing else, so it
+  is a valid leg. #10930 measured it **residue-free** on a PR number.
+- `PATCH /repos/{o}/{r}/issues/{n}` is documented as **at least one of** `Issues` **or** `Pull
+  requests` write — so it CANNOT prove `Issues: write`: a token holding `Pull requests` and no
+  `Issues` passes it, which is #10945's two-leg shape exactly.
+- The Issues leg needs an endpoint whose permission set is Issues-only. `POST /repos/{o}/{r}/issues`
+  is, but it creates a real issue — close it, or record the residue rather than leaving it.
+
+If neither leg can be proven without residue, **escalate rather than build**; do not record a surface
+as proven because a proxy for it passed. It also proves the credential **`git`** resolves for this
+checkout's push URL (normally the same token `gh`
 resolves, because the helper is `!gh auth git-credential`; a box whose helper is something else is the
 exception — and even for one token the grant is **per resource kind**, which is why the surfaces above
 stay unproven).
