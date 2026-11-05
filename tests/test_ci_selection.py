@@ -229,9 +229,12 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured: 131 files for the STORAGE diff (`onboarding`), 60 for the
+    Measured: 150 files for the STORAGE diff (`onboarding` ∪ `tier1`), 60 for the
     EXTRACTOR diff (empty surfaces, the early return); the gate is in the
     selected set in both, and dropping the `tier1` row removes it from both.
+    ⚠️ The 150 is a measurement, not a constant: it moves with every `tier1`
+    addition (`#10980`'s row moved it from 149), so re-derive it rather than
+    trusting it — the assertions below are the pin, this sentence is the note.
     """
     storage = _sel(["docs/architecture/STORAGE-ARCHITECTURE.md"])
     assert storage["surfaces"] == ["onboarding"], storage["surfaces"]
@@ -241,6 +244,21 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+    # #10980 review (P2): the §9.4/§12.1b source-vector pin lives in the
+    # narrative-home module, and it guards the SAME document — so a STORAGE-only
+    # diff must reach it. Before that row it reached the module in NO arm
+    # (`core`/`api` both need a Python path; this diff matches `onboarding`),
+    # i.e. the pin would have been green on every real question asked of it.
+    # Asserted here rather than trusted to the row's comment: a row that is
+    # present but no longer SELECTS is the failure #9778 measured.
+    assert "test_9555_narrative_carrier.py" in storage["test_files"], (
+        "a `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff no longer "
+        "selects `test_9555_narrative_carrier.py` — the §9.4/§12.1b "
+        "source-vector pin (and the §9.1 narrative-home pins beside it) would "
+        "be asleep on the only diff class that can re-scatter the claim "
+        "(#10980 review P2, the #4309 silent-drop class)"
+    )
 
 
 def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
