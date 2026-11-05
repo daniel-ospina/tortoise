@@ -655,6 +655,53 @@ def test_a_null_graph_identity_is_refused_like_a_missing_one(tmp_path):
     assert "names no graph" in str(excinfo.value)
 
 
+def test_a_null_graph_is_not_rescued_by_the_graph_name_ALIAS(tmp_path):
+    """⛔ The `graph_name` fallback re-opened the hole the refusal closes.
+
+    Measured before the fix (review P2 on PR #11097): `payload.get("graph") or
+    payload.get("graph_name")` resolved `{"graph": null, "graph_name": "tortoise"}` to
+    `"tortoise"` BEFORE the refusal could see it, so an artifact with no identity was
+    accepted on an operator-controlled field — and `proves()` returned True. Nothing
+    emits `graph_name` (`census()` emits `graph`), so the alias was a dead pre-fix shim
+    whose only live effect was keeping "the loader authors the identity" open.
+
+    Mutation that goes RED here: restoring the `or payload.get("graph_name")` fallback.
+    """
+    import json
+
+    path = tmp_path / "x.json"
+    path.write_text(
+        json.dumps(_real_shape_report(graph=None, graph_name="tortoise")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="tortoise")
+
+    assert "names no graph" in str(excinfo.value)
+
+
+def test_the_parity_graph_help_states_the_rule_that_is_enforced(capsys):
+    """The flag's help is the only documentation read AT THE MOMENT OF CHOOSING it.
+
+    Measured before the fix (review P2 on PR #11097): the help still said *"the
+    instrument emits no graph identity"* and *"An operator ASSERTION"* — both false
+    after the loader began refusing an unattributed report, and the two halves steering
+    an operator toward the opposite of the new contract (one told them their report
+    carries no identity, which since the fix is a REFUSAL, not a note).
+    """
+    with pytest.raises(SystemExit) as exc:
+        _cli().main(["--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    at = text.index("  --parity-graph")
+    rest = text[at + 1:]
+    block = " ".join(rest[:rest.index("\n  --")].split())
+    assert "emits no graph identity" not in block
+    assert "ASSERTION" not in block
+    assert "REFUSED" in block and "`graph`" in block
+
+
 def test_a_report_naming_NO_instrument_is_refused(tmp_path):
     """⛔ A nameless report was silently attributed to the `turn` population.
 

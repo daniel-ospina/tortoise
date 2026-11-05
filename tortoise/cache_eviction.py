@@ -207,12 +207,14 @@ class ParityReport:
     (``tools/turn_parity_census.py::census`` emits it), :func:`load_parity_report`
     refuses a report that carries none, and a name that disagrees with the graph being
     measured is refused too. ⚠️ What that buys is a real comparison, not a proof: the
-    reader still trusts the instrument to name the graph it actually opened, and the
-    reader cannot correlate a name with an INSTANCE (two hosts can both call a graph
-    ``tortoise``). Stated here rather than overclaimed: the previous version of this
-    docstring called the field "an OPERATOR ASSERTION" and the loader filled in a
-    missing name with the caller's own — which made the check unable to fail at all
-    (review P1 on #11004).
+    reader still trusts the instrument to name the graph it actually opened, the reader
+    cannot correlate a name with an INSTANCE (two hosts can both call a graph
+    ``tortoise``), and a census of the SAME graph measured EARLIER passes this check
+    untouched — time is not part of the identity (the only staleness guard downstream
+    is :func:`assess`'s over-count check). Stated here rather than overclaimed: an
+    earlier version of this docstring called the field "an OPERATOR ASSERTION" and the
+    loader filled in a missing name with the caller's own — which made the check unable
+    to fail at all (review P1 on #11004).
     """
 
     instrument: str
@@ -967,16 +969,26 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     measured = dry_run.get("would_delete_turn_nodes")
     total = population.get("episodic_graph_nodes")
 
-    reported_graph = payload.get("graph") or payload.get("graph_name")
+    # ⛔ THE FIELD IS `graph` AND ONLY `graph`. There is no `graph_name` fallback: the
+    # alias was a pre-fix shim nothing emits (`tools/turn_parity_census.py::census`
+    # emits `graph`), and keeping it re-opened the exact hole this check closes —
+    # `{"graph": null, "graph_name": "tortoise"}` was resolved to `"tortoise"` by the
+    # `or` before the refusal below could ever see it, so an artifact with NO identity
+    # was accepted on an operator-controlled field (review P2 on #11097).
+    reported_graph = payload.get("graph")
     # ⛔ A REPORT THAT NAMES NO GRAPH IS REFUSED, not attributed to the caller's own.
     # Filling the field in with ``graph_name`` made the binding VACUOUS: the loader
     # authored the assertion it was supposed to check, so `mismatched` could never fire
     # and `unbound` could never be reached from this door — the only path that produces
-    # a real report. A CLEAN census taken on another instance, or of a past state, then
-    # loaded as a licence to sweep THIS graph, with the operator's typed `--graph` and
-    # the repeated `--parity-graph` as the whole of the evidence (review P1 on #11004).
+    # a real report. A CLEAN census taken on another instance then loaded as a licence
+    # to sweep THIS graph, with the operator's typed `--graph` and the repeated
+    # `--parity-graph` as the whole of the evidence (review P1 on #11004).
     # `tools/turn_parity_census.py::census` emits the identity, so the honest path is
     # open; a report without one is an artifact that cannot say what it measured.
+    # ⚠️ Neither this check nor any other on this path closes STALENESS: a census of
+    # the SAME graph measured earlier carries the same name and passes. The only
+    # downstream guard is `assess()`'s over-count check (a report claiming MORE nodes
+    # than the graph holds is refused); a report claiming fewer is accepted.
     if reported_graph is None or not str(reported_graph).strip():
         raise CacheReadError(
             f"parity report {path} names no graph — the field is REQUIRED "

@@ -286,10 +286,13 @@ def main(argv: list[str] | None = None) -> int:
                               "each needs --parity-graph."))
     parser.add_argument("--parity-graph", default=None, metavar="NAME",
                         help=("the graph the parity report was measured against. "
-                              "REQUIRED with --parity-report: the instrument emits no "
-                              "graph identity, so without this a CLEAN census of one "
-                              "graph would license evicting another. An operator "
-                              "ASSERTION, and the census says so."))
+                              "REQUIRED with --parity-report, and required to equal "
+                              "--graph. The report must ALSO carry its own `graph` "
+                              "(`tools/turn_parity_census.py --json` emits it) and "
+                              "that name must match this one: a report naming no "
+                              "graph is REFUSED, so a CLEAN census of another graph "
+                              "or another instance cannot be re-badged by repeating "
+                              "--graph here."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "
@@ -333,8 +336,14 @@ def main(argv: list[str] | None = None) -> int:
         # equality to `--graph` (itself pinned to the URI) closes that half; the
         # report's own `graph` (emitted by `turn_parity_census.census`) closes the
         # other — `load_parity_report` refuses a report that names no graph, so a
-        # foreign or stale census cannot be re-badged by repeating `--graph` here
-        # (review P1 on #11004).
+        # FOREIGN census cannot be re-badged by repeating `--graph` here
+        # (review P1 on #11004; the `--parity-graph` help carries the same rule).
+        # ⚠️ What is NOT closed, here or anywhere on this path: a census of the SAME
+        # graph measured EARLIER. Its `graph` matches by construction, so the name
+        # comparison passes it, and the only staleness guard downstream is
+        # `assess()`'s over-count check (`entry.nodes > resident_total`), which fires
+        # only when the report's population EXCEEDS the resident node count
+        # (review P2 on #11097).
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "

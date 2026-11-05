@@ -712,10 +712,19 @@ def resolve_graph_name(uri: str | None, db_path: str | None,
     ``--graph-name`` still overrides the URI's own name (multi-tenant isolation, #7886),
     and the embedded store selects the graph by name too, defaulting to ``tortoise`` —
     the same default :func:`read_graph_turns` applies.
+
+    An EMPTY ``uri`` is not treated as "no URI": it is the URI arm, and the canonical
+    derivation refuses a degenerate one. Passing the embedded default instead would let
+    a shell accident write a graph name onto an artifact measured on a different store
+    (review P2 on #11097).
     """
     if graph_name is not None:
         return graph_name
-    if uri:
+    if uri is not None:
+        # ⛔ `is not None`, NOT truthiness: an EMPTY value is not "no URI" (the CLI
+        # refuses it by name before reaching here, and a library caller must not get
+        # the embedded default for a target it did not ask for). The canonical
+        # derivation refuses a degenerate URI rather than inventing a name.
         from tortoise.projection import resolve_db_endpoint
 
         return resolve_db_endpoint(uri).graph_name
@@ -2037,6 +2046,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.sample < 0:
         parser.error("--sample must be >= 0")
+
+    # ⛔ THE GRAPH TARGET GETS THE SAME PRESENCE-NOT-TRUTHINESS RULE the record flags
+    # already carry below (review P2 on #11097). `--uri "$TORTOISE_DB_URI"` with the
+    # variable UNSET is a set-but-empty value; `read_graph_turns` tests truthiness, so
+    # the run silently fell through to the EMBEDDED store — and because this tool now
+    # authors the graph identity into the artifact, that accident produced a report
+    # naming `tortoise`, which the cache census accepts for a hosted graph of the same
+    # name. A shell accident therefore licensed a sweep of an instance the census never
+    # touched: the exact `different instance` shape the binding exists to refuse.
+    for flag, value in (("--uri", args.uri), ("--db-path", args.db_path)):
+        if value is not None and not str(value).strip():
+            sys.stderr.write(
+                f"turn_parity_census: {flag} was passed but is EMPTY (a shell "
+                f"expansion like {flag} \"$UNSET_VAR\" yields nothing). An empty "
+                f"flag value is NOT 'no flag': falling through reads the EMBEDDED "
+                f"store instead of the target you named, and the report would then "
+                f"name a graph on an instance this run never touched. Refusing "
+                f"instead.\n")
+            return 1
 
     # ⛔ THE FLAG'S PRESENCE, NOT ITS TRUTHINESS (review P2). `if
     # args.local_record_dir:` treated a set-but-EMPTY value as "no flag", so

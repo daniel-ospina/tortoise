@@ -482,6 +482,37 @@ def test_resolve_graph_name_uses_the_canonical_uri_derivation():
     assert tpc.resolve_graph_name("docker://h:1/", None, None) == "tortoise"
 
 
+def test_resolve_graph_name_never_treats_an_EMPTY_uri_as_no_uri():
+    """`--uri "$UNSET_VAR"` must not resolve to the embedded store's graph name.
+
+    Measured before the fix (review P2 on PR #11097): the empty value fell through the
+    truthiness test to the embedded default, so a run that read NOTHING but the local
+    embedded graph emitted `graph: "tortoise"` — a name the cache census accepts for a
+    hosted graph of the same name. A shell accident licensed a sweep of an instance the
+    census never touched, which is the `different instance` shape the binding exists to
+    refuse.
+    """
+    with pytest.raises(ValueError):
+        tpc.resolve_graph_name("", None, None)
+
+
+@pytest.mark.parametrize("flag", ["--uri", "--db-path"])
+def test_an_EMPTY_graph_target_flag_refuses_by_name(flag, capsys):
+    """An empty flag value is NOT "no flag" — the rule the record flags already state.
+
+    Wrong outcome before the fix: `--uri ""` fell through to the EMBEDDED store, exited
+    0 CLEAN, and (once this tool authors the identity) wrote a report naming a graph on
+    an instance the run never opened (review P2 on #11097).
+    """
+    code = tpc.main([flag, "", "--record-dsn", "postgresql://x/y",
+                     "--org-id", "o", "--graph-id", "g"])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err and flag in err
+    assert "EMBEDDED" in err
+
+
 def test_main_maps_clean_to_zero_and_refused_to_two(monkeypatch, tmp_path):
     nodes = {"s1_t0": _graph_node("s1_t0", "s1")}
     graph = {"nodes": nodes}
