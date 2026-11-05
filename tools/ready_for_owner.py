@@ -2609,13 +2609,11 @@ def collect_probe(
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     try:
         required, probe.required_raw = _read_required_contexts(workdir)
-    except RateLimited:
-        # A 403/429 is surfaced as RateLimited and `_try` RE-RAISES it, but the required
-        # set no longer touches the network: reaching here means an unrelated surface
-        # already rate-limited this run. Keep the re-raise so the caller still prints
-        # GH-RATE-LIMITED rather than a verdict built on a throttled read.
-        raise
     except ReadError as exc:
+        # `_read_required_contexts` touches no `Gh`: it shells `git` and converts every
+        # failure to `ReadError` (a `RateLimited` is a `ReadError` too, so it would land
+        # here). A read that could not be made is NOT evidence about the gates, so the set
+        # is left unread and `check_gates` says so.
         probe.required = None
         probe.required_deferred = None
         probe.required_raw = f"required-set: {exc}"
@@ -2769,11 +2767,13 @@ def report_required_set(workdir: Path, ref: str | None = "origin/main") -> int:
     the wrong subsystem — the body would say the contract is violated while the label
     says I/O failed.
 
-    ⛔ AN EMPTY `--ref` IS REFUSED, not treated as "read the workdir". A caller doing
-    `--required-set --ref "$BRANCH"` with `$BRANCH` unset must not silently get the
-    BRANCH'S OWN set printed at exit 0 — that is the self-attestation the whole module
-    exists to refuse. The workdir read is available only as `ref=None`, which is an
-    in-process diagnostic (tests), not a CLI flag.
+    ⛔ AN EMPTY `--ref` IS REFUSED, and the guard buys a DIAGNOSIS rather than a bypass
+    guard: the fallback to the workdir was already closed by branching on `ref is not
+    None`, so an empty ref would have failed closed through `git rev-parse --verify ''`
+    (`fatal: Needed a single revision`) — an opaque message from the wrong subsystem, on a
+    verb a human runs to learn WHY. The refusal names the problem and the reason instead.
+    The workdir read stays available only as `ref=None`, an in-process diagnostic (tests),
+    which no CLI flag can reach.
     """
     if ref is not None and not ref.strip():
         print(

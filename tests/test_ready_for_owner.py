@@ -2347,12 +2347,16 @@ def test_the_required_set_verb_labels_a_config_error_as_one(
 
 
 def test_the_required_set_verb_refuses_an_empty_ref(capsys: pytest.CaptureFixture[str]) -> None:
-    """⛔ `--required-set --ref "$BRANCH"` with `$BRANCH` UNSET must not fall back to
-    reading the worktree — that would print the BRANCH's own required set at exit 0, which
-    is the self-attestation the module exists to refuse.
+    """An empty `--ref` (an unset `$BRANCH` in `--ref "$BRANCH"`) must be REFUSED with a
+    message that names the problem.
 
-    Revert the `if ref is not None and not ref.strip():` guard and this reds (it exits 0
-    having derived the workdir's set).
+    ⛔ THIS GUARD BUYS A DIAGNOSIS, NOT A BYPASS FIX, and the difference matters for the
+    next reader: the fall-back to the workdir was already closed by branching on `ref is
+    not None`, so without this guard an empty ref fails closed through
+    `git rev-parse --verify ''` -> `fatal: Needed a single revision` — correct, but an
+    opaque message from the wrong subsystem, on the one verb a human runs to learn WHY.
+
+    Revert the guard and this reds on the message assertions (it still exits 2).
     """
     code = rfo.main(["--required-set", "--workdir", str(REPO_ROOT), "--ref", ""])
     out = capsys.readouterr().out

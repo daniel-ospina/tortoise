@@ -201,8 +201,10 @@ def derive_from_config(root: Path) -> RequiredSet:
             f"(known: {list(KNOWN_INJECTION_MODES)})"
         )
 
-    # De-duplicate a name repeated in the SAME list (harmless) but NEVER a name
-    # present in both lists (a config error, raised below).
+    # De-duplicate a name repeated in the SAME list (harmless). A name present in BOTH
+    # lists is mode-dependent, which is why it is not decided here: under `merge` it is a
+    # config error (raised below); under `queue` the overlap is the legal shape and is
+    # folded into entry, so nothing is raised.
     def _uniq(seq: list[str]) -> tuple[str, ...]:
         seen: set[str] = set()
         out: list[str] = []
