@@ -3131,6 +3131,15 @@ async def run_control_plane_call(fn, *, op: str,
     ``reawait_control_plane_call`` keeps the witness rule on purpose (its work
     has already run, and its diagnosis must never be replaced).
 
+    ⛔ #10941: the stamp judges BOTH polarities. The failure polarity was the
+    reported symptom, but the same stalled-loop race with a callable that
+    RETURNED in time left ``future_exc is None``, fell past the callable arm
+    into the bound miss below, and answered 503 ``graph_unavailable`` for a read
+    that had already succeeded — unrecoverable, because ``in_flight`` is None
+    once the future is done, so the one re-await this lane allows has nothing to
+    fetch. Work the callable finished inside its deadline is the verdict,
+    whichever way it finished.
+
     ``cancel_on_timeout`` (#4456) selects the bound-miss semantics. ``True``
     (default) is fail-closed: the bound cancels the submission, so a QUEUED
     callable is dropped. ``False`` is DELIVERY-preserving: the bound abandons
@@ -3169,24 +3178,37 @@ async def run_control_plane_call(fn, *, op: str,
             #   3. `wait_for`'s bound expired first -> fail closed
             future_exc = (future.exception()
                           if future.done() and not future.cancelled() else None)
-            # ⛔ BOTH halves are required (#10941). The witness says the callable
-            # ANSWERED; the stamp says it answered INSIDE the deadline. With the
-            # witness alone, a completed-but-LATE failure fell into this branch
-            # and `raise` re-raised `exc` — the seam's own bound ``TimeoutError``
-            # — DISCARDING the callable's real exception. Nothing downstream can
-            # classify that look-alike: every route's failure arms (503
-            # ``graph_unavailable``, its 500, its degraded body) map the CALLABLE's
-            # error, so a bare ``TimeoutError`` escaped them all as an unlabelled
-            # 500. The stamp also keeps #5840's rule intact — a callable's own
-            # ``TimeoutError`` raised in time still propagates UNCHANGED, because
-            # it is re-raised through ``future_exc`` rather than discarded.
+            # ⛔ BOTH halves are required (#10941), on BOTH polarities. The
+            # witness says the callable ANSWERED; the stamp says it answered
+            # INSIDE the deadline. With the witness alone, a completed-but-LATE
+            # failure fell into this branch and `raise` re-raised `exc` — the
+            # seam's own bound ``TimeoutError`` — DISCARDING the callable's real
+            # exception. Nothing downstream can classify that look-alike: every
+            # route's failure arms (503 ``graph_unavailable``, its 500, its
+            # degraded body) map the CALLABLE's error, so a bare ``TimeoutError``
+            # escaped them all as an unlabelled 500. The stamp also keeps #5840's
+            # rule intact — a callable's own ``TimeoutError`` raised in time
+            # still propagates UNCHANGED, because it is re-raised through
+            # ``future_exc`` rather than discarded.
             answered_in_time = (
-                future_exc is not None
-                and not isinstance(future_exc, _WorkerBacklogFull)
+                future.done()
+                and not future.cancelled()
                 and bool(completed_at)
                 and completed_at[0] - started < bound
             )
-            if answered_in_time:
+            if answered_in_time and future_exc is None:
+                # The MIRROR of the reported symptom: a callable that RETURNED
+                # inside its deadline while the expiry was delivered late. The
+                # witness is None here, so gating ``answered_in_time`` on an
+                # exception (as the first cut did) sent this into the bound miss
+                # below and answered 503 for a read that had already succeeded.
+                # ``in_flight`` is None once the future is done, so nothing
+                # downstream could recover the value — the result IS the verdict,
+                # and #5840's single record is ``completed``.
+                outcome = "completed"
+                return future.result()
+            if (answered_in_time
+                    and not isinstance(future_exc, _WorkerBacklogFull)):
                 # ``future_exc is exc`` is the callable's OWN ``TimeoutError``
                 # arriving unchanged — re-raise it untouched, so the caller sees
                 # exactly what ``fn`` raised (#5840). Any other failure is

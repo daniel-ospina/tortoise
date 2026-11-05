@@ -469,6 +469,35 @@ def test_a_callable_failing_inside_its_bound_keeps_its_own_error(monkeypatch):
     )
 
 
+def test_a_callable_returning_inside_its_bound_keeps_its_result(monkeypatch):
+    """#10941: the clock judges BOTH polarities, not just the failing one.
+
+    The mirror of the two tests above, and the reason the first cut of the fix
+    was still half a fix: it gated ``answered_in_time`` on ``future_exc is not
+    None``, so an in-time SUCCESS whose expiry was delivered late (the SAME
+    stalled-loop race) fell past the callable arm into the bound miss and was
+    answered 503 ``graph_unavailable`` for a read that had already returned.
+    That answer was also unrecoverable — ``in_flight`` is None once the future
+    is done, so the one re-await this lane allows has nothing left to fetch.
+    """
+    _stalled_delivery(monkeypatch)
+
+    def _fast_success():
+        return "the row"
+
+    async def _run():
+        return await monitoring.run_control_plane_call(
+            _fast_success, op="in-time-success", pool="graph", timeout=5.0)
+
+    assert asyncio.run(_run()) == "the row"
+    last = monitoring.control_plane_offload_records()[-1]
+    assert last[0] == "in-time-success", last
+    assert last[2] == "completed", (
+        f"a callable that returned inside its bound recorded {last[2]!r} — the "
+        "work was done in time, so its result is the verdict"
+    )
+
+
 def test_a_cancelled_await_is_recorded_as_cancelled():
     """#5840: cancellation is a terminal state and is recorded as its own.
 
