@@ -2351,6 +2351,49 @@ def test_an_already_classified_non_api_module_still_runs_the_identity_enumeratio
     )
 
 
+def test_the_8447_census_pins_run_on_a_census_doc_only_diff():
+    """#10704 review P2: a census-doc-only edit must run the pins that read it.
+
+    `tests/test_8447_truncation_marker.py::TestTheCensusNamesItsEvidenceHome`
+    binds claims to `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` (§2's
+    citation form and cited symbols, §2a's parked-set summary, §5's
+    mutation-evidence home, the hosted `/v1/points` MARKS row) and — since
+    `160d16d6e` — to the `docs/00_index.md` row that routes a reader into that
+    census. `docs/` is in `NON_PYTHON_PREFIXES` and matches no SOURCE_PATTERNS
+    row, so a **census-doc-only** edit filtered to `changed == []` and took the
+    docs-only early return: the pins never ran on the artifact they guard, so
+    an over-claiming §2a summary could be restored green. Measured pre-fix:
+    `_sel(["docs/architecture/BOUNDED-OPERATION-CONTRACT.md"])` -> `surfaces=[]`,
+    8447 pin ABSENT. Non-vacuity: removing that `CORE_ALSO` entry fails the
+    first arm below (`surfaces == []`).
+
+    The `docs/00_index.md` arm is NOT that same hole and this pin does not buy
+    it: `#9638` (`6429a14b4`) already armed the front door for
+    `test_record_schema_placement.py`, and `160d16d6e` added the index-row pin
+    on top of it (measured: `surfaces=['core']`, 8447 pin selected). The arm is
+    here so the class's SECOND artifact stays armed — a silent deletion of the
+    pre-existing entry would otherwise red only via an unrelated pin, in a
+    different file, whose message names a different reader.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for changed in (
+        "docs/architecture/BOUNDED-OPERATION-CONTRACT.md",
+        "docs/00_index.md",
+    ):
+        assert (root / changed).exists(), f"the census artifact is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (
+            f"{changed} selects {r['surfaces']} — the census pins are registered "
+            "on `core`, so a census-only edit runs them nowhere"
+        )
+        assert "test_8447_truncation_marker.py" in r["test_files"], (
+            f"a census-only edit to {changed} does not run "
+            "tests/test_8447_truncation_marker.py, so its pins cannot fire on "
+            "the change they bind (#10704)"
+        )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
@@ -7064,6 +7107,141 @@ def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
     return out
 
 
+# A row that carries a ci-timing BASIS was measured, so a note that still says it is
+# unmeasured ON CI is falsified by its own tail. The flat-default guard above cannot
+# see this shape, because the claim need not mention the default's VALUE:
+# `test_acl_layer_posture_8617.py` said `unmeasured on CI (flat default, see the entry
+# above)` beside an adopted `2.0 -> 0.1` reading at the 2026-11-02 head — the phrase
+# never says `2.0s`, so `_FLAT_DEFAULT_CLAIM_RE` had nothing to match (#10575 review,
+# P3). `_strip_unmeasured_marker` handles the row-LEADING `# unmeasured` marker only,
+# so a mid-note claim of this shape survives every refresh by design.
+_MEASURED_BASIS_RE = re.compile(
+    r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2} [^—]*?"
+    r"(?:;\s*was |;\s*kept |the reading \()")
+_UNMEASURED_ON_CI_RE = re.compile(
+    r"unmeasured\s+(?:on|in|by)\s+CI\b", re.IGNORECASE)
+
+
+def _durations_rows_claiming_unmeasured_on_ci(text: str):
+    """Rows whose note says they are unmeasured on CI AND cites a CI reading."""
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None:
+            continue
+        tail = m.group("tail")
+        if _UNMEASURED_ON_CI_RE.search(tail) and _MEASURED_BASIS_RE.search(tail):
+            out.append((m.group("key"), tail))
+    return out
+
+
+def test_no_durations_row_claims_it_is_unmeasured_on_ci_beside_a_ci_reading():
+    """#10575 review P3: a falsified claim must go with its clause.
+
+    This is the PR's own thesis one clause over — the refresh ADOPTED the row from a
+    CI census, so "unmeasured on CI" is false, and the note stated both facts in one
+    sentence. Corrected by hand because the writer cannot attribute a mid-note claim
+    to the adoption; this pin is what stops the next one from shipping quietly.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_unmeasured_on_ci(text)
+    assert offenders == [], (
+        "a durations row cites a CI reading AND still claims it is unmeasured on CI "
+        f"— drop the falsified claim: {[(k, t[:90]) for k, t in offenders]}"
+    )
+
+
+def test_the_unmeasured_on_ci_claim_check_is_not_vacuous():
+    """The guard above must bite on the shipped shape and stay quiet on its siblings."""
+    stale = (
+        "  test_a.py: 0.1  # new in #1; unmeasured on CI (flat default, see the entry"
+        " above) — ci-timing junit-census+top-15 2026-11-02 (run 1); was 2.0\n"
+        "  test_b.py: 0.1  # unmeasured on CI — ci-timing junit-census+top-15"
+        " 2026-11-02 (run 1): no declared testcase count for this file (UNKNOWN), so"
+        " the reading cannot prove it saw the whole file; the reading (0.1s) is a"
+        " LOWER bound; kept 0.1\n")
+    legitimate = (
+        # an unmeasured claim with NO CI basis at all is the honest state
+        "  test_c.py: 2.0  # unmeasured on CI — a new file takes the flat default.\n"
+        # a CI basis with no unmeasured claim
+        "  test_d.py: 3.7  # ci-timing junit-census+top-15 2026-11-02 (run 1); was 2.0\n"
+        # prose about the MARKER, not a claim about this row's measurement
+        "  test_e.py: 140.3  # the tail must LEAD with `# unmeasured`\n")
+    assert [k for k, _ in _durations_rows_claiming_unmeasured_on_ci(stale)] == [
+        "test_a.py", "test_b.py"]
+    assert _durations_rows_claiming_unmeasured_on_ci(legitimate) == []
+
+
+# The refresher's `unmeasured` marker is `unmeasured [on|in|by CI]`, and the marker
+# paths used to consume the single WORD — leaving its qualifier behind with nothing
+# to modify: `# by CI — #10046: …` on an ADOPTED row and `# carried forward (not a
+# full-file CI measurement) — by CI — #10025: …` on a HELD one (#10575 review, F2).
+# The stub is only ever in those two positions — at the note's OPENING, or straight
+# after the carried-forward restatement — so the detector names them and cannot
+# confuse a note that merely mentions CI.
+_ORPHANED_UNMEASURED_QUALIFIER_RE = re.compile(
+    r"(?:^[ \t]*#[ \t]*|—[ \t]*)(?:by|on|in)[ \t]+CI\b", re.IGNORECASE)
+
+
+def test_no_durations_row_note_carries_an_orphaned_unmeasured_qualifier():
+    """#10575 review F2: a marker's qualifier must not outlive the marker.
+
+    The writer half of this repair is pinned in `tests/test_ci_timing.py`
+    (`test_the_unmeasured_markers_qualifier_goes_with_the_marker`); this is the
+    MAP half, because two rows shipped the stub in this PR's own diff and the
+    guard added for the neighbouring class could not see either of them (it looks
+    for the phrase the deletion destroys).
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = [(key, note[:120]) for key, note in _durations_row_comments(text)
+                 if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)]
+    assert offenders == [], (
+        "a durations row's note opens with (or is joined to) an `unmeasured`"
+        f" marker's stranded qualifier — restore the marker's subject: {offenders}")
+
+
+def test_the_orphaned_qualifier_check_is_not_vacuous():
+    """The guard above bites on the two shipped shapes and stays quiet beside them."""
+    stale = (
+        "durations:\n"
+        "  test_a.py: 0.1  # by CI — #10046: the record tenant, adopted.\n"
+        "  test_b.py: 3.0  # carried forward (not a full-file CI measurement)"
+        " — by CI — #10025: the graph identity, held.\n")
+    legitimate = (
+        "durations:\n"
+        # the honest marker, with its qualifier consumed by the writer
+        "  test_c.py: 2.0  # unmeasured by CI — a new file takes the flat default.\n"
+        "  test_d.py: 3.0  # carried forward (not a full-file CI measurement)"
+        " — #10025: the marker was restated, not mangled.\n"
+        # prose ABOUT CI that is not a stranded marker qualifier
+        "  test_e.py: 0.4  # the census reads the leg's own junit; CI is the source,"
+        " and by CI timings this file is trivial.\n")
+    assert [key for key, note in _durations_row_comments(stale)
+            if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)] == [
+        "test_a.py", "test_b.py"]
+    assert [key for key, note in _durations_row_comments(legitimate)
+            if _ORPHANED_UNMEASURED_QUALIFIER_RE.search(note)] == []
+
+
+def test_a_cut_note_does_not_leave_a_clause_owned_by_no_reading():
+    """#10575 review F3: `test_10017_cache_tier.py`'s re-base orphaned a clause.
+
+    The adopted-note cut removed the sentence that owned `a property of THIS host
+    …` and re-joined the survivor to the unrelated coverage-floor sentence, so the
+    note asserted that a merge-gating coverage check was "a property of THIS host"
+    — and it opened `It still has to EXIST` with the antecedent cut away. The
+    survivors are BALANCED, so `_balance_cut_parens` cannot see the damage.
+    """
+    note = dict(_durations_row_comments(
+        cs.MANIFEST.read_text(encoding="utf-8")))["test_10017_cache_tier.py"]
+    assert "pool's own size; a property of THIS host" not in note, note
+    # the host-property clause keeps the LOCAL READING it describes in front of it
+    assert "136.25s" in note, note
+    assert note.index("136.25s") < note.index("a property of THIS host"), note
+    # …and the antecedent the cut took (what the row is, and when it arrived) is back
+    assert "#10017" in note and "#3400/#4348" in note, note
+
+
 def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
     """#2876/#8254 (P3): a re-derived value must not keep its old basis note."""
     from tools.ci_selection import load_manifest
@@ -7104,9 +7282,31 @@ def _durations_row_comments(text: str):
     A row's comment is the tail after its value PLUS its indented `#` continuation
     lines. The map's long notes are wrapped across lines, so reading only the row
     line both misses damage that sits on a continuation line and reads a pair that
-    wraps as unbalanced. Continuations are unambiguous here: the block carries no
-    standalone comment line (`durations:` is followed by rows and wrap lines only).
+    wraps as unbalanced.
+
+    Continuations are INDENTED lines. That bound is not cosmetic: this block also
+    carries COLUMN-0 prose between rows — 186 lines at the 2026-11-02 head, e.g.
+    the `# #3395: per-file CI wall time …` method note — and attaching it to the
+    row above made one row's note 122 lines of the map's own header, so the guard
+    below judged that prose together with the note (and a note joined with
+    unrelated prose can hide, or invent, an imbalance).
+
+    The join STOPS at a block whose first line OPENS a note of its own
+    (`tools.ci_timing._starts_a_new_note`). Indentation alone cannot answer "which
+    row does this block document" — §3.2.3.3 of the YAML spec says comments are "a
+    presentation detail … not associated with a particular node" — and this map's
+    dominant convention is the OPPOSITE of "the block continues the row above": the
+    block PRECEDES the row it documents (almost every such block opens a new note —
+    re-derive the ratio at the head you are reading; it moves with the map). Joining
+    anyway attributes a neighbour's prose to the wrong key,
+    which matters because these guards read CLAIMS off the joined text — a stale
+    case count or a `WATCHDOG_FLOOR_MIN` claim from the block below then lands on a
+    row whose value it does not describe. The writer bounds its span identically
+    (`tools/ci_timing._row_continuation_lines`), which is the property that keeps a
+    cut from orphaning a parenthesis this guard is counting.
     """
+    from tools.ci_timing import _starts_a_new_note
+
     out = []
     lines = text.splitlines()
     try:
@@ -7123,7 +7323,10 @@ def _durations_row_comments(text: str):
             out.append(current)
             continue
         stripped = lines[i].strip()
-        if current is not None and stripped.startswith("#"):
+        if current is not None and stripped.startswith("#") and lines[i][:1].isspace():
+            if len(current[1]) == 1 and _starts_a_new_note(lines[i]):
+                current = None
+                continue
             current[1].append(stripped.lstrip("#"))
         elif stripped:
             current = None
@@ -7175,6 +7378,35 @@ def test_the_paren_guard_is_not_vacuous():
     assert [k for k, _ in _durations_rows_with_unbalanced_parens(stale)] == [
         "test_a.py", "test_b.py"]
     assert _durations_rows_with_unbalanced_parens(legitimate) == []
+
+
+def test_the_paren_guard_reads_only_a_rows_OWN_note():
+    """A row's note is its indented wrap lines — not the block's column-0 prose.
+
+    The `durations:` block carries COLUMN-0 prose between rows (186 lines at the
+    2026-11-02 head — the `# #3395: per-file CI wall time …` method note). Attaching
+    that prose to the row above it made `test_spa_dependency_overrides.py`'s "note"
+    122 lines of the map's own header. A guard that judges a note together with
+    unrelated prose can both HIDE an imbalance (prose closing a pair the note
+    opened) and INVENT one (prose opening a pair the note never closes), which is
+    why the span is bounded the same way the writer bounds it
+    (`tools/ci_timing._row_continuation_lines`).
+    """
+    text = (
+        "durations:\n"
+        "  test_a.py: 4.3  # a note that OPENS a pair (and never closes it\n"
+        "# column-0 prose, NOT this row's note: it closes a pair) nobody opened\n"
+        "  test_b.py: 7.4  # a balanced row (fine).\n"
+        "      # its continuation line carries the closer (so it stays balanced).\n"
+        "surfaces: []\n")
+    joined = dict(_durations_row_comments(text))
+    assert "column-0 prose" not in joined["test_a.py"], joined["test_a.py"]
+    assert "carries the closer" in joined["test_b.py"]
+    # …so the opener on test_a.py is judged on its own, and is caught.
+    assert [k for k, _ in _durations_rows_with_unbalanced_parens(text)] == [
+        "test_a.py"]
+    # The prose alone is balanced, so the pre-fix join would have cleared it.
+    assert joined["test_a.py"].count("(") != joined["test_a.py"].count(")")
 
 
 # ── the re-derivable CASE COUNT a row states (#10356 review P3-1) ─────────────
@@ -7264,6 +7496,143 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
+
+
+def test_a_note_block_that_opens_of_its_own_is_never_read_as_the_row_aboves(
+        tmp_path):
+    """A block that OPENS a note documents another row — the reader must not join it.
+
+    This map's dominant convention is the block that PRECEDES the row it documents
+    (in `config/ci-surfaces.yml` the `355.0 IS A DELIBERATE CAP … #9172` block lies
+    directly under `test_work_claim.py` and documents `test_lane_stash.py`). YAML
+    supplies no association — §3.2.3.3: comments are "a presentation detail … not
+    associated with a particular node" — so the reader has to decide, and joining by
+    indentation alone attributes a neighbour's CLAIM to the wrong key.
+
+    Non-vacuity (measured pre-fix): the join runs to the end of the indented block,
+    so `test_above.py`'s note inherits the `grep -c '^def test_'` claim written for
+    the row BELOW and `_durations_rows_with_a_stale_case_count` reports
+    `('test_above.py', 2, 3)` — a FALSE RED against a row whose own note says
+    nothing about a count, in a required leg.
+    """
+    (tmp_path / "test_above.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n\n\n"
+        "def test_c():\n    pass\n", encoding="utf-8")
+    text = (
+        "durations:\n"
+        "  test_above.py: 3.8  # ci-timing junit-census+top-15 2026-11-02 "
+        "(run 41375596528); was 4.0\n"
+        "  # #8051: LOCAL readings on this fleet-loaded host — 366.4s, 422.9s,\n"
+        "  # 216.6s, and #10356: 2 cases (`grep -c '^def test_'` -> 2; pytest\n"
+        "  # collects 2).\n"
+        "  test_below.py: 25.4  # ci-timing junit-census+top-15 2026-11-02 "
+        "(run 41375596528); was 355.0\n"
+        "  # #5612: 12.2 is the HIGHER of two local readings of this file.\n"
+        "surfaces: []\n")
+    joined = dict(_durations_row_comments(text))
+    assert "LOCAL readings" not in joined["test_above.py"], joined["test_above.py"]
+    assert "grep -c" not in joined["test_above.py"], joined["test_above.py"]
+    assert _durations_rows_with_a_stale_case_count(text, tmp_path) == []
+    # …and the mid-sentence wrap — the one shape that IS a continuation — still
+    # joins, so the paren guard keeps seeing a pair that wraps across two lines.
+    wrapped = (
+        "durations:\n"
+        "  test_wrapped.py: 9.5  # it opens here (and the closer sits on the\n"
+        "  # continuation line, so the pair is balanced together).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_unbalanced_parens(wrapped) == []
+    assert "continuation line" in dict(_durations_row_comments(wrapped))[
+        "test_wrapped.py"]
+
+
+def test_the_cap_block_is_not_read_as_the_row_aboves_note():
+    """The REAL `355.0 IS A DELIBERATE CAP` block belongs to the row BELOW it.
+
+    The writer's span rule and the reader's are one rule (see
+    `_durations_row_comments`); this pins the committed map against the shape that
+    rule exists for, so a re-flow of the block cannot quietly re-attach it to
+    `test_work_claim.py` (weight 3.8) and leave `test_lane_stash.py` — the row the
+    cap governs — with no note at all (#10575 review, P2).
+    """
+    from tools.ci_timing import _row_continuation_lines
+
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    # Scoped to the `durations:` BLOCK, not the whole file: the block carries the
+    # same keys once more in `durations_floors` above it (a row can be declared a
+    # floor), so a whole-file scan finds the DECLARATION rather than the row and
+    # this pin went red on a `durations_floors` line instead of measuring anything
+    # (#10575 review).
+    block_start = lines.index("durations:")
+    above = next(i for i, ln in enumerate(lines)
+                 if i > block_start and ln.startswith("  test_work_claim.py:"))
+    below = next(i for i, ln in enumerate(lines)
+                 if i > block_start and ln.startswith("  test_lane_stash.py:"))
+    assert above < below, (above, below)
+    block = lines[above + 1:below]
+    assert any("355.0 IS A DELIBERATE CAP" in ln for ln in block), block[:2]
+    assert all(ln[:1].isspace() and ln.strip().startswith("#") for ln in block), (
+        "the cap block must stay an INDENTED comment run beside its row: "
+        f"{[ln[:60] for ln in block][:2]}")
+    # The WRITER does not claim it…
+    assert _row_continuation_lines(lines, above) == [], (
+        "the cap block is being claimed as test_work_claim.py's note")
+    # …and the READER does not attribute it upward either, so no claim it carries is
+    # judged against `test_work_claim.py`'s 3.8.
+    assert "355.0 IS A DELIBERATE CAP" not in dict(_durations_row_comments(
+        text))["test_work_claim.py"]
+
+
+def test_the_committed_map_still_declares_its_three_caps():
+    """DELETING the `durations_floors` block must red — and this is where that runs.
+
+    `_declared_floors` treats an ABSENT `durations_floors` key as legal, and it has
+    to: every fixture manifest that carries no caps must keep its output. The cost
+    of that leniency is that the third defeat direction of the #10575 P1 — removing
+    the block outright — is invisible to every reader and every gate. All three
+    then see `{}`, no cap binds, and the next `--refresh-durations` (the scheduled
+    sweep, unreviewed) adopts the discounted reading this mechanism exists to stop:
+    `test_lane_stash.py` 355.0 -> 25.4.
+
+    WHY THIS PIN LIVES HERE, and not beside the mechanism in `test_ci_timing.py`.
+    `tests/test_ci_timing.py` already asserts `floors` is non-empty — but a PR that
+    edits ONLY `config/ci-surfaces.yml` does not select it. Measured with the map's
+    own selector (`ci_selection.py --changed-files config/ci-surfaces.yml`):
+    `full=False`, `surfaces=['core']`, and `test_ci_timing.py` is in NEITHER
+    `test_files` NOR `slow_selected` — while `test_ci_selection.py` IS in
+    `slow_selected`, in every diff shape that touches the map (map alone, map+code,
+    map+docs, map+`.gitattributes`). So the map's only pin on its own caps is this
+    file's, and a gate whose pin cannot be selected is not a gate (#10704 review).
+
+    DELETING the block was measured, not assumed: with it removed, `ci_manifest.py`,
+    `registry_integrity.py`, `ci_selection.py --integrity` and
+    `_manifest_contract_issues()` all stay green and `_declared_floors()` returns
+    `{}`. Lowering a cap IS caught (`ci_manifest` reds rc 1 with the CAP
+    diagnostic), so only the deletion face was open.
+
+    Scoped to the three KNOWN caps as a SUBSET: adding a fourth cap must not red
+    this, because deciding a cap is a #9172 CI-budget decision and an ordinary PR
+    may legitimately make one. Dropping one, or dropping them all, must.
+    """
+    from tools.ci_timing import _declared_floors
+
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    floors = _declared_floors(text)
+    required = {
+        "test_lane_stash.py": 355.0,
+        "test_calibration.py": 355.0,
+        "eval/write_path/test_write_path_operator_lane.py": 355.0,
+    }
+    missing = sorted(set(required) - set(floors))
+    assert not missing, (
+        f"the committed map no longer declares {missing} in `durations_floors` "
+        f"(it declares {sorted(floors) or 'NOTHING'}) — an absent block is legal to "
+        "`_declared_floors` by design, so every gate stays green while no cap binds "
+        "and the next sweep discounts the row (#10575 P1). Restore the declaration.")
+    for name, value in required.items():
+        assert floors[name].value == value, (name, floors[name])
+        # A CAP, not a FLOOR: the declared value is the weight in BOTH directions.
+        assert floors[name].pinned is True, name
 
 
 def _durations_rows_stating_a_stale_watchdog_floor(text: str, floor: int):
@@ -7380,8 +7749,21 @@ _ROW_LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
 
 
 def _durations_row_tail(key: str) -> str:
-    """The tail comment of a `durations:` row, or "" when the row is absent."""
-    for line in cs.MANIFEST.read_text(encoding="utf-8").splitlines():
+    """The tail comment of a `durations:` row, or "" when the row is absent.
+
+    Scoped to the `durations:` block, NOT the whole file: a floored/capped key is
+    also declared in `durations_floors` ABOVE the block, and a whole-file scan takes
+    that declaration for the row — returning its (empty) tail while the real row
+    carries the note the caller is asking about (#10575 delta review, P3).
+    """
+    lines = cs.MANIFEST.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
+    except StopIteration:  # pragma: no cover — the map always declares the block
+        return ""
+    end = next((i for i in range(start + 1, len(lines))
+                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
+    for line in lines[start + 1:end]:
         m = _DURATIONS_ROW_RE.match(line)
         if m is not None and m.group("key") == key:
             return m.group("tail")
