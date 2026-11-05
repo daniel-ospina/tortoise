@@ -113,6 +113,11 @@ from .session_projection import SESSION_READ_FIELDS  # noqa: F401
 # module as the projection it is a field of, so the SDK read and the hosted
 # reads cannot disagree about one session's status.
 from .session_projection import session_extraction_status
+# #10852 P2: `_SESSION_SOURCE_SUMMARY_PREFIX` (the session `:Source` display
+# prefix) is IMPORTED, not declared here: the record→cache door reads the same
+# spelling and may not import this module, so it lives in the dependency-free
+# leaf module both sides may import (`session_projection`).
+from .session_projection import SESSION_SOURCE_SUMMARY_PREFIX as _SESSION_SOURCE_SUMMARY_PREFIX
 from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
                         is_turn_echo_row, resolve_pool_size)
 from . import monitoring
@@ -4106,8 +4111,13 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 #: is function words) or a member of ``_SESSION_SOURCE_STOPWORDS``. Measured on a
 #: two-session graph (one about a migration plan, one about a fencing budget):
 #: the query "session capture topics" returned BOTH, on the prefix alone.
-_SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
-
+#:
+#: ⛔ THE VALUE IS DECLARED ELSEWHERE (#10852 P2). `session_projection.
+#: SESSION_SOURCE_SUMMARY_PREFIX` holds it, because the record→cache door
+#: (`cache_projection`) must read the same spelling and may not import this
+#: module — see that constant for the whole rule. This name stays as the
+#: capture's own binding of it (and as the name the tests and the comments here
+#: use), never a second literal.
 
 #: #10000: the transcript's own FRAMING labels — the ``Speaker: text`` prefix
 #: ``_session_llm_transcript`` writes for every turn. They are not vocabulary the

@@ -528,23 +528,96 @@ def test_the_display_summary_stays_declined_and_the_residual_is_named():
     """The residual, pinned so it cannot become an accident (#10965).
 
     `_searchText` is restored because its value is mechanically decidable from the
-    row (`_search_text == ", ".join(topics)`, what the capture writes). `summary`
-    is the same lexicon BEHIND a display prefix that lives in the capture
-    (`_SESSION_SOURCE_SUMMARY_PREFIX`), and this module cannot re-derive it —
-    importing the capture from the projection is a layering inversion — so the
-    prose/descriptor distinction for `summary` is NOT mechanically decidable here
-    and the column stays declined. Cost, stated rather than implied: a
-    record-restored session `:Source` carries no `summary` while a live one does.
-    Narrowing it needs the prefix (or the derivation) in a leaf module both sides
-    can import — a change with its own decision, not a guard relaxation.
+    row (`_search_text == ", ".join(topics)` AND `summary` carries the post-#10000
+    display prefix — both terms, see `_episodic_source_search_text_is_the_lexicon`
+    and the P2 leg below). `summary` — the descriptor itself — is NOT restored:
+    the door exists for the field the FTS index is declared on (#3518), and
+    re-materialising the display carrier is a change with its own decision. Cost,
+    stated rather than implied: a record-restored session `:Source` carries no
+    `summary` while a live one does.
+
+    ⭐ The prefix is no longer out of reach (#10852 P2): it lives in
+    `session_projection.SESSION_SOURCE_SUMMARY_PREFIX`, the dependency-free leaf
+    module both sides import, and it is the provenance TEST's second term. So the
+    residual is now a scope choice, and this leg keeps it one — the recognisability
+    that made the test sound must not quietly become a projection.
     """
     node = node_from_row("Source", _post_10000_session_row())
 
     assert SOURCE_SEARCH_TEXT_FIELD in node.props
     assert "summary" not in node.props, (
-        "`summary` was restored without a way to tell the descriptor from the "
-        "prose — that is not a relaxation this guard may take on its own"
+        "`summary` was restored without a decision about the display carrier — "
+        "that is not a relaxation this guard may take on its own"
     )
+
+
+def test_a_list_shaped_legacy_row_is_not_mistaken_for_the_lexicon():
+    """#10852 review P2 — the join ALONE is not proof of provenance.
+
+    The pre-#10000 capture derived `summary` from the transcript's first
+    substantive LINE and `topics` from the same words in first-encounter order
+    (`Counter.most_common`), so a session whose first line was a comma-space list
+    wrote `summary == ", ".join(topics)` EXACTLY:
+
+        first line  : "milk, eggs, bread, cheese, apples, oranges"
+        summary     : the same string            (legacy: the utterance)
+        topics      : ["milk", ..., "oranges"]   (first-encounter order)
+
+    A join-only predicate calls that "the post-#10000 derivation" and
+    re-materialises the session's own sentence as `_searchText` — the §9.1/D1
+    datum on the FTS-indexed field, with nothing red. So the row's DISPLAY column
+    must carry the post-#10000 prefix too, and this leg is the one that reds if
+    that term is dropped (measured pre-fix: it did).
+    """
+    listing = "milk, eggs, bread, cheese, apples, oranges"
+    row = _captured_session_row(
+        summary=listing,
+        _search_text=listing,
+        topics=["milk", "eggs", "bread", "cheese", "apples", "oranges"],
+    )
+    # The trap is REAL: this legacy row satisfies the join term exactly.
+    assert row["_search_text"] == ", ".join(row["topics"])
+    assert row["summary"] == row["_search_text"]
+
+    node = node_from_row("Source", row)
+    assert SOURCE_SEARCH_TEXT_FIELD not in node.props, (
+        "a pre-#10000 row whose first line happened to be a comma-separated list "
+        "was re-materialised as the session's indexed text — the list shape "
+        "satisfies `_search_text == \", \".join(topics)` and so the display "
+        "column has to carry the post-#10000 prefix as well"
+    )
+
+
+def test_the_prefix_is_the_second_term_of_the_provenance_test():
+    """The keep is not decided by the join alone — the prefix term is load-bearing.
+
+    Same `_searchText`, same `topics`, same identity; only `summary` differs. Each
+    of these is a row where the join holds and the DISPLAY column does not carry
+    the post-#10000 prefix, so no derivation is proven and the field stays
+    declined (fail-closed). Without these the guard could be satisfied by the
+    join alone again and #10000's index leak would return silently.
+    """
+    row = _post_10000_session_row()
+    joined = row["_search_text"]
+    summary = row["summary"]
+    assert isinstance(joined, str) and isinstance(summary, str)
+
+    for why, unproven_summary in (
+        ("the bare join — exactly what a list-shaped legacy row holds", joined),
+        ("the prefix without the join", summary[: len(summary) - len(joined)]),
+        ("a prose sentence beside the lexicon", "We decided the rebuild is on Fridays."),
+        ("absent", None),
+    ):
+        node = node_from_row("Source",
+                             _post_10000_session_row(summary=unproven_summary))
+        assert SOURCE_SEARCH_TEXT_FIELD not in node.props, (
+            f"`summary` held {why!r}, which does not prove the post-#10000 "
+            "derivation, and `_searchText` was re-materialised anyway"
+        )
+
+    # And the control: with BOTH terms present the field IS restored, so the
+    # three declines above are a discrimination and not the guard being off.
+    assert SOURCE_SEARCH_TEXT_FIELD in node_from_row("Source", row).props
 
 
 def test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row():

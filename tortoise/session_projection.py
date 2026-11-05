@@ -17,6 +17,13 @@ can import it without pulling the API stack. `tortoise/sdk.py` re-exports
 `SESSION_READ_FIELDS` from here, so the SDK-side declaration that
 `tests/test_hosted_api.py` binds is this one — not a parallel copy.
 
+⭐ The same rule covers ONE derived string, not only the read field list:
+`SESSION_SOURCE_SUMMARY_PREFIX` (below). The capture WRITES it and the
+record→cache door CHECKS it, and neither may import the other (the capture is
+`tortoise/sdk.py`; the door is `tortoise/cache_projection.py`), so the spelling
+lives here — one copy, importable by both. It is not a read field; it is here
+for the same reason the field list is: two consumers, one declaration.
+
 #5498 note on the field that caused the crash: `turns` is a COUNT and
 `turn_points` is the LIST. The old `session view` read `turns` as if it were
 the list and called `len()` on an int. Do not "simplify" that distinction back.
@@ -168,6 +175,28 @@ def session_extraction_status(
         "extractor": capture_extractor,
         "outcome_known": outcome_known,
     }
+
+#: #10000: the DISPLAY prefix on a session `:Source`'s `summary` — the ONE string
+#: that separates the two derivations of the pair, so the record→cache door can
+#: decide a row's PROVENANCE mechanically instead of guessing at the value's
+#: shape (`cache_projection._episodic_source_search_text_is_the_lexicon`).
+#:
+#: ⛔ WHY IT LIVES HERE AND NOT IN THE CAPTURE. The capture is the writer
+#: (`sdk._session_source_metadata` returns `PREFIX + ", ".join(topics)`) and the
+#: door is the checker (`cache_projection`, imported by `record_serve`,
+#: `record_restore` and `record_reconcile`). The door importing the capture is
+#: the layering inversion that module's table refuses (#10965), and a SECOND
+#: copy of the literal is the drift class this module exists to make
+#: unrepresentable. One spelling, both sides — sdk re-exports it under its
+#: historical private name, so no caller's spelling changed.
+#:
+#: It is a LABEL, not vocabulary, and must never reach `_searchText`: the Source
+#: retrieval leg OR-unions query terms, so a constant prefix in the index makes
+#: every captured session match any source query containing "session",
+#: "capture" or "topics" (none of the three is a RediSearch stopword).
+#: #10852 P2: measured on a two-session graph — the query "session capture
+#: topics" returned BOTH, on the prefix alone.
+SESSION_SOURCE_SUMMARY_PREFIX = "session capture topics: "
 
 #: What `GET /v1/sessions/{id}` serves: the list projection plus the detail-only
 #: fields (the turn/point lists and the session source).

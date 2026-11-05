@@ -2,17 +2,19 @@
 
 THE RULE. `docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 (D1, owner ruling
 2026-09-23) puts the transcript in the RECORD: *"not in the graph, not a
-`Document` node, not a `Point`"*. #10000's item 2 measured the route that is
-still open — `:Source.summary` holds the session's first substantive utterance,
-i.e. raw turn text, written by `sdk._session_source_metadata` — and recorded it
-as *"the second prose passthrough onto a node"* (capstone artifact
+`Document` node, not a `Point`"*. #10000's item 2 measured the route that was
+STILL OPEN AT THAT STAMP — `:Source.summary` HELD the session's first
+substantive utterance, i.e. raw turn text, written by
+`sdk._session_source_metadata` — and recorded it as *"the second prose
+passthrough onto a node"* (capstone artifact
 `docs/verify/2026-10-31-record-capstone.md` §4 item 2, and the same reading in
-`docs/verify/2026-10-26-record-capstone.md`).
+`docs/verify/2026-10-26-record-capstone.md`). This file is the guard that closed
+it.
 
-WHY IT IS WORTH A TEST RATHER THAN A NOTE. The same string is the Source's
-`_searchText` (#3518), so the leak is on a field the FTS index is declared on:
-a session's own words are duplicated into the graph AND into the index that
-serves `tortoise_fts_query(entity_type='source')`. Redaction (#4911) does not
+WHY IT WAS WORTH A TEST RATHER THAN A NOTE. That same string WAS the Source's
+`_searchText` (#3518), so the leak was on a field the FTS index is declared on:
+a session's own words were duplicated into the graph AND into the index that
+serves `tortoise_fts_query(entity_type='source')`. Redaction (#4911) did not
 close it — a scrubbed sentence is still the session's sentence.
 
 THE ASSERTION IS A GRAPH-WIDE SCAN, not a property read: the defect is "this

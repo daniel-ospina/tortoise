@@ -87,6 +87,8 @@ CLEARING_ROUTES = ("NEW `session_id`", "FAILED capture", "projection CREATES")
 REQUIRED_PINNED_LEGS = (
     "test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on",
     "test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name",
+    "test_a_list_shaped_legacy_row_is_not_mistaken_for_the_lexicon",
+    "test_the_prefix_is_the_second_term_of_the_provenance_test",
     "test_the_display_summary_stays_declined_and_the_residual_is_named",
     "test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row",
 )
@@ -162,7 +164,7 @@ def test_the_doc_does_not_claim_a_re_capture_heals_a_pre_fix_node():
             "`_materialize_session_source` — whose only caller sits behind the "
             "fresh-capture gate — never runs and the stale pair survives "
             "(measured: `#10852` review, P1). Mirror "
-            "`cache_projection.py`'s docstring instead.\n\n{costs}")
+            f"`cache_projection.py`'s docstring instead.\n\n{costs}")
 
 
 def test_the_doc_states_the_mechanism_and_the_routes_that_do_clear_the_pair():

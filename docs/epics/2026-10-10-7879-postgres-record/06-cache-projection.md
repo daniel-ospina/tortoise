@@ -205,11 +205,20 @@ from the SAME list in one statement. So on a post-#10000 row `_search_text` is n
 prose — it is the lexicon, and it is the only field the Source FTS index is
 declared on, which makes dropping it an UN-INDEXING of every restored session on
 the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
-projected when the row proves the derivation (exact equality with
-`", ".join(topics)` — never a shape test), and declined otherwise. `summary` stays
-declined on every row: it is the same lexicon behind `_SESSION_SOURCE_SUMMARY_PREFIX`,
-the prefix lives in the capture, and without it the descriptor is not mechanically
-separable from a prose sentence here — a stated residual, not an oversight.
+projected when the row proves the derivation — exact equality with
+`", ".join(topics)` **and** the post-#10000 display prefix on `summary`, never a
+shape test — and declined otherwise. ⛔ The join ALONE is not proof: the
+pre-#10000 capture wrote `summary` from the transcript's first substantive line
+and `topics` from the same words in first-encounter order, so a session whose
+first line was a comma-space list (`"milk, eggs, bread, cheese, apples,
+oranges"`) satisfies the join exactly, and a join-only predicate re-indexes the
+session's own sentence. The second term is what separates the two derivations.
+`summary` itself stays declined on every row: it is the same lexicon behind
+`SESSION_SOURCE_SUMMARY_PREFIX`, and re-materialising the display carrier is a
+change with its own decision — a stated residual, not an oversight. (The prefix
+is no longer out of reach: it lives in the dependency-free leaf module
+`session_projection`, imported by both the capture and this door, so the residual
+is a SCOPE choice rather than the layering impossibility it used to be.)
 
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
@@ -291,13 +300,19 @@ other), the label gate, the call-time resolution of the placement spellings, and
 each of the three flags re-added — every one reds at least the leg that names it,
 plus the row/node agreement shape that exists to catch exactly that drift.
 
-and, in the same file, the FOUR `#10965` arms of the per-row decision:
+and, in the same file, the SIX `#10965` arms of the per-row decision:
 `test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on` (the
 restored `_searchText` is the lexicon, and the index really is declared on it);
 `test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name`
 (four near-miss shapes that only LOOK like the derivation are still dropped, plus
-the legacy control); `test_the_display_summary_stays_declined_and_the_residual_is_named`
-(the stated residual, pinned so it cannot become an accident); and
+the legacy control); `test_a_list_shaped_legacy_row_is_not_mistaken_for_the_lexicon`
+(the join is NECESSARY and not sufficient — a pre-#10000 row whose first line was
+a comma-space list satisfies it exactly, so the display prefix is the second
+term); `test_the_prefix_is_the_second_term_of_the_provenance_test` (the prefix
+term is load-bearing: the bare join, the prefix alone, a prose sentence beside
+the lexicon and an absent `summary` all stay declined, and the two-term control
+still projects); `test_the_display_summary_stays_declined_and_the_residual_is_named`
+(the stated residual, pinned so recognisability never becomes a projection); and
 `test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row` (a restored
 `_searchText` that drifts from the record REDS instead of hiding in `graph_only`).
 

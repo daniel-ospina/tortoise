@@ -158,6 +158,7 @@ from .residency import (
     declare_residency,
 )
 from .security import validate_rel_type
+from .session_projection import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
@@ -1228,19 +1229,23 @@ def _scalar(value: Any) -> Any:
 #:
 #: ⛔ SO THE DROP IS DECIDED PER ROW, FROM THE ROW — and the test is EXACT, never a
 #: shape heuristic: the value IS `", ".join(topics)`, the join the capture computes
-#: from the very column that survives. A prose sentence is not that string; a
-#: prefix/suffix/"looks like a word list" test would re-index a legacy sentence
-#: whose opening words happened to match. See
+#: from the very column that survives, AND the display column carries the
+#: post-#10000 prefix — because the join ALONE is also what a pre-#10000 row holds
+#: when its transcript's first line was a comma-space list (#10852 P2). A prefix/
+#: suffix/"looks like a word list" test would re-index a legacy sentence whose
+#: opening words happened to match. See
 #: :func:`_episodic_source_search_text_is_the_lexicon`.
 #:
 #: ⛔ `summary` STAYS DECLINED ON EVERY ROW, and that is the stated residual
 #: (#10965), not an oversight: it is the same lexicon BEHIND
-#: `_SESSION_SOURCE_SUMMARY_PREFIX`, that prefix lives in the capture, and
-#: re-deriving it here would mean the projection importing the capture (a layering
-#: inversion). Without the prefix the descriptor is not mechanically separable
-#: from a prose sentence, so this column stays fail-closed. Cost, named: a
-#: record-restored (or served) session `:Source` carries no `summary` while a live
-#: one does.
+#: `SESSION_SOURCE_SUMMARY_PREFIX` (`session_projection`, imported above). That
+#: prefix is now readable here — it is the second term of the provenance test, so
+#: the descriptor is no longer indistinguishable from a prose sentence and this
+#: is a SCOPE choice rather than an impossibility: the door exists for the field
+#: the FTS index is declared on (`_searchText`, #3518), and re-materialising the
+#: display carrier is a change with its own decision, not a side effect of making
+#: the provenance test sound. Cost, named: a record-restored (or served) session
+#: `:Source` carries no `summary` while a live one does.
 #:
 #: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word
 #: lexicon (its most frequent content words), not a transcript slice, and it
@@ -1373,22 +1378,40 @@ def _episodic_source_search_text_is_the_lexicon(row: Mapping[str, Any]) -> bool:
     `:Source`'s pair, asked of the ROW rather than of the build that wrote it:
     #10000's capture writes `_searchText = _source_search_text(topics=topics)`, and
     `_source_search_text` renders a topic list as `", ".join(topics)`, storing
-    that same `topics` in the same statement. So the derivation is present iff the
-    stored text IS the join — compared as a STRING, exactly.
+    that same `topics` in the same statement. So the join is the derivation's own
+    string — but the join ALONE is necessary, not sufficient (see the prefix
+    requirement below, #10852 P2).
+
+    ⛔ TWO TERMS, AND THE SECOND ONE IS LOAD-BEARING: the DISPLAY column must
+    carry the post-#10000 prefix as well. `summary == ", ".join(topics)` is ALSO
+    the shape a pre-#10000 row has when its transcript's first substantive line
+    was a comma-space list — the old capture derived `summary` from that line and
+    `topics` from the same words in first-encounter order, so
+    `"milk, eggs, bread, cheese, apples, oranges"` satisfies the join EXACTLY and
+    a join-only test re-materialises the session's own sentence as `_searchText`:
+    the §9.1/D1 datum, on the FTS-indexed field, with nothing red. The prefix is
+    what the two derivations differ by — post-#10000 writes
+    `summary = PREFIX + join(topics)`, pre-#10000 wrote `summary = join(topics)`
+    (it passed its summary AS the search text) — so requiring it is strictly
+    stronger and costs no knowledge this module cannot legally import
+    (`session_projection.SESSION_SOURCE_SUMMARY_PREFIX`, the leaf module both
+    sides read).
 
     ⛔ EXACT EQUALITY, never a shape test. `startswith`, "contains no sentence",
     "few words", or a case-folded compare would accept a legacy row's sentence
     whose opening words happen to match the join, and re-index it — the §9.1/D1
-    prose this module declines, smuggled back by a heuristic. The near-miss shapes
-    are pinned in `tests/test_10853_session_source_prose.py`.
+    prose this module declines, smuggled back by a heuristic. The near-miss
+    shapes, AND the list-shaped legacy row that defeats the join alone, are
+    pinned in `tests/test_10853_session_source_prose.py`.
 
     ⛔ FAIL-CLOSED ON EVERY UNCERTAIN SHAPE. A `topics` column that is not a list
-    of non-empty strings (NULL, a JSON string, a list with a hole, empty) cannot
-    prove the derivation, so the row is treated as legacy and the pair stays
-    declined. The cost of a false negative is a session that stays unfindable on
-    the recovery door until it is re-captured (visible, and named at the table);
-    the cost of a false POSITIVE is turn prose on a graph node, which nothing
-    reds — so the polarity is not a preference.
+    of non-empty strings (NULL, a JSON string, a list with a hole, empty), a
+    `summary` that is missing/NULL/not the prefixed descriptor, or a `_search_text`
+    that is not the join — none of these can prove the derivation, so the row is
+    treated as legacy and the pair stays declined. The cost of a false negative is
+    a session that stays unfindable on the recovery door until it is re-captured
+    (visible, and named at the table); the cost of a false POSITIVE is turn prose
+    on a graph node, which nothing reds — so the polarity is not a preference.
     """
     search_text = row.get("_search_text")
     if not isinstance(search_text, str) or not search_text:
@@ -1399,7 +1422,11 @@ def _episodic_source_search_text_is_the_lexicon(row: Mapping[str, Any]) -> bool:
     tokens = [t for t in topics if isinstance(t, str) and t]
     if len(tokens) != len(topics):
         return False
-    return search_text == ", ".join(tokens)
+    if search_text != ", ".join(tokens):
+        return False
+    summary = row.get("summary")
+    return (isinstance(summary, str)
+            and summary == SESSION_SOURCE_SUMMARY_PREFIX + search_text)
 
 
 def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
@@ -1462,12 +1489,12 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
     episodic_source = table == "source" and _is_episodic_source_row(row)
     # ⛔ PROVENANCE, PER ROW (#10965) — never the column's NAME. On a post-#10000
-    # row `_search_text` is the topic lexicon (exactly `", ".join(topics)`), not
-    # prose, and it is the ONLY field the Source FTS index is declared on, so
-    # dropping it un-indexes a restored session. `summary` is NOT relaxed: the
-    # display prefix it carries is not re-derivable in this module, so the
-    # descriptor stays indistinguishable from a prose sentence here (the table
-    # above states that residual).
+    # row `_search_text` is the topic lexicon (exactly `", ".join(topics)` AND the
+    # display column carries the post-#10000 prefix), not prose, and it is the
+    # ONLY field the Source FTS index is declared on, so dropping it un-indexes a
+    # restored session. `summary` is NOT relaxed: the descriptor stays out of the
+    # restored node — a scope choice, since the prefix IS readable here now (it is
+    # the test's second term). The table above states that residual.
     prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS
     if episodic_source and _episodic_source_search_text_is_the_lexicon(row):
         prose_columns = prose_columns - {"_search_text"}
