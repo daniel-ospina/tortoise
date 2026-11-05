@@ -133,6 +133,12 @@ Seams
              GH_CONFIG_DIR       read for `hosts.yml` to resolve the CREDENTIAL for an
                                  account-scoped route when no token is in the environment.
                                  No token is ever written to the cache; only its digest.
+             XDG_CONFIG_HOME     the SAME credential seam, one step down gh's documented
+                                 precedence: `$XDG_CONFIG_HOME/gh/hosts.yml` is used when
+                                 `GH_CONFIG_DIR` is unset. ⛔ UNDOCUMENTED IT IS INVISIBLE
+                                 for exactly the reason above — it selects the `account`
+                                 component of the identity, so a lane that sets it reads a
+                                 different entry, and two accounts can pool on one digest.
              --gh / --cache-dir  the same as the first two, per invocation
 """
 from __future__ import annotations
@@ -696,9 +702,24 @@ def _api_route(argv: tuple[str, ...]) -> str | None:
     graphql/graphql-js` and `search code repos/o/n/actions/runs` (porcelain owner/query
     positionals) all came back rc=3. The route is a POSITION, not a shape.
     """
-    if not argv or argv[0] != "api":
+    if not argv:
         return None
-    i = 1
+    # ⛔ THE VERB POSITION, NOT "THE FIRST TOKEN THAT SAYS api". `label create api
+    # --description graphql` has an ARGUMENT named `api`; treating it as the verb made the
+    # description the route and refused a live read. Leading flags and their values are
+    # skipped; the first token after them must BE `api`, or this is not an `api` command.
+    start = 0
+    while start < len(argv):
+        tok = argv[start]
+        if tok == "api":
+            break
+        if tok.startswith("-"):
+            start += 2 if tok in _API_VALUE_FLAGS else 1
+            continue
+        return None
+    else:
+        return None
+    i = start + 1
     while i < len(argv):
         tok = argv[i]
         if tok in _API_VALUE_FLAGS:
@@ -719,28 +740,38 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     defeated by an ordinary flag; the route POSITIONAL is therefore offered with the `api`
     verb in front, which is the shape the patterns are written in.
 
-    ⛔ AND THE VERB IS `argv[0]`. The first cut of this fix synthesised the candidate for
-    every non-flag token, which refused legitimate reads whose argument collided with a
-    route word — `repo list graphql`, `search repos graphql`, `repo view
-    graphql/graphql-js` — the same false refusal `_prefix_pattern` and
-    `test_repo_slug_that_looks_like_a_verdict_is_still_served` already fixed for a repo
-    legitimately named `foo/pulls`, reopened on a porcelain positional.
+    ⛔ AND THE CANDIDATE IS NOT SYNTHESISED FOR EVERY NON-FLAG TOKEN. That refused
+    legitimate reads whose ARGUMENT collided with a route word — `repo list graphql`,
+    `search repos graphql`, `repo view graphql/graphql-js` — the same false refusal
+    `_prefix_pattern` and `test_repo_slug_that_looks_like_a_verdict_is_still_served`
+    already fixed for a repo legitimately named `foo/pulls`, reopened on a porcelain
+    positional. Neither is a `repos/`-shaped token matched WHEREVER it sits: that refused
+    `search code repos/o/n/actions/runs` (a SEARCH QUERY) as "command 'api
+    repos/{repo}/actions/runs'".
 
-    ⛔ AND `repos/`-SHAPED TOKENS ARE NOT MATCHED WHEREVER THEY SIT. A previous cut did
-    that to catch "a caller who put a global flag before the verb" — but `gh`'s root
-    accepts only `--help` and `--version`, so `gh -R o/n api …` is not an invocation gh
-    will run (measured: rc=1, `unknown shorthand flag: 'R'`). It defended an impossible
-    spelling while refusing a real one: `search code repos/o/n/actions/runs` — a SEARCH
-    QUERY — was refused as "command 'api repos/{repo}/actions/runs'".
+    ⛔ AND THE VERB IS NOT ALWAYS `argv[0]`. A previous cut anchored there on the strength
+    of `gh -R o/n api …` failing — but that failure is FLAG-specific (`-R` is not an `api`
+    flag), not positional: cobra intersperses a resolved subcommand's own flags and their
+    VALUES before the verb, so `gh -X GET api graphql` and `gh -R o/n pr view 42` are real
+    invocations (both measured accepted; the tool served them at rc=0). Every SUFFIX that
+    begins at a token in `_VERB_TOKENS` is therefore offered as a candidate, which finds
+    the verb wherever the flags sat. A suffix starts only at a token that IS one of this
+    module's own verbs, so an argument that merely looks route-shaped cannot start one.
 
-    ⛔ AND THE ROUTE IS NORMALISED THE WAY THE SERVER RESOLVES IT. Spellings that used to
-    slip past, each measured: a leading slash (`api /repos/…`) and any number of them
-    (`api //graphql`); an ABSOLUTE URL (`api
+    ⛔ AND THE ROUTE IS NORMALISED PER RFC 3986, WHICH IS BROADER THAN THE EDGE. Spellings
+    that used to slip past, each measured: a leading slash (`api /repos/…`) and any number
+    of them (`api //graphql`); an ABSOLUTE URL (`api
     https://api.github.com/repos/o/n/actions/runs`), which gh forwards verbatim and which
     matched no candidate at all; and a DOT-SEGMENT prefix — the edge resolves the literal
-    `repos/..` to the API root (`https://api.github.com/repos/../rate_limit` → 200 while
-    `.../foo/../rate_limit` → 404), so `api repos/../graphql` was a LIVE graphql read
-    served at rc=0.
+    `repos/..` to the API root (`https://api.github.com/repos/../rate_limit` → 200), so
+    `api repos/../graphql` was a LIVE graphql read served at rc=0.
+
+    ⛔ AND `normpath` COLLAPSES MORE THAN THE EDGE DOES — which is over-refusal, not an
+    over-claim. Measured, the edge collapses exactly ONE dot-segment shape:
+    `/repos/../rate_limit` → 200, while `/foo/../rate_limit`,
+    `/repos/o/../rate_limit` and `/repos/o/n/../../rate_limit` all → 404. So any
+    dot-segment candidate this function adds can only refuse a read the server would have
+    404'd anyway.
 
     ⛔ BUT A PERCENT-ESCAPED SEGMENT IS NOT DECODED BY ANYONE. This file used to claim
     `p%75lls` "decodes to `pulls` inside gh"; measured against the live API, `gh` forwards
@@ -759,6 +790,15 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     norm = [tok.lstrip("/") for tok in raw]
     unq = [urllib.parse.unquote(tok) for tok in norm]
     candidates = [" ".join(raw), " ".join(norm), " ".join(unq)]
+    # ⛔ THE VERB MAY SIT ANYWHERE: `gh -X GET api graphql` and `gh -R o/n pr view 42` are
+    # accepted by gh, and anchoring at argv[0] served every one of them. A suffix starts
+    # only at a token that IS one of this module's verbs.
+    # ⚠️ THE `_VERB_TOKENS` FILTER IS NOT ITSELF PINNED, AND CANNOT BE: every pattern in
+    # `MUTABLE_ARGV` begins with a verb, so a suffix starting anywhere else can never match
+    # — removing the filter leaves the suite green (measured). It is kept as a boundary on
+    # the candidate set and as the statement of intent above, not as a behaviour. Do not
+    # read a green mutant here as missing coverage.
+    candidates.extend(" ".join(unq[i:]) for i, tok in enumerate(unq) if tok in _VERB_TOKENS)
     route = _api_route(raw)
     if route is not None:
         route = urllib.parse.unquote(route)
@@ -841,6 +881,16 @@ def _verdict_field_names(tokens: tuple[str, ...]) -> set[str]:
 _MUTABLE_PREFIXES: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = tuple(
     (_prefix_pattern(toks), toks, why) for toks, why in MUTABLE_ARGV
 )
+
+# ⛔ THE VERBS THIS TABLE REFUSES FROM, DERIVED FROM THE TABLE ITSELF. A gh invocation may
+# put a subcommand's OWN flag — and that flag's VALUE — before the verb: cobra intersperses
+# them and gh accepts it, all three measured with `--help` so no call is spent:
+#   gh -X GET api --help          -> the `api` help
+#   gh -R cli/cli pr view --help  -> the `pr view` help
+#   gh --limit 5 pr list --help   -> the `pr list` help
+# Deriving the set from MUTABLE_ARGV means a future entry cannot be added without its verb
+# becoming reachable here.
+_VERB_TOKENS = frozenset(tokens[0] for tokens, _why in MUTABLE_ARGV)
 
 
 def refuse_if_mutable(
