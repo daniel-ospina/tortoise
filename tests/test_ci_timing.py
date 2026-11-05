@@ -3816,24 +3816,38 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
     the whole point is the document that has not been written yet: the path
     form would grade the file the refresh is about to replace.
 
-    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE (0.9 vs the real 0.1), which is
+    ⛔ THE PLANTED ROW MUST CARRY A DIFFERENT VALUE FROM THE REAL ONE, which is
     load-bearing (#10648 review P3): with the SAME value this assertion would
-    hold under EITHER resolution order and pin only "the key parses". With 0.9
-    planted ahead of the real 0.1 row, `safe_load` returning 0.1 IS last-wins.
+    hold under EITHER resolution order and pin only "the key parses". So the
+    planted value is DERIVED from the real one rather than hard-coded — a
+    hard-coded `0.9` would silently stop distinguishing anything the first time
+    a sweep moves this row's weight to 0.9 (#10726 review, P3), leaving the
+    test green while pinning exactly the weaker property this docstring says it
+    does not pin.
     """
     import ci_selection as cs
+    import yaml as _yaml
 
     real = cs.MANIFEST.read_text()
     assert ci_timing.integrity_problems(real) == []
 
-    anchor = "  test_7818_plan_record_5362.py: "
-    dup = "  test_7818_plan_record_5362.py: 0.9  # duplicate planted by this test\n"
+    key = "test_7818_plan_record_5362.py"
+    anchor = f"  {key}: "
+    real_value = _yaml.safe_load(real)["durations"][key]
+    # derive a value that provably DIFFERS from the real one, whatever it is
+    other_value = 0.9 if real_value != 0.9 else 0.8
+    dup = f"  {key}: {other_value}  # duplicate planted by this test\n"
     at = real.index(anchor)
     planted = real[:at] + dup + real[at:]
 
-    # The loader the shard packer uses cannot see it …
+    # The loader the shard packer uses cannot see it, and resolves LAST-wins …
     assert sum(1 for line in planted.splitlines()
                if line.startswith(anchor)) == 2
+    assert _yaml.safe_load(planted)["durations"][key] == real_value, (
+        "last-wins must resolve to the REAL row, and the planted value must "
+        "differ from it or this pin collapses to \"the key parses\"")
+    assert real_value != other_value
+
     # … but the refresh's pre-write gate does, by name.
     problems = ci_timing.integrity_problems(planted)
     assert any("duplicate mapping key 'test_7818_plan_record_5362.py'" in p
@@ -3841,6 +3855,25 @@ def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
         "the refresh's pre-write gate must compose the duplicate-key walk "
         "(#5373) — otherwise --refresh-durations writes what --integrity "
         "rejects")
+
+    # SECOND ARM — the shape that actually REACHES the writer (#10726 review).
+    # A duplicated `.durations:` ROW cannot get there: `_locate_durations_block`
+    # refuses it and `render_refreshed_manifest` raises `DurationsBridgeError`
+    # before any rewriting. What DOES reach it is a duplicated TOP-LEVEL
+    # `durations:` key: that locator stops at the first block's end, so the
+    # renderer does not see the second and emits BOTH blocks, and
+    # `validate_refreshed_manifest` does not report it either. Without this arm
+    # the pin above covers only a shape the writer would have refused anyway.
+    top_level_dup = real + f"\ndurations:\n  {key}: {other_value}\n"
+    top_problems = ci_timing.integrity_problems(top_level_dup)
+    assert any("duplicate mapping key 'durations'" in p for p in top_problems), (
+        "a duplicated TOP-LEVEL durations: key is emitted twice by the renderer "
+        "and is NOT reported by validate_refreshed_manifest — the composed "
+        "duplicate-key walk is the only term that refuses it")
+    assert not any("duplicate" in p.lower()
+                   for p in ci_timing.validate_refreshed_manifest(top_level_dup)), (
+        "if this ever starts catching the shape, this arm's premise changed — "
+        "re-derive which gate is load-bearing instead of deleting the arm")
 
 
 def test_integrity_problems_mirrors_the_listed_integrity_composition(

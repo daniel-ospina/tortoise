@@ -3256,16 +3256,20 @@ def integrity_problems(manifest_text: str) -> list[str]:
                 + cs.slow_shard_issues(manifest)
                 + cs.watchdog_headroom_issues(manifest)
                 # #10726 review: the DUPLICATE-KEY walk must run on this side too.
-                # `config/ci-surfaces.yml` is `merge=union`, so a replay can leave
-                # the same `.durations` key twice; `yaml.safe_load` keeps the LAST
-                # while `render_refreshed_manifest` rewrites the FIRST in the TEXT.
-                # Composing it only into `--integrity` (the gate of record) left
-                # this pre-write gate blind to it: measured, with a duplicate
-                # planted, `--integrity` reported it and this function returned
-                # `[]` — so the weekly refresh could PERSIST a manifest the
-                # required `manifest-integrity` job immediately reds. It is graded
-                # on `manifest_text` (the document about to be written), not on the
-                # file it replaces.
+                # `config/ci-surfaces.yml` is `merge=union`, so a replay can leave the
+                # same mapping key in the file twice. The shape that actually REACHES
+                # this writer is a duplicated TOP-LEVEL `durations:` key: the renderer
+                # does not see it (`_locate_durations_block` stops at the first block's
+                # end) and emits BOTH blocks, while `validate_refreshed_manifest` does
+                # not report it either — so without this term the refresh writes a
+                # manifest the required `manifest-integrity` job reds. (A duplicated
+                # `.durations:` ROW is already refused earlier, by
+                # `_locate_durations_block`'s own duplicate check — measured: it raises
+                # `DurationsBridgeError`; that shape cannot reach the write.)
+                # It is graded on `manifest_text` (the document about to be written)
+                # rather than on the path, which is a deliberate design choice and NOT
+                # the only possible one: in the reachable shape the duplicate is already
+                # in the input file, so a path-based composition would also catch it.
                 + cs.duplicate_mapping_key_issues(
                     text=manifest_text, shown="refreshed manifest"))
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
