@@ -2204,7 +2204,7 @@ def test_a_padded_key_is_visible_to_the_Phase_1_GUARD(sdk):
     `_check_endpoints` asks before certifying a key-bearing write, and it asked
     the same unfindable seek."""
     a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
-    holders, terminal = sdk._key_holder_state("statement", "  PK  ")
+    holders, _terminal = sdk._key_holder_state("statement", "  PK  ")
     assert holders == [a["id"]], "the Phase-1 key-identity guard cannot see the holder"
 
 
