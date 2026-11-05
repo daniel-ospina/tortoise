@@ -3274,7 +3274,11 @@ def _duplicate_key_loader():
     tell them apart. The merge KEY is one of those own pairs, though: two ``<<:``
     in one mapping is a repeat and is refused (``merge_key_repeats``), because the
     flatten deletes the key nodes and the repeat would otherwise be the one
-    duplicate this loader could not see.
+    duplicate this loader could not see. That repeat is recorded in
+    ``flatten_mapping``, where the ``<<`` nodes still exist — a count taken in
+    ``construct_mapping`` misses a nested anchor that a later sibling merges,
+    because the parent's flatten strips that anchor's ``<<`` keys first (#10790
+    review r7 P3).
     """
     global _DUP_KEY_LOADER
     if _DUP_KEY_LOADER is not None:
@@ -3333,9 +3337,38 @@ def _duplicate_key_loader():
             document's own value — which is exactly what this loader must keep
             doing. A duplicate INSIDE an anchored mapping is still caught: that
             MappingNode is constructed on its own, with no merge in play.
+
+            A repeated merge KEY (two `<<:` in one mapping) is recorded HERE,
+            not in `construct_mapping`, because this is the last moment the
+            key nodes exist: `super().flatten_mapping` DELETES them. The
+            distinction is not cosmetic — the same recursion that flattens a
+            parent also flattens the anchor it merges, and pyyaml completes
+            nested mappings from its generator queue AFTER the shallower ones,
+            so an anchored mapping merged by a later sibling reaches its own
+            `construct_mapping` already stripped of every `<<` and no count
+            there can see the repeat (measured pre-fix: a repeat inside
+            `outer.inner: &m` merged by `top: {<<: *m}` was ACCEPTED while
+            `tools/registry_integrity.py`, the sibling step of the same
+            required job, refused it — #10790 review r7 P3). Every MappingNode
+            is flattened with its merge keys intact at least once, so `before`
+            is where all shapes converge.
             """
             before = list(node.value)
             before_ids = {id(pair) for pair in before}
+            # The `<<` key is a key like any other, so TWO of them in one
+            # mapping is a duplicate (YAML 1.2.2 §3.2.1.3) — and
+            # `tools/registry_integrity.py`, the sibling step of the same
+            # required job, refuses it from the raw node graph. Recording it
+            # before the flatten (which deletes the key nodes) is what keeps
+            # the two required gates in agreement on EVERY shape, including a
+            # nested anchor flattened first by a later sibling. A document can
+            # still merge several mappings with `<<: [*a, *b]`.
+            merge_key_lines = [
+                key_node.start_mark.line + 1 for key_node, _ in before
+                if key_node.tag == "tag:yaml.org,2002:merge"]
+            if len(merge_key_lines) > 1:
+                self.merge_key_repeats.append(
+                    (merge_key_lines[0], merge_key_lines[-1]))
             super().flatten_mapping(node)
             self.inherited_pairs.setdefault(id(node), []).extend(
                 pair for pair in node.value if id(pair) not in before_ids
@@ -3343,21 +3376,13 @@ def _duplicate_key_loader():
 
         def construct_mapping(self, node, deep=False):
             if isinstance(node, yaml.MappingNode):
-                # The `<<` key is a key like any other, so TWO of them in one
-                # mapping is a duplicate (YAML 1.2.2 §3.2.1.3) — and
-                # `tools/registry_integrity.py`, the sibling step of the same
-                # required job, refuses it from the raw node graph. The flatten
-                # DELETES the merge keys, so the repeat is invisible downstream:
-                # without this check the two required gates would report
-                # different verdicts on one document, which is the exact shape
-                # the guard-agreement pins exist to prevent. A document can
-                # still merge several mappings with `<<: [*a, *b]`.
-                merge_key_lines = [
-                    key_node.start_mark.line + 1 for key_node, _ in node.value
-                    if key_node.tag == "tag:yaml.org,2002:merge"]
-                if len(merge_key_lines) > 1:
-                    self.merge_key_repeats.append(
-                        (merge_key_lines[0], merge_key_lines[-1]))
+                # A `<<` repeat is recorded in `flatten_mapping`, which reads
+                # the merge key nodes BEFORE `super()` deletes them. Counting
+                # them here instead is what let a repeat inside an anchor
+                # survive: a nested anchor merged by a later sibling is
+                # flattened (and stripped) by its parent before it is
+                # constructed, so this list would be empty and the sibling
+                # required gate would disagree (#10790 review r7 P3).
                 self.flatten_mapping(node)
                 inherited = {
                     id(pair) for pair in self.inherited_pairs.get(id(node), ())}
