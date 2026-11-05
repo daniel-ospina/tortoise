@@ -55,7 +55,14 @@ deliberate act through `how-to-use-tortoise`.
      words the same idea differently. Annotates EP confidence but does not
      filter, so low-confidence neighbours stay visible.
    - `tortoise_query(kind="decision")` — the committed decisions, when the claim
-     touches a choice the graph has recorded as decided.
+     touches a choice the graph has recorded as decided. ⚠️ This read is
+     **bounded**: it returns at most `limit` rows (100 by default, 20 when you
+     page), and the un-paginated answer gives you no signal that rows were left
+     behind. On a graph whose `decision` population is larger than one page,
+     walk it — `tortoise_query(kind="decision", offset=0, limit=100)`, then
+     `offset=100`, `offset=200`, … until `hasMore` is `false` — before treating
+     the set as "the committed decisions". Grading a claim against one page while
+     calling it the whole set is the failure this note exists to prevent.
 3. **Test for contradiction.** A contradiction is one of:
    - **Edge-level** — `tortoise_review_connections(mode="prune",
      scope=<topic>)` flags illogical/stale IMPL/NAND connections with

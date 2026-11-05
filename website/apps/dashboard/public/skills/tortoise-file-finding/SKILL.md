@@ -25,7 +25,7 @@ The steps below use the MCP tools, which work for both audiences when an MCP ser
 1. Accept finding content and source from the user or calling agent.
 2. Call `tortoise_create_point(kind='statement', content=<finding>, extractedFrom=<source_url>)` to create the Point with provenance.
 3. Call `tortoise_list_sources()` for discovery — identify what sources already exist in the graph.
-4. Call `tortoise_query(kind='statement', limit=100)` to find existing Points; post-filter by source to find Points from the same origin. ⚠️ This read is **bounded** — it never returns the whole population — so when the graph is larger than your page you must walk it: `tortoise_query(kind='statement', offset=0, limit=100)`, then `offset=100`, `offset=200`, … until `hasMore` is `false`. A single call answers at most `limit` rows and gives you no signal that rows were left behind, so reporting "no existing Points from this source" off ONE page is only correct on a small graph.
+4. Call `tortoise_query(kind='statement')` to find existing Points; post-filter by source to find Points from the same origin.
 5. If existing Points found, surface them as potential connection candidates.
 6. Offer to create IMPL/NAND connections or flag for review.
 
@@ -37,4 +37,4 @@ The steps below use the MCP tools, which work for both audiences when an MCP ser
 ## Error Handling
 
 - If `tortoise_create_point` fails, report the error and do not proceed to query.
-- If `tortoise_query` returns empty, report "no existing Points from this source" — this is a success state. (Only after the page walk above: an empty FIRST page on a large graph and an empty population are different answers, and only `hasMore`/`total` from the `offset=` form tells them apart.)
+- If `tortoise_query` returns empty, report "no existing Points from this source" — this is a success state.

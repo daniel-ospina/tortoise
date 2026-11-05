@@ -245,6 +245,36 @@ def test_3513_the_renumbered_skill_sections_are_cited_by_their_real_numbers():
             f"{rel} cites a SKILL.md section by a stale number (#3513)")
 
 
+def test_10602_the_contradiction_skill_does_not_dress_one_page_as_the_whole_set():
+    """#10602 — `tortoise_query(kind=…)` is BOUNDED, and that skill now says so.
+
+    The structural read returns at most `eff_limit` rows (100 un-paginated) and
+    the un-paginated shape carries no `hasMore`/`total`, so an agent following
+    this skill on a graph with more than a page of `decision` Points graded a
+    claim against a SUBSET while the skill called it "the committed decisions".
+    The disclosure is not optional politeness: `BOUNDED-OPERATION-CONTRACT.md`
+    §1 makes a silently-truncated result indistinguishable from a complete one
+    the defect this repo is closing.
+
+    Non-vacuous: before the fix the passage named neither the bound nor a way to
+    walk the population, so both assertions red on the pre-fix text.
+    """
+    text = _read(os.path.join(SERVED, "analyse-for-contradictions", "SKILL.md"))
+    marker = '`tortoise_query(kind="decision")`'
+    assert marker in text, (
+        f"the decision matcher is gone from the skill — this pin no longer "
+        f"covers anything: {marker}")
+    # The passage is one bullet of step 2; bound it at the next numbered step so
+    # a disclosure elsewhere in the file cannot satisfy this pin.
+    passage = text.split(marker, 1)[1].split("\n3. **Test for contradiction", 1)[0].lower()
+    assert "bounded" in passage, (
+        "the `kind=` read is presented as the committed-decision set with no "
+        f"mention that it is bounded: {passage}")
+    assert "hasmore" in passage and "offset" in passage, (
+        "the passage names no way to walk past the bound, so an agent that "
+        f"knows the read is capped still cannot read the whole set: {passage}")
+
+
 # ── Workflow smoke (embedded) ──────────────────────────────────────────────
 
 @pytest.fixture
