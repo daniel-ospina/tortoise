@@ -35470,10 +35470,17 @@ def _registry_probe_sdk() -> TortoiseSDK:
             _close_registry_probe_handle(retired)
         return sdk
 
-    # The identity never held still for a single build. Cache NOTHING (an
-    # un-cached handle can only mislead the call that built it, never every
-    # later caller), say so, and hand back one built for the identity the
-    # process resolves to right now.
+    # The identity never held still for a single build. INSTALL nothing — and
+    # note the word, because it is not the same as caching nothing (#10962
+    # round-6 obs 2): this fallthrough declines to ADD an entry and leaves
+    # `_REGISTRY_PROBE_CACHE` exactly as it found it, so a handle cached earlier
+    # under a STABLE identity survives untouched. That is the correct outcome,
+    # not an oversight — a churning identity can never equal the one that entry
+    # is filed under, so it cannot be matched to this build, and evicting it
+    # would close a handle a concurrent caller may still be using (#8867
+    # finding 1's close-under-use hazard). An un-cached handle can mislead only
+    # the call that built it, never every later caller. Say so, and hand back
+    # one built for the identity the process resolves to right now.
     _logger.warning(
         "registry probe: identity (TORTOISE_DB_URI / TORTOISE_DB_PATH) changed "
         "during %d consecutive builds — serving an UN-CACHED handle",
