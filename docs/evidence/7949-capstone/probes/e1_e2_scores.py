@@ -371,10 +371,11 @@ def _unit_id_members(where: str, session_id, field: str, members: list) -> None:
     `_consistent_share` already convert-and-refuse in this file; this is the one
     guard the whole E2a partition rests on, so it cannot be the one that skips it.
 
-    A unit id is a string by construction: `e2a_value_units.py:151-152` writes
-    `value_ids` and `[uid for uid in value_ids …]`, and `value_bearing_ids` reads
-    `unit["id"]` out of the corpus gold — so a member that is not a string is an
-    edited record, not a shape this reader can grade.
+    A unit id is a string by construction: `e2a_value_units.py:150-152` writes
+    `value_ids` / `value_survived` / `value_lost`, the last two built by the
+    `[uid for uid in value_ids …]` comprehensions at `:124` and `:143`, and
+    `value_bearing_ids` reads `unit["id"]` out of the corpus gold — so a member
+    that is not a string is an edited record, not a shape this reader can grade.
     """
     for member in members:
         if not isinstance(member, str):
