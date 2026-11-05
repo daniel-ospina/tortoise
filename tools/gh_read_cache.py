@@ -243,9 +243,13 @@ def _expand(docs: Sequence[Any], key: str, container: str) -> list[Any]:
 
 
 def _project_repo_metadata(docs: Sequence[Any]) -> Any:
+    # ⛔ `visibility` IS DELIBERATELY NOT PROJECTED. It flips public -> private, and serving a stale
+    # "public" for six hours turns a "may I quote this repo into a public artifact?" gate into a
+    # false PASS — the only registry field whose staleness is a LEAK rather than a wait. A caller
+    # that needs it must read it live.
     return _pick_last(
         docs,
-        ("id", "node_id", "full_name", "default_branch", "visibility"),
+        ("id", "node_id", "full_name", "default_branch"),
         key="repo.metadata",
         required=("id", "full_name", "default_branch"),
     )
@@ -380,11 +384,13 @@ class Invariant:
 # THE REGISTRY — an EXPLICIT allow-list. Every entry projects to invariant fields only.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 INVARIANTS: dict[str, Invariant] = {
-    # ONLY the identity/branch fields. ⛔ `pushed_at`, `updated_at`, `open_issues_count` and
-    # `stargazers_count` are in this body and change every push; a 6-hour TTL over them would let a
-    # lane answer "has anything landed since my base?" from six hours ago.
+    # ONLY the identity/branch fields. ⛔ `pushed_at`, `updated_at`, `open_issues_count`,
+    # `stargazers_count` and `visibility` are in this body; the first four change every push and the
+    # last one is a security flag, so none is projected.
+    # ⛔ 1 h, not the original 6 h. `default_branch` flips on a rename and a lane branches off it;
+    # an hour bounds that wait while still removing the per-PR identity read from the pool.
     "repo.metadata": Invariant(
-        ttl_s=6 * 3600,
+        ttl_s=60 * 60,
         argv=("api", "repos/{repo}"),
         projection="repo-identity-v1",
         project=_project_repo_metadata,

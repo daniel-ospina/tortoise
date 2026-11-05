@@ -12,8 +12,9 @@ it turns "I could not read" into "I read X", which is this repo's false-PASS cla
 therefore about the FAILURE directions, not the happy path.
 
 ⛔ MUTATION-VERIFIED, AND HONEST ABOUT WHAT IS NOT. Two earlier rounds found fences that could not
-fail for the bug they named — a green suite proving nothing. 50 mutations of the module have now
-been run; **49 are KILLED** and one survives ALONE (M49 — see below):
+fail for the bug they named — a green suite proving nothing. 50 mutation rows have now been run
+(**47 distinct** — M1≡M31, M24≡M44, M26≡M43 were re-run in later rounds rather than
+re-labelled). **49 are KILLED**; M49 survives ALONE by the documented layering:
 
     M1  reader returns the unprojected body ............ KILLED   M12 decode_pages first doc only .... KILLED
     M2  _load ignores freshness ........................ KILLED   M13 envelope scope check removed ... KILLED
@@ -802,7 +803,10 @@ def test_repo_metadata_projection_keeps_only_identity_fields() -> None:
             }
         ]
     )
-    assert set(out) == {"id", "node_id", "full_name", "default_branch", "visibility"}
+    assert set(out) == {"id", "node_id", "full_name", "default_branch"}
+    # ⛔ `visibility` flips public -> private; a stale "public" turns a quoting gate into a false
+    # PASS, so it is deliberately NOT cached.
+    assert "visibility" not in out
 
 
 def test_declare_invariant_requires_a_projection_callable() -> None:
@@ -1372,6 +1376,19 @@ def test_an_identity_with_nulls_is_not_an_answer(key: str, body) -> None:
     naming no account, cached for 12 hours. Same for `[{}]` inside a collections response."""
     with pytest.raises(C.Unreadable):
         C.INVARIANTS[key].project(body)
+
+
+def test_pick_last_refuses_an_all_null_answer_even_with_no_required_fields() -> None:
+    """⛔ M27 WAS NOT ACTUALLY KILLED. Both `_pick_last` callers pass `required=`, so the `missing`
+    check fires first and the all-null guard was UNREACHABLE — removing it left 208 tests green.
+    A future key with optional fields is exactly the spelling that reaches it."""
+    with pytest.raises(C.Unreadable):
+        C._pick_last([{"a": None, "b": None}], ("a", "b"), key="probe", required=())
+    # ...and a body with at least one real value still projects.
+    assert C._pick_last([{"a": None, "b": 2}], ("a", "b"), key="probe", required=()) == {
+        "a": None,
+        "b": 2,
+    }
 
 
 def test_a_well_formed_identity_still_projects() -> None:
