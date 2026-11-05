@@ -367,6 +367,7 @@ Public repository that houses:
 | Finding bugs | `skills/find-bugs/SKILL.md` | Missed regressions |
 | Any non-trivial research | `skills/research/SKILL.md` | Shallow analysis, costly rework |
 | Dispatching work on any issue (worktree, branch, sub-agent, parallel workstream) | `uv run python tools/collision_preflight.py <N> --repo .` — must exit 0 before dispatch | A second agent duplicates live work; overlapping PRs and a wasted dispatch cycle (#3061) |
+| Starting a lane, or any task that must **land** work (commit → push → PR → merge) | `uv run python tools/gh_write_preflight.py` — must exit 0 **before** the first hour of work | A lane does the whole job on a credential that cannot write: `gh api` reads and issue comments still work, so it reports "built, parked" **honestly** and the wave lands nothing — measured as 17 lanes / 0 landings (agent-infra#3453). `GH-WRITE-UNAVAILABLE(<reason>)` names the cause; `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` → `$HOME/.config/gh/hosts.yml` |
 
 ### ⛔ HARD RULE: MCP/SDK Surface Approval — Ask Daniel Before You Change the Surface
 
