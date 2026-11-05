@@ -360,11 +360,11 @@ was **closed unmerged**, so nothing landed. What *does* exist points the other w
   in a **non-capturing** group, and `columns = {m.group(1) …}` keeps only the **name** — so there is nothing
   being discarded, and the type must be **lifted into a capture group**. So *type extraction is nearly there*
   and must be captured, not built; **the genuinely new work is the `ALTER COLUMN … TYPE` form, the widened type
-  vocabulary, and the value→declared-type predicate.** And `_COLUMN_RE`'s type vocabulary is a
-  **hardcoded seven-term allow-list**
-  (`text|jsonb|integer|boolean|bigint|double precision|timestamptz`), so a derivation built on it **silently
-  skips any column of another type** — which is why #11075's closure target ("a column added to a migration with
-  no expectation reds") holds **only for types that vocabulary admits**, and the issue says so.
+  vocabulary, and the value→declared-type predicate.** And `_COLUMN_RE`'s type vocabulary is a **hardcoded
+  seven-term allow-list** (`text|jsonb|integer|boolean|bigint|double precision|timestamptz`), so a
+  derivation built on it **silently skips any column of another type** — which is why #11075's closure target
+  ("a column added to a migration with no expectation reds") holds **only for types that vocabulary admits**,
+  and the issue says so.
 
 **Consequence for #11075, and it is the sharp one:** an implementer who follows "reuse `jsonb_columns()`" reads
 `search_keys jsonb` from the *original* migration, and the pin **reds on the current, correct tree** — whose
