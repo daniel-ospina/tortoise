@@ -1883,7 +1883,7 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     coordinates for the 5400 s floor — and two of them had already drifted by this
     head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
     one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6 "lines 326-332"
-    is §5's `timeout-minutes` kill table (the quoted derivation is at `342-344`). The
+    is §5's `timeout-minutes` kill table (the quoted derivation is at `390-392`). The
     docstring names the reader who will follow these numbers and warns that whoever
     mis-locates the derivation "discards the one section that supports this floor" —
     so a stale coordinate sends the next lane to exactly the misreading the paragraph
@@ -1919,6 +1919,21 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     assert doc[first - 1].strip().startswith("document's own §1 measurement") or (
         "derived from this" in quoted), (
         "the cited span must open on the sentence the docstring quotes")
+
+    # 3. THIS test's own docstring carries the third citation of the same span, and
+    #    it is exactly what drifted when this PR grew `ci-wall-clock.md` by 48 lines:
+    #    the other two citations were re-cut to 390-392 and this one was left on
+    #    342-344 (which now holds §4's "superseded main run" prose). "Pinned
+    #    MECHANICALLY instead of corrected by hand a third time" has to include it,
+    #    or the next insert re-arms the same silent drift (#10962 round 11, P3).
+    own_src = Path(__file__).read_text()
+    own = re.findall(r"the quoted derivation is at `([0-9]{1,4})-([0-9]{1,4})`", own_src)
+    assert own, "this docstring no longer cites the derivation span at all"
+    assert own[0] == (str(first), str(last)), (
+        f"this docstring cites the derivation at {own[0][0]}-{own[0][1]} while the "
+        f"file's own citation (and the pinned span above) says {first}-{last} — a "
+        "stale coordinate sends the next lane to the misreading the paragraph "
+        "exists to prevent")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
