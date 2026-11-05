@@ -497,13 +497,15 @@ ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (
 
 - `exit 0` = `GH-WRITE-OK(<remote>) — push confirmed by ls-remote; <cleanup>` — the credential can
   write **repository contents**, measured by the one operation that needs it: a throwaway ref was
-  **created, confirmed on the remote, and deleted**. That is the `git push` path, so a lane can
-  publish its branch (which is what every later step needs a remote ref for). Read the `cleanup`
-  clause: `deleted` (confirmed), `KEPT (--keep-ref)` (asked for), or `deletion UNCONFIRMED` (the
-  delete or its read-back failed — the credential still wrote; check the remote).
+  **created and confirmed on the remote**, then deleted — unless cleanup was switched off or could not
+  be confirmed. That is the `git push` path, so a lane can publish its branch, which is what every
+  later step needs a remote ref for. Read the `cleanup` clause rather than assuming the remote is
+  clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked for), or `deletion UNCONFIRMED` (the delete
+  or its read-back failed — the credential still wrote; check the remote).
 - `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` on **stderr** (stdout stays clean/JSON) — do NOT start
   the work yet; name the reason in your report. `REASONS` is a **closed set of ten** and the module
-  docstring publishes all of it; the three groupings a lane must not collapse are:
+  docstring publishes all of it. **Ten tokens, three groupings — plus one token that reads like a
+  refusal and is not:**
   - **refusal** — `push-refused` (read-only credential, a branch protection/ruleset, or no network),
     `remote-unreachable`, `verify-mismatch` (the push claimed success and `ls-remote` disagrees).
   - **NO VERDICT, re-run — never "read-only"** — `push-unknown` (the push did not COMPLETE: timed
