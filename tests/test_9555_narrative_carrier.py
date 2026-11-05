@@ -1712,6 +1712,20 @@ def _section(text: str, start_heading: str, end_heading: str) -> str:
     assert end_heading in text, (
         f"{_STORAGE_DOC.name} no longer carries the heading {end_heading!r} — "
         "the section this pin brackets has MOVED or been renamed")
+    # ⛔ The START heading's uniqueness is asserted, not assumed: `index` below binds
+    # to the FIRST match, so a duplicate heading placed ABOVE the real section
+    # silently WIDENS the slice — and every assertion inside it can then be
+    # satisfied by a surviving copy elsewhere, which is exactly the
+    # "presence-only pin certifies whichever text happens to be there" failure this
+    # module's header names. The END heading needs no such assert and must not get
+    # a reflexive one: a duplicate of it between the start and the real end
+    # TRUNCATES the slice, so its assertions red — it already fails CLOSED.
+    assert text.count(start_heading) == 1, (
+        f"{_STORAGE_DOC.name} carries {text.count(start_heading)} occurrences of "
+        f"{start_heading!r} — this pin slices from the FIRST match, so that heading "
+        "must appear exactly once; a duplicate placed above the real section "
+        "widens the span and can leave every assertion inside it green on text "
+        "the section does not own")
     start = text.index(start_heading)
     # `find`, not `index`: a REORDERED end heading (present in the document, but
     # not after the start) reaches the assertion below with its diagnosis instead
