@@ -1857,9 +1857,11 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     `_RETIRED_VECTOR_FOOTNOTE` (⚠️ the helper `_source_vector_footnote` asserts
     only the anchor's presence and uniqueness and then RETURNS the line; the red
     comes from the caller's assert on what it returns), but that half is not
-    executed by a plain run at all. From `b748df7d0` (main, post-`#10978`) onward NEITHER retired
-    string is present — and neither was present at any commit of THIS branch,
-    whose origin `b748df7d0` already carried `#10978`'s correction. So on this
+    executed by a plain run at all. From `b748df7d0` (the base before the rebase,
+    post-`#10978`) onward NEITHER retired string is present, and neither is
+    present at this head's base `e2584e2cb` — nor at any commit of THIS branch:
+    both of this branch's bases already carried `#10978`'s correction (`b748df7d0`
+    before the rebase, `e2584e2cb` after it). So on this
     branch both halves are that correction's REGRESSION GUARD, not its author:
     the pin reds if either section drifts back, which is the only thing that
     would catch it. "Measured on origin/main" would have been FALSE within the
@@ -1952,12 +1954,15 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"exactness is deliberate and fails CLOSED: a future legitimate second "
         f"`:Source.summary` mention reds every docs-only PR, which is the "
         f"price of the trap, paid on purpose")
-    assert "never from `:Source.summary`" in s94, (
-        "§9.4 (as a SECTION) no longer states the NEGATION anywhere — the "
-        "DECIDING sentence is asserted above, and this section-wide check is "
-        "the second, weaker half: it fails only if the negation left §9.4 "
-        "entirely, and it is kept so a rewrite that moves the whole paragraph "
-        "is diagnosed as a section loss rather than a sentence edit")
+    # ⛔ NO section-wide negation assert here, and its absence is deliberate. It
+    # WOULD have been unreachable: `deciding in s94` above plus
+    # `"never from `:Source.summary`" in deciding` together imply it, so it could
+    # never be the assert that reds — a check that cannot fail, whose message
+    # claimed it diagnosed "the whole paragraph moved" while the move actually
+    # reds one line earlier, on the DECIDING-sentence binding, with a better
+    # message. Deleted rather than reordered (cycle 4 put both options): the
+    # earlier assert already gives the actionable diagnosis, and an assert that
+    # can never fire is worse than no assert at all.
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"the document is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates "
         f"the summary ON THE NODE with the narrative IN THE RECORD, and a design "
