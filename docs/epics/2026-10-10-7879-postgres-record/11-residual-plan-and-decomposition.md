@@ -91,9 +91,17 @@ document and in `01-test-design.md` §10.
 
 ⚠️ **The misattribution is not fully removable, and saying so is the point.** Migrations are append-only, so
 `20261102000002_record_point_search_keys_text.sql`'s own header still reads *"(#10620, epic #7879 · R4's remaining
-half)"* — the primary artifact a reader of this fix opens. The same number appears in `tools/ci_selection.py`,
-`docs/infra-runbook.md`, and — **13 occurrences on 11 lines**, the two pin-filename mentions aside — in this
-epic's own `08-hosted-prerequisites.md`, including the line the **302** figure in §1 is quoted from. **The
+half)"* — the primary artifact a reader of this fix opens. The sites named so far — `tools/ci_selection.py`,
+`docs/infra-runbook.md`, and — **13 occurrences on 11 lines**, the two pin-filename mentions aside — this
+epic's own `08-hosted-prerequisites.md`, including the line the **302** figure in §1 is quoted from — are
+**examples, not a census**: `git grep -l 10620` matched **23 files**, and the two that matter most were not on
+that list. `tortoise/record_projection.py` carries it on **18 lines** (`:265` reads *"#10620 — R4's remaining
+half: `public.point.search_keys` NARROWED to …"*), and
+`tests/test_9078_record_written_by_production_path.py` carries it inside the **assertion message** at `:2367`
+(*"… #10620 closed `search_keys`"*) — the text a future failing pin prints, and the very file this document
+quotes at §7.2. `tortoise/hosted_api.py` (4 lines) and `config/ci-surfaces.yml` (`:606`, `:3627`) assert it too.
+So a lane that "fixes the residual" from this paragraph alone leaves a **test assertion message** wrong.
+**The
 correction travels in #10683's recording comment (where a reader of the decision looks) and belongs with
 the sweep in #10864; it cannot travel in the migration.** ⚠️ **`08-hosted-prerequisites.md`
 is a DECLARED residual, not a covered one:** #10864 is scoped to three other post-#10648 contradictions and does
@@ -340,10 +348,11 @@ Review cycle 1 measured it: **`grep -rn jsonb_columns` returns zero code hits.**
 was **closed unmerged**, so nothing landed. What *does* exist points the other way:
 
 - `tortoise/record_projection.py` states that a **forward migration narrowing a column's TYPE** is a form *"the
-  readers do not parse this form, and deliberately"*. ⚠️ **Precisely:** `_COLUMN_RE` **does** capture the declared type —
-  `columns = {m.group(1) …}` then keeps only the **name** and discards it. So *type extraction is nearly there*
-  and must be captured, not built; **the genuinely new work is the `ALTER COLUMN … TYPE` form and the
-  value→declared-type predicate.** And `_COLUMN_RE`'s type vocabulary is a **hardcoded seven-term allow-list**
+  readers do not parse this form, and deliberately"*. ⚠️ **Precisely:** `_COLUMN_RE` **matches** the declared type
+  in a **non-capturing** group, and `columns = {m.group(1) …}` keeps only the **name** — so there is nothing
+  being discarded, and the type must be **lifted into a capture group**. So *type extraction is nearly there*
+  and must be captured, not built; **the genuinely new work is the `ALTER COLUMN … TYPE` form, the widened type
+  vocabulary, and the value→declared-type predicate.** And `_COLUMN_RE`'s type vocabulary is a **hardcoded seven-term allow-list**
   (`text|jsonb|integer|boolean|bigint|double precision|timestamptz`), so a derivation built on it **silently
   skips any column of another type** — which is why #11075's closure target ("a column added to a migration with
   no expectation reds") holds **only for types that vocabulary admits**, and the issue says so.
@@ -354,7 +363,7 @@ obvious repair is to exempt the column or revert the narrowing, i.e. **re-create
 prevent.**
 
 **What is actually new work, stated once so the two documents cannot disagree:** the declared type must be
-**captured from the existing match** (`_COLUMN_RE` already matches it — see §7.1), the **`ALTER COLUMN … TYPE`
+**captured from the existing match** (`_COLUMN_RE` already matches it — above), the **`ALTER COLUMN … TYPE`
 form must be built**, the **type vocabulary must be widened** past its hardcoded seven terms, and the
 **value→declared-type predicate is new**. That mix of "capture one, build three" is why #11075's `db` domain is
 **complex** rather than standard.

@@ -307,6 +307,14 @@ made *"gone rather than parked"* when #9264 closed — the project's "a pin that
 difference that earns this one: a **derived** check cannot go empty, because it is closed over the migration set
 rather than over a hand-kept vocabulary.
 
-**Layer:** `unit` + `contract` (DB-free; the declared types are read from the migration files, so the pin runs in
-the carve-out lane as well — which requires registering the new test file in `config/ci-surfaces.yml`'s
-`carve_out:` list: a `config: standard` registration, not "none").
+**Layer:** `unit` + `contract` (DB-free; the declared types are read from the migration files). Registration is
+a **surface** entry plus a `durations:` row, exactly like the DB-free migration-reading precedent
+`tests/test_record_schema_placement.py` (surface `core`, `config/ci-surfaces.yml`). ⛔ **Not `carve_out:`.**
+That set is not a classification: `classify_test_file()` resolves a file only against `surfaces:`, and
+`integrity()` reports every `tests/**/test_*.py` it cannot classify as drift, which reds the required
+`manifest-integrity` leg — a carve-out-only entry therefore leaves the new file reading as drift. It is also
+**exclusive, not additive**: `select()` does `files -= carve` and carve-out files are excluded from every
+docker leg, so an entry there would *remove* the pin from those legs rather than add the carve-out lane "as
+well". Every one of the manifest's 57 carve-out files is also in a surface (`carve_only: 0`), which is why the
+precedent above is a surface registration and `tests/test_record_searchkeys_10620.py` is registered as
+`api` + `core` with a `durations:` row — not as a carve-out.
