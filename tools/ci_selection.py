@@ -3208,7 +3208,7 @@ class DuplicateManifestKeyError(ValueError):
     touched ``durations`` unions the two blocks as TEXT, so the map ends up
     holding a stale row beside the refreshed one and the parser keeps whichever
     came second (#10717). Measured 2026-11-03 on #10790: merging ``origin/main``
-    produced **24** duplicate keys, and ``python3 tools/ci_selection.py
+    produced **24** duplicate keys, and ``uv run python tools/ci_selection.py
     --integrity`` printed ``✅ integrity: all test files classified`` — the
     duplicates are gone by the time that check holds a dict. One of them
     silently reverted the PR's own ``test_mcp_bridge.py`` weight (23.8 -> 2.0),
