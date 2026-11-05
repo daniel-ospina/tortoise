@@ -77,6 +77,8 @@ def _inner_pytest_cmd(tmp_path: Path, test_file: Path) -> list[str]:
     half of the same hazard, already hit in `test-slow (d)` of #10636 where a
     leaked `/tmp/conftest.py` was imported into an out-of-tree selection
     (`tools/skip-guard.py::_selection_confcutdir` pins it for the same reason).
+    #11095 audits the remaining out-of-tree child runs for the same uncut
+    ancestor walk.
     """
     return [
         sys.executable,
