@@ -9,14 +9,22 @@ gates are OPEN, so a sweep today would delete nodes whose only copy is the graph
 The `--execute` flag is therefore REFUSED BY NAME rather than absent, so a caller
 that tries it learns why instead of concluding the flag was misspelled.
 
-    # measure the cache, name every class that cannot be proven, and refuse
-    uv run python tools/cache_eviction_census.py --graph-uri "$TORTOISE_DB_URI" \\
-        --graph tortoise --out /tmp/egress-census.json
+    # measure the cache, name every class that cannot be proven, and refuse.
+    # ⚠️ `--graph` must be the graph the URI names — a mismatch is a USAGE error, not
+    # a silent measurement of a different cache:
+    uv run python tools/cache_eviction_census.py \\
+        --graph-uri "docker://:falkordb@localhost:6379/tortoise" --graph tortoise \\
+        --out /tmp/egress-census.json
 
-    # …with the one class that HAS a parity instrument already measured:
-    uv run python tools/turn_parity_census.py --out /tmp/turns.json
-    uv run python tools/cache_eviction_census.py --graph-uri "$TORTOISE_DB_URI" \\
-        --graph tortoise --parity-report /tmp/turns.json
+    # …with the one class that HAS a parity instrument already measured. The report
+    # comes from that instrument's `--json` (it has no `--out`), and the graph it was
+    # measured on is named by `--parity-graph` — REQUIRED, and required to equal
+    # `--graph`, because the instrument emits no graph identity of its own:
+    uv run python tools/turn_parity_census.py --uri "$TORTOISE_DB_URI" \\
+        --graph-name tortoise --json /tmp/turns.json
+    uv run python tools/cache_eviction_census.py \\
+        --graph-uri "docker://:falkordb@localhost:6379/tortoise" --graph tortoise \\
+        --parity-report /tmp/turns.json --parity-graph tortoise
 
     # a declared ceiling, instead of the instance's maxmemory:
     TORTOISE_CACHE_CEILING_BYTES=150000000 uv run python tools/cache_eviction_census.py …
@@ -181,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parity-report", type=Path, action="append", default=[],
                         metavar="JSON",
                         help=("a parity instrument report (e.g. from "
-                              "tools/turn_parity_census.py --out). Repeatable."))
+                              "tools/turn_parity_census.py --json). Repeatable; "
+                              "each needs --parity-graph."))
     parser.add_argument("--parity-graph", default=None, metavar="NAME",
                         help=("the graph the parity report was measured against. "
                               "REQUIRED with --parity-report: the instrument emits no "

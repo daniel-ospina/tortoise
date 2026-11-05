@@ -2761,7 +2761,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tortoise/cache_eviction.py` needs no entry: it matches no
              # SOURCE_PATTERN, so a module-only change already falls through to
              # `core`. Pinned by
-             # tests/test_ci_selection.py::test_cache_eviction_census_tool_change_selects_core_not_tier1.
+             # tests/test_ci_selection.py::test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it.
              "tools/cache_eviction_census.py",
              # #10920: the CI runner-label coverage gate. `tools/` is a flat
              # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches

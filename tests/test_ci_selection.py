@@ -14304,3 +14304,48 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_session_events_seal.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_every_pin_reference_in_ci_selection_names_a_test_that_exists():
+    # #10976 / #11004 review P2: every `Pinned by tests/….py::name` citation is what
+    # makes "Pinned by" CHECKABLE — a reader greps the name and confirms the guard.
+    # A citation of a test that does not exist reads as verification while verifying
+    # nothing. Measured before this guard: the census CORE_ALSO entry cited
+    # `test_cache_eviction_census_tool_change_selects_core_not_tier1`, which existed
+    # only in that comment; the real pin is
+    # `test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it` (above).
+    root = Path(__file__).resolve().parents[1]
+    lines = (root / "tools/ci_selection.py").read_text(encoding="utf-8").splitlines()
+
+    # A citation may be WRAPPED across comment lines (`…::test_x_` / `# the_rest.`),
+    # so a name that ends its line inside a comment also offers `name + <next word>`
+    # as a candidate. Both are tried; the citation resolves if EITHER names a real
+    # definition, so a wrap is not mistaken for a dangling reference (and vice versa).
+    refs: list[tuple[str, list[str]]] = []
+    for i, line in enumerate(lines):
+        for m in re.finditer(r"(tests/[\w./-]+\.py)::(\w+)", line):
+            relpath, name = m.group(1), m.group(2)
+            candidates = [name]
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if not line[m.end():].strip() and nxt.startswith("#"):
+                words = nxt.lstrip("#").strip().split()
+                first = words[0].rstrip(".,;:`") if words else ""
+                if re.fullmatch(r"[a-z_]\w*", first):
+                    candidates.append(name + first)
+            refs.append((relpath, candidates))
+
+    # Non-vacuity: the file really does cite its pins (a regex that matched nothing
+    # would pass this guard while checking nothing).
+    assert len(refs) > 50, len(refs)
+
+    missing = []
+    for relpath, candidates in refs:
+        path = root / relpath
+        if not path.exists():
+            missing.append(f"{relpath}::{candidates[0]} (no such file)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        if not any(re.search(rf"^(?:def|class)\s+{re.escape(name)}\b", body, re.M)
+                   for name in candidates):
+            missing.append(f"{relpath}::" + " | ".join(candidates))
+    assert not missing, f"pin reference(s) that name nothing: {missing}"

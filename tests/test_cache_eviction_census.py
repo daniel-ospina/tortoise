@@ -898,3 +898,118 @@ def test_refused_covers_unbounded_and_an_unbounded_plan_offers_nothing():
     assert result.verdict == "UNBOUNDED"
     assert result.refused is True
     assert result.plan["evictable"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Round-6 findings — the documentation an operator actually types.
+# --------------------------------------------------------------------------- #
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _docstring_of(relpath: str) -> str:
+    import ast
+
+    return ast.get_docstring(ast.parse((ROOT / relpath).read_text(encoding="utf-8"))) or ""
+
+
+def _documented_commands(doc: str, tool: str) -> list[str]:
+    """Every `uv run python <tool> …` block in `doc`, with `\\` continuations joined."""
+    commands: list[str] = []
+    current: str | None = None
+    for raw in doc.splitlines():
+        text = raw.strip()
+        if current is None:
+            if f"uv run python {tool}" not in text:
+                continue
+            current = text.split(f"uv run python {tool}", 1)[1].strip()
+        elif text:
+            current = f"{current} {text}"
+        if current.endswith("\\"):
+            current = current[:-1].rstrip()
+            continue
+        commands.append(current)
+        current = None
+    return commands
+
+
+def _flags(command: str) -> set[str]:
+    return set(re.findall(r"(?<![\w-])--[A-Za-z][\w-]*", command))
+
+
+def _accepted_flags(relpath: str) -> set[str]:
+    """The tool's OWN `add_argument` option strings — not its prose."""
+    import ast
+
+    tree = ast.parse((ROOT / relpath).read_text(encoding="utf-8"))
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument" and node.args):
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            if first.value.startswith("--"):
+                flags.add(first.value)
+    return flags
+
+
+def test_the_documented_way_to_produce_the_parity_report_uses_real_flags():
+    """The docstring is this tool's ONLY operator manual, so its commands must run.
+
+    It documented `tools/turn_parity_census.py --out /tmp/turns.json`, but that
+    instrument has no `--out` — its report flag is `--json` (:1972), and `--uri` /
+    `--db-path` is a required mutually-exclusive group (:1945). The documented
+    invocation therefore exited 1 with `unrecognized arguments: --out` and never
+    produced the report this tool consumes: the integration the census exists to
+    enable was documented as impossible.
+    """
+    doc = _docstring_of("tools/cache_eviction_census.py")
+    commands = _documented_commands(doc, "tools/turn_parity_census.py")
+
+    assert commands, "the docstring must document how to produce the report it consumes"
+    accepted = _accepted_flags("tools/turn_parity_census.py")
+    assert "--json" in accepted, "the report comes from --json"
+
+    unknown = sorted({f for c in commands for f in _flags(c)} - accepted)
+    assert not unknown, (
+        f"the documented invocation(s) {commands} name flag(s) the instrument does "
+        f"not accept: {unknown} — accepted: {sorted(accepted)}"
+    )
+
+
+def test_the_documented_parity_example_supplies_the_graph_binding_the_code_requires(tmp_path,
+                                                                                    capsys):
+    """The documented example omitted `--parity-graph`, which the code REQUIRES.
+
+    A report without the graph it was measured on is a vacuous binding (the whole
+    round-2 P1), so the example taught an invocation the tool refuses. This runs the
+    documented command instead of reading it: an unreadable report stops the CLI at
+    its REFUSAL boundary, before any connection, so it never touches a cache.
+    """
+    import shlex
+
+    doc = _docstring_of("tools/cache_eviction_census.py")
+    commands = [c for c in _documented_commands(doc, "tools/cache_eviction_census.py")
+                if "--parity-report" in c]
+    assert commands, "the docstring must document the parity-report invocation"
+
+    report = tmp_path / "turns.json"
+    report.write_text('{"instrument": "tools/turn_parity_census.py", "verdict": "CLEAN"}',
+                      encoding="utf-8")
+
+    for command in commands:
+        argv = shlex.split(command)
+        assert "--parity-graph" in argv, (
+            f"the documented command {command!r} omits --parity-graph, which the CLI "
+            f"refuses without (a CLEAN census of one graph would license evicting another)"
+        )
+        # Point the report at a real file so the run reaches the report check, not an
+        # IO error — the refusal still happens before any connection.
+        argv[argv.index("--parity-report") + 1] = str(report)
+
+        code = _cli().main(argv)
+        err = capsys.readouterr().err
+
+        assert "requires --parity-graph" not in err, (command, err)
+        assert code == 3, (command, code, err)
