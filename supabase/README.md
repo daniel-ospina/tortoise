@@ -255,7 +255,7 @@ already opened a transaction, so a nested `BEGIN` only warns and the inner
    populated in `website/index.html` and `website/investors.html`.
 2. First `supabase db push`: confirm the project's `supabase_migrations`
    history covers 0001-0004 (`supabase migration list`); if not, baseline
-   with `supabase migration repair --status reverted 0001..0004` first so
+   with `supabase migration repair --linked --status reverted 0001..0004 --yes` first so
    the chain cannot abort mid-replay. Also confirm any pre-existing
    `waitlist_subscribers` table has an `id` column (migration 0005 dedupes
    on it before adding the UNIQUE constraint).

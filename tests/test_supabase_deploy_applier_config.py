@@ -40,19 +40,24 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "supabase-deploy.yml"
 CONFIG = REPO_ROOT / "supabase" / "config.toml"
 
 
-def _sections(text: str) -> set[str]:
-    """Top-level TOML section names (`[name]`), comments/blank lines ignored.
-
-    Kept only for the human-readable list in failure messages; the ASSERTIONS parse with
-    ``tomllib`` (see ``_config_doc``) because a lexical scan cannot see the spellings the CLI
-    rejects: ``[inbucket] # legacy``, ``[ inbucket ]`` (both legal TOML) and the documented
-    ``[remotes.<name>.inbucket]`` scope, which v3 scans for the removed name.
-    """
-    return set(re.findall(r"^\[([^\[\]]+)\]\s*$", text, flags=re.MULTILINE))
-
-
 def _config_doc() -> dict:
     return tomllib.loads(CONFIG.read_text(encoding="utf-8"))
+
+
+def test_config_tolerates_the_removed_experimental_orioledb_key() -> None:
+    """A SECOND, same-class landmine in the same file (measured, not assumed).
+
+    CLI v3.0.0 tolerates `[experimental] orioledb_version` only while it is EMPTY; any value
+    fails config load with `experimental.orioledb_version in supabase/config.toml is no longer
+    supported. Use db.orioledb_version instead.` — the identical load-error shape that killed
+    `db push`. Setting that key is a plausible future edit ("turn OrioleDB on"), so guard it.
+    """
+    experimental = _config_doc().get("experimental") or {}
+    assert not experimental.get("orioledb_version"), (
+        "[experimental] orioledb_version must stay empty or be removed: Supabase CLI >= 3.0.0 "
+        "rejects any value there and fails config load — the same break that stopped the "
+        "production applier (#10896). The v3 location is [db] orioledb_version."
+    )
 
 
 def test_config_has_no_section_the_cli_rejects() -> None:
@@ -85,7 +90,7 @@ def test_local_smtp_keeps_the_mail_catcher_settings() -> None:
         "catcher for the signup-confirmation branch (#801)"
     )
     assert section.get("port") == 54324, (
-        "the local SMTP UI port (54324) is referenced by the local-dev instructions"
+        "the local SMTP UI port; the CLI default is 54324 and local-dev docs point at it"
     )
 
 
@@ -139,4 +144,31 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         assert "--yes" in cmd, (
             "`supabase functions deploy` is consent-gated in CLI v3; without `--yes` the schema "
             "applies and the app half never flips — the mismatched pair #3627 exists to prevent"
+        )
+
+
+def test_printed_remediations_pass_yes_too() -> None:
+    """A remedy the repo PRINTS is code: it must run unattended, the same way the workflow does.
+
+    Review cycles found this half of the defect twice — the first commit fixed the command the
+    workflow RUNS and left `migration repair` in the drift gate's own remediation without
+    `--yes`, so the option it offered an operator failed exactly like the bug being closed.
+    Both are consent-gated hosted mutations in CLI v3, and no existing test pins them (the
+    drift-gate suite asserts substrings that pass either way).
+    """
+    script = (REPO_ROOT / ".github" / "scripts" / "check-migration-drift").read_text(
+        encoding="utf-8"
+    )
+    # Anchored on the exact remedy strings rather than a line classifier: this script also
+    # PRINTS prose about `db push` ("the deploy runs `supabase db push --include-all`",
+    # "DDL applied outside 'supabase db push'"), and a matcher broad enough to treat prose as a
+    # command false-reds on any wording edit — a fragile guard is worse than none.
+    for command in (
+        "supabase db push --linked --include-all --yes",
+        "--status applied <version> --yes",
+    ):
+        assert command in script, (
+            f"the drift gate's printed remediation must carry `--yes` ({command!r}): it offers an "
+            f"operator a hosted mutation that CLI v3 rejects in any run that cannot prompt "
+            f"(#10896)"
         )
