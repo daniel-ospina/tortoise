@@ -2007,12 +2007,17 @@ place it stood.
 
 **The figures, and what was wrong with them.** The ≈50 MB payload figure is an additive estimate from the
 2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. **Every leg
-is a VECTOR COUNT × 1.5 KB, not an attribute line** — `Object` 7,859 × 1.5 KB ≈ 11.8 MB, `Event` 4,798 ×
-1.5 KB ≈ 7.2 MB (§12.1b), and `Point` the remaining 20,923 of 33,580 × 1.5 KB ≈ 31.4 MB. So the estimate
-is a vectors-only estimate of the three labels that store them; the sum lands on ≈50 MB, which is a
-**coincidence** with §12.1's `Point` node-attributes line of 50 MB — that line is ALL attributes of the
-label, and no leg reads it (§12.1 says so in the place it stands). The legs are still estimates of the
-payload, not a per-label measurement — but the `Object` and `Event` legs DO exist: those labels store 7,859 and 4,798 embeddings respectively, and the
+is a VECTOR COUNT × bytes-per-vector, not an attribute line** — `Object` 7,859 and `Event` 4,798 are the
+two counts the measurement found (§12.1b), and the third leg is the remainder the estimate attributed to
+`Point`, 20,923 of 33,580. At the exact `1,536 B` §12.1a uses, those are 12.1 / 7.4 / 32.1 MB — sum
+**≈51.6 MB**, the same `33,580 × 1,536 B` §12.1a states; the head-line **≈50 MB** is that same population
+at the rounded `1.5 KB = 1,500 B` the original estimate used, **not a second reading.** ⚠️ **Two things the
+legs do not say.** (1) The ≈50 MB is not §12.1's `Point` **node-attributes** line of 50 MB — that line is
+ALL attributes of the label, no leg reads it, and the numerical agreement is a **coincidence**. (2) The
+three legs are the labels the 2026-09-24 count FOUND vectors on, **not the only labels that store them** —
+a `:Source` writes an `embedding` too (§12.1's footnote), so the third leg is an inventory inference whose
+`Point` attribution only `--census` can settle, and it can. The `Object` and `Event` legs DO exist: those
+labels store 7,859 and 4,798 embeddings respectively, and the
 whole defect this epic exists for is that they store them with **no vector index behind them** (`Object`
 and `Event` carry no vector DDL — only `Point` does). The part of the ≈50 MB that is *removable* is
 therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B = 19.4 MB, 38 % of every
