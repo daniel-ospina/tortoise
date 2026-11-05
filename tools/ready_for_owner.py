@@ -1762,7 +1762,7 @@ def _read_coverage(touched: tuple[str, ...]) -> tuple[tuple[str, ...] | None, st
             has_leg = test_files == "ALL" or bool(test_files)
             if has_leg:
                 # No surface of its own, but the always-on core smoke set runs.
-                tier1_only.append(path)
+                uncovered.append(path)
             else:
                 uncovered.append(path)
     raw = (
