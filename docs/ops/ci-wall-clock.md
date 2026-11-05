@@ -358,8 +358,9 @@ same step with the same tail is the investigation.
 ## 7. Matrix fan-out: how many slots one run may hold (`max-parallel`)
 
 No matrix in this repo declared `strategy.max-parallel` before #6744, so a single PR enqueued
-`python-ci`'s whole shard set — 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — at the same
-instant, on top of 11 singleton jobs.
+`python-ci`'s whole shard set — up to 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — at the same
+instant, on top of the **8** non-matrix jobs that are co-eligible with them ("What the cap does
+NOT bound: the total", below, explains why 8 rather than 11).
 
 ⛔ **Scope of that claim: `python-ci`'s three shard matrices.** It is not a repo-wide audit, and
 reading it as one would be wrong — `.github/workflows/mirror-images.yml` still declares a
@@ -416,7 +417,8 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 | unset | 11 / 18 | 0 / 0 |
 
 **The accepted regression has two components, and only the run-level number judges it.** The slow
-matrix gains its second wave (`ceil(5/3)` = 2): its band goes ~13 m → ~18 m, still narrower than
+matrix gains its second wave (`ceil(5/3)` = 2): one wave of the measured slow-leg wall is ~8.9 m
+(row above), so its band goes ~9 m → ~18 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. The fast
 matrix's band is pinned at `ceil(9/3)` = 3 waves — inside the 2–4 wave band invariant 1 protects,
 but on the runs where the pool delivered those 9 shards in 2, the third wave is new wall. No saving
@@ -477,8 +479,10 @@ move **in the same change as the caps**. Landing a permitted re-tune without it 
 16-runner pool, say) satisfies both invariants and still reds the required check on the stale
 constant.
 
-⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** Section 2
-measures a job's wait as `created_at → started_at`, but a job held back by `max-parallel` is
+⛔ **The re-derivation cannot use per-job queue wait to see the cost this creates.** This section's
+own measurement table records a per-job queue wait (`created_at → started_at`, p50 5.4 m / p95
+21.3 m) — note that §2 does NOT: §2 measures EXECUTED WALL (`first step start → last step end`),
+a different clock, and it never reads `created_at`. But a job held back by `max-parallel` is
 **not created until a slot frees**: its `created_at` lands at the moment it is allowed to start,
 so its queue wait reads ~0 and the cap looks like pure relief. The clock for this change is the
 **matrix band** — the first leg's `started_at` to the last leg's `completed_at` within one matrix

@@ -2030,7 +2030,7 @@ jobs:
       # the `test` job's `max-parallel` comment for the measurement and the two
       # inequalities. `3` here costs ONE extra wave (ceil(5/3) = 2 instead of 1),
       # the one wave THIS matrix adds: measured leg wall p50 8.9m → the band goes
-      # ~13m → ~18m, still narrower than the fast band under the same cap
+      # ~9m → ~18m (1 wave → 2), still narrower than the fast band under the same cap
       # (3 waves × 10.5m ≈ 31.5m), so it does not become the run's widest matrix.
       # It is NOT the whole regression — the fast matrix is pinned at its 3-wave
       # ceiling too, and the run-level cost is the simulation's matrix-band end
