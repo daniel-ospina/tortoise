@@ -49,6 +49,7 @@ from tools.gh_write_preflight import (
     Proc,
     Runner,
     _child_env,
+    _insteadof_env,
     _neutral_push_env,
     _read_env,
     _read_targets,
@@ -1184,6 +1185,74 @@ def test_an_unparseable_url_is_credited_with_a_secret_and_never_handed_raw():
     env = _read_env("origin", "https://x/fetch.git", [leaky])
     assert env["GIT_CONFIG_KEY_0"] == f"url.{leaky}.insteadOf", env
     assert env["GIT_CONFIG_VALUE_0"] == "gh-write-preflight-push0:", env
+
+
+def test_real_git_accepts_an_insteadof_base_holding_the_bracket_urlsplit_refuses(tmp_path: Path):
+    """REAL git: the `[` that makes `urlsplit` raise does NOT stop git's `insteadOf` rewrite.
+
+    The unparseable-URL arm is only SOUND because git tolerates a `url.<base>.insteadOf` key whose
+    base contains that `[`: the secret is withheld from argv (0444) and reached through the alias
+    instead. If git REJECTED such a key, the alias would name nothing and a writable credential
+    would come back `remote-unreachable` — a false block, the one failure this tool must never add.
+    The comment on that arm asserts this was measured of real git; a review carried it as the
+    AUTHOR's measurement, because nothing in this suite executed it. This executes it, twice, with
+    no network:
+
+      1. git's config grammar accepts the EXACT key `_read_env` emits for the leaky URL — a `[`
+         inside the userinfo of an https URL — and reads it back verbatim;
+      2. the rewrite `_insteadof_env` builds RESOLVES an alias to a real bare repo whose path
+         holds a `[`, measured against the control where the same alias resolves nowhere.
+
+    Scope stated, not overstated: (1) covers the arm's real output and (2) covers the rewrite its
+    product performs. Neither is a byte-for-byte replica of GitHub's transport, which is why the
+    control assertion below is what makes the resolution half non-vacuous.
+    """
+    leaky = "https://user:pa[ssw0rd@example.invalid/r.git"
+    alias = "gh-write-preflight-push0:"
+
+    # (1) Git ACCEPTS the base it is handed. No transport involved: `git config` only parses.
+    arm_env = _read_env("origin", "https://x/fetch.git", [leaky])
+    assert arm_env["GIT_CONFIG_KEY_0"] == f"url.{leaky}.insteadOf", arm_env
+    read_back = subprocess.run(
+        ["git", "config", "--get-regexp", r"^url\."],
+        capture_output=True,
+        text=True,
+        env={**_GIT_ENV, **arm_env},
+        check=True,
+    ).stdout.strip()
+    assert read_back == f"url.{leaky}.insteadof {alias}", (
+        f"git refused the insteadOf base the arm builds: {read_back!r}"
+    )
+
+    # (2) That rewrite form RESOLVES. A bare repo whose own path carries the bracket is the
+    #     resolvable stand-in; the position of `[` is irrelevant to insteadOf, which is a plain
+    #     prefix substitution.
+    remote = tmp_path / "re[1].git"
+    work = tmp_path / "work"
+    _git("init", "--bare", "-q", str(remote), cwd=tmp_path)
+    _git("init", "-q", str(work), cwd=tmp_path)
+    (work / "f.txt").write_text("hello\n")
+    _git("add", "f.txt", cwd=work)
+    _git("commit", "-q", "-m", "init", cwd=work)
+    _git("remote", "add", "origin", str(remote), cwd=work)
+    _git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=work)
+
+    def _ls_remote(extra_env: dict[str, str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "ls-remote", "--heads", alias],
+            capture_output=True,
+            text=True,
+            env={**_GIT_ENV, **extra_env},
+        )
+
+    control = _ls_remote({})
+    assert control.returncode != 0, (
+        f"the alias resolved with no rewrite at all, so the resolution half proves nothing: "
+        f"{control.stdout!r}"
+    )
+    rewritten = _ls_remote(_insteadof_env(f"file://{remote}", alias, 0))
+    assert rewritten.returncode == 0, rewritten.stderr
+    assert "refs/heads/main" in rewritten.stdout, rewritten.stdout
 
 
 def test_delete_success_but_ref_still_present_is_leftover(tmp_path: Path):
