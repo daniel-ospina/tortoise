@@ -298,16 +298,29 @@ def test_the_mcp_module_has_exactly_one_breach_counting_site():
     explanatory sentence naming the call would red this test for prose alone —
     a false block on the very comment that documents the invariant. Counting
     `ast.Call` nodes whose callee is `…record_wait_bound_breach` counts CALLS.
+
+    ⛔ AND IT MUST MATCH BOTH SPELLINGS (#11054 review P3, cycle 4). Matching only
+    `node.func.attr` counts `monitoring.record_wait_bound_breach(...)` and MISSES
+    the bare-name form `record_wait_bound_breach(...)` that follows a
+    `from tortoise.monitoring import record_wait_bound_breach` — there `func` is
+    an `ast.Name` and `attr` is `None`. A second real call on a `dispatched=False`
+    return, spelled that way, would double-count a refused request with this test
+    green — precisely the arm the behavioural test cannot reach.
     """
     import ast
     import pathlib
+
+    def _is_breach_call(node: ast.Call) -> bool:
+        """Both spellings: `mod.record_wait_bound_breach(…)` and the bare name."""
+        return (
+            getattr(node.func, "attr", None) == "record_wait_bound_breach"
+            or getattr(node.func, "id", None) == "record_wait_bound_breach")
 
     tree = ast.parse(
         pathlib.Path(mcp_server.__file__).read_text(encoding="utf-8"))
     sites = sum(
         1 for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and getattr(node.func, "attr", None) == "record_wait_bound_breach")
+        if isinstance(node, ast.Call) and _is_breach_call(node))
     assert sites == 1, (
         f"tortoise/mcp_server.py has {sites} breach-counting call sites; the "
         "seam must have exactly one, on the main breach path. A second one on "

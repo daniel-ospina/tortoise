@@ -204,6 +204,26 @@ def test_the_guard_retry_fits_inside_its_pytest_item_budget():
         f"a {_GUARD_ITEM_TIMEOUT_S}s item budget cannot carry two {per_attempt}s "
         "attempts — the retry would be unreachable and pytest-timeout would kill "
         "the item mid-attempt")
+    # ⛔ AND THE BUDGET MUST BE THE ONE THE ITEMS ACTUALLY CARRY (#11054 review P2,
+    # cycle 4). The arithmetic above compares a module CONSTANT to another module
+    # constant, so it stays green when the `@pytest.mark.timeout` decorators come
+    # off and the items silently fall back to `pyproject.toml`'s `timeout = 300`:
+    # measured by deleting both decorators, `-k "budget or retry_fits"` still
+    # reported `2 passed`. That is a pin observing its own constant rather than
+    # the behaviour it names — the proxy class the AST fix below/next-door
+    # replaced on the source-count test. The failure it would hide is exactly the
+    # one this test exists for: a slow first attempt consumes the whole item,
+    # pytest-timeout kills it mid-attempt, neither attempt is named in the report
+    # and the spawned redislite child is orphaned. So assert on the MARKERS.
+    for fn in (test_m0_main_guard, test_ingest_main_guard):
+        declared = [
+            mark.args[0] for mark in getattr(fn, "pytestmark", [])
+            if mark.name == "timeout" and getattr(mark, "args", ())]
+        assert declared == [_GUARD_ITEM_TIMEOUT_S], (
+            f"{fn.__name__} must carry @pytest.mark.timeout("
+            f"{_GUARD_ITEM_TIMEOUT_S}); it declares {declared or 'nothing'}, so "
+            "it falls back to pyproject.toml's 300 s and the retry is "
+            "unreachable — the pin above would not notice (#11054 review P2)")
 
 
 @pytest.mark.timeout(_GUARD_ITEM_TIMEOUT_S)
