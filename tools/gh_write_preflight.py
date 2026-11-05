@@ -293,9 +293,17 @@ def _printable_base(api_base: str) -> str:
         parts = urllib.parse.urlsplit(api_base)
     except ValueError:
         return "[unparseable --api-base, not echoed]"
+    # ⛔ HOST ONLY — THE PATH IS NEVER ECHOED (review cycle 18). The path is caller-supplied text, and when
+    # NO credential resolves there is nothing to scrub it by value, so a `--api-base` carrying a legacy
+    # 40-hex secret in its path printed it on the human line and in `--json`. The endpoint is identified by
+    # its host, which is all a verdict needs ("was this measured against GitHub?").
+    _safe_path = "/<path not echoed>" if parts.path and parts.path != "/" else ""
     if parts.username is not None or parts.password is not None:
         return urllib.parse.urlunsplit(
-            (parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+            (parts.scheme, parts.netloc.rsplit("@", 1)[-1], _safe_path, "", ""))
+    if _safe_path:
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, _safe_path, "", ""))
     # ⛔ `urlsplit` IS BLIND TO USERINFO IN A VALUE IT CANNOT PARSE AS A URL AT ALL. `user:hunter2@host`
     # (no scheme) comes back as scheme='user', netloc='', path='hunter2@host', username=None,
     # password=None — so the branch above returns it VERBATIM and a schemeless credentialed base leaks
@@ -696,7 +704,10 @@ def preflight(repo: str, api_base: str, token: str, source: str) -> dict:
     # ⛔ NOT ECHOED: the scope header is response text, and a response can reflect the request's
     # Authorization header back. The presence of scopes is the useful, safe fact.
     result["scopes"] = "<present — not echoed>" if headers.get("x-oauth-scopes") else ""   # classic/OAuth ONLY
-    result["ratelimit_remaining"] = _scrub(headers.get("x-ratelimit-remaining") or "", token).strip()[:32]
+    # ⛔ A RESPONSE HEADER VALUE IS NOT ECHOED (review cycle 18) — same rule as `scopes`: report the FACT.
+    # Only `"0"` is meaningful (it gates the write probes) and it is a constant, so it is safe to carry.
+    _rl_raw = (headers.get("x-ratelimit-remaining") or "").strip()
+    result["ratelimit_remaining"] = "0" if _rl_raw == "0" else ("present — not echoed" if _rl_raw else "")
 
     # ── 2. RATE LIMIT pre-check: never spend a write probe on an exhausted account, and never
     #      report a permission defect for a bucket that will refill.
@@ -828,7 +839,7 @@ def main(argv: list[str]) -> int:
     # control characters raise `UnicodeEncodeError` inside `http.client` (cycle 3). A missing `/` is the
     # same refusal class, so it serialises the same way instead of printing a human line at a JSON consumer.
     def _repo_refusal(detail: str) -> int:
-        print(json.dumps({"repo": _scrub(args.repo, token),
+        print(json.dumps({"repo": _scrub(args.repo, token) if token else "<not echoed — no credential resolved>",
                           "api_base": _scrub(_printable_base(args.api_base), token),
                           "ok": False, "reason": "usage", "detail": detail},
                          indent=2, sort_keys=True) if args.json
