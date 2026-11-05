@@ -1670,8 +1670,13 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 #     too: a duplicate placed above the real sentence rebinds every assertion
 #     over it.
 #   • PER-SECTION (§9.4 by heading slice): the `:Source.summary` COUNT. This is
-#     the one that catches an ADDITIVE wrong instruction on a different line of
-#     §9.4, which a per-line check cannot see at all.
+#     the one that catches an ADDITIVE occurrence of THAT SPELLING on a different
+#     line of §9.4, which a per-line check cannot see at all. ⚠️ It is spelling-
+#     exact and does NOT cover an additive line naming bare `summary` — that
+#     spelling legitimately appears in §9.4 and in §12.1b's footnote, so a
+#     bare-`summary` instruction added beside the correct pointer is caught by
+#     nothing in this file (the count's own message says so; this bullet used to
+#     claim the broader guard).
 #   • WHOLE-DOCUMENT: the retired-blur absence, deliberately, because that
 #     sentence is a claim about the S1 narrative wherever it appears, and scoping
 #     it to §9.4 would let it return in §10 unremarked.
@@ -1757,15 +1762,20 @@ def _source_vector_section_94_line(text: str) -> str:
                           unique=True)
 
 
-def _section(text: str, start_heading: str, end_heading: str) -> str:
-    """One §-section's text, by heading — never by line number."""
+def _section(text: str, start_heading: str, end_heading: str, where: str) -> str:
+    """One §-section's text, by heading — never by line number.
+
+    `where` names the section for the failure messages. It is a PARAMETER, not a
+    literal, because this helper serves two sections (§9.4 and §12.1b): a message
+    that hardcoded "§9.4" diagnosed a replaced §12.1b heading as a §9.4 problem.
+    """
     assert start_heading in text, (
         f"{_STORAGE_DOC.name} no longer carries the heading {start_heading!r} — "
-        "the section this pin reads has MOVED or been renamed; re-derive where "
-        "§9.4 states what the source vector reads")
+        f"the section this pin reads ({where}) has MOVED or been renamed; "
+        f"re-derive where {where} states what the source vector reads")
     assert end_heading in text, (
         f"{_STORAGE_DOC.name} no longer carries the heading {end_heading!r} — "
-        "the section this pin brackets has MOVED or been renamed")
+        f"the section this pin brackets ({where}) has MOVED or been renamed")
     # ⛔ BOTH headings' uniqueness is asserted, not assumed, and the two hazards are
     # OPPOSITE directions of one hole. `index` below binds to the FIRST start
     # match, so a duplicate start heading placed ABOVE the real section WIDENS the
@@ -1904,7 +1914,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # document, because the sentence it retires is a claim about the S1
     # narrative wherever it appears, and scoping it would let the same blur
     # return in §10 unremarked. Its failure message says so.
-    s94 = _section(text, _S94_HEADING, _S95_HEADING)
+    s94 = _section(text, _S94_HEADING, _S95_HEADING, "§9.4")
     # ⛔ THREE scopings, on purpose, because each catches a regression the others
     # cannot see:
     #   • the DECIDING LINE (`_source_vector_section_94_line`), bound to §9.4 by
@@ -1996,7 +2006,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # copy in, say, §12.2. Measured before this binding existed: moving the footnote
     # into §12.2 left the whole pin GREEN.
     footnote = _source_vector_footnote(text)
-    assert footnote in _section(text, _S121B_HEADING, _S121C_HEADING), (
+    assert footnote in _section(text, _S121B_HEADING, _S121C_HEADING, "§12.1b"), (
         f"§12.1b's `:Source` footnote ({_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r}) is NOT "
         f"inside §12.1b — `_anchored_line` finds the anchor anywhere in the "
         f"document, so a copy moved into another section satisfies every §12.1b "
