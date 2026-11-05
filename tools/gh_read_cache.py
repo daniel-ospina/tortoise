@@ -48,9 +48,12 @@ allowed to be wrong. Concretely:
     cache — and a denylist of routes is not an identity, which is exactly how a
     first cut cached a live PR body under the key `repo`.
   - Freshness must be PROVABLE. A missing, non-numeric, NaN or infinite
-    `fetched_at`, a stamp in the future (age uncomputable), a corrupt entry, a
-    nonsensical TTL, or an entry whose recorded identity does not match the
-    request are all MISSES — never "probably fine".
+    `fetched_at`, a stamp more than `CLOCK_SKEW_TOLERANCE_S` (60 s) in the future, a
+    corrupt entry, a nonsensical TTL, or an entry whose recorded identity (instance
+    host + key + repo + base + argv) does not match the request are all MISSES — never
+    "probably fine". A stamp *within* that tolerance is read as age 0: the clock of the
+    writing process is not this process's clock, and refusing its own peers' writes
+    would make the cache useless on a fleet whose boxes do not share a time source.
   - A failed re-fetch FAILS (rc=4) and emits NOTHING. It never falls back to the
     stale body sitting in the cache dir. That fallback is the tempting behaviour
     and the forbidden one.
@@ -122,6 +125,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -207,6 +211,9 @@ MUTABLE_ARGV: tuple[tuple[tuple[str, ...], str], ...] = (
     (("api", "repos/{repo}/issues"), "issue state"),
     (("api", "repos/{repo}/check-runs"), "check results are the verdict"),
     (("api", "repos/{repo}/check-suites"), "check results are the verdict"),
+    # A graphql query is a live read and its content cannot be classified from argv, so it
+    # is refused rather than guessed at (an under-match here spends a real call).
+    (("api", "graphql"), "a graphql query is a live read with unclassifiable content"),
 )
 
 # Fields that are verdicts no matter which endpoint carries them.
@@ -227,18 +234,36 @@ class Usage(Exception):
     """A malformed request. rc=2 — nothing fetched, nothing written."""
 
 
-def _repo_slug(repo: str) -> str:
-    """Accept `OWNER/REPO`, and also gh's documented `HOST/OWNER/REPO`.
+def _repo_slug(repo: str) -> tuple[str, str]:
+    """Split `OWNER/REPO` or gh's documented `HOST/OWNER/REPO` into (host, slug).
 
-    gh accepts the host-prefixed form (`GH_REPO=github.com/o/n`), so rejecting it made every
-    `get repo` a usage error on a box that exported the standard variable that way.
+    ⛔ THE HOST IS RETURNED, NOT THROWN AWAY. An earlier cut accepted the host-prefixed
+    form and then `parts = parts[1:]`-ed it into oblivion, so `github.com/acme/one` and
+    `ghe.example.com/acme/one` shared ONE cache entry — one instance's `default_branch` /
+    `visibility` served for another and reported fresh. The host is part of the question.
+
+    ⛔ THREE SEGMENTS ARE ALWAYS `host/owner/repo`. Detecting a host by the presence of a
+    dot refused `ghe/o/n` and `localhost:8080/o/n`, i.e. it rejected documented forms.
     """
-    parts = [p for p in repo.split("/")]
-    if len(parts) == 3 and "." in parts[0]:
-        parts = parts[1:]
+    parts = repo.split("/")
+    host = ""
+    if len(parts) == 3:
+        host, parts = parts[0], parts[1:]
     if len(parts) != 2 or not all(parts):
         raise Usage(f"--repo must be owner/name (or host/owner/name), got {repo!r}")
-    return "/".join(parts)
+    for piece in ([host] if host else []) + parts:
+        # A slug with whitespace or a query/fragment would reach gh as a different route.
+        if not piece or any(ch in piece for ch in " \t\n?#"):
+            raise Usage(f"--repo segment {piece!r} is not a valid repository component")
+    return host, "/".join(parts)
+
+
+def _resolve_repo(repo: str) -> tuple[str, str]:
+    """(host, slug), with gh's own `GH_HOST` supplying the instance when not spelled."""
+    host, slug = _repo_slug(repo)
+    if not host:
+        host = os.environ.get("GH_HOST", "")
+    return host, slug
 
 
 def _cache_dir(override: str | None = None) -> Path:
@@ -252,20 +277,24 @@ def _gh_bin(override: str | None = None) -> str:
     return override or os.environ.get("GH_READ_CACHE_GH", "gh")
 
 
-def _identity(key: str, repo: str, base: str, argv: list[str], template: tuple[str, ...]) -> dict:
+def _identity(key: str, repo: str, base: str, argv: list[str], template: tuple[str, ...], host: str = "") -> dict:
     """Everything that makes two cached answers DIFFERENT questions.
 
-    `repo`/`base` participate ONLY when the declared route references them. Keying them
-    unconditionally fragmented the cache for routes that do not vary by either (the
+    `repo`/`host`/`base` participate ONLY when the declared route references them. Keying
+    them unconditionally fragmented the cache for routes that do not vary by either (the
     account-scoped `/rate_limit` was split per repo, and a `{base}`-free route per branch)
     — two calls for one answer. Omitting `base` when it IS used once served `main`'s
     protection policy as `release/1.0`'s, so the rule is "when used".
+
+    `host` accompanies `repo` because the same `owner/name` on two GitHub instances is two
+    different repositories; dropping it served one instance's metadata for another.
     """
     uses_repo = any("{repo}" in a for a in template)
     uses_base = any("{base}" in a for a in template)
     return {
         "key": key,
         "repo": repo if uses_repo else "",
+        "host": host if uses_repo else "",
         "base": base if uses_base else "",
         "argv": list(argv),
     }
@@ -291,7 +320,7 @@ def entry_freshness(entry: object, now: float, ttl: int, expect: dict | None = N
         return False, "bad_ttl"
     if expect is not None:
         # An entry that answers a DIFFERENT question is not a hit, however fresh.
-        for field in ("key", "repo", "base", "argv"):
+        for field in ("key", "repo", "host", "base", "argv"):
             if entry.get(field) != expect.get(field):
                 return False, f"identity_mismatch:{field}"
     fetched_at = entry.get("fetched_at")
@@ -395,7 +424,7 @@ def _prefix_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
     # (`actions/runs/<id>/jobs`, `actions/workflows/x.yml`, `pulls/42`) AND every query
     # spelling — including `actions/runs?per_page=100`, which is the fleet's REAL polling
     # form. A following `/`, `?` or `#` is the same mutable family.
-    return re.compile(" ".join(parts) + r"(?:[ /?#]|$)")
+    return re.compile(" ".join(parts) + r"(?:[ /?#]|$)", re.IGNORECASE)
 
 
 def _route_candidates(argv: tuple[str, ...]) -> list[str]:
@@ -407,17 +436,21 @@ def _route_candidates(argv: tuple[str, ...]) -> list[str]:
     verb in front, which is the shape the patterns are written in.
 
     ⛔ AND A LEADING SLASH IS A THIRD SPELLING. `gh api /repos/o/n/pulls/42` is a real
-    invocation (gh normalises it), and it satisfied neither candidate, so the route passed
-    through — falsifying this file's own "however the caller spelled it" claim.
+    invocation (gh normalises it), so the route passed through — falsifying this file's own
+    "however the caller spelled it" claim. A **PERCENT-ENCODED** segment is a fourth
+    (`p%75lls` decodes to `pulls` inside gh): both are normalised before matching, because
+    an unquoted spelling that gh resolves must not slip past the guard.
     """
-    norm = [tok[1:] if tok.startswith("/") else tok for tok in argv]
-    candidates = [" ".join(argv), " ".join(norm)]
-    candidates.extend(f"api {tok}" for tok in norm if tok.startswith("repos/"))
+    raw = list(argv)
+    norm = [tok[1:] if tok.startswith("/") else tok for tok in raw]
+    unq = [urllib.parse.unquote(tok) for tok in norm]
+    candidates = [" ".join(raw), " ".join(norm), " ".join(unq)]
+    candidates.extend(f"api {tok}" for tok in unq if tok.lower().startswith("repos/"))
     return candidates
 
 
-def _verdict_field_tokens(tokens: tuple[str, ...]) -> str:
-    """Only the tokens a VERDICT can be requested through.
+def _verdict_field_names(tokens: tuple[str, ...]) -> set[str]:
+    """The FIELD NAMES a caller projects — compared as whole names, never substrings.
 
     A verdict arrives via a projection flag (`--json state`, `--jq .conclusion`), never via
     a path segment. Scanning the whole command made a spelled-out slug look like a field
@@ -427,6 +460,11 @@ def _verdict_field_tokens(tokens: tuple[str, ...]) -> str:
     ⛔ BOTH SPELLINGS COUNT. `--json=state`, `--jq=.state`, `--template=.state` and the
     attached shorthands `-q.state` / `-t.state` are real gh invocations; matching only the
     separate-token form left four ways to ask for a verdict unscanned.
+
+    ⛔ WHOLE NAMES, NOT SUBSTRINGS. A `field in text` test refused `--jq .merged_at`
+    ("names the verdict field 'merged'") and `mergeable_state`, `state_reason` — legitimate
+    reads rejected by a guard whose job is to reject verdicts. Names are extracted, then
+    compared exactly.
     """
     picked: list[str] = []
     long_flags = ("--json", "--jq", "--template")
@@ -449,7 +487,17 @@ def _verdict_field_tokens(tokens: tuple[str, ...]) -> str:
             if tok.startswith(f) and len(tok) > len(f):
                 picked.append(tok[len(f):])
                 break
-    return " ".join(picked).lower()
+    names: set[str] = set()
+    for val in picked:
+        # `--json a,b` is a name list; `--jq .a.b` / `{a: .b}` are expressions.
+        for piece in re.split(r"[,\s{}\[\]()|]+", val):
+            piece = piece.strip().lstrip(".")
+            if piece:
+                names.add(piece.split(".")[-1].lower())
+        for expr in re.findall(r"\.([A-Za-z_][A-Za-z0-9_]*)", val):
+            names.add(expr.lower())
+    names.discard("")
+    return names
 
 
 _MUTABLE_PREFIXES: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = tuple(
@@ -487,10 +535,9 @@ def refuse_if_mutable(
                 f"command {' '.join(toks)!r} (as {' '.join(formatted_argv)!r}) is a MUTABLE "
                 f"state read ({why}) — refusing to cache it"
             )
-    lowered = _verdict_field_tokens(caller_tokens)
-    for field in MUTABLE_FIELDS:
-        if field in lowered:
-            raise Refused(f"the command names the verdict field {field!r} — refusing to cache it")
+    lowered = _verdict_field_names(caller_tokens)
+    for field in sorted(MUTABLE_FIELDS & lowered):
+        raise Refused(f"the command projects the verdict field {field!r} — refusing to cache it")
 
 
 def _format_argv(argv: tuple[str, ...], repo: str, base: str) -> list[str]:
@@ -554,7 +601,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         # for the account-scoped `/rate_limit` both made the key unusable bare and split
         # the cache per repo — two calls for one answer.
         uses_repo = any("{repo}" in a for a in template)
-        repo = _repo_slug(args.repo) if uses_repo else ""
+        host, repo = _resolve_repo(args.repo) if uses_repo else ("", "")
         argv = _format_argv(template, repo, args.base)
         # (2) COMMAND-level refusal, as defence in depth (see refuse_if_mutable).
         refuse_if_mutable(args.key, tuple(argv), tuple(template), repo, args.base)
@@ -583,7 +630,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         sys.stdout.write(body)
         return 0
 
-    ident = _identity(decl.key, repo, args.base, argv, decl.argv)
+    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host)
     try:
         cache_dir = _cache_dir(args.cache_dir)
     except OSError as exc:
@@ -652,7 +699,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             raise Usage(f"{args.key!r} is not a declared invariant")
         ttl = _effective_ttl(args.ttl, decl.ttl)
         uses_repo = any("{repo}" in a for a in decl.argv)
-        repo = _repo_slug(args.repo) if uses_repo else ""
+        host, repo = _resolve_repo(args.repo) if uses_repo else ("", "")
     except Refused as exc:
         sys.stderr.write(f"gh_read_cache: REFUSED — {exc}\n")
         return 3
@@ -661,7 +708,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 2
 
     argv = _format_argv(decl.argv, repo, args.base)
-    ident = _identity(decl.key, repo, args.base, argv, decl.argv)
+    ident = _identity(decl.key, repo, args.base, argv, decl.argv, host)
     try:
         cache_dir: Path | None = _cache_dir(args.cache_dir)
     except OSError as exc:
@@ -713,7 +760,7 @@ def cmd_keys(_args: argparse.Namespace) -> int:
 def cmd_check(_args: argparse.Namespace) -> int:
     """Exercise the predicate on the cases that must never be called fresh."""
     now = 1_000_000.0
-    ident = {"key": "repo", "repo": "o/n", "base": "", "argv": ["api", "repos/o/n"]}
+    ident = {"key": "repo", "repo": "o/n", "host": "", "base": "", "argv": ["api", "repos/o/n"]}
     good = {"schema": SCHEMA, "fetched_at": now - 10, "body": '{"id":1}', **ident}
     other = {**good, "repo": "o/m"}
     cases = [
@@ -724,6 +771,14 @@ def cmd_check(_args: argparse.Namespace) -> int:
         ({**good, "fetched_at": now}, True, False),
         ({**good, "fetched_at": now + 4_000}, 60, False),
         ({**good, "fetched_at": now + 5}, 60, True),  # inside skew tolerance -> age 0
+        # ⛔ THE TOLERANCE BOUNDARY IS THE ONLY THING BOUNDING SERVED UNPROVEN FRESHNESS,
+        # so it is pinned from both sides here AND in the suite. With `--ttl 1` (the
+        # docstring's own advice for `rate_limit`) a stamp 59 s in the future is served
+        # with the age DISPLAYED as 0 — the tolerance, not the requested TTL, decides.
+        # Mutants 60→10 and 60→600 both left a 40-test suite green without these.
+        ({**good, "fetched_at": now + 59}, 1, True),
+        ({**good, "fetched_at": now + 61}, 1, False),
+        ({**good, "fetched_at": now + 61}, 600, False),
         ({"schema": SCHEMA, "fetched_at": now - 10, **ident}, 0, False),        ({**good, "fetched_at": float("nan")}, 60, False),
         ({**good, "fetched_at": float("inf")}, 60, False),
         ({k: v for k, v in good.items() if k != "fetched_at"}, 60, False),
