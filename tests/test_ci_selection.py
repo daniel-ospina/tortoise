@@ -2950,32 +2950,26 @@ def test_gh_write_preflight_tool_change_selects_core_not_tier1():
     (`"core" in r["surfaces"]`); the docs-only early return then yields `full: False` with no pin,
     so the later asserts pass unexercised.
 
-    #11027 adds the SIBLING half. The `CORE_ALSO` entry is a PREFIX (`"tools/gh_write_preflight"`),
-    because `_selection_relevant` matches with `path.startswith(CORE_ALSO)` — so an EXACT path claims
-    only the file as spelled today and silently re-opens this same drop for a rename or a split-out
-    sibling, which is the one shape that makes the gate a diff that runs none of its own arms. That
-    property is pinned by the second block below: it is a REAL falsifier, measured by reverting the
-    entry to the exact path, at which point it is the assert that reds.
+    ⛔ This case does NOT pin the entry's SHAPE: it exercises the exact path, which matches a prefix
+    and an exact entry alike, so it stays green if the prefix is narrowed back to
+    `"tools/gh_write_preflight.py"`. That half is owned by the NEXT case
+    (`::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped`), which is the
+    falsifier for it — one case per property, because a single case reported as pinning both is how
+    the second property went unpinned in the first place.
     """
     r = _sel(["tools/gh_write_preflight.py"])
     assert "core" in r["surfaces"], r
     assert "test_gh_write_preflight.py" in r["test_files"], r
     assert r["full"] is False, r
 
-    # The PREFIX property: a split-out sibling must still claim the surface. Under the exact-path
-    # entry this returns `surfaces=[]` and the tier-1 smoke fallback (measured), i.e. a rename would
-    # silently stop running the 96 arms that pin the write proof.
-    sibling = _sel(["tools/gh_write_preflight_extra.py"])
-    assert "core" in sibling["surfaces"], sibling
-    assert "test_gh_write_preflight.py" in sibling["test_files"], sibling
-    assert sibling["full"] is False, sibling
-
 
 def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped():
     """The carve-out entry must be a PREFIX, not the exact path (#11027).
 
-    `_keep_changed` claims a changed path with `startswith(TOOL_CARVEOUTS)`, so an entry naming
-    `tools/gh_write_preflight.py` exactly claims ONLY that spelling. Two ordinary refactors then
+    `_selection_relevant` claims a changed path with `path.startswith(CORE_ALSO)` — this entry's
+    tuple, NOT `TOOL_CARVEOUTS` (whose members force the FULL matrix; this one yields `core` only) —
+    so an entry naming `tools/gh_write_preflight.py` exactly claims ONLY that spelling. Two ordinary
+    refactors then
     re-open the silent drop the entry exists to close, with no test noticing:
 
       * a rename (`tools/write_preflight.py`) — nothing claims it, so a diff to the gate runs none

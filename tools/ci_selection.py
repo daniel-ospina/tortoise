@@ -1653,16 +1653,14 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # with the exact path the second case FAILS and the first still passes, which is why
              # the first alone did not pin this line).
              # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
-             # This entry lives in `CORE_ALSO`, and `_selection_relevant` matches it with
-             # `path.startswith(CORE_ALSO)` — so an EXACT path claims only the file as spelled
+             # NOTE THE TUPLE: this entry is in `CORE_ALSO` (matched by `_selection_relevant`'s
+             # `path.startswith(CORE_ALSO)`), not in `TOOL_CARVEOUTS` — a `TOOL_CARVEOUTS` member
+             # forces the FULL matrix, and this one deliberately yields `core` only. The mechanism
+             # is the same `startswith`, so an EXACT path claims only the spelling that exists
              # today and silently re-opens this very drop for a rename or a split-out sibling
-             # (`gh_write_preflight_<something>.py`): the gate would again be a diff that runs
-             # none of its own arms. (Note the tuple: a `TOOL_CARVEOUTS` entry means the FULL
-             # matrix, and this one deliberately yields `core` only — see the MEASURED line above.)
-             # Over-matching costs extra CI on a file that is not the tool; under-matching ships
-             # the write proof nobody runs. Pinned by the sibling assert in
-             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1,
-             # which was checked to be a real falsifier by reverting this line to the exact path.
+             # (`gh_write_preflight_<something>.py`): the gate would again be a diff that runs none
+             # of its own arms. Over-matching costs extra CI on a file that is not the tool;
+             # under-matching ships the write proof nobody runs.
              "tools/gh_write_preflight",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
