@@ -1880,36 +1880,43 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     """P3 (review): the citation block is the change's own claim about ITSELF.
 
     Commit `a7436214f` ("cite the floor's calibration as it is written") ships three
-    coordinates for the 5400 s floor — and two of them had already drifted by this
-    head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
-    one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6's earlier citation
-    pointed at a `timeout-minutes` kill table rather than at the derivation sentence
-    it quotes.
+    coordinates for the 5400 s floor, and the defect class it kept is that a coordinate
+    can name the WRONG place: a trailing `#:` comment beside the derived value, or a
+    different section of the document than the sentence it is quoted for. Both drifts
+    were real, and both were hand-re-cut more than once before the pin below existed.
 
-    ⛔ NEITHER DRIFT'S ILLUSTRATIVE SPAN IS RESTATED HERE (round 13's P3s — the first
-    attempt to describe them restored the staleness it was warning about). This PR grew
-    that document by 48 lines, which moved every one of those numbers, so a coordinate
-    that is only true on `origin/main` hands the next reader a checkable fact that is
-    false at this head. The lesson needs no coordinate: a citation can name another
-    section entirely, and the docstring quoted above warns that whoever mis-locates the
-    derivation "discards the one section that supports this floor" — so a stale
-    coordinate sends the next lane to exactly the misreading the paragraph exists to
-    prevent.
+    ⛔ NEITHER DRIFT'S ILLUSTRATIVE SPAN IS RESTATED HERE (round 13's P3s, and round
+    14's P3: an earlier revision described them with numbers that were stale at this
+    very head — and in one case had never been right at ANY head, which is why an
+    anecdote about them is not evidence worth keeping). This PR grew that document by
+    48 lines, so a coordinate that is only true on `origin/main` hands the next reader
+    a checkable fact that is false here. The lesson needs no coordinate: a citation can
+    name another section entirely, and the docstring quoted above warns that whoever
+    mis-locates the derivation "discards the one section that supports this floor" — so
+    a stale coordinate sends the next lane to exactly the misreading the paragraph
+    exists to prevent.
 
-    Pinned MECHANICALLY instead of corrected by hand a third time: the numbers are
-    read back out of the docstring and resolved against the files they cite, so a
-    later insert anywhere in either file reddens this instead of silently re-arming
-    the defect. Coverage is EXACT, not best-effort (round 13, P2): the sibling
-    docstring's citation must be found exactly once — a phrasing that silently
-    disappears from the checked set is the same false PASS as a stale number — and any
-    `quoted derivation is at` parenthetical is resolved too. Discriminating: restore
-    `:304`, or shift the span the citation names, and it reddens.
+    Pinned MECHANICALLY instead of corrected by hand a third time: the numbers are read
+    back out of the docstrings and resolved against the files they cite, and the pin is
+    PHRASING-AGNOSTIC (round 14's P2: pinning one literal phrasing left this file's own
+    previous wording — and every new one — uncovered, so a re-introduced coordinate
+    stayed green). Three arms: every `ci_queue_health.py:<line>` cited by EITHER file
+    must BE the assignment; the sibling's `§6 lines A-B` citation must be found exactly
+    once and name the span step 2 resolves; and any line in this file that discusses
+    the derivation or the citation while carrying an `A-B` span must name that same
+    span. Discriminating: shift a cited span anywhere, reword the sibling's phrasing
+    away, or state a different span near the word "derivation", and it reddens.
     """
     root = Path(__file__).resolve().parents[1]
     src = (root / "tools" / "ci_check_repair.py").read_text()
+    own_src = Path(__file__).read_text()
 
-    # 1. Every `ci_queue_health.py:<line>` cited must BE the derived-value assignment.
+    # 1. Every `ci_queue_health.py:<line>` cited — in the tool AND in this file — must
+    #    BE the derived-value assignment. The test file's own coordinates were unchecked
+    #    until round 14, which is how one describing "the trailing comment … one line
+    #    below, at `:305`" survived three rounds while being wrong at every head.
     cited = sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", src)))
+    cited += sorted(set(re.findall(r"ci_queue_health\.py:(\d+)", own_src)))
     assert cited, "the citation block no longer cites ci_queue_health.py by line"
     health_lines = (root / "tools" / "ci_queue_health.py").read_text().splitlines()
     for number in cited:
@@ -1945,20 +1952,45 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     own_src = Path(__file__).read_text()
     sibling_hits = re.findall(
         r"§6 lines ([0-9]{1,4})-([0-9]{1,4}) records the same derivation", own_src)
-    parenthetical_hits = re.findall(
-        r"quoted derivation is at `([0-9]{1,4})-([0-9]{1,4})`", own_src)
     assert len(sibling_hits) == 1, (
         f"expected exactly ONE '§6 lines A-B records the same derivation' citation in "
         f"this file's docstrings, found {len(sibling_hits)} — ZERO means the citation "
         "moved to a phrasing this pin does not cover (round 13's P2: a phrasing that "
         "silently leaves the checked set is the same false PASS as a stale number), "
         "and more than one means a copy nothing examines")
-    for found in [*sibling_hits, *parenthetical_hits]:
+    for found in sibling_hits:
         assert found == (str(first), str(last)), (
             f"a docstring in this file cites the derivation at {found[0]}-{found[1]} "
             f"while the file's own citation (and the pinned span above) says "
             f"{first}-{last} — a stale coordinate sends the next lane to the "
             "misreading the paragraph exists to prevent")
+
+    # 4. PHRASING-AGNOSTIC backstop inside THIS function (round 14's P2). An earlier
+    #    arm matched one literal wording, so the file's own PREVIOUS wording — and any
+    #    new one — could state a stale span and stay green. This arm drops the keyword
+    #    filter entirely and instead forbids ANY `A-B` span in this function's source
+    #    that is not the pinned one: the region is small and fully under this pin's
+    #    control, so "no other span appears here" is a cheap invariant, and a
+    #    re-introduced coordinate cannot choose its own phrasing to escape it. Lines
+    #    carrying `[0-9]` are the regex sources above, not prose, and are excluded.
+    fn_start = own_src.index(
+        "def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head")
+    fn_end = own_src.find("\ndef ", fn_start + 1)
+    fn_src = own_src[fn_start:fn_end if fn_end != -1 else len(own_src)]
+    prose_spans = [
+        match
+        for line in fn_src.splitlines()
+        if "[0-9]" not in line
+        for match in re.findall(r"(?<![\d.])([0-9]{1,4})-([0-9]{1,4})(?![\d.])", line)
+    ]
+    assert prose_spans, (
+        "no prose span cites the derivation any more — this backstop would be vacuous, "
+        "so the anchor citation above must be restored or this arm rewritten")
+    for found in prose_spans:
+        assert found == (str(first), str(last)), (
+            f"this function states the span {found[0]}-{found[1]} while the pinned span "
+            f"is {first}-{last} — a coordinate that has moved is stale here whatever "
+            "its phrasing, and a reworded citation must not be able to escape the pin")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
