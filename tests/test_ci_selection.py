@@ -5748,12 +5748,24 @@ def test_the_real_manifest_has_no_duplicate_mapping_key():
 def test_a_duplicate_inside_an_anchored_mapping_is_still_refused():
     """The merge override must not widen into "ignore everything merged".
 
-    An anchor's own mapping is constructed on its own, with no merge in play, so
-    a genuine repeat inside it is data loss and must still raise.
+    A genuine repeat inside an anchor is data loss and must still raise — but NOT
+    for the reason this docstring used to give ("an anchor's own mapping is
+    constructed on its own, with no merge in play"). That premise is false:
+    `Constructor.flatten_mapping` recurses into the merged value node, so a
+    parent's `<<:` flattens an anchor BEFORE that anchor is constructed (pyyaml
+    completes nested mappings from its generator queue after the shallower ones),
+    and its own `<<` is already gone when its `construct_mapping` runs. What keeps
+    an anchor's own rows distinguishable from the merged ones is the inherited/own
+    split by OBJECT IDENTITY in `_NoDuplicateKeyLoader.flatten_mapping`
+    (`tools/ci_selection.py`), which survives that pre-flatten.
+
+    Both orderings are checked, because only the second exercises the
+    parent-flatten: in the first the anchor is constructed before the merge is
+    seen, in the second `top` merges `mid` and flattens it first.
     """
     from tools import ci_selection as cs
 
-    doc = """\
+    anchor_constructed_first = """\
 base: &b
   a: 1
   a: 2
@@ -5761,9 +5773,32 @@ child:
   <<: *b
   c: 3
 """
-    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
-        cs.parse_manifest_text(doc)
-    assert "'a'" in str(excinfo.value), excinfo.value
+    # The anchor sits inside an EARLIER sibling that `top` merges, so `top`'s
+    # flatten reaches `&m` (and, through it, `&b`) before either is constructed.
+    anchor_flattened_by_its_parent_first = """\
+group:
+  base: &b
+    a: 1
+  mid: &m
+    <<: *b
+    a: 2
+    a: 3
+top:
+  <<: *m
+  c: 3
+"""
+
+    for doc, key in (
+        (anchor_constructed_first, "'a'"),
+        (anchor_flattened_by_its_parent_first, "'a'"),
+    ):
+        with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+            cs.parse_manifest_text(doc)
+        assert key in str(excinfo.value), excinfo.value
+    # The refusal above is the duplicate and not the merge: the library accepts
+    # the same document, keeping the last of the two own rows.
+    assert yaml.safe_load(anchor_flattened_by_its_parent_first)["group"][
+        "mid"] == {"a": 3}
 
 
 def test_the_two_duplicate_key_guards_agree_on_a_duplicate(tmp_path):
@@ -7681,8 +7716,18 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
     # anchored to a determiner so a note that merely SAYS `is` somewhere and then
     # describes the counterfactual ("the file is in the fast pool, so its absence
     # packs it at the flat 2.0s default") is not read as a claim.
-    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+2\.0s?\s+default"
-    r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+2\.0s?\s+default",
+    #
+    # The default is ALSO spelled by its constant's NAME, and a note that says "it
+    # takes the flat `DEFAULT_FAST_WEIGHT`" asserts exactly the same basis while
+    # carrying no `2.0s` token — which is how `test_oauth_consent_page_step4.py:
+    # 3.1` and `test_5095_s3_identity_policy.py: 0.4` kept a false basis statement
+    # past this guard after the 2026-11-02 census refreshed them (#10790 review,
+    # P3). Both spellings are matched; the VERB gate is what keeps the legitimate
+    # counterfactual forms silent ("its absence packs it at the flat
+    # `DEFAULT_FAST_WEIGHT`", "the flat default is what it REPLACED").
+    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
+    r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+"
+    r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)",
     re.IGNORECASE)
 
 
@@ -7855,16 +7900,32 @@ def test_flat_default_claim_check_is_not_vacuous():
     stale = (
         "  test_a.py: 2.2  # a new file takes the #3400 flat 2.0s default."
         "\n"
-        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required.")
+        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required."
+        "\n"
+        # The CONSTANT-NAME spelling of the same claim: measured on the real
+        # manifest as `test_oauth_consent_page_step4.py: 3.1` and
+        # `test_5095_s3_identity_policy.py: 0.4`, both invisible to the value-only
+        # pattern (#10790 review, P3).
+        "  test_g.py: 3.1  # a PR-added file, so it takes the flat"
+        " `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading."
+        "\n"
+        "  test_h.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
     legitimate = (
         "  test_c.py: 7.2  # unmeasured — without this row the file packs at the"
         " flat 2.0s default.\n"
         "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
         "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
-        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.")
-    durations = {f"test_{c}.py": 1.0 for c in "abcdef"}
+        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.\n"
+        # The counterfactual forms, spelled with the constant's name.
+        "  test_i.py: 0.4  # THAT SWEEP HAS NOW LANDED: the flat"
+        " `DEFAULT_FAST_WEIGHT` is what it REPLACED rather than what it needs.\n"
+        "  test_j.py: 23.8  # must carry a row or it packs at the flat 2.0 s"
+        " `DEFAULT_FAST_WEIGHT`, not a dev-box reading.")
+    durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
     assert _durations_rows_claiming_the_flat_default(stale, durations) == [
-        ("test_a.py", 2.2), ("test_b.py", 3.7)]
+        ("test_a.py", 2.2), ("test_b.py", 3.7),
+        ("test_g.py", 3.1), ("test_h.py", 0.4)]
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
 
 
