@@ -49,6 +49,19 @@ from gh_read_cache import INVARIANTS as _INV  # noqa: E402
 
 INVARIANT_REPO_TTL = _INV["repo"].ttl
 
+# The credential axis of the tool's identity. `run_tool` STRIPS these from the inherited
+# environment and pins `GH_CONFIG_DIR` itself (see the helper) — the suite must not inherit
+# the ambient account, or it passes on a reviewer's box and reds on a credential-free runner.
+CREDENTIAL_VARS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_HOST",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+)
+
 
 # ── stub `gh` ────────────────────────────────────────────────────────────────
 # Counts invocations in $GH_STUB_DIR/calls and prints $GH_STUB_DIR/body on stdout.
@@ -79,6 +92,14 @@ class CacheTest(unittest.TestCase):
         (self.stubdir / "body").write_text('{"id": 1296269, "default_branch": "main"}')
         self.cachedir = Path(self.tmp) / "cache"
         self.cachedir.mkdir()
+        # The account-scoped caching path stores ONLY when the credential is knowable, so
+        # the harness supplies one for each host family rather than inheriting the box's.
+        self.ghconfig = Path(self.tmp) / "gh-config"
+        self.ghconfig.mkdir()
+        (self.ghconfig / "hosts.yml").write_text(
+            "github.com:\n    oauth_token: TEST-DOTCOM-TOKEN\n"
+            "ghe.example.com:\n    oauth_token: TEST-GHES-TOKEN\n"
+        )
 
     def tearDown(self) -> None:
         import shutil
@@ -86,9 +107,29 @@ class CacheTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ── helpers ──────────────────────────────────────────────────────────────
-    def run_tool(self, *args: str) -> subprocess.CompletedProcess:
-        env = dict(os.environ)
+    def run_tool(
+        self, *args: str, env_overrides: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess:
+        """Run the tool with the CREDENTIAL SEAM PINNED, never inherited.
+
+        ⛔ WHY PINNED. The account-scoped path deliberately refuses to cache when the
+        credential is unknowable (`_account_fingerprint` -> `resolvable=False`), so a test
+        that lets the box supply the account is not testing the cache — it is testing the
+        box. Measured on a credential-free runner (the CI job's default row): the three
+        `rate_limit` cases below fail as `no cache entry written` / `2 != 1`, while the very
+        same file's `test_an_unresolvable_credential_is_never_cached` drives the OTHER branch
+        on purpose. Two sets of cases cannot both pass on one host unless an ambient
+        credential happens to exist — the definition of non-hermetic.
+
+        So: the ambient credential variables are dropped and `GH_CONFIG_DIR` points at a temp
+        `hosts.yml` holding one token per host family. `env_overrides` is for the cases that
+        need a DIFFERENT seam (a second account, a host-scoped env token).
+        """
+        env = {k: v for k, v in os.environ.items() if k not in CREDENTIAL_VARS}
         env["GH_STUB_DIR"] = str(self.stubdir)
+        env["GH_CONFIG_DIR"] = str(self.ghconfig)
+        if env_overrides:
+            env.update(env_overrides)
         return subprocess.run(
             [sys.executable, str(TOOL), *args],
             capture_output=True,
