@@ -1694,10 +1694,11 @@ def _source_vector_footnote(text: str) -> str:
     assert text.count(_SOURCE_VECTOR_FOOTNOTE_ANCHOR) == 1, (
         f"{_STORAGE_DOC.name} carries "
         f"{text.count(_SOURCE_VECTOR_FOOTNOTE_ANCHOR)} occurrences of "
-        f"{_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r} — this pin binds to the FIRST, so "
-        "the anchor must name exactly one line; a second occurrence would "
-        "rebind all three §12.1b assertions to the wrong sentence while the "
-        "real footnote drifts back")
+        f"{_SOURCE_VECTOR_FOOTNOTE_ANCHOR!r} — this pin binds to the FIRST "
+        "occurrence, so the anchor must appear on exactly one line; a duplicate "
+        "placed ABOVE §12.1b's footnote would rebind all three §12.1b "
+        "assertions to it, which is how the pin starts certifying a sentence "
+        "§12.1b does not own")
     start = text.rfind("\n", 0, at) + 1
     return text[start:].split("\n", 1)[0]
 
@@ -1774,7 +1775,9 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"presence-only check misses. ⚠️ This counts the `:Source.summary` "
         f"spelling ONLY — §9.4 legitimately names bare `summary` (\"a §4.6 "
         f"`:Source` property\"), so a bare-`summary` additive form is NOT "
-        f"covered here; `_RETIRED_SUMMARY_BLUR` is the only arm over it. The "
+        f"covered at all: `_RETIRED_SUMMARY_BLUR` matches that ONE retired "
+        f"sentence's exact wording, so a NEW bare-`summary` sentence is caught "
+        f"by nothing here. The "
         f"exactness is deliberate and fails CLOSED: a future legitimate second "
         f"`:Source.summary` mention reds every docs-only PR, which is the "
         f"price of the trap, paid on purpose")
