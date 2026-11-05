@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import math
-import os  # noqa: F401
+import os
 import re
 import subprocess
 import sys
@@ -1057,6 +1057,38 @@ def test_duplicate_edu_index_rejected():
 # ── #10060: no module under tests/ may shadow a stdlib top-level name ────────
 
 
+def _stdlib_shadowing_paths(tests_root: Path) -> list[str]:
+    """Every path under `tests_root` that shadows a stdlib top-level name.
+
+    Two shapes shadow identically for a child interpreter handed the containing
+    directory on `sys.path` (`PYTHONPATH` precedes the stdlib), so the scan
+    reports both:
+
+    * a MODULE — `tests/eval/types.py`: the file's stem becomes the name;
+    * a PACKAGE DIRECTORY — `tests/eval/types/` (with or without an
+      `__init__.py`): the directory's name becomes the name. Scanning files
+      alone misses this shape entirely, because the `__init__.py` filter skips
+      the only file in it and its stem is `__init__`, not `types`.
+
+    Directory hits carry a trailing `/` so the failure message names the shape it
+    found. A directory is reported only when it holds Python content, so an
+    unrelated fixture directory that happens to share a stdlib name cannot red
+    the guard.
+    """
+    stdlib_names = set(sys.stdlib_module_names)
+    hits = {
+        str(path.relative_to(tests_root.parent))
+        for path in tests_root.rglob("*.py")
+        if path.name != "__init__.py" and path.stem in stdlib_names
+    }
+    hits |= {
+        f"{path.parent.relative_to(tests_root.parent)}/"
+        for path in tests_root.rglob("*.py")
+        if path.parent.name in stdlib_names
+    }
+    return sorted(hits)
+
+
 def test_no_test_module_shadows_a_stdlib_top_level_name():
     """A file under `tests/` named after a stdlib module shadows it for any FRESH
     interpreter given its directory on `sys.path` (#10060).
@@ -1084,17 +1116,14 @@ def test_no_test_module_shadows_a_stdlib_top_level_name():
     """
     tests_root = Path(__file__).resolve().parent
 
-    shadowing = sorted(
-        str(path.relative_to(tests_root.parent))
-        for path in tests_root.rglob("*.py")
-        if path.name != "__init__.py" and path.stem in sys.stdlib_module_names
-    )
+    shadowing = _stdlib_shadowing_paths(tests_root)
     assert not shadowing, (
         f"module(s) under tests/ shadow a stdlib top-level name: {shadowing}. "
         f"pytest puts a directory without __init__.py verbatim on sys.path, so a "
         f"child interpreter resolves the shadow during site init and dies before "
         f"running its own code (#10060). Rename the file (e.g. "
-        f"tests/eval/types.py -> tests/eval/eval_types.py)."
+        f"tests/eval/types.py -> tests/eval/eval_types.py) or the directory (a "
+        f"trailing `/` marks a directory hit)."
     )
 
     # The behavioural half: the exact child that used to die. Kept after the
@@ -1115,3 +1144,27 @@ def test_no_test_module_shadows_a_stdlib_top_level_name():
         "a fresh interpreter given tests/eval on PYTHONPATH cannot import stdlib "
         f"`types`: {child.stderr.strip()[-500:]}"
     )
+
+
+def test_the_stdlib_shadow_scan_sees_a_package_directory_not_just_a_file(tmp_path):
+    """The scan is a property guard, so it must see BOTH shadow shapes.
+
+    A file named `types.py` and a package DIRECTORY named `types/` shadow the
+    stdlib identically for a child handed the containing directory on `sys.path`,
+    and the directory shape survives the `__init__.py` filter untouched — so
+    without this pin a scan that had been narrowed back to files alone would
+    still pass, and the guard's claim ("a second shadow cannot be introduced
+    quietly") would be false.
+    """
+    tests_root = tmp_path / "tests"
+    (tests_root / "eval").mkdir(parents=True)
+    (tests_root / "eval" / "fine.py").write_text("x = 1\n")
+    assert _stdlib_shadowing_paths(tests_root) == []
+
+    (tests_root / "eval" / "types.py").write_text("x = 1\n")
+    assert _stdlib_shadowing_paths(tests_root) == ["tests/eval/types.py"]
+
+    (tests_root / "eval" / "types.py").unlink()
+    (tests_root / "eval" / "types").mkdir()
+    (tests_root / "eval" / "types" / "__init__.py").write_text("x = 1\n")
+    assert _stdlib_shadowing_paths(tests_root) == ["tests/eval/types/"]
