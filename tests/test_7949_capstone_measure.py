@@ -5607,6 +5607,23 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
         f"{e2a['frozen_units']}` lost, i.e. {e2a['value_survived']} surviving) — a loss count "
         f"that disagrees with the record tells a lane the wrong dependency: {dep_rows[0][:400]}")
 
+    # ⛔ …AND THE SAME LOSS COUNT ON THE INDEX ROW, which is the SECOND copy of that claim and
+    # the route a reader meets first (review). The leg above derives the loss for `E1-E5-PROOFS`
+    # only, so `docs/00_index.md`'s copy was read by nothing: it sat at "the 1-of-14 value loss"
+    # — the superseded `#9775` reading — while the same row printed `RED 8/14` and the record
+    # scored 8 of 14 surviving, i.e. `6 of 14` lost. Measured: the suite stayed green over that
+    # contradiction. One criterion, two documents, one derivation —
+    # the same rule the dependency row is held to, so a count typed into either row is refused.
+    assert f"`{lost} of {e2a['frozen_units']}` lost" in route, (
+        f"the `#9080` index row does not state the record's loss (`{lost} of "
+        f"{e2a['frozen_units']}` lost, i.e. {e2a['value_survived']} surviving) while the same "
+        f"row states RED {e2a['value_survived']}/{e2a['frozen_units']} — a loss count that "
+        f"disagrees with the record tells a lane the wrong dependency: {route[:400]}")
+    assert "1-of-14" not in route, (
+        "the `#9080` index row still carries the SUPERSEDED `1-of-14` loss reading beside the "
+        f"record's `{lost} of {e2a['frozen_units']}` — two present-tense loss counts for one "
+        f"criterion: {route[:400]}")
+
     # The E2b row is COUNTED above but was never INSPECTED — so this diff's own new claim on
     # it (E2b's bar is MET at 1/114, and the RED belongs to the composite via E2a) could be
     # mutated to `3/114` with every pin green (measured at `42143b80`). Hold it to the record
