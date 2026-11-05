@@ -10591,40 +10591,45 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
         "and it buys nothing: FOUR other jobs already write the key (#10327's "
         "argument, applied to the bigger half).")
-    pip_writers_elsewhere = [jid for jid, jd in wf["jobs"].items() if jid != "test"
-                             for s in (jd.get("steps") or [])
-                             if pip_key_root in _key_of(s) and _is_writer(s)]
+    pip_writer_rows = [(jid, s.get("name"), _key_of(s))
+                       for jid, jd in wf["jobs"].items() if jid != "test"
+                       for s in (jd.get("steps") or [])
+                       if pip_key_root in _key_of(s) and _is_writer(s)]
+    pip_writers_elsewhere = [row[0] for row in pip_writer_rows]
     assert pip_writers_elsewhere, (
         "NO other job writes the shared pip key any more, so this job's "
         "restore-only shape now empties the key it depends on and every shard "
         "pays the cold torch download #7612 removed. Re-derive the remedy (#10327 "
         "vs a bounded writer here) rather than leaving this pin asserting a stale "
         "premise.")
-    assert len(pip_writers_elsewhere) >= 2, (
-        f"only {pip_writers_elsewhere} writes the shared pip key. `test-carve-out` "
-        "is restore-only by its own pin, and `test-slow` / `test-carve-out` are "
-        "diff-gated, so the load-bearing writer is `test-concurrency-falkor` — the "
-        "one that shares THIS job's `python == 'true'` gate. If it drops out, a run "
-        "can reach this job with nothing writing the key.")
-    # ⛔ THE ROOT TEST ABOVE IS A PREFIX TEST, and a prefix test is a FALSE PASS on
-    # the invariant it is named for (#11065 review, verified by mutation): it
-    # accepts any `pip-<formula>` spelling, so changing this job's key to
-    # `pip-<os>-<github.sha>` leaves the root `pip-`, still matches a sibling's
-    # `pip-` (the arm below is a substring test too), and reads GREEN — while no
-    # job ever writes the key this one reads, so every shard cold-downloads the
-    # 3.2 GB torch set and #7612 is silently reverted. The expected spelling is
-    # therefore taken from a SIBLING WRITER, never restated here.
-    pip_sibling_keys = sorted({_key_of(s) for jid, jd in wf["jobs"].items()
-                               if jid != "test"
-                               for s in (jd.get("steps") or [])
-                               if _is_writer(s) and pip_key_root in _key_of(s)})
-    assert pip_key in pip_sibling_keys, (
-        f"the `test` job restores {pip_key!r}, which is not the key ANY other job "
-        f"writes ({pip_sibling_keys}). A key-formula change on this side only is "
-        "the #7612 regression with a green pin: the root arm above passes on any "
-        "`pip-…` spelling and the sibling arm is a substring match, so the miss "
-        "is invisible until every shard pays the cold torch download. Use the "
-        "shared spelling, or change BOTH sides in one commit.")
+    # A writer that runs LESS OFTEN than this job empties the key this job reads.
+    # `test` runs on `python == 'true'`; a writer whose job carries that same
+    # expression runs whenever this job runs, and one gated only on `always()` is
+    # strictly broader. The two DIFF-GATED writers (`slow_run`, `carve_out_run`)
+    # are the ones that can vanish on a run that still reaches this job — so a
+    # COUNT of writers names the wrong population: it cannot tell the two
+    # unconditional writers from the two diff-gated ones, and its message named
+    # `test-carve-out` twice while omitting `test-d14-hosted-api` and
+    # `test-record-postgres` (#11065 cycle 4, finding 2).
+    test_gate = str(job.get("if") or "").strip()
+
+    def _gate_of(job_id: str) -> str:
+        return str((wf["jobs"].get(job_id) or {}).get("if") or "").strip()
+
+    load_bearing = [jid for jid in pip_writers_elsewhere
+                    if _gate_of(jid) == test_gate
+                    or _gate_of(jid).startswith("always()")]
+    assert load_bearing, (
+        f"every job writing the shared pip key is diff-gated away from this job's "
+        f"own run: {[(jid, _gate_of(jid)) for jid in pip_writers_elsewhere]} vs "
+        f"this job's `{test_gate}`. A writer that needs `slow_run`/`carve_out_run` "
+        "to be true does not populate the key on a run that still executes `test`, "
+        "so this job reads an entry nothing wrote. The unconditional writers are "
+        "`test-d14-hosted-api` and `test-record-postgres` (`always() && "
+        "needs.changes.result == 'success'`), and `test-concurrency-falkor` shares "
+        "this job's own gate; `test-slow` and `test-carve-out` are the diff-gated "
+        "pair and cannot be the load-bearing writer.")
+
 
     # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
     uv_steps = [s for s in steps if "~/.cache/uv" in _path_of(s)]
@@ -10647,6 +10652,12 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "shared `uv-pip-` one, which archived `~/.cache/pip` under the same entry "
         "— pairing 3.6 GB of shared pip wheels with this job's ~253 MB uv delta is "
         "what turned a save into a 3.88 GB upload (#11063)")
+
+    assert _path_of(uv_restore).strip() == "~/.cache/uv", (
+        f"the uv restore reads {_path_of(uv_restore).strip()!r}, not `~/.cache/uv`. "
+        "`path` is part of the cache's VERSION, so a restore pointed at any other "
+        "directory can never match the entry this job's save writes — a permanent "
+        "MISS with the cache step present and green (#11065 cycle 4, finding 1).")
 
     uv_writers = [s for s in steps if _is_writer(s) and uv_key_root in _key_of(s)]
     assert len(uv_writers) == 1, (
@@ -10884,6 +10895,15 @@ def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
         "could not parse any `timeout -s INT -k 10 <N>m` watchdog from the "
         "`test` job's run steps — the pre-phase term of the arm-2 SUM is "
         "unreadable, so this pin cannot bound anything")
+    # ⛔ EXACTLY ONE (#11065 cycle 4, finding 5). Taking `found[0]` of a sorted set
+    # silently returns the SMALLEST, so a second, larger pre-phase watchdog would
+    # leave this SUM term at the old value and WEAKEN the cap arm instead of
+    # reddening it — the inverse of "parse it, don't restate it".
+    assert len(found) == 1, (
+        f"the `test` job now carries {len(found)} distinct `timeout -s INT -k 10 "
+        f"<N>m` watchdogs {found}m, so the pre-phase term of the arm-2 SUM is "
+        "ambiguous. Sum them here deliberately, or keep one — do not let the "
+        "smallest stand in for the job's pre-phase budget.")
     return found[0]
 
 
