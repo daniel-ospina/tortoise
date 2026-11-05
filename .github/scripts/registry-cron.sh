@@ -1548,12 +1548,32 @@ CURL_RC=0
 # #5028: time the call. "driver_timeout" alone hid a 600s-vs-260s inversion —
 # the elapsed seconds make budget exhaustion self-evident.
 SWEEP_START="$(date +%s)"
-RUN="$(curl -sS -m 600 -X POST -H "Authorization: Bearer $KEY" \
+SWEEP_TIMEOUT_S="${SWEEP_TIMEOUT_S:-1500}"
+# #10234 review P2: the knob is passed straight to `curl -m`, so a bad value is
+# not a crash — curl rejects the option (rc=2) with NO request sent, and the
+# classifier below turns that into an empty body. That would be a green run in
+# which the sweep was never posted at all. Refuse it up front instead.
+case "$SWEEP_TIMEOUT_S" in
+  ''|*[!0-9]*)
+    fail "SWEEP_TIMEOUT_S must be whole seconds, got '${SWEEP_TIMEOUT_S}'"
+    exit 1 ;;
+esac
+RUN="$(curl -sS -m "$SWEEP_TIMEOUT_S" -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" -d '{}' \
   "${API}/v1/internal/backups/sweep" 2>/dev/null)" || CURL_RC=$?
 SWEEP_ELAPSED=$(( $(date +%s) - SWEEP_START ))
+# #10234 review P1: name the SHAPE, and do not fold two different faults into
+# one. rc=28 is the caller's OWN ceiling (a budget artifact). ANY other non-zero
+# rc with no body is a TRANSPORT fault — measured in production as rc=56 at 201s
+# and 480s of a 600s budget, i.e. the driver still had 399s/120s of patience
+# left, so calling that a "budget timeout" would assert a cause it never
+# observed. rc=0 with an empty body is a completed exchange that carried no
+# report. Only the two budget/empty shapes are judged against completion age;
+# a transport fault stays loud.
 if [ "$CURL_RC" -eq 28 ]; then
   RUN='{"status":"driver_timeout"}'
+elif [ "$CURL_RC" -ne 0 ]; then
+  RUN='{"status":"transport_error"}'
 elif [ -z "$RUN" ]; then
   RUN='{"status":"empty_response"}'
 fi
@@ -1692,12 +1712,70 @@ case "$RUN_STATUS" in
     # the exempt route has no server-side ceiling and an abandoned request keeps
     # running — so this must not claim "backups are NOT running", and the purge/
     # reconcile ride-along is skipped below (see the ride-along guard) while the
-    # sweep may still hold the per-org locks. SWEEP_NO_COVERAGE stays the right
-    # KIND: this run produced no coverage, and any run that does back up
-    # auto-resolves it. The TEXT is what had to become true.
-    log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — filing SWEEP_NO_COVERAGE with a timeout claim (job red)"
-    file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep did not finish within the driver's budget" \
-      "the driver gave up on POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}). The sweep may still be RUNNING server-side — this leg cannot tell — so this is not evidence that the sweep failed, only that it did not report in time. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
+    # sweep may still hold the per-org locks.
+    #
+    # #10234: a BUDGET timeout is not, by itself, a COVERAGE outage. This arm
+    # used to red the run and file `SWEEP_NO_COVERAGE` on ANY timeout, while its
+    # own body admitted the sweep might still be running — so it asserted a
+    # coverage failure it had not measured. On `main` that produced 127
+    # recurrences against a pipeline that was landing a sweep every hour: the
+    # false red sat on the trunk continuously from at least 08:26Z.
+    #
+    # What this leg CAN prove is narrower, and it is already in hand: how old
+    # the last COMPLETED sweep is. `last_sweep_at` is written only at the end of
+    # the roll-up (tortoise/backup_sweep.py ~1837-1842), so it is completion
+    # evidence, not a start stamp. Gate on it exactly as the held-lock arm above
+    # does, and with the SAME bound (`DRIVER_DOWN_MIN`) the direct-R2 leg below
+    # already uses — so this arm cannot widen the outage blind spot, it only
+    # stops calling a measured-healthy pipeline an outage. Fail-closed is kept:
+    # an unusable `last_sweep_at` with a pool that is not measured-empty is red
+    # (a timeout plus no completion evidence is exactly the #2790 class), and a
+    # completed sweep older than the bound is red with an age attached.
+    #
+    # No resolve here on purpose: a timeout is not positive coverage evidence,
+    # so an open SWEEP_NO_COVERAGE is closed by a run that actually reports
+    # (`backed_up`/`degraded`), never by this one going quiet.
+    TIMEOUT_LAST_TS=0
+    if [ -n "$LAST_SWEEP_AT" ]; then
+      TIMEOUT_LAST_TS="$(date -d "$LAST_SWEEP_AT" +%s 2>/dev/null || echo 0)"
+    fi
+    # #10234 review P2: a stamp in the FUTURE makes the age negative, which is
+    # never `> DRIVER_DOWN_MIN` — a skewed or corrupt ops/state.json would then
+    # read as fresh forever. Treat a stamp more than 5 minutes ahead as
+    # UNUSABLE and fall through to the fail-closed branch, which is what the
+    # analytics block in this same script already does with a negative age.
+    if [ "$TIMEOUT_LAST_TS" != "0" ] \
+       && [ "$TIMEOUT_LAST_TS" -le $(( $(date +%s) + 300 )) ]; then
+      timeout_age_min=$(( ($(date +%s) - TIMEOUT_LAST_TS) / 60 ))
+      if [ "$timeout_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
+        log "sweep ${RUN_STATUS_SAFE} and the last COMPLETED sweep was ${timeout_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
+        file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — no sweep has completed within the driver-down window" \
+          "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}), and the last COMPLETED sweep is ${timeout_age_min}m old (> ${DRIVER_DOWN_MIN}m). Unlike a bare budget timeout this IS coverage evidence: no sweep has landed inside the declared driver-down window, so sweeps have stopped completing. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
+        NO_COVERAGE=1
+      else
+        log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m), so the driver's patience ran out, not the pipeline — leaving SWEEP_NO_COVERAGE unchanged"
+      fi
+    elif [ "$R2_LIST_OK" != "1" ] || [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
+      # No usable completion evidence (absent, unparseable, or future-dated) and
+      # a pool that is NOT measured-empty: unknown is not healthy (#2790).
+      log "sweep ${RUN_STATUS_SAFE}, no usable last_sweep_at, and the pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} prefix(es)) — filing SWEEP_NO_COVERAGE (job red)"
+      file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep timed out and completion cannot be verified" \
+        "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}) and /status carries no usable last_sweep.last_sweep_at (absent, unparseable, or dated in the future), so there is no evidence any sweep has completed. The R2 pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} team prefix(es)), so this cannot be read as the chronic pre-beta empty state. Check the app's sweep lock and its ops/state.json." ""
+      NO_COVERAGE=1
+    else
+      log "sweep ${RUN_STATUS_SAFE}, no usable last_sweep_at, and the pool is measured empty — leaving silent"
+    fi
+    ;;
+  transport_error)
+    # #10234 review P1: the connection died mid-response, or curl refused its own
+    # arguments. This is NOT a budget artifact — measured in production as rc=56
+    # at 201s and 480s of a 600s budget, i.e. the driver still had patience left
+    # — so it must not borrow the timeout arm's softening, and it must not be
+    # reported as "the sweep backed up nothing" either (that is the catch-all's
+    # claim and this run never received a report to make it from).
+    log "sweep transport_error (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — filing SWEEP_NO_COVERAGE (job red)"
+    file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — the sweep call failed in transport" \
+      "the driver's POST /v1/internal/backups/sweep failed after ${SWEEP_ELAPSED}s with curl exit ${CURL_RC} and no usable body. That is not a budget expiry (rc 28): the request itself broke — connection reset, TLS, or a curl argument error — so no outcome was read. Backups may or may not be running; check the app's /status last_sweep and the app logs. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
     NO_COVERAGE=1
     ;;
   *)
@@ -1729,8 +1807,12 @@ PURGE_FAILED=0
 RECONCILE_FAILED=0
 # #4939: a timed-out sweep may still hold the per-org locks server-side, so the
 # ride-along is skipped for it exactly as for a held lock (already_running).
+# #10234 review P1: `transport_error` (the connection died mid-response) is the
+# same situation for this purpose — a reset connection says nothing about
+# whether the server stopped the sweep, so the locks may still be held.
 if [ "$RUN_STATUS" != "already_running" ] \
    && [ "$RUN_STATUS" != "driver_timeout" ] \
+   && [ "$RUN_STATUS" != "transport_error" ] \
    && [ "$RUN_STATUS" != "empty_response" ]; then
   # #4612: each leg's OWN outcome is now filed as an incident, so a persistent
   # ride-along failure is no longer log-only. The shape comes from

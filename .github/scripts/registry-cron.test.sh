@@ -119,10 +119,18 @@
 #  77. #5028: the ride-along skip names the ACTUAL status — already_running is
 #      the lock case; a non-lock skip (driver_timeout/empty_response) must
 #      never assert a held lock
-#  78. #5028: a sweep --max-time timeout (curl rc 28) names driver_timeout and
-#      reports the elapsed seconds in the log line AND the filed incident body;
-#      the ride-along stays skipped
-#  79. #5028: an empty sweep body names empty_response (not a held lock)
+#  78. #5028/#10234: a sweep --max-time timeout (curl rc 28) names
+#      driver_timeout and reports the elapsed seconds AND the completion age it
+#      gated on; a timeout over a FRESH last COMPLETED sweep is NOT red; the
+#      ride-along stays skipped
+#  78b. #10234: a timeout over a STALE last COMPLETED sweep (> driver-down) IS
+#      red, and the filed body carries the age rather than a bare timeout claim
+#  78c. #10234: a timeout with NO usable last_sweep_at and a pool holding team
+#      prefixes IS red — unknown is not healthy (#2790)
+#  78d. #10234: the sweep ceiling is an overridable knob (default derived from
+#      the job timeout); the 600s literal that killed healthy sweeps is gone
+#  79. #5028: an empty sweep body names empty_response (not a held lock); it is
+#      judged on the same completion gate as a timeout
 #  80. #5028: the sweep OUTCOME is logged untruncated even when `per_team`
 #      (the org census) precedes it in the payload
 #  81. #5028: the outcome's org census is `unknown` (never blank) when /status
@@ -1873,21 +1881,121 @@ assert_contains "$OUT" "sweep skipped (status=already_running)" "77. a held lock
 assert_not_contains "$OUT" "already_running (lock held)" "77. the false lock-held claim is gone"
 assert_not_contains "$OUT" "ride-along OK" "77. already_running still skips the purge/reconcile ride-along"
 
-# ── 78. #5028: a sweep timeout names the status AND the elapsed time ───────
+# ── 78. #5028/#10234: a sweep timeout names the status AND the elapsed time,
+#        and a timeout with a HEALTHY completion history is NOT a red ───────
+# #10234: this case used to assert RED on ANY timeout. That is the defect: the
+# arm's own body said the sweep might still be running, yet the verdict claimed
+# a coverage outage. Measured on `main` 2026-11-05: six consecutive hourly runs
+# hit the 600s ceiling (rc=28) while `/status` on the NEXT run showed each
+# abandoned sweep had COMPLETED (last_sweep_at advanced one hour at a time,
+# graph_totals attempted=84/backed_up=4/errors=0) — 127 false recurrences on
+# #10234 and a red trunk from at least 08:26Z. The naming #5028 added is kept
+# verbatim; only the verdict changes, and only when completion is PROVEN fresh.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export STUB_SWEEP_RC=28
 run_driver
-assert_eq "$RC" 1 "78. a sweep timeout stays RED (1)"
+assert_eq "$RC" 0 "78. a timeout with a fresh last COMPLETED sweep is NOT red"
 assert_contains "$OUT" "sweep skipped (status=driver_timeout)" "78. a timeout names driver_timeout"
 assert_not_contains "$OUT" "lock held" "78. a timeout is NOT reported as a held lock"
 assert_match "$OUT" "curl rc=28, took [0-9]+s" "78. the timeout reports rc 28 and the elapsed seconds"
-# #5028: the elapsed is carried in the FILED body too, not only the log line —
-# the incident is what a human reads weeks later, when the run's stdout is gone.
-assert_match "$(cat "$LOG")" 'after [0-9]+s \(curl exit 28' "78. the filed incident body carries the elapsed seconds"
+assert_contains "$OUT" "the driver's patience ran out, not the pipeline" "78. the verdict names the driver's patience, not a coverage outage"
+assert_contains "$OUT" "the last COMPLETED sweep was" "78. the verdict carries the completion age it gated on"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78. no SWEEP_NO_COVERAGE incident is filed"
 assert_not_contains "$OUT" "ride-along OK" "78. a timeout still skips the purge/reconcile ride-along"
+
+# ── 78b. #10234: a timeout PLUS a stale last COMPLETED sweep IS red ────────
+# The fail-closed half. A budget timeout proves nothing on its own, but no
+# completed sweep inside the declared driver-down window IS coverage evidence:
+# sweeps have stopped landing. The bound is `DRIVER_DOWN_MIN` (240 default),
+# the SAME one the held-lock arm and the direct-R2 leg use — so this fix
+# cannot widen the outage blind spot.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_STALE")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78b. a timeout with a stale last COMPLETED sweep stays RED"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78b. a stale completion files SWEEP_NO_COVERAGE"
+assert_contains "$OUT" "the last COMPLETED sweep was" "78b. the red names the completion age"
+assert_match "$(cat "$LOG")" 'COMPLETED sweep is [0-9]+m old' "78b. the filed body carries the age, not just a timeout claim"
+# #5028 guard, restored (review P2 finding 6): the elapsed seconds must survive
+# into the FILED body, not only the log — the incident is what a human reads
+# weeks later, when the run's stdout is gone.
+assert_match "$(cat "$LOG")" 'after [0-9]+s \(curl exit 28' "78b. the filed body still carries the elapsed seconds (#5028)"
+
+# ── 78c. #10234: a timeout with NO usable completion evidence IS red ───────
+# Unknown is not healthy (#2790). With no `last_sweep_at` at all the driver has
+# no completion evidence, and a pool holding team prefixes means this is not
+# the chronic pre-beta empty state.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78c. a timeout with no usable last_sweep_at stays RED"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78c. unverifiable completion files SWEEP_NO_COVERAGE"
+
+# ── 78d. #10234: the ceiling knob exists and its default exceeds the 600s ──
+# The 600s literal WAS the defect: the sweep needs longer than its client was
+# willing to wait, so the driver killed a healthy sweep every run. The default
+# is derived from the job's own timeout (45 min) minus the driver's other work;
+# the knob exists so ops can retune without a code change.
+assert_file_match "$DRIVER" 'SWEEP_TIMEOUT_S="\$\{SWEEP_TIMEOUT_S:-[0-9]+\}"' "78d. the sweep ceiling is an overridable knob"
+assert_file_match "$DRIVER" 'curl -sS -m "\$SWEEP_TIMEOUT_S"' "78d. the sweep POST uses the knob, not a literal"
+# Review P2 finding 2: the pre-fix assertion grepped only lines containing
+# `backups/sweep`, but the URL and the ceiling sit on DIFFERENT physical lines of
+# one continued command — so it passed against the code it was meant to disprove.
+# Assert on the whole file instead.
+assert_not_match "$(cat "$DRIVER")" 'curl[^|]*-m 600' "78d. no literal 600s ceiling survives anywhere in the driver"
+
+# ── 78d-ii. #10234 review P2: a non-numeric knob must not go green ─────────
+# It is passed straight to `curl -m`; a bad value makes curl reject the option
+# (rc=2) with NO request sent, which the shape classifier would read as an empty
+# body — i.e. a green run whose sweep was never posted.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=abc
+run_driver
+assert_eq "$RC" 1 "78d-ii. a non-numeric SWEEP_TIMEOUT_S is refused RED, not silently green"
+assert_contains "$OUT" "SWEEP_TIMEOUT_S must be whole seconds" "78d-ii. the refusal names the variable"
+unset SWEEP_TIMEOUT_S
+
+# ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
+# rc=56 (connection reset) was measured in production at 201s and 480s of a
+# 600s budget — the driver still had patience left, so folding it into the
+# timeout arm's softening would call it a budget artifact it is not, and would
+# make the entire sweep-outcome surface go dark on a green run.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=56
+run_driver
+assert_eq "$RC" 1 "78e. a transport failure stays RED even with a fresh completion"
+assert_contains "$OUT" "sweep transport_error" "78e. the shape is named transport_error, not driver_timeout"
+assert_not_contains "$OUT" "budget timeout" "78e. a transport fault is NOT called a budget timeout"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78e. a transport fault files SWEEP_NO_COVERAGE"
+assert_match "$(cat "$LOG")" 'curl exit 56' "78e. the filed body names curl's own rc"
+
+# ── 78f. #10234 review P2: a FUTURE-dated last_sweep_at is unusable, not fresh ──
+# A skewed/corrupt ops/state.json makes the age negative, and a negative age is
+# never `> DRIVER_DOWN_MIN` — so without a clamp the run reads fresh forever.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+FUTURE_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=6)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FUTURE_TS")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78f. a future-dated last_sweep_at fails CLOSED, not open"
+assert_contains "$OUT" "no usable last_sweep_at" "78f. the future stamp is reported as unusable"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
@@ -1896,9 +2004,10 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export STUB_SWEEP_RC=0
 run_driver
-assert_eq "$RC" 1 "79. an empty response stays RED (1)"
+assert_eq "$RC" 0 "79. an empty response with a fresh completion is NOT red"
 assert_contains "$OUT" "sweep skipped (status=empty_response)" "79. an empty response names empty_response"
 assert_not_contains "$OUT" "lock held" "79. an empty response is NOT reported as a held lock"
+assert_contains "$OUT" "the driver's patience ran out, not the pipeline" "79. an empty body is judged on the same completion gate"
 
 # ── 80. #5028: the sweep OUTCOME is never truncated away ───────────────────
 # `per_team` (the org census) is serialized BEFORE `last_sweep`, so the old
