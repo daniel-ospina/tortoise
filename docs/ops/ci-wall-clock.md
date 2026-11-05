@@ -359,8 +359,10 @@ same step with the same tail is the investigation.
 
 No matrix in this repo declared `strategy.max-parallel` before #6744, so a single PR enqueued
 `python-ci`'s whole shard set — up to 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — at the same
-instant, on top of the **8** non-matrix jobs that are co-eligible with them ("What the cap does
-NOT bound: the total", below, explains why 8 rather than 11).
+instant, on top of the **8** non-matrix jobs that are co-eligible with them. (It is 8 and not 11
+because four of the 12 non-matrix jobs cannot be enqueued alongside the matrices: `changes` is
+their own prerequisite, `canary-streak` needs `test` and is `push`-only, and
+`ci-introduced-failure` / `python-ci-gate` both `need:` the matrices.)
 
 ⛔ **Scope of that claim: `python-ci`'s three shard matrices.** It is not a repo-wide audit, and
 reading it as one would be wrong — `.github/workflows/mirror-images.yml` still declares a
