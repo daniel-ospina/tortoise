@@ -189,17 +189,18 @@ def test_a_reserved_filter_key_is_a_structured_error_not_a_typeerror(stub_factor
     `skip`/`limit` are reserved filter keys (`security.validate_filter_key`) AND
     the names the bounded path passes to `_safe(...)` itself, so
     `filters={"limit": 5}` is a duplicate keyword while BINDING that call —
-    outside `_safe`'s try — and escaped as a bare TypeError. `kind` collides the
-    other way: it is `paginated_query`'s first POSITIONAL argument, so the
-    duplicate forms inside `_safe` and came back as a structured error carrying
-    the internal signature instead of this message. Both are guarded above the
-    arms, so all three names must answer with "Reserved filter key".
+    outside `_safe`'s try — and escaped the tool body as a bare TypeError
+    (measured by neutralising the guard). `kind` collides the other way: it is
+    `paginated_query`'s first POSITIONAL argument, so the duplicate forms inside
+    `_safe` and came back as a structured error carrying the internal signature
+    instead of this message. Both are guarded above the arms, so all three names
+    must answer with "Reserved filter key".
 
     Fails on the value `isinstance(result, _SafeError)` and on the message text:
     before the guard the plain path reached `validate_filter_key` inside `_safe`
-    and returned the structured error, while the bounded path crashed (`limit`)
-    or answered with the raw SDK signature (`kind`). The fixture reaches it
-    because 5 > 0 points and the filter dict carries a colliding key.
+    and returned the structured error, while the bounded path crashed (`limit` /
+    `skip`) or answered with the raw SDK signature (`kind`). The fixture reaches
+    it because 5 > 0 points and the filter dict carries a colliding key.
     """
     from tortoise.mcp_server import _SafeError, tortoise_query
     stub_factory(n_points=5)
@@ -217,9 +218,9 @@ def test_reserved_filter_key_is_refused_on_EVERY_bounded_arm(stub_factory):
     The collision was closed on the plain arm while the `offset=`/`page=` arm
     eight lines away still raised a bare TypeError (pre-existing, but the F3
     wording claimed the class was closed). One guard above BOTH arms is what
-    closes it, so this asserts every arm that forwards `filters` — and every
-    reserved name the guard advertises (`skip`, `limit`, `kind`; round-6
-    finding 2 showed `kind` was the one it did not check).
+    closes it, so this asserts every arm that forwards `filters` — for every
+    reserved name the guard advertises (`skip`, `limit`, `kind`; round-6 finding 2
+    showed `kind` was the one it did not check).
     """
     from tortoise.mcp_server import _SafeError, tortoise_query
     stub_factory(n_points=5)
@@ -301,33 +302,45 @@ def test_the_tag_alias_is_not_silently_truncated_by_the_new_bound(stub_factory):
         f"the alias truncated a 250-row tag to {len(result)} with no way to page")
 
 
-def test_the_retired_tag_alias_does_not_claim_a_ceiling_the_sdk_never_enforces():
-    """Review round 6, finding 1 — the migration text that ships with the deprecation.
+def test_the_retirement_docstring_agrees_with_the_constant_and_names_the_walk():
+    """Review round 6, finding 1 — the two sentences that ship with the deprecation.
 
-    `tortoise_query_points_by_tag`'s docstring is the one place a reader on the
-    retirement path lands. At the pre-fix head it said `_TAG_ALIAS_LIMIT` was
-    "the same ceiling the SDK's own `limit` validation accepts" — no such ceiling
-    exists: `paginated_query` checks only `limit >= 1` — and that the cap
-    "restores the pre-bound behaviour exactly", which is false above 10,000 tagged
-    rows (the served description for the same tool says it truncates there).
-    Worse, its `Migrate to:` line named the bare `tortoise_query(tag=tag)` that
-    this PR caps at 100 with no `hasMore`, so following the documented migration
-    loses the population the alias exists to return.
+    On the retirement path the docstring IS the migration instruction, and it
+    said two things this same PR makes false: that `_TAG_ALIAS_LIMIT` is "the
+    same ceiling the SDK's own `limit` validation accepts" (it is not —
+    `paginated_query` checks only `limit >= 1`, so no ceiling exists and 10,000
+    is a number this file invented; the constant's own comment says the exact
+    opposite), and that it "restores the pre-bound behaviour exactly"
+    (it truncates above 10,000 — the SERVED description says so). Worse, its
+    `Migrate to:` line pointed at the bare `tortoise_query(tag=tag)`, whose
+    RESPONSE now caps at 100 with a plain list and no `hasMore`/`total`, so a
+    caller who followed the printed migration silently lost the population the
+    alias exists to return.
 
-    Value whose presence makes this fail: a false ceiling claim, or a migration
-    advice that names no walk. Both are present at the pre-fix head.
+    Fails on the pre-fix docstring: the false ceiling claim is present, the
+    "exactly" claim is present, and the `Migrate to:` line names neither the
+    walk (`offset=`) nor its terminating signal (`hasMore`).
     """
     from tortoise.mcp_server import tortoise_query_points_by_tag
-    doc = tortoise_query_points_by_tag.__doc__ or ""
+
+    doc = " ".join((tortoise_query_points_by_tag.__doc__ or "").split())
+    assert doc, "the retiring alias lost its docstring"
     assert "the same ceiling the SDK's own" not in doc, (
-        f"the alias claims an SDK ceiling that does not exist: {doc}")
+        "the docstring still claims an SDK-validated ceiling that does not "
+        "exist (`paginated_query` checks only limit >= 1): " + doc)
     assert "restores the pre-bound behaviour exactly" not in doc, (
-        f"the alias claims an exact cap above 10,000 rows: {doc}")
-    idx = doc.index("Migrate to:")
-    migration = doc[idx:doc.index("\n\n", idx)]
-    assert "offset=" in migration and "hasMore" in migration, (
-        "the migration advice sends the reader into a silently-capped read: "
-        f"{migration}")
+        "the docstring still claims the cap is exact, while this PR's own "
+        "SERVED text says it truncates above 10000 tagged rows: " + doc)
+    assert "10,000" in doc or "10_000" in doc, (
+        "the docstring does not state where the population-sized cap bites: " + doc)
+    assert "Migrate to:" in doc, "the migration instruction is gone: " + doc
+    migrate = doc.split("Migrate to:", 1)[1]
+    assert "offset=" in migrate, (
+        "the migration path it prints does not name the walk, so following it "
+        "lands on a response capped at 100 with no way to see the rest: " + migrate)
+    assert "hasMore" in migrate, (
+        "the migration path names no terminating signal, so the truncation it "
+        "lands on cannot be noticed: " + migrate)
 
 
 def test_the_tag_arm_honours_a_lone_limit_like_the_structural_arm(stub_factory):

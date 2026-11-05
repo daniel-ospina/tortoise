@@ -3788,11 +3788,11 @@ def tortoise_query(kind: str | None = None,
     # #10602 review (F3, then round-6 finding 2): `kind`, `skip` and `limit` are
     # reserved filter keys (`security.validate_filter_key`) AND names the binding
     # below already binds, so a caller's `filters={"limit": 5}` collides. The two
-    # collisions FAIL DIFFERENTLY, and covering both is the point:
+    # collisions FAIL DIFFERENTLY, and covering both is the point (both measured on
+    # this tree by neutralising this guard):
     #   * `skip`/`limit` are passed to `_safe(...)` itself, so the duplicate is
     #     raised while BINDING THAT CALL — outside `_safe`'s try, which therefore
-    #     never sees it — and escapes the tool body as a bare TypeError. (Measured:
-    #     `_safe(...)` is never entered.)
+    #     never sees it — and escapes the tool body as a bare TypeError.
     #   * `kind` is the accessor's first POSITIONAL argument, so the duplicate forms
     #     INSIDE `_safe` (`paginated_query(kind, **{"kind": …})`) and is caught
     #     there — a structured error, but one carrying the internal signature
@@ -3803,16 +3803,18 @@ def tortoise_query(kind: str | None = None,
     # closed while the `offset=`/`page=` arm still raised (a pre-existing hole eight
     # lines away), and one guard above the branch closes the class rather than the
     # one instance of it.
+    # The set is READ from its owner (`tortoise/security.py`), not re-typed here: a
+    # second copy is what drifted, and a `frozenset` literal in this handler is not
+    # even fingerprint-stable — `tools/surface_manifest.py::_code_digest` reprs
+    # `co_consts`, and a multi-element frozenset's repr order follows string hashes,
+    # so `tortoise_query`'s recorded `served_from` digest would differ between
+    # processes (measured: distinct digests across runs of one unchanged tree). A
+    # name lookup keeps the digest deterministic.
     # `tag`/`text` forward no caller filters at all, so a refusal on those arms is
     # redundant-but-harmless rather than a check on a real collision.
-    _filters = _public_filters(filters)
-    # The reserved set is IMPORTED from the validator, not restated: the drift this
-    # closes (`kind` missing from a hand-written `{"skip", "limit"}`) happened
-    # precisely because the two lists were maintained separately. A literal set here
-    # would also put a `frozenset` in this function's `co_consts`, whose `repr` order
-    # follows the per-process string hash — `tools/surface_manifest.py` hashes that
-    # and the recorded digest would differ on every run.
     from tortoise.security import _RESERVED_FILTER_KEYS
+
+    _filters = _public_filters(filters)
     _collide = sorted(set(_filters) & _RESERVED_FILTER_KEYS)
     if _collide:
         return _SafeError({
@@ -4025,11 +4027,12 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     """DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=...).
 
     Kept for one release with grace; will be removed in the next release.
-    Migrate to: tortoise_query(tag=tag, offset=0, limit=N). The PAGED form returns
-    {results, total, hasMore}, so it walks a large tagged population without loss;
-    a bare tortoise_query(tag=tag) caps the response at 100 and gives the caller no
-    signal that it did, which is the #8447 §1 shape this tool's users would
-    otherwise walk into.
+    Migrate to: tortoise_query(tag=tag, offset=0, limit=N), walking it while
+    `hasMore` is true. The PAGED form returns {results, total, hasMore}; the bare
+    `tortoise_query(tag=tag)` caps the RESPONSE at the un-paginated default (100)
+    and answers a plain list with no `hasMore`/`total`, so a large read through it
+    cannot be told from a complete one — the loss this alias exists to avoid, and
+    the #8447 §1 shape this tool's users would otherwise walk into.
 
     Note: passes include_retracted=True to preserve this tool's pre-#888 behavior
     (raw tag results incl. tombstones); the new tortoise_query(tag=...) default
@@ -4039,11 +4042,12 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     RAW, complete tag result set. Without it the new bound in `tortoise_query`
     would silently truncate this tool to the un-paginated default (100), turning
     an answer this signature cannot page into an incomplete one that looks
-    complete. The value is `_TAG_ALIAS_LIMIT` — a POPULATION-SIZED cap chosen here
-    to exceed any realistic tag, NOT a ceiling any SDK validator enforces
-    (`paginated_query` checks only `limit >= 1`, and the `tag=` arm slices a list in
-    the handler), and a tag population above 10,000 rows is still truncated. See
-    the constant's own note, which this text must keep agreeing with.
+    complete. The value is `_TAG_ALIAS_LIMIT` — a POPULATION-SIZED CAP, not a
+    validated ceiling: no SDK limit guard runs on this path (see that constant's
+    own comment, which this text must keep agreeing with), so it restores the
+    pre-bound behaviour for any realistic tag and TRUNCATES above 10,000 tagged
+    rows. The SERVED description of this tool says so out loud, because this
+    signature offers no `offset`/`page` with which to walk the truncation.
     """
     return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 
