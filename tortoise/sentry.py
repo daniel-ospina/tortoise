@@ -48,6 +48,49 @@ def init() -> bool:
             # the freshly minted `oat_`/`ort_` pair, so the default ships live
             # credentials to Sentry. The traceback itself is still sent.
             include_local_variables=False,
+            # #10892: source context is ON by default, and building an event then
+            # READS AND DECODES THE SOURCE FILE OF EVERY FRAME
+            # (`sentry_sdk.utils.get_source_context` -> `SourceLoader.get_source`
+            # -> `tokenize.detect_encoding`/`find_cookie`) in the thread that logged
+            # the error — on the hosted API that is the asyncio event loop, holding
+            # the GIL. Measured on tortoise-y4mjjq 2026-11-04: three `py-spy dump`s
+            # in a row parked the MainThread in exactly that stack while every
+            # request hung, `loop_age_ms` reached 43 444, and the machine exited 1
+            # and restarted. The storm's fuel is a client hanging up (see
+            # `is_benign_exception`), but source context is what makes each event
+            # expensive; the vendor tracks the defect as sentry-python#8089 ("~2-3.7
+            # ms per event … asyncio applications can experience event-loop blocking
+            # during bursts of handled exceptions"). The traceback itself is still
+            # sent.
+            include_source_context=False,
+            # #11092 review round 1 (P1): `ServerErrorMiddleware` ALWAYS re-raises
+            # after our handler returns, and the Starlette integration (installed
+            # by this same `init`) then captures that re-raised exception itself —
+            # through `sentry_sdk.capture_event`, NOT through
+            # `tortoise.sentry.capture_exception`, so the refusal there is not on
+            # that path. Measured with a real client and an aborted POST: 2 events
+            # per abort before, 1 after the handler change. `ignore_errors` is
+            # evaluated in `Client._should_capture`, i.e. BEFORE
+            # `_prepare_event`/`serialize`, which is where the remaining cost was
+            # (measured `_capture_exception`: 3-7 ms -> 0.15-0.18 ms). The
+            # integration builds the event before `capture_event`, so this saves
+            # the tail and not the build — which is why
+            # `include_source_context=False` above is still required.
+            # Broken pipe / reset / anyio's broken-resource all mean the same
+            # thing at this layer (the peer is gone) and none is an app fault.
+            #
+            # ⚠️ The SDK matches these by EXACT type name (`Client._is_ignored_error`),
+            # not by MRO, so a SUBCLASS of ClientDisconnect is benign here and not
+            # there — measured (review round 2, P3): a subclass delivered 1 event
+            # while `is_benign_exception` said benign. Starlette raises the base
+            # class itself, so nothing in this tree is in that gap; the names are
+            # exact on purpose, and the helper's MRO match is the stricter half.
+            ignore_errors=[
+                "ClientDisconnect",
+                "BrokenPipeError",
+                "ConnectionResetError",
+                "BrokenResourceError",
+            ],
         )
         _enabled = True
         _log.info("sentry enabled for %s", _service)
@@ -62,9 +105,44 @@ def enabled() -> bool:
     return _enabled
 
 
+# Exceptions that are NOT application errors and must never become Sentry events.
+# #11092: a peer hanging up is routine (a health probe timing out, a browser tab
+# closed, a dropped fetch). Routing it through the unhandled-exception handler
+# built a full event — including the per-frame source read that
+# `include_source_context=False` now removes — for EVERY disconnect, and under a
+# probe storm that starved the event loop into a customer-visible outage.
+BENIGN_EXCEPTION_NAMES = frozenset(
+    {"ClientDisconnect", "BrokenResourceError", "BrokenPipeError", "ConnectionResetError"}
+)
+
+
+def is_benign_exception(exc: BaseException) -> bool:
+    """True for exception types that are client-side events, not server faults.
+
+    Two checks, and the identity one is the load-bearing half:
+
+    * `isinstance` against starlette's own `ClientDisconnect`, imported lazily so
+      this module stays importable without starlette;
+    * a NAME match as the fallback, which covers the re-wrapped/re-exported
+      classes an integration can raise and costs nothing when idle.
+    """
+    try:
+        from starlette.requests import ClientDisconnect as _ClientDisconnect
+
+        if isinstance(exc, _ClientDisconnect):
+            return True
+    except Exception:  # noqa: BLE001, RUF100 — starlette absent is not a failure here
+        pass
+    return any(cls.__name__ in BENIGN_EXCEPTION_NAMES for cls in type(exc).__mro__)
+
+
 def capture_exception(exc: BaseException, tags: dict[str, Any] | None = None) -> None:
     """Capture an exception with optional tags. No-op when disabled."""
     if not _enabled:
+        return
+    if is_benign_exception(exc):
+        # Belt to the handler's braces (#11092): even if a caller forgets to
+        # check, a peer that hung up never costs an event.
         return
     try:
         import sentry_sdk  # noqa: PLC0415, RUF100
