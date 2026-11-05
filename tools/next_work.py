@@ -113,13 +113,20 @@ Exit codes
        constituent, is a duplicate of a row already offered (a blocked row owns its
        action target, so a duplicate can be the rank leader), or the queue is
        empty. The block prints ``NONE`` and that is an answer, not an error
-    2  INCOMPLETE: a surface the decision depends on could not be read — the
-       queue gate (``.mergify.yml``, at collection OR missing from a replayed
-       snapshot), the claim registry (``claims.sh`` absent, its snapshot header
-       failed, or ANY key answering ``claim-unreadable`` — a per-key abstention
-       is INCOMPLETE, not a note beside a pick), the attestation TOOL (``record-review.sh`` absent — not
-       a per-PR ``norecord``/``unreadable`` verdict, which is a real answer and
-       lands the row at ``NEEDS-REVIEW``), the issue search, or the PR list.
+    2  INCOMPLETE — one of the things the decision depends on could not be read,
+       OR the input contradicts itself:
+         · a surface — the queue gate (``.mergify.yml``, at collection or missing
+           from a replayed snapshot), the claim registry (``claims.sh`` absent, its
+           snapshot header failed, or ANY key answering ``claim-unreadable`` — a
+           per-key abstention, not a note beside a pick), the attestation TOOL
+           (``record-review.sh`` absent — not a per-PR ``norecord``/``unreadable``
+           verdict, which is a real answer and lands the row at ``NEEDS-REVIEW``),
+           the issue search, or the PR list;
+         · a SHAPE the door refuses — a decision input, a pull field, an issue
+           element, an element of a list, or a value that is the wrong type for
+           what it states (see ``_normalise_shapes``);
+         · a contradicted TARGET — a replayed snapshot whose ``repo`` disagrees
+           with ``--repo``, or no target repo at all.
        "Could not check" is never reported as "free" — the same posture
        ``collision_preflight.py`` (exit 2) and ``who-is-on`` (exit 2) take.
 """
@@ -1302,17 +1309,21 @@ def next_action(unit: Unit, repo: str) -> str | None:
             f"the author must UNDRAFT {target} — the queue will not take it and a fixer must "
             "not be dispatched at the author's branch"
         )
+    if any(d.startswith("gate-refusal:") for d in unit.detail):
+        # ⛔ BEFORE `nodigest`: a gate refusal keeps the PR out of the queue whatever
+        # the record says, so it must be the line a lane reads. Measured: a PR with a
+        # wrong base AND `nodigest` got "re-record … needs NO new review" as its only
+        # ACTION, and the base mismatch appeared nowhere but the row detail.
+        why = next(d.split(":", 1)[1].strip() for d in unit.detail if d.startswith("gate-refusal:"))
+        return (
+            f"a HUMAN fixes the gate refusal on {target}: {why}. No code change and no rail does "
+            "this, so nothing is dispatched"
+        )
     if unit.position == "NEEDS-REVIEW" and any("nodigest" in d for d in unit.detail):
         # The record carries no usable digest: re-mint at the head, no review owed.
         return (
             f"re-record {target} at head {unit.head} — the record has no usable digest, so "
             f"record-review.sh {unit.pr} <current-head> clean {repo} needs NO new review"
-        )
-    if any(d.startswith("gate-refusal:") for d in unit.detail):
-        why = next(d.split(":", 1)[1].strip() for d in unit.detail if d.startswith("gate-refusal:"))
-        return (
-            f"a HUMAN fixes the gate refusal on {target}: {why}. No code change and no rail does "
-            "this, so nothing is dispatched"
         )
     if any(d.startswith("review-gate-red:") for d in unit.detail):
         return (
@@ -2044,8 +2055,9 @@ def render(
         )
     elif pick is None:
         out.append(
-            "  NONE — every measured unit is held, superseded, or a duplicate of a row "
-            "already offered. That is an answer, not an error."
+            "  NONE — no unit is pickable: every measured one is held, superseded, or a "
+            "duplicate of a row already offered (or the queue is empty). That is an "
+            "answer, not an error."
         )
     else:
         out.append(f"  TOP       {_label(pick)}  ({pick.priority}, {pick.reason}, position {pick.position})")
@@ -2319,7 +2331,27 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 )
             if cfg is not None:
                 snap.config_source = f"{snap.config_source} (from snapshot)"
+        # ⛔ THE TARGET REPO TRAVELS WITH THE DATA. `repo = args.repo or snap.repo`
+        # let a replay of a snapshot collected for repo A emit
+        # `merge-one.sh . <repo B> 1001 …` at exit 0 — every row, head, attestation
+        # and claim read from A, the command naming B, and `merge-one.sh` does not
+        # re-assert the slug against the checkout's origin. This is the same hazard
+        # `claim_ns` already closes ("the namespace travels with the data"), and the
+        # one `dispatch-merge.sh` exists to stop (a lane built for the wrong repo).
+        if snap.repo and args.repo and args.repo.strip() != snap.repo.strip():
+            print(
+                f"next_work: INCOMPLETE — the snapshot was collected for {snap.repo!r} but "
+                f"--repo says {args.repo!r}. A command aimed at the other repo is a wrong-repo "
+                "dispatch, so nothing is emitted.",
+                file=sys.stderr,
+            )
+            return 2
         repo = args.repo or snap.repo
+        if not repo:
+            # No slug = no addressable command, and every emit site depends on it.
+            snap.unreadable.append(
+                "repo: no target repo could be resolved — every emitted command needs one"
+            )
     else:
         repo = _repo_slug(args.repo, repo_root)
         snap, cfg, _ = collect(repo, repo_root, base="main")

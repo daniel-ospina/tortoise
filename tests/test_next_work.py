@@ -2762,3 +2762,68 @@ def test_every_human_case_is_named_in_help():
     text = proc.stdout.lower()
     for phrase in ("review", "gate refusal", "runner", "unmeasured merge tree", "draft"):
         assert phrase in text, phrase
+
+
+# ── the target repo travels with the data (r23 #1) ───────────────────────
+def test_a_replay_cannot_retarget_the_command_to_another_repo(tmp_path: Path):
+    """`--repo <other>` on a snapshot collected for A emitted a command naming B.
+
+    Every row, head, attestation and claim was read from A; the merge command named
+    B, and `merge-one.sh` does not re-assert the slug against the checkout's origin.
+    """
+    raw = _rich_snapshot().to_json()
+    assert raw["repo"] == REPO
+    path = tmp_path / "snap.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path), "--repo", "someone-else/other-repo"]) == 2
+    # agreement is still fine
+    assert _run_main(["--from", str(path), "--repo", REPO]) in (0, 1)
+
+
+def test_a_snapshot_with_no_repo_is_incomplete(tmp_path: Path):
+    """No slug = no addressable command, and every emit site depends on one."""
+    raw = _rich_snapshot().to_json()
+    raw["repo"] = ""
+    path = tmp_path / "no-repo.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert _run_main(["--from", str(path)]) == 2
+
+
+# ── a gate refusal outranks an attestation verdict in the ACTION (r23 #3) ─
+def test_a_gate_refusal_outranks_nodigest_in_the_action():
+    """A wrong base AND `nodigest` got "re-record … needs NO new review" as its only
+    ACTION, and the base mismatch appeared nowhere but the row detail."""
+    from tools.next_work import next_action
+
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100]), "head_ref": "fix/100-x", "base": {"ref": "release/1.x"}}],
+        check_runs={"a" * 40: all_green()},
+        attestation={"1001": {"verdict": "nodigest"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    action = (next_action(row, REPO) or "")
+    assert "gate refusal" in action, action
+    assert "base=main (actual release/1.x)" in action
+
+
+# ── a DRAFT with a failing check must not get a fixer (r23 #4) ────────────
+def test_a_draft_with_a_failing_check_dispatches_no_fixer():
+    """The one reachable combination the suite did not exercise.
+
+    `draft` → structural → NEEDS-REVIEW normally, but a red required check wins
+    first (NEEDS-FIX), so only the `unit.draft` guard in `next_command` prevents a
+    fixer at the author's draft branch.
+    """
+    s = snap(
+        issues=[issue(100)],
+        pulls=[{**pull(1001, closes=[100], draft=True), "head_ref": "fix/100-wip"}],
+        check_runs={"a" * 40: _runs_for_position("NEEDS-FIX")},
+        attestation={"1001": {"verdict": "head"}},
+        merge_tree={"1001": {"clean": True}},
+    )
+    (row,) = units_for(s)
+    assert row.position == "NEEDS-FIX"
+    assert row.draft
+    assert next_command(row, REPO) is None, "a fixer was dispatched at a draft"
