@@ -1180,6 +1180,217 @@ def test_an_unlistable_store_REFUSES_rather_than_reading_through(
     with pytest.raises(tpc.CensusError) as exc:
         tpc.read_graph_turns(None, "/tmp/x.db", "tortoise")
     assert "could not be listed" in str(exc.value)
+    # NON-VACUITY for the credential diagnosis below: an ordinary store failure
+    # is NOT reported as a credential problem. Without this, "the refusal names
+    # the credential" would hold for every unlistable store and would say
+    # nothing about the NOPERM arm.
+    assert "credential" not in str(exc.value)
+    assert "GRAPH.LIST" not in str(exc.value)
+
+
+def _refusal_from_listing(monkeypatch, error):
+    """The CensusError `_refuse_unless_graph_present` raises for *error*."""
+    class _DB:
+        @staticmethod
+        def list_graphs():
+            raise error
+
+    class _Proj:
+        db = _DB()
+        g = object()   # ⛔ never touched: a refusal must not open the graph
+        _graph_name = "tortoise"
+
+    import tortoise.projection as projection
+    monkeypatch.setattr(projection, "FalkorProjection", lambda *a, **k: _Proj())
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, "/tmp/x.db", "tortoise")
+    return str(exc.value)
+
+
+def test_a_permission_refusal_is_diagnosed_as_the_CREDENTIAL(monkeypatch):
+    """#11113 review P2: "the store could not be listed" blamed the wrong side.
+
+    `GRAPH.LIST` is individually granted, and the repo's per-graph tenant user is
+    deliberately forbidden it (`tortoise/acl_graph_users.py`, #2113/#8617) — so a
+    census on the `--uri` leg with a tenant credential is a REFUSAL the operator
+    can only act on if the message says whose problem it is. Measured on the
+    pinned client (redis 7.4.1): the vendor parser maps `NOPERM` to
+    `NoPermissionError`, which is the type arm below.
+    """
+    from redis.exceptions import NoPermissionError
+
+    err = _refusal_from_listing(
+        monkeypatch,
+        NoPermissionError("NOPERM this user has no permissions to run the "
+                          "'graph.list' command"))
+
+    assert "credential" in err, err
+    assert "GRAPH.LIST" in err, err
+    assert "does not exist" not in err, err      # the store is NOT at fault
+    assert "nothing was created" in err, err
+    # the remedy an operator will otherwise reach for is the forbidden one
+    assert "Do NOT grant" in err, err
+    assert "per-graph tenant user" in err, err
+    assert "#2113/#8617" in err, err
+
+
+def test_the_permission_arm_also_reads_the_vendor_TEXT(monkeypatch):
+    """The text arm, for a client/version or double that hands back a bare
+    `ResponseError` — the code is the contract, not the class."""
+    from redis.exceptions import ResponseError
+
+    err = _refusal_from_listing(
+        monkeypatch,
+        ResponseError("NOPERM User tenant_acme has no permissions to run the "
+                      "'graph.list' command"))
+    assert "credential" in err, err
+    assert "GRAPH.LIST" in err, err
+
+
+def test_a_transport_failure_is_NOT_reported_as_a_permission_refusal(
+        monkeypatch):
+    """⛔ The answered-refusal / outage split, both directions.
+
+    On the pinned client `AuthenticationError` and `AuthorizationError` SUBCLASS
+    `ConnectionError`, so a type-or-message test that admitted the transport
+    family would send an operator after their credentials when the box was
+    down (`tortoise/retry.py` records the same trap, #8827).
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    err = _refusal_from_listing(
+        monkeypatch, RedisConnectionError("Error connecting to localhost:6379"))
+    assert "could not be listed" in err, err
+    assert "credential" not in err, err
+
+
+def test_the_permission_predicate_is_the_ACL_layer_s_own():
+    """⛔ ONE rule, not a second spelling.
+
+    `tortoise/acl_graph_users.py` mints the per-graph user AND owns the predicate
+    that recognises its refusal; a copy here would drift from the module that
+    defines the grant (`_quote_identifier`, `_bounded_server_socket_kwargs` are
+    the repo's same move in the sibling censuses).
+    """
+    assert not hasattr(tpc, "_is_permission_refusal"), (
+        "import tortoise.acl_graph_users._is_permission_refusal instead of "
+        "respelling it — a second spelling drifts from the rule that defines "
+        "the grant")
+
+
+def test_the_uri_leg_binds_without_WRITING_either(monkeypatch):
+    """The URI leg is the one that can mint a graph on a LIVE server.
+
+    #11113 review, non-blocking observation (i): the flags were pinned only on
+    the embedded branch, because every `from_uri` fake swallowed `**k` — so a
+    future edit dropping `ensure_indexes=False` there would have been silent on
+    the leg that writes to a customer instance.
+    """
+    seen = {}
+
+    class _G:
+        def query(self, cypher, params=None):
+            class _R:
+                result_set = [[0]] if "count" in cypher else []
+            return _R()
+
+    from tortoise.projection import FalkorProjection
+
+    class _Proj:
+        g = _G()
+        _graph_name = "g"
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+
+        @classmethod
+        def from_uri(cls, *a, **k):
+            seen.update(k)
+            seen["positional"] = a
+            return cls()
+
+    monkeypatch.setattr(FalkorProjection, "from_uri", _Proj.from_uri)
+    assert tpc.read_graph_turns("docker://h:1/g", None, "g")["nodes"] == {}
+    assert seen["positional"] == ("docker://h:1/g",)
+    assert seen["skip_health_check"] is True
+    assert seen["ensure_indexes"] is False
+
+
+def test_presence_is_asked_about_the_RESOLVED_name_not_the_argument(
+        monkeypatch):
+    """#11113 review, non-blocking observation (ii): nothing covered this.
+
+    A redirect or a test-name derivation can change which graph is addressed,
+    so the question is asked about the projection's OWN name (`_graph_name`) —
+    refusing on the raw argument would reject a graph the store really holds,
+    and accepting on it would open a graph the store does not.
+    """
+    seen = {}
+
+    class _G:
+        def query(self, cypher, params=None):
+            seen["queries"] = seen.get("queries", 0) + 1
+
+            class _R:
+                result_set = [[0]] if "count" in cypher else []
+            return _R()
+
+    from tortoise.projection import FalkorProjection
+
+    def _proj_for(graphs):
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return list(graphs)
+
+        class _Proj:
+            g = _G()
+            db = _DB()
+            _graph_name = "resolved_acme"     # the redirect's name, not the arg
+
+        return _Proj
+
+    # the STORE holds the RESOLVED name while the ARGUMENT names something else:
+    # that is not a refusal — the argument is a selector, not an address.
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _proj_for(
+                            ["resolved_acme"])()))
+    assert tpc.read_graph_turns("docker://h:1/team_acme", None,
+                                "team_acme")["nodes"] == {}
+    assert seen.get("queries")                      # it really read
+
+    # …and when only the ARGUMENT's name is present, refusing is correct:
+    # opening `resolved_acme` is what would create it.
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _proj_for(
+                            ["team_acme"])()))
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://h:1/team_acme", None, "team_acme")
+    assert "'resolved_acme'" in str(exc.value), str(exc.value)
+
+
+def test_the_graph_list_requirement_is_documented_at_the_flag(capsys):
+    """#11113 review P2(b): the requirement is stated where the operator reads it.
+
+    The module documented no permission requirement at all, so the natural
+    remedy an operator reached for was the one the ACL layer forbids. A help
+    string and a docstring are the only places an operator reads BEFORE the
+    flag is chosen, so both name it.
+    """
+    with pytest.raises(SystemExit) as exit_:
+        tpc.main(["--help"])
+    assert exit_.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "GRAPH.LIST" in help_text, help_text
+    assert "credential" in help_text, help_text
+
+    doc = " ".join((tpc.__doc__ or "").split())
+    assert "GRAPH.LIST" in doc
+    assert "per-graph tenant user" in doc
 
 
 def test_a_caller_holding_the_handle_does_not_re_ask_the_store(monkeypatch):
