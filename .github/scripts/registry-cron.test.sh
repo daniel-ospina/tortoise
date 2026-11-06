@@ -1922,6 +1922,7 @@ assert_contains "$OUT" "the driver's own ceiling was hit" "78. the verdict names
 assert_contains "$OUT" "the last COMPLETED sweep was" "78. the verdict carries the completion age it gated on"
 assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78. no SWEEP_NO_COVERAGE incident is filed"
 assert_not_contains "$OUT" "ride-along OK" "78. a timeout still skips the purge/reconcile ride-along"
+assert_contains "$OUT" "ride-alongs are SKIPPED for this run" "78. the green line WARNS that erasure/revocation were not attempted"
 
 # ── 78b. #10234: a timeout PLUS a stale last COMPLETED sweep IS red ────────
 # The fail-closed half. A budget timeout proves nothing on its own, but no
@@ -2064,7 +2065,8 @@ assert_eq "$RC" 1 "78g. a fresh stamp over an UNMEASURABLE pool is NOT green"
 assert_contains "$OUT" "could not read an archive timestamp" "78g. the red names the pool evidence, not a coverage claim"
 # Round 10: the PURE unparseable case has its own POOL_STALE title — pin it, or a
 # wrong-shape summary ("0 team default archive(s) older than 90m") passes CI.
-assert_file_match "$LOG" 'POOL_STALE — an archive timestamp could not be parsed' "78g. the TITLE names the unparseable stamp, not a zero-count stale claim"
+assert_file_match "$LOG" 'POOL_STALE — an archive timestamp could not be parsed \(pool age UNMEASURABLE, 1 team\(s\)\)' "78g. the TITLE names the unparseable stamp AND its count, not a zero-count stale claim"
+assert_file_match "$LOG" 'this zero is NOT a healthy reading' "78g. the BODY says the zero is not a healthy measurement"
 # "Filed" can take two shapes: a create POST, or a dedup adoption of an already
 # open POOL_STALE. Both record the condition; silence records nothing. Accept
 # either, and fail only on silence.
@@ -2108,7 +2110,8 @@ assert_contains "$OUT" "could not read an archive timestamp" "78i. the unparseab
 # BOTH — so a single needle matched either half and the case proved nothing.
 # Assert one phrase unique to each.
 assert_file_match "$LOG" 'AGE UNMEASURABLE, see the log for the specific team' "78i. the FILED body bullet names the corrupt stamp"
-assert_file_match "$LOG" 'and an archive timestamp could not be parsed' "78i. the TITLE covers both causes, not just the stale count"
+assert_file_match "$LOG" 'and an archive timestamp could not be parsed \(1 team\(s\) age UNMEASURABLE\)' "78i. the TITLE covers both causes and COUNTS the unparseable teams"
+assert_file_match "$LOG" "teamZ — newest archive timestamp 'not-a-timestamp' could not be parsed" "78i. the BODY names the offending tenant and its value (#4994)"
 
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
 # rc=56 (connection reset) was measured in production at 201s and 480s of a
@@ -2181,6 +2184,7 @@ assert_not_contains "$OUT" "lock held" "79. an empty response is NOT reported as
 # cause the leg never observed, and on a green run this line is the only record.
 assert_contains "$OUT" "the exchange COMPLETED (curl rc=0) but carried no report body" "79. an empty body names the REAL cause (no report), not a budget expiry"
 assert_not_contains "$OUT" "ceiling was hit" "79. (control) no budget claim on a completed exchange"
+assert_contains "$OUT" "ride-alongs are SKIPPED for this run" "79. the green line WARNS that erasure/revocation were not attempted"
 
 # ── 80. #5028: the sweep OUTCOME is never truncated away ───────────────────
 # `per_team` (the org census) is serialized BEFORE `last_sweep`, so the old

@@ -756,7 +756,7 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
 # shape classifier below) rather than calling this helper. That duplication used
 # to be justified by a gap this driver has since closed: the sweep now expresses
 # `transport_error` too, so it produces THREE of these four tokens with a
-# near-verbatim copy of this body — #5114's gap is closed by that split (the issue itself is referenced in the PR), and #11119
+# near-verbatim copy of this body — #5114's gap is closed by that split, and #11119
 # tracks collapsing both onto ONE owner. Until then, change them together.
 leg_shape() { # <curl_rc> <body> -> shape label on stdout
   if [ "${1:-99}" -eq 28 ]; then
@@ -977,6 +977,7 @@ R2_OK=1
 POOL_STALE=0        # a team's newest default archive is older than DRIVER_DOWN_MIN
 POOL_UNPARSEABLE=0  # a team's newest-archive timestamp could not be parsed (no healthy reading)
 UNPARSEABLE_TEAMS="" # the tenants that hit it, for the pooled body (#4994)
+UNPARSEABLE_COUNT=0  # how many did, for the title
 R2_TEAM_COUNT=0     # team prefixes present under backups/
 # #4994: the direct-R2 leg's PER-TEAM staleness is accumulated here instead of
 # being filed as one `[DR] STALE` per tenant. One systemic pool fault therefore
@@ -1161,6 +1162,7 @@ if [ "$R2_OK" = "1" ]; then
           # #4994: the pooled incident names its tenants. Record this one too, or
           # an operator holding the incident cannot tell which LastModified to fix
           # without the 90-day run log.
+          UNPARSEABLE_COUNT=$(( ${UNPARSEABLE_COUNT:-0} + 1 ))
           UNPARSEABLE_TEAMS="${UNPARSEABLE_TEAMS}- ${org_id} — newest archive timestamp '${newest}' could not be parsed
 "
         else
@@ -1270,15 +1272,17 @@ if [ "$STALE_TEAM_COUNT" != "0" ] || [ "${POOL_UNPARSEABLE:-0}" = "1" ]; then
     POOL_LIST_NOTE="
 ⚠️ The pool listing did NOT complete this run (R2_LIST_OK=0), so this is what WAS measured, not the whole pool (see the R2_UNLISTABLE incident for the storage fault)."
   fi
-  POOL_STALE_BODY="The driver's direct R2 freshness leg (app-independent) measured ${STALE_TEAM_COUNT} team default archive(s) older than BACKUP_STALE_THRESHOLD_MIN (${STALE_MIN}m):
+  POOL_AGE_CAVEAT=""
+  [ "${POOL_UNPARSEABLE:-0}" = "1" ] && [ "${STALE_TEAM_COUNT:-0}" = "0" ] && POOL_AGE_CAVEAT=" (and an archive timestamp could not be read, so the pool's age is UNMEASURABLE — this zero is NOT a healthy reading)"
+  POOL_STALE_BODY="The driver's direct R2 freshness leg (app-independent) measured ${STALE_TEAM_COUNT} team default archive(s) older than BACKUP_STALE_THRESHOLD_MIN (${STALE_MIN}m)${POOL_AGE_CAVEAT}:
 
 ${STALE_TEAMS}
 Per-tenant STALE incidents are watcher-owned (the watcher resolves them per org, in-process); this pooled incident is the driver-side record of the same systemic fault and self-heals once the pool is measured fresh on $(recovery_streak_for POOL_STALE) consecutive runs.${POOL_LIST_NOTE}"
   if [ "${STALE_TEAM_COUNT:-0}" != "0" ]; then
     POOL_STALE_SUMMARY="${STALE_TEAM_COUNT} team default archive(s) older than ${STALE_MIN}m"
-    [ "${POOL_UNPARSEABLE:-0}" = "1" ] && POOL_STALE_SUMMARY="${POOL_STALE_SUMMARY}, and an archive timestamp could not be parsed (one team's age UNMEASURABLE)"
+    [ "${POOL_UNPARSEABLE:-0}" = "1" ] && POOL_STALE_SUMMARY="${POOL_STALE_SUMMARY}, and an archive timestamp could not be parsed (${UNPARSEABLE_COUNT} team(s) age UNMEASURABLE)"
   else
-    POOL_STALE_SUMMARY="an archive timestamp could not be parsed (pool age UNMEASURABLE)"
+    POOL_STALE_SUMMARY="an archive timestamp could not be parsed (pool age UNMEASURABLE, ${UNPARSEABLE_COUNT} team(s))"
   fi
   file_alert POOL_STALE \
     "[DR] POOL_STALE — ${POOL_STALE_SUMMARY}" \
@@ -1608,7 +1612,7 @@ RUN="$(curl -sS -m "$SWEEP_TIMEOUT_S" -X POST -H "Authorization: Bearer $KEY" \
 SWEEP_ELAPSED=$(( $(date +%s) - SWEEP_START ))
 # #10234 review P1: name the SHAPE, and do not fold two different faults into
 # one. rc=28 is the caller's OWN ceiling (a budget artifact). ANY other non-zero
-# rc with no body is a TRANSPORT fault — measured in production as rc=56 at 201s
+# rc (with or without a partial body) is a TRANSPORT fault — measured in production as rc=56 at 201s
 # and 480s of a 600s budget, i.e. the driver still had 399s/120s of patience
 # left, so calling that a "budget timeout" would assert a cause it never
 # observed. rc=0 with an empty body is a completed exchange that carried no
@@ -1848,7 +1852,7 @@ case "$RUN_STATUS" in
           if [ "$RUN_STATUS" = "empty_response" ]; then
             SWEEP_CAUSE="the exchange COMPLETED (curl rc=0) but carried no report body — a server/proxy fault, not a budget artifact"
           else
-            SWEEP_CAUSE="the driver's own ceiling was hit (rc=${CURL_RC}), so it stopped waiting — not the pipeline"
+            SWEEP_CAUSE="the driver's own ceiling was hit (rc=${CURL_RC}), so the CLIENT stopped waiting (this says nothing about whether the pipeline stopped)"
           fi
           log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m): ${SWEEP_CAUSE}; leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
         fi
