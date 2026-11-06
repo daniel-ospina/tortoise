@@ -4860,36 +4860,63 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     #: exemption (see `_PREDICATE_NAMES_TRUE_TREE`), so "the arming commit itself" and
     #: "the arming commit's son" stay refused.
     #: ⛔ THE ADVERB SLOT IS A GRAMMAR, NOT THE LIST OF WORDS THE EARLIER ROUNDS HAPPENED
-    #: TO PROBE (#11191 review r10 residual 4, P2 — MEASURED). The closed set stopped at
-    #: nine words, so the claim walked past the arm one adverb beyond it:
+    #: TO PROBE, AND NOT A COUNT EITHER (#11191 review r10 residual 4, P2; r11 F2, P1 —
+    #: MEASURED). The closed set stopped at nine words, so the claim walked past it one
+    #: adverb beyond it:
     #:   "…is, IN PRACTICE, the arming commit itself"        -> ACCEPTED
     #:   "…is INDISPUTABLY the arming commit itself"          -> ACCEPTED
     #:   "…is EFFECTIVELY the arming commit's son"            -> ACCEPTED
-    #: — the list-runs-out fail-open that the FIGURE set and the decoration set were
-    #: widened for, in the one slot where a writer has unbounded choice. An `-ly` adverb
-    #: is the PRODUCTIVE class in English, so it is admitted AS A CLASS; it cannot swallow
-    #: the object, because no `commit`/`tree`/`merge`/`sha` noun ends in `-ly`. `never` is
-    #: deliberately OUT: "is never the arming commit itself" DENIES the predication, which
-    #: is a correction this arm must not read as the claim.
-    _PREDICATE_ADVERB = (
-        r"(?:(?:[A-Za-z][A-Za-z-]*ly|still|now|later|also|already|actually|really|"
+    #: — and the first cut of the widening bounded the class with `{0,2}`, so the next
+    #: stack past two was open again, as `origin/main` REFUSES and this head accepted:
+    #:   "…is NOW QUITE CLEARLY the arming commit itself"     -> ACCEPTED
+    #:   "…is ALMOST CERTAINLY STILL the arming commit itself" -> ACCEPTED
+    #: That is the same list-runs-out fail-open with the list spelled as a number: an
+    #: adverb is an OPEN lexical category in English (the `-ly` derivation is its
+    #: productive subclass), so the slot is a REPETITION, not a count. The repeat is
+    #: linear, never catastrophic: the two alternatives are disjoint at their first
+    #: character (a comma vs a letter).
+    #: ⛔ AND THE NEGATIVE-POLARITY ADVERBS ARE EXCLUDED — as a CLASS, by the same rule
+    #: `never` is excluded by, not by adding words to a list (#11191 review r11 F3, P2 —
+    #: MEASURED): `hardly` / `scarcely` / `barely` deny the predication (which is a
+    #: correction, so the arm must not read them as the claim), and an `-ly` class that
+    #: swallowed them REFUSED a truthful denial that the previous head accepted — a
+    #: regression in the false-RED direction.
+    #: ⛔ AND AN INTENSIFIER MAY PRECEDE THE ADVERB (#11191 review r11 F2, P1 — MEASURED):
+    #: `almost certainly` is ordinary English and the `-ly` alternative alone cannot reach
+    #: it, so "is ALMOST CERTAINLY still the arming commit itself" was ACCEPTED while
+    #: `origin/main` refuses it. Intensifiers are a genuinely CLOSED class in English
+    #: (unlike adverbs), which is why this one is spelled out and the adverb itself is not.
+    _INTENSIFIER = (
+        r"(?:almost|nearly|very|so|too|much|more|most|less|least|far|quite|rather|really|"
+        r"even|just|simply|entirely|completely|wholly|utterly|partly)\s+"
+    )
+    _ADVERB_WORD = (
+        r"(?:(?!(?:hardly|scarcely|barely|rarely|seldom)\b)(?:"
+        + _INTENSIFIER
+        + r")?(?:[A-Za-z][A-Za-z-]*ly"
+        r"|still|now|later|also|already|actually|really|"
         r"apparently|instead|then|even|indeed|only|just|again|always|nonetheless|"
         r"nevertheless|however|therefore|thus|hence|rather|quite|too|"
-        r"in\s+fact|as\s+a\s+matter\s+of\s+fact|to\s+date)\b\s*){0,2}"
+        r"in\s+fact|as\s+a\s+matter\s+of\s+fact|to\s+date))\b"
+    )
+    _PREDICATE_ADVERB = (
+        r"(?:(?:"
+        + _ADVERB_WORD
+        + r"\s*)"
+        # …and a COMMA-DELIMITED adverbial incise is the same slot at word-phrase length
+        # ("is, in practice, the arming commit itself"), in ANY position relative to the
+        # adverbs. It must close on a comma, so it can never swallow the object.
+        r"|,[^,.;\u2014\u2013]{1,40},\s*)*"
     )
     _PREDICATED_OBJECT = re.compile(
         r"\s*(?:is|was|are|were|means|denotes|refers\s+to|stays?|stayed|remains?|"
         r"remained|becomes?|became|continues?\s+to\s+be|continued\s+to\s+be)"
-        # ⛔ …AND A COMMA-DELIMITED ADVERBIAL SITS AS AN INCISE between the copula and
-        # the object ("is, in practice, the arming commit itself"), so a slot for it is
-        # required beside the one-word adverbs; a bounded comma incise cannot swallow the
-        # object, because it must CLOSE on a comma (#11191 review r10 residual 4).
-        r"\s*(?:,[^,.;\u2014\u2013]{1,40},\s*)?"
         # ⛔ ONE ADVERB IS ADMISSIBLE (#11191 review r9, P1 — MEASURED): with the copula
         # followed IMMEDIATELY by the object, "is STILL the arming commit itself" and
         # "stayed the arming commit's son" were ACCEPTED — the closure claim was one word
         # from failing open. Never an open `\w+` (that swallows the object itself); the
         # productive `-ly` class above is the widening that does not.
+        r"\s*"
         + _PREDICATE_ADVERB
         + r"(?:the\s+|a\s+|an\s+)?"
         + r"(?:(?:arming|merge|revert|fix|feature|squash|base|parent)\s+)?"
@@ -4913,6 +4940,23 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     #: …and the `of <sha>` spelling, admissible ONLY behind a "parent" predicate.
     _PARENT_OF_SHA = re.compile(
         r"^\s+of\s+`?(?:785bb2b59|" + _TRUE_TREE + r")`?", re.I
+    )
+    #: A DIFFERENT, NAMED SUBJECT predicated of a sha — the only thing that makes a
+    #: trailing tree a statement about ANOTHER object rather than about the phrase's own.
+    #: A `#<n>` reference is a named subject in this repo's prose ("the #9601 merge"), and
+    #: the phrase's own `#9548` does not count (the caller filters it). Read in both word
+    #: orders, because `<sha> is the #9601 merge` and `the #9601 merge is <sha>` are the
+    #: same proposition (#11191 review r11 F1/F4, P1 — MEASURED: the punctuation-keyed
+    #: test admitted `; the tree is <false sha>` and refused `, and the #9601 merge is …`).
+    _OTHER_SUBJECT_LEFT = re.compile(
+        r"#(\d+)\b[^;:.!?\u2014\u2013]{0,80}?"
+        r"\b(?:is|was|are|were|means|denotes|refers\s+to)\b",
+        re.I,
+    )
+    _OTHER_SUBJECT_RIGHT = re.compile(
+        r"\b(?:is|was|are|were|means|denotes|refers\s+to)\b"
+        r"[^;:.!?\u2014\u2013]{0,80}?#(\d+)\b",
+        re.I,
     )
     #: A correction that RETIRES the attribution — "§A8 no longer calls `ff6379eb2` the
     #: tree before #9548", "… does not call it …". Closed on purpose: the verb set is
@@ -5002,7 +5046,8 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         which sha precedes the phrase, and asterisks around a copula change nothing
         there (also measured — the emphasis controls stay green under that same
         mutation, so the two arms are independently covered).
-        attributable prose. A markdown LINK TARGET is metadata, not prose (#11191 review
+
+        A markdown LINK TARGET is metadata, not prose (#11191 review
         r8, P2 — MEASURED): a dotted URL carries a `.` that ends every clause class in this
         predicate, and often a sha of its own — so `[`047c91f7a`](https://example.invalid/…)`
         was read as a clause BOUNDARY, each arm saw a different sentence from the author's,
@@ -5081,39 +5126,22 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
             # figure dated to the phrase and every truthful attribution went RED.
             return norm[start:pos]
 
-        def _sentence_tail(text: str) -> str:
-            """`text` cut at its first SENTENCE end, with abbreviations protected.
-
-            `_CLAUSE_DELIM` splits on `.`, so a clause ends INSIDE `i.e.`/`e.g.` — the one
-            idiom whose own abbreviation carries the delimiter. One definition of "the rest
-            of this sentence" for every arm that has to read past it (#11191 review r7/r8).
-            """
-            sentinel = "\ue000"
-            src = re.sub(
-                r"\b(i\.e|e\.g|viz|cf|vs)\.",
-                lambda _m: _m.group(1) + sentinel,
-                text,
-                flags=re.I,
-            )
-            return re.split(r"[;:\u2014\u2013]|\.(?=\s|$)", src, maxsplit=1)[0].replace(
-                sentinel, "."
-            )
-
         def _sentence_tail_hard(text: str) -> str:
             """`text` cut at its first SENTENCE-ENDING full stop, abbreviations protected.
 
-            `_sentence_tail` also cuts at `:` `;` and the dashes — right for "the rest of a
-            clause", wrong for "the rest of the claim": this doc writes its cells with em
-            dashes, so a tree named after one is still named (#11191 review r9, P1).
+            ⛔ ONE helper, not two (#11191 review r11 F5, P3): a `_sentence_tail` that also
+            cut at `:` `;` and the dashes lived here until r11 and was **never called** —
+            dead code presented as a live sibling by this docstring, so a later reader could
+            "restore" the arm that relied on it and see nothing red. It is deleted rather
+            than kept for symmetry: the arms that read past a clause use THIS one.
 
             ⛔ AND IT DELIBERATELY STILL READS ACROSS `;`/`:` — DO NOT "fix" that by
             cutting here (#11191 review r10 residual 2). The `;`-separated two-tree
             comparison this file requires to stay green ("…is the arming commit's parent;
             the #9601 merge is `ff6379eb2`") is refused by the CALLER's `_admits`, which
-            admits a sha in a `;`-clause that NAMES its own subject while still refusing
-            the clause that opens with the sha or with a demonstrative. Cutting the tail
-            at `;` would accept `"; `ff6379eb2` is the parent"` and `"; that is
-            `ff6379eb2`"`, which both assert the equivalence.
+            admits a sha in a clause that PREDICATES it of a different, named subject
+            while still refusing a co-referential one ("; the tree is `ff6379eb2`").
+            Cutting the tail at `;` would accept the second.
             """
             sentinel = "\ue000"
             src = re.sub(
@@ -5342,8 +5370,9 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 _pred_span = _predicated.group(0)
                 _after = norm[phrase.end() + _predicated.end() :]
                 # ⛔ THE TAIL IS THE REST OF THE SENTENCE, not the rest of the CLAUSE
-                # (#11191 review r9, P1 — MEASURED). `_sentence_tail` splits on `:` `;`
-                # and the dashes, so a wrong tree named after a DASH — the house style of
+                # (#11191 review r9, P1 — MEASURED). A tail that also cut at `:` `;` and
+                # the dashes stopped reading at the first of them, so a wrong tree named
+                # after a DASH — the house style of
                 # this very cell — was never read: "…is the arming commit's parent —
                 # `ff6379eb2`, as the note says." was ACCEPTED while the comma spelling
                 # reddened. Only a sentence-ENDING full stop cuts this tail.
@@ -5416,36 +5445,57 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                     while the truthful separate assertion must still pass. The separator is
                     the CONNECTIVE: an appositive is introduced by punctuation alone, a new
                     assertion by `and` / `since` / `because` / a `;`.
-                    ⛔ …AND A `;`/`:` CLAUSE WITH ITS OWN NAMED SUBJECT IS A DIFFERENT TREE
-                    (#11191 review r10 residual 2, P2 — FALSE RED, MEASURED). Reading the
-                    whole sentence tail made the `;`-separated two-tree comparison this file
-                    requires to stay green REFUSED:
+                    ⛔ …AND A CLAUSE THAT PREDICATES THE SHA OF A **DIFFERENT, NAMED**
+                    SUBJECT IS A DIFFERENT TREE (#11191 review r10 residual 2, P2 — FALSE
+                    RED, MEASURED; corrected by r11 F1/F4, P1). Reading the whole sentence
+                    tail made the `;`-separated two-tree comparison this file requires to
+                    stay green REFUSED:
                       "…is the arming commit's parent; the #9601 merge is `ff6379eb2`."
-                    A clause that NAMES its subject ("the #9601 merge") is not about the
-                    phrase's object; a clause that opens with the sha itself, or with a
-                    DEMONSTRATIVE, still is — so `"; `ff6379eb2` is the parent"` and
-                    `"; that is `ff6379eb2`"` stay refused.
+                    ⛔ THE FIRST CUT OF THIS ADMISSION TESTED "is there ANY non-stopword
+                    word before the sha in this clause", which is a PUNCTUATION-keyed test
+                    on a proposition: it admitted every CO-REFERENTIAL subject, so the
+                    equivalence came back one semicolon from the form this file refuses —
+                    measured ACCEPTED at r11, and REFUSED by `origin/main` and by r10:
+                      "…parent; the tree is `ff6379eb2`."
+                      "…parent; its parent is `ff6379eb2`."
+                      "…parent; the merge is `ff6379eb2`."
+                    (and `, and` / `; `ff6379eb2` is the #9601 merge` were REFUSED while
+                    saying the same true thing as the admitted `;` spelling — one arm, two
+                    verdicts keyed on punctuation). So the test is the PROPOSITION: the
+                    clause must attribute the sha to a DIFFERENT, NAMED subject — a `#<n>`
+                    reference other than the phrase's own `#9548`, joined to the sha by a
+                    copula in either order. A co-referential noun has no such reference,
+                    whichever punctuation it follows.
                     """
                     _tok = _named.group(0).lower()
                     if _TRUE_TREE.startswith(_tok) or _tok.startswith(_TRUE_TREE):
                         return True
                     _lead = _rest[: _named.start()]
-                    if len(re.split(r"[;:]", _lead)) > 1:
-                        _head_clause = re.split(r"[;:]", _lead)[-1]
-                        _head = [
-                            _word
-                            for _word in re.findall(
-                                r"#\d+|[A-Za-z][A-Za-z'-]*", _head_clause
-                            )
-                            if _word.lower()
-                            not in {
-                                "the", "a", "an", "is", "was", "are", "were", "be",
-                                "been", "that", "this", "these", "those", "it", "they",
-                                "which", "and", "but", "of", "in", "at", "on", "for",
-                            }
-                        ]
-                        if _head:
-                            return True
+                    # The clause the sha sits in, found with the SAME boundary set the
+                    # arms above use (`;` `:` and the coordinating conjunction), then
+                    # split at the sha so either word order can be read.
+                    _bounds = [
+                        (_m.start(), _m.end()) for _m in _CLAUSE_DELIM.finditer(_rest)
+                    ]
+                    _c_start, _c_end = 0, len(_rest)
+                    for _bs, _be in _bounds:
+                        if _be <= _named.start():
+                            _c_start = _be
+                        elif _bs >= _named.end():
+                            _c_end = _bs
+                            break
+                    _left = _rest[_c_start : _named.start()]
+                    _right = _rest[_named.start() : _c_end]
+                    _other = None
+                    _hit = _OTHER_SUBJECT_LEFT.search(_left)
+                    if _hit:
+                        _other = _hit.group(1)
+                    else:
+                        _hit = _OTHER_SUBJECT_RIGHT.search(_right)
+                        if _hit:
+                            _other = _hit.group(1)
+                    if _other and _other != "9548":
+                        return True
                     if not "785bb2b59".startswith(_tok):
                         return False
                     return bool(
@@ -7107,6 +7157,104 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         "(#11191 review r10):\n  "
         + "\n  ".join(
             f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _r10_wrong
+        )
+    )
+    # ⛔⛔ THE r11 FINDINGS — the four defects the FIRST fix of the r10 residuals introduced
+    # or left one spelling short. Each was measured on `ebb8f840e6` (the r11 head) before it
+    # was fixed, and each is a shape `origin/main` REFUSES while that head accepted (F1, F2)
+    # or a truthful denial that head refused (F3).
+    #   F1/F4 — the r10 residual-2 fix tested PUNCTUATION ("is there any noun before the sha
+    #     in this `;` clause") instead of the PROPOSITION, so every co-referential subject
+    #     bought the admission and the equivalence came back one semicolon from the form the
+    #     file already refuses — while `, and the #9601 merge is …`, which says the same true
+    #     thing as the admitted `;` spelling, was still refused. One arm, verdicts keyed on a
+    #     punctuation mark. The admission now requires the clause to predicate the sha of a
+    #     DIFFERENT NAMED subject (a `#<n>` other than the phrase's own `#9548`).
+    #   F2 — the r10 residual-4 fix bounded an OPEN class with a COUNT (`{0,2}`), so the next
+    #     stack past two was open again; and an `-ly` adverb behind an intensifier (`almost
+    #     certainly`) was unreachable. The slot is a repetition, and the intensifier is a
+    #     closed class named on purpose.
+    #   F3 — the same widening swallowed the NEGATIVE-POLARITY `-ly` adverbs, so a denial was
+    #     read as the claim and REFUSED (a regression against the previous head).
+    _r11_findings = (
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "the tree is `ff6379eb2`.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "its parent is `ff6379eb2`.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "the merge is `ff6379eb2`.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent, "
+            "and the #9601 merge is `ff6379eb2`.",
+            False,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "`ff6379eb2` is the #9601 merge.",
+            False,
+        ),
+        (
+            "The tree immediately before #9548 is now quite clearly the arming commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is almost certainly still the arming "
+            "commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is really quite clearly the arming commit "
+            "itself.",
+            True,
+        ),
+        # ⛔ THREE ITEMS, not two: the count `{0,2}` that the first widening used let the
+        # two-item controls above pass while the three-item stack was open again, so the
+        # discrimination this block claims is only real with a stack ONE PAST the count.
+        (
+            "The tree immediately before #9548 is really quite clearly still the arming "
+            "commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is indisputably, in practice, the arming "
+            "commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is hardly the arming commit itself.",
+            False,
+        ),
+        (
+            "The tree immediately before #9548 is scarcely the arming commit itself.",
+            False,
+        ),
+        (
+            "The tree immediately before #9548 is barely the arming commit itself.",
+            False,
+        ),
+    )
+    _r11_wrong = [
+        (s, want, _refuses_before_9548(s))
+        for s, want in _r11_findings
+        if _refuses_before_9548(s) is not want
+    ]
+    assert not _r11_wrong, (
+        "the r11 findings are open: a CO-REFERENTIAL subject in a `;`/`and` clause buys the "
+        "named-subject admission (F1/F4, a false equivalence `origin/main` refuses), an "
+        "adverb STACK past the count or behind an intensifier is unread (F2), or a "
+        "NEGATIVE-POLARITY `-ly` adverb is read as the claim instead of as its denial (F3). "
+        "Each was measured on `ebb8f840e6` before it was fixed (#11191 review r11):\n  "
+        + "\n  ".join(
+            f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _r11_wrong
         )
     )
 
