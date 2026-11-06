@@ -9542,6 +9542,37 @@ class CollisionPreflightTest(unittest.TestCase):
         mod = _tool_module()
         return mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
 
+    @staticmethod
+    def _census_file_row(row: str) -> str:
+        """One served row, rewritten in the FILE seam's own shape: `pid ppid command`.
+
+        ⛔ THE TWO SEAMS DO NOT SHARE A COLUMN SHAPE (review P2, #10833). The rows this
+        fixture serves are `pid ppid uid command`, because that is what
+        `fleet_state.pi_processes()` reads (`ps -ww -axo pid=,ppid=,uid=,command=` — the uid
+        is how it drops OTHER users' processes). The file seam is read by the tool's
+        `_process_rows`, whose documented shape is `ps -ww -Ao pid=,ppid=,command=` — THREE
+        columns, split `line.split(None, 2)`, so `parts[2]` is the WHOLE command.
+
+        Writing the four-column string into that file therefore put the UID where the
+        command belongs, and `_argv0_pi` read `1000` as argv[0]: an injected `pi` row was
+        invisible through the file seam while plainly visible through the `ps` stub. That
+        is exactly the "two censuses could disagree" defect `set_process_table` exists to
+        remove, one layer down — it stayed green only because every current case asserts
+        on the worktree-demotion surface, which reads the stub.
+
+        The uid is DROPPED, not reordered: the file seam has no such column and the tool
+        never reads one, so a row that kept it (however reordered) would still be the
+        wrong shape for this seam.
+        """
+        fields = row.split(None, 3)
+        assert len(fields) == 4, (
+            f"a served process row must be `pid ppid uid command`, got {row!r} — both "
+            "seam shapes are derived from THIS one, so a short row would mis-parse in "
+            "one of them and the fixture would disagree with itself again"
+        )
+        pid, ppid, _uid, command = fields
+        return f"{pid} {ppid} {command}"
+
     def set_process_table(self, *rows: str) -> None:
         """Replace the stubbed process table — `pid ppid uid command` rows.
 
@@ -9556,11 +9587,15 @@ class CollisionPreflightTest(unittest.TestCase):
         so a test that injects a lane sees it through EITHER seam rather than one — a
         fixture whose two censuses could disagree is the defect this resolves, not a
         preference between them.
+
+        The two writes are NOT the same string: each seam gets its own column shape via
+        `_census_file_row`. `test_the_fixture_serves_each_seam_its_own_shape` pins it.
         """
         self.ps_stub_rows = list(rows)
         _write_ps_stub(self.ps_dir, self.ps_stub_rows)
         self.ps_rows.write_text(
-            "".join(f"{row}\n" for row in self.ps_stub_rows), encoding="utf-8")
+            "".join(f"{self._census_file_row(row)}\n" for row in self.ps_stub_rows),
+            encoding="utf-8")
 
     def add_process_row(self, row: str) -> None:
         """Serve ONE more row (a fixture's own fake lane) beside the default."""
@@ -9782,6 +9817,70 @@ exec {real} "$@"
         self.assertIn("pid:777001", out)
         self.assertIn("command line names #3061", out)
         self.assertIn("live `pi` process(es) enumerated", out)
+
+    def test_the_fixture_serves_each_seam_its_own_column_shape(self):
+        """⛔ ONE LIST, TWO SEAMS, ONE ANSWER — pinned on the SHAPES (review P2, #10833).
+
+        `set_process_table` promises that a test injecting a lane sees it through EITHER
+        seam. The seams do not share a column shape: `fleet_state.pi_processes()` reads
+        `ps -ww -axo pid=,ppid=,uid=,command=` (FOUR columns, `fleet_state._pi_pids_from_ps`
+        splits with maxsplit=3 and filters on the uid), while the tool's `_process_rows`
+        reads `ps -ww -Ao pid=,ppid=,command=` (THREE columns, `parts[2]` is the whole
+        command). Before the fix the fixture wrote the four-column string into the file
+        seam too, so `_argv0_pi` read the UID as argv[0] and the injected `pi` row was
+        invisible there while visible through the stub.
+
+        This asserts each seam with ITS OWN reader, so a future edit that unifies the
+        strings again cannot be green: `_argv0_pi("1000 pi")` is False.
+        """
+        mod = _tool_module()
+        pid, ppid, uid = 4321, 1, os.getuid()
+        self.set_process_table(f"{pid} {ppid} {uid} pi")
+
+        # The FILE seam, read by the tool's own parser — the reader that was wrong.
+        with mock.patch.dict(os.environ, {mod.PROCESS_TABLE_ENV: str(self.ps_rows)}):
+            rows, why = mod._process_rows("ps", str(self.tmp), 5.0)
+        self.assertEqual(why, "", "the served table must be readable")
+        self.assertIsNotNone(rows)
+        self.assertIn(
+            (pid, ppid, "pi"), rows,
+            "the FILE seam must carry `pid ppid command` — the uid column is not "
+            "part of this seam's shape, and putting it there hides every injected "
+            f"lane from the tool's live-lane census (parsed rows: {rows})",
+        )
+        self.assertTrue(
+            mod._argv0_pi("pi"),
+            "precondition: the command column of the row above really is a `pi`",
+        )
+
+        # The STUB seam, read by `fleet_state`'s own parser — unchanged, and it must
+        # stay four-column or the demotion census loses its uid filter.
+        stub_text = (self.ps_dir / "rows").read_text(encoding="utf-8")
+        self.assertEqual(
+            [r["pid"] for r in mod.fleet_state._pi_pids_from_ps(stub_text)],
+            [pid],
+            "the STUB seam must keep `pid ppid uid command` — `fleet_state` reads the "
+            "uid to exclude other users' processes",
+        )
+
+    def test_an_injected_lane_row_is_visible_through_the_file_seam(self):
+        """The same claim END TO END: the TOOL's live-lane surface names the pid.
+
+        `tool_env` always points `COLLISION_PREFLIGHT_PROCESS_TABLE` at `self.ps_rows`, and
+        a set seam WINS over `ps` by design (`_process_rows`), so this is the census every
+        tool launch actually reads. Pre-fix this row was parsed as
+        `(777001, 1, "1000 pi -p …")`, `_argv0_pi` saw `1000`, no `pi` row existed, and the
+        surface reported no live lane — a silently vacuous case for the first test that
+        injects a lane and asserts on `[live lane processes]`.
+        """
+        self.set_process_table(
+            f"777001 1 {os.getuid()} pi -p dispatch-3061-brief")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[live lane processes]", out)
+        self.assertIn("pid:777001", out)
+        self.assertIn("command line names #3061", out)
 
     def test_a_live_harness_lane_for_an_attributed_pr_blocks(self):
         """The `prd-<owner>-<repo>-<PR>` case: a lane launched BY a PR number.

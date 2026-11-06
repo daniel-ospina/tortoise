@@ -801,6 +801,48 @@ def _fresh_cli_db_env(env, tmp_path):
     return {**env, "TORTOISE_DB_PATH": str(tmp_path / "cli.db")}
 
 
+def _live_embedded_holder(db) -> int | None:
+    """The pid of the live redislite daemon holding `db`, or ``None``.
+
+    Read EXACTLY the way `TortoiseSDK._probe_embedded_busy` reads it (#942): the
+    ``<db>.settings`` registry, its recorded ``pidfile``, then a ``kill(pid, 0)``
+    liveness probe. This is the state that makes the NEXT process to open the
+    same DB fail with `EmbeddedStoreBusyError`.
+
+    ⛔ WHY A TEST HELPER AND NOT DECORATION (review P3, #10833).
+    `embedded_close_cannot_stop` used to be applied without anything ever
+    MEASURING it: the only observable effect of the patch was that a daemon kept
+    running. An assertion that this holder exists after `close()` is what turns
+    the fixture from an assumption into evidence — if the #3653 guard ever stops
+    being fail-closed (or the patch stops reaching `close()`), the daemon goes
+    away and the two output tests below say so instead of quietly passing for a
+    different reason than the one their docstrings give.
+    """
+    registry = Path(str(db)).with_name(Path(str(db)).name + ".settings")
+    if not registry.is_file():
+        return None
+    try:
+        settings = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    pidfile = settings.get("pidfile")
+    if not pidfile or not Path(str(pidfile)).is_file():
+        return None
+    try:
+        pid = int(Path(str(pidfile)).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    return pid
+
+
 @pytest.mark.parametrize("bind,port", [("0.0.0.0", 8000), ("::", 8000), ("0.0.0.0", 9000)])
 def test_key_create_wildcard_bind_prints_lan_note(
     local_db, embedded_close_cannot_stop, tmp_path, bind, port,
@@ -810,10 +852,16 @@ def test_key_create_wildcard_bind_prints_lan_note(
     the printed wildcard URL is unusable for clients, and the note used to
     fire only on full defaults (suppressed exactly when needed most).
     Wildcard + non-default port must also show it."""
-    _db, _key, env, cli_sdk = local_db  # noqa: RUF059
+    _db, _key, env, cli_sdk = local_db
     # The fixture's own embedded server is left alive on purpose (its close()
-    # cannot prove "last client" here) — the subprocess must not care.
+    # cannot prove "last client" here) — the subprocess must not care, and the
+    # assertion below is what PROVES it really is still alive (review P3).
     cli_sdk.close()
+    assert _live_embedded_holder(_db) is not None, (
+        "the #3653 fail-closed arm must leave the fixture's daemon running: that "
+        "is the condition under test (a same-DB subprocess would hit "
+        "EmbeddedStoreBusyError). The fresh-DB env is then the repair, not luck"
+    )
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test",
          "--bind", bind, "--port", str(port)],
@@ -832,10 +880,15 @@ def test_key_create_default_bind_still_prints_mirror_hint(
 ):
     """The defaults case keeps the mirror hint (pass --bind/--port to match
     a custom serve setup) — regression guard for the elif branch."""
-    _db, _key, env, cli_sdk = local_db  # noqa: RUF059
+    _db, _key, env, cli_sdk = local_db
     # Same contract as the wildcard test: the fixture's server stays alive
-    # (fail-closed teardown guard), and the subprocess runs on its own db.
+    # (fail-closed teardown guard, MEASURED below), and the subprocess runs on
+    # its own db.
     cli_sdk.close()
+    assert _live_embedded_holder(_db) is not None, (
+        "the #3653 fail-closed arm must leave the fixture's daemon running — see "
+        "`test_key_create_wildcard_bind_prints_lan_note` for the full argument"
+    )
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
         capture_output=True, text=True, env=_fresh_cli_db_env(env, tmp_path),
