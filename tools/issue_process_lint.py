@@ -204,7 +204,15 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # module keeps re-discovering — the list a claim CONTINUES, the list a decline NAMES, and the run a
 # plural decline CLEARS have to be the same list.
 _LIST_SEP = r"[\s*_`]*"
-_GLOSS = rf"(?:{_LIST_SEP}\([^)\n#]{{0,80}}\))?"
+# ⛔ `_GLOSS`'S LEADING GAP IS THE SOFT ONE, NOT `_LIST_SEP` (review round 23, P3). `_LIST_SEP`
+# contains `\s`, so one parenthetical ahead of a conjunction quietly restored the cross-paragraph claim
+# the `_SOFT_GAP` rule had just removed:
+#     `Closes #100\n\nand #200 is a separate follow-up.`                -> closing=[100]        (clean)
+#     `Closes #100\n\n(see the plan) and #200 is a separate follow-up.`  -> closing=[100], weak=[200]
+# The blank line is the gap, not the parenthetical, so the LEADING token is a soft one; a single
+# wrapped line break is still admitted, which is what keeps `#100 (the parent),\n#200` a list.
+_SOFT_EMPH = r"[ \t*_`]*(?:\n[ \t*_`]*)?"
+_GLOSS = rf"(?:{_SOFT_EMPH}\([^)\n#]{{0,80}}\))?"
 # ⛔ A LIST DOES NOT CONTINUE ACROSS A BLANK LINE (review round 22, P3-1). The continuation's separator
 # was `\s`, which includes `\n`, so a conjunction or comma in a FOLLOWING PARAGRAPH continued the
 # list and a legitimate mention was claimed and flagged:
@@ -388,8 +396,17 @@ DECLINE_RE = re.compile(
     rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}"
     rf"|(?P<reason_a>{_REASON_TAIL})))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
+    # ⛔ A COMMA MAY INTRODUCE THE REASON, AND ONLY THE REASON (round 23, P2). Admitting the plain
+    # comma as a clause end made the module's own "a decline may carry its reason" rule hold for ONE
+    # spelling: `not closing it, because …` was FLAGGED while `deliberately not closing it, because …`
+    # declined — 3 of the 4 cells of that 2×2 were green, which is how the gap survived four rounds of
+    # fixes to this grammar. The comma is admitted ONLY as the preamble to `_REASON_TAIL`, not as a
+    # bare clause end: a bare comma is what round 12's pinned negative needs to stay FLAGGED
+    # (`Refs #1234 — non-closing reference, see the review.`), and `_REASON_TAIL`'s `[^#\n]*$` keeps a
+    # reason that names a reference from buying the decline.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-|{_CONTRACTION})(?:{_EMPH})?{_DET}(?P<stem_b>{_CLOSING_STEM})"
-    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}(?:$|[.;])|(?P<reason_b>{_REASON_TAIL}))",
+    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}(?:$|[.;]|,{_REASON_TAIL})"
+    rf"|(?P<reason_b>{_REASON_TAIL}))",
     re.IGNORECASE,
 )
 # ⛔ A DECLINE IS ABOUT *ITS OWN* REFERENCE — the two properties the grammar alone cannot express,

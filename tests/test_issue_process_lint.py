@@ -2273,3 +2273,63 @@ def test_a_wrapped_list_is_still_one_list():
     """
     assert L.claims("Part of #10085,\n#10063\n", 1)["weak"] == [10063, 10085]
     assert L.claims("Part of #100 and\n#300\n", 1)["weak"] == [100]
+
+
+# --- review round 23: the same rule, read in the spelling that was not pinned ---------------------
+
+
+@pytest.mark.parametrize("body", [
+    "Refs #100 — not closing it, because the criteria are unproven.\n",
+    "Refs #100 — not closing it, since the criteria are unproven.\n",
+    "Refs #100 — does not close the issue, since it is a measurement PR.\n",
+    "Refs #100 — deliberately does not close the issue, since it is a measurement PR.\n",
+])
+def test_a_comma_may_introduce_the_reason_in_EITHER_spelling(body):
+    """Measured at `fd9d3e1f0a98` (review round 23, P2) — the FALSE POSITIVE direction.
+
+    The reason tail was reachable without a comma in both spellings and with a comma in only ONE, so
+    the engine of the whole "a decline may carry its reason" rule worked in 3 of the 4 cells of that
+    2 × 2:
+
+        not closing it, because …                       -> FLAGGED
+        deliberately not closing it, because …          -> declined
+        does not close the issue, since …               -> FLAGGED
+        deliberately does not close the issue, since …  -> FLAGGED (this stem is alternative (b))
+
+    That is the same one-spelling-at-a-time gap this grammar has produced in four consecutive rounds.
+    The comma is admitted as the REASON's preamble and not as a bare clause end, so round 12's pinned
+    negative (`Refs #1234 — non-closing reference, see the review.`, which must stay FLAGGED) is
+    untouched, and a reason that names a reference still cannot buy the decline (pinned below).
+    """
+    assert L.claims(body, 1)["declined"] == [100], body
+    assert L.classify_pr(body, 1) == [], body
+
+
+def test_a_comma_introducing_a_reason_that_NAMES_a_reference_is_still_not_a_decline():
+    """The bound: `_REASON_TAIL` requires the remainder to hold no `#`, so the comma route cannot
+    swallow a live claim. `#300` is not claimed by this body at all, but the decline must not buy
+    `#100` on the strength of a sentence about `#300`."""
+    body = "Refs #100 — not closing it, because #300 must land.\n"
+    assert L.claims(body, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]]
+
+
+def test_a_parenthetical_does_not_reopen_the_cross_paragraph_claim():
+    """Measured at `fd9d3e1f0a98` (review round 23, P3) — the FALSE POSITIVE direction.
+
+    `_GLOSS`'s LEADING gap was `_LIST_SEP`, which contains `\\s`, so ONE parenthetical ahead of a
+    conjunction quietly restored the cross-paragraph claim round 22's `_SOFT_GAP` rule had just
+    removed:
+
+        Closes #100\\n\\nand #200 is a separate follow-up.                -> closing=[100]  (clean)
+        Closes #100\\n\\n(see the plan) and #200 is a separate follow-up.  -> weak=[200]      (flagged)
+
+    The blank line is the gap, not the parenthetical, so the leading token is now the soft one. A
+    single wrapped line break is still admitted, which is what keeps a glossed list a list.
+    """
+    for body in ("Closes #100\n\n(see the plan) and #200 is a separate follow-up.\n",
+                 "Closes #100\n\n(see the plan) or #200 is a separate follow-up.\n"):
+        assert L.claims(body, 1) == {**L.claims(body, 1), "closing": [100], "weak": []}, body
+        assert L.classify_pr(body, 1) == [], body
+    # control: a gloss followed by a comma-separated list is still one list
+    assert L.claims("Closes #100 (the parent), #200 (the child).\n", 1)["weak"] == [200]
