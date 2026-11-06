@@ -116,7 +116,7 @@ Completeness check in the other direction: **every seam the plan names has a row
 | plan § | seam / interface | surface(s) | note |
 |---|---|---|---|
 | §5 row 1 | the gate's default (`embed_gate.py`, `ENV_FLAG`, `embed_gate_enabled`) | **SF1** | the default-*reading* code is unchanged; only shipped config moves |
-| §5 row 2 | the gate's consult point (`embeddings.py:1268` → **`:1228`** at this head) | **SF2** | untouched by this epic — mapped because an untouched seam is where a new writer silently bypasses |
+| §5 row 2 | the gate's consult point (`embeddings.py:1268`; the enclosing def `encode_for_row` is `:1228`, SF2 cites the **def** because that is the symbol a writer calls) | **SF2** | untouched by this epic — mapped because an untouched seam is where a new writer silently bypasses |
 | §5 row 3 | the exemption register (new leaf) | **SF4**, **SF5** | placement is the risk, so the import boundary is its own surface |
 | §5 row 4 | the inventory report (`projection/__init__.py:18491` → **`:18556`** at this head) | **SF7**, **SF8**, **SF9**, **SF10** | one function, four surfaces: the read, the failure mode, the declaration, the new state |
 | §5 row 5 | the census (new, read-only) | **SF11** | must not run against production without `--dry-run` |
@@ -137,7 +137,7 @@ Straight from the `test-design` checklist, restricted to the items that actually
 | **empty vs null** | SF7 / SF8 / SF10 | two different **facts**, exercised separately: the engine's response being `None` (`result_set is None` ⇒ attribute `None` + DEBUG, `:18608`) versus an **empty** catalogue (`[]` ⇒ attribute `set()`). ⚠️ The parameter is not the seam — `catalogue_rows` (`:18606`) falls through to `self.g.query("CALL db.indexes()").result_set` when it is `None`, so a test cannot reach the `None` attribute by *passing* `None`; it must make the **query return** `None`. ⚠️ The two arms are reached by TWO different harnesses, and confusing them is how a test claims the `None` branch while asserting the empty one: `index_rows` (`tests/test_4997_vector_index_parity.py:138`) coerces `None` to `[]` (`self._index_rows = index_rows if index_rows is not None else []`), so it can reach **only** the empty arm — the `None` arm is `test_none_result_set_means_not_measured` (`:321`), whose `_NoneGraph.query` returns `_MockResult(None)` and which asserts the attribute is `None`. |
 | **malformed response** | SF7 | `len(row) < 3`, `types` not a dict, a type value not a list — each is *skipped*, and a skip must not silently become "no index exists" for that label in the reported pair. |
 | **boundary values** | SF10 / SF11 | served == indexed (the no-gap case), 0 vectors on a label, a label with vectors and no index, and a catalogue that names a label outside `ENTITY_TYPE_LABELS` (must not enter `measured`, which is `measured & served`). |
-| **service down / timeout** | SF8 | a raising read is covered (fail-open) **and a hanging one is a raising one**: the docker client is built with `**_bounded_server_socket_kwargs()` (`projection/__init__.py:11163` — `socket_timeout` 10.0 s default at `:408`, `retry` pinned to zero via `_no_server_retry()`), and the embedded lane passes `socket_timeout=read_to` (`:11103`), so a non-answering engine raises within the bound and lands on the existing `except Exception` ⇒ attribute `None`, store healthy. ⚠️ The one unbounded shape is the **documented per-lane opt-out** `TORTOISE_DB_SOCKET_TIMEOUT=none/off/0` (`:118`, marked *not recommended*) — name it in the test's own notes rather than treating it as coverage. |
+| **service down / timeout** | SF8 | a raising read is covered (fail-open) **and a hanging one is a raising one**: the docker client is built with `**_bounded_server_socket_kwargs()` (`projection/__init__.py:11163` — `socket_timeout` 10.0 s default at `:408`, `retry` pinned to zero via `_no_server_retry()`), and the embedded lane passes `socket_timeout=read_to` (`:11103`), so a non-answering engine raises within the bound and lands on the existing `except Exception` ⇒ attribute `None`, store healthy. ⚠️ The one unbounded shape is the **documented per-lane opt-out** `TORTOISE_DB_SOCKET_TIMEOUT=none/off/false/0` (`:123-125`, where the spellings and the *“(NOT recommended: it restores the unbounded-hang failure mode)”* note live) — name it in the test's own notes rather than treating it as coverage. |
 | **concurrent access** | SF10 | the once-per-`(process, graph)` warning latch is `_VECTOR_INDEX_GAP_LOCK` + the process-global `_VECTOR_INDEX_GAP_WARNED`. The **new INFO pair must be per-instance, not latched** (plan R3) — two `Projection`s over two graphs is the assertion, and a latch on the pair would reintroduce the silence. |
 | **atomic writes** | SF11 | the census writes **nothing**; "writes nothing" is asserted structurally (no write clause, read-only handle), not by trusting the docstring. |
 | **ordering** | SF4 | register resolution happens at **import**, before any writer runs — a lazy registration would let a writer bypass between import and first use. |
@@ -218,22 +218,29 @@ shrinking the checklist.
 
 ## 9. Findings recorded while building this map
 
-**F1 — the epic docs' line cites have drifted at this head.** Spread across three artifacts, not one:
-`04-plan.md` §5 cites `projection/__init__.py:18491`, `:18570`, `:18577` and `embeddings.py:1268`;
-`03-scope.md:66` (S4) and `05-decompose.md:112` (C4) cite `:18570`, `:18577`, `:18582`; `04-plan.md`
-§5 additionally cites `embeddings.py:1268`. At `af864a42a` these resolve to **`:18635`, `:18642`,
-`:18647` and `:1228`** respectively (`:18491` → `:18556`). ⚠️ **Not every difference here is
-drift**, and the distinction is the point of the finding: the epic docs'
-`tests/test_4997_vector_index_parity.py:415` is the *assertion* inside
-`test_a_store_with_no_gap_does_not_warn`, and this map cites `:410`, the *test def* — that file
-is **byte-identical** between `641e5f1b37` and `af864a42a` (`git diff --quiet ... -- tests/test_4997_vector_index_parity.py` → IDENTICAL), so it is a citation choice, not a move, and
-this map names it as such rather than reporting a five-line drift that does not exist. Cause: the epic docs were cut at `641e5f1b37` and
-`main` moved. **Not silently corrected in the plan** (it is a record of a head); this map cites the live
-lines and names the delta, so a reader can tell a real move from a typo. ⚠️ A first draft of this finding
-also attributed a `tools/dod_5090_probe.py:801` cite to the epic docs and attributed `:18582`/`:415` to
-`04-plan.md`; **both were false** and were corrected in review (`:801` occurs in no epic doc — it is prose
-inside a docstring; `flag_in_shipped_configs` is `:911`). Recorded rather than quietly dropped, because a
-finding that was wrong once is evidence about how the next one should be checked.
+**F1 — the epic docs' line cites have drifted at this head, and three of the differences a first
+pass read as drift are NOT.** Spread across three artifacts: `04-plan.md` §5 cites
+`projection/__init__.py:18491`, `:18570`, `:18577` and `embeddings.py:1268`; `03-scope.md:66` (S4) cites
+`:18570`, `:18577`, `:18582`; `05-decompose.md:112` (C4) cites `:18570` and `:18577`. At `af864a42a` the
+`projection/__init__.py` cites resolve to **`:18556`, `:18635`, `:18642` and `:18647`** — a real move,
+because the docs were cut at `641e5f1b37` and `main` moved. **Not silently corrected in the plan** (it is
+a record of a head): this map cites the live lines and names the delta. But the distinction between a
+move and a **citation choice** is the point of saying any of it, and two files are byte-identical between
+the two heads, so a difference in their numbers is never drift:
+
+- `embeddings.py` — IDENTICAL (`git diff --quiet 641e5f1b37 af864a42a -- tortoise/embeddings.py` → exit
+  0). `:1268` is `if embed_gate.embed_gate_enabled():` at **both** heads; `:1228` is the enclosing
+  `def encode_for_row`. SF2 cites the def because the def is what a writer calls, the plan cites the
+  consult line, and both are right.
+- `tests/test_4997_vector_index_parity.py` — IDENTICAL. The epic docs' `:415` is the *assertion* inside
+  `test_a_store_with_no_gap_does_not_warn`; this map cites `:410`, the *test def*. A citation choice.
+
+⚠️ A first draft of this finding got two attributions wrong, and they are recorded rather than quietly
+dropped, because a finding that was wrong once is evidence about how the next one should be checked: it
+attributed a `tools/dod_5090_probe.py:801` cite to the epic docs (`:801` occurs in no epic doc — it is
+prose inside a docstring; `flag_in_shipped_configs` is `:911`), and it attributed `:18582` to
+`04-plan.md` and to `05-decompose.md:112` (`grep -rn 18582 docs/epics/2026-11-04-5090-vector-layer/` →
+`03-scope.md:66` only).
 
 **F2 — `docs/architecture/SUBSTRATE-REBUILD-MAP.md` states the opposite of this artifact's existence**
 (`:84` *"No test-design issue and no capstone exist for E4"*, `:322` ❌, `:375` D6). That was true when
@@ -251,7 +258,7 @@ unbounded. The docker lane builds its client with `**_bounded_server_socket_kwar
 inside the bound**, and the raise is already on the fail-open arm (`:18636`) — attribute `None`, store
 construction continues. That is exactly SF8's contract, so **no C4 follow-up is owed here** and none is
 filed. The single unbounded shape is the documented per-lane opt-out
-`TORTOISE_DB_SOCKET_TIMEOUT=none/off/0` (`:118`, *"NOT recommended"*): a deployment that takes it trades
+`TORTOISE_DB_SOCKET_TIMEOUT=none/off/false/0` (`:123-125`, *"NOT recommended: it restores the unbounded-hang failure mode"*): a deployment that takes it trades
 the bound for a store-setup stall. Recorded as a **condition a reader should know about**, not as a
 defect — and recorded at all because the refutation is the useful part: a map that had shipped the first
 version would have sent a lane to add a timeout that is already there.
