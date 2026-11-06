@@ -756,8 +756,10 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
 # shape classifier below) rather than calling this helper. That duplication used
 # to be justified by a gap this driver has since closed: the sweep now expresses
 # `transport_error` too, so it produces THREE of these four tokens with a
-# near-verbatim copy of this body — #5114's gap is closed by that split, and #11119
-# tracks collapsing both onto ONE owner. Until then, change them together.
+# near-verbatim copy of this body — #5114's gap is closed by that split. Nothing
+# tracks de-duplicating the two (round 20 corrected this line, which cited
+# #11119 — that issue is the held-lock arm's future-dated stamp, a different
+# defect), so **change them together** until a de-dup is filed.
 leg_shape() { # <curl_rc> <body> -> shape label on stdout
   if [ "${1:-99}" -eq 28 ]; then
     printf 'driver_timeout'

@@ -2242,6 +2242,12 @@ assert_contains "$OUT" "could not read an archive timestamp" "78i. the unparseab
 assert_file_match "$LOG" 'AGE UNMEASURABLE, see the log for the specific team' "78i. the FILED body bullet names the corrupt stamp"
 assert_file_match "$LOG" 'and an archive timestamp could not be parsed \(1 team\(s\) age UNMEASURABLE\)' "78i. the TITLE covers both causes and COUNTS the unparseable teams"
 assert_file_match "$LOG" "teamZ — newest archive timestamp 'not-a-timestamp' could not be parsed" "78i. the BODY names the offending tenant and its value (#4994)"
+# Round 20 (fresh-context review): the caveat's NEGATIVE side was unpinned.
+# Deleting the `STALE_TEAM_COUNT = 0` half of the POOL_AGE_CAVEAT condition made a
+# MIXED pool emit "this zero is NOT a healthy reading" beside a measured 1 in the
+# SAME public body — and the whole suite shipped green (589/0). The caveat is true
+# only when there is no stale team to count; a mixed pool must not claim a zero.
+assert_not_match "$(cat "$LOG")" 'this zero is NOT a healthy reading' "78i. a MIXED pool does not claim the count is a zero"
 
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
 # rc=56 (connection reset) was measured in production at 201s and 480s of a
@@ -2464,7 +2470,20 @@ assert_not_contains "$OUT" "$LONG_NONSECRET_TS" "78r. the ACTIONS LOG does not p
 # The prefix assertion is what pins the width from ABOVE: it fails if the bound
 # is lowered, and the not-contains above fails if it is raised or dropped.
 assert_contains "$OUT" "$LONG_TS_PREFIX" "78r. the Actions log keeps the first 80 chars, so the bound is 80 and not merely some bound"
+# Round 20 (fresh-context review): the width's UPPER side was not pinned on EITHER
+# channel. The fixture is 100 chars, so a bound of 81-99 still satisfied both
+# "the whole value is absent" and "the 80-char prefix is present" — measured
+# GREEN at 90 and at 99, i.e. the comment above claimed a guarantee the case did
+# not have (the class rounds 4-19 kept closing). `[^']{81}` matches 81 chars
+# between the quotes, so it fails for ANY bound above 80 and passes exactly at 80.
+assert_not_match "$OUT" "unparseable archive timestamp '[^']{81}" "78r. the Actions log's bound is exactly 80 (an 81st char fails this)"
 if grep -qF "$LONG_NONSECRET_TS" "$LOG" 2>/dev/null; then bad "78r. the whole value reached the filed body"; else ok "78r. the filed body does not carry the whole value"; fi
+# Round 20: the BODY channel was pinned from above only, so narrowing ITS bound
+# (redact_truncate "$newest" 80 -> 40) shipped fully green — and an operator
+# holding the incident then sees half the diagnostic prefix the commit message
+# says is kept. Pin the body's lower side too.
+assert_not_match "$(cat "$LOG")" "newest archive timestamp '[^']{81}" "78r. the filed body's bound is exactly 80 (an 81st char fails this)"
+if grep -qF "$LONG_TS_PREFIX" "$LOG" 2>/dev/null; then ok "78r. the filed body keeps the first 80 chars of the value"; else bad "78r. the filed body does NOT keep the first 80 chars (its bound is not 80)"; fi
 assert_file_match "$LOG" 'could not be parsed' "78r. the cause is still reported in the body"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
