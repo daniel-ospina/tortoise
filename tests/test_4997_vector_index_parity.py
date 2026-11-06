@@ -156,6 +156,19 @@ class _RecordingGraph:
         return _MockResult([])
 
 
+class _NoneCatalogueGraph(_RecordingGraph):
+    """A catalogue read that ANSWERS `None` — ``result_set is None``, which is
+    NOT the same thing as an empty catalogue (see the attribute's docstring).
+    A separate class, not a flag on ``_RecordingGraph``, so a reader cannot
+    mistake "measured and empty" for "not measured"."""
+
+    def query(self, cypher, params=None, timeout=None):
+        self.calls.append(cypher)
+        if "db.indexes()" in cypher.lower():
+            return _MockResult(None)
+        return super().query(cypher, params=params, timeout=timeout)
+
+
 @pytest.fixture
 def recording_graph():
     return _RecordingGraph()
@@ -510,15 +523,7 @@ def test_unmeasured_pair_is_none_in_both_halves(caplog):
         )
 
     proj2 = _bare()
-
-    class _NoneGraph(_RecordingGraph):
-        def query(self, cypher, params=None, timeout=None):
-            self.calls.append(cypher)
-            if "db.indexes()" in cypher.lower():
-                return _MockResult(None)
-            return super().query(cypher, params=params, timeout=timeout)
-
-    proj2.g = _NoneGraph()
+    proj2.g = _NoneCatalogueGraph()
     # ⛔ The INFO capture must WRAP the call and the negative assertion must
     # follow it: the not-measured lane is exactly where a regression would
     # report `serves=[] indexes=[]` (the misreading warned of above), and an
@@ -530,6 +535,57 @@ def test_unmeasured_pair_is_none_in_both_halves(caplog):
         assert not _pair_records(caplog), (
             "an unmeasured pair must not be reported"
         )
+
+
+def test_a_re_read_that_cannot_measure_clears_an_already_populated_pair(caplog):
+    """#11087: the two `= None` resets are LOAD-BEARING — only this test sees a
+    missing one.
+
+    Every negative above starts from a VIRGIN projection: `_bare()` leaves both
+    halves `None`, so "is None afterwards" there cannot distinguish "the failed
+    read CLEARED the pair" from "the pair was never populated". That is a
+    false-PASS shape — a refactor could drop either reset and keep the suite
+    green while the pair ships half-populated.
+
+    The re-entry is real, not hypothetical: `rebuild_from_record` runs
+    `_ensure_indexes()` on an ALREADY-measured projection
+    (``tortoise/projection/__init__.py``, the `rebuild_from_record` call site),
+    so a store that measured once and then meets an unreadable catalogue would
+    otherwise keep `served = all five labels` beside `indexed = None` — which a
+    caller reads as "5 labels served, 0 indexed" instead of "unknown".
+    """
+    proj = _bare([_vector_row(label) for label in SERVED])
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+    assert proj._vector_index_served_labels == set(SERVED)
+    assert proj._vector_indexed_labels == set(SERVED)
+
+    # Second read RAISES — the `except` lane must clear BOTH halves.
+    proj.g = _RecordingGraph(raise_on_indexes=True)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        proj._record_vector_index_inventory()  # must not raise
+        assert proj._vector_index_served_labels is None, (
+            "a failed re-read must CLEAR the served half, never keep the old set"
+        )
+        assert proj._vector_indexed_labels is None
+        assert not _pair_records(caplog), (
+            "a failed re-read must not report the pair"
+        )
+
+    # Re-populate, then answer `None` — the `rows is None` lane must clear both.
+    proj.g = _RecordingGraph([_vector_row(label) for label in SERVED])
+    proj._record_vector_index_inventory()
+    assert proj._vector_index_served_labels == set(SERVED)
+    proj.g = _NoneCatalogueGraph()
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        proj._record_vector_index_inventory()
+        assert proj._vector_index_served_labels is None, (
+            "an answered-None catalogue must CLEAR the served half too"
+        )
+        assert proj._vector_indexed_labels is None
+        assert not _pair_records(caplog)
 
 
 def test_distinct_graphs_each_report_once(caplog):
