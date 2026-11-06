@@ -592,7 +592,9 @@ the `{error}`-only shape whose retry action is different.
   written id whose non-canonical fields changed can still be refused 429 or
   422). The **capture lane** has none of this: a refused capture wrote nothing
   and opened no `:CommitRecord`, so a retry is the same request sent again —
-  there is no id to replay and nothing to adjudicate it against.
+  there is no id to replay and nothing to adjudicate it against. It is charged
+  again in whatever window it lands in, so an identical re-POST of an
+  already-captured session can be throttled even though it mints nothing new.
   (The repo's bundled SDK does not
   yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
   should honour `Retry-After` itself.) It exists because the removal of the

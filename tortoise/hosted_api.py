@@ -17114,8 +17114,11 @@ class SessionRequest(BaseModel):
 # not see, so the two bounds compose instead of double-charging.
 #
 # UPPER, deliberately (the same fail-closed direction the commit charge
-# documents): a pure replay MERGEs nodes that already exist, a store-only
-# capture skips the ``sessionCaptured`` ``:Event`` mint, and the stored turn
+# documents): a pure replay MERGEs nodes that already exist, a re-capture of an
+# EXISTING session skips the ``sessionCaptured`` ``:Event`` mint (it is minted
+# on a fresh session, and on a failed retry of a fresh one — see the
+# ``if not session_existed or (retry_failed_capture and not store_only)``
+# below), and the stored turn
 # window can be shorter than the posted conversation — all three over-charge.
 # Under-charging would remove the bound; over-charging delays a request.
 #
@@ -17197,8 +17200,11 @@ def capture_ingest_charge_bytes(body: SessionRequest) -> int:
     bounded by the ``max_points`` gate, not by this charge (see the block above).
 
     * the **payload term** is the whole ``SessionRequest`` as serialized
-      (``model_dump_json()``), i.e. the transcript text plus metadata — the
-      bytes the capture stores. It matters MORE here than on the commit lane,
+      (``model_dump_json()``), i.e. the transcript text plus metadata — an
+      UPPER bound on the bytes the capture stores, not an inventory of them:
+      ``metadata`` is never stored, and each turn is clipped to
+      ``sdk._CAPTURE_TURN_CAP`` (5,000 chars), so a large turn is over-charged.
+      It matters MORE here than on the commit lane,
       because the per-turn content is schema-unbounded: the route's body cap is
       ``body_limits.CAPTURE_SESSION_MAX_BYTES`` (16 MiB), so a byte-only loop is
       already a real write, and a handful of max-size captures must not fit
