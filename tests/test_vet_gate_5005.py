@@ -68,13 +68,25 @@ def _discard_matching(text: str):
         if c["text"] == text]}
 
 
+_RESOLVED_SEARCH = {
+    # #10997: a COMPLETE lookup — `#2552`'s mint is an identity assertion, so it is
+    # licensed only by a lookup that resolved; `{}` now HOLDS the edge instead.
+    "mode": "real", "degraded": False, "reason": None,
+    "entities": [], "points": [], "events": [], "queries_run": 5,
+    "query_coverage": {"derived": {"object": 1, "event": 1, "point": 1},
+                       "ran": {"object": 1, "event": 1, "point": 1},
+                       "failed": {"object": 0, "event": 0, "point": 0}},
+}
+
+
 def _payload_of(embed_list: dict):
     """Run the downstream S5 embedder over a list — the ONLY way to prove a
     DISCARD actually reached the payload (or was re-minted into it)."""
     import copy
 
     from tortoise.extractor_v2 import execute_embed
-    res = execute_embed(copy.deepcopy(embed_list), {}, session_id="vet-test")
+    res = execute_embed(copy.deepcopy(embed_list), _RESOLVED_SEARCH,
+                        session_id="vet-test")
     return res["payload"], res
 
 
