@@ -201,7 +201,11 @@ _DEFAULT_ON_VARS = ("TORTOISE_VALUE_GATE",)
 #: (`test_the_legacy_head_really_predates_the_flip` reads
 #: `git show <this head>:tortoise/value_gate.py` and asserts the default is not
 #: ON) — if the campaign head ever contained the flip, that test reds and this
-#: licence has to be revisited instead of silently widening.
+#: licence has to be revisited instead of silently widening. ⛔ THAT CHECK NEEDS
+#: HISTORY: on a `fetch-depth: 1` checkout (CI's `test` job) the ancestor is
+#: absent by construction, so the pin SKIPS and names the premise UNCHECKED
+#: rather than passing; an unreadable head in a FULL clone FAILS, because there
+#: the sha is wrong rather than unreachable.
 _PRE_FLIP_HEAD = "54922a800f96858935b58ef250da569a4896df44"
 
 #: The shortest head prefix the PRODUCERS actually write into a graph name.
