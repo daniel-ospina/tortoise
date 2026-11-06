@@ -510,19 +510,61 @@ the `{error}`-only shape whose retry action is different.
 - **The cap is CUMULATIVE, not rate-based.** It is the team's total node
   count against the tier limit (`max_points` ← `graph_size_cap`). Backoff
   cannot clear it — only raising the limit (or pruning) does.
-- **One bound IS rate-based — and backoff DOES clear it (429).** `POST
-  /v1/sessions/commit` also carries a **per-team ingest budget**: a rolling
-  60-second allowance of `10 MiB` of writes per team, per instance (the window
-  is process state; today the service runs one worker, so per-instance and
-  per-team are the same figure). A request is charged the larger of (a) the
-  bytes of the re-serialized §6.1 **request body** — the whole validated
-  payload, including `sources`, `provenance_refs` and `telemetry`, so it is
-  never less than the canonical form used for `client_commit_id` — and (b) the
-  nodes it will write × 1024, where (b) is a declared **upper bound** on the
-  nodes the request leaves behind (a node plus its `:GraphEvent` record for
-  every point/operator/supersession — three for a superseding point, three for
-  a `MITIGATES` bridge-attack — plus the fixed record/session/source/event
-  chain), never an under-count. Exceeding the allowance answers **429** with a
+- **One bound IS rate-based — and backoff DOES clear it (429).** BOTH session
+  write lanes — `POST /v1/sessions/commit` and `POST /v1/sessions` — carry ONE
+  **per-team ingest budget**: a rolling 60-second allowance of `10 MiB` of
+  writes per team, per instance (the window is process state; today the
+  service runs one worker, so per-instance and per-team are the same figure).
+  It is ONE window, not one per endpoint: alternating the two endpoints does
+  not buy a second allowance, and `detail.resource` (`commit_ingest_bytes` /
+  `capture_ingest_bytes`) names **this request's** charge — the lane that
+  refused you, not the lane that spent the window (`detail.used` is the team's
+  whole spend across both lanes). A request is charged
+  the larger of (a) the bytes of the re-serialized **request body** — on the
+  commit lane the whole validated §6.1 payload, including `sources`,
+  `provenance_refs` and `telemetry`, so it is never less than the canonical
+  form used for `client_commit_id`; on the capture lane the whole posted
+  capture request (`conversation` turns plus metadata) — and (b) the nodes the
+  write chain DECLARES, × 1024. (b) is an upper bound on **the chain a FRESH
+  capture or commit mints** — the part no other quota counts — and not on
+  everything a request can leave behind (see the scope note below, and #11245
+  for the one measured gap) — on the commit lane a node
+  plus its `:GraphEvent` record for
+  every point/operator/supersession (three for a superseding point, three for
+  a `MITIGATES` bridge-attack) plus the fixed record/session/source/event
+  chain; on the capture lane the `:Session`, the `sessionCaptured` `:Event`,
+  the transcript `:Source`, and TWO nodes per conversation entry — the turn
+  `:Point` and a `PointAdded` `:GraphEvent`, which is what a turn costs on the
+  journal-configured/record-unarmed lane. The charge is computed from the
+  request, so it cannot know where the turn lands: an armed-record deployment
+  (production) stores turns in the record and is charged those two nodes anyway,
+  and the no-journal lane costs one. The worst shape is the one charged.
+  ⚠️ Scope of that node term: it covers the **capture chain** — the part no
+  other quota counts. The non-episodic Points, entities and operators a capture
+  extracts are bounded separately by the `max_points` gate and are deliberately
+  NOT charged here, so (b) is an upper bound on the chain, not on every node the
+  request can leave behind.
+  ⚠️ Known under-count, #11245: a capture that SHRINKS a session hard-deletes
+  the surplus turns, and that sweep journals one `PointRetracted` `:GraphEvent`
+  and one `EntityMutated` record per swept turn — neither is in (b), because
+  (b) is computed from the request while the sweep is proportional to what the
+  team already stored. ⛔ Scope it to the lanes where the GRAPH holds the
+  turns: the emit is guarded by `if not _record_first`, and `_record_first`
+  (`record_writer.record_holds_turns`) is true exactly when the record can
+  carry them — so the **record-armed** lane, which is what production runs,
+  mints **no** `:GraphEvent` from the sweep (only the `EntityMutated` JSONL
+  row, which is not a node). The under-count is therefore a graph-held-turns
+  phenomenon on the **journal-configured / record-unarmed** lane alone: the
+  record-armed lane (what production runs) mints none, and on the
+  journal-less lane `sdk.py` returns
+  (`if sdk._get_event_log() is None: return redacted_total`) BEFORE the
+  journalling pass — its sweep's hard `DETACH DELETE` has already run above
+  that return — so that lane emits no `PointRetracted` and mints no
+  `:GraphEvent` either: its swept turns are REMOVED, never re-charged.
+  Measured on the journal-configured / record-unarmed lane: a 1-turn
+  re-capture of a 500-turn session was charged 5 120 B and minted 499 nodes.
+
+  Exceeding the allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
   is always **your** spend in the window, and `detail.scope` says which
   allowance refused you — `"org"` (your team's own budget) or `"process"` (the
@@ -531,9 +573,18 @@ the `{error}`-only shape whose retry action is different.
   refusal is about the instance and not about anything you wrote). This is a
   **throttle, not a cap**: it never refuses your data, the window self-heals
   within 60 s, and the correct action is **backoff-and-retry** — the opposite
-  of the cumulative `ERR_QUOTA` advice above. A request refused by THIS throttle
-  leaves no record of its own: the `:CommitRecord` it opened is removed when
-  that request created it, so the retry cannot be judged against it. If that
+  of the cumulative `ERR_QUOTA` advice above. One edge case an operator must
+  size against: a SINGLE request larger than the whole allowance is admitted
+  ONCE while the window is completely empty (refusing it would tell a client to
+  retry a request that can never fit — `quota.py::commit_ingest_admit`,
+  `bucket_used == 0 and charge > limit`), so the real per-request ceiling on the
+  capture lane is the route's 16 MiB body cap, once per window — reachable at
+  default config because 16 MiB exceeds the 10 MiB allowance (#11218).
+
+  On the **commit lane**, a request
+  refused by THIS throttle leaves no record of its own: the `:CommitRecord` it
+  opened is removed when that request created it, so the retry cannot be judged
+  against it. If that
   attempt was the first for this `client_commit_id`, the retry is therefore a
   **first** attempt — the same `held[]` adjudication a clean request would have
   received, not a second one. When an EARLIER attempt of the same id left a
@@ -545,7 +596,11 @@ the `{error}`-only shape whose retry action is different.
   zero writes before the org-cap and ingest gates are consulted (the per-key
   rate limiter and Layer-1 validation still run first, so a re-POST of a
   written id whose non-canonical fields changed can still be refused 429 or
-  422).
+  422). The **capture lane** has none of this: a refused capture wrote nothing
+  and opened no `:CommitRecord`, so a retry is the same request sent again —
+  there is no id to replay and nothing to adjudicate it against. It is charged
+  again in whatever window it lands in, so an identical re-POST of an
+  already-captured session can be throttled even though it mints nothing new.
   (The repo's bundled SDK does not
   yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
   should honour `Retry-After` itself.) It exists because the removal of the
@@ -555,8 +610,12 @@ the `{error}`-only shape whose retry action is different.
   points count, so the points gate cannot see it. Graph **bytes**, not nodes,
   are the unit because that is the ruled storage unit (#4495/#5331). Operators
   can retune the allowance with `TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`. **The
-  capture lane (`POST /v1/sessions`) is not covered by this budget** — its
-  `count + estimate` points gate and its per-session turn cap are unchanged.
+  capture lane (`POST /v1/sessions`) is covered by the SAME budget** — it
+  charges the same per-team window (`detail.resource = "capture_ingest_bytes"`),
+  so alternating the two endpoints does not buy a second allowance, and its
+  `count + estimate` points gate and per-session turn cap are unchanged on top
+  of it. An `ingest_rate_limited` 429 on either lane means the same thing and
+  takes the same action: honour `Retry-After` and retry.
 - **How to check usage:** `tortoise team info` → `GET /v1/team` returns
   `point_count` plus user/graph limits. **Known mismatch:** `GET /v1/team`
   exposes only `point_count` — there is **no points-limit field**, and the
