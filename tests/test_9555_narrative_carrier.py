@@ -1839,13 +1839,26 @@ _AFFIRMATIVE_ADVERBS = (
 
 #: The exclusion ITSELF, built once and applied to BOTH cue arms.
 #:
-#: ⛔ The peek is not one token. `not the ONLY narrative` inserts an article and
-#: `not so much the narrative as the summary` asserts the second term — both
-#: measured to leave the ENTIRE pin green while stating §12.1b's inverse, so the
-#: optional article and the `so much … as` comparative are part of the class.
+#: ⛔ The peek is not one token: `not the ONLY narrative` inserts an article, so
+#: the optional article is part of the class (measured: it left the ENTIRE pin
+#: green while stating §12.1b's inverse).
+#:
+#: ⛔ `not so much X as Y` is NOT in this class, and an earlier cut put it here by
+#: mistake. It is a MITIGATED DENIAL of X — the very term these guards are bound
+#: to — so excluding it turned two correct re-wordings RED with the inverted
+#: diagnosis *"no longer states the NEGATION"*. Measured both ways; it is now an
+#: ACCEPT case in both objects' re-wording lists.
 _AFFIRMATIVE_EXCLUSION = (
-    rf"(?!(?:\s+(?:the\s+)?(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b"
-    rf"|\s+so\s+(?:much|many)\b))"
+    rf"(?!(?:\s+(?:the\s+)?(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b))"
+)
+
+#: The SAME exclusion applied AFTER the object. English writes the family in the
+#: natural order too — `not the narrative alone` / `not from `:Source.summary`
+#: only` — and that spelling was measured to leave the whole pin GREEN over a
+#: footnote stating the inverse. Pre-existing, and closed here rather than
+#: declared, because it is the FAIL-OPEN direction.
+_AFFIRMATIVE_EXCLUSION_POST = (
+    rf"(?!\s+(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b)"
 )
 
 _NEGATION_CUE = (
@@ -1880,6 +1893,10 @@ _NEGATION_CUE = (
 #: with *"NEGATES the pointer"* (a false red on correct prose) and the second was
 #: ACCEPTED (the pin certifying the exact instruction it exists to forbid).
 _NEG_ADVERSATIVE = r"(?:\bbut\b|\brather\b|\binstead\b)"
+
+#: Markdown emphasis, stripped before the guards read a line (see
+#: `_negation_bound_to`). Asterisks only — underscores live inside identifiers.
+_EMPHASIS_RE = re.compile(r"\*{1,2}")
 
 #: What a negation may NOT cross on its way to the object it negates: another
 #: backticked name, or a clause boundary (`. , ; : ( — –`). The BACKTICK half
@@ -1977,7 +1994,13 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
     leading = _NEGATION_CUE + _neg_span(40)
     if read_verb:
         leading += rf"{_NEG_READ_VERB}\b{_neg_span(30)}"
-    pattern = f"(?:{leading}{object_regex})"
+    #: ⛔ MARKDOWN EMPHASIS is not prose: the document bolds its claims
+    #: (`not **only** X`, `not the **only** X`), and `**` inside the peek gap made
+    #: the exclusion miss and the cue count again — measured, the whole pin GREEN
+    #: over a §12.1b footnote stating the inverse. Asterisks are stripped before
+    #: matching; backticks are NOT, because the guards bind objects BY them.
+    line = _EMPHASIS_RE.sub("", line)
+    pattern = f"(?:{leading}{object_regex}{_AFFIRMATIVE_EXCLUSION_POST})"
     if trailing:
         pattern += (f"|(?:{object_regex}{_neg_span(30)}"
                     f"{_NEGATION_CUE}{_NEG_TRAILING_SUBJECT})")
@@ -2510,6 +2533,11 @@ _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     #: the same ruling, and the leading-only guard REFUSED it (measured).
     ("the trap as the subject of the negation",
      "`:Source.summary` is never what the vector reads"),
+    #: ⛔ `not so much X as Y` DENIES X — the trap is the denied term, so the
+    #: guard MUST accept it. An earlier cut excluded it and turned this correct
+    #: re-wording RED with the inverted diagnosis (measured).
+    ("the `not so much … as` mitigated denial",
+     "not so much from `:Source.summary` as from the S1 narrative"),
 ]
 
 #: Lines that NAME the trap with NO negation cue applied to it, or apply one to
@@ -2545,15 +2573,13 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "⛔ isn't only `:Source.summary` but the S1 narrative"),
     ("the `not the only` article form",
      "⛔ not the only `:Source.summary` but the S1 narrative"),
-    ("the `not so much … as` comparative",
-     "⛔ not so much `:Source.summary` as the narrative"),
 ]
 
 
 @pytest.mark.parametrize(
     "why,clause", _SUMMARY_NEGATION_REWORDINGS,
     ids=["head-document-wording", "and-not-from", "must-not-be",
-         "never-the-field", "trap-as-negated-subject"])
+         "never-the-field", "trap-as-negated-subject", "not-so-much-as"])
 
 
 def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str):
@@ -2581,7 +2607,7 @@ def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str)
     ids=["negation-dropped", "negates-another-name",
          "negation-in-other-clause", "not-only-but-also", "not-merely",
          "not-just", "not-least", "not-alone", "isnt-only",
-         "not-the-only", "not-so-much-as"])
+         "not-the-only"])
 
 
 def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
@@ -2633,6 +2659,10 @@ _NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     #: did not carry — the same widening `_SUMMARY_NEGATION_INVERSIONS` pins for
     #: the other object, read in the ACCEPT direction here.
     ("cannot, cue before the object", "cannot be the narrative"),
+    #: ⛔ `not so much X as Y` DENIES X: the narrative is the denied term here, so
+    #: the guard must ACCEPT it (an earlier cut excluded it — measured false red).
+    ("the `not so much … as` mitigated denial",
+     "not so much the narrative as a lexicon"),
     #: ⛔ `rather than` / `instead of` belong HERE in spirit and are NOT admitted:
     #: see `_NEGATION_CUE`. In this guard's `cue + span + object` shape they bind
     #: the negation across the term they negate, and the shape
@@ -2700,14 +2730,24 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: The two shapes the exclusion's PEEK missed, both on §12.1b's own clause.
     ("the `-n't only` contraction", "isn't only the narrative"),
     ("the `not the only` article form", "not the only narrative"),
-    ("the `not so much … as` comparative",
-     "not so much the narrative as the summary"),
+    #: ⛔ The EMPHASIS spelling — the document bolds its claims, so `not **only**`
+    #: is a reachable rendering and `**` inside the peek gap used to defeat the
+    #: exclusion (measured: the whole pin GREEN over a footnote stating the
+    #: inverse). The guard strips asterisks before matching.
+    ("the emphasised `not **only**`", "not **only** the narrative"),
+    ("the post-positional `not the narrative alone`",
+     "not the narrative alone"),
 ]
+
+#: `not so much X as Y` is a MITIGATED DENIAL of X — it belongs in the ACCEPT
+#: lists, not in the exclusions (an earlier cut excluded it and turned correct
+#: prose red).
 
 
 @pytest.mark.parametrize(
     "why,clause", _NARRATIVE_NEGATION_REWORDINGS,
-    ids=["head-document-wording", "not-no-conjunction", "cannot-cue"])
+    ids=["head-document-wording", "not-no-conjunction", "cannot-cue",
+         "not-so-much-as"])
 
 
 def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
@@ -2789,7 +2829,8 @@ def test_every_affirmative_adverb_is_refused_on_BOTH_guards():
          "not-just-affirmative", "not-solely-affirmative",
          "not-least-affirmative", "not-alone-affirmative",
          "not-to-mention-affirmative", "isnt-only-contraction",
-         "not-the-only-article", "not-so-much-as-comparative"])
+         "not-the-only-article",
+         "emphasised-not-only", "post-positional-not-alone"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
