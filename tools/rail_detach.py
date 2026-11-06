@@ -1151,6 +1151,20 @@ def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
             if _rail_alive(snap.pid, snap.child, str(art),
                            age=_age_seconds(st.since)):
                 st.state = WAITING
+                # ⛔ A `waiting` VERDICT MUST SAY WHY IT HAS NO VERDICT YET. This
+                # arm is the one every live poll takes, and it used to return an
+                # EMPTY `reason` — so the most common state the tool reports was
+                # the only one that named no mechanism. Measured cost (PR #11128,
+                # shard `test (h)`, run 42185502189): the vetting assertion printed
+                # `assert 'waiting' == 'merged'` and nothing else, so the lane had
+                # no pid, no carrier and no log path to read, and had to re-derive
+                # all three. Naming them costs one f-string on a path that already
+                # ran two process probes.
+                st.reason = (
+                    "the rail's carrier is still running, so there is no verdict "
+                    "yet (a merge is announced only after the API confirms "
+                    f"state=MERGED) — wrapper pid {snap.pid}, rail "
+                    f"pid {snap.child}; the rail's own output is {snap.logp}")
                 return st
         if probes == 0:
             # Both probes said gone and the adopted snapshot is the post-probe

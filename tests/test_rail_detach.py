@@ -148,8 +148,11 @@ def not_merged(state_dir, pr, st, want=rd.MERGED) -> str:
             tail = "\n".join(lines[-10:]) or "(the log is empty)"
         except OSError as exc:            # unreadable is a finding, not a crash
             tail = f"(the log is unreadable: {exc})"
-    # ⛔ A LIVE `waiting` READ CARRIES NO REASON (the rail is simply still alive), so
-    # the reason is rendered only when there is one — `waiting ()` reads as a bug.
+    # ⛔ A LIVE `waiting` READ NOW DOES CARRY A REASON — `tools/rail_detach.py`'s
+    # carrier arm names the wrapper pid, the rail pid and the rail's own log
+    # (`_collect_read`, "a `waiting` verdict must say why it has no verdict yet").
+    # The conditional below is kept for the states that still answer none, so an
+    # empty reason is never rendered as `waiting ()`.
     detail = (f" ({st.reason})" if st is not None and st.reason else "")
     return (f"never reached `{want}` within {STALL_BUDGET_S:.0f}s — last read: "
             f"{st.state if st is not None else 'absent'}{detail}\n"
@@ -191,6 +194,15 @@ def test_start_returns_immediately_and_collect_sees_it_waiting(tmp_path, monkeyp
     st = wait_state(sd, 7, rd.WAITING)
     assert st.state == rd.WAITING, st.as_dict()
     assert st.line().startswith("RAIL(#7, waiting,")
+    # ⛔ A `waiting` VERDICT NAMES WHY IT HAS NO VERDICT — the invariant this arm
+    # also pins, and the reason `not_merged()` below can now render a live read
+    # instead of `waiting ()`. The 2026-11-06 shard printed
+    # `assert 'waiting' == 'merged'` with no mechanism attached, so the pid, the
+    # carrier and the rail's log all had to be re-derived by hand; `collect` now
+    # carries them in `reason`, on every arm that can answer `waiting` (carrier,
+    # sentinel, replaced record).
+    assert st.reason, st.as_dict()
+    assert st.log in st.reason, st.as_dict()
     st = wait_state(sd, 7, rd.MERGED)
     assert st.state == rd.MERGED, not_merged(sd, 7, st)
 
