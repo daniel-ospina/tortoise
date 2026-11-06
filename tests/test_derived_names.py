@@ -815,11 +815,17 @@ def _raw_detach_violations(root=None):
                         "this arm certifies only what it can PROVE, so the site "
                         "fails CLOSED — make the journaled name literal if the "
                         "name IS owned")
+                # The HEADLINE differs by case for the same reason the
+                # CONSEQUENCE does: `undecidable` never established that the
+                # handle is outside the vocabulary (#11217 review round 11, B-P2).
+                headline = (
+                    "journals a handle OUTSIDE the ownership vocabulary"
+                    if outside
+                    else "journals a handle this census cannot PROVE owned")
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
-                    f"L{lineno} journals a handle OUTSIDE the ownership "
-                    f"vocabulary {' and '.join(detail)} — {consequence} "
-                    f"(#11217 review P1)")
+                    f"L{lineno} {headline} {' and '.join(detail)} — "
+                    f"{consequence} (#11217 review P1)")
     return violations
 
 
@@ -1197,9 +1203,24 @@ def _const_str(node, _depth: int = 0) -> str | None:
         if isinstance(node.slice, ast.Slice):
             if node.slice.step is not None:
                 return None
-            low = None if node.slice.lower is None else _const_int(node.slice.lower)
-            high = None if node.slice.upper is None else _const_int(node.slice.upper)
-            return base[low:high]
+            # ⛔ "no bound" and "bound present but UNDECIDABLE" are different
+            # answers. Collapsing them (the round-10 shape: `low = None if
+            # node.slice.lower is None else _const_int(...)`) folds
+            # `"test_evict_"[:width]` to `"test_evict_"` — an OWNED prefix for a
+            # name that is actually `"te" + tag`, i.e. a fail-OPEN in the arm
+            # whose whole job is to fail CLOSED (#11217 review round 11, B-P1).
+            # A present-but-unresolvable bound means the value is unknown: None.
+            bounds: dict[str, int | None] = {}
+            for bound_name, part in (("low", node.slice.lower),
+                                     ("high", node.slice.upper)):
+                if part is None:
+                    bounds[bound_name] = None
+                    continue
+                value = _const_int(part)
+                if value is None:
+                    return None
+                bounds[bound_name] = value
+            return base[bounds["low"]:bounds["high"]]
         index = _const_int(node.slice)
         if index is None:
             return None
@@ -1997,6 +2018,41 @@ def _raw_client_site(*lines: str) -> str:
             + "\n    c = FalkorDB(host=\"h\")"
             "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
             "\n")
+
+
+def test_a_present_but_undecidable_slice_bound_fails_CLOSED(tmp_path):
+    """A slice bound that EXISTS but cannot be resolved is NOT an omitted bound.
+
+    #11217 review round 11 (B-P1). `_const_str` folded a slice with
+    `low = None if node.slice.lower is None else _const_int(node.slice.lower)`,
+    which yields `None` — meaning "unbounded" to `base[low:high]` — for BOTH
+    "no bound" and "bound present, undecidable". `"test_evict_"[:width]` then
+    folded to the OWNED literal `"test_evict_"` while the real name is
+    `"te" + tag`: an OWNED claim for an UNOWNED name — a fail-OPEN in the arm
+    whose entire purpose is to fail CLOSED. `step` already had the right
+    treatment two lines above, so one of the three bound fields disagreed with
+    the other two.
+
+    Pinned as BEHAVIOUR, not helper introspection: deleting the fix turns both
+    cases GREEN, which is exactly the regression class rounds 8-10 closed.
+    """
+    site = tmp_path / "test_slice_bound_undecidable.py"
+    for assignment, bindings in (
+        ('name = "test_evict_"[:width] + os.urandom(4).hex()', ("    width = 2",)),
+        ('name = "test_evict_"[lo:] + os.urandom(4).hex()', ("    lo = 9",)),
+    ):
+        site.write_text(
+            _raw_client_site(*bindings, f"    {assignment}",
+                             "    _journal_append(name)"),
+            encoding="utf-8",
+        )
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad, (
+            f"`{assignment}` has a PRESENT but undecidable slice bound — the "
+            f"census must fail CLOSED, not fold it to the owned literal: {bad}")
+        assert "UNDECIDABLE" in bad[0], (
+            f"`{assignment}` is NOT decidable, so the violation must say so "
+            f"rather than claim a resolved prefix: {bad}")
 
 
 def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_path):

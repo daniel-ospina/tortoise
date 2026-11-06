@@ -5169,12 +5169,12 @@ surfaces:
   # this file selected.
   #
   # ⛔ THIS ROW IS THE ONLY COPY (#11217). THREE lanes registered the same file
-  # independently — #11210 here, #11211 beside `test_pack_state.py`, #11222 (and
-  # this PR) at the `core:` head — so by `eee753b4` main's red was a DUPLICATE
+  # independently — #11210 here, #11211 beside `test_pack_state.py`, #11222 at
+  # the `core:` head — so by `eee753b4` main's red was a DUPLICATE
   # (`duplicate entry 'test_pack_hierarchy_11001.py' at .surfaces.core[] (lines
-  # 1965, 5137)` … `5169`), not the missing row it was first reported as. Adding
-  # a fourth copy, which is what an additive registration does, keeps the leg
-  # red. The other copies and their comments are removed, and this one stays
+  # 1965, 5137)` … `5169`), not the missing row it was first reported as. This
+  # PR added no row of its own; it collapses the three. A FOURTH copy would
+  # keep the leg red. The other copies and their comments are removed, and this one stays
   # because it is the alphabetically correct position among its `test_pack_*`
   # siblings. A second row here is a RED, not a redundant comment: `merge=union`
   # on this file is why parallel lanes produced three in the first place.
