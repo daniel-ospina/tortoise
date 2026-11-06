@@ -89,8 +89,9 @@ _SETUP_CLI_USES = re.compile(r"(?i)^\s*supabase/setup-cli(?:@|$)")
 def _is_setup_cli_step(uses: object) -> bool:
     """True when a step's `uses:` names the `supabase/setup-cli` action — the ONE predicate.
 
-    `_setup_cli_step` (the comparison) and `_setup_cli_step_node` (the literal-line check) both
-    resolve "which step is this?" through this function, so the two readers cannot disagree about
+    `_setup_cli_step` (the comparison) and `_setup_cli_step_node` (the step LOCATOR, shared with
+    the literal-line check and the construct walk) both resolve "which step is this?" through this
+    function, so the two readers cannot disagree about
     WHICH ACTION is the step. That is all the predicate decides — the COUNT is a separate question
     and is re-checked: one anchored step aliased twice (`- &scli …` then `- *scli`) yields two
     entries from `yaml.safe_load` but ONE node from the node walk, which de-dupes by node identity;
@@ -921,8 +922,8 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         f"step drops exactly that line, so this must read {pin!r}: {_literal_version_lines(eof)!r}"
     )
     assert _requested_version(eof) == pin, (
-        "a workflow whose LAST line is the pin, with no trailing newline, was refused — the block "
-        "slice dropped the final line, so the guard blamed a step it had resolved correctly"
+        "a workflow whose LAST line is the pin, with no trailing newline, was refused — the pin's "
+        "own key-node line was not read, so the guard blamed a step it had resolved correctly"
     )
     assert _violations(eof, CONFIG.read_text(encoding="utf-8")) == [], (
         "a legal, correctly pinned workflow was refused at the GUARD level over a trailing byte"
