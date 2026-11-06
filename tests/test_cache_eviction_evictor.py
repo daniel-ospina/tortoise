@@ -85,10 +85,10 @@ class _Record:
 @pytest.fixture()
 def lane():
     """A dedicated graph on the live lane container, dropped afterwards."""
-    import uuid
-
     import redis
     from falkordb import FalkorDB
+
+    from tests._embedded import _journal_append
 
     host = _live_utils.service_host()
     port = _live_utils.docker_port()
@@ -98,7 +98,18 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{uuid.uuid4().hex[:12]}"
+    # ⛔ Epic #1647 (cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope, so this handle needs all
+    # three halves of the one contract — a per-test-UNIQUE name (`os.urandom`, the
+    # shape every other raw site in this tree uses), the OWNERSHIP record, and the
+    # `finally` drop below. Without the journal the graph is UNOWNED: a live peer
+    # session's `scope=None` sweep cannot see it and may `GRAPH.DELETE` it
+    # MID-TEST (#3074/#3214), and a killed run leaves it for the whole session.
+    # Pinned by
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`,
+    # which reds on this file's absence of either half.
+    graph_name = f"evict_{os.urandom(6).hex()}"
+    _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
     try:
