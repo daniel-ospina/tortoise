@@ -7269,6 +7269,13 @@ def _maybe_onboarding_auto_complete(*,
 # → ingest_rate_limited 429 (#4051 §3.1 — the per-org window, NOT the
 # admission 429 above); the tool docstring below carries the full list,
 # including the inner extractor-provider 503 that can follow them.
+# ⛔ The 429 note lives HERE and NOT in the tool docstring: the docstring is a
+# `co_consts` member, so prose there moves `_code_digest` and reds the required
+# `surface-guard` job (measured at head c0cb695152 — served_from
+# `bd6dbf27d57b404c` → `d93e6d0ba135d51f`, rc=1, reversed to rc=0 by keeping
+# this note here). A description change is a FROZEN-SURFACE change and needs
+# Daniel's approval (#4282); a comment carries the same information to the same
+# reader at no surface cost.
 # A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
@@ -7290,10 +7297,7 @@ def tortoise_session_capture(conversation: list[dict],
     in-flight capture of the same session_id — both raised by the admission
     reservation at ``_reserve_capture_slot`` below, #3060/#3129) -> 409
     (recording off) -> 400 (turn cap) -> 422 (empty/blank transcript) -> 402
-    (quota) -> 429 ``ingest_rate_limited`` (the per-org ingest window of
-    #4051 §3.1, shared with the commit lane; DISTINCT from the capacity 429
-    above and deliberately last — an org at its quota gets the permanent 402,
-    never a retryable throttle for a request that can never fit). The pre-#3892 "503 (no provider)" entry in that list is removed:
+    (quota). The pre-#3892 "503 (no provider)" entry in that list is removed:
     a MISSING provider key is no longer a gate — since #3892 (owner ruling)
     the capture is STORED and only the LLM extraction is skipped (receipt mode
     "no-provider"). A provider refusal can still surface as a 503 from INSIDE
