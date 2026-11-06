@@ -754,10 +754,24 @@ class RecordStatementError(RecordProjectionError):
     line a caller logs. ``record_writer._bounded_cause`` cannot repair it either
     — it narrows on the OUTER exception's ``diag``/``pgcode``, and a
     ``RecordStatementError`` carries neither, so it takes its ``str(exc)``
-    branch with the driver's ``DETAIL`` already embedded here. No in-tree caller
-    builds this form today (only :func:`replay` raises the class, via the
-    message form), which is exactly why it is pinned by a test rather than left
-    as a trap for the repair script or backfill the form is documented for.
+    branch with the driver's ``DETAIL`` already embedded here.
+
+    ⚠️ AND THE NARROWING IS NOW SHAPE-BLIND, which is the one thing this fix
+    costs (#11124 review P3). :func:`_primary_message` falls back to the FIRST
+    LINE of ``str(exc)`` for every exception, not only a driver-shaped one, so a
+    multi-line NON-driver cause keeps its first line and drops the rest —
+    measured, on a `Statement` cause: ``ValueError("line one\\nline two")``
+    reported ``ValueError: line one`` where the pre-fix arm carried both. It is
+    the same narrowing the message arm has always applied (:func:`replay` at
+    ``:5768``), so the two arms are now consistent rather than newly wrong, and
+    no in-tree caller passes a multi-line cause. Stated because ``_bounded_cause``
+    escapes newlines rather than dropping them (`record_writer.py:1297`), i.e.
+    pre-fix those lines DID reach the log stream.
+
+    No in-tree PRODUCTION caller builds this form today (only :func:`replay`
+    raises the class, via the message form; the cause form is built by this
+    module's own tests), which is exactly why it is pinned by a test rather than
+    left as a trap for the repair script or backfill the form is documented for.
     """
 
     def __init__(self, statement: Statement | str,

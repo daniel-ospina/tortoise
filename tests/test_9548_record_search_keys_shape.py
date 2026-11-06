@@ -784,10 +784,13 @@ def test_the_cause_form_withholds_the_drivers_detail_and_context():
     with the driver's ``DETAIL`` already embedded here — which is what makes a
     leak in this class a leak all the way to the log.
 
-    This is not a live exposure (no in-tree caller builds this form: only
-    :func:`replay` raises the class, via the message form), and that is exactly
-    why it is pinned — the docstring advertises the form for the caller that
-    logs it (a repair script, a backfill).
+    This is not a live exposure (no in-tree PRODUCTION caller builds this form:
+    only :func:`replay` raises the class, via the message form; the cause form
+    is built by this module's own tests), and that is exactly why it is pinned —
+    the docstring advertises the form for the caller that logs it (a repair
+    script, a backfill). The five in-tree constructions are all THIS file's
+    pins, which is why the qualifier matters: an unqualified "no in-tree caller"
+    is refuted by its own assertions (#11124 review P3).
 
     Non-vacuous: restore ``type(cause).__name__}: {cause}`` and this test reds on
     the first assertion — the DETAIL token is the SAME string the attribution
