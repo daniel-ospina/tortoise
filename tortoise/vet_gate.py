@@ -1156,6 +1156,7 @@ def apply_vet(embed_list: Mapping[str, Any],
         _spelling = str(_item.get("name") or "").strip()
         if _spelling:
             held_folded.setdefault(_key.casefold(), _spelling)
+    restored_keys: set[str] = set()
     for ref_name in sorted(to_restore):
         name = ref_name
         # A RELATION endpoint whose entity this pass already holds under another
@@ -1187,6 +1188,12 @@ def apply_vet(embed_list: Mapping[str, Any],
             # branch for why). Stamped on the REFERENCE's key: the folded prior
             # key is not what a reference's `_norm` form looks up.
             canonical[ref_name] = str(original["name"]).strip()
+            if name in restored_keys:
+                # Two divergent references can both resolve to ONE prior entry
+                # (the direct hit and a folded sibling): reconcile, never append
+                # a second copy or repeat the warning.
+                continue
+            restored_keys.add(name)
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
@@ -1205,11 +1212,23 @@ def apply_vet(embed_list: Mapping[str, Any],
                     "(the relation is the story's own assertion; this is NOT "
                     "a Layer-1 reference)")
         elif ref_name in layer1_referenced:
-            warnings.append(
-                "vet: ⚠️ a surviving candidate references entity "
-                f"{name!r}, which no pass emitted — it cannot be restored "
-                "here; the payload will fail Layer-1 unless the extractor "
-                "emits it")
+            # `prior` cannot supply this spelling, but the emission may already
+            # HOLD the entity under a casefold sibling — and payload identity
+            # is EXACT, so leaving the reference as written makes
+            # `validate_layer1` reject the whole session ("about_entities
+            # reference unknown entities"), where re-spelling it onto the held
+            # entity is both valid and what the reference names to every other
+            # stage. Reconcile when a held spelling exists; warn only when
+            # nothing can be reconciled (then the 422 is real and named).
+            held = held_folded.get(name.casefold())
+            if held:
+                canonical[ref_name] = held
+            else:
+                warnings.append(
+                    "vet: ⚠️ a surviving candidate references entity "
+                    f"{name!r}, which no pass emitted — it cannot be restored "
+                    "here; the payload will fail Layer-1 unless the extractor "
+                    "emits it")
         # else: a relation endpoint naming an entity no pass emitted restores
         # nothing and warns nothing — it cannot 422 (result-level channel), and
         # S5 names the dropped relation itself.

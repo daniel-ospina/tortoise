@@ -1402,3 +1402,43 @@ def test_a_relation_endpoint_already_held_in_another_case_is_reconciled():
     # emission's own spelling
     assert [(r["src"], r["dst"]) for r in _run(out)["relations"]] == [
         ("Straße", "Other")]
+
+
+def test_a_layer1_reference_reconciles_onto_a_held_casefold_sibling():
+    """Round-8 P2: when `prior` cannot supply the reference's own spelling, the
+    emission may still HOLD the entity under a casefold sibling — and payload
+    identity is EXACT, so leaving the reference as written makes
+    `validate_layer1` reject the whole session (422) where the parent commit
+    reconciled it. Reconcile; warn only when nothing can be."""
+    emission = {
+        "entities": [{"name": "Straße", "kind": "core:rule"},
+                     {"name": "Z", "kind": "core:rule"}],
+        "points": [{"content": "a point", "about_entities": ["STRASSE"]}],
+        "events": [], "operators": [], "relations": [],
+    }
+    # prior holds nothing casefold-equal, so the restore branch cannot answer;
+    # the reference must be reconciled onto the HELD spelling. (A DISCARD keeps
+    # `apply_vet` from early-returning on an empty `prior`.)
+    out, _warns = vg.apply_vet(emission, _discard_entity(emission, 1))
+    assert [e["name"] for e in out["entities"]] == ["Straße"]
+    assert out["points"][0]["about_entities"] == ["Straße"]
+
+
+def test_a_layer1_divergent_pair_restores_one_copy():
+    """Round-8 P3: two divergent Layer-1 references can both resolve to ONE
+    prior entry; the second must reconcile, not append a duplicate or repeat
+    the warning."""
+    emission = {
+        "entities": [{"name": "Z", "kind": "core:rule"}],
+        "points": [{"content": "p1", "about_entities": ["Straße"]},
+                   {"content": "p2", "about_entities": ["STRASSE"]}],
+        "events": [], "operators": [], "relations": [],
+    }
+    prior = {"removed_entities": {
+        "straße": {"name": "Straße", "kind": "core:rule"}}}
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    names = [e["name"] for e in out["entities"]]
+    assert names == ["Z", "Straße"], names
+    assert sum(1 for w in warns if "restored" in w) == 1, warns
+    assert out["points"][0]["about_entities"] == ["Straße"]
+    assert out["points"][1]["about_entities"] == ["Straße"]
