@@ -150,6 +150,8 @@
 #  78l. #10234: an UNMEASURABLE pool never reads as measured-empty
 #  78m/78n. #10234: the arm's bound is DRIVER_DOWN_MIN (150m green, red at 120m)
 #  78o. #10234: a 2-minute-old stamp is USABLE — pins the skew grace's lower side
+#  78p. #10234: a stamp 120s AHEAD is usable (the grace's tolerated band), and the
+#      run reports 0m instead of an impossible negative age
 #  78i. #10234: a MIXED pool (one stale team AND one unparseable timestamp) files
 #      a POOL_STALE whose body names the corrupt stamp and whose title covers both
 #      causes — the placeholder bullet must not be gated on the stale count
@@ -563,11 +565,8 @@ TS_STALE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.ti
 # DRIVER_DOWN_MIN (240). Without one, the arm's central comparison could be
 # mutated to STALE_MIN — or to a hardcoded literal — and every case stayed green.
 TS_MID="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=150)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
-# Round 15: a stamp comfortably INSIDE the 300s skew grace. Without one, the grace's
-# sign could be inverted (+300 -> -300) and any stamp minutes old would be read as
-# corruption — a red on a healthy pipeline — with the suite green.
-TS_FRESH="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
-export TS_RECENT TS_STALE TS_MID TS_FRESH
+
+export TS_RECENT TS_STALE TS_MID
 
 # ── driver env ──────────────────────────────────────────────────────────────
 export INTERNAL_API_URL="https://api.example.test"
@@ -2310,11 +2309,11 @@ unset BACKUP_DRIVER_DOWN_THRESHOLD_MIN
 # -300): any stamp minutes old would then read as corruption, filing
 # "last_sweep_at is in the future" against a healthy pipeline. This pins the
 # lower side — a recent stamp must be usable, and the green line must carry it.
-# Round 16: stamp it INLINE, here, exactly as 78f does for FUTURE_TS. TS_FRESH is
-# captured once at suite start, and this case runs ~54s in — asserting it as an
-# exact minute made the case cross 2m -> 3m at 60s of elapsed suite time, so the
-# step red a CORRECT driver on a slightly slower or loaded runner (measured: 91s
-# under load). The age shape is pinned instead of its integer.
+# Round 16: stamp it INLINE, here, exactly as 78f does for FUTURE_TS. An earlier
+# revision captured the stamp once at suite start while this case runs ~54s in, and
+# asserted an EXACT minute — so the case crossed 2m -> 3m at 60s of elapsed suite
+# time and red a CORRECT driver on a slightly slower or loaded runner (measured:
+# 91s under load). The age's SHAPE is pinned instead of its integer.
 reset_case
 FRESH_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
 export R2_TEAMS=$'backups/teamA/'
@@ -2325,6 +2324,24 @@ run_driver
 assert_eq "$RC" 0 "78o. a 2-minute-old completion stamp is usable, not corruption"
 assert_not_contains "$(cat "$LOG")" "in the future" "78o. it does NOT file a future-stamp incident"
 assert_match "$OUT" 'the last COMPLETED sweep was [0-9]+m ago' "78o. the green line carries an age (shape, not an exact integer)"
+
+# ── 78p. #10234 review P2 (round 17): the skew grace's TOLERATED band ──────
+# Nothing stamped a `last_sweep` in the future but INSIDE the grace, so tightening
+# 300s to 30s shipped green — and would then red a healthy driver on ordinary
+# app<->runner skew ("dated in the FUTURE ... corrupt state"), the #10234 class one
+# layer down. It also printed an impossible age ("was -2m ago") on a green run.
+reset_case
+AHEAD_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=120)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$AHEAD_TS")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78p. a stamp 120s AHEAD (inside the grace) is usable, not corruption"
+assert_not_contains "$(cat "$LOG")" "in the future" "78p. it does NOT file a future-stamp incident"
+assert_not_match "$OUT" 'was -[0-9]+m ago' "78p. the run does NOT publish an impossible negative age"
+assert_contains "$OUT" "inside the 300s skew grace" "78p. it names the skew instead"
+assert_contains "$OUT" "0m ago" "78p. the age is clamped to 0m"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case

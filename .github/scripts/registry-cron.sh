@@ -1813,6 +1813,15 @@ case "$RUN_STATUS" in
       NO_COVERAGE=1
     elif [ "$TIMEOUT_STAMP" = "usable" ]; then
       timeout_age_min=$(( (NOW_S - TIMEOUT_LAST_TS) / 60 ))
+      # #10234 review P2 (round 17): a stamp inside the skew grace but AHEAD of
+      # this runner yields a negative age, so the only record a green run leaves
+      # reported "was -2m ago" — an impossible age. Clamp it and say why, rather
+      # than publishing arithmetic that cannot be true.
+      SWEEP_SKEW_NOTE=""
+      if [ "$timeout_age_min" -lt 0 ]; then
+        SWEEP_SKEW_NOTE=" (that stamp is $(( TIMEOUT_LAST_TS - NOW_S ))s AHEAD of this runner — inside the 300s skew grace, so the age is reported as 0m)"
+        timeout_age_min=0
+      fi
       if [ "$timeout_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
         log "sweep ${RUN_STATUS_SAFE} and the last COMPLETED sweep was ${timeout_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
         file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — no sweep has completed within the driver-down window" \
@@ -1857,7 +1866,7 @@ case "$RUN_STATUS" in
           else
             SWEEP_CAUSE="the driver's own ceiling was hit (rc=${CURL_RC}), so the CLIENT stopped waiting (this says nothing about whether the pipeline stopped)"
           fi
-          log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m): ${SWEEP_CAUSE}; leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
+          log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m)${SWEEP_SKEW_NOTE}: ${SWEEP_CAUSE}; leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
         fi
       fi
     elif [ "$R2_LIST_OK" != "1" ] || [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
