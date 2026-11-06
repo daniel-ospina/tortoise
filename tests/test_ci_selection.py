@@ -9801,6 +9801,22 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     def _key_of(step: dict) -> str:
         return str((step.get("with") or {}).get("key") or "")
 
+    def _refs_of(step: dict) -> str:
+        """Everything this step's `with:` block says on a key axis.
+
+        A cache step names keys on TWO axes: `key` (the exact key it wants) and
+        `restore-keys` (the prefixes it will settle for on a miss). A reference
+        question — "does anything still point at the retired key?" — has to read
+        both, because a migrated `key:` carrying `restore-keys: uv-pip-` restores
+        exactly the archive the retirement is supposed to have removed.
+
+        Do NOT use this for a WRITE question: what a writer saves is its `key`
+        alone, so `_key_of` is the right accessor there.
+        """
+        block = step.get("with") or {}
+        return "\n".join(str(block.get(axis) or "")
+                         for axis in ("key", "restore-keys"))
+
     def _uses_of(step: dict) -> str:
         return str(step.get("uses") or "")
 
@@ -10146,14 +10162,33 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert order[id(prune)] < order[id(uv_save)], (
         "`uv cache prune` must run BEFORE the save, or it bounds nothing")
 
-    # The legacy shared key must be fully retired: no reader, no writer. A step
-    # left behind on `uv-pip-` would restore 3.6 GB of another job's pip archive
-    # into this job's uv leg and re-open the payload this change splits.
+    # The legacy shared key must be fully retired: no reader, no writer, on
+    # EITHER key axis. A step left behind on `uv-pip-` would restore 3.6 GB of
+    # another job's pip archive into this job's uv leg and re-open the payload
+    # this change splits — and `restore-keys` is a reference like any other, so a
+    # `key:` migrated to `uv-cache-` with `restore-keys: uv-pip-` still restores
+    # the retired archive. Reading `_key_of` alone left that axis unexamined and
+    # the arm green over exactly the defect it exists to catch (measured: the
+    # mutated workflow passed before this line read `_refs_of`).
+    # A `restore-keys`-only reference is the silent one, and it is invisible to
+    # any future refactor that reads `key` alone — so pin the axis itself rather
+    # than relying on the live workflow happening not to carry one today.
+    _probe = {"with": {"key": "uv-cache-Linux-abc",
+                       "restore-keys": "uv-pip-Linux-"}}
+    assert "uv-pip-" in _refs_of(_probe), (
+        "the retirement arm cannot see a `restore-keys` reference: a migrated "
+        "`key:` with `restore-keys: uv-pip-` restores the retired 3.88 GB "
+        "archive while the pin reads green (#11063)")
+    assert "uv-pip-" not in _key_of(_probe), (
+        "this probe must be invisible on the `key` axis, or it does not "
+        "demonstrate the axis `_refs_of` adds")
+
     legacy = [(jid, s.get("name")) for jid, jd in wf["jobs"].items()
               for s in (jd.get("steps") or [])
-              if "uv-pip-" in _key_of(s)]
+              if "uv-pip-" in _refs_of(s)]
     assert not legacy, (
-        f"`uv-pip-` is still referenced {legacy}. The key is retired: pip is read "
+        f"`uv-pip-` is still referenced {legacy} (on `key` or `restore-keys`). "
+        "The key is retired: pip is read "
         "from the shared `pip-` key and uv is written under `uv-cache-`. Anything "
         "left on the combined key restores both trees into one step again, which "
         "is the 3.88 GB archive (#11063).")
