@@ -468,31 +468,38 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
 def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
     """#11064 review (P1): the pins must run on the DOCS that can break them.
 
-    `tests/test_record_schema_placement.py` reads four doc paths, and they do not
-    select the same surface. `08-hosted-prerequisites.md` and `docs/00_index.md`
-    are `core`-selecting, so the pins on them run through that row. But
+    `tests/test_record_schema_placement.py` reads several doc paths, and they do
+    not all select the same surface. `08-hosted-prerequisites.md`, `docs/00_index.md`,
+    `docs/architecture/STORAGE-ARCHITECTURE.md` and the capstone `README.md` are
+    surface-selecting, so the pins on them run through those rows. But
     `docs/infra-runbook.md` (§"Secrets Matrix", and the §9 drill row that
     `test_the_epic_r8_drill_blocker_agrees_with_the_runbook` requires to keep
-    naming a `captured` session and a `direct` DSN) and
+    naming a `captured` session and a `direct` DSN),
     `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
-    (the `_ARMED_SOURCE_OF_TRUTH` anchors) match no SOURCE_PATTERNS entry, and
-    `docs/` is in NON_PYTHON_PREFIXES — so a runbook-only or 09-only diff
-    filters to `changed == []` and takes the docs-only early return: tier1 ONLY.
+    (the `_ARMED_SOURCE_OF_TRUTH` anchors) and
+    `docs/epics/2026-10-10-7879-postgres-record/04-projection.md` (its
+    resolved-totals sentence) match no SOURCE_PATTERNS entry, and `docs/` is in
+    NON_PYTHON_PREFIXES — so a diff touching only one of them filters to
+    `changed == []` and takes the docs-only early return: tier1 ONLY.
     Registered in `core` but not in `tier1`, those pins were therefore asleep on
     exactly the diffs that can re-break them: deleting `captured`/`direct` from
     the §9 drill row (which is what the pre-#11064 row said — the stale premise
-    sent a lane back to the arming) or dropping 09's arming anchor would merge
-    green and leave 08 §R8 silently disagreeing with the runbook it is derived
-    from (#4309 silent-drop class; the #8614 / #9548 shape one file over).
+    sent a lane back to the arming), dropping 09's arming anchor, or editing 04's
+    sentence would merge green and leave 08 §R8 silently disagreeing with the
+    runbook it is derived from (#4309 silent-drop class; the #8614 / #9548 shape
+    one file over).
 
     A `core` registration cannot cover this on its own: a surface's test files
     run only once that surface is ALREADY selected, which a docs-only diff never
-    does. Measured at the pre-fix tree: `surfaces=[]`, 73 tier1 files, this file
-    absent from both.
+    does. Measured at the pre-fix tree: `surfaces=[]` for each of the three, and
+    this file absent from `test_files` — and selected once the `tier1` entry is
+    in. (Counts are deliberately not restated here: a copied figure is what goes
+    stale, per `tools/ci_selection.py`'s own rule.)
     """
     for doc in (
         "docs/infra-runbook.md",
         "docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md",
+        "docs/epics/2026-10-10-7879-postgres-record/04-projection.md",
     ):
         r = _sel([doc])
         assert r["full"] is False
