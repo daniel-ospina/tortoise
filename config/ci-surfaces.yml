@@ -3599,8 +3599,12 @@ surfaces:
   # exit-code contract). Registered `core` with the paired CORE_ALSO entry in
   # `tools/ci_selection.py` (the `tools/lane_stash.py` pattern): a tools-only
   # diff must select the surface that carries this pin. Hermetic: the pure
-  # comparison core + CLI contract, no stores, no network;
-  # `TORTOISE_TEST_CARVE_OUT=1` verified green.
+  # comparison core + CLI contract; `TORTOISE_TEST_CARVE_OUT=1` verified green.
+  # ⚠️ NOT hermetic since #11112/#11113: the presence check and the
+  # write-freedom pins need a REAL `GRAPH.LIST` to be measured against, so two
+  # helpers here build a throwaway EMBEDDED redislite store (no server, no
+  # network — `DELIBERATE_EMBEDDED_LANE` in `tests/test_uri_env_mutations_declared.py`).
+  # The pure comparison core and the CLI contract remain store-free.
   - test_10017_turn_parity_census.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   # #8051: `refs/stash` lives in the COMMON git dir, so a lane's bare

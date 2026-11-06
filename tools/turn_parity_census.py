@@ -11,17 +11,18 @@ a statement about the STORE's graph list: the graph leg refuses a graph the
 store does not already hold, instead of creating it (#11112 — a typo'd
 `--graph-name` used to leave a stub graph behind). It is NOT a claim that
 opening the store is free of side effects. On the EMBEDDED leg the redislite
-open writes SIDECARS beside the store — measured at this head: a read from an
-existing `<db>` leaves `<db>.settings` and `<db>.<graph>-construct.lock` — and a
-`--db-path` that does not exist gets those two files but NO store file, so a
-typo'd path leaves residue to explain even though no GRAPH and no RDB is
-created (measured; an earlier reading on a 1.4 MB store recorded the RDB itself
-moving 1,402,361 → 1,402,370 B on one read, and that does NOT reproduce here —
-two reads left the RDB byte-identical, sha-pinned — so the durable fact is the
-SIDECARS, and the byte census is still taken around a run rather than from a
-copy the run itself touched). On the URI leg the bind issues no graph write
-(measured: `GRAPH.LIST` unchanged), but it IS a connection, and "no graph
-write" is not "no server-side effect" — the census never claims the latter.
+open rewrites the RDB on EVERY open/close — measured at this head on a 1-node
+store: `live.db` 861 B → 854 B across two consecutive read-only CLI runs, with a
+different sha256 each time — so the #10017 byte census is taken AROUND a run,
+never from a copy the run itself touched. It also leaves a
+`<db>.<graph>-construct.lock` beside the store, and a `<db>.settings` that lives
+ONLY while the daemon does (measured: present mid-run, GONE after `close()`). A
+`--db-path` that does not exist gets an empty 118-byte store file plus that
+lock — the file has no graphs in it (`GRAPH.LIST` → `[]`), which is the claim
+below, but a typo'd path still leaves FILE residue to explain. On the URI leg
+the bind issues no graph write (measured: `GRAPH.LIST` unchanged), but it IS a
+connection, and "no graph write" is not "no server-side effect" — the census
+never claims the latter.
 
 ⚠️ THE URI LEG NEEDS A CREDENTIAL THAT MAY RUN `GRAPH.LIST` (#11113 review P2).
 That refusal is proven by LISTING the store (`GRAPH.LIST`, which creates
@@ -883,7 +884,13 @@ def _refuse_unless_graph_present(proj, requested: str | None) -> None:
     # `['tortoise', '']`. That is the #11112 defect one layer down, with this
     # function's own contract ("asked about the projection's OWN resolved
     # name") inverted. Neither an empty nor an absent name can be verified, so
-    # both REFUSE before the handle is addressed.
+    # both REFUSE before the handle is addressed — and `read_graph_turns` must
+    # therefore hand this bind the name it was GIVEN. Its embedded branch used
+    # `graph_name or "tortoise"`, which coerced a caller's `""` into a
+    # DIFFERENT graph before this guard could refuse it (measured: the read
+    # returned `tortoise`'s nodes while `resolve_graph_name` named `""` in the
+    # artifact). The coercion is now `is not None`, so only an ABSENT name
+    # (the documented default) is defaulted and an EMPTY one is refused here.
     wanted = getattr(proj, "_graph_name", None)
     if wanted is None:
         wanted = getattr(proj, "graph_name", None)
@@ -989,7 +996,14 @@ def read_graph_turns(uri: str | None, db_path: str | None,
                 # `GRAPH.QUERY` statements, and on a graph that does not exist
                 # the first one creates it.
                 proj = FalkorProjection(
-                    db_path, graph_name=graph_name or "tortoise",
+                    db_path,
+                    # ⛔ `is not None`, NOT truthiness (#11113 review, P3): an
+                    # EMPTY name is a name the caller supplied, and coercing it
+                    # to `tortoise` opened a DIFFERENT graph than the one the
+                    # artifact then reported (`resolve_graph_name` returns
+                    # `""`). Only an ABSENT name is the documented default.
+                    graph_name=(graph_name if graph_name is not None
+                                else "tortoise"),
                     skip_health_check=True, ensure_indexes=False)
         except Exception as exc:
             # ⛔ A REFUSED BIND IS DIAGNOSED AS THE CREDENTIAL, LIKE A REFUSED
