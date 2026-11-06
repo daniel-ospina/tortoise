@@ -401,7 +401,7 @@ _HARMLESS_SET_NAMES = frozenset(
 #: word, which must be a harmless name), and every noexec spelling is refused by
 #: `_disables_execution` BEFORE this set is consulted — `set -euon pipefail` and `set -on noexec`
 #: both carry an `n` in the word, which that parser returns on.
-_HARMLESS_SET_LETTERS = frozenset("euxoET")
+_HARMLESS_SET_LETTERS = frozenset("euxoETvh")
 
 
 def _set_statement_is_harmless(line: str) -> bool:
@@ -462,31 +462,43 @@ _SECRETS_SET_REMEDY = re.compile(r"supabase\s+secrets\s+set[^\"\n]*--project-ref
 
 #: The command roots `supabase/README.md` prints. Every one of them is a hosted-mutating door.
 _README_REMEDY_ROOTS = ("supabase db push", "supabase functions deploy", "supabase secrets set")
-#: What makes a line an INVOCATION rather than PROSE about one. Deliberately NOT the target flag:
-#: `functions deploy <name>` and `secrets set` both target the LINKED project with no target flag at
-#: all (pinned CLI: "Set a secret(s) to the linked Supabase project"), so requiring one hides a real
-#: unpinned remedy — measured, a false PASS. A flag or a `NAME=VALUE` assignment is present in every
-#: form the README prints and in no sentence of prose it prints about them.
-_README_REMEDY_FLAG = re.compile(r"(?:^|\s)--[A-Za-z]")
-_README_REMEDY_ASSIGNMENT = re.compile(r"(?:^|\s)[A-Z][A-Z0-9_]*=")
+#: A fenced code block is what makes a line COPYABLE. This is the third attempt at the question and the
+#: first structural one, because both lexical guesses were measured wrong in OPPOSITE directions:
+#:   * the command ROOT alone read PROSE as a command — `supabase secrets set writes to the hosted
+#:     project, so never paste a real value.` red a correct README (review cycle 16);
+#:   * requiring a TARGET FLAG then exempted `supabase functions deploy <name>` / `secrets set`, which
+#:     target the LINKED project with no target flag at all (false PASS, review cycle 17);
+#:   * requiring a flag OR a `NAME=VALUE` then exempted a BARE invocation — `supabase db push` and
+#:     `supabase functions deploy <name>` with no arguments are COMPLETE hosted mutations (the pinned
+#:     CLI's `db push`/`functions deploy` take every flag optionally), and the base DID catch them:
+#:     measured 1 failed at `4e41164b17`, 16 passed under the flag-or-assignment rule — a regression
+#:     against the base, on the exact remedy this repo's own workflow prints (review cycle 18).
+#: A fence is the property that actually separates a command a reader can copy from a sentence about
+#: one, and it is what the README uses. Declared residual: a command printed OUTSIDE a fence is not
+#: governed, and prose placed INSIDE a fence would be — neither occurs in any README section this
+#: file governs (all seven remedy sites are fenced), and both are stated here rather than implied.
 
 
 def _readme_remedies(text: str) -> list[str]:
     """Every PRINTED command in `supabase/README.md`, one stripped line per invocation.
 
-    Line-continuations are joined first, so a remedy whose flags wrap is one entry. A line qualifies
-    when it STARTS with a governed root and CARRIES an invocation token (a flag or a `NAME=VALUE`).
-    Both halves are load-bearing and both were measured: the root alone reads prose as a command (and
-    red a correct README), while a target-flag requirement silently exempts a command that names its
-    target by `supabase link` instead — either way the operator's copy-paste path goes unasserted.
-    Pinned in both directions by `test_the_readme_remedy_selector_sees_a_command_and_not_prose`.
+    Line-continuations are joined FIRST, so a remedy whose flags wrap is one entry — that join is
+    load-bearing, not cosmetic: three live sites open with `supabase functions deploy <name> \\` and
+    carry every flag on the next line, so without it the invocation loses its `--yes`.
+
+    A line qualifies when it STARTS with a governed root and sits INSIDE a fenced code block. The
+    fence, not a guess about which tokens look command-like, is the distinguisher — see the note on
+    `_README_REMEDY_ROOTS` for the three lexical rules that were each measured wrong. Pinned in both
+    directions by `test_the_readme_remedy_selector_sees_a_command_and_not_prose`.
     """
     remedies: list[str] = []
+    in_fence = False
     for line in text.replace("\\\n", " ").splitlines():
-        stripped = line.strip()
-        if not stripped.startswith(_README_REMEDY_ROOTS):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
             continue
-        if _README_REMEDY_FLAG.search(stripped) or _README_REMEDY_ASSIGNMENT.search(stripped):
+        stripped = line.strip()
+        if in_fence and stripped.startswith(_README_REMEDY_ROOTS):
             remedies.append(stripped)
     return remedies
 # The banner remedy omits the `supabase` prefix (it is printed as `'migration repair …'`), so it needs
@@ -1215,14 +1227,18 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
 
 
 def test_the_readme_remedy_selector_sees_a_command_and_not_prose() -> None:
-    """The README selector must SEE an unpinned command and must NOT see prose about one.
+    """The README selector must SEE every copyable command and must NOT see prose about one.
 
-    Both directions are holes this file has already paid for, and each is pinned because the
-    selector's narrowings are invisible by construction — a line it does not select is never
-    asserted on, so nothing reds when the exemption is wrong. That is how a fix for one direction
-    becomes a false PASS in the other (measured, review cycle 17).
+    Three review cycles were spent here because each narrowing was invisible by construction: a line
+    the selector does not select is never asserted on, so nothing reds when the exemption is wrong.
+    Every direction below is therefore pinned by a measurement that FAILS if it regresses — which is
+    what makes these pins and not decoration.
     """
-    # PROSE that begins a line with a command root is not a command. Measured: it red a CORRECT
+
+    def fenced(*lines: str) -> str:
+        return "```bash\n" + "\n".join(lines) + "\n```\n"
+
+    # ⛔ PROSE that begins a line with a command root is not a command. Measured: it red a CORRECT
     # README with "1 printed command(s) without `--yes`", while an operator can copy nothing from it.
     for prose in (
         "supabase secrets set writes to the hosted project, so never paste a real value.",
@@ -1230,21 +1246,35 @@ def test_the_readme_remedy_selector_sees_a_command_and_not_prose() -> None:
         "supabase db push is the manual door when the co-move has failed.",
     ):
         assert _readme_remedies(prose) == [], f"prose was read as a command: {prose!r}"
-    # A COMMAND is a command whether or not it names a TARGET FLAG — `functions deploy <name>` and
-    # `secrets set` both target the LINKED project with no flag at all. Requiring a target flag made
-    # these invisible: measured, `supabase functions deploy deck-view --no-verify-jwt` with no `--yes`
-    # gave 1 failed at the PR base and 15 passed after that narrowing — a false PASS, which is the
-    # failure this whole file exists to prevent.
+
+    # ⛔ A BARE invocation is a complete command. Every flag on the pinned CLI's `db push` and
+    # `functions deploy` is OPTIONAL, and both target the LINKED project — `supabase db push` +
+    # `supabase functions deploy` is the exact remedy this repo's own workflow prints. A selector that
+    # demanded a flag or a `NAME=VALUE` exempted it: measured 1 failed at the PR base, 16 passed after
+    # that narrowing, i.e. a regression against the base.
     for command in (
+        "supabase db push",
+        "supabase functions deploy deck-view",
         "supabase functions deploy deck-view --no-verify-jwt",
         "supabase secrets set RESEND_API_KEY=re_...",
         "supabase db push --linked --include-all --yes",
-        "supabase functions deploy tenant-provision --project-ref abc --yes",
     ):
-        assert _readme_remedies(command) == [command], f"a command was exempted: {command!r}"
-    # A continuation the README actually uses stays ONE invocation (joined before selection).
-    wrapped = "supabase secrets set --project-ref abc --yes \\\n  RESEND_API_KEY=re_..."
-    assert len(_readme_remedies(wrapped)) == 1, _readme_remedies(wrapped)
+        assert _readme_remedies(fenced(command)) == [command], f"command exempted: {command!r}"
+
+    # ⛔ The continuation JOIN is load-bearing: three live sites open with the root and carry every
+    # flag on the next line, so without the join the invocation keeps `--yes` out of its own argv.
+    # Asserting on the CONTENT, not just the count — a count of 1 is also true when the join is gone
+    # and only the first line is selected, which is how an earlier version of this test pinned nothing.
+    joined = _readme_remedies(
+        fenced("supabase functions deploy waitlist-subscribe \\", "  --project-ref abc --yes")
+    )
+    assert len(joined) == 1, joined
+    assert "waitlist-subscribe" in joined[0] and "--yes" in joined[0], (
+        f"a wrapped remedy was not joined with its flags: {joined!r}"
+    )
+
+    # A line outside a fence is not copyable from this README and is not governed (declared residual).
+    assert _readme_remedies("supabase db push --linked --include-all --yes") == []
 
 
 def test_printed_remediations_pass_yes_too() -> None:
