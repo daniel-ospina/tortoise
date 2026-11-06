@@ -1943,6 +1943,7 @@ assert_match "$(cat "$LOG")" 'COMPLETED sweep is [0-9]+m old' "78b. the filed bo
 # into the FILED body, not only the log — the incident is what a human reads
 # weeks later, when the run's stdout is gone.
 assert_match "$(cat "$LOG")" 'after [0-9]+s \(curl exit 28' "78b. the filed body still carries the elapsed seconds (#5028)"
+assert_contains "$(cat "$LOG")" 'no sweep has completed within the driver-down window' "78b. the TITLE names the driver-down window, not a bare timeout"
 
 # ── 78c. #10234: a timeout with NO usable completion evidence IS red ───────
 # Unknown is not healthy (#2790). With no `last_sweep` at all the driver has no
@@ -1964,6 +1965,9 @@ assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78c. unverifiable completion fil
 assert_contains "$OUT" "no usable last_sweep_at" "78c. the fail-closed branch is the one that ran (not the stale-age branch)"
 assert_not_contains "$OUT" "the last COMPLETED sweep was" "78c. (control) the stale-age branch did NOT run"
 assert_contains "$OUT" "no sweep report was read (status=driver_timeout)" "78c. the exit line names the missing report, not a coverage failure"
+# Round 9: the incident TITLE must name the cause the SHAPE had. Phrase occurs only
+# in the title, never in the body, so this pins the title specifically.
+assert_contains "$(cat "$LOG")" 'sweep timed out and completion cannot be verified' "78c. the TITLE names the budget ceiling for rc=28"
 
 # ── 78c-ii. #10234 review P2 (round 8): a rc=0 completion is NOT "timed out" ──
 # The fail-closed arm's incident TITLE said "sweep timed out" even for
@@ -2126,6 +2130,8 @@ assert_contains "$OUT" "sweep skipped (status=transport_error)" "78e. a transpor
 assert_not_contains "$OUT" "ride-along OK" "78e. (control) neither ride-along ran"
 # and the terminal line must not make a coverage claim it cannot measure
 assert_contains "$OUT" "no sweep report was read (status=transport_error)" "78e. the exit line names the missing report, not a coverage failure"
+assert_contains "$(cat "$LOG")" 'the sweep call failed in transport' "78e. the TITLE names the transport fault, not a timeout"
+assert_not_contains "$(cat "$LOG")" 'sweep timed out' "78e. (control) no budget claim on a transport fault"
 
 # ── 78f. #10234 review P2: a FUTURE-dated last_sweep_at is unusable, not fresh ──
 # A skewed/corrupt ops/state.json makes the age negative, and a negative age is
