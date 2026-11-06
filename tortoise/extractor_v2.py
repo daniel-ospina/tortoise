@@ -10292,6 +10292,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     _armed = _referentiality.enabled()
     _records = ([m for m in (embed_list.get("mentions") or []) if isinstance(m, dict)]
                 if _armed else [])
+    # ⛔ The ACCOUNTING is deduped at its source, not only on the lists that are
+    # published: `_dedupe_mentions` runs inside `route_mentions`, the call that may
+    # have raised, so on the fail-open path ONE hold was counted twice here while
+    # `result["mentions"]["records"]` said one — `mentions_recorded` is the number
+    # plan R1's arming gate reads, and the "did not emit" warning counted two
+    # records while naming one surface (review at `d785f3da8`, P2: deduping the
+    # published lists left the number it protects un-fixed).
+    _records = _dedupe_mentions(_records)
     _emitted_refs = {_norm(str(p.get("content") or "")) for p in payload_points
                      if isinstance(p, dict)}   # payload content IS the write's form
     unresolved = [m for m in _records
@@ -11407,7 +11415,10 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     has the same rule first (the one home, #5007) — this path may not be the
     weaker copy.
     """
-    surface = str(surface or "")[:200]
+    # ⛔ STRIP **THEN** CAP: `_clamped_mention` now strips before capping too, so a
+    # padded surface over the cap is the same name on both builders — capping
+    # first left `"i"` here and `"itx"` there (review at `d785f3da8`, P3).
+    surface = str(surface or "").strip()[:200]
     # ⛔ The record's own text is CLAMPED FIRST, because the span is located in it:
     # locating in the unclamped quote and then storing 200 chars shipped
     # `span_source: "quote"` with offsets pointing past the end of the quote the
@@ -11619,7 +11630,13 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
         v = m.get(k)
         if v is None or v == "":
             continue
-        if k in _MENTION_CAPS:
+        if k == "surface":
+            # ⛔ STRIP **THEN** CAP, the order `_mention_record` uses: capping
+            # first let a padded 202-character surface collapse to the
+            # one-character `"i"` here and stay `"itx"` on the sibling builder
+            # (review at `d785f3da8`, P3).
+            record[k] = str(v).strip()[:_MENTION_CAPS[k]]
+        elif k in _MENTION_CAPS:
             record[k] = str(v)[:_MENTION_CAPS[k]]
         elif k in ("span_start", "span_end"):
             record[k] = v if isinstance(v, int) else None
@@ -11636,6 +11653,7 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
     surface = str(record.get("surface") or "")
     if not surface:
         return None
+    record["surface"] = surface
     # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
     # one `commit_schema.Mention` accepts — otherwise the whole payload 422s.
     # Both halves are dropped rather than 422 (review cycle 2, P1: an over-cap
@@ -11648,7 +11666,14 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
             and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
         record.pop("span_start", None)
         record.pop("span_end", None)
-    declared = record.get("span_source")
+    # ⛔ A PADDED space is the SAME declaration: `_mention_record` strips it
+    # (`str(span.get("span_source") or "").strip()`), so leaving it raw here
+    # demoted a verifiable address on one builder and verified it on the other.
+    # Written back STRIPPED, or the record carries `" quote "` and
+    # `commit_schema.Mention.span_source`'s `Literal` 422s the whole payload.
+    declared = str(record.get("span_source") or "").strip()
+    if declared in _MENTION_SPAN_SOURCES:
+        record["span_source"] = declared
     if declared not in _MENTION_SPAN_SOURCES:
         record.pop("span_source", None)
     elif declared in ("quote", "narrative") and "span_start" in record:
@@ -11730,7 +11755,10 @@ def _mentions_for_claim(embed_list: dict, content: str,
         record = _clamped_mention(m, narrative=narrative)
         if record is not None:
             out.append(record)
-    return out
+    # ⛔ `_dedupe_mentions` runs INSIDE `route_mentions` — the call that may have
+    # raised. On the fail-open path nothing deduped, so ONE hold was counted twice
+    # (review at `d785f3da8`, P3). Idempotent: the normal path deduped upstream.
+    return _dedupe_mentions(out)
 
 
 def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
@@ -12328,7 +12356,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _evidence_records.append(_r)
     result["mentions"] = {
         "stats": mention_s2_stats,
-        "records": _evidence_records,
+        # …and deduped for the same reason `_mentions_for_claim` is: on the
+        # fail-open path `_dedupe_mentions` (inside `route_mentions`) never ran, so
+        # this surface double-counted one hold (review at `d785f3da8`, P3).
+        "records": _dedupe_mentions(_evidence_records),
     }
     # #1933 (E2E-4 negative a): the chain-completeness evidence surface +
     # human-readable warnings (additive keys — the S5-failure branch above
