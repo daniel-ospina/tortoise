@@ -9719,3 +9719,64 @@ def test_a_MAXIMALLY_strict_E1_bar_is_accepted(tmp_path):
     # …and the strict-but-legal sibling on E2b is accepted for the same reason.
     repo2 = _prereg_with_threshold(tmp_path, "E2b", "`<= 0`")
     assert scores_probe.score(repo2)["e1"]["outcome"] == "REFUSED"
+
+
+def test_the_rules_block_states_the_boundary_the_code_enforces():
+    """P3: the block that JUSTIFIES E1's rule is prose, and nothing read it.
+
+    The round at `52d7173d5` corrected this block's E1 bullet back to the inclusive
+    window and corrected the same stale sentence in
+    `test_a_frozen_bar_that_binds_nothing_is_refused`'s docstring — but a comment is
+    unread by every pin in this file, so the drift can come straight back: the review's
+    own diagnosis was that a lane taking `0 < m < 1` at its word "fixes" the
+    enforcement back to `0 <` and re-opens the `0.0` over-block, with the suite green.
+    This pin is the reading that was missing.
+
+    The expected window is derived from the CODE (the AST of the guard comparison),
+    never restated here, so it reds in BOTH directions: code inclusive-at-zero with
+    prose that says `0 <`, and prose that claims the inclusive window while the code
+    reverts to `0 <`.
+    """
+    source = SCORES_PROBE.read_text(encoding="utf-8")
+
+    # The enforced window, read off the guard itself rather than copied into this test.
+    guard = next((n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.Compare)
+                  and isinstance(n.left, ast.Constant) and n.left.value == 0
+                  and len(n.ops) == 2
+                  and isinstance(n.comparators[0], ast.Name)
+                  and n.comparators[0].id == "multiplier"
+                  and isinstance(n.comparators[-1], ast.Constant)
+                  and n.comparators[-1].value == 1), None)
+    assert guard is not None, (
+        "INSTRUMENT FOUND NOTHING: no `0 <op> multiplier <op> 1` comparison in "
+        f"{SCORES_PROBE.name} — the E1 bar rule this block justifies is gone or "
+        "re-spelled, so re-derive what it enforces before trusting the prose.")
+    inclusive_at_zero = isinstance(guard.ops[0], ast.LtE)
+
+    # The bullet, wrap-joined: the block is a comment block, so its continuation
+    # lines are the `#    ` lines directly under the `* E1 is a REDUCTION` marker.
+    lines = source.splitlines()
+    start = next((i for i, ln in enumerate(lines)
+                  if "* E1 is a REDUCTION" in ln), None)
+    assert start is not None, (
+        "INSTRUMENT FOUND NOTHING: the rules block's `* E1 is a REDUCTION` bullet "
+        "is gone — this pin has no subject on this tree.")
+    block = [lines[start]]
+    for ln in lines[start + 1:]:
+        if not ln.startswith("    #    "):
+            break
+        block.append(ln)
+    bullet = re.sub(r"\s+", " ", " ".join(
+        re.sub(r"^\s*#\s*", "", ln) for ln in block))
+
+    assert ("0 <= m < 1" in bullet) is inclusive_at_zero, (
+        "the E1 bullet states the WRONG window for the code beside it: the guard is "
+        f"`{'0 <= multiplier < 1' if inclusive_at_zero else '0 < multiplier < 1'}` "
+        f"(inclusive_at_zero={inclusive_at_zero}) while the bullet reads {bullet!r}. "
+        "`0 <` refuses `0.0`, which is MAXIMALLY strict rather than inert — see "
+        "`test_a_MAXIMALLY_strict_E1_bar_is_accepted`.")
+    assert ("0 < m < 1" in bullet) is not inclusive_at_zero, (
+        "the E1 bullet argues BOTH sides of the boundary — it still carries the "
+        "pre-fix window `0 < m < 1` beside the guard it justifies "
+        f"(inclusive_at_zero={inclusive_at_zero}): {bullet!r}")
