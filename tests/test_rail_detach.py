@@ -989,6 +989,11 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
       `test_a_torn_record_cannot_certify_or_shadow_a_live_rail` and
       `test_the_duplicate_rail_guard_asks_a_liveness_question` — which all RED when
       it is removed, while this one stays green (measured).
+    * `_slug`'s site ALONE is pinned by a case this one is not:
+      `test_one_record_is_readable_under_any_spelling_of_its_repo` REDS when
+      `_slug` loses its `_repo_key` (measured), which is why the negative
+      results above are about THIS case and not about the keying.
+
 
     ⛔ EVERY SPELLING A CLONE URL CAN PRODUCE, because each one is a paste: `.git` is
     the suffix a clone URL always ends in and the SCP form glues the host to the owner
@@ -1642,6 +1647,16 @@ def test_cli_collect_answers_absent_without_asking_gh(tmp_path, monkeypatch, cap
     assert capsys.readouterr().out.startswith("RAIL(#95, absent, ")
     assert not called.exists(), "collect asked the network a question disk settles"
 
+    # ⛔ THE ZERO-CANDIDATE RETURN IS A SEPARATE ARM FROM THE `st is None` ONE, and
+    # `--json` must answer JSON on BOTH. Pinning only the `--repo` path left THIS
+    # arm's prose answer alive (measured: mutating it back to the `RAIL(...)` print
+    # left the whole file green at 100 passed, and the real CLI then emitted prose
+    # with rc 3 — the exact defect the fix was written for, one arm over).
+    rc = rd.main(["collect", "95", "--state-dir", str(sd), "--json"])
+    assert rc == 3, rc
+    doc = json.loads(capsys.readouterr().out)      # pre-fix: JSONDecodeError here
+    assert doc["state"] == "absent" and doc["pr"] == 95
+
     # An absent rail is NOT "not merged": the machine gate must not read 1 here.
     rc = rd.main(["collect", "95", "--state-dir", str(sd), "--assert-merged"])
     assert rc == 3, f"absent must not wear the gate's code (1): got {rc}"
@@ -1744,6 +1759,50 @@ def test_a_torn_LOG_header_does_not_crash_collect(tmp_path):
     assert st is not None and st.state != rd.MERGED, st.as_dict()
     assert rd.main(["collect", "91", "--repo", "o/r", "--state-dir", str(sd),
                     "--assert-merged"]) == 1
+
+
+def test_absent_collect_answers_json_when_json_was_asked_for(tmp_path, capsys):
+    """⛔ `--json` MUST ANSWER JSON ON THE ABSENT PATH TOO — that is the path a lane hits most.
+
+    Both absent returns printed a bare `RAIL(#n, absent, -, -)` line even under
+    `--json`, so `json.loads(stdout)` raised `JSONDecodeError` on the single most
+    common answer ("this PR was never railed here"). The exit code (3) was correct
+    the whole time, which is exactly why a key-on-exit-code caller never noticed: the
+    broken surface is the documented machine one, and it breaks only when there is
+    nothing to report.
+
+    Both output SHAPES are asserted here — a fix that made ABSENT json-only would
+    break the human surface, which is the shape a person reads in a terminal. The
+    OTHER absent return (zero candidates, no `--repo` given) is a SEPARATE code path;
+    it is pinned by `test_cli_collect_answers_absent_without_asking_gh`.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+
+    rc = rd.main(["collect", "424242", "--repo", "o/r", "--state-dir", str(sd), "--json"])
+    out = capsys.readouterr().out
+    assert rc == 3
+    doc = json.loads(out)                      # pre-fix: JSONDecodeError here
+    assert doc["state"] == "absent" and doc["pr"] == 424242
+    real = rd.RailState(pr=1, state=rd.LOST).as_dict()
+    assert set(doc) == set(real), (
+        "the absent document must carry the SAME key set as a real status, or a "
+        "consumer needs two schemas")
+    # ⛔ KEY SET IS NOT ENOUGH: emitting `None` where a real status emits `""` (and
+    # `0` for `pid`/`child`) makes `int(doc["pid"])` raise for a consumer that
+    # learned the schema on the NORMAL path — the same break, one level down.
+    # VGATE caught exactly that in this fix's first cut, which is why the types and
+    # not just the names are pinned.
+    assert {k: type(v) for k, v in doc.items()} == {k: type(v) for k, v in real.items()}, (
+        f"per-key TYPES must match a real status: "
+        f"absent={ {k: type(v).__name__ for k, v in doc.items()} } "
+        f"real={ {k: type(v).__name__ for k, v in real.items()} }")
+
+    # ARM 2 — without `--json` the human line is unchanged.
+    rc = rd.main(["collect", "424242", "--repo", "o/r", "--state-dir", str(sd)])
+    out = capsys.readouterr().out
+    assert rc == 3
+    assert out.strip() == "RAIL(#424242, absent, -, -)", out
 
 
 def test_a_named_rail_under_spawning_is_not_no_rail(tmp_path):

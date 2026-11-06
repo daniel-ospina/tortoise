@@ -1007,9 +1007,9 @@ def test_a_fold_worktree_that_cannot_be_built_is_UNMEASURABLE(
 
     `tools/batch_open.py:538-545` names three ways a diff cannot be computed: an absent
     object, no merge base in a shallow clone, and **no scratch worktree**. The first two
-    are pinned by their own tests; this one had none. Measured (review cycle 2): reverting
-    `return "UNMEASURABLE", f"could not materialise the fold tree: ..."` to
-    `"NOT-CONTAINED"` left **all 57 cases green**.
+    are pinned by their own tests; this one had none. Measured at `8399b86c6`:
+    reverting `return "UNMEASURABLE", f"could not materialise the fold tree: ..."` to
+    `"NOT-CONTAINED"` left **all 57 cases collected there green**.
 
     It is reachable without a contrived fixture: `tempfile.mkdtemp` followed by
     `git worktree add` fails on ENOSPC, on an unwritable TMPDIR, and on a stale entry under

@@ -971,6 +971,33 @@ class RailState:
         }
 
 
+def _absent_document(pr: int, as_json: bool) -> str:
+    """The ABSENT answer, in whichever shape the caller asked for.
+
+    ⛔ A MACHINE SURFACE MUST ANSWER MACHINE-READABLY ON *EVERY* PATH. Both absent
+    returns printed a bare `RAIL(...)` line even under `--json`, so a consumer doing
+    `json.loads(stdout)` CRASHED on the answer a lane hits most often — "this PR was
+    never railed here" — while the exit code (3) was already correct, which is
+    precisely why a key-on-exit-code caller never saw it.
+
+    ⛔ The values carry the SAME TYPES as `RailState.as_dict()`, not just the same
+    keys: emitting `None` where a real status emits `""` (and `0` for `pid`/`child`)
+    makes `int(doc["pid"])` raise for a consumer that learned the schema from the
+    normal path — the same break the JSON fix exists to remove, moved one level down.
+
+    Pinned by `tests/test_rail_detach.py::test_absent_collect_answers_json_when_json_was_asked_for`,
+    which compares key sets AND per-key types against a real `RailState`.
+    """
+    if not as_json:
+        return f"RAIL(#{pr}, absent, -, -)"
+    return json.dumps({
+        "pr": pr, "state": "absent",
+        "run_ids": [], "run_id": "-", "since": "",
+        "head": "", "pid": 0, "child": 0, "exit_code": None,
+        "merge_sha": "", "reason": "", "artifact": "", "log": "",
+    })
+
+
 @dataclass
 class _Snapshot:
     """ONE read of the artifact, plus the attempt-scoped tail of its log.
@@ -2349,7 +2376,7 @@ def main(argv: list[str] | None = None) -> int:
             # an empty state dir exited 2 (environment error) instead of 3. The
             # `>1 REPO` case still resolves, because two repos' artifacts for one PR
             # number genuinely does not name a target.
-            print(f"RAIL(#{a.pr}, absent, -, -)")
+            print(_absent_document(a.pr, a.json))
             return 3
     if not repo:
         try:
@@ -2359,7 +2386,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     st = collect(sd, repo, a.pr)
     if st is None:
-        print(f"RAIL(#{a.pr}, absent, -, -)")
+        print(_absent_document(a.pr, a.json))
         return 3
     if a.json:
         print(json.dumps(st.as_dict()))

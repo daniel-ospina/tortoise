@@ -6081,10 +6081,13 @@ surfaces:
   # ⚠️ The registration alone does NOT make the pin run on the file it guards:
   # `tools/` is a flat `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py`
   # matches no `SOURCE_PATTERNS` row, so a tool-only diff filters to
-  # `changed == []` and takes the docs-only early return (measured:
-  # `select(["tools/rail_detach.py"])` → `surfaces=[]`, this file
-  # ABSENT — no file count is restated here, on this row's own rule above). That
-  # half is closed by the `CORE_ALSO` entry beside this one in
+  # `changed == []` and takes the docs-only early return (measured BEFORE that
+  # `CORE_ALSO` entry: `select(["tools/rail_detach.py"])` → `surfaces=[]`, this file
+  # ABSENT — and no count is restated here, on this row's own rule above: the tier-1
+  # fallback set changes when tests are REGISTERED into it, never by a test file
+  # merely being added, and a restated figure restales silently (the same reason the
+  # `CORE_ALSO` entries carry "a SNAPSHOT, re-measure" notes)). That half is closed
+  # by the `CORE_ALSO` entry beside this one in
   # `tools/ci_selection.py` — the #1349/#3332/#3616 silent-drop class.
   - test_rail_detach.py
   # #10920: the runner-label coverage gate. `tools/ci_runner_labels.py` parses every

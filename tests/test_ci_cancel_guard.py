@@ -432,6 +432,29 @@ def test_a_fork_head_never_decides_our_branch(fixture):
     assert fixture.cancelled() == []
 
 
+def test_a_fork_RUN_head_never_decides_our_branch(fixture):
+    """⛔ THE RUN'S OWN `head_repository` IS THE OTHER HALF, AND IT HAD NO DETECTOR.
+
+    `decide` REFUSES a run whose `head_repository` is not ours (`foreign-head-repo`);
+    `read_run` validates only the run's `head_sha`.
+    The sibling case above pins only the PR-side row, which exercises `read_pr_map`'s
+    key ("no open PR on this branch"), a DIFFERENT arm: measured at `8399b86c6`,
+    deleting the run-side refusal left **55 cases green**, and the same fixture then
+    answered `SUPERSEDED` and issued the `POST /cancel` with **exit 0**. So the one
+    refusal standing between this guard and a cancellation on ANOTHER repository's run
+    could be reverted in silence — the exact "one behavioural fix with no other
+    detector" class `8399b86c6` fixed for `rail_detach._read_snapshot`'s guard.
+
+    Both halves are asserted: the exit code AND that nothing was posted.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD, repo="someone/tortoise-fork"))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "foreign-head-repo" in r.stdout, r.stdout
+    assert fixture.cancelled() == []
+
+
 def test_unreadable_pr_surface_is_fail_closed(fixture):
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.touch("prs.unreadable")
@@ -555,9 +578,11 @@ def test_a_capped_open_PR_list_is_fail_closed(fixture):
     is the same shape as the two arms cycle 1 pinned (`total > len(jobs)`, an absent
     `total_count`), in the same reader layer, so it gets the same treatment.
 
-    ⚠️ Reachability stated honestly: this needs 500 open PRs, and the repo has ~34
-    today. It is a regression detector, not a live bypass — which is why it is a
-    missing pin and not a defect in the code.
+    ⚠️ Reachability stated honestly: this needs 500 open PRs, and the repo is far
+    short of that today. It is a regression detector, not a live
+    bypass — which is why it is a missing pin and not a defect in the code.
+    (No figure is restated: the number moves with every batch fold, and a stale count
+    in a docstring is the one class of defect this PR keeps re-finding.)
 
     The `PR_LIMIT - 1` control matters: without it a blanket refusal (rc 2 for every
     list) would satisfy the pin and prove nothing.
