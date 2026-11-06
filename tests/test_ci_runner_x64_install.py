@@ -3759,11 +3759,13 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: sentence is about. Separate from `_REFUSAL_CITATION_SITES` because the anchor differs: these
 #: point at install/cache STEPS, not at the `test-slow` cost paragraph's opener, so one anchor cannot
 #: serve both. (The postgres-extra install row, the falkor/torch install row, the arm-1 cache-key
-#: row, and the save-arm note — the last one added with the `test-track-b` launch, whose save
-#: surface is a `setup-python cache: pip` argument rather than an `actions/cache` step of its own.)
-#: ⚠ Named by ROW, not by section: all four sit in §2 today, and a §-number would re-stale on the
+#: row, the save-arm note — added with the `test-track-b` launch, whose save surface is a
+#: `setup-python cache: pip` argument rather than an `actions/cache` step of its own — and the three
+#: cache steps #11273's correction started citing: falkor's restore-only pip step, and the HF-cache
+#: POSTs on falkor and the carve-out.)
+#: ⚠ Named by ROW, not by section: every one sits in §2 today, and a §-number would re-stale on the
 #: next section this doc gains — the same failure mode as the citations themselves.
-#: ⚠ All four numbers were re-anchored TWICE: once when #10962's merge first brought the workflow
+#: ⚠ Every number was re-anchored TWICE: once when #10962's merge first brought the workflow
 #: forward, and again after `origin/main`'s 113 further commits moved every one of them (the
 #: falkor/torch row by −59, the three `test-record-postgres`-era rows by +48…+56 — measured, not
 #: guessed). The doc ALSO names the same constructs in prose (`Install package + the postgres extra`,
@@ -3775,7 +3777,19 @@ _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("python-ci.yml:2941-2946", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
     ("python-ci.yml:4656-4658", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
     ("python-ci.yml:3222", ("cache: pip",)),
+    # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
+    # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
+    # adding it here is what puts a new citation under the pin instead of beside it. Each span is
+    # anchored on `path:` as well as `uses:`, so a bare `uses: actions/cache@v4` line (there are
+    # several in this workflow) cannot satisfy it from the wrong step.
+    ("python-ci.yml:2934-2938", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
+    ("python-ci.yml:2977-2979", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:3539-3541", ("actions/cache@v4", "path: ~/.cache/huggingface")),
 )
+
+#: The citation shape the completeness arm below reads — a line number or a line RANGE.
+_WALL_CLOCK_CITATION_RE = r"python-ci\.yml:\d+(?:-\d+)?"
+
 
 #: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
 #: DIFFERENT step since: they were ALREADY stale on `main` (the workflow has grown by thousands of
@@ -3783,6 +3797,21 @@ _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: nothing read them. The pin catches drift from ANY insert above the cited step, not from this
 #: branch's.
 _WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", "python-ci.yml:3624-3631")
+
+
+def _unregistered_wall_clock_citations(
+    text: str,
+    anchors: "tuple[tuple[str, tuple[str, ...]], ...]" = _WALL_CLOCK_CITATION_ANCHORS,
+) -> set:
+    """Every `python-ci.yml:<n>` `text` quotes that `anchors` does not pin.
+
+    The anchor loop in the pin below runs in ONE direction: it resolves each REGISTERED citation, so
+    a citation the doc GAINS is an unchecked claim and reds nothing. That is how #11273 — the PR
+    whose whole purpose was to correct stale citations — added three citations outside the register
+    and took coverage from 4 of 4 to 4 of 7 with every arm still green. This helper is the reverse
+    direction, so an unregistered citation is a red instead of a silent gap.
+    """
+    return set(re.findall(_WALL_CLOCK_CITATION_RE, text)) - {citation for citation, _ in anchors}
 
 #: The sentence such a citation must land on — the FIRST line of the `test-slow` header's cost
 #: paragraph (`# Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while`). The
@@ -3993,10 +4022,11 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
 
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
-    # This doc cites `python-ci.yml:<n>` for four cost arguments (the postgres-extra install row,
-    # the falkor/torch install row, the save-arm note, the arm-1 cache-key row — all four in §2;
-    # named by row rather than by section, see the note on `_WALL_CLOCK_CITATION_ANCHORS`). ⛔ NOT ONE
-    # of the four was correct in the commit that wrote it, so "they drifted" is the wrong diagnosis:
+    # This doc cites `python-ci.yml:<n>` for its cost arguments (the postgres-extra install row,
+    # the falkor/torch install row, the save-arm note, the arm-1 cache-key row, plus the cache steps
+    # #11273 added — all in §2; named by row rather than by section, see the note on
+    # `_WALL_CLOCK_CITATION_ANCHORS`). ⛔ NOT ONE of the original four was correct in the commit that
+    # wrote it, so "they drifted" is the wrong diagnosis:
     # in `cd2835e59` the postgres row's `:4312` was 43 lines above the install (`:4355`), the falkor
     # row's `:2734-2739` 21 above `install-cpu-torch` (`:2755`), and the arm-1 row's `:4304-4306`
     # pointed at the `test-record-postgres:` JOB HEADER, 43 lines above its cache step (`:4347`); in
@@ -4035,6 +4065,28 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
             for _, anchors in _WALL_CLOCK_CITATION_ANCHORS
             for anchor in anchors
         ), f"the stale citation `{stale}` still resolves — the non-vacuity control is matching nothing"
+
+    # ── COMPLETENESS: a citation the doc GAINS must join the register (#11273 review, P1) ──────
+    # The loop above is one-directional — it resolves each REGISTERED citation — so a
+    # `python-ci.yml:<n>` this doc newly quotes used to be an unchecked claim that reds nothing.
+    # That is not hypothetical: the PR whose whole purpose was correcting stale citations ADDED
+    # three (the falkor restore-only pip step, and the HF-cache POSTs on falkor and the carve-out)
+    # and left every arm green, while the register stayed at its old size. So the register is
+    # asserted COMPLETE over the doc, not merely consistent with it.
+    unregistered = _unregistered_wall_clock_citations(wall_clock)
+    assert not unregistered, (
+        f"ci-wall-clock.md cites {sorted(unregistered)}, which `_WALL_CLOCK_CITATION_ANCHORS` does "
+        "not pin. An unregistered citation is an unchecked claim: a later insert above the step it "
+        "names re-stales it silently and not one arm below reds. Add the span — anchored on `path:` "
+        "as well as `uses:`, never a bare `uses:` line — to the tuple, and cite that exact span in "
+        "the doc.")
+    # Non-vacuity, executable: remove ONE register entry and the arm must name exactly that
+    # citation, so a green on the real file cannot be this arm matching nothing.
+    dropped = _WALL_CLOCK_CITATION_ANCHORS[-1][0]
+    without = tuple(a for a in _WALL_CLOCK_CITATION_ANCHORS if a[0] != dropped)
+    assert _unregistered_wall_clock_citations(wall_clock, without) == {dropped}, (
+        f"the completeness arm does not see `{dropped}` once its register entry is removed — it "
+        "would stay green on an unregistered citation, which is the hole it exists to close")
 
 
 # ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
