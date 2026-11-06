@@ -9406,7 +9406,12 @@ def test_gate_drops_total_is_a_count_or_a_refusal(value, tmp_path, capsys):
     # …and the shipped 0 still scores, so the guard refuses the edited count rather
     # than the whole record.
     path.write_text(text)
-    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
 
 
 @pytest.mark.parametrize("value", ["[]", '{"a": 1}', "[1, 2]"])
@@ -9441,7 +9446,12 @@ def test_a_before_arm_switch_value_of_another_type_is_refused(value, tmp_path, c
 
     # …and the shipped `null` still scores.
     path.write_text(text)
-    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
 
 
 # ── the drop census, and a bar that binds nothing (#10610 review at `6e28a20e1f`) ─────────────
@@ -9489,8 +9499,10 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
     assert "drops_total" in capsys.readouterr().err
 
     # ARM 2 — the opposite direction, which only the equality check can refuse: one
-    # name in the census, zero claimed in the total.
-    record["value_gate_drops"] = {"the one dropped object": None}
+    # REAL Object in the census, zero claimed in the total. The name must be one of
+    # this run's `object_names`, or the census-identity arm added at `05761cf29`
+    # refuses it first and this arm would no longer be about the equality check.
+    record["value_gate_drops"] = {record["object_names"][0]: "value.identifier_only.path"}
     record["drops_total"] = 0
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused2:
@@ -9502,7 +9514,12 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
     # …and the shipped pair still scores, so the guard refuses an edited count
     # rather than the field.
     path.write_text(text)
-    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
 
 
 def test_a_drop_census_that_is_not_an_object_is_refused(tmp_path, capsys):
@@ -9526,7 +9543,12 @@ def test_a_drop_census_that_is_not_an_object_is_refused(tmp_path, capsys):
     assert "value_gate_drops" in err, err
 
     path.write_text(text)
-    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
 
 
 def _prereg_with_threshold(tmp_path: Path, bar: str, new: str) -> Path:
@@ -9584,4 +9606,114 @@ def test_a_frozen_bar_that_binds_nothing_is_refused(bar, new, tmp_path, capsys):
     # …and the SHIPPED bar for that same row still scores, so the rule refuses the
     # inert value rather than the row.
     shipped = _bundle(tmp_path / f"shipped-{bar}")
-    assert scores_probe.score(shipped)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value `capstone_measure.outcome()` can produce satisfies
+    # `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would only prove
+    # `score()` did not raise — the over-block half of this pin would be no pin
+    # at all (#10610 review at `05761cf29`, P3; same class fixed at `bde94f89d`).
+    assert scores_probe.score(shipped)["e1"]["outcome"] == "REFUSED"
+
+
+def test_a_forged_drop_census_cannot_size_its_own_ceiling(tmp_path, capsys):
+    """P1: the census must not size the bound it is checked against.
+
+    The first cut of the census fix passed `ceiling=len(gate_census)`: the census is
+    ATTACKER-SIZED, so that ceiling bound nothing while DROPPING the population bound
+    the previous head had. Measured at that head, with a matching `drops_total`,
+    **62 and 100 fabricated keys were ACCEPTED** and the record emitted
+    `drops_total: 100` beside `objects: 61` — a numerator 1.64x its own population,
+    which is the class `_count(ceiling=…)` exists for (E1b's `real_facts=100000`
+    beside `bar=90 of 90` was a finding earlier in this PR).
+
+    Four checks now hold the census to the record's OTHER statements, so it can no
+    longer vouch for itself: a census larger than `objects`; a key that is not one of
+    the run's `object_names`; a non-string `rule_id`; and
+    `drops_among_bare_definite` — the record's second statement of the same drops,
+    written unconditionally by the producer and read by nothing before this.
+    """
+    repo = _bundle(tmp_path / "forged")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+
+    # ARM 1 — the P1 itself: a census big enough to carry the bound past the population.
+    for n in (62, 100):
+        record["value_gate_drops"] = {f"forged-{i}": "r" for i in range(n)}
+        record["drops_total"] = n
+        path.write_text(json.dumps(record))
+        with pytest.raises(SystemExit) as refused:
+            scores_probe.score(repo)
+        assert refused.value.code == 2, refused.value
+        err = capsys.readouterr().err
+        assert "cannot be larger than the population" in err, err
+
+    # ARM 2 — a census that FITS but names an Object this run never wrote.
+    record["value_gate_drops"] = {"not an object of this run": "r"}
+    record["drops_total"] = 1
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "not one of this run's `object_names`" in err, err
+
+    # ARM 3 — a real name, a value the producer cannot write.
+    real = record["object_names"][0]
+    record["value_gate_drops"] = {real: {"nested": 1}}
+    record["drops_total"] = 1
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "the verdict's `rule_id` string" in capsys.readouterr().err
+
+    # ARM 4 — the record's SECOND statement of the same drops, contradicted: a
+    # bare-definite Object is dropped while `drops_among_bare_definite` says none was.
+    bare = next(n for n in record["object_names"]
+                if scores_probe._is_bare_definite(n))
+    record["value_gate_drops"] = {bare: "r"}
+    record["drops_total"] = 1
+    record["drops_among_bare_definite"] = []
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "drops_among_bare_definite" in capsys.readouterr().err
+
+    # ARM 5 — OVER-BLOCK: a legitimate drop of one real Object, with the second
+    # statement agreeing, must SCORE. Without this the arms above are satisfied by
+    # refusing every non-empty census.
+    record["value_gate_drops"] = {real: "value.identifier_only.path"}
+    record["drops_total"] = 1
+    record["drops_among_bare_definite"] = ([real]
+                                           if scores_probe._is_bare_definite(real)
+                                           else [])
+    path.write_text(json.dumps(record))
+    scored = scores_probe.score(repo)
+    assert scored["gate_drops"]["drops_total"] == 1, scored["gate_drops"]
+
+    # …and the shipped record still scores, byte-identically (checked by the
+    # file's reproduction pin, which passes independently).
+    path.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] == "REFUSED"
+
+
+def test_a_MAXIMALLY_strict_E1_bar_is_accepted(tmp_path):
+    """P3: `0 < m < 1` refused `0.0`, a bar that binds as hard as a bar can.
+
+    The rule's own proof covers `m >= 1` (satisfied by the null result) and says
+    nothing about `m == 0`: `after_share <= 0.0 x before_share` is satisfied only by a
+    zero after-share, so it fails every non-zero reading. Measured at the pre-fix
+    head — `0.0` REFUSED while the equally strict sibling E2b `<= 0` was ACCEPTED, an
+    asymmetry between two rules that must agree at the strict end. The shipped 0.50
+    sits inside the window either way, so this arm is over-block only.
+    """
+    repo = _prereg_with_threshold(tmp_path, "E1",
+                                  "`after_share <= 0.0 × before_share`")
+    # No exit: only the AFTER share is compared, and the rule must not refuse the bar.
+    record = scores_probe.score(repo)
+    assert record["e1"]["outcome"] in ("FAIL", "REFUSED"), record["e1"]["outcome"]
+
+    # …and the strict-but-legal sibling on E2b is accepted for the same reason.
+    repo2 = _prereg_with_threshold(tmp_path, "E2b", "`<= 0`")
+    assert scores_probe.score(repo2)["e1"]["outcome"] == "REFUSED"

@@ -834,13 +834,22 @@ def frozen_denominators(repo: Path) -> dict:
             "more accepts the worst possible reading (every unit fused) and a "
             "negative one accepts none; it binds iff `0 <= t < 1`")
     multiplier = bars["E1"]["multiplier"]
-    if not 0 < multiplier < 1:
+    # ⛔ THE BOUNDARY AT ZERO IS INCLUSIVE (#10610 review at `05761cf29`, P3). The
+    # first cut of this rule said `0 < m < 1`, justified by the null result — right
+    # about `m >= 1`, WRONG about `m == 0`: `after_share <= 0.0 x before_share` is
+    # satisfied only by a zero after-share, so it fails every non-zero reading and
+    # binds as hard as a bar can. Measured at the pre-fix head: `0.0` REFUSED while
+    # the equally strict sibling E2b `<= 0` was ACCEPTED — an asymmetry between two
+    # rules that must agree at the strict end. Same shape as E2b's now; the shipped
+    # 0.50 is inside it either way, so this is over-block only.
+    if not 0 <= multiplier < 1:
         raise _refuse(
             f"{PREREG}'s criteria[E1] bar is 'after_share <= {multiplier} x "
             "before_share' — E1 registers a REDUCTION, and at a multiplier of "
             "1.0 or more the criterion is satisfied by the null result (an after "
             "arm that improved nothing), so it is not the reduction the row "
-            "claims to measure; it binds iff `0 < m < 1`")
+            "claims to measure; it binds iff `0 <= m < 1` (0.0 is MAXIMALLY "
+            "strict — only a zero after-share passes it)")
     return {
         "e1_objects": floors["e1_objects"],
         "e1_min_before_share": floors["e1_min_before_share"],
@@ -1914,17 +1923,78 @@ def score(repo: Path = _ROOT) -> dict:
     # `{}` is legitimate here (zero drops is the shipped reading) — unlike
     # `with_anchor`, where an empty block means the run never wrote its counter —
     # so the check is `len()`, not emptiness.
+    #
+    # ⛔ THE CENSUS IS NOT THE POPULATION (#10610 review at `05761cf29`, P1). The
+    # first cut passed `ceiling=len(gate_census)` — and the census is
+    # ATTACKER-SIZED, so that ceiling bound nothing while DROPPING the population
+    # bound the previous head had. Measured at that head: 62 and 100 fabricated keys
+    # with a matching `drops_total` were ACCEPTED, emitting `drops_total: 100` beside
+    # `objects: 61` — a numerator 1.64x its own population, exactly the class
+    # `_count(ceiling=...)` exists for (E1b's `real_facts=100000` beside
+    # `bar=90 of 90` was a finding earlier in this same PR).
+    #
+    # So the ceiling is the RUN'S population again, and four things are now checked
+    # against the record's OTHER statements rather than against the census's own
+    # size — nothing here lets the census vouch for itself:
+    #   1. it holds no more names than the record's own `objects`;
+    #   2. every key IS one of this run's `object_names` (a drop of something the run
+    #      never wrote is not a drop);
+    #   3. every value is a STRING — the producer writes
+    #      `value_gate.mechanical_verdict(name)["rule_id"]` (`e1_gate_drops.py:73`);
+    #   4. `drops_among_bare_definite` — the record's SECOND statement of the same
+    #      drops, written unconditionally at `e1_gate_drops.py:85` as
+    #      `[n for n in bare if n in drops]` and read by NOTHING until now — is
+    #      reconciled against the census and the names, so an internally
+    #      contradictory record (a bare-definite name dropped, with an empty
+    #      `drops_among_bare_definite`) cannot pass on its total alone.
     gate_census = _object_block(str(EVIDENCE / GATE_DROPS), "value_gate_drops",
                                gate_record.get("value_gate_drops"))
+    if len(gate_census) > gate_objects:
+        raise _refuse(
+            f"{EVIDENCE / GATE_DROPS} carries {len(gate_census)} "
+            f"`value_gate_drops` names beside objects={gate_objects} — a drop is "
+            "an Object the run WROTE, so the census cannot be larger than the "
+            "population it is drawn from")
+    unknown = sorted(set(gate_census) - set(gate_names))
+    if unknown:
+        raise _refuse(
+            f"{EVIDENCE / GATE_DROPS} records a drop for {unknown[0]!r}, which is "
+            "not one of this run's `object_names` — a drop of an Object the run "
+            "never wrote is a forged census, not a measurement")
+    for dropped, rule_id in gate_census.items():
+        if not isinstance(rule_id, str):
+            raise _refuse(
+                f"{EVIDENCE / GATE_DROPS} records the drop of {dropped!r} with "
+                f"{rule_id!r} — the producer writes the verdict's `rule_id` "
+                "string, so anything else is not this reader's shape")
     gate_drops_total = _count(f"{EVIDENCE / GATE_DROPS}", "drops_total",
                              gate_record.get("drops_total"),
-                             ceiling=len(gate_census))
+                             ceiling=gate_objects)
     if gate_drops_total != len(gate_census):
         raise _refuse(
             f"{EVIDENCE / GATE_DROPS} states drops_total={gate_drops_total} but "
             f"its own `value_gate_drops` census holds {len(gate_census)} — "
             "the count IS the names it dropped, so a total that disagrees with "
             "its own census is a number edited away from the run")
+    # The record's SECOND statement of the same drops, reconciled. `[]` is the
+    # legitimate shipped reading — the producer writes the field unconditionally,
+    # so an ABSENT one is an edit rather than another producer's older shape.
+    among_bare = gate_record.get("drops_among_bare_definite")
+    if not isinstance(among_bare, list) or any(
+            not isinstance(member, str) for member in among_bare):
+        raise _refuse(
+            f"{EVIDENCE / GATE_DROPS} carries no `drops_among_bare_definite` "
+            "list — the producer writes it on every run as the bare-definite "
+            "subset of the drops, so a record without it cannot be checked "
+            "against its own census")
+    expected_bare_drops = [n for n in gate_names
+                           if _is_bare_definite(n) and n in gate_census]
+    if among_bare != expected_bare_drops:
+        raise _refuse(
+            f"{EVIDENCE / GATE_DROPS} reports {len(among_bare)} "
+            "`drops_among_bare_definite` names but its own census and "
+            f"`object_names` give {len(expected_bare_drops)} — two statements of "
+            "one run's drops disagree, so neither can be trusted")
     return {
         "schema": "e1-e2-scores/1",
         "corpus_sha256": floors["fixtures_hash"],
