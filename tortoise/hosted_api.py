@@ -3122,22 +3122,100 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     The original exception is re-raised for the server's logging/telemetry
     AFTER the response is prepared."""
     import logging as _logging
+
+    # #11092: a peer hanging up is not a server error. It is also the storm's
+    # fuel: a client hanging up MID-REQUEST (a closed tab, a dropped fetch, a
+    # probe abandoned mid-flight) used to arrive here as "unhandled", get logged
+    # at ERROR and be captured as a Sentry event — and building that event
+    # re-reads the source file of every frame on the event loop (see the sentry
+    # init note). An aborted RESPONSE never reaches a handler at all (uvicorn's
+    # `send` returns early once the client is gone), so the mid-request hang-up
+    # is what fed the storm. Under it the loop never got back to serving, which
+    # is the outage: loop_age_ms 43 444 ms (~43 s), every request hung, machine
+    # exited 1.
+    #
+    # So: log it low and do not capture it here. The response SHAPE is unchanged
+    # (the 500 below) on purpose — review round 1 (P3) measured that a 204 for a
+    # request whose body never arrived would tell a slow-but-alive caller
+    # "succeeded" for a request that did not complete, while the 500 tells it the
+    # truth. Skipping the ERROR log and the capture is what fixes the storm; the
+    # status code was never part of the problem.
+    #
+    # ⛔ This does NOT make a disconnect free on its own: `ServerErrorMiddleware`
+    # re-raises after this handler returns, and the Sentry Starlette integration
+    # captures the re-raised exception through `capture_event`, bypassing this
+    # module's helpers. `ignore_errors` in `tortoise/sentry.py::init` is the
+    # guard that stops THAT path; uvicorn still logs its own `Exception in ASGI
+    # application` ERROR record, with traceback (round 1, P2 — not fixable here).
+    # ⛔ CLASSIFICATION CANNOT BREAK THE 500 (review round 3, P3). This import and
+    # call used to sit outside any `try`, in an exception HANDLER — an error here
+    # would have escaped the handler and produced no response at all, instead of
+    # the guaranteed 500 below. Failing to `False` is the safe direction: a real
+    # error still gets logged at ERROR and captured, which is the pre-#11092 shape.
+    try:
+        from tortoise.sentry import is_benign_exception as _is_benign
+
+        # `inbound_request=True` — this handler runs while serving an inbound
+        # request. ⛔ That establishes the REQUEST is inbound, not which socket
+        # reset (review round 9, P2 — measured): starlette/uvicorn raise neither
+        # of the direction-ambiguous classes, a caller hang-up arrives as
+        # `ClientDisconnect`, and an aborted send reaches no handler at all. An
+        # exact-named reset here is an app/upstream failure, and calling it benign
+        # costs the ERROR record (this DEBUG write is dropped in the hosted
+        # deployment) and nothing else — the tags are dropped either way and the
+        # delivered event still carries the `request` interface; the event itself
+        # goes out via the Starlette re-raise. Accepted for round 4's reason; the
+        # statement and the alternative are in `REQUEST_LAYER_DISCONNECT_NAMES`'
+        # note.
+        _benign = _is_benign(exc, inbound_request=True)
+    except Exception:  # noqa: BLE001, RUF100 — classification never breaks the 500 response
+        _benign = False
     # P2 (code review): sanitize the path before logging — Starlette's
     # URL.path is percent-decoded, so an unauthenticated request to
     # /foo%0d%0a[forged-line] could write CRLF-decoded control chars into
     # the log (log-line forgery for monitoring/audit pipelines).
     _path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
-    _logging.getLogger("tortoise.api").exception(
-        "unhandled exception: %s %s", request.method, _path)
-    # #2444: surface unhandled hosted errors to Sentry when enabled (SENTRY_DSN).
-    # The error is also the live intake signal for the inbound channel — the
-    # forwarder dedupes by issue group, so repeated signatures collapse.
-    try:
-        from tortoise.sentry import capture_exception as _sentry_capture
+    if _benign:
+        # Below ERROR — the ERROR level is what feeds the Sentry logging
+        # integration (`LoggingIntegration.event_level` defaults to ERROR), so a
+        # sub-ERROR record builds no event — and no capture. Deliberately not a
+        # bare `if ...: return` with a new response: the 500 shape below is kept
+        # as-is.
+        #
+        # ⚠️ MEASURED, and it corrects an earlier claim here (review round 7, P2):
+        # at DEBUG this line is NOT emitted in the hosted deployment. uvicorn's
+        # `LOGGING_CONFIG` configures only the `uvicorn*` loggers and leaves root
+        # at WARNING, `Dockerfile.hosted:153` passes no `--log-level`, and nothing
+        # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
+        # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
+        # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
+        # per-abort signal is uvicorn's own `Exception in ASGI application` ERROR
+        # record with traceback, from `ServerErrorMiddleware`'s unconditional
+        # re-raise (see the ⛔ block above in this method) — not this line.
+        #
+        # Why not WARNING instead? Because uvicorn already emits an ERROR with the
+        # full traceback for every abort, so raising ours would ADD a record per
+        # abort to the very storm this change exists to make cheap, while adding
+        # only the request line (method + path) — which uvicorn's traceback does
+        # not carry, so it is not nothing, just not worth a record per abort. If
+        # that attribution IS wanted in production, the fix is a uvicorn
+        # `--log-config`/dictConfig arm that sets `tortoise.*` to DEBUG and pins
+        # that config — a deployment change, recorded rather than taken silently
+        # here.
+        _logging.getLogger("tortoise.api").debug(
+            "client disconnected: %s %s", request.method, _path)
+    else:
+        _logging.getLogger("tortoise.api").exception(
+            "unhandled exception: %s %s", request.method, _path)
+        # #2444: surface unhandled hosted errors to Sentry when enabled (SENTRY_DSN).
+        # The error is also the live intake signal for the inbound channel — the
+        # forwarder dedupes by issue group, so repeated signatures collapse.
+        try:
+            from tortoise.sentry import capture_exception as _sentry_capture
 
-        _sentry_capture(exc, tags={"method": request.method, "path": _path})
-    except Exception:  # noqa: BLE001, RUF100 — capture never breaks the 500 response
-        pass
+            _sentry_capture(exc, tags={"method": request.method, "path": _path})
+        except Exception:  # noqa: BLE001, RUF100 — capture never breaks the 500 response
+            pass
     origin = request.headers.get("origin")
     acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
     return JSONResponse(

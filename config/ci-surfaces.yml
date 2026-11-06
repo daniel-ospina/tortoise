@@ -103,6 +103,7 @@ slow_shards: 5
 
 surfaces:
   api:
+  - test_11092_sentry_loop_stall.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
   # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
@@ -603,8 +604,18 @@ surfaces:
   # `TORTOISE_RECORD_DSN` resolves in this process, publishes the value's 8-hex
   # fingerprint (never the value) and the record counters, and degrades
   # `status` only for a set-but-unusable DSN. The POSITIVE pair
-  # (`record_writes_applied` / `record_last_write_at`) is pinned here too, so a
-  # rename that leaves the docstring and runbook false reds this suite. Same dual
+  # (`record_writes_applied` / `record_last_write_at`) is pinned here against
+  # `metrics()`'s own key names and against `_record_health`'s docstring, so a
+  # rename that leaves the docstring false reds this suite. ⚠️ The RUNBOOK half of
+  # that claim is deliberately NOT here: a runbook-only diff selects no surface and
+  # runs `tier1` only, so the field-row pin lives in `test_deploy_workflow.py`
+  # (tier1), where that diff actually runs it — and it DERIVES its names from
+  # `metrics()`'s record keys for the set it DEMANDS rather than repeating these
+  # literals as that set, so a coherent rename (code + docstring + literals) reds it while the runbook is
+  # untouched. ⚠️ The pair is still hand-spelled at all three roles the pin's own docstring enumerates — the
+  # `<= record_keys` precondition, the non-vacuity mutation's search literals and its expectation, and the
+  # survivor check — because naming it IS the #9548 claim; what is derived is the set a rename must move.
+  # Same dual
   # registration as the guards
   # above and for the same reason: the file it guards is `tortoise/hosted_api.py`,
   # which selects the `api` surface — and the arming state is invisible from
@@ -2661,6 +2672,13 @@ surfaces:
   # reason: `cache_projection.py` is the subject and this is the arm that pins
   # the new rule, so a change to it runs here rather than going silently green.
   - test_10853_session_source_prose.py
+  # #11070: the pre-#10852 `:Source` prose REPAIR
+  # (`tortoise/session_source_prose_migration.py`) and the census predicate it
+  # has to reach zero with. `session_source_prose_migration.py` matches no named
+  # SOURCE_PATTERN, so it falls through to `core` — registering the guard on the
+  # same surface as the #10853 narrowing above is what makes the repair's own
+  # suite run on a change to the module alone, instead of going silently green.
+  - test_11070_source_prose_repair.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -3679,8 +3697,14 @@ surfaces:
   # exit-code contract). Registered `core` with the paired CORE_ALSO entry in
   # `tools/ci_selection.py` (the `tools/lane_stash.py` pattern): a tools-only
   # diff must select the surface that carries this pin. Hermetic: the pure
-  # comparison core + CLI contract, no stores, no network;
-  # `TORTOISE_TEST_CARVE_OUT=1` verified green.
+  # comparison core + CLI contract; `TORTOISE_TEST_CARVE_OUT=1` verified green.
+  # ⚠️ NOT hermetic since #11112/#11113: the presence check, the write-freedom
+  # pins and the LOST-store arm need a REAL `GRAPH.LIST` (and a real RDB) to be
+  # measured against, so FOUR helpers here build throwaway EMBEDDED redislite
+  # stores (no server, no network — `DELIBERATE_EMBEDDED_LANE` in
+  # `tests/test_uri_env_mutations_declared.py`, whose declaration enumerates the
+  # same four; keep the two counts in step).
+  # The pure comparison core and the CLI contract remain store-free.
   - test_10017_turn_parity_census.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
   # #8051: `refs/stash` lives in the COMMON git dir, so a lane's bare
@@ -3771,6 +3795,16 @@ surfaces:
   # guard is dropped on every hosted_api.py-only diff.
   - test_health_build_identity_10447.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
+  # #11092 (review round 2, P1): the ONLY non-vacuous guard for the Sentry
+  # disconnect fix. Dual-registered for the reason the hosted_api.py guards above
+  # are: the handler half lives in `tortoise/hosted_api.py` (an exact `api`
+  # SOURCE_PATTERN that REPLACES the `core` fallback → the `api` row above), while
+  # the `ignore_errors` / `include_source_context` / `is_benign_exception` half
+  # lives in `tortoise/sentry.py`, which selects `core`. Without this row the fix
+  # round 1 asked for is pinned by a test that NO diff of either file runs —
+  # `tests/test_sentry.py` carries none of those three, and it sits in the frozen
+  # `_SELF_GUARD_DEBT` so a `sentry.py`-only diff does not run it either.
+  - test_11092_sentry_loop_stall.py
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_context_confinement.py  # #10612: one fresh contextvars.Context per invocation (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
@@ -10385,9 +10419,9 @@ durations:
   test_9206_apply_first_lane.py: 0.9  # #9206: Local embedded-lane reading 16.2 s for the 16 tests on a box with the embedder warm: 11 build their own journal-backed SDK and drive REAL doors (capture_session alone issues a full capture + journal), the other 5 are pure unit/AST pins with no SDK. ⚠️ Do NOT "refresh" this row from a cold box: those same 16 tests measured 138–151 s here, ~123 s of it the FIRST `create_point`'s once-per-process embedding-model load blocked in huggingface_hub's HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` row above discloses at 134 s), not the battery. Declared above the quiet reading so a cold leg cannot under-pack — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 10.4
   test_graph_census_7949.py: 11.0  # #8444: Measured this turn on the private docker lane: 19 tests, `testcase/@time` sum 9.74 s (max 3.79 s), whole-file wall 10.0 s; 15 of the 19 take the `captured` fixture and drive a real `capture_session` on the embedded lane, none needs a provider key. Weight 10.0 = the wall reading, the same rule the neighbouring #8501 row states; refresh on the first post-merge sweep — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 11.1
   test_9206_derived_recompute_lane.py: 0.1  # #9206: (#3400 trap), same class as the row above. Local embedded-lane reading 2.9 s for 5 tests (the resolver's adopt-on-touch plus the journal-bytes assertion); declared above the reading so a cold leg cannot under-pack — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
+  test_10017_turn_parity_census.py: 25.0  # carried forward (not a full-file CI measurement) — #10017 (#3400 trap): a file ADDED BY A PR has no CI junit measurement, so the row is declared from a LOCAL reading. Measured at `30ede76cb` (2026-10-26), embedded carve-out (`TORTOISE_TEST_CARVE_OUT=1`): 47 tests (45 at the two review heads, 39 before the review rounds, 36 before the P3 fix round, 26 before the first), pytest-reported 2.61–2.91 s and whole-file wall 3.14–3.39 s at that sha (the earlier 39-test head read 3.11–3.27 s reported over a 4.64–4.78 s wall). ⛔ That whole reading is HISTORICAL and the count is no longer the file's: `--collect-only -q` at `f8068e09d` collects **125** (**119** `def test_`), because `#10153`/`#10483`/`#10717`/`#10627` all grew it after this note was written — an earlier version of this clause said "47 tests … at THIS head", the currency form the sha-binding rule above forbids and which rounds 3–5 removed from four neighbouring rows. Re-derive both the count and the wall at your own head; ⛔ never carry these forward. (pure comparison core + the paged-read/exit-code contract + the record leg through a stubbed connection; the live graph leg is still pinned through a fake `g`, but since #11112/#11113 four helpers here also build throwaway EMBEDDED redislite stores to measure `GRAPH.LIST` presence and bind write-freedom — no server, no network). A CONTENDED re-measure of the same file read 3.99–8.35 s reported / 6.43–11.66 s wall, so the reading is host-sensitive: the weight is 25.0, ABOVE the highest wall re-measured at the #11113 post-rebase head (`17.06 s`, `17.71 s`, `18.59 s` over three consecutive runs of `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_10017_turn_parity_census.py -q` on an otherwise idle box), and the refresh re-derives it from the first post-merge sweep — a weight is a shard-layout input, so the number is the refresher's to write, not this branch's to hand-pick (#2818/#9003). — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 25.0
   test_8501_capture_path_anchor.py: 5.6  # #8501: Local embedded-lane reading: 10 tests, `testcase/@time` sum ~7 s on a warm box (per-test bodies 0.50-1.00 s: five drive a REAL `capture_session` + journal, three run a full `rebuild_all()`); whole-file wall 10-14 s. ⚠️ Do NOT "refresh" this row from a cold box: the same file measured 191.6 s here, 185.5 s of it the FIRST test paying the once-per-process embedding-model load in huggingface_hub HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` and `test_9206_apply_first_lane.py` rows above disclose), which is paid once per leg and is not what this weight packs. Required on BOTH halves: the `core` surface row alone is classification, not a durations weight (#4348) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 95.3
   test_9451_pre_existing_stub_ingest_instant.py: 3.7  # #9451: Local embedded-lane reading: 5 tests, `testcase/@time` sum ~4.5 s on a warm box (each drives a REAL `capture_session`/`create_point` + journal; three of them run a full `rebuild_all()` and two a record-by-record `rebuild()`); whole-file wall 6-8 s. ⚠️ Do NOT "refresh" this row from a cold box: the FIRST test pays the once-per-process embedding-model load in huggingface_hub HTTP backoff on a box with no HF egress (the #8501 / `test_9206_apply_first_lane.py` rows above disclose the same artefact), which is paid once per leg and is not what this weight packs. Required on BOTH halves: the `core` surface row alone is classification, not a durations weight (#4348) — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.8
-  test_10017_turn_parity_census.py: 5.0  # carried forward (not a full-file CI measurement) — #10017 (#3400 trap): a file ADDED BY A PR has no CI junit measurement, so the row is declared from a LOCAL reading. Measured at `30ede76cb` (2026-10-26), embedded carve-out (`TORTOISE_TEST_CARVE_OUT=1`): 47 tests (45 at the two review heads, 39 before the review rounds, 36 before the P3 fix round, 26 before the first), pytest-reported 2.61–2.91 s and whole-file wall 3.14–3.39 s at that sha (the earlier 39-test head read 3.11–3.27 s reported over a 4.64–4.78 s wall). ⛔ That whole reading is HISTORICAL and the count is no longer the file's: `--collect-only -q` at `f8068e09d` collects **125** (**119** `def test_`), because `#10153`/`#10483`/`#10717`/`#10627` all grew it after this note was written — an earlier version of this clause said "47 tests … at THIS head", the currency form the sha-binding rule above forbids and which rounds 3–5 removed from four neighbouring rows. Re-derive both the count and the wall at your own head; ⛔ never carry these forward. (pure comparison core + the paged-read/exit-code contract + the record leg through a stubbed connection; no stores, no network — the live graph leg is pinned through a fake `g`, not a container). A CONTENDED re-measure of the same file read 3.99–8.35 s reported / 6.43–11.66 s wall, so the reading is host-sensitive: the weight stays at 5.0 (above the quiet wall reading so a loaded leg cannot under-pack, the same rule the #8444 row above states) and the refresh re-derives it from the first post-merge sweep — a weight is a shard-layout input, so the number is the refresher's to write, not this branch's to hand-pick (#2818/#9003). — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 5.0
   test_audit_fallback_home_isolation.py: 1.9  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.6
   test_ax_write_eval.py: 5.0  # carried forward (not a full-file CI measurement) — #9675 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so an absent row would pack it at the flat 2.0s default. Local readings on this box: `testcase/@time` sum ~2.9 s, whole-file wall ~2.5-3.5 s over several runs (the suite's own test count is deliberately not restated here — it drifts with every pin added and this comment is not the place that would notice). Nothing cold-box inflates it — no DB, no embedding model, no network: it reads the committed gold/`graph.json`/`score.json` files and the pack registry's manifests (the one heavy import is the pack registry, paid once per session). Declared at 5.0, above the highest observed wall, so a loaded leg cannot under-pack. Required on BOTH halves: the `core` surface row above is classification, not a durations weight (#4348). Refresh from the first post-merge run that includes it. — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (1.0s) is a LOWER bound; kept 5.0
   test_9208_change_feed_degraded.py: 4.1  # see the capture note at the end. Without the row the file is in the fast pool, so it would pack at the flat 2.0s default AND `duration_coverage_issues()` sat at 90.02% — one peer lane adding a file tips it under the 90% floor — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.2 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (4.0s) is a LOWER bound; kept 4.1
@@ -10564,6 +10598,10 @@ durations:
   # cannot have measured it — the flat `DEFAULT_FAST_WEIGHT` is the only honest
   # row. `tools/ci_timing.py --refresh-durations` replaces it.
   test_10853_session_source_prose.py: 2.0  # unmeasured — new in #10853
+  # #11070: new in this PR, same reason as the row above — unmeasured, and the
+  # flat `DEFAULT_FAST_WEIGHT` is the only honest row until the refresher can
+  # sample it.
+  test_11070_source_prose_repair.py: 2.0  # unmeasured — new in #11070
   # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
   # per-test graphs; two of the functions are parametrised, so the collected
   # count is larger than the function count — deliberately not restated here,

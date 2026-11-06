@@ -10850,7 +10850,8 @@ class FalkorProjection(
                  graph_name: str = "tortoise",
                  ssl: bool = False,
                  allow_nonstandard_path: bool = False,
-                 skip_health_check: bool = False):
+                 skip_health_check: bool = False,
+                 ensure_indexes: bool = True):
 
         # Epic #1647 (D-1=A): capture whether the caller passed an explicit
         # path BEFORE the no-arg fallback below resolves it — the redirect
@@ -11273,7 +11274,32 @@ class FalkorProjection(
         # Its `None` default is set ABOVE, before the health check — the
         # recovery replay reads it through `required_embedding_dim`, so it must
         # exist first (#5119).
-        self._ensure_indexes()
+        #
+        # ``ensure_indexes=False`` is for a caller that must address the store
+        # WITHOUT writing to it (#11112: the #10017 purge census, which
+        # certifies a store it must not mutate). The DDL this call issues is a
+        # set of `GRAPH.QUERY` statements, and on a graph that does not exist
+        # yet the FIRST ONE CREATES IT — so a read-only instrument could not
+        # avoid minting the target it was asked to look at. Skipping the schema
+        # leaves `_vector_index_api` at its documented `None` and the index
+        # inventory at "not measured"; both are read-path-neutral (the census
+        # issues no vector query), and the schema is recreated by the next
+        # ordinary construction.
+        #
+        # ⛔ THIS FLAG ALONE IS NOT WRITE-FREEDOM — it skips only the schema
+        # DDL. The open-time health probe (`_auto_health_recover`, above) is a
+        # `GRAPH.QUERY` too and creates a missing graph just the same: measured
+        # with `ensure_indexes=False` and `skip_health_check` left at its
+        # default, binding a graph the store did not hold ADDED it to
+        # `GRAPH.LIST` (#11113 review P2). Write-freedom is the PAIR —
+        # `skip_health_check=True, ensure_indexes=False` — which is what the
+        # census passes; pinned by
+        # `test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone`.
+        # Without this paragraph the comment sends the next fixer (e.g.
+        # `tools/purge_legacy_turns.py`'s default-binding sites, #11112
+        # residual 2) after a knob that does not deliver on its own.
+        if ensure_indexes:
+            self._ensure_indexes()
 
         # Lifecycle hardening (plan Task 4 + issue #1005):
         # - _closed flag for idempotent close()
@@ -11884,7 +11910,9 @@ class FalkorProjection(
                 result["corrupt_lines"], result.get("reason"))
 
     @classmethod
-    def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037
+    def from_uri(cls, uri: str, graph_name: str | None = None, *,
+                 skip_health_check: bool = False,
+                 ensure_indexes: bool = True) -> "FalkorProjection":  # noqa: UP037
         """Parse a connection URI into a projection.
 
         Supported schemes (all treated as docker://):
@@ -11923,7 +11951,9 @@ class FalkorProjection(
                    username=endpoint.username,
                    password=endpoint.password,
                    graph_name=graph_name,
-                   ssl=endpoint.ssl)
+                   ssl=endpoint.ssl,
+                   skip_health_check=skip_health_check,
+                   ensure_indexes=ensure_indexes)
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
@@ -13002,6 +13032,20 @@ class FalkorProjection(
         # wrong engine (there is no #7951 re-assert in this engine).
         from tortoise.session_source_migration import reconcile_after_replay
         reconcile_after_replay(self, engine="rebuild")
+        # #11070: the same class, one node-property over. A pre-#10852 capture's
+        # `SourceCreated` record carries the transcript's first utterance in
+        # `summary`/`_searchText`, so this replay re-mints the §9.1/D1 prose that
+        # the repair exists to remove. Trailing sweep, after every pass, exactly
+        # like the identity reconciler above — and for the same reason: a
+        # graph-only repair is undone by the next wipe (#2296). Never raises.
+        # ⛔ With no record handle it is PLAN-ONLY: a replay engine has none, and
+        # the clear arm is destructive AND not self-correcting (its output is no
+        # longer a candidate), so clearing here would un-index the population
+        # irreversibly and report census==0 — a false PASS. It logs the count; the
+        # CLI run, which has the record, is what heals it (#11070 review, P1).
+        from tortoise import session_source_prose_migration as sspm
+
+        sspm.reconcile_after_replay(self, engine="rebuild")
         # #4653: re-establish the watermark captured above. DEGRADES, never
         # raises — this runs after the wipe (#2943 "no loss without proof").
         try:
@@ -17724,6 +17768,18 @@ class FalkorProjection(
         # `reconcile_after_replay`.
         from tortoise.session_source_migration import reconcile_after_replay
         reconcile_after_replay(self, engine="rebuild_all")
+        # #11070: rebuild-DETECTED, not repaired. The pre-#10852 `SourceCreated`
+        # record still holds the utterance, so THIS replay re-mints the prose
+        # pair — and with no record handle the hook is PLAN-ONLY (writes
+        # nothing), so a rebuild does not restore the repair. Re-run the CLI after
+        # any rebuild with `--graph <this cache graph>` AND `--record-dsn`
+        # (`session_source_prose_migration` docstring: REBUILD DETECTION, NOT
+        # REBUILD REPAIR) — without `--graph` the CLI addresses the URI's default
+        # graph, which on a hosted box is not the tenant graph this replay wrote.
+        # Never raises.
+        from tortoise import session_source_prose_migration as sspm
+
+        sspm.reconcile_after_replay(self, engine="rebuild_all")
 
         # ── #4653: re-establish the event-log watermark ───────────────
         # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is
