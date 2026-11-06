@@ -4671,7 +4671,12 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # about the month it shipped in" PASSED, because `wrong` was enough. A refutation
         # of the EQUIVALENCE ends its claim there; one that goes on to qualify WHAT is
         # wrong is refuting something else.
-        + r"(?:is|was)\s+(?:(?:false|wrong|mistaken|incorrect)\b|not\s+true\b|untrue\b)"
+        + r"(?:is|was)\s+"
+        # `not true` / `not correct` / `not right` / `untrue` are the same claim as
+        # `false`; the pin's own failure message offers "deny it applies" as a remedy, and
+        # the negative-copula spellings are how a writer denies it (#11191 review r11, P1).
+        + r"(?:(?:false|wrong|mistaken|incorrect|untrue)\b"
+        + r"|not\s+(?:true|correct|right)\b)"
         # ⛔ …AND THE SAME QUALIFIER SET AS THE NEXT-CLAUSE ARM (#11191 review r4, P3 —
         # measured): "wrong WITH RESPECT TO the count" / "wrong REGARDING the count" is
         # a refutation of the FIGURE, and this arm is reached FIRST for a `;`-joined
@@ -5312,6 +5317,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 return True
             if _REFUTED_NEXT_CLAUSE.match(norm[clause_end:]):
                 return True
+            # ⛔ …AND THE SAME REFUTATION WHEN IT IS SPELLED `IS NOT TRUE` (#11191 review
+            # r11, P1 — MEASURED false RED, and a regression against `origin/main`). The
+            # closed set above accepted `false|wrong|mistaken|incorrect` but not `not
+            # true`, so the sentence that satisfies BOTH remedies this pin's own failure
+            # message offers (deny it applies to `ff6379eb2` AND name `047c91f7a`) landed
+            # RED:
+            #   "The claim that `ff6379eb2` is the tree before #9548 is not true; the true
+            #    tree is `047c91f7a`."                                   -> REFUSED
+            # That spelling is added to `_REFUTED_AFTER`, which is the arm the sentence
+            # actually reaches — the refutation FOLLOWS the phrase here.
+            # ⛔ THE MIRROR — a refutation written BEFORE the phrase ("It is not true that
+            # `ff6379eb2` is the tree before #9548") — is deliberately NOT admitted, even
+            # though `origin/main` accepts it. `_POLARITY_FRAME` carries that vocabulary,
+            # but it is a DOUBT detector: the same frames read as assertions when the
+            # clause has an inner negation ("It is false that the census was NOT 3 lines
+            # immediately before #9548" ASSERTS 3 lines), and the r4 round measured that
+            # treating them as denials is a fail-open. Admitting the prefix form here
+            # turned the pinned doubt class green, so it stays a documented residual
+            # (#11301) rather than an arm that trades a false RED for a fail-open.
             # 2. A DENIAL, in the phrase's own clause. Each arm is a CLOSED set: an open
             #    "any `not` nearby" is how a denial of doubt came to excuse a sentence
             #    that asserts the equivalence.
@@ -5672,6 +5696,26 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 return (
                     _TRUE_TREE.startswith(_ref)
                     or _ref.startswith(_TRUE_TREE)
+                    # ⛔ THE ARMING COMMIT'S OWN SHA IS NOT A TREE REFERENT (#11191
+                    # review r11, P1 — MEASURED false RED, and a regression against
+                    # `origin/main`). `preceding[-1]` takes the NEAREST sha, and the doc
+                    # itself names the arming commit inline, so the possessive spelling of
+                    # the pinned truth is refused while its one-token-shorter twin is
+                    # pinned GREEN a few lines below:
+                    #   "`047c91f7a` is the arming commit's parent and the tree before
+                    #    #9548 reads 10 lines."                           -> accept (pinned)
+                    #   "`047c91f7a` is the arming commit `785bb2b59`'s parent and the
+                    #    tree before #9548 reads 10 lines."                -> REFUSED
+                    # The arming commit is `785bb2b59`; it is an ANCESTOR of the true tree,
+                    # so it can never be the tree the phrase refers to. The exemption is
+                    # therefore CLOSED on that one sha and additionally requires the true
+                    # tree named in the sentence and the FALSE tree absent — so it cannot
+                    # buy a claim about `ff6379eb2` or a third tree.
+                    or (
+                        "785bb2b59".startswith(_ref)
+                        and _TRUE_TREE in norm.lower()
+                        and _FALSE_TREE not in norm.lower()
+                    )
                     # ⛔ AN ANCESTRY RELATION NAMING THE TRUE TREE IS A DIFFERENT, TRUE
                     # PROPOSITION (#11191 review r11, P1 — MEASURED false RED and a
                     # REGRESSION against `origin/main`). Without this arm the referent
@@ -5697,9 +5741,16 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                         # — and that sentence injected into the REAL §A8 cell left the pin
                         # GREEN, i.e. the exemption disabled the pin on the one artefact it
                         # guards. A third tree rides the same alibi. So the exemption is
-                        # withheld when ANY non-true tree-shaped token in this clause is
-                        # copulated to the phrase; the truthful ancestries all name their
-                        # tree OUTSIDE such a copula, so none of them is touched.
+                        # withheld when a non-true tree-shaped token in this clause is
+                        # COPULATED TO THE PHRASE — `copula` being the closed verb set and
+                        # a TREE NOUN as its object, in the spellings `_copulated_to_phrase`
+                        # implements (`is`/`was`/`means`/`denotes`/`refers to`). ⛔ It is NOT
+                        # "any non-true sha anywhere in the clause": an ordinary adverb or
+                        # an aside between the sha and the copula (`is IN FACT the tree`,
+                        # `remains`/`stayed`/`becomes`) is still reachable, it is SHARED with
+                        # `origin/main`, and it is recorded with this pin's other residuals
+                        # (#11301) rather than claimed closed here. A comment that overstates
+                        # its own coverage is the alibi pattern this delta exists to close.
                         and not _copulated_to_phrase(clause)
                     )
                 )
@@ -6975,6 +7026,62 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         "false tree must still be refused once `_asserts_false_tree` replaces the bare "
         "substring test — the exemption is for a REFUTATION in front of the token, not for "
         "any sentence that mentions it (#11191 review r11, P1)"
+    )
+    # ⛔ CONTROLS FOR THE r11 FRAME + ARMING-SHA FIXES (#11191 review r11, P1 — each
+    # MEASURED REFUSED at `3e277b571` while `origin/main` ACCEPTS it, so each closes a
+    # REGRESSION rather than a hardening nit).
+    assert not _refuses_before_9548(
+        "The claim that `ff6379eb2` is the tree before #9548 is not true; the true tree "
+        "is `047c91f7a`."
+    ), (
+        "the `X IS NOT TRUE` refutation is refused — the closed refutation set accepted "
+        "`false|wrong|mistaken|incorrect` but not `not true`, and this sentence satisfies "
+        "BOTH remedies the pin's own failure message offers (deny it applies to "
+        "`ff6379eb2` AND name `047c91f7a`), so a lane that follows the pin's advice lands "
+        "RED (#11191 review r11, P1)"
+    )
+    # ⛔ …the PREFIX form ("It is not true that `ff6379eb2` is the tree before #9548") is
+    # a DOCUMENTED RESIDUAL, not a control: `_POLARITY_FRAME` is a DOUBT detector, and
+    # admitting it as a refutation turned the pinned double-negative class green ("It is
+    # false that the census was NOT 3 lines …" ASSERTS 3 lines). Recorded in #11301, where
+    # it belongs with the other shapes that need a semantic decision rather than a regex.
+    assert _refuses_before_9548(
+        "It is not true that the census is 5, and the tree before #9548 is `ff6379eb2`."
+    ), (
+        "the new frame arm must be CLAUSE-scoped: a frame over a DIFFERENT proposition "
+        "must not exempt the equivalence beside it, or the fix re-opens the alibi class "
+        "one arm over (#11191 review r11, P1)"
+    )
+    assert not _refuses_before_9548(
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent and the tree before #9548 "
+        "reads 10 lines."
+    ), (
+        "the ARMING COMMIT's own sha steals the referent from the true tree named beside "
+        "it, so the possessive spelling of the pinned truth is refused while its "
+        "one-token-shorter twin is pinned GREEN a few lines above — the doc itself names "
+        "the arming commit inline, so this is the house style (#11191 review r11, P1)"
+    )
+    assert not _refuses_before_9548(
+        "The arming commit `785bb2b59`'s parent, `047c91f7a`, is the tree immediately "
+        "before #9548."
+    ), (
+        "the appositive spelling of the same truth is refused — the true tree sits in a "
+        "comma incise, so the referent became the arming commit (#11191 review r11, P1)"
+    )
+    assert _refuses_before_9548(
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent and the tree before #9548 "
+        "is `ff6379eb2`."
+    ), (
+        "the arming-sha exemption becomes an ALIBI: with the FALSE tree present the "
+        "sentence must still be refused, so the exemption cannot buy a claim about "
+        "`ff6379eb2` (#11191 review r11, P1)"
+    )
+    assert _refuses_before_9548(
+        "The arming commit `785bb2b59`'s parent is the tree before #9548."
+    ), (
+        "the arming-sha exemption fires with the TRUE tree absent — it must require the "
+        "true tree in the sentence, or it exempts a referent it cannot check "
+        "(#11191 review r11, P1)"
     )
     # ⛔ THE ANAPHORA RESIDUAL, PINNED AS A CHARACTERISATION — NOT AS CORRECT BEHAVIOUR
     # (#11191 review r11, P3 — the PR body states this residual but the CODE did not, and
