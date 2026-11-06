@@ -9457,12 +9457,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # (a MITIGATES may legitimately precede its target IMPL in the model
     # output).
     def _resolve(ref: str) -> str:
-        r = _norm(ref)
-        if r in point_ids:
-            return point_ids[r]
-        if r in event_ids:
-            return event_ids[r]
-        return ""
+        # BOTH key forms of BOTH maps (#10997 review 7-8, P1): `point_ids` holds the
+        # untruncated ref AND the `_write_span` clamp, `event_ids` only the HARD
+        # `[:cap]` cut — asking one form missed an Event emitted from a >cap ref,
+        # and the mint re-created the identity as a duplicate Point.
+        r, _s = _norm(ref), str(ref or "").strip()
+        h, c = _norm(_s[:_MAX_CONTENT]), _norm(_write_span(_s, _MAX_CONTENT))
+        return (point_ids.get(r) or event_ids.get(r) or point_ids.get(h)
+                or event_ids.get(h) or point_ids.get(c) or event_ids.get(c, ""))
 
     # ── MINT-BEFORE-WIRE (#2552, dependency order 3.5) ────────────────────
     # The OPERATOR REFERENCING hard rule in the S2/S4 prompts instructs the
@@ -9943,14 +9945,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 if not hold_store.claim(_rec["key"]):
                     continue
                 _claimed = True
-                # ⛔ The ORIGINAL ref, not the truncated `content` (review P1):
-                # `_write_span` clamps the content to `_MAX_CONTENT`, while the
-                # restored operator still carries the untruncated ref — draining
-                # from `content` would mint a key the operator cannot resolve and
-                # the prune would then discard it.
-                _pid = _mint_endpoint(
-                    _rec.get("ref") or _rec["content"],
-                    f"drained {_rec.get('where') or 'held endpoint'}")
+                # ⛔ The ORIGINAL ref (review P1), RESOLVED BEFORE MINTING in BOTH key
+                # forms (review 6/7, P1): `event_ids` is keyed on the CLAMPED content
+                # while `point_ids` also holds the untruncated key, so asking one form
+                # missed the other and a >cap EVENT identity was re-minted as a Point.
+                _drain_ref = _rec.get("ref") or _rec["content"]
+                _pid = (_resolve(_drain_ref) or _mint_endpoint(
+                    _drain_ref, f"drained {_rec.get('where') or 'held endpoint'}"))
                 if not _pid:
                     # The mint produced nothing (refused / an entity / empty) —
                     # the item goes back to PENDING rather than leaking out of
@@ -10182,21 +10183,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     _entry["committed"] = True
                 warnings.append(
                     f"held endpoint COMMITTED (#10997 drain): {_where} held in an "
-                    f"earlier run is now resolved and was minted as {_pid} "
+                    f"earlier run is now RESOLVED as {_pid} "
                     "(exactly once — a resolved key is never re-held or re-minted)")
                 continue
-            # ⛔ Its edge did not survive, so the Point was pruned: the item goes
-            # BACK to the hold rather than being confirmed into a resolution the
-            # payload does not contain.
+            # ⛔ Its EDGE did not survive: the item goes BACK to the hold rather
+            # than being confirmed into a resolution the payload does not wire.
             with contextlib.suppress(Exception):
                 hold_store.release(_key)
             if _entry is not None:
                 _entry["committed"] = False
             warnings.append(
-                f"held endpoint NOT committed (#10997 drain): {_where} was "
-                f"drained and minted as {_pid}, but no surviving operator "
-                "references it, so the Point was pruned and the item is HELD "
-                "again for a later run")
+                f"held endpoint NOT committed (#10997 drain): {_where} resolved "
+                f"as {_pid}, but no surviving operator references it — the "
+                "restored EDGE did not survive, so the item is HELD again for a "
+                "later run (the endpoint keeps whatever the payload carries)")
 
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
