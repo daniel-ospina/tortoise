@@ -572,7 +572,9 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
 class IngestOutcome(StrEnum):
     """What an `ingest` run DID — the CLI's own completeness instrument (#8447 C3).
 
-    The ingest door is one of the four doors #8447's refusal clause names:
+    The ingest door is one of the four doors the refusal clause is enforced on
+    (`BOUNDED-OPERATION-CONTRACT.md` §6 enumerates them; §1a states the clause
+    itself, and names no doors):
 
         A refused operation must either refuse visibly (an error, or a reply
         field that says so) or succeed. It must never return a value
@@ -604,8 +606,10 @@ class IngestOutcome(StrEnum):
     re-run look like a failure, which breaks callers in the other direction.
 
     The ``returncode`` property is the ONE mapping from outcome to exit
-    status; ``main`` returns it and both entry points (the ``tortoise-ingest``
-    console script and ``python -m tortoise.ingest``) hand it to the shell.
+    status. ``main`` returns the OUTCOME — never a status, and never a
+    ``sys.exit`` — and both entry points (the ``tortoise-ingest`` console
+    script and ``python -m tortoise.ingest``) go through :func:`cli`, which
+    dereferences it.
     """
 
     #: The ask was done: extraction ran, a metadata capture was written, or the
