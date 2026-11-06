@@ -3992,23 +3992,37 @@ jobs:
             --junit "${RUNNER_TEMP:-/tmp}/junit-d14.xml"
           [ "$rc" -eq 0 ] || exit "$rc"
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
-          # widened. The floor is 30 and the number is NOT arbitrary: the four
+          # widened. The floor is 40 and the number is NOT arbitrary: the four
           # marked files that are ALREADY carve-out registered (precision_leak
-          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27 marked,
-          # of which 25 PASS on the ubuntu runner — the two darwin-gated
-          # fork_safety ones skip) are the always-passing baseline, so a floor at
-          # 25 would still be met by a hook broadened to skip exactly the class
-          # #4164 rescues. 30 sits above that baseline (25) and below the measured
-          # total, so losing the rescued class reds the job while a few legitimate
-          # removals do not.
-          # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
-          # passed / 34 skipped (each skip exogenous — the 32 module-level gate
-          # markers, and the two darwin-gated #3845 fork tests; no real test skips
-          # for any other reason). The contract is that the marks RUN; the exact
-          # count is free to grow.
+          # 6 + test_hosted_api 12 + fork_slot_wedge 12 + fork_safety 4 = 34
+          # marked, of which 32 PASS on the ubuntu runner — the two darwin-gated
+          # fork_safety ones skip) are the always-passing baseline, so a floor
+          # that is not ABOVE that baseline is met by a hook broadened to skip
+          # exactly the class #4164 rescues. 40 sits above the baseline (32) and
+          # far below the measured total, so losing the rescued class reds the
+          # job while a few legitimate removals do not.
+          # ⛔ THE FLOOR MUST BE RE-CUT WHEN THE BASELINE GROWS — this is the rule
+          # that had silently stopped holding. The floor was 30, calibrated
+          # against a 25-PASS baseline; #10962 marked six further `embedded_only`
+          # legs inside `test_hosted_api.py` — a BASELINE file — taking that file
+          # 5→12 passing and the baseline to 32, i.e. ABOVE the 30 floor, so the
+          # arm this comment exists for could no longer fire while the step stayed
+          # green. The `#4207` manifest arm below does NOT cover it:
+          # `skip-guard.py --manifest-only` accepts a nodeid appearing as passed
+          # OR skipped, so a broadened skip-hook leaves the manifest green and
+          # this count is the only detector left.
+          # Measured 2026-11-06 at this head (the marker selection over `tests/`,
+          # URI unset, `TORTOISE_TEST_CARVE_OUT=1`): 261 passed / 40 skipped
+          # overall, and the
+          # four baseline files ALONE 32 passed / 2 skipped. The earlier figure is
+          # kept only to show the growth, NOT as current: 35 passed / 34 skipped
+          # (measured 2026-09-20 on run 35518962357, head fd23a4033; each skip
+          # exogenous — the 32 module-level gate markers and the two darwin-gated
+          # #3845 fork tests). The contract is that the marks RUN; the exact count
+          # is free to grow.
           passed=$(grep -c ' PASSED' "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || true)
           echo "embedded_only-marked tests passed: $passed"
-          [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
+          [ "$passed" -ge 40 ] || { echo "::error::expected >=40 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
           # #4207: the floor above is a COUNT of PASSED lines, so a single
           # subtracted test leaves 34 and the step stays green — and the pin in
           # tests/test_markers.py reads this step's TEXT, so a deselecting flag
