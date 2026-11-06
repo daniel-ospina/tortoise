@@ -191,11 +191,16 @@ def _applier_steps() -> list[dict]:
 #: of these roots. `config push` and `secrets set/unset` are the plausible next additions to THIS
 #: workflow: it exists to sync schema, and it already prints a `secrets set` remedy. None of these
 #: appears as an executed command today, so widening the tuple introduces no false RED.
+#:
+#: ⛔ THIS TUPLE SELECTS THE APPLIER JOB (`_mutates_hosted` → `_applier_jobs` → the
+#: `len(jobs) == 1` assert), so a root here may only be one that CHANGES the hosted project (#11135).
+#: `db pull` / `db diff` / `config pull` are consent-gated but READ-ONLY: listing them here made
+#: `_mutates_hosted({"run": "supabase db pull --linked"})` true, so a future read-only drift job
+#: would have been selected as "the applier" and red the suite naming the wrong cause. They belong in
+#: `_CONSENT_GATED_ROOTS` below, which the SWEEP reads and the selector does not.
 _MUTATING_ROOTS = (
     "supabase db push",
     "supabase db reset",
-    "supabase db pull",
-    "supabase db diff",
     "supabase functions deploy",
     "supabase functions delete",
     "supabase migration repair",
@@ -205,6 +210,15 @@ _MUTATING_ROOTS = (
     "supabase secrets set",
     "supabase secrets unset",
     "supabase config push",
+)
+
+#: Consent-gated commands that do NOT change the hosted project. The v3 consent gate covers them, so
+#: a step that RUNS one must still pass `--yes` — but such a step must never make its job "the
+#: applier" (see `_MUTATING_ROOTS`). The sweep reads `_MUTATING_ROOTS + _CONSENT_GATED_ROOTS`; the
+#: job selector reads only `_MUTATING_ROOTS`. Two questions, two sets (#11135).
+_CONSENT_GATED_ROOTS = (
+    "supabase db pull",
+    "supabase db diff",
     "supabase config pull",
 )
 
@@ -336,12 +350,18 @@ def _printed_remedies(text: str, pattern: str) -> list[str]:
 
 
 def _mutating_steps_with_job() -> list[tuple[str, dict, dict]]:
-    """`(job name, job, step)` for each step that RUNS a hosted-mutating CLI command."""
+    """`(job name, job, step)` for each step that RUNS a consent-gated hosted CLI command.
+
+    The subject is the CONSENT GATE, not mutation: `_MUTATING_ROOTS + _CONSENT_GATED_ROOTS`, because
+    v3 asks before a hosted READ too. The job set is still `_applier_jobs()` (mutation only) — a
+    read-only step inside the applier job is swept, and cannot create a second "applier" (#11135).
+    """
+    swept = _MUTATING_ROOTS + _CONSENT_GATED_ROOTS
     return [
         (name, job, step)
         for name, job in _applier_jobs()
         for step in (job.get("steps") or [])
-        if any(c.startswith(_MUTATING_ROOTS) for c in _commands_in(step))
+        if any(c.startswith(swept) for c in _commands_in(step))
     ]
 
 
@@ -422,7 +442,11 @@ def _carries_consent(argv: tuple[str, ...]) -> bool:
       was a real review finding against the bare-token form, not a hypothetical.
 
     An UNRECOGNISED value is not consent: for a consent flag, "not proven" must never read as
-    "yes". `--memo "--yes"` stays one argv word that is not `--yes`, so it is not consent either.
+    "yes". Stated residual, and it is the exception to that rule: `shlex` strips quotes, so
+    `--memo "--yes"` arrives here as the argv `('…', '--memo', '--yes')` — a bare `--yes` that is
+    the VALUE of another flag is indistinguishable from the flag and therefore READS AS CONSENT.
+    That is pinned as a documented residual (test at the end of this file), not a property, and it
+    is unreachable with the flag sets this file governs.
     """
     consent = False
     for word in argv:
@@ -441,20 +465,30 @@ def _remedy_command(banner: str, anchor: re.Pattern[str]) -> str:
     command and mention it in a sentence of the SAME banner, and a `--yes` search still matches
     while the operator's paste repairs nothing. A printed remedy is a delimited span
     (quoted/backticked) in every banner this repo prints, so slice to the delimiter and assert on
-    the command's OWN argv. A banner that does not delimit its command falls back to
-    anchor-to-end, which is the strictest reading available without quotes.
+    the command's OWN argv.
+
+    A banner that does not delimit its command is cut at its first CLAUSE boundary
+    (`,;` / " and " / newline), never run to the end: running to the end is NOT "the strictest
+    reading available" — it is fail-OPEN, and it was measured GREEN. With the command stripped of
+    `--yes` and the sentence "… and note that --yes is required on CLI v3" appended in the same
+    banner: the quoted form reds, and the run-to-end form passed, because the prose's flag was the
+    one the matcher found (#11135). A clause cut keeps prose out of the command either way.
     """
+
+    def _clause(tail: str) -> str:
+        return re.split(r"[,;]|\s+and\s+|\n", tail, maxsplit=1)[0].strip()
+
     match = anchor.search(banner)
     if match is None:
         return banner
     start = match.start()
     opened = max(banner.rfind(quote, 0, start) for quote in "'`\"")
     if opened == -1:
-        return banner[start:]
+        return _clause(banner[start:])
     closes = [banner.find(quote, start) for quote in "'`\""]
     closed = min((idx for idx in closes if idx != -1), default=len(banner))
     delimited = banner[opened + 1 : closed]
-    return delimited if anchor.search(delimited) else banner[start:]
+    return delimited if anchor.search(delimited) else _clause(banner[start:])
 
 
 def _applier_commands() -> list[str]:
@@ -1021,4 +1055,25 @@ def test_the_drift_banner_remedy_is_the_COMMAND_not_prose_that_mentions_the_flag
     assert not _carries_consent(_argv(command)), (
         "the flag lives only in prose here; a whole-banner match would bless a remedy that repairs "
         "nothing (#10896)"
+    )
+
+
+def test_an_undelimited_banner_remedy_does_not_inherit_the_prose_flag() -> None:
+    """The same attack on a banner that does NOT quote its command (#11135).
+
+    Measured GREEN before this test existed: `_remedy_command`'s undelimited fallback returned
+    anchor-to-END, prose included, so deleting `--yes` from the command and mentioning it in the
+    sentence after it still matched. The docstring called that fallback "the strictest reading
+    available without quotes"; it was the opposite — fail-OPEN — and only the quoted dialect ever
+    had a test. A clause cut keeps the sentence's flag out of the command.
+    """
+    banner = (
+        "Migrations pending — resolve OUT OF ORDER versions first; a lane may run migration "
+        "repair --linked --status applied <version> and note that --yes is required on CLI v3."
+    )
+    command = _remedy_command(banner, _BANNER_REPAIR)
+    assert re.search(r"--status\s+applied", command), "the slice must still be the repair command"
+    assert not _carries_consent(_argv(command)), (
+        "the prose after the clause boundary mentions --yes; reading it as the command's flag is "
+        "the fail-open this test closes (#11135)"
     )
