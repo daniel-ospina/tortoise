@@ -180,8 +180,8 @@ stated there once, not restated here, which is how this pair drifted apart in th
 ⚠ **The `~9 m` save term the saving rows use is not re-measured here.** That figure comes from the
 `test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063
 stood its save down, on a different runner and day, and shows a 3.6 GB save can cost TWICE that.
-The rows derived from `~9 m` (`test-slow`'s 60 m, and the `test-d14-hosted-api` headroom
-statements below — ⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived
+The rows derived from `~9 m` (`test-slow`'s 60 m, the `test-d14-hosted-api` headroom
+statements below, and `test-track-b`'s save arm at `:226` — ⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived
 its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term, and split its payload so
 that job no longer writes the 3.6 GB archive at all — see its row below, which is the
 authority for it. Nor is `test-carve-out`, whose pip step has been

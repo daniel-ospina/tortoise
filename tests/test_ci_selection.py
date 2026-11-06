@@ -13389,7 +13389,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert _path_of(pip_restore).strip() == "~/.cache/pip", (
         f"the pip restore reads {_path_of(pip_restore).strip()!r}, not "
         "`~/.cache/pip`. `path` is part of the cache's VERSION, so the entry the "
-        "four writer jobs produce can never match it — a permanent MISS with the "
+        "two writer jobs produce can never match it — a permanent MISS with the "
         "step green, which is a cold 3.6 GB torch download on every shard "
         "(#7612 reverted, #11063 cycle 5 finding 2).")
     assert pip_restore.get("continue-on-error") is True, (
@@ -13401,7 +13401,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert pip_key_root == "pip-", (
         f"the pip cache key is {pip_key!r}; the SHARED key other jobs write is "
         "`pip-<os>-<hash uv.lock>` — any other spelling silently unships it from "
-        "the four writers that populate it")
+        "the two writers that populate it")
     pip_writers_here = [s.get("name") for s in steps
                         if _is_writer(s) and pip_key_root in _key_of(s)]
     assert not pip_writers_here, (
