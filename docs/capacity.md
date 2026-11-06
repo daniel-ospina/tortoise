@@ -81,7 +81,7 @@ single-writer-plus-many-readers pattern that is verified.
 |---|---|---|
 | Hosted REST and MCP, per API key | **100 req/min** | `tortoise/hosted_api.py` |
 | Hosted `POST /v1/sessions/commit`, per key | **300 req/min**, on its own bucket | `tortoise/hosted_api.py` |
-| Hosted `POST /v1/sessions/commit` **and** `POST /v1/sessions`, **per team (org)**, per process | **10 MiB of writes per rolling 60 s, ONE shared window** (`TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`) — a request is charged `max(payload bytes, nodes it will leave behind × 1024)` (commit: `commit_schema.commit_ingest_charge_bytes`; capture: `hosted_api.capture_ingest_charge_bytes`); over the allowance is `429` + `Retry-After` (`detail.code = ingest_rate_limited`) | `tortoise/quota.py` (`commit_ingest_admit`) |
+| Hosted `POST /v1/sessions/commit` **and** `POST /v1/sessions`, **per team (org)**, per process | **10 MiB of writes per rolling 60 s, ONE shared window** (`TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`) — a request is charged `max(payload bytes, nodes it will leave behind × 1024)` (commit: `commit_schema.commit_ingest_charge_bytes`; capture: `hosted_api.capture_ingest_charge_bytes`, whose node term is **3 fixed + 2 per turn** and covers the CAPTURE CHAIN ONLY — the points a capture extracts are bounded by the cumulative `max_points` cap instead); over the allowance is `429` + `Retry-After` (`detail.code = ingest_rate_limited`). One exception, once per empty window: a request larger than the whole allowance is admitted and spends it — reachable at DEFAULT config on the capture lane, whose body cap is **16 MiB** (> the 10 MiB allowance) | `tortoise/quota.py` (`commit_ingest_admit`) |
 | Hosted, unauthenticated or malformed key | **100 req/min per client IP** | `tortoise/hosted_api.py` |
 | Self-hosted daemon | **100 req/min** (`TORTOISE_RATE_LIMIT`) — per API key when one is presented, otherwise per client IP | `tortoise/selfhost.py`, `README.md` |
 | Rate-limit bucket store (hosted) | **10,000 buckets** per process (`MAX_BUCKETS`) | `tortoise/hosted_api.py` |
@@ -93,9 +93,10 @@ nor are consumed by the 100/min general budget. The limiter charges **once per
 request** in `RateLimitMiddleware.dispatch`; the unit is called "points/minute"
 in its own docstring and in the 429 body, and it is one charge per request.
 
-The **second** bound is per TEAM, not per key: the 300/min bucket above
-multiplies with the number of API keys a team may mint (20 on Team), so it does
-not bound a tenant. The team-level ingest budget in `tortoise/quota.py` does —
+The **second** bound is per TEAM, not per key: a per-key bucket multiplies with
+the number of API keys a team may mint (20 on Team) — 300/min on the commit
+endpoint's own bucket, 100/min on the general bucket the capture lane uses — so
+neither bounds a tenant. The team-level ingest budget in `tortoise/quota.py` does —
 it is one window covering **both** session write lanes (`POST /v1/sessions` and
 `POST /v1/sessions/commit`), so alternating endpoints cannot buy a second
 allowance; it is measured in BYTES (the ruled storage unit, #4495/#5331), it is
