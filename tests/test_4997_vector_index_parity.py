@@ -687,17 +687,20 @@ def test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty(caplog
 
 
 def test_the_pair_is_reported_on_every_setup_and_a_repaired_store_announces_it(caplog):
-    """#11087: the INFO is deliberately NOT latched — see the method docstring.
+    """#11087: the report is latched on the pair VALUE, so a CHANGE is always news.
 
-    A latch is the obvious "dedupe this log spam" refactor (setup runs from
-    `__init__` and from the hosted construction paths). It would also delete the
-    property the docstring argues is the point: a store that GAPPED once and was
-    then repaired could never report its contract again. Two successive
-    measurements on ONE `(endpoint, graph)` must therefore both report, and the
-    second must name the repaired pair while the WARNING stays latched.
+    Deduplication is the obvious "dedupe this log spam" refactor (setup runs
+    from `__init__` and from the hosted per-request construction path), and it is
+    correct for a REPEATED pair — see `test_an_unchanged_pair_is_not_reported_twice`.
+    What it must never do is delete the property the report exists for: a store
+    that GAPPED once and was then repaired could never announce the repair. So
+    the latch keys on WHAT was reported, not on whether the graph was reported:
+    two successive measurements on ONE `(endpoint, graph)` whose pairs DIFFER
+    must both report, and the second must name the repaired pair while the
+    #4997 WARNING stays latched on the key.
 
-    Falsifiable: with the report latched on the same key the `#4997` warning
-    uses (or on a dedicated key), `len(pairs)` is 1 and this fails.
+    Falsifiable: with a key-only latch (the `#4997` shape, or a dedicated key),
+    `len(pairs)` is 1 and this fails.
     """
     proj = _bare([_vector_row("Point")])          # a gapped store
     with caplog.at_level(logging.INFO):
@@ -709,7 +712,7 @@ def test_the_pair_is_reported_on_every_setup_and_a_repaired_store_announces_it(c
 
     pairs = _pair_records(caplog)
     assert len(pairs) == 2, (
-        "the pair must be reported on EVERY setup — latching it would hide a "
+        "a CHANGED pair must report again — a key-only latch would hide a "
         f"repaired store forever (got {len(pairs)} record(s))"
     )
     assert pairs[1].levelno == logging.INFO
@@ -724,6 +727,30 @@ def test_the_pair_is_reported_on_every_setup_and_a_repaired_store_announces_it(c
                 if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
     assert len(warnings) == 1, (
         "the WARNING stays latched — #11087 unlatches the REPORT only"
+    )
+
+
+def test_an_unchanged_pair_is_not_reported_twice(caplog):
+    """#11087: the INFO is deduplicated on the PAIR VALUE.
+
+    `_ensure_indexes` runs on the hosted PER-REQUEST path, so a line per call
+    would put two label lists on the INFO stream at full request rate — the same
+    reason the `#4997` WARNING above is latched. But the dedup must key on what
+    was REPORTED, not on whether this graph was reported at all: the sibling
+    test above pins the other half (a repaired store must announce it), and a
+    key-only latch fails there.
+
+    Falsifiable both ways: with no latch at all `len(pairs)` is 2 here; with a
+    key-only latch the repaired-store test is the one that reds.
+    """
+    proj = _bare([_vector_row("Point")], graph="test_11087_pair_dedup")
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+        proj._record_vector_index_inventory()   # same catalogue, same pair
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 1, (
+        f"an unchanged pair must be reported once, not per setup (got {len(pairs)})"
     )
 
 
