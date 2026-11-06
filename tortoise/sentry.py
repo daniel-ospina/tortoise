@@ -147,10 +147,12 @@ def init() -> bool:
             # the tail and not the build — which is why
             # `include_source_context=False` above is still required. (Measured on
             # origin/main with a real server, a real client and a capturing
-            # transport: 1 DELIVERED event per abort with ~58 source reads; at
-            # this head, 0 events and 0 source reads. Read the earlier "2 events
-            # per abort" figure as two CAPTURE attempts — `DedupeIntegration`
-            # collapses them to one delivered envelope.)
+            # transport: ONE delivered envelope per abort carrying ~58 source
+            # reads, from THREE `capture_event` calls — the handler's ERROR
+            # record, its tagged capture, and the ASGI re-raise — which
+            # `DedupeIntegration` collapses. At this head: 0 delivered, 0 source
+            # reads. A capture-CALL count is not a delivered count, which is how
+            # an earlier "2 events per abort" figure in this file misled.)
             # (Reviewed rounds 3/4): `ignore_errors` carries ONLY the names
             # admitted PROCESS-WIDE — `ClientDisconnect`, which only a caller can
             # produce, plus `BrokenResourceError` (see the note on it below, which

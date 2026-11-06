@@ -3124,12 +3124,15 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     import logging as _logging
 
     # #11092: a peer hanging up is not a server error. It is also the storm's
-    # fuel: every aborted request (a health probe timing out, a closed tab, a
-    # dropped fetch) used to arrive here as "unhandled", get logged at ERROR and
-    # be captured as a Sentry event — and building that event re-reads the source
-    # file of every frame on the event loop (see the sentry init note). Under a
-    # probe storm the loop never got back to serving, which is the outage:
-    # loop_age_ms 43 444 ms (~43 s), every request hung, machine exited 1.
+    # fuel: a client hanging up MID-REQUEST (a closed tab, a dropped fetch, a
+    # probe abandoned mid-flight) used to arrive here as "unhandled", get logged
+    # at ERROR and be captured as a Sentry event — and building that event
+    # re-reads the source file of every frame on the event loop (see the sentry
+    # init note). An aborted RESPONSE never reaches a handler at all (uvicorn's
+    # `send` returns early once the client is gone), so the mid-request hang-up
+    # is what fed the storm. Under it the loop never got back to serving, which
+    # is the outage: loop_age_ms 43 444 ms (~43 s), every request hung, machine
+    # exited 1.
     #
     # So: log it low and do not capture it here. The response SHAPE is unchanged
     # (the 500 below) on purpose — review round 1 (P3) measured that a 204 for a

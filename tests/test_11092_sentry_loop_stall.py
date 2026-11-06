@@ -1,4 +1,9 @@
-"""#11092 — a client hang-up must not build a Sentry event.
+"""#11092 — a client hang-up must not DELIVER a Sentry event.
+
+It is still BUILT (frames are serialized for it); what makes it cheap is
+``include_source_context=False``, and what stops delivery is ``ignore_errors``.
+Read the two guards below that way — either one alone is a single point of
+failure, and "not built" is the misconception this PR exists to correct.
 
 The 2026-11-04 outage: a client hanging up mid-request (a closed tab, a dropped
 fetch, a probe abandoned mid-flight) arrived at ``_unhandled_exception_handler``
@@ -464,10 +469,12 @@ def test_unhandled_handler_still_reports_a_real_error_at_error_level(
 # returns, and Sentry's Starlette integration captures that re-raised exception
 # itself through `capture_event` — NOT through `tortoise.sentry.capture_exception`.
 # A test that only patches our helper therefore stays green while a real event is
-# built per aborted request (measured before the fix: 2 events per abort; after
-# the handler change alone: 1). This test drives a REAL client with a capturing
-# transport through a REAL `ServerErrorMiddleware` and asserts on what actually
-# reaches Sentry.
+# still DELIVERED per aborted request (measured on `origin/main`: THREE
+# `capture_event` calls per abort — the handler's ERROR record, its tagged
+# capture, and the ASGI re-raise — which `DedupeIntegration` collapses to ONE
+# delivered envelope; a capture-CALL count is not a delivered count). This test
+# drives a REAL client with a capturing transport through a REAL
+# `ServerErrorMiddleware` and asserts on what actually reaches Sentry.
 
 sentry_sdk = pytest.importorskip("sentry_sdk")
 
