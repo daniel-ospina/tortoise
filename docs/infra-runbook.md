@@ -3433,7 +3433,12 @@ operator who read the line above as "CI defends this" would never run it.
 > *(2)* deploy the record migrations, including `20261102000002_record_point_search_keys_text.sql` and
 > the tenancy/role migration; *(3)* **measure**, do not assert, `record_write_failures.write_failed == 0`
 > on the running deployment plus indicator (a) — a captured session writes `journal_event` + `point`
-> rows; *(4)* only then close `#9548`, with the measurement posted there.
+> rows; *(4)* close `#9548` only once (3) is posted there. ⚠️ **The closure happened WITHOUT it:**
+> `#9548` closed **2026-11-06T01:57:25Z** on PR **#11109**'s merge (`74fdd9ca0`), and its **last**
+> comment — **2026-11-05T23:15:15Z**, the `arm-9548` status — still reports **indicator (a)** as
+> **unreachable**. So **step (3) is still owed**, and the closure is **not** evidence that a
+> measurement was taken. Re-read the issue before quoting either state: this sub-section describes a
+> sequence whose step (3) has not run.
 > ⚠️ **Step (1) is the live blocker, and it is a missing CREDENTIAL, not a ruling:**
 > `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and **both** credentials
 > we DO hold fail the backup's checks — on two independent gates, which
