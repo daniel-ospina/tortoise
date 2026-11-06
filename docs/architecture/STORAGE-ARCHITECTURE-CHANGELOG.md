@@ -2105,8 +2105,13 @@ occurrence (one property the projection declines to write), NOT as a `field_mism
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
 a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE class lacks a non-destructive repair (nothing writes
-the column, so no in-place route can exist); the declined pair has one, shipped —
+whole-graph and therefore clears a legacy copy too. ⛔ The classes that lack a non-destructive repair are the NOT-PROJECTABLE one (nothing writes
+the column, so no in-place route can exist) **and a `:Subject` whose `status` its own write door refuses** —
+`retracted` is read-terminal (`SUBJECT_TERMINAL_STATUSES`) yet absent from the writable `SUBJECT_STATUS_VALUES`,
+so neither the carrier mint nor a clear goes through the SDK and its only routes are the graph-side `REMOVE n.status`
+and the wipe (the missing door is `#11271`) ⚠️ **CORRECTED `#11253`**: this entry said **only** the NOT-PROJECTABLE
+class lacked one; the `status` family's mint-first repair, and this Subject restriction, are `#11253`'s, measured at
+that PR's head. The declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
 

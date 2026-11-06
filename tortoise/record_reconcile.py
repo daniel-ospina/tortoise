@@ -63,13 +63,29 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``supersededBy``/``supersededAt`` can still be corroborated (measured: a
   carrier-less ``:Object`` with a birth record folds ``status='draft'`` and a
   disagreeing cache is a ``field_mismatches`` entry, not a bucket occurrence).
-  ⛔ Its repair door is LABEL-DEPENDENT: on an ``:Object``
+  ⛔ Its repair is to MINT THE CARRIER, not to clear: re-assert the value
+  through the write door — ``update_entity(…, status=<the value>)`` — which
+  journals an ``EntityMutated`` whose applied map carries it
+  (``classify_entity_mutation_op`` labels a status write ``restatus``, and
+  ``_journal_entity_mutation`` records the map in ``state``), the leg
+  ``EVENT_STREAM_FOLDS`` folds; the record side then DERIVES the name, the
+  ``graph_only`` count for that name drops by one per minted node — to zero once
+  every node carrying an uncorroborated ``status`` has a carrier — and the value
+  is PRESERVED.
+  ⚠️ That door is label- AND value-dependent: it writes any ``:Object`` value but,
+  on a ``:Subject``, only the words in ``sdk._SUBJECT_STATUS_VALUES`` — and
+  ``retracted`` is in the READ set (``SUBJECT_TERMINAL_STATUSES``) while being
+  deliberately absent from the writable one, so a ``:Subject`` carrying it can
+  neither mint nor clear through the SDK and has NO non-destructive door at all
+  (the same gap, `#11271`). A CLEAR is the route only where the value is NOT
+  TRUSTWORTHY, and clearing is LABEL-DEPENDENT: on an ``:Object``
   ``update_entity(…, status=None)`` is applied as ``SET n += {status: null}``, a
   REMOVAL; on a ``:Subject`` the SAME call is REFUSED — ``sdk._update_entity``'s
   Subject status door validates against ``_SUBJECT_STATUS_VALUES``, and ``None``
   is not one of them (measured, `#11252`'s review; the missing SDK door is
   `#11271`) — so a ``:Subject``'s clear is the graph-side ``REMOVE n.status`` or
-  the wipe below. ⛔ Never a record-sourced re-projection, which is ADDITIVE
+  the wipe below, and either clear makes a TERMINAL entity read LIVE. ⛔ Never a
+  record-sourced re-projection, which is ADDITIVE
   (``MERGE … SET n += $props``, no REMOVE pass) and would leave the value in
   place;
   (b) any property a
@@ -100,7 +116,12 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair — bar ``status``, which the record's own derivation makes
   COMPARABLE wherever the record DERIVES one, and a ``status`` the record derives
-  NOWHERE is the form that has a DESTRUCTIVE CLEAR, see (a) above); the
+  NOWHERE is the form whose carrier is MINTED by re-asserting the value through
+  the write door (its ``graph_only`` count for that name falls by one per node
+  minted), and a CLEAR is only for
+  a value that is not trustworthy — except on a ``:Subject`` whose value the door
+  cannot write (``retracted``), which has no non-destructive door at all — see (a)
+  above); the
   projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record's
@@ -551,15 +572,24 @@ def reconcile_record_and_cache(
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
     a ``graph_only`` name has one repair per population: none (schema-refused —
-    bar ``status``: where the record DERIVES one the name is COMPARED, and
-    its uncorroborated form — a value the record cannot place — is cleared by an
-    explicit caller clear that is LABEL-DEPENDENT: ``update_entity(…,
+    bar ``status``: where the record DERIVES one the name is COMPARED, and its
+    uncorroborated form — a value the record derives nowhere — is repaired by
+    MINTING that carrier, ``update_entity(…, status=<the value>)``, which
+    journals an ``EntityMutated`` whose ``state`` carries the value — the leg
+    folds by PAYLOAD, not by the op label — so the value is PRESERVED
+    and the count for that name falls by one per node minted; a CLEAR is only for
+    a value that is not trustworthy, and it is LABEL-DEPENDENT: ``update_entity(…,
     status=None)``, ``SET n += {status: null}``, a REMOVAL, on an ``:Object``;
     on a ``:Subject`` that call is REFUSED (#1423's status door accepts only
     ``SUBJECT_STATUS_VALUES``, and ``None`` is not one of them), so a Subject's
-    clear is the graph-side ``REMOVE n.status``. That, or the destructive wipe,
-    is the repair — ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
-    leaves the value in place — measured, see the module docstring's (5)),
+    clear is the graph-side ``REMOVE n.status`` — and either clear makes a
+    TERMINAL entity read LIVE (``live.status_as_reported``). ⚠️ The MINT is
+    refused by that
+    same door for a Subject value outside the writable set — ``retracted`` is in
+    the READ set (``SUBJECT_TERMINAL_STATUSES``) yet not writable, so it has no
+    non-destructive door at all (the same gap, #11271) — ⛔ NOT a record-sourced
+    re-projection, which is ADDITIVE and leaves the value in place — measured,
+    see the module docstring's (5)),
     a record-sourced clear IN PLACE for the declined pair —
     ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
     ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
