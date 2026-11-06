@@ -1012,10 +1012,15 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
     restore, and for nothing else. The record's `public.source.story_arc` column
     is classed PRIMARY in the placement table
     (`docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md:368`),
-    so `cache_projection.projected_columns("source")` keeps it and
-    `record_restore.restore_from_record_view` writes it back onto `:Source` —
-    which is what `tests/test_9555_narrative_cache_rebuild.py:147/187` measure,
-    in that file, not below.
+    and it is the column `#10394` closed the CACHE side of: the projection used
+    to keep it (`projected_columns("source")`) and
+    `record_restore.restore_from_record_view` wrote it back onto `:Source`; since
+    `cache_projection.CACHE_FORBIDDEN_COLUMNS` a restore writes no `story_arc` on
+    any node — which is what `tests/test_9555_narrative_cache_rebuild.py`
+    measures (the survival leg asserts the rebuilt cache is PROSE-FREE while the
+    record reader serves the text; `test_the_record_restore_writes_no_story_arc_on_any_node`
+    reads `sum(size(n.story_arc))` back as 0). ⛔ The record still HOLDS the
+    column — that half is §9.1's placement and did not move.
 
     ⛔ It is NOT the document fold's shape (#10389 review P3). `_upsert_document`
     folds `DocumentCreated`, and its open passthrough is CLOSED in this PR
@@ -1071,10 +1076,13 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
         if with_source:
             # SYNTHETIC, and named as such (#10000): a `SourceCreated` row
             # carrying `story_arc`, standing for door 2 — the RECORD → CACHE
-            # restore (#10394), whose PRIMARY `public.source.story_arc` column
-            # `record_restore.restore_from_record_view` re-projects onto
-            # `:Source`. Measured in tests/test_9555_narrative_cache_rebuild.py
-            # (:147/#187), NOT by the fold — no graph fold runs on this seed.
+            # restore (#10394). Its PRIMARY `public.source.story_arc` column is
+            # the one the cache used to re-materialise; since
+            # `cache_projection.CACHE_FORBIDDEN_COLUMNS` a restore writes no
+            # `story_arc` on any node, so this seed now proves the DENY as well
+            # as the record's retention. Measured in
+            # tests/test_9555_narrative_cache_rebuild.py, NOT by the fold — no
+            # graph fold runs on this seed.
             records.append({
                 "type": "SourceCreated",
                 "id": f"session:{SESSION}",
@@ -1331,26 +1339,35 @@ def test_the_record_type_cannot_bypass_the_replay_registry():
     assert rp.NARRATIVE_RECORD_TYPE in rp.JOURNAL_EVENT_TYPES
 
 
-# ── §6 the residual's own coverage: door 2 restores BOTH anchors ────────────
+# ── §6 the residual's own coverage: door 2 is DENIED on BOTH anchors ────────
 #
 # `#10389` review P2 — "residual (b) understates door 2: the same route
 # re-materialises the prose on `:Event` too". The design document described
 # `#10394` as the `:Source` half only, and the pin in
-# `tests/test_9555_narrative_cache_rebuild.py:187` asserts a **Source** node, so
+# `tests/test_9555_narrative_cache_rebuild.py` asserted a **Source** node, so
 # nothing in the suite could red on the understatement. Measured at
 # `b326d1cc4`: `public.event.story_arc` exists
 # (`supabase/migrations/20261012000001_record_event_stream.sql:237`), it is
 # classed PRIMARY in the placement table, and `projected_columns("event")`
-# keeps it — so the RECORD → CACHE restore re-materialises the prose on
-# `:Event` exactly as it does on `:Source`.
+# kept it — so the RECORD → CACHE restore re-materialised the prose on
+# `:Event` exactly as it did on `:Source`.
+#
+# ⛔ #10394 CLOSED IT, and this pin was INVERTED rather than deleted when it
+# was. It used to prove the route was open ("both anchors project `story_arc`");
+# it now proves it is SHUT while both placements still stand, so the two halves
+# keep guarding the same thing from the other side: the RECORD keeps the column
+# (its class is `P`, which is correct — §9.1 says the text lives in Postgres and
+# the record IS Postgres) and the CACHE must not materialise it
+# (`cache_projection.CACHE_FORBIDDEN_COLUMNS`). Deleting the pin would have left
+# the residual free to drift in either direction: a re-projection of the key, or
+# a doc that stops naming one anchor.
 #
 # This pin is DOC-ANCHORED on purpose. The residual is the artefact that tells
 # the next lane which routes are still open; a residual that names one anchor
 # of a two-anchor route is the "names the wrong mechanism" failure the section
 # exists to prevent. The premise half is derived from the code, not re-typed,
-# so a placement change reds here instead of silently making the prose sentence
-# stale — and the doc half reds if the wording regresses to `:Source` only
-# (which is exactly the state this pin was written against).
+# so a placement change reds here instead of silently making the sentence stale
+# — and the doc half reds if the wording regresses to `:Source` only.
 
 _PLACEMENT_DOC = (
     REPO_ROOT
@@ -1409,18 +1426,25 @@ def _placement_row(table: str, column: str) -> str:
     return ""
 
 
-def test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so():
+def test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so():
     """The residual is the routing table for the next lane — it must be whole.
 
     Two halves, and each is proved falsifiable in a direction the other cannot
     reach: the PREMISE half reads the decision (placement class) and the code
-    that consumes it, so a placement change reds it; the DOC half reads §9.1's
-    residual, so a regression to the `:Source`-only wording — the shape
-    `b326d1cc4` carried — reds without any code moving.
+    that consumes it, so a placement change or a re-opened projection reds it;
+    the DOC half reads §9.1's residual, so a regression to the `:Source`-only
+    wording — the shape `b326d1cc4` carried — reds without any code moving.
+
+    ⛔ INVERTED BY #10394, not deleted. The route this pin once certified OPEN
+    ("both anchors project `story_arc`") is now certified SHUT — and the two
+    halves of the claim that matter are BOTH asserted, because either alone is
+    satisfiable by the defect: the record must still hold the column (that is
+    §9.1's placement, and dropping it would break the `#7968` pin the other way)
+    while the projection must not (that is the door).
     """
     from tortoise import cache_projection
 
-    # ── the premise: both record tables keep the column, and both project ──
+    # ── the premise: both record tables keep the column, neither projects ──
     for table, node_label in (("source", "Source"), ("event", "Event")):
         assert _placement_row(table, "story_arc"), (
             f"the placement table no longer classes `story_arc` PRIMARY for "
@@ -1431,11 +1455,19 @@ def test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so():
             f"`cache_projection.NODE_TABLES` no longer maps `:{node_label}` to "
             f"`public.{table}` — the projection's own table map is what makes "
             "the restore land on that label")
-        assert "story_arc" in cache_projection.projected_columns(table), (
-            f"`projected_columns({table!r})` no longer keeps `story_arc`, so the "
-            f"RECORD → CACHE restore would stop writing it onto `:{node_label}` "
-            "— the residual's claim, and the reason #10394 is a placement "
-            "decision rather than a key-set entry, would then be false")
+        assert table in cache_projection.CACHE_FORBIDDEN_COLUMNS, (
+            f"`CACHE_FORBIDDEN_COLUMNS` no longer names `public.{table}` — the "
+            f"RECORD → CACHE restore then re-materialises §9.1's prose on "
+            f"`:{node_label}` again, which is the door #10394 closed")
+        assert "story_arc" in cache_projection.cache_forbidden_columns(table), (
+            f"`cache_forbidden_columns({table!r})` no longer denies "
+            "`story_arc` — the deny is per COLUMN as well as per table, so a "
+            "row that drops the name must red here and not only the table map")
+        assert "story_arc" not in cache_projection.projected_columns(table), (
+            f"`projected_columns({table!r})` keeps `story_arc` again, so the "
+            f"RECORD → CACHE restore writes it back onto `:{node_label}` and "
+            "the graph-side purge is undone by the next routine restore "
+            "(#10394 door 2)")
 
     # ── the claim: the design document names BOTH anchors ─────────────────
     section = _STORAGE_DOC.read_text(encoding="utf-8")
@@ -1610,7 +1642,8 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
     assert counted["record"] == 1, (
         f"§9.1(b)'s enumeration no longer carries exactly ONE record-owned "
         f"route (counted {counted['record']}: {counted}) — the count sentence "
-        "treats the RECORD's route as the one route that is not denied, so a "
+        "adds the RECORD's route to the DENIED total and to the projection-set "
+        "half (it is denied by `CACHE_FORBIDDEN_COLUMNS` since #10394), so a "
         "second record row (or none) makes every number below wrong")
 
     stated_source = _stated_count(residual, r"\b(\w+) on `:Source`")
@@ -1632,20 +1665,26 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
         f"§9.1(b) states {stated_point} `:Point` route(s) but enumerates "
         f"{counted[':Point']}: {counted}")
 
-    node_routes = counted[":Source"] + counted[":Event"] + counted[":Point"]
-    assert stated_denied == node_routes, (
+    #: EVERY enumerated route is denied since #10394: the three `:Source` and
+    #: two `:Event` denies, the `:Point` route at its SDK doors, and the
+    #: RECORD's now denied by `cache_projection.CACHE_FORBIDDEN_COLUMNS`. So the
+    #: DENIED total is all four buckets, and it is derived from the rows.
+    all_routes = sum(counted.values())
+    assert stated_denied == all_routes, (
         f"§9.1(b) says {stated_denied} routes are DENIED but its enumeration "
-        f"carries {node_routes} node routes (the RECORD's is the one that is "
-        f"not): {counted}")
+        f"carries {all_routes} routes ({counted}) — before #10394 the RECORD "
+        f"row was the one excluded here; it is denied now, so a sentence that "
+        f"still excludes it understates the closure by one")
     #: The `:Point` route is denied at its two SDK WRITE DOORS rather than by a
     #: projection set (`sdk._refuse_unpaired_narrative`), so the projection-set
-    #: half of the sentence counts the `:Source` and `:Event` rows only. A new
+    #: half of the sentence counts the `:Source`, `:Event` and RECORD rows —
+    #: the RECORD's deny (`CACHE_FORBIDDEN_COLUMNS`) IS a projection set. A new
     #: denial mechanism that moves a row between those two halves reds here.
-    assert stated_sets == counted[":Source"] + counted[":Event"], (
+    projection_set_routes = counted[":Source"] + counted[":Event"] + counted["record"]
+    assert stated_sets == projection_set_routes, (
         f"§9.1(b) says {stated_sets} routes are denied by the projection's own "
-        f"sets, but {counted[':Source'] + counted[':Event']} rows are "
-        f"`:Source`/`:Event` (the `:Point` row is denied at its SDK doors): "
-        f"{counted}")
+        f"sets, but {projection_set_routes} rows are `:Source`/`:Event`/RECORD "
+        f"(the `:Point` row is denied at its SDK doors): {counted}")
 
 
 # ════════════════════════════════════════════════════════════════════════════

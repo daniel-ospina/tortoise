@@ -547,6 +547,42 @@ def test_a_fold_on_create_default_is_not_an_invention():
     assert diff.clean, diff.as_dict()
 
 
+def test_a_not_projectable_column_is_EXPLAINED_and_not_a_projection_gap():
+    """#10394 door 2, from the SERVED side: the deny must not read as a gap.
+
+    ⛔ WHY THIS IS ITS OWN ARM AND NOT A RESTATEMENT OF THE CARVE-OUT ONE. The
+    carve-out (`_refused`) explains a field the SCHEMA forbids the record to
+    hold. `cache_projection.CACHE_FORBIDDEN_COLUMNS` is the opposite case — a
+    field the record DOES hold and the projection must not materialise (§9.1/D1
+    on `source`/`event`, `#10394`) — and without its own explanation here a cache
+    node that still holds the pre-purge prose is reported as an
+    `unexplained_missing` PROJECTION GAP, whose only sanctioned repair in this
+    module is a re-projection. That is an instruction to re-open the door the
+    projection exists to keep shut, on the very pair this change closes.
+
+    The control arm is the other half: a genuinely unexplained field still
+    reddens, so the new explanation is one declared class and not a blanket
+    amnesty.
+    """
+    from tortoise.cache_projection import cache_forbidden_columns, node_from_row
+
+    prose = "the S1 narrative"
+    row = {"url": "docs/door-2.md", "title": "door 2", "story_arc": prose}
+    # The map the serve path returns for that row.
+    served = dict(node_from_row("Source", row).props)
+
+    diff = rs.parity_difference(dict(row), served, label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) == {"story_arc"}, diff.as_dict()
+    # The explanation is the DECLARATION's, not a list curated here.
+    assert set(diff.explained_missing) <= cache_forbidden_columns("source")
+
+    # …and the amnesty is exactly that class, not every absence.
+    gap = rs.parity_difference({"url": "u", "unexplained_prop": "x"},
+                               {"url": "u"}, label="Source")
+    assert set(gap.unexplained_missing) == {"unexplained_prop"}, gap.as_dict()
+
+
 def test_a_record_served_read_carries_no_derived_name():
     conn = _FakeConn(rows=[_row(content_hash="abc", ep_dirty=True)])
     props = rs.read_point(conn, org_id="org_t", graph_id="g_t", point_id="p-1")

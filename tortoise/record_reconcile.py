@@ -288,7 +288,12 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
     # §9.1/D1's narrowed pair, in the CACHE's vocabulary — resolved ONCE per
     # read (it is table-derived, so it must not be a module constant: see
     # `cache_projection._episodic_source_kind_property` for the installed-wheel
-    # reason).
+    # reason). ⚠️ Two DISJOINT sets, not one nested in the other (measured: this
+    # pair is {summary, _searchText} and `cache_forbidden_columns("source")` is
+    # {story_arc}). `placeable` below omits MORE than this set does — a column in
+    # `CACHE_FORBIDDEN_COLUMNS` (§9.1/D1's narrative, #10394) is never projected
+    # either — so it reaches `graph_only` through `projected_properties` rather
+    # than through `declined`.
     declined = episodic_source_prose_properties()
     for label in wanted:
         # The names the record PLACES for this label: the placement table's
@@ -370,10 +375,13 @@ class RecordReconcileResult:
     declaration: ResidencyDeclaration
     not_hot: int = 0
     #: Properties the CACHE holds that this projection will not judge — §17.5's
-    #: EP/derived scalars (the record schema refuses them by name) PLUS the pair
+    #: EP/derived scalars (the record schema refuses them by name), PLUS the pair
     #: the §9.1/D1 narrowing declines for an EPISODIC Source
     #: (``cache_projection.episodic_source_prose_properties()``, which the RECORD
-    #: does hold) — as ``(name, node count)``. Kept OUT of ``field_mismatches``
+    #: does hold), PLUS the NOT-PROJECTABLE columns
+    #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
+    #: and the cache must not materialise, ``#10394``) — as
+    #: ``(name, node count)``. Kept OUT of ``field_mismatches``
     #: (counting them
     #: made the clean verdict unreachable on a journal-projected cache) and kept
     #: as its OWN count (a comparison that declines to judge a field has to say
@@ -443,8 +451,20 @@ def reconcile_record_and_cache(
     refuses by name) is NOT a field mismatch and is reported as its own named
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
-    a ``graph_only`` name has two possible repairs: none (schema-refused) or a
-    record-sourced re-projection (declined). ⚠️ **What the exclusion CAN and
+    a ``graph_only`` name has three possible repairs, one per omission class:
+    none (schema-refused), a record-sourced re-projection (declined), or the
+    graph-side purge for a not-projectable column (below).
+
+    ⛔ AND A THIRD OMISSION, from `#10394`: `cache_projection.
+    CACHE_FORBIDDEN_COLUMNS` subtracts the NOT-PROJECTABLE class from
+    `projected_properties`, so ``story_arc`` is not placeable either. That is a
+    statement about the CACHE, not about the record — the column is PRIMARY
+    there and §9.1/D1 forbids it only in the graph — so a legacy cache node
+    that still carries the prose reads as a ``graph_only`` occurrence (one
+    property the projection declines to write), NOT as a ``field_mismatches``
+    against a record that is correct. The repair for that occurrence is
+    `#10017`'s destructive graph-side purge, which is a different lane from a
+    re-projection; nothing here performs it. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. For the DECLINED pair

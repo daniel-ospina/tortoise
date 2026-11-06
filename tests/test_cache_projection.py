@@ -132,28 +132,71 @@ def _node(label: str, row: dict):
 # ── 1. the read shape is total and lossless ────────────────────────────────
 
 
+def _declared_not_projectable() -> set[tuple[str, str]]:
+    """`{(table, column)}` the projection DECLARES it must not materialise.
+
+    Read from `cache_projection.CACHE_FORBIDDEN_COLUMNS`, never restated: the
+    two tests below use it as the ONLY permitted reason for a PRIMARY row not
+    to project, so a column that stops projecting for any other reason still
+    reds them (#10394).
+    """
+    return {(table, column)
+            for table, columns in cp.CACHE_FORBIDDEN_COLUMNS.items()
+            for column in columns}
+
+
 def test_every_primary_property_has_a_canonical_spelling_that_is_projected():
     """The record's PRIMARY field set survives, spelled the GRAPH's way.
 
     `pointKind` is the graph property; `point_kind` is the column. A projection
     that wrote the column name would rename the whole namespace, and the S1/S3
     field contract would be broken by a spelling.
+
+    ⛔ ONE DECLARED EXCEPTION, and it is a THIRD category rather than a hole in
+    the rule (`#10394`): a column can be PRIMARY in the record — authority that
+    must be stored — and forbidden in the CACHE, because the target store is
+    where §9.1/D1 says the value must not live at all (`source.story_arc`,
+    `event.story_arc`: the S1 narrative, whose home is
+    `public.session_narrative`). The exemption is not a wildcard: the set of
+    exemptions ASSERTED below is derived from
+    `CACHE_FORBIDDEN_COLUMNS` and must equal the set of PRIMARY rows that fail
+    to project, so any OTHER column that stops projecting reds this test.
     """
+    exempt: set[tuple[str, str]] = set()
     unresolved = []
     for table, prop in _rows("P"):
         if table not in cp.placement_columns():
             continue  # a predicate-only row (no property, e.g. `mitigated_by.*`)
         canonical = cp.canonical_property(table, rp.snake(prop))
         if canonical not in cp.projected_properties(table):
+            if rp.snake(prop) in cp.cache_forbidden_columns(table):
+                exempt.add((table, rp.snake(prop)))
+                continue
             unresolved.append((table, prop, canonical))
     assert not unresolved, (
         "a PRIMARY property the placement table declares is NOT projected — "
         f"the cache would be poorer than the record: {unresolved}"
     )
+    assert exempt == _declared_not_projectable(), (
+        "the set of PRIMARY rows that do not project is not the set the "
+        f"projection DECLARES it must not materialise: {sorted(exempt)} vs "
+        f"{sorted(_declared_not_projectable())}. Either a column silently "
+        "stopped projecting, or `CACHE_FORBIDDEN_COLUMNS` names a column that "
+        "is not a PRIMARY row (and the entry is then doing nothing)")
 
 
 def test_a_primary_property_round_trips_through_a_record_row():
-    """Arrange a real row shape and assert the value lands under its own name."""
+    """Arrange a real row shape and assert the value lands under its own name.
+
+    The DECLARED not-projectable columns are asserted the other way round: a row
+    that CARRIES one must not have it on the node, and must still carry its
+    neighbours. Both directions are here so the exemption cannot become a place
+    where a column's presence/absence is simply unobserved — the behaviour is
+    the seam the RECORD → CACHE restore runs through (`#10394` door 2), and
+    `tests/test_9555_narrative_cache_rebuild.py` measures it on a real restore.
+    """
+    forbidden = _declared_not_projectable()
+    checked_forbidden: set[tuple[str, str]] = set()
     for table, prop in _rows("P"):
         if table == "relation":
             continue  # exercised by the relation test below
@@ -161,11 +204,30 @@ def test_a_primary_property_round_trips_through_a_record_row():
             continue
         label = next(k for k, v in cp.NODE_TABLES.items() if v == table)
         canonical = cp.canonical_property(table, rp.snake(prop))
-        got = _node(label, {rp.snake(prop): "v"})
+        # The NEIGHBOUR is a `props`-tail key: an ordinary open-set property
+        # that reaches the node through the same function, and one that can
+        # never collide with the placement row under test (`summary` is itself a
+        # PRIMARY row on `source`/`event`).
+        row = {rp.snake(prop): "v", "props": {"openSetProp": "kept"}}
+        got = _node(label, row)
+        if (table, rp.snake(prop)) in forbidden:
+            checked_forbidden.add((table, rp.snake(prop)))
+            assert canonical not in got.props, (
+                f"{table}.{rp.snake(prop)} is DECLARED not-projectable "
+                f"(`CACHE_FORBIDDEN_COLUMNS`) but a row carrying it projected "
+                f"{canonical!r} anyway — the deny is not reaching the seam")
+            assert got.props.get("openSetProp") == "kept", (
+                f"{table}: the not-projectable deny dropped the whole row "
+                "instead of the one column")
+            continue
         assert got.props.get(canonical) == "v", (
             f"{table}.{rp.snake(prop)} did not project to {canonical!r} "
             f"(the placement table spells it {prop!r})"
         )
+    assert checked_forbidden == forbidden, (
+        f"a declared not-projectable column was never exercised: "
+        f"{sorted(forbidden - checked_forbidden)} — a stale entry would keep "
+        "guarding a name while the real column projected freely")
 
 
 def test_no_derived_property_has_a_record_column():

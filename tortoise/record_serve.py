@@ -716,6 +716,13 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     reachable only after the record was successfully read; a failure to read
     raises :class:`RecordServeError`.
 
+    ⚠️ "The record's PRIMARY set" is the record's primary set **as the CACHE may
+    hold it**: `cache_projection.CACHE_FORBIDDEN_COLUMNS` subtracts the
+    not-projectable columns (an authority the target store forbids — §9.1/D1's
+    narrative on `source`/`event`, `#10394`), so a served node does not carry a
+    PRIMARY record column there. That is the same map `rebuild_from_record`
+    writes, which is the contract this function exists to keep.
+
     ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
     ``node_from_row`` DERIVES from those columns (`status`, from a supersession
     carrier) — #9974 — **plus** the same `status` derived from the record's own
@@ -1048,12 +1055,17 @@ class ParityDiff:
                              field the record path made up. Non-empty = RED.
     ``changed``              fields both stores answer, with different values.
                              Non-empty = RED.
-    ``explained_missing``    the declared asymmetries at work: the schema's
-                             carve-out (`confidence`, `content_hash`, `ep_*`, …)
-                             and, for an episodic Source, §9.1/D1's declined
-                             turn prose (`summary`, `_searchText`) — enumerated
-                             in :func:`parity_difference`, never silently
-                             tolerated.
+    ``explained_missing``    a DECLARED asymmetry at work. Every member comes
+                             from one of three declarations, and the member's
+                             NAME (not this dict) says which by resolving
+                             against it: the schema's carve-out (`confidence`,
+                             `content_hash`, `ep_*`, …), §9.1/D1's declined
+                             turn prose for an episodic Source (`summary`,
+                             `_searchText`), or a **not-projectable** column
+                             (`cache_projection.CACHE_FORBIDDEN_COLUMNS` —
+                             §9.1/D1's narrative on `source`/`event`, #10394).
+                             Enumerated in :func:`parity_difference`, never
+                             silently tolerated.
     """
 
     label: str
@@ -1087,16 +1099,17 @@ def parity_difference(cache_props: Mapping[str, Any],
     function so the rule has ONE home: the tests call it, and an audit of a
     production pair can call it without re-deciding what "the same" means.
 
-    Three explanations, and every one of them comes from a declaration the other
+    Four explanations, and every one of them comes from a declaration the other
     halves of the epic already made — none is re-listed here. (The clause after
     them — *"nothing else"* — is the ABSENCE rule that closes the list, not a
-    fourth explanation: it says what an UNEXPLAINED difference does.) ⛔ It was
-    TWO before #10853, and the third arrived with the narrowing that made it
-    necessary (#10867 review ISSUE 1): an asymmetry absent from this list is not
-    explained by omission, it is a RED, so a declared asymmetry that this rule
-    did not know about turned a sanctioned decline into the same signal as a
-    projection gap — *"a signal indistinguishable from noise is not
-    observability"*, the class this same change treats as P1 elsewhere.
+    fifth explanation: it says what an UNEXPLAINED difference does.) ⛔ It was
+    TWO before #10853, the THIRD arrived with the narrowing that made it
+    necessary (#10867 review ISSUE 1), and the FOURTH with `#10394`: an
+    asymmetry absent from this list is not explained by omission, it is a RED,
+    so a declared asymmetry that this rule did not know about turned a
+    sanctioned decline into the same signal as a projection gap — *"a signal
+    indistinguishable from noise is not observability"*, the class this same
+    change treats as P1 elsewhere.
 
     * **the EP carve-out** — a field absent from the record whose name the SCHEMA
       refuses (``cache_projection._refused(table)``: ``confidence``,
@@ -1117,12 +1130,20 @@ def parity_difference(cache_props: Mapping[str, Any],
       identity, never by the label alone: a transcript DOCUMENT Source keeps its
       own ``summary``, and there the same absence IS a projection gap (leg
       ``test_parity_reddens_on_the_same_names_for_a_document_source``).
+    * **a NOT-PROJECTABLE column (#10394)** — a field the RECORD legitimately
+      holds and the projection must not materialise
+      (``cache_projection.CACHE_FORBIDDEN_COLUMNS``: §9.1/D1's narrative on
+      ``source``/``event``). ⛔ Without this arm a legacy cache node that still
+      carries the pre-purge prose is reported as a **projection gap**, whose
+      only sanctioned repair is a re-projection — i.e. this rule would instruct
+      the operator to re-open the door the projection exists to keep shut. The
+      cache-only field is ``explained``, not ``unexplained_missing``.
     * **nothing else.** A field the cache answers and the record does not, with no
       explanation, is a projection gap — and it reddens. A field the record
       answers and the cache does not is an invention — and it reddens too. The
-      carve-out is the ONLY sanctioned asymmetry the SCHEMA declares, the decline
-      above is the only one the PROJECTION declares, and because both are
-      enumerated they cannot be used to hide a gap.
+      carve-out, the decline above and the not-projectable set are the ONLY
+      sanctioned asymmetries, and because all three are enumerated they cannot
+      be used to hide a gap.
 
     ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
     the record's answer here is the projection's own map
@@ -1139,6 +1160,7 @@ def parity_difference(cache_props: Mapping[str, Any],
         FOLD_ON_CREATE_DEFAULTS,
         NODE_TABLES,
         _refused,
+        cache_forbidden_columns,
         episodic_source_declined_properties,
         is_episodic_source_node,
     )
@@ -1147,6 +1169,7 @@ def parity_difference(cache_props: Mapping[str, Any],
     if table is None:
         raise RecordServeError(f"{label!r} has no record table")
     refused = _refused(table)
+    not_projectable = cache_forbidden_columns(table)
     defaults = FOLD_ON_CREATE_DEFAULTS.get(label, {})
     # #10853's declared decline, resolved ONCE per comparison and only for a
     # Source: the set is graph-property names AND the raw column spellings, read
@@ -1163,7 +1186,8 @@ def parity_difference(cache_props: Mapping[str, Any],
     for field_name, value in cache_props.items():
         if field_name in record_props:
             continue
-        if field_name in refused or _is_fold_default(field_name, value):
+        if (field_name in refused or field_name in not_projectable
+                or _is_fold_default(field_name, value)):
             explained[field_name] = value
             continue
         if field_name in declined:

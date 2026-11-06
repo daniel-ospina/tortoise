@@ -44,11 +44,16 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    forbids, and `rebuild_from_record`'s report is about the RECORD's coverage,
    not a census of what the wipe destroyed.
 2. **The cache is never authoritative.** A property is projected **iff** the
-   schema declares a column for it and does not refuse it. The property→column
+   schema declares a column for it, does not refuse it, **and** the projection
+   does not declare that column not-projectable (:data:`CACHE_FORBIDDEN_COLUMNS`
+   — a THIRD class, neither PRIMARY-and-projectable nor schema-refused; the
+   record may hold it as authority and the cache must not materialise it).
+   The property→column
    decision is **read from disk** — the schema (#7968) and the placement table
    (#7955) — never restated here, so a new column is a loud failure rather than
-   a silent drop. ⛔ **One declared NARROWING (#10853, narrowed again by
-   #10965):** an EPISODIC Source — EITHER identity arm,
+   a silent drop. ⛔ **A declared NARROWING, one of TWO (#10853, narrowed again
+   by #10965; the second is :data:`CACHE_FORBIDDEN_COLUMNS`, stated as
+   exception (5) under point 3 below):** an EPISODIC Source — EITHER identity arm,
    `_EPISODIC_SOURCE_URL_PREFIX` or `_EPISODIC_SOURCE_KIND` — never carries the
    COLUMNS in :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`;
    graph property `_searchText`) onto its node **when the row holds the
@@ -133,6 +138,22 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      (`MERGE … SET n += $props`, :func:`node_statement`) and `summary` is
      declined on this door, so a node that ALREADY carries the old pair keeps
      it. Anything else needs an explicit property clear (#11070).
+   A **fifth** declared exception is :data:`CACHE_FORBIDDEN_COLUMNS` (#10394),
+   and it is the one that is NOT per-row: a COLUMN the record holds as authority
+   and the cache must never materialise, because §9.1/D1 places the text in
+   Postgres and forbids it in the graph — and the record IS the Postgres half.
+   `story_arc` on `public.source` and `public.event` is the case, and it is ONE
+   DECLARATION with ONE ENTRY PER TABLE (`CACHE_FORBIDDEN_COLUMNS` is keyed by
+   table and consulted by `projected_columns`), so the placement rows keep their PRIMARY
+   class (the record does store it) and state `not projected` beside it. ⛔ The
+   distinction from the fourth exception is the point: that one decides per ROW
+   from the row's provenance because a LATER build made the column legitimate
+   again; this one is a stable statement about the two stores, so a row-derived
+   test would answer the wrong question. Consumers are aligned rather than
+   assumed: `record_reconcile` counts a legacy cache copy as `graph_only` (not a
+   divergence), and `record_serve.parity_difference` EXPLAINS it (not a
+   projection gap) — both pinned, because either rule, left alone, would tell an
+   operator to re-project a field the projection exists to keep out.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -178,6 +199,7 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "CACHE_FORBIDDEN_COLUMNS",
     "DERIVED_FROM_RECORD",
     "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
@@ -199,6 +221,7 @@ __all__ = [
     "ambiguities",
     "apply_event_stream_folds",
     "bookkeeping_columns",
+    "cache_forbidden_columns",
     "canonical_property",
     "declaration_for",
     "declaration_is_sound",
@@ -1102,7 +1125,7 @@ def projected_columns(table: str) -> frozenset[str]:
     pin), and a name the schema REFUSES as a `props` key is DERIVED/VOLATILE by
     that refusal. So:
 
-        projected = schema columns  −  refused  −  bookkeeping
+        projected = schema columns  −  refused  −  bookkeeping  −  not-projectable
 
     with the placement table supplying only the SPELLING. That is what makes
     the eight `U` rows resolve correctly without a second copy of §2.7: the
@@ -1110,16 +1133,25 @@ def projected_columns(table: str) -> frozenset[str]:
     `baseline_source`, `temporal_reviewed`, `IMPL.confidence`, `IMPL.weight`),
     and the three that become DERIVED are refused by name (`version`,
     `inherited_at`, `baseline_set` — all in `chk_point_props_no_derived`).
+
+    ⛔ The last subtraction is `CACHE_FORBIDDEN_COLUMNS` and it is a THIRD
+    category, not a fourth spelling of `refused`: those columns stay authoritative
+    in the record and are simply not projectable into the cache (§9.1/D1's
+    narrative is the case, `#10394` door 2). Folding them into `refused` would
+    say the record must not store them, which is false — and would red the
+    record's own `props`-tail CHECK.
     """
     from .record_projection import table_columns
 
     columns = table_columns().get(table, frozenset())
     refused = _refused(table)
+    forbidden = cache_forbidden_columns(table)
     placed = placement_columns().get(table, {})
     extra = ADDITIONAL_PRIMARY_COLUMNS.get(table, {})
     return frozenset(
         c for c in columns
         if c not in bookkeeping_columns(table) and c not in refused
+        and c not in forbidden
         and (c in placed or c in extra)
     )
 
@@ -1145,6 +1177,57 @@ def _refused(table: str) -> frozenset[str]:
     from .record_projection import refused_props_names
 
     return frozenset(refused_props_names().get(table, ()))
+
+
+#: Columns the RECORD holds **authoritatively** and the CACHE must NEVER
+#: materialise: `{table: {column}}`.
+#:
+#: ⛔ THIS IS NOT `_refused`, AND THE DIFFERENCE IS THE WHOLE POINT. `_refused`
+#: (`record_projection.refused_props_names`) is derived from the schema's own
+#: CHECK constraints and means *"the record must not store this name as
+#: authority"*. These columns ARE authority in the record — §9.1/D1 puts the S1
+#: narrative in **Postgres** and forbids it in the **graph**, and the record is
+#: the Postgres half. Authority in the source store is not projectability into
+#: this cache, and a projection with no vocabulary for that distinction
+#: re-materialises the prose on every RESTORE — which is `#10394` door 2, and it
+#: undoes `#10000` (the write deletions) and `#10017` (the destructive purge) at
+#: once: a purge that the next routine recovery reverses is not a purge.
+#:
+#: So an entry here is a statement about the CACHE, not about the record: the
+#: placement table keeps the row's class (`P` — the record does store it) and
+#: its note says `not projected` with the reason, so a reader cannot take this
+#: for an omission and `#7968`'s two-way pin (PRIMARY ⇒ column) still holds.
+#:
+#: ⛔ The fix is HERE — at the seam — and deliberately not a purge pass after
+#: the restore: a sweep would still rent the RAM for the duration of the write
+#: and would have to run on every restore forever. Stop the write.
+#:
+#: Pinned per table by `tests/test_9555_narrative_cache_rebuild.py::
+#: test_the_record_restore_writes_no_story_arc_on_any_node`, whose restore arm
+#: runs over a cache that still holds a legacy copy (`sum(size(n.story_arc))`
+#: must end at 0).
+CACHE_FORBIDDEN_COLUMNS: dict[str, frozenset[str]] = {
+    # §9.1/D1 — the S1 narrative, on BOTH anchors the commit path could reach
+    # (`public.source.story_arc`, `public.event.story_arc`; the `:Event` half
+    # was measured in `#10389`'s review and is why this is not a
+    # `:Source`-only entry). Its ONE home is `public.session_narrative`, which
+    # `record_text.serve_from_record` reads and this module never touches — so
+    # nothing a reader sees is lost by denying the projection.
+    "source": frozenset({"story_arc"}),
+    "event": frozenset({"story_arc"}),
+}
+
+
+def cache_forbidden_columns(table: str) -> frozenset[str]:
+    """The COLUMN names of `table` that are authoritative and NOT projectable.
+
+    ⚠️ Column names, not graph property names. The two coincide for `story_arc`
+    (which the placement table spells once) and do NOT in general — callers that
+    compare against graph-property keys must widen the set through
+    :func:`placement_spellings`, which is what the `props`-tail filter in
+    :func:`_props_from_row` does (#10394 review).
+    """
+    return CACHE_FORBIDDEN_COLUMNS.get(table, frozenset())
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1711,11 +1794,12 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
                     skip: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Project a record row's columns + `props` tail into graph properties.
 
-    FOUR destinations, and no fifth. The first three were the contract before
-    §9.1/D1; the fourth is #10853's declared NARROWING, and it is a destination
-    rather than an absence ON PURPOSE — a name it refuses must be nameable here,
-    or the next reader takes "no fourth destination" as proof that a property
-    cannot be lost on this door:
+    FIVE destinations, and no sixth. The first three were the contract before
+    §9.1/D1; the fourth is #10853's declared NARROWING and the fifth is
+    #10394's declared NON-PROJECTABILITY. Both of the last two are destinations
+    rather than absences ON PURPOSE — a name either one refuses must be nameable
+    here, or the next reader takes "no further destination" as proof that a
+    property cannot be lost on this door:
 
     * a column the placement table spells → that property, under its name —
       **unless** the row is an EPISODIC Source and the column is in
@@ -1723,12 +1807,17 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
       below (`episodic_source_declined_properties()` is its declared set);
     * a column the schema REFUSES (the EP carve-out, the projection caches) →
       dropped, by name — never stored as authority (S3's contract clause);
+    * a column `CACHE_FORBIDDEN_COLUMNS` names → dropped, by name, and for the
+      OPPOSITE reason to the line above: it IS authority in the record and the
+      cache is the one place it must not land (§9.1/D1, `#10394` door 2);
     * the `props` tail → the open-set surface, unmapped. ⚠️ It is not written
       "verbatim" any more, and the order matters: the tail is seeded **first**
       and a column value **overwrites** it (the row-ordering collision resolved
-      once — see the seed comment below), and for an EPISODIC Source the
-      declined names are **popped** from the seeded tail afterwards, in both
-      spellings;
+      once — see the seed comment below). TWO name sets are filtered out of that
+      seed: for an EPISODIC Source the declined names, in both spellings, and
+      the not-projectable set in every spelling the placement table declares
+      (#10394 — the tail is an open set keyed by GRAPH names, so a column-name
+      deny alone would leave the back door open);
     * an EPISODIC Source's §9.1/D1 turn prose (`summary`, `_search_text` /
       `_searchText`) → **declined**, whatever build wrote the row, from the
       column door AND from the tail door;
@@ -1736,6 +1825,7 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     """
     placed = placement_columns().get(table, {})
     refused = _refused(table)
+    forbidden = cache_forbidden_columns(table)
     projected = projected_columns(table)
     # The tail is decoded ONCE: it feeds the identity read below AND the verbatim
     # seed of `out`, and decoding is what decides whether the identity participates.
@@ -1824,7 +1914,27 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
                 f"authority, so the cache must not either (the "
                 f"schema's own CHECK refuses this row)"
             )
-        out.update(dict(tail))
+        # ⛔ THE TAIL DOOR IS CLOSED FOR A NOT-PROJECTABLE COLUMN TOO (#10394).
+        # `props` is copied VERBATIM below, so a legacy row that carried the
+        # name there would reach the graph by the back door while the column
+        # door stayed shut. Not reachable through today's writer
+        # (`record_projection` classifies `story_arc` as a COLUMN, so it never
+        # reaches the tail) — filtered rather than assumed, exactly as the
+        # episodic pair is two blocks down.
+        # ⚠️ BOTH SPELLINGS. `forbidden` holds RECORD COLUMN names and the tail
+        # is keyed by GRAPH PROPERTY names, which coincide only for a column the
+        # placement table spells one way. Five columns in this projection are
+        # AMBIGUOUS (`ambiguities()`: `event.session_id` →
+        # `sessionId`/`session_id`, …), so filtering on the column name alone
+        # would let a forbidden AMBIGUOUS column walk through the tail while the
+        # column door stayed shut — a deny that stops denying without reddening.
+        # Both spellings, derived from the same table the column door reads.
+        tail_denied = forbidden | {
+            spelled for column in forbidden
+            for spelled in placement_spellings().get(table, {}).get(column, ())
+        }
+        out.update({k: v for k, v in dict(tail).items()
+                    if k not in tail_denied})
         # ⛔ THE TAIL'S DECLINED NAMES ARE POPPED **BEFORE** THE COLUMN LOOP.
         # Popping them AFTER it removed the coordinate the COLUMN had just
         # legitimately written (#10962 review, P2): a post-#10000 row whose
@@ -1868,6 +1978,23 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         if column in refused:
             # The EP carve-out and the projection-owned caches. Dropped BY NAME
             # rather than by the CHECK's later refusal (S3's contract clause).
+            continue
+        if column in forbidden:
+            # Authoritative in the RECORD, forbidden in the CACHE (§9.1/D1: text
+            # in Postgres, not in the graph). ⛔ **DEFENSIVE, not the operative
+            # deny, and the distinction is measured rather than assumed**:
+            # `projected_columns` already subtracts the same set, so deleting
+            # these lines reds NOTHING (measured by review: the seam suites stay
+            # green, whose counts depend on which files are selected — so the
+            # property is the claim here, not a number) — `story_arc` is a PLACED
+            # column, so it reaches the `placed` fallback below either way. It is
+            # kept because that fallback means *"DERIVED/VOLATILE"*, a DIFFERENT
+            # statement about the same absence: without this line an auditor
+            # reading a `story_arc` drop is told the column is derived, which is
+            # false (§9.1/D1 makes it authority the record keeps). The operative
+            # denies are `projected_columns` for the column and the TAIL filter
+            # below for the open set — and the tail filter IS load-bearing
+            # (deleting it reds `test_the_record_restore_writes_no_story_arc…`).
             continue
         if column in projected:
             if value is not None:
