@@ -10535,8 +10535,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
 
 
 def test_the_test_job_carries_no_unbounded_cache_post_step():
-    """#11063: the `test` job must carry NO unbounded cache post step, and its one
-    writer must be bounded twice — in SIZE and in TIME.
+    """#11063: the `test` job must carry NO unbounded cache post step, and each
+    dependency-cache writer must be bounded twice — in SIZE and in TIME.
 
     MEASURED (run 42000057137, job `test (d)` 127165076497, runner
     `pi-runner-vm-6`, 90 m cap): the uv+pip restore MISSED
@@ -10626,8 +10626,178 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         return _uses_of(step).split("@")[0] in {"actions/cache", "actions/cache/save"}
 
     # ── No implicit save may come back: that is the defect itself ──────────────
+    # Enumerated by MECHANISM, never by one spelling (#11065 cycle 3, review finding).
+    # `actions/cache@` is only the FIRST way to acquire an unbounded post-step save:
+    #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
+    #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
+    #       the 3.6 GB half, in a post step with no timeout. It is used one job away
+    #       (`python-ci.yml:3125-3128`, `test-track-b` — the ONLY `cache:`-family input in
+    #       this workflow), so this is a live shape, not a hypothetical;
+    #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
+    #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
+    #       action — expanded TWO levels below, and parsed (not grepped) so all three
+    #       mechanisms are seen.
+    # A `uses:`-prefix scan alone reads GREEN over both.
+    #
+    # `cache` ALONE is the arming input for the two OPT-IN actions: `cache-dependency-path`
+    # is read only inside the `if (cache)` branch (`setup-python` `src/setup-python.ts:26`,
+    # read inside `cacheDependencies`), so on its own it installs NO post step — counting
+    # it reddened a no-op edit (cycle 8 review round 2, P2).
+    #
+    # ⛔ SCOPE OF THIS PREDICATE, stated honestly (#11065 review, 2026-11-06): it keys on a
+    # KNOWN ACTION-ID TABLE, not on "any cache mechanism in the universe". The table is
+    # small on purpose — a generic `with:` scan cannot know the polarity — but it is
+    # complete for this workflow's vocabulary, and it is EXACTLY the set of ids that
+    # actually appear here plus their two neighbours, so an unrecognised cache-writing
+    # action is still a gap. The gap is named in the message rather than implied away.
+    _CACHE_INPUTS = frozenset({"cache"})
+    # OPT-IN, value-gated: the value names a package manager, and an action input is a
+    # STRING, so the only values that INSTALL a save are the SUPPORTED ones —
+    # `getCacheDistributor` is `default: throw`, and `setup-python`'s
+    # `post-if: success()` (action.yml:43) means a throwing main step installs NO post
+    # save. So `cache: false`, `cache: "false"` and any other unsupported value are all
+    # NOT armed — they fail the step, they do not upload (measured: all GREEN).
+    _SUPPORTED_CACHE_VALUES = {
+        "actions/setup-python": frozenset({"pip", "pipenv", "poetry"}),
+        "actions/setup-node": frozenset({"npm", "yarn", "pnpm"}),
+    }
+    # DEFAULT-ON, boolean-gated: `actions/setup-go@v5`'s `cache:` is **`default: true`**
+    # (action.yml:15-17), so a BARE step — no `with:` at all — installs an unbounded
+    # post-step save. That is a stronger fail-open than the one this arm was written to
+    # close, and it measured GREEN without this set (#11065 review, P2).
+    _DEFAULT_ON_CACHE_ACTIONS = frozenset({"actions/setup-go"})
+    # Actions that ARE a cache write, with no input to read: an allow-list by ID, because
+    # there is nothing in the step's own `with:` to detect (`Swatinem/rust-cache`).
+    _CACHE_WRITING_ACTIONS = frozenset({"Swatinem/rust-cache"})
+    # Inputs that write a foreign cache directly (`docker/build-push-action`'s GHA cache
+    # backend). Any non-empty value is a write.
+    _GENERIC_CACHE_WRITE_INPUTS = frozenset({"cache-to"})
+    # ⛔ `astral-sh/setup-uv` is a THIRD mechanism, and it is the opposite polarity: there is
+    # no `actions/setup-uv` (a nonexistent id keys a set on nothing), and the real action's
+    # cache is ON BY DEFAULT — `enable-cache: auto`, `save-cache: true` (v7 action.yml:32-52)
+    # — and FOUR other workflows in this repo use it (`ci.yml:1286`, `deploy-hosted.yml:476`,
+    # `deploy-pages.yml:962`, `skills-parity.yml:59`) with a `with:` block that never sets
+    # `enable-cache`. A copied line in the `test` job installs that action's own unbounded
+    # post-step save of `~/.cache/uv` — the payload this PR bounds — so PRESENCE is the
+    # arming unless the step states an explicit off (#11065 cycle 8 review, P2).
+    # ⚠️ `auto` resolves to OFF when `RUNNER_ENVIRONMENT !== "github-hosted"`
+    # (`src/utils/inputs.ts:171-176`), and `python-ci.yml:790-795` records that
+    # `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the SELF-HOSTED pool — which is
+    # the runner class the measured incident ran on. So on this repo's own pool the bare
+    # form is inert, and this arm is CONSERVATIVE there rather than derived; it is derived
+    # for the `github-hosted` class. Recorded so the justification is not falsifiable by
+    # one vendor source read (#11065 review, P3).
+    _UV_SETUP = "astral-sh/setup-uv"
+
+    def _arming_of(step: dict) -> list:
+        """The cache-arming inputs THIS step carries, by mechanism (empty = none).
+
+        One implementation, used for the `test` job's own steps AND for the body of a
+        local composite action it delegates to: a second copy of this predicate is how
+        the two drift apart, and the composite arm below would then certify only the
+        `actions/cache` spelling (measured GREEN over a composite arming
+        `setup-python`+`cache: pip` — cycle 8 review round 2).
+        """
+        _with = step.get("with") or {}
+        _action = _uses_of(step).split("@")[0]
+        if _action in _CACHE_WRITING_ACTIONS:
+            return ["the action IS a cache write"]
+        _generic = [k for k in sorted(_with)
+                    if k in _GENERIC_CACHE_WRITE_INPUTS and str(_with.get(k) or "").strip()]
+        if _generic:
+            return _generic
+        if _action == _UV_SETUP:
+            _off = any(str(_with.get(k, "")).strip().lower() == "false"
+                       for k in ("enable-cache", "save-cache"))
+            return [] if _off else ["enable-cache (default `auto`)"]
+        if _action in _SUPPORTED_CACHE_VALUES:
+            # ARMED ONLY BY A VALUE THE ACTION ACTUALLY CACHES FOR. `cache:`/`cache-dependency-path`
+            # are read only inside `if (cache)`, and an unsupported manager THROWS in
+            # `getCacheDistributor` — with `post-if: success()` (setup-python action.yml:43)
+            # no post step is installed, so it does not upload. Presence alone reddened a
+            # genuine no-op; a VALUE test reddened `cache: "false"` for a save that is
+            # never created. Both were false blocks (#11065 cycle 8 round 3, and review
+            # 2026-11-06 finding 5).
+            _val = str(_with.get("cache") or "").strip().lower()
+            return ["cache"] if _val in _SUPPORTED_CACHE_VALUES[_action] else []
+        if _action in _DEFAULT_ON_CACHE_ACTIONS:
+            # The off is an EXPLICIT `cache: false`; absence is ON.
+            _val = _with.get("cache", True)
+            return [] if str(_val).strip().lower() == "false" else ["cache (default `true`)"]
+        return []
+
     implicit = [(s.get("name"), s.get("uses")) for s in steps
                 if _uses_of(s).startswith("actions/cache@")]
+    for s in steps:
+        armed = _arming_of(s)
+        assert not armed, (
+            f"the `test` job's step {s.get('name')!r} arms a cache save through "
+            f"{s.get('uses')!r} ({armed}). A `cache:`-family input — or, for "
+            "`astral-sh/setup-uv`, the action's own default-on cache — installs that "
+            "action's OWN UNBOUNDED post-step save, charged against the job's "
+            "`timeout-minutes` exactly as #11063's was, so it is the defect one "
+            "spelling over. For `actions/setup-python`/`actions/setup-node` the off is "
+            "ABSENCE — delete the `cache:` input; for `astral-sh/setup-uv` write "
+            "`enable-cache: false`. Otherwise keep the cache an explicit, BOUNDED "
+            "`actions/cache/save@` for a key this job owns.")
+        uses = _uses_of(s)
+        if uses.startswith("./"):
+            _root = Path(__file__).resolve().parents[1]
+            # ⛔ TWO levels, not one: a composite that delegates to another local composite
+            # still reaches this job's post-step budget, and a one-level scan read GREEN
+            # over the nested case (#11065 review, P3).
+            _frontier = [(uses, 0)]
+            _seen = set()
+            while _frontier:
+                _ref, _depth = _frontier.pop()
+                if _ref in _seen or _depth > 2:
+                    continue
+                _seen.add(_ref)
+                _manifest = next((mp for _e in ("action.yml", "action.yaml")
+                                  if (mp := _root / _ref / _e).exists()), None)
+                # ⛔ A `./`-prefixed `uses:` that does not resolve is a BROKEN WORKFLOW, not
+                # an absent cache — the previous `continue` left no assertion at all and
+                # read GREEN (#11065 review, P3). Fail closed and say which path.
+                assert _manifest is not None, (
+                    f"the `test` job's step {s.get('name')!r} delegates to {_ref!r}, "
+                    "which has no `action.yml`/`action.yaml` under the repo root — a "
+                    "`./` reference that does not resolve cannot be certified to "
+                    "carry no cache write (#11063)")
+                _body = yaml.safe_load(_manifest.read_text(encoding="utf-8")) or {}
+                _body_steps = (_body.get("runs") or {}).get("steps") or []
+                # PARSED, not grepped: a composite body can reach a cache write through any
+                # of the mechanisms `_arming_of`/`_is_writer` model, and a substring scan
+                # for one spelling certified the others (measured GREEN — cycle 8 round 2).
+                _offenders = [(b.get("name"), _uses_of(b)) for b in _body_steps
+                              if _arming_of(b)
+                              or (_is_writer(b)
+                                  and not (isinstance(b.get("timeout-minutes"), int)
+                                           and b.get("timeout-minutes") > 0))]
+                # A body that is not a composite (no `runs.steps`) is not resolvable here;
+                # the grep fallback keeps the arm honest rather than silently green.
+                if not _body_steps:
+                    _raw = _manifest.read_text(encoding="utf-8")
+                    assert ("actions/cache@" not in _raw
+                            and "actions/cache/save@" not in _raw), (
+                        f"the `test` job's step {s.get('name')!r} delegates to the "
+                        f"composite action {_ref!r}, whose body carries a cache write "
+                        "— an implicit, UNBOUNDED post step one indirection away "
+                        "from this scan (#11063)")
+                # ⛔ The message must describe what was FOUND (#11065 review, finding 3).
+                # `_is_writer` alone red an explicit, BOUNDED `actions/cache/save@` with
+                # `timeout-minutes` — the very remedy the sibling message prescribes —
+                # while accusing it of being "implicit, UNBOUNDED". Only an ARMING input,
+                # or a writer with no positive bound, is an offender now.
+                assert not _offenders, (
+                    f"the `test` job's step {s.get('name')!r} delegates to the "
+                    f"composite action {_ref!r}, whose body carries an UNBOUNDED cache "
+                    f"write {_offenders}. A cache-arming `setup-*`/`setup-uv` input, or a "
+                    "write with no positive `timeout-minutes`, is charged against the "
+                    "JOB cap and withholds a REQUIRED check on a green shard (#11063). "
+                    "An explicit `actions/cache/save@` WITH a positive "
+                    "`timeout-minutes` is the prescribed remedy and does not red here.")
+                _frontier.extend((_uses_of(b), _depth + 1) for b in _body_steps
+                                 if _uses_of(b).startswith("./"))
     assert not implicit, (
         f"the `test` job still carries implicit post-step cache SAVE(s) {implicit}. "
         "That post step is UNBOUNDED and is charged against the job's "
@@ -10727,7 +10897,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # `always()` and is diff-gated, so a `startswith("always()")` test accepts the
     # very shape this arm exists to reject (#11065 review, reproduced by mutation:
     # with every writer diff-gated, the prefix form read GREEN).
-    broader = {test_gate, "always() && needs.changes.result == 'success'"}
+    # Bare `always()` IS in the set and is the exception the exactness must NOT swallow:
+    # it is the widest possible gate, so a writer carrying it is strictly MORE load-bearing
+    # than this job, never diff-gated away — omitting it reddened a CORRECT change with a
+    # message asserting the opposite (#11065 cycle 8 review, P3, reproduced).
+    broader = {test_gate, "always()", "always() && needs.changes.result == 'success'"}
     load_bearing = [jid for jid in pip_writers_elsewhere if _gate_of(jid) in broader]
     assert load_bearing, (
         f"every job writing the shared pip key is diff-gated away from this job's "
@@ -10911,12 +11085,31 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "the `OVERRIDES:` block does not name the cache directory it governs "
         "(`~/.cache/uv`) or its only writer (`uv sync --frozen`), so its reason "
         "is unattributable — restate it against the uv-side payload.")
-    assert "#7612's payload" not in overrides, (
-        "the `OVERRIDES:` block still attributes #7612's payload (the 3.2 GB "
-        "torch wheel set) to `~/.cache/uv`. It is not there: `install-cpu-torch` "
-        "installs torch with `pip`, so it lives in `~/.cache/pip`, which this "
-        "job only restores. `--ci` would drop the DEV-GROUP registry wheels "
-        "`uv sync --frozen` re-resolves — say that instead (#11065 cycle 7).")
+    # Test the ATTRIBUTION, not the phrase (#11065 cycle 3, review finding). A bare
+    # substring ban reddened a CORRECT edit — a sentence saying the 3.2 GB torch wheels
+    # are #7612's payload and live in `~/.cache/pip` — because it matched the words rather
+    # than the claim. What is forbidden is an assertion that the payload SITS in
+    # `~/.cache/uv`.
+    #
+    # ⛔ SENTENCE-SCOPED, not line-scoped (#11065 review, finding 2). The block is hard-wrapped
+    # at ~76 columns, so a line loop is blind to the same false claim once it wraps — and it
+    # reds the natural way to state the CORRECT answer ("lives in `~/.cache/pip`, never in
+    # `~/.cache/uv`"), which names the wrong path in order to negate it. Unwrap the comment
+    # block, strip the leading `#`, split on sentence terminators, and judge the CLAIM: a
+    # sentence that attributes #7612's torch payload must not place it in `~/.cache/uv`
+    # without also naming `~/.cache/pip`.
+    _prose = " ".join(re.sub(r"^\s*#\s?", "", _ln) for _ln in overrides.splitlines())
+    for _sentence in re.split(r"(?<=[.;:])\s+", _prose):
+        _attributes = ("#7612" in _sentence and "torch" in _sentence.lower())
+        if not _attributes or "~/.cache/uv" not in _sentence:
+            continue
+        assert "~/.cache/pip" in _sentence, (
+            "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB torch wheel "
+            "set) to `~/.cache/uv`. It is not there: `install-cpu-torch` installs torch "
+            "with `pip`, so it lives in `~/.cache/pip`, which this job only restores. "
+            "`--ci` would drop the DEV-GROUP registry wheels `uv sync --frozen` "
+            f"re-resolves — say that instead (#11065 cycle 7). Offending sentence: "
+            f"{_sentence.strip()!r}")
     assert prune.get("continue-on-error") is True, (
         "the uv prune must be `continue-on-error: true` — a prune that cannot run "
         "only leaves a bigger archive for a save that is bounded on its own")
@@ -11066,10 +11259,31 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
 
     # Any DEPENDENCY-cache write kept in this job must be explicit AND bounded: an
     # unbounded save is the defect (#11063) — it killed a green shard at the cap.
-    # Scoped to `~/.cache` on purpose, so the arm cannot be read as covering the
-    # `Save pytest last-failed state (#6142)` write, which is still an explicit
-    # unbounded `actions/cache/save@v4` (disclosed in the PR body, payload
-    # measured at 23 s, OUT OF SCOPE here — #11065 cycle 2, closing note).
+    #
+    # ⛔ The one writer OUTSIDE `~/.cache` is admitted BY NAME, never by omission
+    # (#11065 cycle 3, review finding). The previous scope was a `~/.cache` substring
+    # test, so a NEW unbounded save on any other path — `~/.cargo`, `node_modules`, a
+    # repo-relative tree — read GREEN: the exact #11063 shape, one path over. Naming
+    # the admitted exception makes the NEXT writer red instead of invisible.
+    _ADMITTED_OUTSIDE_CACHE = "Save pytest last-failed state (#6142)"
+    _outside = {s.get("name") for s in steps
+                if _is_writer(s) and "~/.cache" not in _path_of(s)}
+    # ⛔ `map(str, …)` because unnamed steps are NORMAL in this job: the mixed set raised
+    # `TypeError: '<' not supported between 'str' and 'NoneType'` and the whole diagnostic —
+    # the admitted exception AND the remedy — was lost behind a crash (#11065 review, P3).
+    assert _outside <= {_ADMITTED_OUTSIDE_CACHE}, (
+        "the `test` job carries cache write(s) on a path outside `~/.cache` that "
+        f"this pin does not admit: {sorted(map(str, _outside - {_ADMITTED_OUTSIDE_CACHE}))}. "
+        f"The only admitted one is {_ADMITTED_OUTSIDE_CACHE!r} (`.pytest_cache`, "
+        "payload measured at 23 s, `continue-on-error`, independent owner in "
+        "tests/test_ci_last_failed.py). Any OTHER write on a non-`~/.cache` path is the "
+        "#11063 defect — it is charged against the job cap and withholds a REQUIRED check "
+        "on a green shard. EXACTLY TWO THINGS CLEAR THIS ARM: move the path under "
+        "`~/.cache` (which hands the step to the boundedness loop below, where a positive "
+        "`timeout-minutes` and `continue-on-error` are what it checks), or add the step's "
+        "name to `_ADMITTED_OUTSIDE_CACHE` above — a `timeout-minutes` ALONE does NOT "
+        "clear it (#11065 review, finding 7: an earlier version of this message said it "
+        "did, and a bounded save on `~/.cargo` reds).")
     for s in (st for st in steps if _is_writer(st)
               and "~/.cache" in _path_of(st)):
         bound = s.get("timeout-minutes")
@@ -11125,7 +11339,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # prescribes left the pin GREEN (`1 passed`), i.e. it certified the remedy after its premise
     # was gone. EXACT gate strings, never a prefix (the pip arm's own lesson: a `startswith("always()")`
     # test accepts the diff-gated `always() && … carve_out_run == 'true'`).
-    hf_broader = {test_gate, "always() && needs.changes.result == 'success'"}
+    hf_broader = {test_gate, "always()", "always() && needs.changes.result == 'success'"}
     hf_load_bearing = [jid for jid in hf_writers if _gate_of(jid) in hf_broader]
     assert hf_load_bearing, (
         f"every job writing the shared HF key is diff-gated away from this job's own run: "

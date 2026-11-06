@@ -195,7 +195,7 @@ class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11
 `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
 ~57 m+ degraded against the ~10.4 m of room the SUM leaves. Splitting the payload is what brings it
 inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
-that shape (one bounded writer, no implicit post step), and the watchdog comes from
+that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
