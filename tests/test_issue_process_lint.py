@@ -2360,7 +2360,7 @@ def test_a_multi_line_comment_between_a_claiming_word_and_its_ref_still_claims(b
     A comment is now blanked character-for-character INCLUDING its newlines, so the claim survives.
     RED against the newline-preserving blanking: `claims()` returns `{}` and there is no finding.
     The closing-word spelling is included because it is the one that never broke (`cmid` is
-    ``\s*:?\s*`` — the separator ITSELF, never a character class (see the `cmid` note above), so it
+    ``\\s*:?\\s*`` — the separator ITSELF, never a character class (see the `cmid` note above), so it
     crossed the blanked newline) — the pair keeps the two keyword classes honest.
     """
     claimed = L.claims(body, 1)
@@ -2468,7 +2468,7 @@ def test_a_plural_decline_across_a_wrapped_list_is_a_DECLARED_residual():
                     1)["declined"] == [10063, 10085]
 
 
-@pytest.mark.parametrize("tail", [",", ";", ".", "*", "_", "`", " ", "!", "?"])
+@pytest.mark.parametrize("tail", [",", ";", ".", "*", "_", "`", " ", "!", "?", "\u2026", '"', ">", "'", "%", "|", "@", "~"])
 def test_one_character_after_the_auxiliary_does_not_turn_a_subject_into_a_gloss(tail):
     """The aux-tail guard tested `[ \\t]*` after the auxiliary, so `is` was refused and `is,`,
     `*is*`, `` `is` ``, `is;` and `is.` — the same clause subject with ONE character of emphasis or
