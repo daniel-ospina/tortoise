@@ -31,7 +31,7 @@ auth is enforced inside the function:
 Set the secret (dashboard step, #802):
 
 ```bash
-supabase secrets set --project-ref ybetwichurajbfswfeqa \
+supabase secrets set --project-ref ybetwichurajbfswfeqa --yes \
   AUTH_HOOK_SECRET='v1,whsec_...'   # value from Dashboard → Auth → Hooks
 ```
 
@@ -50,7 +50,7 @@ platform-reserved secret auto-injected into edge functions (warn-only in
 the check). A missing one surfaces as a 500/502 at signup:
 
 ```bash
-supabase secrets set --project-ref ybetwichurajbfswfeqa \
+supabase secrets set --project-ref ybetwichurajbfswfeqa --yes \
   FASTAPI_URL='https://...'          # data plane (/internal/demo demo seed)
   FASTAPI_INTERNAL_KEY='...'         # Bearer for the data-plane call
   TORTOISE_SECRET_PEPPER='...'       # MUST match tortoise/auth.py (key hashing)
@@ -111,7 +111,7 @@ Storage: `waitlist_subscribers` (migration 0005) — `email` UNIQUE (dedup via
 Set on the function (never in the browser):
 
 ```bash
-supabase secrets set --project-ref ybetwichurajbfswfeqa \
+supabase secrets set --project-ref ybetwichurajbfswfeqa --yes \
   RESEND_API_KEY=re_... \
   RESEND_FROM_EMAIL='Premise Labs <noreply@premiselabs.co>' \
   TURNSTILE_SECRET_KEY=0x...

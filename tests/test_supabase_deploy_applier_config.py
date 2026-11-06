@@ -54,6 +54,16 @@ _PINNED_CLI_MAJOR = 2
 #: fixes because nothing is red. A project move is a deliberate change: move this constant in the
 #: same commit so it shows in the diff instead of arriving as a one-token edit.
 _PRODUCTION_PROJECT_REF = "ybetwichurajbfswfeqa"
+#: THE GATE ITSELF. Every gated step in the applier job carries exactly this `if:`, and it reads the
+#: job's `env.SUPABASE_ACCESS_TOKEN` — GitHub does not allow `secrets` in `if:`, so the env binding is
+#: the whole mechanism. Until review cycle 15 nothing read the TOKEN binding at all (only the project
+#: ref), and that was measured GREEN: set `SUPABASE_ACCESS_TOKEN: ''` in the job's `env:` — or write a
+#: one-character secret-name typo, which GitHub resolves to an empty string — and the entire file
+#: still passed (10 passed), while every gated step skipped, `db push` never ran, zero migrations
+#: applied, the app flip never fired, and the run reported SUCCESS. A gate read from a variable that
+#: can resolve empty is not a gate. These two constants are that gate, spelled once.
+_APPLIER_GATE = "github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''"
+_APPLIER_TOKEN = "${{ secrets.SUPABASE_ACCESS_TOKEN }}"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "supabase-deploy.yml"
 CONFIG = REPO_ROOT / "supabase" / "config.toml"
 
@@ -374,6 +384,65 @@ def _disables_execution(body: str) -> str | None:
     return None
 
 
+#: The `set` flags a mutating step may use: they make a bare command FAIL HARDER (`errexit`,
+#: `pipefail`, `nounset`) or only affect tracing (`xtrace`/`errtrace`/`functrace`/`verbose`) or the
+#: history list — none can substitute a zero status for a non-zero one. Named as LONG forms because
+#: that is how a body may legitimately spell them (`set -o errexit`), and the short letters are the
+#: other spelling (`set -eu`) — the same flags, and the pair form was measured RED before this
+#: (review cycle 15): `set -o errexit` + `set -o pipefail` + the push is STRICTLY SAFER than the
+#: `set -e` this allowlist already blessed, and the allow and the deny had drifted apart.
+_HARMLESS_SET_NAMES = frozenset(
+    {"errexit", "nounset", "xtrace", "errtrace", "functrace", "pipefail", "verbose", "history"}
+)
+#: `o` is included because the combined spelling puts it INSIDE the word: `set -euo pipefail` is
+#: `-e -u -o pipefail`, and it is the spelling this file already blessed — a letter set without `o`
+#: would false-RED the most common correct body in the repo. `o` cannot smuggle a dangerous flag past
+#: the check: the VALUE is validated by the `-o` pair branch (or, in the combined form, is the next
+#: word, which must be a harmless name), and every noexec spelling is refused by
+#: `_disables_execution` BEFORE this set is consulted — `set -euon pipefail` and `set -on noexec`
+#: both carry an `n` in the word, which that parser returns on.
+_HARMLESS_SET_LETTERS = frozenset("euxoET")
+
+
+def _set_statement_is_harmless(line: str) -> bool:
+    """Whether this ONE line is a `set` statement that only makes a failure fail harder.
+
+    ⛔ ONE parser for the dangerous direction: `_disables_execution` still owns the question "does
+    this `set` put the shell in noexec", and it is asked FIRST, so the allowlist can never admit
+    `noexec` (`set -n`, `set -en`, `set -o noexec`) — nor a `set +e`, which is not a `set -…`
+    statement at all. A second opinion on which flags are dangerous is how the allow and the deny
+    diverge; that divergence is what measured `set -o errexit` RED while `set -e` passed.
+    """
+    if _disables_execution(line) is not None:
+        return False
+    words = line.split()
+    if not words or words[0] != "set":
+        return False
+    rest = words[1:]
+    if not rest:
+        return False
+    index = 0
+    while index < len(rest):
+        word = rest[index]
+        if word == "-o":  # `-o` is a word of its own whose VALUE is the flag name
+            if index + 1 >= len(rest) or rest[index + 1] not in _HARMLESS_SET_NAMES:
+                return False
+            index += 2
+            continue
+        if word.startswith("--"):
+            return False
+        if word.startswith("-"):
+            if not word[1:] or any(ch not in _HARMLESS_SET_LETTERS for ch in word[1:]):
+                return False
+            index += 1
+            continue
+        if word in _HARMLESS_SET_NAMES:  # the bare long form of a pair: `set -eu pipefail`
+            index += 1
+            continue
+        return False
+    return True
+
+
 def _run_body(step: dict) -> str:
     """A step's `run:` body, shell line-continuations joined so a wrapped flag is still one command."""
     return str(step.get("run") or "").replace("\\\n", " ")
@@ -390,6 +459,36 @@ def _run_body(step: dict) -> str:
 _REPAIR_REMEDY = re.compile(r"supabase\s+migration\s+repair[^\"\n]*--status\s+applied[^\"\n]*")
 _DB_PUSH_REMEDY = re.compile(r"supabase\s+db\s+push\s+--linked[^\"\n]*--include-all[^\"\n]*")
 _SECRETS_SET_REMEDY = re.compile(r"supabase\s+secrets\s+set[^\"\n]*--project-ref[^\"\n]*")
+
+#: The command roots `supabase/README.md` prints. Every one of them is a hosted-mutating door.
+_README_REMEDY_ROOTS = ("supabase db push", "supabase functions deploy", "supabase secrets set")
+#: What makes a line an INVOCATION rather than PROSE about one. Deliberately NOT the target flag:
+#: `functions deploy <name>` and `secrets set` both target the LINKED project with no target flag at
+#: all (pinned CLI: "Set a secret(s) to the linked Supabase project"), so requiring one hides a real
+#: unpinned remedy — measured, a false PASS. A flag or a `NAME=VALUE` assignment is present in every
+#: form the README prints and in no sentence of prose it prints about them.
+_README_REMEDY_FLAG = re.compile(r"(?:^|\s)--[A-Za-z]")
+_README_REMEDY_ASSIGNMENT = re.compile(r"(?:^|\s)[A-Z][A-Z0-9_]*=")
+
+
+def _readme_remedies(text: str) -> list[str]:
+    """Every PRINTED command in `supabase/README.md`, one stripped line per invocation.
+
+    Line-continuations are joined first, so a remedy whose flags wrap is one entry. A line qualifies
+    when it STARTS with a governed root and CARRIES an invocation token (a flag or a `NAME=VALUE`).
+    Both halves are load-bearing and both were measured: the root alone reads prose as a command (and
+    red a correct README), while a target-flag requirement silently exempts a command that names its
+    target by `supabase link` instead — either way the operator's copy-paste path goes unasserted.
+    Pinned in both directions by `test_the_readme_remedy_selector_sees_a_command_and_not_prose`.
+    """
+    remedies: list[str] = []
+    for line in text.replace("\\\n", " ").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(_README_REMEDY_ROOTS):
+            continue
+        if _README_REMEDY_FLAG.search(stripped) or _README_REMEDY_ASSIGNMENT.search(stripped):
+            remedies.append(stripped)
+    return remedies
 # The banner remedy omits the `supabase` prefix (it is printed as `'migration repair …'`), so it needs
 # its own anchor rather than `_REPAIR_REMEDY`.
 _BANNER_REPAIR = re.compile(r"migration\s+repair")
@@ -554,8 +653,13 @@ def _carries_consent(argv: tuple[str, ...]) -> bool:
     return consent
 
 
+#: The characters a banner can delimit its printed COMMAND with. A remedy is delimited in every
+#: banner this repo prints, which is what makes "the command" separable from "prose about it".
+_REMEDY_DELIMITERS = ("'", "`", '"')
+
+
 def _remedy_command(banner: str, anchor: re.Pattern[str]) -> str:
-    """The COMMAND a banner prints, sliced out of its quotes — never the whole banner.
+    """The COMMAND a banner prints, sliced out of its own delimiter PAIR — never the whole banner.
 
     A whole-banner match is defeated by PROSE, measured GREEN: delete `--yes` from the copy-paste
     command and mention it in a sentence of the SAME banner, and a `--yes` search still matches
@@ -582,12 +686,12 @@ def _remedy_command(banner: str, anchor: re.Pattern[str]) -> str:
 
     match = anchor.search(banner)
     if match is None:
-        return banner
+        return banner  # the anchor is absent: the CALLER's assertion reports that, not this slicer
     start = match.start()
-    opened = max(banner.rfind(quote, 0, start) for quote in "'`\"")
+    opened = max(banner.rfind(quote, 0, start) for quote in _REMEDY_DELIMITERS)
     if opened == -1:
         return _clause(banner[start:])
-    closes = [banner.find(quote, start) for quote in "'`\""]
+    closes = [banner.find(quote, start) for quote in _REMEDY_DELIMITERS]
     closed = min((idx for idx in closes if idx != -1), default=len(banner))
     delimited = banner[opened + 1 : closed]
     return delimited if anchor.search(delimited) else _clause(banner[start:])
@@ -732,6 +836,23 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
                 f"{_PRODUCTION_PROJECT_REF!r}: `db push --linked` would apply production DDL to "
                 f"that project while this run reports success (#10896)"
             )
+        # THE OTHER BINDING — the one every `if:` in this job dereferences. `db push --linked` being
+        # reachable at all depends on `env.SUPABASE_ACCESS_TOKEN != ''`, so the job's `env:` entry is
+        # the gate itself, and until review cycle 15 nothing read it (only the project ref). Measured
+        # GREEN: `SUPABASE_ACCESS_TOKEN: ''` in this job's `env:` left all 10 tests in this file
+        # passing while every gated step skipped — `Apply migrations` never ran, ZERO migrations
+        # applied, the app flip never fired, and the job reported SUCCESS. The same hole opens with
+        # no credential edit at all: a one-character typo in the secret NAME resolves to an empty
+        # string. A gate read from a variable that can resolve empty is not a gate.
+        token_binding = str((job.get("env") or {}).get("SUPABASE_ACCESS_TOKEN") or "").strip()
+        assert token_binding == _APPLIER_TOKEN, (
+            f"job {job_name!r} must bind `env: SUPABASE_ACCESS_TOKEN: {_APPLIER_TOKEN}` (got "
+            f"{token_binding!r}). Every gated step in this job carries `if: {_APPLIER_GATE}`, so a "
+            f"binding that can resolve EMPTY — a bare `''`, or a misspelled secret name, which "
+            f"GitHub resolves to an empty string without failing the parse — skips the whole "
+            f"deploy: the apply never runs, zero migrations land, `Dispatch deploy-hosted` (#3627) "
+            f"never fires, and the run reports SUCCESS over an unapplied schema (#10896)"
+        )
         # …and the value that reference RESOLVES to must not be re-pointed one level down. A GitHub
         # Actions step-level `env:` takes precedence over job `env:`, so the three assertions above
         # were all satisfied while `env: SUPABASE_PROJECT_REF: someoneelsesproject01` on the Link
@@ -780,6 +901,29 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
                 f"refusal, which is what stops a non-main dispatch applying that branch's "
                 f"migrations to production (#10896)"
             )
+            # …and the false-literal test above is only the shapes that were SPELLED false. A step
+            # skipped for a different reason is the same hole, and two were measured GREEN on the
+            # `Verify required edge-function secrets (#1121)` step (review cycle 15): `if: 0 == 1`
+            # (no `false` token anywhere, so the regex cannot see it) and the realistic
+            # `if: github.event_name == 'push'` — permanently false in a dispatch-only job, which is
+            # exactly what a copy-paste from the `check-drift` job produces. In THIS job the only
+            # legal gate is the job's own, so the check is equality rather than a blacklist of
+            # spellings: absent (the setup steps, which are ungated on purpose) or the gate, nothing
+            # else. Proof it is not vacuous: all SEVEN gated steps in the current workflow carry that
+            # exact expression and every other step has no `if:`. ⛔ Do NOT widen this to the
+            # `check-drift` job: its `if: github.event_name == 'push'` is CORRECT there (push is the
+            # only event it runs on) and must stay green — which is why this loop is over
+            # `_applier_jobs()`, the mutating job(s), not over `_workflow_doc()`.
+            assert step.get("if") in (None, _APPLIER_GATE), (
+                f"step {step.get('name')!r} in job {job_name!r} is gated on {step.get('if')!r}, "
+                f"which is neither absent nor the job's gate (`{_APPLIER_GATE}`): any other "
+                f"condition is a way to SKIP a check step, and in the applier job a skipped step is "
+                f"a skipped CHECK — the secrets verification named here exists so a missing secret "
+                f"fails the deploy instead of 500-ing every signup at runtime (#1121), and "
+                f"`if: 0 == 1` or a copy-pasted `github.event_name == 'push'` silences it while the "
+                f"job stays GREEN (#10896). If you are deliberately re-wording this job's gate, "
+                f"change _APPLIER_GATE in the same commit so the two cannot drift"
+            )
             # The tree that is CHECKED OUT is what `db push` applies. The workflow refuses a
             # non-main dispatch by reading `github.ref`, but nothing read what checkout actually
             # fetched — `with: {ref: some-other-branch}` measured GREEN (review cycle 13), and that
@@ -800,6 +944,19 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
                 f"with {override!r}: a step-level `env:` SHADOWS the job's value, so the link and "
                 f"every hosted mutation in that step would target that project while the guard "
                 f"reads the job env and stays green (#10896)"
+            )
+            # …and the TOKEN binding is re-pointed the same way, with a worse consequence: the value
+            # is not a target but the gate. A step-level `env: SUPABASE_ACCESS_TOKEN:` shadows the
+            # job's, and one that resolves empty turns that step's `if:` false — the step is skipped
+            # while the job reads green, which is the whole no-op this PR closes, one level down.
+            token_override = (step.get("env") or {}).get("SUPABASE_ACCESS_TOKEN")
+            assert token_override is None or str(token_override).strip() == _APPLIER_TOKEN, (
+                f"step {step.get('name')!r} in job {job_name!r} overrides "
+                f"`SUPABASE_ACCESS_TOKEN` with {token_override!r}: a step-level `env:` SHADOWS the "
+                f"job's binding, so a value that resolves empty makes the step's own "
+                f"`env.SUPABASE_ACCESS_TOKEN != ''` gate false — the step (an apply, a deploy, or "
+                f"a CHECK) silently skips, the job reports SUCCESS, and nothing was applied "
+                f"(#10896)"
             )
             for argv in (_argv(command) for command in _commands_in(step)):
                 for index, token in enumerate(argv):
@@ -860,6 +1017,39 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         "the workflow must still RUN a consent-gated hosted command — finding none means the sweep "
         "broke, and every assertion below would pass vacuously (#10896)"
     )
+    # `shell:` is resolved from THREE places, not one. The STEP-level override is refused below and
+    # the JOB-level one inside the contract; the WORKFLOW-level `defaults.run.shell` is the third and
+    # it is global, so it is asserted here, unconditionally, before any per-job loop. Measured GREEN
+    # (review cycle 15): `defaults: {run: {shell: "bash -c 'exit 0' {0}"}}` above `jobs:` left the
+    # whole suite passing while every step's body ran as `$0` — the deploy applies nothing and the
+    # run reports SUCCESS (#10896, #3627).
+    workflow_run_defaults = (_workflow_doc().get("defaults") or {}).get("run") or {}
+    assert "shell" not in workflow_run_defaults, (
+        f"the workflow sets `defaults.run.shell: {workflow_run_defaults.get('shell')!r}`: a `shell:` "
+        f"resolved at this level applies to EVERY step in EVERY job, and `bash -c 'exit 0' {{0}}` "
+        f"takes the body as `$0` and exits 0 without running it — the deploy applies nothing and "
+        f"reports SUCCESS (#10896, #3627)"
+    )
+    # …and the JOB level, over EVERY job — not only the jobs that carry a production mutation. This
+    # assertion began inside `_applier_contract`, which RETURNS for a step that does not mutate
+    # production, so a read-only job was never inspected and `check-drift` (which runs
+    # `bash .github/scripts/check-migration-drift` and no `supabase ` command at all) could be
+    # silently no-opped: measured GREEN at `4e41164b1` with
+    # `defaults: {run: {shell: "bash -c 'exit 0' {0}"}}` on that job — the drift check executed
+    # nothing and the run reported SUCCESS (review cycle 16). The read-only half is not a lesser
+    # half: this file's own doctrine is that sweeping only the mutating job left it INERT (#11135).
+    for job_name in sorted(_workflow_doc().get("jobs") or {}):
+        job_run_defaults = ((_workflow_doc()["jobs"].get(job_name) or {}).get("defaults") or {}).get(
+            "run"
+        ) or {}
+        assert "shell" not in job_run_defaults, (
+            f"job {job_name!r} sets `defaults.run.shell: {job_run_defaults.get('shell')!r}`: a "
+            f"job-level `shell:` applies to EVERY step in it, so `bash -c 'exit 0' {{0}}` takes each "
+            f"body as `$0` and exits 0 without running it — for a read-only job that silently "
+            f"no-ops the check, and for the applier job the apply, the edge-function deploys and "
+            f"the co-move dispatch all exit 0 without running, reporting SUCCESS over an unapplied "
+            f"schema (measured, review cycle 16, #10896, #3627)"
+        )
     def _applier_contract(job_name: str, job: dict, step: dict) -> bool:
         """The APPLY contract — asserted for every swept step that MUTATES production.
 
@@ -918,6 +1108,9 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"`bash -e`; `shell: bash -c 'exit 0'` takes the body as `$0` and exits 0 without running "
             f"it — a silent no-op that reads as a successful apply (measured, review cycle 9)"
         )
+        # (`jobs.<id>.defaults.run.shell` is the third level and it is asserted GLOBALLY, above, over
+        # every job — not here: this contract returns early for a step that does not mutate
+        # production, and a read-only job's `shell:` silences that job just as thoroughly.)
         assert job.get("if") is not False and not _FALSE_CONDITION.fullmatch(
             str(job.get("if") or "").lower()
         ) and not _FALSE_OPERAND.search(str(job.get("if") or "").lower()), (
@@ -945,14 +1138,15 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             line = _command_text(raw_line)
             if not line:
                 continue
-            assert line.startswith("supabase ") or re.fullmatch(
-                r"set\s+-[A-Za-z]+(?:\s+pipefail)?", line
-            ), (
+            assert line.startswith("supabase ") or _set_statement_is_harmless(line), (
                 f"{where} contains a command line that is not its CLI invocation ({line!r}): a "
                 f"mutating step must BE its invocation. An unconditional `exit 0` / `exec true` / "
                 f"`return 1` (or any other second statement) makes the step exit 0 having applied "
                 f"nothing, with no control operator for the scan below to catch — the #3627 "
-                f"inversion, measured green (#10896)"
+                f"inversion, measured green (#10896). A `set` statement is allowed when it only "
+                f"makes a failure fail harder (`set -euo pipefail`, `set -o errexit`, "
+                f"`set -o pipefail`, …); `_set_statement_is_harmless` asks the SAME parser the noexec "
+                f"check uses, so `set -n` / `set -o noexec` stay RED here too"
             )
         assert not _ERRETIT_DISABLED.search(body), (
             f"{where} disables errexit (`set +e` / `set +o errexit`): the apply can then fail and "
@@ -1020,6 +1214,39 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         )
 
 
+def test_the_readme_remedy_selector_sees_a_command_and_not_prose() -> None:
+    """The README selector must SEE an unpinned command and must NOT see prose about one.
+
+    Both directions are holes this file has already paid for, and each is pinned because the
+    selector's narrowings are invisible by construction — a line it does not select is never
+    asserted on, so nothing reds when the exemption is wrong. That is how a fix for one direction
+    becomes a false PASS in the other (measured, review cycle 17).
+    """
+    # PROSE that begins a line with a command root is not a command. Measured: it red a CORRECT
+    # README with "1 printed command(s) without `--yes`", while an operator can copy nothing from it.
+    for prose in (
+        "supabase secrets set writes to the hosted project, so never paste a real value.",
+        "supabase functions deploy needs the CLI on the runner before this block.",
+        "supabase db push is the manual door when the co-move has failed.",
+    ):
+        assert _readme_remedies(prose) == [], f"prose was read as a command: {prose!r}"
+    # A COMMAND is a command whether or not it names a TARGET FLAG — `functions deploy <name>` and
+    # `secrets set` both target the LINKED project with no flag at all. Requiring a target flag made
+    # these invisible: measured, `supabase functions deploy deck-view --no-verify-jwt` with no `--yes`
+    # gave 1 failed at the PR base and 15 passed after that narrowing — a false PASS, which is the
+    # failure this whole file exists to prevent.
+    for command in (
+        "supabase functions deploy deck-view --no-verify-jwt",
+        "supabase secrets set RESEND_API_KEY=re_...",
+        "supabase db push --linked --include-all --yes",
+        "supabase functions deploy tenant-provision --project-ref abc --yes",
+    ):
+        assert _readme_remedies(command) == [command], f"a command was exempted: {command!r}"
+    # A continuation the README actually uses stays ONE invocation (joined before selection).
+    wrapped = "supabase secrets set --project-ref abc --yes \\\n  RESEND_API_KEY=re_..."
+    assert len(_readme_remedies(wrapped)) == 1, _readme_remedies(wrapped)
+
+
 def test_printed_remediations_pass_yes_too() -> None:
     """A remedy the repo PRINTS is code: it must run unattended, the same way the workflow does.
 
@@ -1083,18 +1310,38 @@ def test_printed_remediations_pass_yes_too() -> None:
         f"({lacking}): CLI v3 consent-gates `db push` and cannot prompt, so the copy-paste apply an "
         f"operator takes from the gate applies nothing and says nothing (#10896)"
     )
-    # The README's manual-fallback block is the OTHER printed apply path, and it selects its target
-    # with `--project-ref` rather than `--linked`, so `_DB_PUSH_REMEDY` cannot see it (measured: it
-    # stayed GREEN with `--yes` removed, review cycle 11). Its anchor is the COMMAND ROOT at the
-    # start of a line (continuations joined): prose such as "First `supabase db push`: …" does not
-    # start the line with the command, so documentation cannot false-RED and a remedy cannot hide
+    # The README's manual-fallback blocks are the OTHER printed apply path, and they select their
+    # target with `--project-ref` rather than `--linked`, so `_DB_PUSH_REMEDY` cannot see them
+    # (measured: it stayed GREEN with `--yes` removed, review cycle 11). Its anchor is the COMMAND ROOT
+    # at the start of a line (continuations joined): prose such as "First `supabase db push`: …" does
+    # not start the line with the command, so documentation cannot false-RED and a remedy cannot hide
     # behind prose.
-    readme = governed["supabase/README.md"].read_text(encoding="utf-8").replace("\\\n", " ")
-    readme_remedies = [
-        line.strip()
-        for line in readme.splitlines()
-        if line.strip().startswith(("supabase db push", "supabase functions deploy"))
-    ]
+    #
+    # ⛔ EVERY root this file governs, not just the two that happened to be listed (review cycle 15):
+    # `supabase secrets set` was printed three times here with no `--yes` while the WORKFLOW's own
+    # `secrets set` remedy carried it and was asserted — the sweep went partial because the selector
+    # could not see the third root, so the operator's documented path fails the v3 consent gate exactly
+    # like the bug it recovers from (#10896, #1121).
+    # ⛔ A root at the start of a line is NOT enough to make a line a command — PROSE can begin with
+    # one too, and that shape RED A CORRECT README (measured, review cycle 16): the sentence
+    # `supabase secrets set writes to the hosted project, so never paste a real value.` was selected
+    # by the root alone and reported as "1 printed command(s) without `--yes`", while the operator can
+    # copy nothing from it. ⛔ And the TARGET FLAG is not the distinguisher either: `functions deploy
+    # <name>` and `secrets set` both target the LINKED project with no target flag at all (the pinned
+    # CLI says so: `Set a secret(s) to the linked Supabase project`), which is this file's own
+    # fail-closed doctrine two predicates away — an UNKNOWN target must never read as a safe one.
+    # Keying on it made a remedy INVISIBLE (measured: `supabase functions deploy deck-view
+    # --no-verify-jwt`, no `--yes` → 1 failed at the PR base, 15 passed with the target-flag
+    # selector, i.e. a false PASS introduced by the fix). The distinguisher is whether the line looks
+    # like an INVOCATION at all — a flag or a `NAME=VALUE` assignment — and that shape is pinned in
+    # both directions by `test_the_readme_remedy_selector_sees_a_command_and_not_prose`.
+    # Declared residual, stated not implied: prose that reaches column 0 spelling the root AND a flag
+    # (`supabase secrets set --project-ref is required`) is indistinguishable from a command by any
+    # lexical rule, so it would still be inspected — a much narrower shape than a bare sentence, and
+    # one no README section this file governs carries.
+    readme_remedies = _readme_remedies(
+        governed["supabase/README.md"].read_text(encoding="utf-8")
+    )
     assert readme_remedies, (
         "supabase/README.md must keep its manual-fallback apply block: it is the operator's "
         "copy-paste path when the automated co-move has already failed (#3627)"
@@ -1114,10 +1361,10 @@ def test_printed_remediations_pass_yes_too() -> None:
         remedy for remedy in readme_remedies if not _carries_consent(_argv(remedy))
     ]  # `_argv` strips the comment itself, so the two cannot disagree
     assert not unconsented, (
-        f"supabase/README.md prints {len(unconsented)} manual-fallback command(s) without `--yes` "
-        f"({unconsented}): CLI v3 consent-gates `db push` and `functions deploy` and cannot prompt "
-        f"in a copy-paste, so the documented recovery fails exactly like the bug it recovers from "
-        f"(#10896, #11107)"
+        f"supabase/README.md prints {len(unconsented)} printed command(s) without `--yes` "
+        f"({unconsented}): CLI v3 consent-gates `db push`, `functions deploy` AND `secrets set` and "
+        f"cannot prompt in a copy-paste, so the documented recovery fails exactly like the bug it "
+        f"recovers from (#10896, #11107)"
     )
 
 
