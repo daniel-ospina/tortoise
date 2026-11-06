@@ -5677,7 +5677,21 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     : _inv_true.group(0).lower().rfind(_TRUE_TREE)
                 ]
                 _inv_between = re.sub(_PHRASE_RE, " ", _inv_between, flags=re.I)
-                if not _SHA_LIKE_RE.search(_inv_between):
+                # ⛔ ASK THE SIBLING HELPER, DO NOT COUNT SHAS (#11191 review r16, P1 —
+                # MEASURED false RED this guard introduced). Counting ANY sha refused the
+                # truth whenever the ARMING COMMIT sat between the copula and the true
+                # tree — or an aside did — which `origin/main` and the base accept:
+                #   "The tree immediately before #9548 is the arming commit `785bb2b59`'s
+                #    parent, `047c91f7a`."                            -> REFUSED (must pass)
+                #   "The tree immediately before #9548 is (the parent of `785bb2b59`)
+                #    `047c91f7a`."                                    -> REFUSED (must pass)
+                # `_third_sha_in_clause` already encodes the doctrine — skip the TRUE tree
+                # and the ARMING COMMIT, and treat a DENIED sha as a correction — so the two
+                # guards cannot disagree about the same sentence. An aside between a copula
+                # and its object is not the predication, so incises are blanked first.
+                if not _third_sha_in_clause(
+                    _INCISE.sub(lambda _m: " " * len(_m.group(0)), _inv_between)
+                ):
                     return True  # "the tree before #9548 IS `047c91f7a`"
             # 4. A REFERENT. The phrase refers to the nearest sha written before it — that
             #    is what apposition and attribution mean in prose, with no distance
@@ -7439,6 +7453,16 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "The tree immediately before #9548 is `047c91f7a`.",
         "The tree immediately before #9548 is `047c91f7a`, where the same path set returns 10.",
         "The tree before #9548 means `047c91f7a`.",
+        # ⛔ THE ARMED COMMIT AND AN ASIDE BETWEEN THE COPULA AND ITS OBJECT ARE NOT THE
+        # PREDICATION (#11191 review r16, P1 — MEASURED false RED). A first cut counted ANY
+        # sha in the gap, so these truths were refused while `origin/main` and the base
+        # accept them; they are now decided by the SAME helper the referent guard uses,
+        # which skips the true tree and the ARMING COMMIT, so the two cannot disagree.
+        "The tree immediately before #9548 is the arming commit `785bb2b59`'s parent, "
+        "`047c91f7a`.",
+        "The tree immediately before #9548 is (the parent of `785bb2b59`) `047c91f7a`.",
+        "The tree immediately before #9548 is, as `785bb2b59` says, `047c91f7a`.",
+        "The tree immediately before #9548 is the arming commit's parent, `047c91f7a`.",
     ):
         assert not _refuses_before_9548(_true_copula), (
             f"REFUSED: {_true_copula!r}\n"
