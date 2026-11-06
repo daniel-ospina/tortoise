@@ -9036,32 +9036,62 @@ def test_the_paren_guard_reads_only_a_rows_OWN_note():
 # provenance for a WEIGHT ("the module held **30** at the #9352 head, **31** after
 # #9358") — history that must NOT be re-derived, and a guard that read those would
 # red on correct notes.
+# ⛔ EVERY claim in a row is judged, not just the first (`finditer`, not `search`;
+# #10610 review at `fdff8f432`, P2). A row that CORRECTED its leading count and left
+# the superseded one standing beside it returned `[]` — the guard's claim is "no
+# count in a row is one its file refutes", and "the first count is right" is a
+# different, weaker sentence. The two-claim arm is
+# `test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row`.
+# ⛔ The JOINER is free-form: the row's ENTRY RULE tells a reader to re-derive the
+# count with `grep -c '^def test_'` and never prescribes how the note spells the
+# relation. Matching `->`/`→` ALONE left the `=` spelling unpoliced, and measured at
+# the #10610 review head the `test_7949_capstone_measure.py` row stated BOTH `191
+# cases` and `` `grep -c '^def test_'` = 190 `` in one sentence with this guard green
+# (`_durations_rows_with_a_stale_case_count` returned `[]`), so the row's own
+# re-derivation instruction handed a maintainer 191 against a note saying 190 — the
+# edit that re-installs the false count this guard exists to catch.
 _CASE_COUNT_CLAIM_RE = re.compile(
-    r"`grep -c '\^def test_'`\s*(?:->|\u2192)\s*(?P<n>\d+)")
+    r"`grep -c '\^def test_'`\s*(?:->|\u2192|=)\s*(?P<n>\d+)")
 
 
 def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
-    """`(key, stated, actual)` for rows whose cited `grep -c` count is wrong.
+    """`(key, stated, actual)` for EVERY cited `grep -c` count that is wrong.
 
     `actual` is the file's `^def test_` count — the SAME instrument the row names,
-    so a file that collects a different number through `parametrize` (none here; the
-    two rows that cite it both say so explicitly) is not silently re-based. `None`
+    so a file that collects a different number through `parametrize` is not silently
+    re-based. That case is NOT hypothetical and the earlier "(none here; the two rows
+    that cite it both say so explicitly)" was FALSE **when measured at `2ffc5db19`**:
+    **10** rows cited the instrument then, and `test_7949_capstone_measure.py` — one of
+    them — has `parametrize` uses, **205** `^def test_` definitions and **235** collected
+    items at that commit, so its row's "205 cases at this merge head" was the def-count
+    and NOT what pytest runs. That count has moved since (re-derive it rather than
+    reading it here: `grep -c '^def test_'`); the measurement is named by COMMIT on
+    purpose, because a hand-carried present-tense count is the defect this guard is
+    about (#10610 review at `1c2130dd9`, P3).
+    The instrument is a WEIGHT, so the def-count is the right operand; the point is that
+    this guard reads that operand and nothing else. `None`
     means the row weighs a file that is not there, which a citation may not do.
+
+    ⛔ A row may cite the instrument more than once, and EVERY cite is examined: a
+    note whose first claim is correct and whose second is stale still hands a
+    maintainer two different numbers, which is the defect. The file is read ONCE per
+    row, not once per claim.
     """
     out = []
     for key, note in _durations_row_comments(text):
-        m = _CASE_COUNT_CLAIM_RE.search(note)
-        if m is None:
+        claims = list(_CASE_COUNT_CLAIM_RE.finditer(note))
+        if not claims:
             continue
-        stated = int(m.group("n"))
         path = tests_dir / key
-        if not path.exists():
-            out.append((key, stated, None))
-            continue
-        actual = len(re.findall(
-            r"^def test_", path.read_text(encoding="utf-8"), re.M))
-        if actual != stated:
-            out.append((key, stated, actual))
+        if path.exists():
+            actual = len(re.findall(
+                r"^def test_", path.read_text(encoding="utf-8"), re.M))
+        else:
+            actual = None
+        for m in claims:
+            stated = int(m.group("n"))
+            if actual is None or actual != stated:
+                out.append((key, stated, actual))
     return out
 
 
@@ -9090,6 +9120,13 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` \u2192 2; pytest "
         "collects 2).\n"
         "surfaces: []\n")
+    # The SAME claim spelled with `=` — a CORRECT one must stay quiet (#10610 review
+    # at `7c03efc1d`), or the widened branch would red notes it was widened for.
+    fresh_equals = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2; pytest "
+        "collects 2).\n"
+        "surfaces: []\n")
     historical = (
         "durations:\n"
         "  test_two.py: 3.0  # #9352: the module held 7 at the #9352 head and 9 after "
@@ -9100,6 +9137,21 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
     assert _durations_rows_with_a_stale_case_count(stale, tmp_path) == [
         ("test_two.py", 3, 2)]
     assert _durations_rows_with_a_stale_case_count(fresh, tmp_path) == []
+    # ⛔ The `=` spelling. Measured at the #10610 review head, a row carried BOTH a
+    # corrected leading count and `` `grep -c '^def test_'` = <old> `` beside it, and
+    # the pre-fix regex (`->`/`→` only) returned `[]` for it — a required leg green
+    # over the claim its own ENTRY RULE tells the reader to re-derive. This arm reds
+    # on that regex and passes on the widened one; the note's joiner is not the claim.
+    equals = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 3).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(equals, tmp_path) == [
+        ("test_two.py", 3, 2)]
+    # …and the guard must stay QUIET on a CORRECT `=` claim: reading the
+    # new branch as a citation is only safe if it still clears the spelling
+    # it was widened for (an over-matching guard would red correct notes).
+    assert _durations_rows_with_a_stale_case_count(fresh_equals, tmp_path) == []
     assert _durations_rows_with_a_stale_case_count(historical, tmp_path) == []
     gone = (
         "durations:\n"
@@ -9107,6 +9159,61 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         "surfaces: []\n")
     assert _durations_rows_with_a_stale_case_count(gone, tmp_path) == [
         ("test_gone.py", 4, None)]
+
+
+#: One note carrying TWO `grep -c` claims: a CORRECT one first, a STALE one second.
+#:
+#: ⛔ THE SHAPE THE `.search` VERSION COULD NOT SEE (#10610 review at `fdff8f432`,
+#: P2). `_CASE_COUNT_CLAIM_RE.search` stops at the first claim, so a row that fixed
+#: its leading count and left the old one standing beside it returned `[]` — green
+#: over exactly the contradiction the guard was widened for two cycles earlier
+#: (`tests/test_ci_selection.py`'s own comment measures that row). It is a FAIL-
+#: OPEN in a guard: the guard's job is "no row carries a count its file refutes",
+#: and "the first count is right" is not that sentence.
+_ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM = (
+    "durations:\n"
+    "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2) — and the\n"
+    "  # older re-derivation beside it still reads (`grep -c '^def test_'` = 190).\n"
+    "surfaces: []\n")
+
+
+def test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row(tmp_path):
+    """A row may cite the instrument twice; the STALE cite must be the one reported.
+
+    Non-vacuity: at the pre-fix head (`.search`) this is `[]` — measured, one arm
+    red — because the first claim is CORRECT and the search never reached the
+    second. With `finditer` it reports `('test_two.py', 190, 2)`.
+
+    ⛔ AND THE COUNT IS NOT SILENTLY DEDUPLICATED: two stale cites of DIFFERENT
+    values are two offenders, because each is a separate sentence a maintainer has
+    to delete. Two cites of the SAME stale value are reported TWICE as well — one
+    entry per offending SENTENCE, never per distinct repair: the read appends on
+    every match and nothing deduplicates it, so the list describes what the row
+    still carries. Both shapes are MEASURED below rather than asserted, because an
+    earlier revision of this docstring claimed a dedupe the code never had.
+    """
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    assert _durations_rows_with_a_stale_case_count(
+        _ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM, tmp_path) == [("test_two.py", 190, 2)]
+
+    # The SAME stale value cited twice is two offenders, not one: nothing dedupes.
+    twice = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 190) and\n"
+        "  # again (`grep -c '^def test_'` = 190).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(twice, tmp_path) == [
+        ("test_two.py", 190, 2), ("test_two.py", 190, 2)], (
+        "one offender per offending SENTENCE — the guard does not deduplicate")
+
+    # A row whose ONLY claim is correct stays quiet — the widened read must not
+    # turn a single good cite into an offender.
+    fresh_only = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(fresh_only, tmp_path) == []
 
 
 def test_a_detached_note_is_a_claim_no_guard_can_read(tmp_path):
@@ -9602,6 +9709,199 @@ def test_the_unchanged_weight_claim_check_is_not_vacuous():
         "surfaces: []\n")
     assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
         legitimate) == []
+
+
+#: A row restating its file's total in PROSE, beside the machine-read instrument cite:
+#: "(`198` at this head, with #10610's `39` added cases)". The instrument cite on the
+#: same row (`grep -c '^def test_'` = 198) is what `_CASE_COUNT_CLAIM_RE` reads; this
+#: parenthetical is a SECOND total for the SAME file and no rule read it.
+#:
+#: ⛔ THE BACKTICKS ARE OPTIONAL ON PURPOSE. This map's convention is to backtick a
+#: number (`(`198` at this head, with #10610's `39` added cases)` is the spelling the
+#: example above uses, and it is what a maintainer copying from here writes), while
+#: the live `test_7949_capstone_measure.py` row happens to be unbackticked. A pattern
+#: that read only one spelling would return no claim at all for the other and report a
+#: clean map — the `=`-vs-`->` FALSE PASS this file's sibling guard was widened for one
+#: round earlier (`_CASE_COUNT_CLAIM_RE`, whose note states the rule: "a spelling the
+#: guard cannot see is a FALSE PASS, not a wording preference").
+#:
+#: ⛔ AND THE TAIL IS NOT PART OF THE SHAPE (#10610 review at `52d7173d5`, P2). The
+#: first cut required the literal `, with #N's M added cases)` after the number, and
+#: this PR's own row was then re-spelled to `(215 at this head: origin/main's 190 plus
+#: the twenty-five net new cases this PR adds, …)`. Measured on the live map:
+#: `grep -c 'added cases)' config/ci-surfaces.yml` -> **0**, so the selector matched
+#: ZERO rows tree-wide and the guard reported `[]` as a pass over a subject set that
+#: was EMPTY — a no-op gate, defeated inside the PR that added it. The shape that is
+#: stable across both spellings is the parenthetical's HEAD: `(` + the total + ` at
+#: this head` + `,` or `:` (the separator is required so a bare `(N at this head)` — a
+#: `--collect-only` count — is still excluded).
+_HEAD_TOTAL_CLAIM_RE = re.compile(r"\(`?(?P<n>\d+)`? at this head[,:]")
+
+
+def _head_total_claims(text: str) -> list[tuple[str, int]]:
+    """`(key, stated)` for every durations row that states a prose head total.
+
+    This is the guard's SUBJECT SET, exposed so a test can assert it is not empty:
+    a selector that matches nothing turns its caller's `assert offenders == []` into
+    a pass over nothing, which is the defect (#10610 review at `52d7173d5`, P2).
+    """
+    return [(key, int(m.group("n")))
+            for key, note in _durations_row_comments(text)
+            for m in _HEAD_TOTAL_CLAIM_RE.finditer(note)]
+
+
+def _durations_rows_with_a_stale_head_total(text: str, tests_dir: Path):
+    """`(key, stated, actual)` for every prose `N at this head` total that is wrong.
+
+    ⛔ TWO TOTALS FOR ONE FILE IS THE DEFECT, whatever spelling carries them. The
+    guard above reads only the `grep -c '^def test_'` cites; measured at the #10610
+    review head `3e56f60ef`, the `test_7949_capstone_measure.py` row stated **198**
+    in its leading claim AND in that cite, and **192** in the parenthetical beside
+    it — so a maintainer got two different numbers for one file and EVERY guard was
+    green, because nothing machine-read the prose total.
+
+    ⛔ The phrase is judged ONLY in this parenthetical shape, and that is deliberate:
+    `at this head` is used elsewhere in this map for counts that are NOT `^def test_`
+    (a `--collect-only` count, e.g. "34 functions / 35 executions at this head"), for
+    POOL sizes, and inside quoted HISTORY of a past row revision. A guard over the
+    bare phrase would red those correct notes; this one reads the sentence that
+    asserts the very total the cite beside it asserts. What the shape requires is
+    only that the claim OPENS a parenthetical with the number and CONTINUES with the
+    phrase (`(`…` at this head,` / `:`), never the tail that follows it — requiring
+    the tail is what made the first cut inert (#10610 review at `52d7173d5`, P2).
+    """
+    out = []
+    for key, note in _durations_row_comments(text):
+        claims = list(_HEAD_TOTAL_CLAIM_RE.finditer(note))
+        if not claims:
+            continue
+        path = tests_dir / key
+        if path.exists():
+            actual = len(re.findall(
+                r"^def test_", path.read_text(encoding="utf-8"), re.M))
+        else:
+            actual = None
+        for m in claims:
+            stated = int(m.group("n"))
+            if actual is None or actual != stated:
+                out.append((key, stated, actual))
+    return out
+
+
+def test_no_durations_row_states_a_head_total_its_file_refutes():
+    """#10610 review-at-`3e56f60ef` P3-1: one file, ONE stated total."""
+    offenders = _durations_rows_with_a_stale_head_total(
+        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
+    assert offenders == [], (
+        "a durations row states its file's case total in prose (\"(N at this head, "
+        "with ... added cases)\") and the file disagrees — (key, stated, actual): "
+        f"{offenders}. The row's own `grep -c '^def test_'` cite is the instrument; "
+        "a second total beside it that does not equal it hands a maintainer two "
+        "numbers for one file.")
+
+
+def test_the_head_total_guard_has_a_live_subject():
+    """The guard must READ something: `[]` from an empty subject set is a no-op.
+
+    #10610 review at `52d7173d5` (P2), measured on the live map: the selector
+    required the tail `, with #N's M added cases)`, the `test_7949_capstone_measure.py`
+    row was re-spelled to the colon form, and `grep -c 'added cases)'
+    config/ci-surfaces.yml` returned **0** — so every row was skipped and
+    `test_no_durations_row_states_a_head_total_its_file_refutes` reported a clean map
+    over nothing. The stale-total arms above cannot catch that class (they feed the
+    selector a row it CAN read); only reading the live manifest can.
+    """
+    claims = _head_total_claims(cs.MANIFEST.read_text(encoding="utf-8"))
+    assert claims, (
+        "the prose-total guard matched ZERO rows in the live manifest — it is a "
+        "no-op gate: its `assert offenders == []` is a pass over an EMPTY subject "
+        "set, so any `(N at this head, …)` / `(N at this head: …)` total would ship "
+        "unread. Re-point `_HEAD_TOTAL_CLAIM_RE` at the spelling the map actually "
+        "uses, or retire this guard.")
+    keys = {key for key, _ in claims}
+    assert "test_7949_capstone_measure.py" in keys, (
+        "the row this guard was written for no longer states a prose head total "
+        f"that it can read — claims found: {sorted(keys)}. If the parenthetical was "
+        "deliberately dropped, re-point the guard at the row that now carries one "
+        "(or retire it); do not leave it reading a subject set the map no longer has.")
+
+
+def test_the_head_total_guard_is_not_vacuous(tmp_path):
+    """The prose-total guard must bite on a stale total and stay quiet on history.
+
+    Non-vacuity, measured: at the pre-fix head the `test_7949_capstone_measure.py`
+    row's parenthetical read 192 against a file of 198 and this returned
+    `[('test_7949_capstone_measure.py', 192, 198)]` — one arm red. The `fresh`
+    fixture is the SAME sentence with the file's own count, which must stay quiet
+    (`= 2` defs).
+    """
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    stale = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(3 at this head, with #10610's 1 added cases), no case counted twice.\n"
+        "surfaces: []\n")
+    fresh = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(2 at this head, with #10610's 0 added cases), no case counted twice.\n"
+        "surfaces: []\n")
+    # A row quoting a PAST total in prose (the row's own revision history, or a
+    # `--collect-only` count beside the defined-function count) is not a claim the
+    # guard may re-derive — it is history, and the map's rule keeps history.
+    history = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #9352: an earlier revision said \"10 cases at this "
+        "head\"; the file holds 2 functions / 3 executions at this head (`grep -c "
+        "'^def test_'` -> 2, pytest collects 3).\n"
+        "surfaces: []\n")
+    # The spelling this map's convention actually uses: BOTH numbers backticked. The
+    # arms above are unbackticked, so they alone left the documented shape unread —
+    # measured pre-fix, `(`204` at this head, with #10610's `45` added cases)` matched
+    # NOTHING and a stale backticked total was a clean map (the false PASS class this
+    # file already carries a rule for). Both directions, because a pattern widened to
+    # silence is the same defect inverted.
+    stale_ticked = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(`3` at this head, with #10610's `1` added cases), no case counted twice.\n"
+        "surfaces: []\n")
+    fresh_ticked = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(`2` at this head, with #10610's `0` added cases), no case counted twice.\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_head_total(stale, tmp_path) == [
+        ("test_two.py", 3, 2)]
+    assert _durations_rows_with_a_stale_head_total(fresh, tmp_path) == []
+    assert _durations_rows_with_a_stale_head_total(history, tmp_path) == []
+    assert _durations_rows_with_a_stale_head_total(stale_ticked, tmp_path) == [
+        ("test_two.py", 3, 2)], (
+        "the BACKTICKED spelling is this map's convention — a guard that cannot read "
+        "it reports a clean map over a stale total")
+    assert _durations_rows_with_a_stale_head_total(fresh_ticked, tmp_path) == []
+    # …and the COLON spelling, which is what the live `test_7949_capstone_measure.py`
+    # row actually uses (#10610 review at `52d7173d5`, P2). The first cut required the
+    # `, with #N's M added cases)` tail, so this row was skipped and a stale total in
+    # it was a clean map — the guard was inert on the very row it was written for.
+    stale_colon = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(3 at this head: `origin/main`'s 2 plus the one net new case this PR "
+        "adds), no case counted twice.\n"
+        "surfaces: []\n")
+    fresh_colon = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(2 at this head: `origin/main`'s 2 plus the zero net new cases this PR "
+        "adds), no case counted twice.\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_head_total(stale_colon, tmp_path) == [
+        ("test_two.py", 3, 2)], (
+        "the COLON spelling is what the live row uses — a guard that cannot read it "
+        "is a no-op on the only row that states a prose total")
+    assert _durations_rows_with_a_stale_head_total(fresh_colon, tmp_path) == []
 
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".

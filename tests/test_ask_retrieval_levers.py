@@ -160,17 +160,21 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
 # `tests/test_battery_parity_mabench_tortoise.py`'s BATTERY_PARITY_TORTOISE_E2E.
 _BENCH_OPT_IN_ENV = "TORTOISE_LME_BENCH"
 
-# One full LongMemEval haystack is seeded per question, and the loop arm seeds
-# three in a SINGLE item — which is the item measured over the 300s repo default.
-# A bench arm that legitimately needs longer must SAY so (pyproject.toml's
-# `timeout = 300` block: "A leg that needs a longer single item must SAY so …
-# `@pytest.mark.timeout(N)` on the test"), so these four declare their budget
-# instead of relying on the gate's.
+# One full LongMemEval haystack is seeded per question. The loop arm this file
+# USED to carry seeded three of them in a SINGLE item, and that one item is what
+# crossed the 300s repo default; it is now parametrized one question per item
+# (`_POOL_MEMBERSHIP_QIDS` below), so what is left to justify is PER-ITEM
+# headroom on a loaded runner — 181-188 s warm, 294.31 s for `ceb54acb` under
+# load — not an aggregate in one item. A bench arm that legitimately needs
+# longer must SAY so (pyproject.toml's `timeout = 300` block: "A leg that needs
+# a longer single item must SAY so … `@pytest.mark.timeout(N)` on the test"), so
+# these four declare their budget instead of relying on the gate's.
 _BENCH_ITEM_BUDGET_S = 900
 
 _BENCH_SKIP_REASON = (
     "bench prerequisite: the corpus-scale ask-lever arms seed a full "
-    "LongMemEval haystack per question and exceed the repo-wide 300s budget, "
+    "LongMemEval haystack per question and measure 181-188 s warm, 294.31 s for "
+    "one question under load — at the repo-wide 300s budget — "
     f"so they run only when opted in — set {_BENCH_OPT_IN_ENV}=1 with "
     f"{_CACHED_DATASET} present"
 )
@@ -281,34 +285,55 @@ def test_gold_turn_in_context_recorded_failure(qid):
 
 # ── Degraded-lane honesty: pool membership (the "fix membership" step) ─────
 
+# ONE ITEM PER QUESTION, never one item looping over all of them. `_seed`
+# ingests a full LongMemEval haystack, so the loop form seeded three in a
+# SINGLE item and crossed the repo-wide `timeout = 300` bound (pyproject.toml)
+# on a loaded runner: measured 2026-11-06, CI run 42169082726 shard `(a)`
+# reported `test_gold_turn_in_pool_membership_embedded - Failed: Timeout
+# (>300.0s) from pytest-timeout` at 300.01 s while every sibling
+# per-question item in this file finished in 181-188 s. Parametrizing is also
+# the honest attribution: a failure names the question instead of a loop
+# iteration that passed for the others.
+#
+# The `@pytest.mark.timeout(_BENCH_ITEM_BUDGET_S)` below is NOT a substitute for
+# splitting the loop, and it does not need to be: it is this file's declared
+# budget for an OPT-IN bench arm (see `_BENCH_OPT_IN_ENV`), which runs only when
+# an operator asks. One question per item measured 181-188 s warm on this box,
+# but 294.31 s for `ceb54acb` under load — a hair under the repo-wide default —
+# so the per-item bound is headroom on a loaded runner, not the absence of a fix.
+_POOL_MEMBERSHIP_QIDS = [q for q in RECORDED_FAILURES if q != "gpt4_d84a3211"]
+
+
 @pytest.mark.timeout(_BENCH_ITEM_BUDGET_S)
-def test_gold_turn_in_pool_membership_embedded():
+@pytest.mark.parametrize("qid", _POOL_MEMBERSHIP_QIDS)
+def test_gold_turn_in_pool_membership_embedded(qid):
     """On the degraded embedded lane (no vector leg), the A1/A4/A5 levers
     deliver POOL MEMBERSHIP for the rank/cap + thin-overlap classes (the
     plan's "fix membership before ordering" step). gpt4_d84a3211 is the
     numeric-invisible class whose membership requires the vector leg (A2) —
-    asserted separately with its documented prerequisite."""
+    asserted separately with its documented prerequisite, so it is excluded by
+    `_POOL_MEMBERSHIP_QIDS` above rather than skipped inside the body."""
     questions = _recorded_questions()
     if not questions:
         pytest.skip(_BENCH_SKIP_REASON)
-    for qid, q in questions.items():
-        if qid == "gpt4_d84a3211":
-            continue  # documented: needs the vector leg (A2), not A1
-        sdk = _fresh_sdk()
-        try:
-            _seed(sdk, q)
-            gold = _gold_turn_ids(q)
-            assert gold, f"{qid}: no has_answer turns"
-            hits = sdk.tortoise_fts_query(
-                q["question"], limit=120, pool_size=120,
-                include_terminal=True, keep_numeric=True,
-                search_keys_prf=True)
-            pool_ids = {h["id"] for h in hits}
-            assert pool_ids & gold, (
-                f"{qid}: gold {sorted(gold)} not even in the 120-pool on "
-                f"the degraded lane — membership lever failed")
-        finally:
-            sdk.close()
+    q = questions.get(qid)
+    if q is None:
+        pytest.skip(f"{qid} not in cached dataset")
+    sdk = _fresh_sdk()
+    try:
+        _seed(sdk, q)
+        gold = _gold_turn_ids(q)
+        assert gold, f"{qid}: no has_answer turns"
+        hits = sdk.tortoise_fts_query(
+            q["question"], limit=120, pool_size=120,
+            include_terminal=True, keep_numeric=True,
+            search_keys_prf=True)
+        pool_ids = {h["id"] for h in hits}
+        assert pool_ids & gold, (
+            f"{qid}: gold {sorted(gold)} not even in the 120-pool on "
+            f"the degraded lane — membership lever failed")
+    finally:
+        sdk.close()
 
 
 def _embedder_installed() -> bool:
