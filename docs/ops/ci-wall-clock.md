@@ -180,15 +180,15 @@ stated there once, not restated here, which is how this pair drifted apart in th
 ⚠ **The `~9 m` save term the saving rows use is not re-measured here.** That figure comes from the
 `test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063
 stood its save down, on a different runner and day, and shows a 3.6 GB save can cost TWICE that.
-The rows derived from `~9 m` (`test-slow`'s 60 m, and the `test-carve-out` /
-`test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below —
-⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived its SUM on a MEASURED
-~7.3 m startup plus an 8 m cache-write term, and split its payload so that job no longer writes
-the 3.6 GB archive at all — see its row below, which is the authority for it) are
-optimistic by ~7 m against the censored 15.9 m and by ~11 m against the completed ~20 m. Re-deriving
-them is owed and is deliberately NOT done here: nothing has measured any of the four being
-cancelled, and this document's rule is to move a cap from a measurement, not from a comparison of
-two samples.
+The rows derived from `~9 m` (`test-slow`'s 60 m, the `test-d14-hosted-api` headroom statements
+below, and `test-track-b`'s save arm — `python-ci.yml:3222`, `cache: pip`) are optimistic by ~7 m
+against the censored 15.9 m and by ~11 m against the completed ~20 m. ⛔ **`test` is NOT one of
+them:** #11063 re-derived its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term and
+split its payload, so it no longer writes the 3.6 GB archive at all (its row below is the
+authority). Nor is `test-carve-out`, whose pip step has been `actions/cache/restore@v4` since
+#10182. Re-deriving them is owed and is deliberately NOT done here: the two cancellations that DID
+move a cap (`test-d14-hosted-api`, `test-track-b` — both worked below) were sized WITH this `~9 m`
+figure rather than from a fresh save measurement, and this document's rule is to move a cap from a measurement, not from a comparison of two samples.
 
 ⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
 itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job
@@ -228,15 +228,19 @@ names:
 Every other row was checked against that rule. The discriminating fact is **not** that the
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
-SUM. `test` clears it with room to spare: 10 m last-failed pre-phase + the emitted **26 m** per-shard
+SUM. `test` clears it with room to spare: 10 m last-failed pre-phase + the emitted **27 m** per-shard
 watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
-90, x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **58.6 m against
+90, x 1.5 = 87.9**. (The watchdog term read **26 m** until #10999 registered its own fast suite,
+`tests/test_10999_batch_story_relations.py` — one more file in `fast_pool()` re-packs the worst
+shard across a whole minute, and this paragraph restates that emission rather than owning it:
+`tools/ci_selection.py --emit-push-matrix` is the authority, and `tests/test_ci_selection.py`
+reds the moment the two disagree again.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
-is now read from the shared `pip-<os>-<hash uv.lock>` key that FOUR other jobs write, while
+is now read from the shared `pip-<os>-<hash uv.lock>` key that TWO other jobs write, while
 `~/.cache/uv` keeps exactly one writer here, bounded in ACCUMULATION (`uv cache prune` — it drops entries no environment reaches, not a single environment's set) and in time
 (`timeout-minutes: 7`, `continue-on-error`, fail-open to a MISS). A SINGLE 3.88 GB write still does
 not fit — but on the measured rates, not on an assumption: this run's degraded uplink was 0.9 MB/s
@@ -256,14 +260,14 @@ are still in that state — `test-slow`, `test-carve-out` and `test-concurrency-
 false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its cap rose: #11063
 took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its
 cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
-`test-carve-out` is 9 m past it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against
-30). The last has the least headroom of all:
+`test-carve-out` sits at ~31.6 m against 30: 10 m embedder + 19 m shard watchdog + ~1 m, plus the 1 m 38 s
+`~/.cache/huggingface` POST (`python-ci.yml:3539-3541`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
-`timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
-because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2941-2946`, both
-in the `test-concurrency-falkor` job) and so
-writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
-move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
+`timeout-minutes: 10` embedder provision** — ≈ 21 m of IN-STEP caps (10 + 10 + ~1 m), and it installs
+`install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2941-2946`). The ~30 m this row used to
+carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2934-2938` is
+`actions/cache/restore@`), and it still carries an ungated `actions/cache@v4` POST on `~/.cache/huggingface`
+(`python-ci.yml:2977-2979`) that uploads on a MISS, so its SUM needs a measurement: `15 → 50` is VOID.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 

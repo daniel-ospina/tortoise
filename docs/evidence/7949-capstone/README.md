@@ -156,9 +156,9 @@ the arm — and then **reads the values back out of `os.environ`**. The log's `a
 read-back, never a typed literal, and a flag that does not read back as set REFUSES the run.
 ⛔ **`"0"`, not `<unset>`** (`#10996`): the value gate DEFAULTS ON, so an absent value pins nothing —
 absence IS the ON arm. The committed log in this bundle was taken at a PRE-flip head, where absence
-genuinely was OFF; its `<unset>` spelling is admitted by `e1_e2_scores.py` only under that
-campaign-head licence (disclosed as `value_gate_pin` in `docs/evidence/9889/e1-e2-scores.json`) and
-does not license a re-take. The
+genuinely was OFF; its `<unset>` spelling is **history, and no licence follows from it here** — `e1_e2_scores.py`
+is scoped to **9889** (`ON_ARM_LOG = "on-arm.log"`) and never reads this bundle's log, so the `value_gate_pin` in
+`docs/evidence/9889/e1-e2-scores.json` describes that bundle's arms only (`#11201`). The
 earlier stamp of this bundle printed `arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1` while setting
 neither: a re-run following a recipe that exported only `TORTOISE_DB_URI` measured the **OFF**
 population under a log declaring both ON. Pinned by
@@ -602,6 +602,162 @@ measurement of this number): `EXTRACTOR-V4-ARCHITECTURE.md` §10's
 prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
 29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
+## C9 (`#10990`) — the two stale bars re-derived at this head, and E5's population answered
+
+**Measured at:** `af864a42a6` (`origin/main`, 2026-11-06) — every command and number below was run
+there, so a later head that disagrees is a regression rather than an argument. Both rows were
+re-derived, not re-implemented; nothing here builds a second instrument.
+
+### E4 — `#2552` / `#4716` / `#8503` re-derived: **VERIFIED-RED at 5 of 15**, unpatched
+
+```bash
+# 1. the receipt is chosen by its OWN corpus_hash against the frozen pin, not by filename
+cd docs/evidence/7949-capstone && uv run python -c 'import json,sys
+sys.path.insert(0,"probes"); sys.path.insert(0,"../../..")
+import capstone_measure as m
+prereg = json.load(open("preregistration.json"))
+rel, rec = m.select_e4_receipt(frozen_pin=m.check_corpus(prereg))
+print(rel, rec["operator_audit"]["edge_correct"], rec["operator_audit"]["planted"])'
+#    frozen pin: sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc
+#    selected:   tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json
+#    edge_correct: 5 of 15   commit a999be41e   date 2026-10-24T06:10:47Z
+#    extractor real: True    posture: llm
+
+# 2. the receipt's own evidence rules (the checker that grades an E4 artifact)
+uv run python tools/operator_receipt_check.py \
+    tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json
+#    [PASS] E4-EXTRACTOR: real extractor (tortoise.extractor_v2.extract_session_v2)
+#    [PASS] E4-LANE: product lane (extractor_posture=llm)
+#    [PASS] E4-DENOM: denominator 15 == gold
+#    [PASS] E4-NUMERATOR: edge_correct 5 == the per-edge rows   (content_ok 11)
+#    [PASS] E4-CAUSE: 10 miss(es) individually named
+#    VERDICT: EVIDENCE VALID   (exit 0)
+
+# 3. the shipped verdict table gates it
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log
+#    GREEN=0, RED=3, BLOCKED=2 — 5/5 rows carry an evidence artifact + sha (exit 0)
+```
+
+⇒ **E4 = 5/15 = RED** against `= 15 of 15`. The leg is **unpatched in the sense that matters**: the
+receipt's own `extractor` block records `real: true` with `extractor_posture: llm`, so
+`tortoise.extractor_v2.extract_session_v2` is the SHIPPED function and the number grades whether the
+extractor *forms* the operators. The only *test* still cannot say that —
+`tests/eval/write_path/test_write_path_operator_lane.py` monkeypatches `extract_session_v2` (`:212`)
+and its docstring says so — but a **measurement** can and does, twice: `8503-a`
+(`edge_correct 5`, `content_ok 11`, 06:03:47Z) and `8503-b` (same 5/11, 06:10:47Z) are two
+independent runs seven minutes apart that agree on the numerator, plus `preleg` (5, `content_ok` 13).
+So 5/15 REPRODUCES and is not one lucky draw.
+
+**Both tree figures, named as the issues require** — `2/15` (shipped log, receipt
+`w2b-operator-2026-10-19.json`, `corpus_hash 943a99ec…`, commit `6164c683c`) and `5/15` (frozen pin,
+commit `a999be41e`). The `2/15` is not the bar and is not this row's artifact any more: it measures a
+corpus revision that was never frozen.
+
+**The gap, split two ways — and the two splits do not agree on WHICH half dominates.** At the
+frozen pin (10 lost of 15): **6** `edge_missing` — both endpoints present, no qualifying operator,
+the **operator-selection** half — and **4** endpoint-recall misses (`3 to_content_missing` +
+`1 from_content_missing`, `wp02_lumen_refactor_op_01`). `#8503` reports the same numerator on a
+**14**-edge population (wp02 excluded as unmeasured) as **4 selection / 5 recall** — so selection is
+the larger half in the frozen reading only, and the older reading has recall larger.
+
+⛔ **The split did NOT move because wp02 joined the population — that was this section's first
+draft, and the receipts refute it.** Re-grading the frozen receipt over exactly the 14 edges `#8503`
+scored gives **6 selection / 3 recall** (not 4/5), and `#8503`'s own four `edge_missing` edges grade
+`edge_correct` (`wp03_ember_design_op_01`) and `to_content_missing` (`wp01_quarry_debug_op_02`) in
+that receipt. Four of the frozen run's six `edge_missing` edges were not `edge_missing` in `#8503`.
+So what changed is **per-edge attribution across runs**, not the denominator: LLM non-determinism
+moves which edge is missed, while the **numerator is stable at 5**.
+
+⚠️ **Which means the 5 is reproducible and the attribution is NOT.** `8503-a` and `8503-b` — seven
+minutes apart on the same commit — agree on `edge_correct 5` but disagree on **five of fifteen**
+individual verdicts (`wp01_op_01`, `wp03_op_01`, `wp03_op_02`, `wp05_op_02`, `wp06_op_01`), and
+`preleg` splits its 10 misses **8 selection / 2 recall**. Read the 5 as the measurement and any split
+as one run's draw: a single reading of "where the 10 go" is not a stable fact at this corpus.
+
+**Blocker named, not assumed satisfied: `#9596`.** The row's retrievability dimension is UNMEASURED —
+and this re-derivation found the reason is stronger than that issue says: `#9596` describes a fix (a
+v2 receipt carrying `operators_seen` / `operators_unprovenanced`, plus an `E4-PERSIST-OPS` rule in
+`tools/operator_receipt_check.py`), and **that fix is not in the tree**:
+`git log --all -S'operators_unprovenanced'` and `-S'E4-PERSIST-OPS'` return NOTHING on any ref, all
+four receipts are `receipt_version: 1`, and the checker's persistence rule still reads the
+eventId-filtered list whose numerator and denominator come from the same query. So `N/N` here is
+still the layer's SIZE, not a rate — `#9596` stays the row's blocker and its described repair has to
+be re-landed.
+
+### E5 — the raw arm re-derived: **VERIFIED-RED at raw 0.4800**, and the 25-vs-29 population answered
+
+```bash
+# 1. the registered scorer, re-run over the committed arm receipts
+uv run python -m tests.eval.write_path.score_qualifiers \
+    --sessions wp01_quarry_debug wp02_lumen_refactor wp03_ember_design wp04_aurora_perf \
+               wp05_retro_writeup wp06_quarry_rollout wp07_bluepeak_followup \
+    --arms-dir tests/eval/write_path/receipts/7947-arms-2026-10-18 --out /tmp/e5-rescore.json
+#    raw        n=25  loss 13  recovery 0.480000   <- bar >= 0.80  FAILS
+#    narrative  n=25  loss 12  recovery 0.520000
+#    ratio      0.52/0.48 = 1.0833                 <- bar >= 0.90  PASSES
+#    INCOMPLETE RECEIPTS IN THE HOLDOUT: wp07_bluepeak_followup:raw partial=True
+
+# 2. the committed artifact is byte-identical to that run
+python3 -c "print(open('/tmp/e5-rescore.json','rb').read() == \
+    open('docs/evidence/7949-capstone/e5-rescore.json','rb').read())"     # True  (44 092 B)
+
+# 3. the population question, answered mechanically
+uv run python docs/evidence/7949-capstone/probes/e5_population_reconcile.py
+```
+
+⇒ **E5 = RED on the absolute floor** (0.4800 < 0.80) with the ratio passing (1.0833) — the asymmetry
+the record required two bars to catch. Blocker **`#5087`** (S3 selection recovery), named by id and
+still OPEN.
+
+**The 25-vs-29 population is now answered, and the answer is that no arithmetic reconciliation
+exists.** The two counts are different **instruments over different units**, not one population
+counted twice:
+
+| | what it counts | derived by |
+|---|---|---|
+| **29** | **sentences** in the corpus fixture matching the pre-registration's own 24 `hedge_scope_lexemes` (of 343 sentences) | `capstone_preregistration_check.derive_corpus_facts` |
+| **25** | **planted qualifiers** in the sealed gold, which is what `score_qualifiers` classifies | `gold/<session>.gold.json → planted_qualifiers` |
+
+| session | marker sentences | planted qualifiers |
+|---|---|---|
+| wp01_quarry_debug | 8 | 3 |
+| wp02_lumen_refactor | 6 | 4 |
+| wp03_ember_design | 3 | 4 |
+| wp04_aurora_perf | 5 | 4 |
+| **wp05_retro_writeup** | **0** | **3** |
+| wp06_quarry_rollout | 4 | 4 |
+| wp07_bluepeak_followup | 3 | 3 |
+| **total** | **29** | **25** |
+
+Markers **exceed** qualifiers in three sessions (wp01, wp02, wp04) and **fall short** in two (wp03,
+wp05), so no monotone map exists and the 29 cannot be reached by adding rows to the 25. **wp05 is the
+decisive case**: its three qualifiers (`about`, `they are both good`, `that was the decision after the
+August incident`) are in the fixture text, but no word of theirs is in the corpus lexeme table — the
+two vocabularies differ (13 of the 24 corpus lexemes appear nowhere in the scorer's 78 markers). The
+registered *"29 marker-bearing sentences"* therefore binds **no gold**: it cannot be scored, and the
+only population that can is the 25. Pinned by `tests/test_7949_e5_population_reconcile.py` (5 tests)
+so the argument cannot rot silently.
+
+⚠️ **This narrows the open reconciliation, it does not decide it.** Which count is *canonical* — i.e.
+whether E5's registration should keep a denominator it cannot score — is carried by **`#5087`** (the
+S3 epic), and this bundle says so instead of re-registering the row: `preregistration.json` still
+carries `hedge_scope_sentences: 29` and E5's `post_registration_measurement` still names both
+figures. ⚠️ `#9738` — which owned this until 2026-11-02 — **CLOSED that morning on its own §10
+*record* correction, which is not a measurement of this number** (the re-attribution is the README's
+dependency table, not this section's).
+
+**Two questions, kept apart** — conflating them is what made "unreconciled" unreadable:
+
+| question | state |
+|---|---|
+| *Are the 29 and the 25 one population counted twice?* — arithmetic | **ANSWERED**: no, different instruments over different units (the table above) |
+| *Which count is E5's denominator?* — policy | **OPEN**, `#5087`'s to carry; `preregistration.json` still pins 29, so neither number is called final here |
+
+> ⚠️ **What is NOT claimed.** E5's *other* two halves stay green and separate: the scorer regenerates
+> the committed artefact byte-identically (verified above), and §10's write-back pin
+> (`tests/test_7949_e5_section10_writeback.py`) still passes. Neither is E5's registered outcome, and
+> reporting either as the verdict is the substitution this bundle exists to refuse.
+
 ## E1 / E2 — the `#9889` record: E1 still UNDECIDED (n=1 per arm), E2 would score 8 of 14 on a RE-RUN
 
 **These two rows no longer read `e1-e2.log` — no row the current builder emits does.** Their `evidence` is
@@ -905,11 +1061,14 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   pre-`#8503` receipt on another revision); the run's own operator-shaped
   relationships (`IMPL=65 INPUT=68 NAND=14` — the log's `step S5`
   line carry the same three numbers) are a *step witness*, not the 15-edge gold.
-- **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
-  the record's denominator is 29 marker-bearing sentences. `#5087` carries that reconciliation
-  (`#9738`, which owned it until 2026-11-02, CLOSED that morning on its own §10 *record*
-  correction — which is not a measurement of this number), and this bundle says
-  so instead of calling the numbers final.
+- **E5's population is reconciled as "two different populations", not as one denominator.** The
+  instrument's `n` is 25 planted qualifiers; the record's denominator is 29 marker-bearing
+  sentences; the C9 section above measures why those cannot be reconciled arithmetically (markers
+  exceed qualifiers in 3 sessions and fall short in 2; wp05 has 3 qualifiers and 0 marker sentences)
+  and pins it in `tests/test_7949_e5_population_reconcile.py`. The ARITHMETIC question is answered;
+  which count is CANONICAL — i.e. what E5's denominator should be — is `#5087`'s to carry (`#9738`,
+  which owned it until 2026-11-02, CLOSED that morning on its own §10 *record* correction — which is
+  not a measurement of this number), so neither number is called final here.
 - **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated limit: it
   closes *inference* (green rows with no artifact), not forgery.
 - **Nothing about the five dependencies beyond their state** — the states above are the tracker

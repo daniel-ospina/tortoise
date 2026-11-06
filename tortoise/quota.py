@@ -1670,6 +1670,15 @@ def _commit_ingest_reclaim(store, now_ts: float) -> None:
 def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmission:
     """Charge ``charge_bytes`` against the org's rolling-60s ingest allowance.
 
+    ⚠️ ONE WINDOW FOR BOTH SESSION WRITE LANES (#4051 §3.1). The name follows
+    the documented operator knob (``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN``,
+    ``docs/capacity.md`` §3) and predates the second caller: since the capture
+    lane was wired, ``POST /v1/sessions`` charges the SAME per-org window as
+    ``POST /v1/sessions/commit`` (``hosted_api.capture_ingest_charge_bytes``).
+    Alternating endpoints therefore cannot buy a second allowance — the
+    allowance is per ORG and per WINDOW, not per route. A caller that adds a
+    third write lane must charge this same window rather than add a constant.
+
     Exemptions:
 
     * ``not org_id`` (stdio/operator) is unbounded — it mirrors
@@ -1679,7 +1688,11 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
       RECORDED when the window is EMPTY. Refusing it (with a Retry-After) would
       tell a client to retry a request that can never fit — an unbreakable loop
       that only appears if an operator sets
-      ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` below the route's 8 MiB body cap.
+      ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` below a route's body cap — 8 MiB
+      for commit, 16 MiB for capture
+      (``body_limits.CAPTURE_SESSION_MAX_BYTES``), which is ABOVE the default
+      10 MiB allowance, so a legitimate max-size capture exceeds the whole
+      window and is admitted only while that window is EMPTY (#11218).
       Admitting it once spends the window, so the NEXT request is throttled: at
       most one over-sized request per window, never an unlimited stream of
       them (which is why the ``used == 0`` condition is load-bearing, not a
