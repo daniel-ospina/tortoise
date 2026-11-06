@@ -28,6 +28,17 @@ TOOLCHAIN — same harness contract as `tests/test_oauth_session_flow_properties
 built-in type stripping, a resolver hook for extensionless `./x` imports, and a D1 stand-in.
 The fakes substitute the STORE and the PROVIDER only; the route modules under test are the
 shipped ones.
+
+WHAT THIS FILE PINS, AND WHAT IT DOES NOT (#10487 residual)
+-----------------------------------------------------------
+Both consent legs answer a STORE fault with the typed `503 consent_store_unavailable` below,
+and that response SHAPE is asserted here. What is neither asserted nor fixed is what the
+VISITOR sees: the reason is returned as raw JSON on a blank page. That arm is a store fault,
+not a carriage fault — it needs the Pages Function logs (`wrangler pages deployment tail`) to
+name the failing store call before it can be fixed honestly, so it is tracked OPEN on #10884
+rather than guessed at. #10487 (whose title names this arm) and its keyless-re-entry sibling
+are retired by the fold that lands this hop, so #10884 — not the closed thread — is the OPEN
+home; `tortoise/oauth.py` points at it from both residual docstrings.
 """
 
 from __future__ import annotations
@@ -2063,3 +2074,136 @@ def test_start_validates_the_params_the_way_the_AS_will(broken: dict, needle: st
     assert out["status"] == 400, out
     assert out["body"]["error"] == "invalid_request"
     assert needle in out["body"]["message"], out["body"]["message"]
+
+
+def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> None:
+    """#10790 review (P2): the residual's declared home must OUTLIVE the fold.
+
+    Both consent legs still answer a store fault with the raw
+    `503 consent_store_unavailable` JSON asserted above, on a blank page. That arm was
+    recorded on #10487 — which this fold CLOSES — so after landing the residual was
+    reachable only by someone who already knew to read a closed issue's comments.
+    Its open home is #10884, filed from that review.
+
+    The assertion is a BICONDITIONAL so the guard cannot rot into a tautology either way:
+
+    * the arm is still emitted and this file's docstring has lost the open home → RED
+      (the residual survives with no reachable record: the defect this pins);
+    * the arm is FIXED and the docstring still declares it → RED (a stale claim pointing
+      the next reader at a closed thread). Fixing the arm means updating the note here,
+      and this test says so at the moment it happens.
+    """
+    routes = CONSENT_DIR / "start.ts", CONSENT_DIR / "token.ts"
+    arm_present = any(
+        "consent_store_unavailable" in path.read_text(encoding="utf-8")
+        for path in routes
+    )
+    declared = "tracked OPEN on #10884" in (__doc__ or "")
+
+    assert arm_present == declared, (
+        "the store-fault residual and its declared home disagree (#10487 is closed by "
+        f"this fold; its open home is #10884): arm_still_emitted={arm_present}, "
+        f"docstring_names_the_open_home={declared}. If the arm is present, keep the "
+        "#10884 paragraph in this module docstring; if it was fixed, DELETE the "
+        "paragraph instead of re-pointing it."
+    )
+
+
+def test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close() -> None:
+    """#10790 review (P2): the THIRD residual must point at an OPEN home too.
+
+    `presented_consent_attempt_key`'s docstring records a residual the AS hop does
+    not close: the page and `start.ts` do not strip, so a whitespace
+    `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS —
+    is still adopted verbatim (`start.ts:255-256`,
+    `presentedKey || newAttemptKey()`). That residual was written down on #10487,
+    which this fold retires, so the docstring points a reader at #10884 instead.
+
+    A pointer is a CLAIM, and the previous review found it was one the artifact
+    did not support: #10884's body recorded the store-fault arm and the
+    keyless-re-entry hole, but not this one. The body now carries it (the
+    decision-relay rule: record the answer where the next lane reads it).
+
+    The assertion is a BICONDITIONAL, so the guard cannot rot into a tautology
+    either way: while `start.ts` still adopts a presented key unstripped, the
+    docstring must name the OPEN home; once the adoption strips (or refuses a
+    blank one), the note must be DELETED rather than re-pointed.
+    """
+    start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
+    adopted_verbatim = (
+        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";'
+        in start_ts
+        and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
+    )
+
+    # Read the emitting predicate's own docstring, not the module: the pointer
+    # lives beside the predicate a reader lands on when they ask what "present"
+    # means on this hop.
+    source = (REPO / "tortoise" / "oauth.py").read_text(encoding="utf-8")
+    start = source.index("def presented_consent_attempt_key")
+    end = source.find("\ndef ", start + 1)
+    docstring = source[start:end if end != -1 else len(source)]
+    declared = "#10884" in docstring
+
+    assert adopted_verbatim == declared, (
+        "the whitespace-attempt-key residual and its declared home disagree "
+        f"(#10487 is retired; its open home is #10884): "
+        f"start_ts_adopts_a_presented_key_unstripped={adopted_verbatim}, "
+        f"docstring_names_the_open_home={declared}. If the residual is present, keep "
+        "#10884 in `presented_consent_attempt_key`'s docstring AND in #10884's body; "
+        "if it was fixed, DELETE the note instead of re-pointing it."
+    )
+
+
+def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -> None:
+    """#10790 review (P2): the security record must not state an absolute the code falsifies.
+
+    `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule
+    as "…ADOPTED by `/api/consent/start` on the insert — the entry leg no longer
+    invents one". The entry leg still invents one: `start.ts:255-256` is
+
+        const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
+        const attemptKey = presentedKey || newAttemptKey();
+
+    and `newAttemptKey()` mints 32 CSPRNG bytes. No earlier guard in `onRequestGet`
+    requires a presented key, so a request presented straight to `/api/consent/start`
+    (bypassing the AS) is handed a fresh key — exactly the residual the pins below
+    on `presented_consent_attempt_key` call "the direct-to-`start` residual".
+
+    A wrong absolute in the *delivered security rule* is not cosmetic: the reader
+    concludes no entry-leg-minted key can exist, so the residual tracked OPEN on
+    #10884 reads narrower than it is ("only adopts a whitespace key verbatim",
+    never "mints one when handed none") and the next lane reasons about the
+    ownerless window from a code shape that is not in the tree.
+
+    BICONDITIONAL, so it cannot rot into a tautology in either direction: while
+    `start.ts` mints on the empty path the record MUST say so; once that path is
+    removed, the sentence must be deleted rather than left standing.
+    """
+    start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
+    mints_when_handed_none = (
+        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";' in start_ts
+        and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
+    )
+
+    doc = (
+        REPO / "docs" / "engineering" / "auth" / "consent-identity-bridge.md"
+    ).read_text(encoding="utf-8")
+
+    assert "the entry leg no longer" not in doc, (
+        "the bridge record claims the ENTRY leg stopped minting an attempt key, but "
+        "`start.ts:255-256` still does (`presentedKey || newAttemptKey()`), and no "
+        "guard before it requires a presented key. Restore the qualifier — the entry "
+        "leg mints one when it is handed none (the direct-to-`start` residual on "
+        "#10884/#10865) — instead of stating an absolute the code falsifies.")
+
+    declares_the_residual = (
+        "the entry leg still mints one when it is handed none" in doc
+    )
+    assert mints_when_handed_none == declares_the_residual, (
+        "the entry-leg mint and the record disagree: "
+        f"start_ts_mints_when_handed_none={mints_when_handed_none}, "
+        f"record_states_the_residual={declares_the_residual}. While `start.ts` has the "
+        "`||newAttemptKey()` fallback the record must name it; if the fallback is "
+        "removed, DELETE the sentence instead of leaving a stale claim."
+    )
