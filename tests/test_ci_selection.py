@@ -6050,7 +6050,10 @@ def test_the_registration_comment_states_the_hermetic_arm_count_it_has():
     try:
         entry = lines.index(f"  - {target}")
     except ValueError:  # pragma: no cover - registration is separately pinned
-        raise AssertionError(f"{target!r} is not registered in the manifest")
+        # `from None`: the `ValueError` is a `list.index` MISS, not the cause of
+        # the failure this assertion reports — chaining it would print
+        # "'  - <target>' is not in list" over the real message (B904).
+        raise AssertionError(f"{target!r} is not registered in the manifest") from None
     block: list[str] = []
     for line in reversed(lines[:entry]):
         if not line.strip().startswith("#"):
