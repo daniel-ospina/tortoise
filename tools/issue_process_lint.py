@@ -262,11 +262,23 @@ _REF_LIST = (rf"(?:{_REF_OBJ})"
              rf"(?:(?:,{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
              rf"|(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))#\d{{1,7}})*")
 _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
+# ⛔ THE OBJECT MAY NAME THE REFERENCE BY ITS KIND — `a closing one`, `the closing ref`,
+# `a resolving one`. The object slot admitted `_DET` immediately followed by `_REF_NOUN`, so the
+# closing WORD sitting between them had no route through the grammar, the object captured EMPTY,
+# and the unreadable-object guard below suppressed the proximity path (measured at `6d8e4ed8b`,
+# review P2, the one finding that round declared rather than fixed):
+#     `Part of #1234 — deliberately not closing a closing one.`   -> rc 3, FLAGGED
+# while `deliberately not a closing one.` (no leading stem) declined, which is what makes it a
+# grammar gap and not a doctrine: the same sentence about the same reference reads two ways
+# depending on where the author put the word `closing`. Flagging it is the FALSE-POSITIVE
+# direction — the author is answering the question the block asks.
+_CLOSING_OBJ = rf"{_DET}{_CLOSING_STEM}{_EMPH}{_REF_LIST}"
 DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
-    rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})(?P<obj_a>{_EMPH}{_DET}{_REF_LIST})?"
+    rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})"
+    rf"(?P<obj_a>{_EMPH}(?:{_DET}{_REF_LIST}|{_CLOSING_OBJ}))?"
     rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
@@ -314,6 +326,10 @@ _DECLINE_BRIDGE_RE = re.compile(
 # Ref TOKENS with positions, for deciding which reference a decline is about. Deliberately dumber
 # than CLAIM_RE: this answers "where is the reference", never "does it claim".
 _REF_POS_RE = re.compile(r"#(?P<num>\d{1,7})\b")
+# A conjunction that INTRODUCES a reference (`and #200`, `or owner/repo#200`) — the discriminator the
+# unreadable-object guard uses to tell a continuing clause from a blanked object plus prose.
+_CONJ_REF_RE = re.compile(
+    rf"[ \t]+(?:and|or){_EMPH}(?:[A-Za-z0-9_.\-/]+/)?#\d{{1,7}}", re.IGNORECASE)
 SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
 # The task-list marker SET is the sibling grammar's (`closes_landing._TASK_ITEM_RE`), including
 # `+` and ordered markers: GitHub renders all four as task lists, so counting only `-`/`*` reads a
@@ -468,9 +484,21 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
                 # begins with a space, and there the space is the conjunction's, not a blanked span's.
                 # Only `and`/`or` are admitted as that continuation: any other word after the gap is
                 # the appositive or the rest of the sentence, which cannot tell us what was blanked.
+                # ⛔ …and a CONJUNCTION is admitted as that continuation only when it actually
+                # introduces the next reference-naming clause (`… is deliberately not Closes and
+                # #200 is deliberately not Closes.`). Admitting the bare word was still a silent
+                # drop one word over: a blanked object followed by `and <prose>`
+                #     `Part of #11000 — deliberately not closing `\u0060#3300\u0060` and this one is separate.`
+                # read CLEAN, rc 0, with `#11000` claimed and resolved by nothing (measured at
+                # `6d8e4ed8b`) — the same class as the appositive tails pinned above, and the
+                # direction this module ranks worst. A `#N` right after the conjunction is the one
+                # mechanical signal that the conjunction joins CLAUSES ABOUT REFERENCES rather
+                # than continuing prose about the blanked object.
                 head = re.match(r"[ \t]+([A-Za-z]+)?", after_stem)
-                if head and (head.group(1) or "").lower() not in ("and", "or"):
-                    continue
+                if head:
+                    is_conj = (head.group(1) or "").lower() in ("and", "or")
+                    if not is_conj or not _CONJ_REF_RE.match(after_stem):
+                        continue
             before = [r for r in refs if r[1] <= m.start()]
             if not before:
                 continue
