@@ -212,8 +212,11 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
   0.0 pp is a corpus property (every Object wired to its statement), not a property of S2.2"*). So nothing
   is removed here because on this corpus every Object is defended by a reference — which is the same fact
   that makes E1b's `90 of 90` hold **vacuously**.
-- And the mechanism that *would* move it is foreclosed: `#5333` (OPEN) records that a pass may not
-  remove a committed row, and E1's share is moved by **no non-destructive mechanism**.
+- And the mechanism that *would* move it is foreclosed: the **design decision recorded for `#5333`,**
+  in `#10069` (merged) and in `EXTRACTOR-V4-ARCHITECTURE.md` §*G5's destructive half*, says a pass may
+  not remove a committed row — and E1's share is moved by **no non-destructive mechanism**. ⚠️ `#5333`
+  is still **OPEN** because that is the *design* answer only: the **authorisation** (its task 1,
+  *whether a relocation pass may ever RUN*) remains the owner's, and nothing here assumes it.
 
 ⛔ **The blocker `#10985` names by id has LANDED — and it did not move the number.** Its body: *"⛔ The id
 is `#10997` (S3 — an unresolved identity is HELD, never minted)"*. `#10997` is **CLOSED
@@ -337,7 +340,7 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
   `state_value_carve_out`, `atomic_point_write`, `failure_policy`) and **none for the declared-hierarchy
   mechanism**, despite `#10984`'s body asserting that `#11001` ships the `implemented` row. `#11001` is
   CLOSED and shipped no such row, so A1 is a mechanism that is now **implemented but undeclared** — the
-  inverse of the `#5064` failure (*"a declared mechanism read exactly like a shipped one"*). ⛔ **`#10984`
+  inverse of the `#5064` failure (*"a declared mechanism reads exactly like a shipped one"*). ⛔ **`#10984`
   cannot simply take it:** its own body forecloses that (*"this child does not ship an `implemented` row and
   must not duplicate one"* — the row belongs to the producer, `#11001`). `#11001` is CLOSED without it, so
   the row is **orphaned** and needs its own tracker decision (reopen `#11001`, or file the declaration row
@@ -442,8 +445,12 @@ Suites run at `80c912244`, through `tools/test_lane.py run` (private lane contai
   record is reproducible instead: §5 re-derives every line.
 - **It does not adjudicate `#4889`.** §3 offers the reading that reconciles the two measurements and says
   plainly it is a reading; `#10987` owns the adjudication.
-- **It does not re-open `#5333`.** `#5333`'s ruling (a pass may not remove a committed row) is recorded
-  and quoted, not challenged — which is why A2's remaining path must be non-destructive.
+- **It does not re-open `#5333`.** The **design** decision is recorded in `#10069` and in
+  `EXTRACTOR-V4-ARCHITECTURE.md` §*G5's destructive half*, and this record does not challenge it: no
+  pass may remove, archive or withdraw a committed row except through the one journaled lifecycle fold,
+  or through the D7 `ObjectSuperseded` arm where a visible successor exists. `#5333` is **OPEN** because that records the design half
+  only — the **authorisation** (task 1) is still the owner's, so no reading here treats it as given.
+  That is why A2's remaining path must be non-destructive.
 
 ## 7. The transferable lesson (why §0 exists)
 
