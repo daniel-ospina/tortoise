@@ -144,7 +144,7 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      drifted `_searchText` is COMPARED and reds. `summary`, and a legacy row's
      whole pair, stay CACHE-HELD — ⛔ NOT "cache-owned": that term is §17.5's for
      the scalars the record CANNOT hold, and this pair the record DOES hold
-     (`record_reconcile.ReconciliationResult.graph_only_total` is the retraction)
+     (`record_reconcile.RecordReconcileResult.graph_only_total` is the retraction)
      — via :func:`episodic_source_prose_properties`,
      consumed by `record_reconcile.scan_cache_view`, counted under their
      own `graph_only` bucket — visible, and not a divergence against a record that
