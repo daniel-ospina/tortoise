@@ -721,12 +721,17 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # `#11000` was silently dropped and arm 1 read CLEAN. A named object is the strongest
             # possible statement of what the sentence is about, so it OVERRIDES the proximity rule.
             #
-            # EVERY object the clause names, not just the first: the capture groups hold one `#N`,
-            # so a written-out list (`deliberately not closing #100, #200.`) put only `#100` in
-            # `obj` and the region scan below had to be added — without it the SECOND named ref was
-            # flagged as un-declined, and `Part of #100 — deliberately not closing #200, #100.`
-            # (rc 0 at `e7dd41058`) became rc 3 (review P2). The region stops at the clause end
-            # (`.`/`;`), so a following sentence's refs are never swept in.
+            # EVERY object the clause names, not just the first, and by the GRAMMAR: `obj` is
+            # captured through `_REF_LIST`, whose continuation must be a `#N` right after `,`,
+            # `and`, `or` or `&`, so (`deliberately not closing #100, #200.`) names BOTH refs.
+            # ⛔ DO NOT REINTRODUCE A "REGION"/"ZONE" SCAN. Two rounds measured it failing in both
+            # directions, which is why what runs here is a captured list and not a text scan:
+            #   * a scan to the CLAUSE END swept a LATER clause's refs into the decline and moved a
+            #     claim from `weak` to `declined` (`Closes #100 — deliberately not closing #200 and
+            #     Refs #300 for the follow-up.` read NOTHING FLAGGED, measured at `2219dfe86`, P2);
+            #   * making the separator the clause-end class swept a FOLLOWING sentence's refs in
+            #     (`… deliberately not closing #100. #300` lost `#300`, measured at `0e785300b`, P2).
+            # The list therefore stops at its own last `, #N` / `and #N` / `or #N` / `& #N`.
             named = [int(x) for x in _REF_POS_RE.findall(obj)]
             if named:
                 targets.update(named)
@@ -764,11 +769,6 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # Both directions are pinned as a pair, so neither half can be "fixed" by tweaking the
             # other; without the run test the reason reading wins in both and the blanked-object
             # silent drop comes back through a new door.
-            #
-            # ⛔ THE TEST IS ON THE CAPTURED OBJECT, NOT ON THE REST OF THE LINE (measured at
-            # `2219dfe86`): searching `_REF_NOUN` over `after_stem` matched `one\b` inside `none`,
-            # `pr\b` inside `PR` and `it\b` inside `commit`, so appending any ordinary clause
-            # (`… `#11078`, the review issue.`) re-opened the drop.
             stem_end = (m.end("stem_a") if m.group("stem_a") is not None
                         else m.end("stem_b") if m.group("stem_b") is not None
                         else None)
