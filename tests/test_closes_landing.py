@@ -5307,7 +5307,8 @@ def test_a_type_6_block_on_a_LAZY_line_belongs_to_the_item_it_is_still_inside():
         `- a` + `x` + `  </ul>` + `> > 2.     Closes #100`
             renderer: the `<li>` holds the paragraph AND an `html_block` whose raw text is `</ul>`;
             that block ends WITH THE ITEM, so the last line is a NEW blockquote whose wide-gap
-            content is `<pre><code>` -> CODE. `origin/main` `[]`; the pre-fix head `[100]` in
+            content is `<pre><code>` -> CODE. `[]` at the branch point `origin/main` `80c912244`;
+            `[100]` at `1177c6708`/tip and at the pre-fix head, i.e. a fail-open current `main` in
             `lenient`, `strict=True` (the `issue_process_lint` PASS arm) AND `indented_code=True`.
 
     The same root is why the `<div>` spelling has always leaked on `origin/main`
@@ -5485,13 +5486,12 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
             so in `strict` the gate restored a fail-open that predates this branch); the gated head
             `[100]` in both.
 
-    ⚠️ The gate protected exactly ONE body, and it is DECLARED, not pinned as correct:
+    ⚠️ The gate protected exactly ONE body, and the fix for the sibling finding CLOSES it instead:
         `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`
-            renderer ONE `html_block` whose raw text is the marker line -> PROSE, `[100]` at the
-            branch point `origin/main` `80c912244`; this head blanks it in both arms (this module's
-            `_html_here` is False on every line of it — a shape it already models wrongly).
-            ⚠️ `main` has since moved: at `1177c6708` it blanks this body too, for the same reason,
-            so the divergence is against the branch point and NOT against the current tip.
+            renderer ONE `html_block` whose raw text is the marker line -> PROSE; `[100]` at the
+            branch point `origin/main` `80c912244`, `[]` at `1177c6708` and at the tip `3861f0a10`,
+            and `[100]` HERE — a line that adds a `>` interrupts the paragraph, so the type-7 veto
+            has nothing to protect (round-54).
     """
     md = MarkdownIt("commonmark")
 
@@ -5518,15 +5518,15 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
         assert cl.parse_closing_refs(body) == [], body
         assert cl.parse_closing_refs(body, None, strict=True) == [], body
 
-    # …and the ONE body the removed gate used to keep as prose, recorded as the known blanking it is
-    # (the branch point `origin/main` `80c912244` credits it and this head does not, in either arm;
-    # current `main` `1177c6708` blanks it too) so the trade is a pinned fact
-    # rather than a docstring claim. Repairing it needs a discriminator this module does not have —
-    # `_html_here` is False on every line of it — not a paragraph-state gate here.
-    abandoned = "- Text\n> <br />\n> <span>\n> - *\n>   2.     Closes #100\n"
-    assert keyword_types(abandoned) == {"html_block"}, abandoned
-    assert cl.parse_closing_refs(abandoned) == [], abandoned
-    assert cl.parse_closing_refs(abandoned, None, strict=True) == [], abandoned
+    # …and the body the removed gate used to keep as prose is a REAL close again (round-54, the
+    # sibling of the P0 above): a line that ADDS a `>` starts a new container and interrupts the
+    # paragraph, so the type-7 `<span>` opens the block the renderer opens and the marker line under
+    # it is that block's raw text. `[100]` at the branch point `80c912244`; `[]` at `1177c6708` and
+    # at the tip `3861f0a10`; `[100]` here.
+    recovered = "- Text\n> <br />\n> <span>\n> - *\n>   2.     Closes #100\n"
+    assert keyword_types(recovered) == {"html_block"}, recovered
+    assert cl.parse_closing_refs(recovered) == [100], recovered
+    assert cl.parse_closing_refs(recovered, None, strict=True) == [100], recovered
 
 
 def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
@@ -5541,7 +5541,8 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
 
         `-` + `    code` + `<br />` + `     -     Closes #100`
             renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
-            `origin/main` `[]` in `strict`; the pre-fix head `[100]` — a FALSE PASS.
+            `[]` at the branch point `origin/main` `80c912244`, `[100]` at `1177c6708`/tip and at the
+            pre-fix head — a FALSE PASS that CURRENT `main` still has.
 
     The mechanism is the strict arm's own declared over-blank feeding the guess: `strict` blanks
     `    code`, so no paragraph looks open, so `<br />` is read as a legal type-7 opener (§4.6: type
