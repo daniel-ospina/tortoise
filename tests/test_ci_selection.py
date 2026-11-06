@@ -240,21 +240,22 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured at this head: 150 files for the STORAGE diff, 73 for the EXTRACTOR
+    Measured at this head: 153 files for the STORAGE diff, 76 for the EXTRACTOR
     diff (empty surfaces, the early return); the gate is in the selected set in
     both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
     measurements, not constants, and they move for DIFFERENT reasons:
 
-    * the **150** is `onboarding` ∪ `tier1` **minus 14** — the union is 164 at
-      this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
+    * the **153** is `onboarding` ∪ `tier1` **minus 14** — the union is 167 at
+      this head (97 + 76 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
-    * the **73** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1097 at
-      this head (1094 on `main` before this fold's three new test files), and it
+    * the **76** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool", which is 1109 at
+      this head (1094 on `main` before this fold's three new test files and
+      #11064's runbook pins), and it
       moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
       The `60` this sentence carried was that same `tier1` set **13 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
-      and 73 here), i.e. the very "a past state quoted as a current one"
+      and 76 here), i.e. the very "a past state quoted as a current one"
       defect the line below warns about.
 
     Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
@@ -606,8 +607,6 @@ def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
         "otherwise a README edit dropping `--yes` merges green (#11104 review, "
         "#4309 class)"
     )
-
-
 
 
 def test_the_8503_docs_pins_run_on_a_docs_only_diff():
@@ -5303,8 +5302,8 @@ def test_ready_for_owner_tool_change_fails_closed_to_full():
     # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
     # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
     #
-    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 73 since #10980,
-    # so re-derive it rather than reading this as a current count):
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 76 at the
+    # #11064 head, so re-derive it rather than reading this as a current count):
     #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
     #       -> surfaces: []  full: False  tier-1 `test_files`,
     #          with `test_ready_for_owner.py` ABSENT
