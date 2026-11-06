@@ -762,9 +762,10 @@ class RecordStatementError(RecordProjectionError):
     multi-line NON-driver cause keeps its first line and drops the rest —
     measured, on a `Statement` cause: ``ValueError("line one\\nline two")``
     reported ``ValueError: line one`` where the pre-fix arm carried both. It is
-    the same narrowing the message arm has always applied (:func:`replay` composes
-    ``_failure_line(_statement_attribution(...), _driver_fault(exc))`` in its
-    ``raise``), so the two arms are now consistent
+    the same narrowing the message arm has applied SINCE #10648 (before it,
+    :func:`replay` composed ``f"{type(exc).__name__}: {exc!s}"`` — full
+    ``str(exc)`` — and only then took ``_driver_fault(exc)`` inside
+    ``_failure_line``), so the two arms are now consistent
     rather than newly wrong. Stated because ``_bounded_cause`` escapes newlines
     rather than dropping them (`record_writer._bounded_text`), i.e. pre-fix those
     lines DID reach the log stream.
