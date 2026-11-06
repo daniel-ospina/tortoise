@@ -11624,6 +11624,94 @@ def test_every_python_ci_job_carries_an_outer_cap():
         f"(docs/ops/ci-wall-clock.md), not from the default.")
 
 
+def _doc_paragraphs(text: str) -> list[tuple[int, list[str]]]:
+    """`(first_line_number, lines)` for every blank-line-separated paragraph."""
+    out: list[tuple[int, list[str]]] = []
+    current: list[str] = []
+    first = 0
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.strip():
+            if not current:
+                first = number
+            current.append(line)
+        elif current:
+            out.append((first, current))
+            current = []
+    if current:
+        out.append((first, current))
+    return out
+
+
+def _wall_clock_cap_claims(text: str, job: str, cap: int) -> list[str]:
+    """Every quoted `X → Y` cap MOVE for `job` that lands off `cap`.
+
+    Attributed by WINDOW: a claim WRAPS in this doc's prose — "`test-record-postgres`
+    was the first … so it has MOVED: `20 → 50`" puts the name and the number on
+    ADJACENT lines — so the two lines either side of a line naming the job are read as
+    its claim. It is not paragraph-wide: one paragraph of §2 otherwise carries the
+    arm-2 arithmetic of OTHER rows, and attributing that reds on `test-d14-hosted-api`'s
+    own worked example.
+
+    Excused by the PARAGRAPH: that same wrap means the historical `20 → 50` raise and
+    its own revert marker sit on adjacent lines ("…was raised 20 → 50 … and then
+    **put back to 20**"), and a revert marker anywhere in the paragraph is the record
+    being honest about a past value rather than contradicting the code. The pre-fix
+    defect is NOT excused: its paragraph never mentions the revert at all.
+    """
+    offenders: list[str] = []
+    reverted = ("put back", "revert")
+    for first, block in _doc_paragraphs(text):
+        if any(word in "\n".join(block).lower() for word in reverted):
+            continue
+        named = [index for index, line in enumerate(block) if job in line]
+        if not named:
+            continue
+        window = set()
+        for index in named:
+            window.update(range(max(0, index - 2), min(len(block), index + 3)))
+        for index in sorted(window):
+            for target in re.findall(r"→\s*\**`?(\d+)", block[index]):
+                if int(target) != cap:
+                    offenders.append(
+                        f"line {first + index}: moves `{job}` to {target}, "
+                        f"the workflow ships {cap}")
+    return offenders
+
+
+def test_the_wall_clock_record_states_no_cap_the_workflow_does_not_ship():
+    """`docs/ops/ci-wall-clock.md` must not re-assert a cap move the code reversed.
+
+    #10962 review (P2): the cap revert put `test-record-postgres` back to 20 and
+    corrected the table row, the note under it and the §2 summary — but left the §2
+    paragraph that RANKS the four non-clearing rows still saying "so it has MOVED:
+    `20 → 50`". The record then asserted BOTH sides of one cap in one section, which
+    is the exact defect this document exists to remove: the next cap lane reads 50 as
+    live and re-litigates it, or "fixes" `python-ci.yml` back to 50 against a SUM that
+    no longer contains the save.
+
+    The rule is mechanical: on any paragraph naming the job, a `X → Y` cap move must
+    land on the cap `python-ci.yml` actually ships, unless the paragraph records the
+    move as reverted. Scoped to `test-record-postgres` because it is the row that has
+    moved twice (20 → 50 → 20); widening it to every row is its own decision.
+
+    Non-vacuous at the pre-fix head (`8aac7cb8d`'s parent): that head's §2 paragraph
+    reads "so it has MOVED: `20 → 50`" while the workflow ships 20, so this reds there
+    and passes here.
+    """
+    job = "test-record-postgres"
+    cap = _load_python_ci()["jobs"][job]["timeout-minutes"]
+    assert isinstance(cap, int) and cap > 0, (
+        f"python-ci.yml:{job} carries no literal `timeout-minutes`, so there is no "
+        f"shipped cap for the record to agree with")
+    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    offenders = _wall_clock_cap_claims(doc, job, cap)
+    assert not offenders, (
+        "docs/ops/ci-wall-clock.md re-asserts a cap `python-ci.yml` does not ship — the "
+        "record then holds both sides of one number and the next cap lane cannot tell "
+        "which is live. State the shipped cap, or name the move as reverted:\n  "
+        + "\n  ".join(offenders))
+
+
 def test_every_required_merge_check_carries_an_outer_cap():
     """A job EMITTING a required merge context must carry a literal cap.
 

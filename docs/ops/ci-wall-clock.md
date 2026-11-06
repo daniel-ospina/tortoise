@@ -251,10 +251,10 @@ clamp the carve-out shards land on, not the fast shards' budget, and restating a
 is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were
 recorded here rather than moved: nothing had measured any of them being cancelled, and this
 document's own rule is to move a cap from a measurement instead of on suspicion. THREE of the four
-are still in that state. `test-record-postgres` was the first — 22 m against 20 on the arm-2
-estimate — and it false-killed on 2026-11-05, so it has MOVED: `20 → 50` from the measured
-15.9 m censored save (above); the remaining three are `test-slow`, `test-carve-out` and
-`test-concurrency-falkor`. `test-slow` sits exactly AT its
+are still in that state — `test-slow`, `test-carve-out` and `test-concurrency-falkor`.
+`test-record-postgres` was the FIRST of them (22 m against 20 on the arm-2 estimate), and it
+false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its cap rose: #11063
+took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the four. `test-slow` sits exactly AT its
 cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
 `test-carve-out` is 9 m past it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against
 30). The last has the least headroom of all:
@@ -304,12 +304,12 @@ produces no runs — and because a warn-only step added to that workflow never e
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": a job that mounts `~/.cache/pip` on a WRITABLE
   shared key is not an arm-1 row, because on a key change its save IS the archive.
-  `test-record-postgres` mounts that path (`python-ci.yml:4605-4607` — the `Restore pip dependency
-  caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block in `test-record-postgres`) but is
-  **restore-only since #11063**, so it no longer pays a save and now IS arm-1 shaped — which is
-  why its cap is 20 and not 50 (see the note under the table). Arm 1 otherwise applies to a job
-  whose save is small because nothing restores an archive into its cache path, not because its
-  `pip install` line omits torch.
+  `test-record-postgres` mounts that path (`python-ci.yml:4605-4607` — its `Restore pip dependency
+  caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block) but is **restore-only since #11063**,
+  so it pays no save: 20 is the ARM-2 SUM minus that term (13 m × 1.5 → 20), not an arm-1 reading,
+  and its retained `max` 15.43 m is save-era (§1 predates #11063), so arm 1 would say 30 — re-measure.
+  Arm 1 otherwise applies to a job whose save is small because nothing restores an archive into
+  its cache path, not because its `pip install` line omits torch.
 - **The job's cold save IS that archive** — `2 × max` cannot see the POST-step at all, so the
   binding term is the SUM of every in-step cap plus ~1 m setup plus the observed cold save, and
   the cap is **that SUM × 1.5, rounded UP to the next 10 m**. The margin is not decoration: a save
