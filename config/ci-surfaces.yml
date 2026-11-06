@@ -5912,6 +5912,15 @@ surfaces:
   # builds its store by path (the `test_update_point_content_embedding_4208.py`
   # pattern), which runs on any lane.
   - test_embed_gate_5008.py
+  # #11085: the embedding-writer EXEMPTION REGISTER — `tortoise/embed_writer_register.py`, a leaf
+  # module reached through the `core` fallback (`tortoise/` matches no named SOURCE_PATTERNS
+  # entry), so a diff touching only the register selects `core` and nothing else. Registered
+  # beside its two siblings because the three guard one seam from three sides:
+  # `test_embed_gate_5008.py` the predicate, `test_dod_5090_probe.py` (also `core`) the
+  # instrument's census, and this file the PRODUCT's declaration — which is what #11086 (arming
+  # the gate) has to point at. NOT carve_out-registered: it writes no graph, opens no connection
+  # and needs no lane.
+  - test_embed_writer_register.py
   # #5049: the verdict contract (`tests/_verdict.py`) — condition-vs-deadline
   # waits, INCONCLUSIVE-on-expiry, the measured `Deadline`, the host-capability
   # gate, and the per-test process-global reset. Registered here (core) AND its
