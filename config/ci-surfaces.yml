@@ -3650,10 +3650,6 @@ surfaces:
   # `tools/ci_selection.py` (the `tools/lane_stash.py` pattern): a tools-only
   # diff must select the surface that carries this pin. Hermetic: the pure
   # comparison core + CLI contract; `TORTOISE_TEST_CARVE_OUT=1` verified green.
-  # ⚠️ NOT hermetic since #11112/#11113: the presence check and the
-  # write-freedom pins need a REAL `GRAPH.LIST` to be measured against, so four
-  # helpers here build throwaway EMBEDDED redislite stores (no server, no
-  # network — `DELIBERATE_EMBEDDED_LANE` in `tests/test_uri_env_mutations_declared.py`).
   # ⚠️ NOT hermetic since #11112/#11113: the presence check, the write-freedom
   # pins and the LOST-store arm need a REAL `GRAPH.LIST` (and a real RDB) to be
   # measured against, so FOUR helpers here build throwaway EMBEDDED redislite

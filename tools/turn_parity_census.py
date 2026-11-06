@@ -1136,8 +1136,10 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
     except (OSError, ValueError):
         return
     replayable = _one_replayable_log(events_dir)
+    kind = "log"
     if replayable is None:
         replayable = _pending_prewipe_snapshot(events_dir)
+        kind = "snapshot"
     if replayable is None:
         return                    # recovery would refuse this log too
     try:
@@ -1145,18 +1147,25 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
             return                # non-empty graph: drained, not lost
     except Exception:
         return                    # the read arm owns an unreadable graph
+    if kind == "snapshot":
+        why = ("tortoise's own recovery REFUSES to act while this pre-wipe "
+               "snapshot is pending — it may be the only surviving record of a "
+               "rebuild's graph-only Points (#2943) — and this gate does not "
+               "certify over a record it cannot replay")
+    else:
+        why = ("these are the SAME conditions under which tortoise's own "
+               "recovery would REPLAY that log and refill the graph")
     raise CensusError(
-        "the graph EXISTS and holds ZERO nodes of ANY label, while the one "
-        f"replayable event log beside the store ({replayable!r}) holds events — "
-        "that is the LOST-STORE shape (a fresh redislite daemon on a corrupt "
-        "RDB, an interrupted restore, a manual delete), not a drained graph: "
-        "these are the SAME conditions under which tortoise's own recovery "
-        "would REPLAY that log and refill the graph. An empty graph with a "
-        "replayable log is NOT evidence of a drained graph, so --expect-empty "
-        "must not certify it. This gate never recovers — a replay here would "
+        "the graph EXISTS and holds ZERO nodes of ANY label, while "
+        f"{kind} {replayable!r} beside the store is a record it could be "
+        "rebuilt from — that is the LOST-STORE shape (a fresh redislite "
+        "daemon on a corrupt RDB, an interrupted restore, a manual delete), "
+        f"not a drained graph: {why}. An empty graph with such a record is "
+        "NOT evidence of a drained graph, so --expect-empty must not certify "
+        "it. This gate never recovers — a replay here would "
         "resurrect purged turns (#10017). Restore or rebuild deliberately "
         "(python -m tortoise rebuild --dir <log-dir> --db <db>) and re-run; if "
-        "the store really is meant to be empty, remove or archive the log "
+        "the store really is meant to be empty, remove or archive that record "
         "first so the state is unambiguous.")
 
 
@@ -1239,6 +1248,14 @@ def _pending_prewipe_snapshot(events_dir: str) -> str | None:
     graph-only Points, and it is replayed. So a 0-node store whose sole record
     is a pending sidecar is the LOST shape too (#11113 review cycle 7, P3), and
     the loader — not `lexists` — is what decides presence.
+
+    ⛔ AND THE LOADER'S THIRD ANSWER IS A REFUSAL, NOT AN ABSENCE (#11113 review
+    cycle 8, P2). `_load_prewipe_snapshot` raises for a sidecar that exists but
+    cannot be trusted (unparsable, a symlink, a FIFO, absurdly large), because
+    it may be the only surviving record; `recover_from_log` turns that into its
+    own refusal. Swallowing it into `None` made this arm report "no record here"
+    for a state recovery refuses on, and `--expect-empty` then certified it
+    CLEAN — the same false-PASS class the arm exists to prevent.
     """
     try:
         from tortoise.projection import prewipe_snapshot_path
@@ -1247,9 +1264,23 @@ def _pending_prewipe_snapshot(events_dir: str) -> str | None:
         return None
     try:
         path = prewipe_snapshot_path(events_dir)
-        return path if _load_prewipe_snapshot(path) is not None else None
-    except Exception:
+    except Exception:             # pragma: no cover - path derivation
         return None
+    if not os.path.lexists(path):
+        return None               # nothing there: the ordinary case
+    try:
+        pending = _load_prewipe_snapshot(path) is not None
+    except Exception as exc:
+        raise CensusError(
+            f"a pre-wipe snapshot exists at {path} and cannot be trusted "
+            f"({type(exc).__name__}: {exc}) — it may be the only surviving "
+            "record of a rebuild's graph-only Points, and tortoise's own "
+            "recovery REFUSES on this state rather than proceeding. An "
+            "emptiness verdict here would certify a store whose surviving "
+            "record is unreadable, so this gate refuses too (#11113 review "
+            "cycle 8). Inspect the file and repair it, or delete it to accept "
+            "the loss deliberately, then re-run.") from exc
+    return path if pending else None
 
 
 def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:

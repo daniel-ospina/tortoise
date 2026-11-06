@@ -10,11 +10,14 @@ The live end-to-end demonstration (real capture → real journal replay into a
 throwaway record → census exit 0 → one row removed → exit 2) is a lane-run
 artifact on throwaway stores, not a CI test; what CI can and must hold is the
 comparison core and the CLI contract, which is everything the verdict is made
-of. The STORE LEGS are pinned separately, without stores: `read_record_turns`
-is driven through a STUBBED connection (its scoped door, its SQL column
-contract and the refusal each failure raises) and `read_graph_turns` through a
-fake `g` (paging, the aggregate cross-check, and the classification of every
-row the store returns). An unpinned door is exactly how an unscoped read
+of. The STORE LEGS are pinned separately — `read_record_turns` through a
+STUBBED connection (its scoped door, its SQL column contract and the refusal
+each failure raises), `read_graph_turns` through a fake `g` (paging, the
+aggregate cross-check, and the classification of every row the store returns),
+AND through four real throwaway EMBEDDED redislite stores (#11112/#11113: the
+presence check, the write-freedom pins and the LOST-store arm can only be
+measured against a real `GRAPH.LIST` — a fake cannot show that a typo'd
+`--graph-name` mints a graph). An unpinned door is exactly how an unscoped read
 (#10024) would certify vacuously while every core case stayed green.
 """
 
@@ -1530,7 +1533,7 @@ def test_a_LOST_graph_with_a_replayable_log_is_REFUSED_not_certified(
         tpc.read_graph_turns(None, db_path, "tortoise")
     message = str(exc.value)
     assert "LOST-STORE shape" in message, message
-    assert "event log" in message, message
+    assert "would REPLAY that log" in message, message
 
 
 def test_a_DRAINED_graph_is_never_mistaken_for_a_LOST_one(
@@ -1716,6 +1719,57 @@ def test_a_pending_prewipe_SNAPSHOT_alone_is_the_LOST_shape_too(
     with pytest.raises(tpc.CensusError) as exc:
         tpc.read_graph_turns(None, db_path, "tortoise")
     assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+
+
+def test_an_UNTRUSTWORTHY_prewipe_snapshot_REFUSES_instead_of_reading_as_absent(
+        tmp_path, monkeypatch):
+    """⛔ The loader's third answer is a REFUSAL, not an absence (#11113 cycle 8).
+
+    `_load_prewipe_snapshot` raises for a sidecar that exists but cannot be
+    trusted — unparsable, a symlink, a FIFO, absurdly large — because it may be
+    the only surviving record of a rebuild's graph-only Points, and
+    `recover_from_log` turns that into its own refusal. Swallowing it into None
+    made `--expect-empty` certify `CLEAN` against a state recovery refuses on.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    from tortoise.projection import prewipe_snapshot_path
+
+    path = prewipe_snapshot_path(str(tmp_path))
+    with open(path, "w") as fh:
+        fh.write("this is not the snapshot you are looking for\n")
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "cannot be trusted" in message, message
+    assert "LOST-STORE" not in message, message   # a different refusal, on purpose
+
+
+def test_a_pending_sidecar_with_TWO_logs_says_RECOVERY_REFUSES_not_replays(
+        tmp_path, monkeypatch):
+    """The diagnosis must match what recovery does on THIS state (#11113 c8).
+
+    Measured on the sibling: with a pending sidecar AND two adjacent logs,
+    `recover_from_log` returns `recovered: False` — "ambiguous log set".
+    Refusing to certify is right; claiming "recovery would REPLAY" is not.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    from tortoise.projection import prewipe_snapshot_path
+    import json as _json
+
+    _json.dump({"synthetic_events": [{
+        "type": "PointAdded",
+        "point": {"id": "p-synthetic", "content": "x",
+                  "pointKind": "point", "is_episodic": False},
+    }]}, open(prewipe_snapshot_path(str(tmp_path)), "w"))
+    for name in ("a.jsonl", "b.jsonl"):
+        (tmp_path / name).write_text('{"event_type": "SessionStarted"}\n')
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "REFUSES" in message, message
+    assert "would REPLAY" not in message, message
 
 
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(
