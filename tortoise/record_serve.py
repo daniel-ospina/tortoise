@@ -1009,6 +1009,18 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
         # (`UnprojectableRecord` / `UnknownRecordColumn`) means the record row —
         # or a column the reader does not know — cannot be projected at all:
         # the "the record is newer than the reader" class.
+        # ⛔ One of its subclasses, `PlacementTableUnavailable`, is NOT that class
+        # and must not be read with it: nothing about the record is wrong — the
+        # property namespace came from a broken INSTALL (no carrier, a carrier
+        # or doc that will not decode/read/parse, an EMPTY or truncated one, or
+        # a malformed row), so the operator's remedy is to repair the install,
+        # not the credentials or the reader version (#10663, #11227).
+        # `UnprojectableRecord` and `UnknownRecordColumn` are not the whole set —
+        # `CacheProjectionError` has FIVE direct subclasses in
+        # `cache_projection.py`: `UnknownRecordLabel` is a caller's label with no
+        # record table and `AmbiguousRecordColumn` is a placement-table
+        # declaration fault, and neither is "newer than the reader" nor a broken
+        # install.
         # `RecordProjectionError` is where `scope_connection` refuses a
         # MISCONFIGURED tenancy: a role that BYPASSES RLS, a lost tenant GUC, an
         # unreadable role posture. Its message names the fix ("arm
@@ -1157,7 +1169,7 @@ def parity_difference(cache_props: Mapping[str, Any],
       still carries them — the legacy population, and every session the current
       capture wrote — is CACHE-HELD, not a gap. ⛔ "cache-held", never
       "cache-owned": the record DOES hold this pair, so the term reserved for what
-      the record cannot hold (`record_reconcile.ReconciliationResult.graph_only_total`)
+      the record cannot hold (`record_reconcile.RecordReconcileResult.graph_only_total`)
       would tell an operator there is nothing to repair (#10394 review, cycle 9).
       Scoped by the node's own
       identity, never by the label alone: a transcript DOCUMENT Source keeps its
@@ -1201,9 +1213,15 @@ def parity_difference(cache_props: Mapping[str, Any],
 
     ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
     the record's answer here is the projection's own map
-    (``cache_projection.node_from_row``, the same map ``read_node`` returns), so
-    the declined pair is absent by construction — exactly the shape the
+    (``cache_projection.node_from_row``, the same map ``read_node`` returns), and
+    the declined pair is absent from it by construction on every row where the
+    decline applies — ``summary`` on every row of the EPISODIC Source class,
+    ``_searchText`` too unless #10965 relaxes it — exactly the shape the
     comparison must not redden on.
+    ⛔ NOT on every row: since #10965 a post-#10000 episodic row PROJECTS
+    ``_searchText``, so there the name is PRESENT in that same map and this arm
+    is OPERATIVE on the sanctioned path — the measured false GREEN the
+    ``invented``-loop comment below describes (filed as ``#11233``).
 
     ⚠️ A field BOTH sides carry is always compared, refused name or not. That is
     what keeps a caller's own re-derivation honest: the served endpoint puts a

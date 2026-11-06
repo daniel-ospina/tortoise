@@ -6165,9 +6165,10 @@ def test_ci_surfaces_declares_each_yaml_key_at_most_once():
     """Review round 5 on #11057 — a duplicate `durations` key is SILENT, and worse than a list one.
 
     `duplicate_entries` (#2913/#5373, the test above) gates a name repeated within one
-    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union`: a conflicting
-    hunk keeps BOTH sides' lines, so two lanes appending the same registration is the
-    natural conflict shape. The `durations` map has the same hazard and a strictly worse
+    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union` — which keeps
+    BOTH sides inside a conflicting hunk and never dedupes, while the same row appended at
+    a DIFFERENT anchor lands twice with no conflict at all (measured; see
+    `duplicate_entries`' docstring). The `durations` map has the same hazard and a strictly worse
     failure mode — it is a YAML MAPPING, so a second row for the same file is not a repeat
     any list check can see. The loader collapses it and the LAST row wins, silently.
 
@@ -6206,9 +6207,12 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
 
     `config/ci-surfaces.yml` carries `merge=union`, which keeps BOTH sides' lines for
-    a conflicting hunk — so a same-surface duplicate is the exact shape union emits
-    when two lanes register the same test. It used to be a ⚠️ note; a note on a
-    union-merged registry lets the duplicate in silently.
+    a conflicting hunk — so a same-surface duplicate can be exactly what a merge emits
+    when two lanes register the same test, and a note on a union-merged registry lets it
+    in silently. ⛔ Do not expect a byte-identical append to collapse, though: MEASURED
+    on real merges, the same row appended at two DIFFERENT positions survives as two
+    rows with `merge=union` and without it alike; only the same change made in the same
+    place collapses, by git's ordinary identical-change resolution (#3153).
     """
     import tools.ci_selection as cs
 
@@ -12853,8 +12857,9 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     against the job's `timeout-minutes` like any other step. This job cannot
     amortize such a save, and no cap it is allowed to carry can: the cap above
     is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
-    at the ceiling), while ONE shard already spends its 19m floor-clamped
-    watchdog plus ~1.5m of setup/provision — and the SAVE has no timeout of its
+    at the ceiling), while ONE shard already spends its 10m embedder cap + 19m
+    floor-clamped watchdog + ~1m setup + the 1m38s `~/.cache/huggingface` POST
+    ≈ 31.6m against a 30m cap — and the SAVE has no timeout of its
     own, so a slow one is unbounded, not merely large. Headroom amortizes a
     bounded cost; it cannot amortize an unbounded one.
 
@@ -12869,8 +12874,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     check on a diff that never touched this job.
 
     Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`) and is still written on EVERY run by
-    `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`, so this
+    (`pip-<os>-<hash uv.lock>`), written by `test-d14-hosted-api` on EVERY run
+    (unconditional, PR + push), by `test-slow` only under `slow_run` — each saving on a MISS, so this
     job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
@@ -13043,7 +13048,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     3,616,385,308 B in a PR scope and 397,897,273 B in `refs/heads/main`, while
     `uv-pip-Linux-8755d72f…` is 662,393,744 B in `refs/heads/main` — so pip (the
     torch wheel set, #7612's own payload, installed by `install-cpu-torch` with
-    `pip`) is 93% of the uploaded payload on its own, and FOUR other jobs write
+    `pip`) is 93% of the uploaded payload on its own, and TWO other jobs write
     `pip-<os>-<hash uv.lock>`, so this job reads it and writes nothing. The uv
     half has no other writer (`refs/heads/main` puts it at 252 MiB, an order of
     magnitude rather than a bound — scope variance is large), so this job keeps
@@ -13365,10 +13370,10 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "Use `actions/cache/restore@` plus an explicit, BOUNDED "
         "`actions/cache/save@` — for a NEW key. The two keys this job already "
         "carries are pinned separately and a save is REJECTED for both: `pip-` "
-        "because four other jobs write it, and `uv-cache-` because it must keep "
+        "because two other jobs write it, and `uv-cache-` because it must keep "
         "exactly one bounded writer (the next two arms).")
 
-    # ── The pip half: READ ONLY, because FOUR other jobs write it ──────────────
+    # ── The pip half: READ ONLY, because TWO other jobs write it ──────────────
     pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
     assert pip_steps, (
         "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
@@ -13389,7 +13394,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert _path_of(pip_restore).strip() == "~/.cache/pip", (
         f"the pip restore reads {_path_of(pip_restore).strip()!r}, not "
         "`~/.cache/pip`. `path` is part of the cache's VERSION, so the entry the "
-        "four writer jobs produce can never match it — a permanent MISS with the "
+        "two writer jobs produce can never match it — a permanent MISS with the "
         "step green, which is a cold 3.6 GB torch download on every shard "
         "(#7612 reverted, #11063 cycle 5 finding 2).")
     assert pip_restore.get("continue-on-error") is True, (
@@ -13401,14 +13406,14 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert pip_key_root == "pip-", (
         f"the pip cache key is {pip_key!r}; the SHARED key other jobs write is "
         "`pip-<os>-<hash uv.lock>` — any other spelling silently unships it from "
-        "the four writers that populate it")
+        "the two writers that populate it")
     pip_writers_here = [s.get("name") for s in steps
                         if _is_writer(s) and pip_key_root in _key_of(s)]
     assert not pip_writers_here, (
         f"the `test` job WRITES the shared pip cache again {pip_writers_here}. "
         "That archive measured 3,616,385,308 B in a PR scope — restoring it and "
         "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
-        "and it buys nothing: FOUR other jobs already write the key (#10327's "
+        "and it buys nothing: TWO other jobs already write the key (#10327's "
         "argument, applied to the bigger half).")
     pip_writer_rows = [(jid, s.get("name"), _key_of(s))
                        for jid, jd in wf["jobs"].items() if jid != "test"
@@ -13466,12 +13471,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"own run: {[(jid, _gate_of(jid)) for jid in pip_writers_elsewhere]} vs "
         f"this job's `{test_gate}`. A writer that needs `slow_run`/`carve_out_run` "
         "to be true does not populate the key on a run that still executes `test`, "
-        "so this job reads an entry nothing wrote. The unconditional writers are "
-        "`test-d14-hosted-api` and `test-record-postgres` (`always() && "
-        "needs.changes.result == 'success'`), and `test-concurrency-falkor` shares "
-        "this job's own gate; `test-slow` (`slow_run`) is the only diff-gated pip "
-        "writer, and `test-carve-out` is NOT a writer — its pip step is "
-        "restore-only by its own pin.")
+        "so this job reads an entry nothing wrote. The unconditional writer is "
+        "`test-d14-hosted-api` (`always() && needs.changes.result == 'success'`); "
+        "`test-slow` (`slow_run`) is the only diff-gated pip writer, and "
+        "`test-carve-out`, `test-record-postgres` and `test-concurrency-falkor` are NOT "
+        "writers — their pip steps are restore-only (`_PIP_CACHE_READER_JOBS`).")
 
 
     # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
@@ -13539,7 +13543,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert save_paths == ["~/.cache/uv"], (
         f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
-        "measured 3,616,385,308 B and is written by THREE other jobs.")
+        "measured 3,616,385,308 B and is written by TWO other jobs.")
     gate = str(uv_save.get("if") or "").strip()
     # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
     # finding 3). The literal let a rename or a deletion read GREEN — and a
@@ -16769,9 +16773,21 @@ def test_surface_audit_tolerates_null_surface_value(tmp_path):
 def test_real_manifest_has_no_duplicate_entries():
     # #3381: two files were each registered twice — one entry added by two
     # different PRs fixing the same drift independently. A same-surface
-    # duplicate is invisible to select() (surfaces are unioned) and reported
-    # non-fatally by `--integrity` and `--surface-audit` — never as a gate
-    # failure — so pin its absence here where CI will actually see it.
+    # duplicate is invisible to select() (surfaces are unioned), but it is a
+    # GATE FAILURE, not a note: `--integrity` reds on it, emitting BOTH shapes in
+    # ONE report — a `duplicate entry '<name>' at .surfaces.<surface>[] (lines N,
+    # M)` element (via `duplicate_mapping_key_issues`, the walk shared with
+    # `tools/registry_integrity.py`) AND a trailing `<surface>: <name>` element
+    # (via `_manifest_contract_issues` -> `duplicate_entries`) — because `main()`
+    # composes all of them into `problems`. (`integrity()` ITSELF does not: it
+    # returns only the `missing` list, which is why that distinction is spelled
+    # out here. The same job's separate `registry_integrity` step reports the
+    # duplicate-entry form as well, so neither step is the only place it appears.)
+    # See `duplicate_entries`' own docstring (#5373), the authority here. Pin
+    # its absence where CI will actually see it. (This comment said "reported
+    # non-fatally … never as a gate failure" until #11285; that was true in the
+    # #3381 era and has been false since #5373 made the duplicate a gate
+    # failure.)
     # Call the production detector rather than reimplementing it, so this pin
     # cannot drift from the real semantics (e.g. cross-surface dual
     # registration is deliberate and must stay allowed).
