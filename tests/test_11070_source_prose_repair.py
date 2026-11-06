@@ -1411,3 +1411,130 @@ def test_the_runbook_commands_that_touch_the_cache_all_name_the_graph():
                     "11070_repair_session_source_prose.py"), (
                     f"{label} hands the operator a cache-touching command that "
                     f"does not name the graph: {line.strip()}")
+
+
+def test_the_flag_still_USES_the_record_when_a_scope_is_typed(monkeypatch,
+                                                              capsys):
+    """⛔ `--clear-without-record` must not throw away a record you asked for.
+
+    The flag exists so the clear arm is REACHABLE on a box that exports
+    `TORTOISE_RECORD_DSN`. Passing it WITH a typed scope is an explicit statement
+    that the record is to be used, so the run must keep the inherited DSN and
+    re-derive where the record answers — not open no record at all and clear every
+    candidate, including ones the record could have healed (#11152 round 8, P1).
+
+    Before the fix this argv wrote `{'sum': '', 'st': None}` over an answerable
+    session.
+    """
+    _export_a_record_dsn(monkeypatch)          # inherited DSN only
+    graph = _RecordingGraph([(_session_node(),)])
+
+    def answers(conn, *, org_id, graph_id, session_id, turn_max_index=None):
+        return _OneTurn()
+
+    _install_cli(monkeypatch, graph, [
+        "--repair", "--org-id", "org_x", "--graph-id", "gx",
+        "--clear-without-record"])
+    monkeypatch.setattr("tortoise.record_read.session_turns", answers)
+
+    _cli.main()
+    assert len(graph.writes) == 1
+    written = graph.writes[0][1]
+    assert written["sum"].startswith(SESSION_SOURCE_SUMMARY_PREFIX), (
+        "the inherited record was discarded although a scope was typed — the "
+        "answerable session was CLEARED instead of re-derived")
+    assert written["st"]
+
+
+def test_the_flag_still_drops_the_inherited_dsn_when_NO_scope_is_typed(
+        monkeypatch):
+    """The flag's original purpose must survive: reachable where a DSN is exported."""
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(),)])
+    _install_cli(monkeypatch, graph, ["--repair", "--clear-without-record"])
+
+    _cli.main()
+    assert len(graph.writes) == 1
+    assert graph.writes[0][1]["sum"] == "", (
+        "the by-name clear arm did not clear where no scope was typed")
+
+
+def test_an_EMPTY_graph_name_is_refused_at_the_boundary(monkeypatch, capsys):
+    """`--graph ""` is not "the default": it is a real graph, or a driver crash.
+
+    On the served arm it reached `select_graph("")` and raised
+    `TypeError: Expected a string parameter` from inside the driver, and
+    `report["graph"]` would print "(URI default)" over a graph it never opened.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:x@127.0.0.1:1/none")
+    monkeypatch.setattr(sys, "argv", [_CLI_PATH.name, "--graph", "", "--dry-run"])
+
+    assert _cli.main() == 2
+    assert "--graph may not be empty" in capsys.readouterr().err
+
+
+# ── the four replay CALL SITES ────────────────────────────
+#
+# #11152 round 8: every hook test above calls `reconcile_after_replay` DIRECTLY,
+# so deleting one of the four wiring blocks — or copying the wrong `engine=`
+# literal — reded nothing. The sibling migration (#4125) shipped exactly that
+# defect: its `rebuild()` site passed `engine="rebuild_all"` and misdirected a
+# failure investigation. These two tests close the gap the cheap way: one drives a
+# REAL `rebuild()` and asserts the hook is invoked with the right label (the defect
+# 4125 shipped), and one asserts all FOUR sites exist with their own literals (a
+# deleted call site would otherwise be invisible).
+
+def test_the_REAL_rebuild_engine_invokes_the_prose_hook_with_its_own_label(
+        monkeypatch, tmp_path):
+    """(1) FAILS if `projection.rebuild` drops the hook or mislabels the engine.
+
+    (2) REACHABLE: a real `rebuild()` over a real journal. The population is empty
+    here on purpose — the hook runs even when it reports nothing, and the LABEL is
+    what this test is about.
+    """
+    from tortoise import session_source_prose_migration as mod
+    from tortoise.log import EventLog
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    s = TortoiseSDK(str(tmp_path / "g.db"), namespace="test_11070_hook",
+                    event_log_path=str(events / "events.jsonl"))
+    calls: list[str] = []
+    real = mod.reconcile_after_replay
+
+    def spy(projection, *, engine, **kw):
+        calls.append(engine)
+        return real(projection, engine=engine, **kw)
+
+    monkeypatch.setattr(mod, "reconcile_after_replay", spy)
+    try:
+        s._get_proj().rebuild(EventLog(str(events / "events.jsonl")),
+                             confirm_destructive=True)
+    finally:
+        s.close()
+    assert calls == ["rebuild"], (
+        f"rebuild() invoked the hook as {calls!r}; #4125's defect was exactly a "
+        f"wrong engine label here")
+
+
+def test_ALL_FOUR_replay_engines_wire_the_hook_with_their_own_literal():
+    """A deleted call site is invisible to the hook tests (they call it directly).
+
+    The four whole-journal engines re-mint the prose pair from the journal, so each
+    must run the sweep AND name itself, or a rebuild silently leaves the population
+    and a failure investigation is sent to the wrong engine.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    expected = {
+        "tortoise/projection/__init__.py": ['engine="rebuild"', 'engine="rebuild_all"'],
+        "tortoise/consistency.py": ['engine="recover_from_log"'],
+        "tortoise/backup.py": ['engine="backup.restore"'],
+    }
+    for rel, literals in expected.items():
+        text = (root / rel).read_text()
+        assert "reconcile_after_replay" in text, f"{rel} lost its #11070 hook"
+        for literal in literals:
+            assert literal in text, f"{rel} no longer passes {literal}"

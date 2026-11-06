@@ -26,7 +26,8 @@ IDENTITY plus the display-prefix WITNESS — see the module docstring.
 
 Usage:
   # 1) census + plan, no writes (the default). ⚠️ NO RECORD SCOPE IS NEEDED:
-  #    the census reads the CACHE only and the record is not consulted at all —
+  #    the census reads the CACHE, and consults the record ONLY if you give it a
+  #    scope (then its "re-derived" count is a PLAN, not work done) —
   #    but the CACHE GRAPH still has to be named (see step 2), or the census counts
   #    a different graph and reports 0 candidates with confidence.
   uv run python graph-scripts/11070_repair_session_source_prose.py \\
@@ -161,10 +162,11 @@ def main() -> int:
                     help="WRITE the repair (the default is a dry run)")
     ap.add_argument("--record-dsn", default=None,
                     help="record DSN — re-derive each lexicon from the RECORD "
-                         "(default: env TORTOISE_RECORD_DSN). ⛔ ABSENT IS NOT "
-                         "'clear only': the writing arm REFUSES without a DSN "
-                         "unless --clear-without-record asks for the clear arm "
-                         "by name")
+                         "(default: env TORTOISE_RECORD_DSN; the inherited DSN "
+                         "is not used when --clear-without-record is passed "
+                         "WITHOUT a scope). ⛔ ABSENT IS NOT 'clear only': the "
+                         "writing arm REFUSES without a DSN unless "
+                         "--clear-without-record asks for the clear arm by name")
     ap.add_argument("--org-id", default=None,
                     help="tenant org id for the record read (REQUIRED with "
                          "--record-dsn on the WRITING arm — a scope is never "
@@ -175,11 +177,14 @@ def main() -> int:
                          "record's scope)")
     ap.add_argument("--clear-without-record", action="store_true",
                     help="authorise CLEARING a candidate the record cannot "
-                         "answer for. Where the record DOES answer the pair is "
-                         "still RE-DERIVED, so this is not 'clear everything' "
-                         "when a scope is also supplied. Without it such a "
-                         "candidate is REPORTED and LEFT ALONE. Not required on "
-                         "a census (--dry-run), which never writes.")
+                         "answer for. The RECORD IS STILL USED when you supply "
+                         "one (typed --record-dsn, or a typed --org-id/"
+                         "--graph-id with an exported TORTOISE_RECORD_DSN): "
+                         "where it answers the pair is RE-DERIVED, and only the "
+                         "nodes it cannot answer for are cleared. With NO record "
+                         "scope at all it clears every candidate. Without this "
+                         "flag such a candidate is REPORTED and LEFT ALONE. Not "
+                         "required on a census (--dry-run), which never writes.")
     ap.add_argument("--assert-clean", action="store_true",
                     help="exit 1 if any candidate remains (dry run only) — the "
                          "step-3 verification; without it a dry run always exits 0")
@@ -193,6 +198,13 @@ def main() -> int:
     if not uri:
         print("ERROR: no DB URI — pass --db or set TORTOISE_DB_URI", file=sys.stderr)
         return 1
+    if args.graph is not None and not args.graph.strip():
+        # ⛔ AN EMPTY NAME IS NOT "the default": it is a real, distinct graph — or,
+        # on the served arm, a driver `TypeError` from `select_graph("")`. Refuse
+        # it at the boundary instead of guessing either way (#11152 round 8).
+        print("ERROR: --graph may not be empty. Omit it to use the graph the URI "
+              "addresses, or name the cache graph explicitly.", file=sys.stderr)
+        return 2
     graph_name = args.graph if args.graph is not None else derive_uri_graph(uri)
 
     read_transcript = None
@@ -201,16 +213,22 @@ def main() -> int:
     explicit_dsn = args.record_dsn is not None
     record_dsn = (args.record_dsn if explicit_dsn
                   else os.environ.get("TORTOISE_RECORD_DSN", ""))
-    if args.clear_without_record and not explicit_dsn:
-        # ⛔ ONLY THE INHERITED DSN IS DROPPED. `--clear-without-record` exists so
-        # the clear arm is reachable on a box that EXPORTS a `TORTOISE_RECORD_DSN`
-        # the operator did not mean to use — it must never discard a `--record-dsn`
-        # the operator TYPED. Zeroing that too made the safe combination
-        # unreachable from the CLI ("re-derive where the record answers, clear
-        # where it does not"), so a run with a real DSN and the flag cleared every
-        # node with NO lexicon, including ones the record could have re-derived —
-        # measured with a bogus DSN that could never be dialled (#11152 review
-        # round 2, P2).
+    # ⛔ ONLY THE INHERITED DSN IS DROPPED, AND ONLY WHEN NO SCOPE WAS TYPED.
+    # `--clear-without-record` exists so the clear arm is reachable on a box that
+    # EXPORTS a `TORTOISE_RECORD_DSN` the operator did not mean to use — it must
+    # never discard a `--record-dsn` the operator TYPED (that made the safe
+    # combination unreachable; #11152 round 2), and it must not discard the
+    # inherited one either when the operator TYPES A SCOPE, because typing
+    # `--org-id`/`--graph-id` is an explicit statement that the record IS to be
+    # used: the flag then means "re-derive where it answers, clear where it does
+    # not", which is what the flag's own help promises (#11152 round 8, P1).
+    # Dropping the inherited DSN in that case opened no record at all and cleared
+    # every candidate, including ones the record could have re-derived.
+    typed_scope_here = bool((args.org_id or os.environ.get("TORTOISE_ORG_ID"))
+                            and args.graph_id)
+    drop_inherited = (args.clear_without_record and not explicit_dsn
+                      and not typed_scope_here)
+    if drop_inherited:
         record_dsn = ""
     org_id = args.org_id or os.environ.get("TORTOISE_ORG_ID", "")
     graph_id = args.graph_id
