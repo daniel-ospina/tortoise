@@ -179,7 +179,8 @@ uv run python tools/test_design_map_check.py          # exit 0 = clean, 1 = viol
 uv run python tools/test_design_map_check.py --self-test   # is the checker a rubber stamp?
 ```
 
-**Measured at this head (`af864a42a` + this change):**
+**Measured on this branch** — `af864a42a` is the main-line tree the anchors below are resolved
+against; the checker output is this change's own:
 
 ```text
 test-design-map-check: 15 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 9/9 plan seam(s) crosswalked · layers=contract,doc-assert,guard,live-docker,unit
@@ -193,18 +194,28 @@ test-design-map-check: CLEAN — every rule holds
   ok   shorten SF2's failure to a mechanism restatement → violation (R3 SF2: failure cell is 3 word(s) (min 8) — a restated mechanism is not a named failure)
   ok   delete the SF13 row AND every mention of it (a consistent shrink) → violation (R1 SF13: pinned surface is missing from the surface table)
   ok   retype a crosswalk surface as one that has no row → violation (R5 §6.4: names SF99, which has no surface row)
+  ok   splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   delete the child table's section heading → refusal (section `## 4.` is missing — cannot check the map)
-self-test: 10/10 mutation(s) refused — the checker is not a rubber stamp
+self-test: 11/11 mutation(s) refused — the checker is not a rubber stamp
 ```
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
-it applies the ten mutations an editor actually makes (remove a row, **remove a row and every mention
+it applies the eleven mutations an editor actually makes (remove a row, **remove a row and every mention
 of it**, blank a cell, retype a layer as a mechanism, retype a crosswalk surface as one that has no
-row, drop a child, drop a capability, forget a seam, destroy the section structure) to an in-memory
+row, **splice a raw `|` into a cell**, drop a child, drop a capability, forget a seam, destroy the
+section structure) to an in-memory
 copy and **requires each to be caught**. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
 never built the consistent shrink its own label claimed.
+
+**The width case is load-bearing, and that is measured, not asserted.** The arm that matters most is
+the one covering the rule added *last*: with `parse_surface_rows` monkeypatched back to the previous
+`< 7` floor — the exact false PASS the exact-7 rule closes — `--self-test` reports **11/11 refused and
+exits 0** without this case, so a quietly relaxed width rule would have kept the REQUIRED `docs` job
+green. With the case present, the same relaxation exits **1**. `cells()` is escape-aware (it splits on
+`(?<!\\)\|`), so an escaped `\|` stays inside its cell and R2/R3 read the column they name; a raw
+extra `|` is still refused as an unreadable row.
 
 **It runs on every edit, not only when someone remembers.** Both arms are wired into CI's `docs` job
 (`.github/workflows/ci.yml`, beside `tools/substrate_map_check.py`): the check, **and** `--self-test` —
@@ -282,7 +293,7 @@ version would have sent a lane to add a timeout that is already there.
 
 | fact | command / source |
 |---|---|
-| no test-design artifact existed for this epic | `ls docs/epics/2026-11-04-5090-vector-layer/` → `01-align.md`…`05-decompose.md`; `git log --all --format='%h %s' --grep="#11084" --not fix/11084-5090-test-design-surface-map` → two commits (`e91c4e0a5` the decomposition, `f2c6f1bce` its review pass), both prose in PR #11091 — neither is a test-design artifact. ⚠️ The `--not <this branch>` is part of the command: unscoped, the same query returns **six** at this head, because four of them are this PR's own commits and `f2c6f1bce` matches on its body, not its subject |
+| no test-design artifact existed for this epic | `ls docs/epics/2026-11-04-5090-vector-layer/` → `01-align.md`…`05-decompose.md`, no test-design file; the only `#11084` commits at the time of this check were `e91c4e0a5` (the decomposition) and `f2c6f1bce` (its review pass) — `git show --stat --format='%h %s' e91c4e0a5 f2c6f1bce` shows both touch only the epic's prose (01–05 + two storage docs), so neither is a test-design artifact. ⚠️ Deliberately a **dated measurement on named shas**, not a live `--grep`: a `--grep` count moves as commits land (this branch's own commits match, and its squash subject matches after landing), and scoping it `--not <this branch>` cannot work either — `e91c4e0a5` is in this branch's ancestry, so that form excludes the very commit it names |
 | the substrate map's contrary claim | `docs/architecture/SUBSTRATE-REBUILD-MAP.md:84,322,375` |
 | every `SF` row's anchor resolves at this head | `rg -n` on each cited path at `af864a42a` |
 | the map's own claims parse | `uv run python tools/test_design_map_check.py` |

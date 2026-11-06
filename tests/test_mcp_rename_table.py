@@ -1136,8 +1136,9 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
         "the drift step must invoke EXACTLY the installer, the four `--check` "
-        "commands and the map guard's two arms — no shell operator, no `echo` "
-        f"trailing anything, or a real failure reports green (#2656); got "
+        "commands and the map guard's two arms — no shell operator, no wrapper, "
+        f"no `echo` decoy, no trailing anything, or a real failure reports green "
+        f"(#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )
     assert not docs_job.get("continue-on-error"), (

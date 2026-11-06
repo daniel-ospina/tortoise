@@ -4079,7 +4079,8 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     assert code.strip() == expected, (
         "the drift step must invoke EXACTLY the installer, the four "
         "`--check` commands and the map guard's two arms — no shell operator, "
-        f"anything, or a real failure reports green (#2656); got {code!r}"
+        "no wrapper, no trailing anything, or a real failure reports green "
+        f"(#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
     # silencing keys one at a time is what left the next one open, so the rule is

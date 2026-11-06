@@ -121,9 +121,16 @@ def split_sections(text: str) -> dict[str, str]:
     return sections
 
 
+#: Split on pipes that are NOT backslash-escaped. `\\|` is a LITERAL pipe inside a
+#: markdown cell (MD056 creates no extra markdown cell for it), so splitting on
+#: every `|` shifted every column after it: R2/R3 then read `row[4]`/`row[6]` of a
+#: shifted row and reported CLEAN while the real failure cell was never read.
+_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+
+
 def cells(line: str) -> list[str]:
-    """Split a markdown table row into trimmed cells."""
-    return [c.strip() for c in line.strip().strip("|").split("|")]
+    """Split a markdown table row into trimmed cells (escape-aware)."""
+    return [c.strip() for c in _CELL_SPLIT.split(line.strip().strip("|"))]
 
 
 def parse_surface_rows(section: str) -> dict[str, dict[str, str]]:
@@ -139,14 +146,13 @@ def parse_surface_rows(section: str) -> dict[str, dict[str, str]]:
             continue
         row = cells(line)
         if len(row) != 7:
-            # EXACT, not a floor. `cells()` splits on every `|` with no escape
-            # handling, so an escaped `\|` inside a cell (which markdownlint's
-            # MD056 does NOT flag — it creates no extra markdown cell) makes an
-            # 8-cell row, and `row[4]`/`row[6]` then read the WRONG columns: R2
-            # and R3 grade a shifted row and report clean while the real failure
-            # cell is never read. Measured before this arm existed: an 8-cell row
-            # scored CLEAN. A width the parser cannot interpret is an unreadable
-            # map (exit 2), the same posture as the short-row arm.
+            # EXACT, not a floor. `cells()` is escape-aware, so a `\|` stays
+            # inside its cell; what still makes an 8-cell row is a RAW extra
+            # `|`, and `row[4]`/`row[6]` then read the WRONG columns — R2 and R3
+            # grade a shifted row and report clean while the real failure cell is
+            # never read. Measured before this arm existed: an 8-cell row scored
+            # CLEAN. A width the parser cannot interpret is an unreadable map
+            # (exit 2), the same posture as the short-row arm.
             raise Refusal(
                 f"{match.group(1)} has {len(row)} column(s); the table needs exactly 7 "
                 "(SF · surface · type · flow · layer · contract · failure) — a "
@@ -269,9 +275,10 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     # R5 — the plan's seams are all crosswalked, AND each crosswalk row's surface
     # cell resolves to a real surface row. The second half was missing in the
     # first version: R1 and R4 both referentially check what they read, so a
-    # seam bound to `SF99` (or to a surface number typed a digit off) was the one
-    # referential hole left in the map — a typo that produces a checklist row
-    # pointing at nothing.
+    # seam bound to `SF99` was the one referential hole left in the map — a typo
+    # that produces a checklist row pointing at nothing. (A surface number typed
+    # a digit OFF lands on a real surface row, so R5 does NOT catch it; R5's
+    # wording is "names a surface with no row in §1", and that is all it claims.)
     crosswalk = sections["5"]
     present: set[str] = set()
     for seam in PLAN_SEAMS:
@@ -395,6 +402,15 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "retype a crosswalk surface as one that has no row",
         lambda t: _rewrite_crosswalk_row(t, "§6.4", "**SF99**"),
         "violation",
+    ),
+    (
+        # The width rule must be covered by the arm that is supposed to catch a
+        # quietly weakened rule. Without this case, reverting `!= 7` to the old
+        # `< 7` floor left --self-test green at 10/10 — the false PASS this rule
+        # closes, re-opened with the REQUIRED `docs` job fully green.
+        "splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns)",
+        lambda t: _rewrite_row(t, "SF2", 5, "live-docker | unit"),
+        "refusal",
     ),
     (
         "delete the child table's section heading",
