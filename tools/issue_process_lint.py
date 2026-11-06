@@ -253,14 +253,21 @@ _REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
 # ref is visible to the target logic; the continuation requires a `#N` right after the separator, so
 # `#200 and Refs #300 for the follow-up` stops at `#200` (the `and` there joins CLAUSES, and
 # sweeping `#300` in silently dropped a claim the author had made — measured at `2219dfe86`).
-_REF_LIST = rf"(?:{_REF_OBJ})(?:{_DECLINE_TAIL}(?:and{_EMPH})?#\d{{1,7}})*"
+# ⛔ THE SEPARATOR IS NOT `_DECLINE_TAIL`: that class contains `.` `;` `:` and `—`, which are the
+# CLAUSE ENDS. Using it made `deliberately not closing #100. #300` capture `#100. #300` as one list,
+# so a ref claimed by a FOLLOWING sentence was swept into the decline and disappeared (measured at
+# `0e785300b`, review P2). A list separator is a comma or a conjunction, and nothing else.
+_LIST_SEP = r"[\s*_`]*"
+_REF_LIST = (rf"(?:{_REF_OBJ})"
+             rf"(?:(?:(?:,{_LIST_SEP})|(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))"
+             rf"#\d{{1,7}})*")
 _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
 DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
     rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})(?P<obj_a>{_EMPH}{_DET}{_REF_LIST})?"
-    rf"{_DECLINE_TAIL}(?:$|[,;]|{_EMPH}and{_EMPH}))"
+    rf"{_DECLINE_TAIL}(?:$|[,;]|{_EMPH}(?:and|or){_EMPH}))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
     rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?{_DECLINE_TAIL}$",
