@@ -9511,10 +9511,14 @@ def _ingest_rate_limited(admission, *, resource: str) -> HTTPException:
     lanes drift on the contract a client branches on (``detail.code``,
     ``scope``, ``used``/``limit``, the ``Retry-After`` header).
 
-    ``resource`` names WHICH charge spent the window (``commit_ingest_bytes`` /
-    ``capture_ingest_bytes``). It must not be read as "which allowance": there
-    is ONE window per org, which is why alternating lanes cannot buy a second
-    one.
+    ``resource`` names THIS request's charge (``commit_ingest_bytes`` /
+    ``capture_ingest_bytes``) — the lane that refused you, NOT the lane that
+    spent the window. The spender is only inferable from ``used``, which is the
+    org's whole spend across BOTH lanes (``test_the_window_is_shared_with_the_
+    commit_lane`` is the leg that shows a capture-spent window reporting
+    ``resource="commit_ingest_bytes"`` on the commit refusal). It must not be
+    read as "which allowance": there is ONE window per org, which is why
+    alternating lanes cannot buy a second one.
 
     The prose follows ``scope``: in the shared-overflow regime the caller's own
     ``used`` can be 0 (the INSTANCE's shared capacity is spent), so saying "by
@@ -17541,7 +17545,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
       2. 409 — session_recording disabled (state-conflict);
       3. 400 — turn cap > MAX_SESSION_TURNS;
       4. 422 — empty/blank stored-window transcript (handler-level);
-      5. 402 — quota (skipped when session_existed).
+      5. 402 — quota (skipped when session_existed);
+      6. 429 ``ingest_rate_limited`` — the per-ORG ingest window, shared with
+         ``POST /v1/sessions/commit`` (#4051 §3.1). It sits AFTER the 402 on
+         purpose: an org at ``max_points`` gets its permanent refusal, never
+         "retry shortly" for a request that can never fit. That ordering is
+         pinned on the COMMIT lane
+         (``TestCommitPointsGate::
+         test_the_points_cap_refuses_before_the_ingest_window``),
+         because this lane's 402 is skipped on the store-only paths (#3892,
+         #4258) — where no capture can be refused by it at all.
     #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
     the capture is stored for every request and ONLY the LLM extraction is
     skipped, reported truthfully as receipt mode "no-provider".

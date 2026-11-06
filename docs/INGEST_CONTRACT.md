@@ -517,7 +517,9 @@ the `{error}`-only shape whose retry action is different.
   service runs one worker, so per-instance and per-team are the same figure).
   It is ONE window, not one per endpoint: alternating the two endpoints does
   not buy a second allowance, and `detail.resource` (`commit_ingest_bytes` /
-  `capture_ingest_bytes`) names the charge that spent it. A request is charged
+  `capture_ingest_bytes`) names **this request's** charge — the lane that
+  refused you, not the lane that spent the window (`detail.used` is the team's
+  whole spend across both lanes). A request is charged
   the larger of (a) the bytes of the re-serialized **request body** — on the
   commit lane the whole validated §6.1 payload, including `sources`,
   `provenance_refs` and `telemetry`, so it is never less than the canonical
@@ -558,7 +560,14 @@ the `{error}`-only shape whose retry action is different.
   refusal is about the instance and not about anything you wrote). This is a
   **throttle, not a cap**: it never refuses your data, the window self-heals
   within 60 s, and the correct action is **backoff-and-retry** — the opposite
-  of the cumulative `ERR_QUOTA` advice above. On the **commit lane**, a request
+  of the cumulative `ERR_QUOTA` advice above. One edge case an operator must
+  size against: a SINGLE request larger than the whole allowance is admitted
+  ONCE while the window is completely empty (refusing it would tell a client to
+  retry a request that can never fit), so the real per-request ceiling on the
+  capture lane is the route's 16 MiB body cap, once per window — reachable at
+  default config because 16 MiB exceeds the 10 MiB allowance (#11218).
+
+  On the **commit lane**, a request
   refused by THIS throttle leaves no record of its own: the `:CommitRecord` it
   opened is removed when that request created it, so the retry cannot be judged
   against it. If that
