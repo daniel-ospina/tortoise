@@ -106,6 +106,13 @@ def _census(nodes, rows):
     return tpc.census(graph, record, sample=5)
 
 
+def _census_titled(graph_name):
+    """The same census, with the graph identity the report must now carry."""
+    graph, record = _stores({"s1_t0": _graph_node("s1_t0", "s1")},
+                            {"s1_t0": _record_row("s1_t0")})
+    return tpc.census(graph, record, sample=5, graph_name=graph_name)
+
+
 def _problems(report: dict, session: str) -> list[dict]:
     for v in report["parity"]["failed_sessions"]:
         if v["session"] == session:
@@ -421,6 +428,116 @@ def test_graph_name_help_names_the_graph_leg_only(capsys):
     assert "BOTH legs" not in block
     assert "GRAPH leg only" in block
     assert "--org-id/--graph-id" in block
+
+
+def test_the_report_carries_the_graph_it_measured():
+    """⛔ THE ARTIFACT MUST NAME ITS TARGET, OR THE CONSUMER'S CHECK CANNOT FAIL.
+
+    Review P1 on PR #11004: `census()` emitted no graph identity, so
+    `cache_eviction.load_parity_report` filled the caller's own name in — and the
+    binding that exists to stop a CLEAN census of graph A licensing a sweep of graph B
+    proved only that the operator typed one string. The identity is authored HERE, by
+    the leg that read the graph, so the consumer has something to compare.
+    """
+    report = _census_titled("live-v4")
+
+    assert report["graph"] == "live-v4"
+
+
+def test_an_unattributed_census_says_SO_instead_of_omitting_the_field():
+    """`None` is emitted, never dropped: a shape from before the field existed must not
+    be indistinguishable from an artifact that knows it has no target."""
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1")}
+    report = _census(nodes, {"s1_t0": _record_row("s1_t0")})
+
+    assert "graph" in report
+    assert report["graph"] is None
+
+
+def test_the_cli_writes_the_measured_graph_into_the_json_artifact(
+        monkeypatch, tmp_path, capsys):
+    """End-to-end: `--uri` → the JSON an operator hands to `--parity-report` names the
+    graph the run actually addressed (derived by the canonical resolver, not the argv)."""
+    out = tmp_path / "r.json"
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1")}})
+    monkeypatch.setattr(tpc, "read_record_turns", lambda *a, **k: {
+        "rows_by_key": {"s1_t0": _record_row("s1_t0")},
+        "non_turn_shaped": 0})
+
+    assert tpc.main(_argv("--json", str(out))) == 0
+    assert json.loads(out.read_text())["graph"] == "g"
+    assert "graph      : g" in capsys.readouterr().out
+
+
+def test_resolve_graph_name_uses_the_canonical_uri_derivation():
+    """Not a second URI parser: the URI arm is `resolve_db_endpoint`, the derivation
+    `FalkorProjection.from_uri` itself calls — so the emitted name is the one the
+    connection addressed. A hand-rolled parse here would be the same defect one layer
+    down (the `--graph-name` override and the embedded default must both still work)."""
+    assert tpc.resolve_graph_name("docker://h:1/live-v4", None, None) == "live-v4"
+    assert tpc.resolve_graph_name("docker://h:1/live-v4", None, "team_acme") \
+        == "team_acme"
+    assert tpc.resolve_graph_name(None, "/tmp/x.db", None) == "tortoise"
+    assert tpc.resolve_graph_name("docker://h:1/", None, None) == "tortoise"
+
+
+def test_resolve_graph_name_never_treats_an_EMPTY_uri_as_no_uri():
+    """`--uri "$UNSET_VAR"` must not resolve to the embedded store's graph name.
+
+    Measured before the fix (review P2 on PR #11097): the empty value fell through the
+    truthiness test to the embedded default, so a run that read NOTHING but the local
+    embedded graph emitted `graph: "tortoise"` — a name the cache census accepts for a
+    hosted graph of the same name. A shell accident licensed a sweep of an instance the
+    census never touched, which is the `different instance` shape the binding exists to
+    refuse.
+    """
+    with pytest.raises(ValueError):
+        tpc.resolve_graph_name("", None, None)
+
+
+@pytest.mark.parametrize("flag,extra", [
+    ("--uri", []),
+    ("--db-path", []),
+    # ⛔ `--graph-name ""` won the `graph_name is not None` branch and was written
+    # into the artifact as `graph: ""` while the EMBEDDED read fell back to
+    # `tortoise` — an artifact that misstates its own target AND can never be
+    # loaded, because the consumer refuses a blank name (review P2, cycle 2).
+    ("--graph-name", ["--uri", "docker://:@127.0.0.1:1/g"]),
+])
+def test_an_EMPTY_graph_target_flag_refuses_by_name(flag, extra, capsys):
+    """An empty flag value is NOT "no flag" — the rule the record flags already state.
+
+    Wrong outcome before the fix: `--uri ""` fell through to the EMBEDDED store, exited
+    0 CLEAN, and (once this tool authors the identity) wrote a report naming a graph on
+    an instance the run never opened (review P2 on #11097).
+    """
+    code = tpc.main([flag, "", *extra, "--record-dsn", "postgresql://x/y",
+                     "--org-id", "o", "--graph-id", "g"])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err and flag in err
+    assert "EMBEDDED" in err
+
+
+def test_a_broken_tortoise_import_is_a_CensusError_not_a_traceback(monkeypatch):
+    """The URI arm's import is guarded, like `read_graph_turns`' own.
+
+    Measured before the fix (review P2, cycle 2): the new unguarded
+    `from tortoise.projection import resolve_db_endpoint` raised ImportError straight
+    out of `main()`, which exits the interpreter with **1** — the documented USAGE
+    code — so a broken install read as a mistyped flag and the operator retried flags
+    instead of repairing the environment.
+    """
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "tortoise.projection", None)
+
+    with pytest.raises(tpc.CensusError) as excinfo:
+        tpc.resolve_graph_name("docker://h:1/g", None, None)
+
+    assert "tortoise import failed" in str(excinfo.value)
 
 
 def test_main_maps_clean_to_zero_and_refused_to_two(monkeypatch, tmp_path):
