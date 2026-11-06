@@ -46,6 +46,7 @@ from tortoise.sdk import (
     _item_effective_status,
     _item_stored_key,
     _item_stored_point_kind,
+    _key_seek_terms,
 )
 
 
@@ -2445,6 +2446,147 @@ def test_every_ENGINE_trimmed_pad_is_found_by_its_OWN_spelling(sdk):
             "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
             params={"id": a["id"]}).result_set
         assert stored and stored[0][0] == key, stored
+
+
+# ── #10481 review P2: the seek has TWO engine forms and must hold in both ──
+#
+# `n.key = $term` normalises differently depending on whether the
+# `:Point(key)` RANGE index serves it:
+#
+#   index-served : the index holds the ENGINE-TRIMMED term, so the seek must
+#                  send the trimmed term (that is #10481's fix);
+#   label scan    : the predicate compares the STORED bytes, with no
+#                  normalisation at all — and index creation is BEST-EFFORT
+#                  (`projection._ensure_indexes_declared` logs and continues),
+#                  so this is a reachable steady state, not a hypothetical.
+#
+# Measured on the embedded engine (2026-11-06) over one Point stored as
+# `"  PK  "`: with the index, `seek("  PK  ") == []` and `seek("PK") == [id]`;
+# with the index DROPPED, exactly the opposite. So the trimmed term ALONE was
+# a new-miss in the scan form — the #6110 duplicate re-created there while the
+# suite stayed green. `_key_seek_terms` sends both terms when the spelling is
+# padded, which makes the predicate a strict superset of the pre-fix one in
+# BOTH forms, and the tests below pin that parity by DROPPING the index.
+
+
+def _drop_key_index(sdk) -> str:
+    """Drop the `:Point(key)` index and RETURN the seek's own plan, so a test
+    asserts the label-scan state really happened instead of trusting the DDL
+    to have taken effect (a silent no-op would make the case vacuous)."""
+    proj = sdk._get_proj()
+    proj.g.query("DROP INDEX ON :Point(key)")
+    return str(proj.g.explain(
+        "MATCH (n:Point) WHERE (n.key = 'PK' OR n.key = '  PK  ') RETURN n.id"))
+
+
+def test_the_seek_terms_are_the_TRIMMED_term_plus_the_RAW_one(sdk):
+    """The helper's shape, pinned literally: a padded spelling offers BOTH
+    terms (trimmed first — the one the index serves), an unpadded or
+    engine-untrimmed one offers exactly ONE so the seek keeps its existing
+    shape."""
+    assert _key_seek_terms("  PK  ") == ("PK", "  PK  ")
+    assert _key_seek_terms("PK") == ("PK",)
+    # NBSP is NOT in the engine's trim set, so trimmed == raw: one term, raw.
+    assert _key_seek_terms("\u00a0PK\u00a0") == ("\u00a0PK\u00a0",)
+    assert _key_seek_terms(None) == (None,)
+    assert _key_seek_terms(7) == (7,)
+
+
+def test_the_seek_holds_when_the_key_INDEX_is_ABSENT(sdk):
+    """#10481 review P2 — the LABEL-SCAN form, which the fix as first written
+    broke.
+
+    Pre-fix (trimmed term only) this FAILS on every assertion below: with no
+    index the predicate compares stored bytes, so the trimmed term misses the
+    padded holder, `_key_holder_state` certifies the vacancy, and the second
+    `dedup=True` write mints a second carrier of one key — the exact #6110
+    duplicate, in the one engine state where the trimmed-only seek was right
+    before. Post-fix the raw disjunct keeps it findable.
+    """
+    a = sdk.create_point("statement", "SCAN-A", key="  PK  ", dedup=True)
+    # A DIFFERENT key, same kind — the identity-safety half: the raw disjunct
+    # must never reach outside the caller's own trimmed identity class.
+    other = sdk.create_point("statement", "SCAN-OTHER", key="  QK  ",
+                             dedup=True)
+    plan = _drop_key_index(sdk)
+    assert "Node By Label Scan" in plan, (
+        f"the :Point(key) index was not actually dropped, so this case would "
+        f"be vacuous (plan={plan!r})")
+
+    assert sdk._find_points_by_key("  PK  ", pointKind="statement") == [a["id"]], (
+        "the padded key is unfindable by its OWN spelling with the index "
+        "absent — the #6110 duplicate is re-created in the label-scan form")
+    # ⚠️ RECORDED BOUNDARY, pinned so it is a stated limit and not a silent one:
+    # the scan form has no normaliser on the STORED side, so a caller who spells
+    # the key UNPADDED does not reach a padded-stored row there. That is the
+    # PRE-FIX behaviour for this state (``stored == raw`` was the only hit
+    # then), so the two-term seek is a strict superset of it and never a
+    # regression; it is not closable without a normalising predicate on the
+    # stored side, which cannot use the index (the 40x label scan #8400's index
+    # exists to remove). ``test_the_seek_answers_the_SAME_with_and_without_the
+    # _key_INDEX`` pins what IS owed: each spelling finds its own row in both
+    # forms.
+    assert sdk._find_points_by_key("PK", pointKind="statement") == [], (
+        "the label-scan form now normalises the STORED side — that is a much "
+        "wider change than this fix (it would need `trim(n.key)`, which no "
+        "key index can serve): if it landed deliberately, delete this pin "
+        "and say so, otherwise a stray normaliser just widened key identity")
+    holders, _terminal = sdk._key_holder_state("statement", "  PK  ")
+    assert holders == [a["id"]], (
+        "the Phase-1 guard cannot see the padded holder with the index absent, "
+        "so it CERTIFIES the duplicate write")
+    assert a["id"] not in sdk._find_points_by_key("QK", pointKind="statement")
+    assert other["id"] not in sdk._find_points_by_key("PK", pointKind="statement")
+    assert other["id"] not in sdk._find_points_by_key("  PK  ",
+                                                     pointKind="statement")
+
+    b = sdk.create_point("statement", "SCAN-B", key="  PK  ", dedup=True)
+    assert b["id"] == a["id"], (
+        "dedup=True minted a second carrier of one key in the label-scan form")
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.key ENDS WITH 'PK  ' RETURN n.id").result_set
+    assert len(rows) == 1, f"{len(rows)} carriers of one padded key"
+
+
+def test_the_seek_answers_the_SAME_with_and_without_the_key_INDEX(sdk):
+    """PARITY — the property the whole fix rests on, pinned in both
+    directions rather than one.
+
+    One Point is written per spelling (its own `pointKind`, so the identity
+    classes cannot interfere), the seek is answered with the index present, the
+    index is dropped, and the SAME seeks are answered again. A correct fix
+    answers identically; the trimmed-only seek fails on the SAME spelling under
+    a different pad, and the ORIGINAL raw-only seek fails it in the index form
+    — so this reds whichever direction the term is argued to, which is what
+    makes it a property pin rather than a restatement of the fix.
+    """
+    proj = sdk._get_proj()
+    spellings = ["PK", "  PK  ", "\tPK\n", "\u00a0PK\u00a0"]
+    for i, spelling in enumerate(spellings):
+        proj.g.query(
+            "CREATE (n:Point {id:$id, key:$k, pointKind:$kind, "
+            "content_hash:$ch, status:'live'})",
+            params={"id": f"parity-{i}", "k": spelling,
+                    "kind": f"parityKind{i}", "ch": _content_hash(f"parity-{i}")})
+
+    def answers() -> dict[str, list[str]]:
+        return {s: sorted(sdk._find_points_by_key(s, pointKind=f"parityKind{i}"))
+                for i, s in enumerate(spellings)}
+
+    with_index = answers()
+    # Non-vacuity: every spelling must resolve in the index form FIRST, or the
+    # parity comparison below could pass on two empty answers.
+    assert all(v == [f"parity-{i}"] for i, v in enumerate(with_index.values())), (
+        f"the index-served form did not resolve every spelling: {with_index}")
+
+    plan = _drop_key_index(sdk)
+    assert "Node By Label Scan" in plan, plan
+    scan_form = answers()
+    assert scan_form == with_index, (
+        "the key-identity seek answers DIFFERENTLY in the index-served and "
+        f"label-scan forms — {scan_form} vs {with_index}. A padded key must "
+        "stay findable by its own spelling where no index is served, or the "
+        "#6110 duplicate is re-created in that state")
 
 
 def test_a_blank_to_PYTHON_key_agrees_across_the_simulation_and_the_writer(sdk):
