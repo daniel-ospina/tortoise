@@ -2745,9 +2745,11 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "not the narrative alone"),
 ]
 
-#: `not so much X as Y` is a MITIGATED DENIAL of X — it belongs in the ACCEPT
-#: lists, not in the exclusions (an earlier cut excluded it and turned correct
-#: prose red).
+#: ⛔ `not so much X as Y` is in the EXCLUSIONS (see `_AFFIRMATIVE_EXCLUSION`) and
+#: its cost is declared in `_DECLARED_OVER_BLOCK_SO_MUCH`. It is a mitigated
+#: DENIAL of X, so these guards SHOULD accept it, but they bind positionally; every
+#: role-based attempt opened a measured fail-open. Do not re-add it here without
+#: replaying those.
 
 
 @pytest.mark.parametrize(
@@ -3058,6 +3060,51 @@ def test_the_declared_rather_than_over_block_is_the_documented_one():
 _DECLARED_OVER_BLOCK_SO_MUCH = (
     "the S1 narrative read from `{home}` — not so much from `:Source.summary` "
     "as from the transcript")
+
+
+#: ⛔ DECLARED RESIDUALS OF THE CUE-VOCABULARY GUARD — the shapes a regex over
+#: prose CANNOT be closed against by enumerating words. Every attempt to close one
+#: of these by adding vocabulary has opened a different one (nine review cycles on
+#: this file recorded that), because the semantic question is "which term does the
+#: polarity reach", and the guards answer "which words are near the object".
+#:
+#: They are recorded here, ASSERTED OPEN, so that (a) nothing in this file claims
+#: the guard is total, (b) a future cycle that closes one reds a test and must do
+#: so deliberately, with the fail-open replays in `_*_INVERSIONS` re-run. The
+#: structural fix is filed against this seam, not against this PR.
+_DECLARED_RESIDUALS = (
+    # split word order: the construction the contiguous arm cannot see
+    ("the split `not A so much as B` order",
+     "not from the S1 narrative so much as from `{trap}`", "summary"),
+    ("the exception phrase `other than`",
+     "we do not embed anything other than `{trap}`", "summary"),
+    ("the split `so much as` on the narrative object",
+     "not a separate field so much as the narrative", "narrative"),
+)
+
+
+def test_the_declared_cue_vocabulary_residuals_are_the_measured_ones():
+    """*What value makes this test fail?* A claim of closure this guard lacks.
+
+    Each shape below ASSERTS the object (or asserts something instead of the
+    negation the section needs) and is currently ACCEPTED as a negation, so the
+    document-level pin stays GREEN over a section stating its own inverse —
+    measured on the real document. They are ASSERTED OPEN on purpose: closing one
+    must delete its case here, and the deletion is the record that the seam moved.
+    """
+    for why, templ, obj in _DECLARED_RESIDUALS:
+        if obj == "summary":
+            line = templ.format(trap=_SUMMARY_OBJECT)
+            assert _negates_the_summary(line), (
+                f"the declared residual {why!r} is now CLOSED — "
+                f"`_negates_the_summary` refuses {line!r}. That is the direction "
+                f"this seam wants: delete this case and record the closure")
+        else:
+            line = _NARRATIVE_CARRIER.format(templ)
+            assert _negates_the_narrative(line), (
+                f"the declared residual {why!r} is now CLOSED — "
+                f"`_negates_the_narrative` refuses {line!r}. Delete this case and "
+                f"record the closure")
 
 
 def test_the_declared_not_so_much_over_block_is_the_documented_one():
