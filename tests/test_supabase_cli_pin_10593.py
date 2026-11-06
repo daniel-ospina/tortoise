@@ -302,16 +302,6 @@ def _construct_refusals(workflow_text: str) -> list[str]:
     """
     found: list[str] = []
     step_node = _setup_cli_step_node(workflow_text)
-    # ⛔ BOUND BY INDEX, NOT BY LINE (found in review, P3). `end_mark.line` is the line of the first
-    # token AFTER the step — i.e. the NEXT step's first line — so a line range counts that whole
-    # neighbouring line as ours. Measured: with the step after this one written as `- with: *base`
-    # (its first key, the `with:`-before-`uses:` shape this reader accepts elsewhere) and the pin
-    # left as a plain literal, the alias was reported at that line, and the guard REFUSED a
-    # legitimate workflow while naming the wrong step. The node ends at index 14932 and the alias
-    # token starts at 14940 — outside by index, "inside" by line. `_setup_cli_block` already slices
-    # byte-precisely; this is the same rule for the token scan.
-    step_first, step_last = step_node.start_mark.index, step_node.end_mark.index
-
     # ⛔ The walk below starts at the node `_setup_cli_step_node` RETURNS. When the step's own `uses:`
     # (and `with:`) arrive from a step-level merge key, that node is the merge TARGET — the `<<:` sits
     # on the step mapping, which is the target's PARENT and is therefore never walked — so the merge
@@ -372,15 +362,32 @@ def _construct_refusals(workflow_text: str) -> list[str]:
                 walk(item)
 
     walk(step_node)
-    # ⛔ An alias is a divergence only where it SUPPLIES the pin. The old scan refused ANY alias
-    # inside the step's line span, so `env: *shared` — an alias with nothing to do with `version`,
-    # next to an untouched literal pin — was refused with a message asserting the action "would see
-    # no `version` input", which is false for that shape (found in review, P2). Both parsers read
-    # `env: *…` exactly the same way, so it is not a divergence and refusing it is a false block.
-    # The hazard is precisely an alias as the WHOLE value of `with:` (or of `version:`), which is
-    # visible in the token stream as `ScalarToken(with|version)` -> `ValueToken` -> `AliasToken`.
-    # (`KeyToken` carries no `.value` in PyYAML — the key's text arrives as the following
-    # `ScalarToken` — so the key is matched on that scalar, not on the key marker.)
+    return found
+
+
+def _alias_supplies_the_pin(workflow_text: str) -> bool:
+    """Does an ALIAS supply this step's whole `with:`, or its `version:`?
+
+    ⛔ NOT a refusal. GitHub Actions RESOLVES anchors and aliases — its own reference says so in as
+    many words ("You can use YAML anchors and aliases to reduce repetition in your workflows … This
+    is equivalent to writing the following YAML without anchors and aliases", including an
+    entire-job reuse example), so `with: *pin` is a legitimate spelling of a correctly pinned step
+    and PyYAML resolves it exactly as CI does. Refusing it was a FALSE BLOCK whose diagnostic
+    asserted the action "would see no `version` input and fall back to `latest`" — a mechanism that
+    does not exist (found in review, P2, with the doc citation; the previous arms were built on the
+    opposite premise and are corrected here).
+
+    What still matters is the pin's VALUE: an aliased `with:` has no literal `version:` line of its
+    own, so the literal-line arm below must not demand one. The value read through the alias is
+    checked by every other arm (exact x.y.z, the major ceiling, duplicate keys, input collisions),
+    which is why accepting the spelling costs no coverage.
+
+    Detected in the TOKEN stream, because PyYAML 6 has no `AliasNode` — it substitutes the anchored
+    node object, so an alias is invisible in the composed tree. `KeyToken` carries no `.value`, so
+    the key's text arrives as the following `ScalarToken`.
+    """
+    step_node = _setup_cli_step_node(workflow_text)
+    step_first, step_last = step_node.start_mark.index, step_node.end_mark.index
     tokens = list(yaml.scan(workflow_text))
     for index in range(len(tokens) - 2):
         key_token, separator, value_token = tokens[index], tokens[index + 1], tokens[index + 2]
@@ -393,13 +400,9 @@ def _construct_refusals(workflow_text: str) -> list[str]:
             continue
         if not isinstance(value_token, yaml.tokens.AliasToken):
             continue
-        if not (step_first <= key_token.start_mark.index < step_last):
-            continue
-        found.append(
-            f"an alias (`*{value_token.value}`) as the value of `{key_token.value}:` "
-            f"at line {value_token.start_mark.line + 1}"
-        )
-    return found
+        if step_first <= key_token.start_mark.index < step_last:
+            return True
+    return False
 
 
 def _requested_version(workflow_text: str) -> str:
@@ -412,18 +415,26 @@ def _requested_version(workflow_text: str) -> str:
     same class covers a duplicate `version:` key, where PyYAML takes the last one and GitHub's
     tie-break is not measured, and a CASE-VARIANT key, where PyYAML sees two distinct keys but
     the action sees one input (see `_normalized_input_collisions`). So the step must carry
-    EXACTLY ONE literal `version:` line, and it must be the resolved value. Merge keys and
-    aliases are refused outright — STRUCTURALLY, over the composed step node and its tokens
-    (`_construct_refusals`), not by looking inside the parsed `with:` mapping.
+    EXACTLY ONE literal `version:` line, and it must be the resolved value — UNLESS the pin is
+    supplied by an alias, which is ACCEPTED: GitHub resolves anchors and aliases (see
+    `_alias_supplies_the_pin`), so such a step installs exactly what this reader resolves and the
+    literal-line demand would be a false block. MERGE KEYS are refused outright, STRUCTURALLY over
+    the composed step node (`_construct_refusals`) — not by looking inside the parsed `with:`
+    mapping, which has already flattened them.
     """
     constructs = _construct_refusals(workflow_text)
     assert not constructs, (
-        "the setup-cli step carries a YAML construct GitHub Actions does not implement: "
-        + "; ".join(constructs)
-        + ". PyYAML resolves it, so the `version` read here is not the version CI resolves — the "
-        "action would see no `version` input and fall back to its own default (`latest`), which is "
-        "exactly the float this pin exists to remove. Declare the pin literally, in this step."
+        "the setup-cli step carries a YAML construct whose meaning for CI this reader cannot "
+        "establish: " + "; ".join(constructs) + ". GitHub's Actions reference documents anchors "
+        "and aliases, NOT merge keys — so a `<<:` may be a mapping PyYAML builds and the runner "
+        "never sees, and the action would fall back to `latest` (3.x) while this reader reports a "
+        "pin. Write the mapping out instead of merging it."
     )
+    # An alias-supplied pin is ACCEPTED: GitHub RESOLVES anchors and aliases (see
+    # `_alias_supplies_the_pin`), so it installs exactly what this reader resolves. It simply has no
+    # literal `version:` line of its own, so the literal-arms below are skipped for it; every other
+    # check still runs on the resolved VALUE.
+    alias_supplied = _alias_supplies_the_pin(workflow_text)
     step = _setup_cli_step(workflow_text)
     with_ = step.get("with") or {}
     collisions = _normalized_input_collisions(with_)
@@ -450,15 +461,18 @@ def _requested_version(workflow_text: str) -> str:
         "first. Declare each key once."
     )
     literals = _literal_version_lines(workflow_text)
+    if alias_supplied:
+        return resolved
     assert literals, (
-        f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step. Two shapes land "
-        "here and this message must not send a reader hunting for the wrong one: a YAML CONSTRUCT "
-        "this reader resolves differently from CI (merge key, alias — `_construct_refusals` refuses "
-        "those first), or a step written as a FLOW MAPPING "
-        "(`- {uses: …, with: {version: …}}`), which has no `version:` line of its own for any reader "
-        "to check. In both cases the value asserted here is not provably the value installed; write "
-        "`version:` on its own line inside the step (a quoted key, or a space before the colon, is "
-        "fine — both are the same plain key to YAML and to GitHub)."
+        f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step. Three shapes "
+        "land here and this message must not send a reader hunting for the wrong one: a MERGE KEY "
+        "(`<<:`) building the `with:` mapping or the pin, which `_construct_refusals` refuses "
+        "before this arm; a step written as a FLOW MAPPING (`- {uses: …, with: {version: …}}`), "
+        "which has no `version:` line for any reader to check; or a pin supplied by an alias, which "
+        "is ACCEPTED — anchors and aliases are documented Actions YAML — so reaching this message "
+        "through one means the alias is somewhere this reader could not follow. In every case the "
+        "value asserted here is not provably the value installed; write `version:` on its own line "
+        "inside the step."
     )
     assert len(literals) == 1, (
         f"the setup-cli step carries {len(literals)} literal `version:` lines ({', '.join(literals)}) "
@@ -626,12 +640,14 @@ def test_a_major_the_committed_config_cannot_load_is_refused() -> None:
 
 
 def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
-    """A pin must be a LITERAL `version:` line in the step — never a YAML construct PyYAML resolves.
+    """A `<<:` merge key must be REFUSED — it is the construct whose meaning for CI is unknowable.
 
-    PyYAML implements the merge key (`<<`) and follows aliases; GitHub Actions does not implement
-    merge keys, and does not follow our anchors either. So a step can carry no `version:` line of its
-    own while `yaml.safe_load` hands this reader a pin — the action then sees no `version` input and
-    falls back to `latest` (3.x), a fail-open identical to #10593.
+    PyYAML implements the YAML merge key (`<<`); GitHub's Actions reference documents anchors and
+    aliases but NOT merge keys, so a `<<:` may be a mapping the runner never sees — the action would
+    then fall back to `latest` (3.x) while this reader reports a pin, a fail-open identical to
+    #10593. ALIASES are the opposite case and are ACCEPTED (GitHub documents them; see
+    `test_an_alias_that_does_not_supply_the_pin_does_not_refuse`), which is why the third spelling
+    below asserts the VALUE an alias carries is still refused while the spelling is not.
 
     ⛔ THREE spellings, at three depths, because a dict-level probe covers none of them and the
     step-level one was measured GREEN before `_construct_refusals` existed (#11134 review, P1):
@@ -665,8 +681,8 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
     # ⛔ The `match` names the ARM, not the verb (#11134 review P2). `match="merge key"` was
     # satisfied by the LITERALS arm's prose (which says "merge key, alias" while explaining what a
     # construct could be), so a deleted merge walk passed this case — the failure it produced came
-    # from a different arm. "does not implement" appears in the construct refusal and nowhere else.
-    with pytest.raises(AssertionError, match=r"does not implement: a merge key"):
+    # from a different arm. "cannot establish" appears in the construct refusal and nowhere else.
+    with pytest.raises(AssertionError, match=r"cannot establish: a merge key"):
         _requested_version(inside)
 
     # (b) a merge key that SUPPLIES `with:` — the shape the dict-level probe could not see at all.
@@ -676,11 +692,13 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
         "mutation (b) introduced a duplicate key — the structural-key arm would be what fires, "
         "not the merge arm this case is for"
     )
-    with pytest.raises(AssertionError, match=r"does not implement: a merge key"):
+    with pytest.raises(AssertionError, match=r"cannot establish: a merge key"):
         _requested_version(supplying)
 
-    # (c) an ALIAS — the step's `with:` is `*pin`, anchored on the step above it. PyYAML follows it;
-    #     the pin's literal line is no longer in the setup-cli step's own block.
+    # (c) a MAJOR-3 pin behind an ALIAS — the alias itself is legitimate (GitHub resolves anchors
+    #     and aliases, see `_alias_supplies_the_pin`), so what must be refused is the VALUE it
+    #     supplies. This is the fail-open direction of the alias case: if accepting the spelling had
+    #     also accepted whatever major the anchor carries, it would be a hole.
     aliased = workflow.replace(
         "      - uses: supabase/setup-cli@v1",
         "      - uses: actions/checkout@v9\n"
@@ -691,16 +709,16 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
     )
     aliased = canonical.sub("        with: *pinned\n", aliased)
     assert "with: *pinned" in aliased, "mutation (c) did not apply — vacuous"
-    # ⛔ This is the ONLY arm that proves the `AliasToken` scan exists. `match="alias"` was
-    # satisfied by the literals arm's prose, so deleting the scan left the whole suite green
-    # (#11134 review P2, measured: merge-walk-only `8/9 passed`, identical to the real detector;
-    # alias-scan-only `7/9`, with case (a) the only red). Assert the ARM by name, then the refusal.
-    assert any("alias" in refusal for refusal in _construct_refusals(aliased)), (
-        "the alias case did not reach the construct arm — `_construct_refusals` returned "
-        f"{_construct_refusals(aliased)!r}, so this case would pass on the literals arm alone"
+    aliased_v3 = aliased.replace(f"          version: {pin}\n", "          version: 3.0.0\n", 1)
+    assert "version: 3.0.0" in aliased_v3, "mutation (c) did not apply to the anchor — vacuous"
+    # The alias spelling is ACCEPTED (GitHub resolves aliases; `_alias_supplies_the_pin`) — so the
+    # assertion is on the VALUE the anchor carries, which the major ceiling must still refuse.
+    assert _requested_version(aliased_v3) == "3.0.0", "the aliased pin was not read"
+    assert _construct_refusals(aliased_v3) == [], (
+        "the alias spelling itself is legitimate and must not be reported as a construct"
     )
-    with pytest.raises(AssertionError, match=r"does not implement: an alias"):
-        _requested_version(aliased)
+    problems = _violations(aliased_v3, CONFIG.read_text(encoding="utf-8"))
+    assert problems and "major 3" in problems[0], problems
 
     # (d) a merge key that supplies the step's OWN `uses:` as well as its `with:`. The returned node
     #     is then the merge TARGET, so the `<<:` sits on that node's PARENT and the depth walk above
@@ -730,7 +748,7 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
         "the step-level merge that supplies `uses:` reached no arm — `_construct_refusals` "
         f"returned {_construct_refusals(merged)!r}"
     )
-    with pytest.raises(AssertionError, match=r"does not implement: the step's `uses:` arrives"):
+    with pytest.raises(AssertionError, match=r"cannot establish: the step's `uses:` arrives"):
         _requested_version(merged)
 
 
@@ -940,14 +958,19 @@ def test_a_legal_spelling_of_the_step_is_read_not_refused() -> None:
 
 
 def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
-    """Only an alias that SUPPLIES the pin is a divergence; any other alias is read by both parsers.
+    """An alias is RESOLVED by both parsers, so it is never itself a divergence — only its VALUE is.
 
-    ⛔ Measured in review (P2): the alias arm scanned for ANY `AliasToken` inside the step's line
-    span, so `env: *shared` — an alias with nothing to do with `version`, beside an untouched
-    literal pin — was REFUSED, with a message asserting the action "would see no `version` input".
-    That claim is false for that shape: `env: *…` is read identically by PyYAML and by GitHub, so
-    the refusal is a false block, not a guard. The arm now fires only where the alias IS the value
-    of `with:`/`version:`, which is the shape that really hides the asserted pin from CI.
+    ⛔ Two corrections, both measured. First, the alias arm scanned for ANY `AliasToken` inside the
+    step's line span, so `env: *shared` — an alias with nothing to do with `version`, beside an
+    untouched literal pin — was refused. Second, and worse, it also refused `with: *pinned`, whose
+    alias supplies the pin. That is not a divergence at all: GitHub's Actions reference documents
+    anchors and aliases as supported workflow YAML ("This is equivalent to writing the following
+    YAML without anchors and aliases", including entire-job reuse), so the step installs exactly the
+    pin this reader resolves, and the refusal's explanation — the action "would see no `version`
+    input and fall back to `latest`" — described a mechanism that does not exist.
+
+    What remains a guard is the VALUE: (b2) shows an alias carrying a MAJOR-3 pin is still refused
+    by the ceiling, so accepting the spelling costs no coverage on the fail-open side.
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
     pin = _requested_version(workflow)
@@ -966,25 +989,35 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
     assert _construct_refusals(env_aliased) == [], _construct_refusals(env_aliased)
     assert _requested_version(env_aliased) == pin, "an unrelated alias refused the guard"
 
-    # (b) the pin ITSELF supplied by an alias → still REFUSED (this is the hazard).
+    # (b) the pin ITSELF supplied by an alias → ACCEPTED, and the RESOLVED value is what is checked.
+    #     ⛔ This arm asserted a REFUSAL before the premise was corrected: GitHub's Actions reference
+    #     documents anchors and aliases as supported workflow YAML ("This is equivalent to writing
+    #     the following YAML without anchors and aliases", including entire-job reuse), so
+    #     `with: *pinned` installs exactly the pin this reader resolves. Refusing it was a false
+    #     block carrying the false explanation that the action "would see no `version` input".
     canonical = f"        with:\n          version: {pin}"
     aliased_pin = workflow.replace(
         "      - uses: supabase/setup-cli@v1\n",
         "      - uses: actions/checkout@v9\n"
         "        with: &pinned\n"
-        "          version: 9.9.9\n"
+        f"          version: {pin}\n"
         "      - uses: supabase/setup-cli@v1\n",
         1,
     ).replace(canonical, "        with: *pinned", 1)
     assert "        with: *pinned" in aliased_pin, "mutation (b) did not apply — vacuous"
-    # ⛔ The `match` names the ARM, not the verb (#11134 review P2). `match="alias"` was satisfied
-    # by the LITERALS arm's prose — that message says "merge key, alias" while explaining what a
-    # construct could be — so DELETING the `AliasToken` scan left this case GREEN: PyYAML then
-    # follows the alias, resolves 9.9.9 from the unrelated step, `literals` comes back empty, and the
-    # literals arm raises a message that merely CONTAINS the word. "does not implement: an alias"
-    # appears in the construct refusal and nowhere else (the sibling case (c) uses the same key).
-    with pytest.raises(AssertionError, match=r"does not implement: an alias"):
-        _requested_version(aliased_pin)
+    assert _requested_version(aliased_pin) == pin, "an alias-supplied pin was not read"
+    assert _violations(aliased_pin, CONFIG.read_text(encoding="utf-8")) == [], (
+        "a correctly pinned step written with an alias was refused — GitHub resolves aliases, so "
+        "this is a false block"
+    )
+
+    # (b2) …and the VALUE is still guarded: an alias supplying a MAJOR-3 pin is refused by the
+    #      ceiling, so accepting the spelling costs no coverage on the fail-open side.
+    aliased_v3 = aliased_pin.replace(f"          version: {pin}\n", "          version: 3.0.0\n", 1)
+    assert "version: 3.0.0" in aliased_v3, "mutation (b2) did not apply — vacuous"
+    assert _requested_version(aliased_v3) == "3.0.0"
+    problems = _violations(aliased_v3, CONFIG.read_text(encoding="utf-8"))
+    assert problems and "major 3" in problems[0], problems
 
     # (c) an alias on the FOLLOWING step's own first key → ACCEPTED. The token scan's upper bound
     #     was `end_mark.line`, which is the line of the token AFTER this step — i.e. the next step's
