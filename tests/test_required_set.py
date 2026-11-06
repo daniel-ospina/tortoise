@@ -444,20 +444,8 @@ def test_derive_from_ref_discloses_the_COMMIT_for_an_annotated_tag(tmp_path: Pat
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "config")
     _git(tmp_path, "-c", "user.email=t@example.com", "tag", "-a", "cfg4", "-m", "tagged")
-    commit = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=str(tmp_path),
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    tag_object = subprocess.run(
-        ["git", "rev-parse", "--verify", "cfg4"],
-        cwd=str(tmp_path),
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    commit = _git_out(tmp_path, "rev-parse", "--verify", "HEAD")
+    tag_object = _git_out(tmp_path, "rev-parse", "--verify", "cfg4")
     assert commit != tag_object, "an annotated tag must not point at itself"
     required = derive_from_ref(tmp_path, "cfg4")
     assert commit[:12] in required.source
@@ -476,13 +464,7 @@ def test_derive_from_ref_discloses_the_sha_it_read(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-b", "main")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "config")
-    expected = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"],
-        cwd=str(tmp_path),
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    expected = _git_out(tmp_path, "rev-parse", "--verify", "HEAD")
     required = derive_from_ref(tmp_path, "HEAD")
     assert expected[:12] in required.source
     assert "HEAD" in required.source
