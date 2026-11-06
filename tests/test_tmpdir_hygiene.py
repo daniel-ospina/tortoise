@@ -409,8 +409,29 @@ def test_sweep_reclaims_a_dead_marked_root_and_keeps_a_live_one():
         with open(os.path.join(live, ".session-pid"), "w") as fh:
             fh.write(f"pid={os.getpid()}\n")
         reclaimed = sweep_stale_session_roots()
-        assert dead in reclaimed
-        assert not os.path.exists(dead)
+        # A CONCURRENT suite's install-time sweep (`tests/conftest.py`,
+        # `sweep_stale_session_roots()` at import) walks the SAME shared
+        # `ROOT_BASE`, so it can reclaim this root in the window between our
+        # marker write and this call — measured 2026-11-05 on the carve-out
+        # runner, where two shards of one PR share /tmp and the identical
+        # invocation passed in one and failed here with `[]`. What this test
+        # pins is the OUTCOME — a dead-marked root does not survive, a live
+        # one does — never that THIS call is the one that names it, so a
+        # reclaim we did not perform is attributed rather than required.
+        # The relaxation is not vacuous: a sweep that never fires leaves
+        # `dead` on disk, so the assertion below still reds.
+        #
+        # ⛔ ONE assertion, not two (#10610 review at `6a7546064`, note on this
+        # line). The pre-fix shape was `assert dead in reclaimed or not
+        # os.path.exists(dead)` FOLLOWED by `assert not os.path.exists(dead)`;
+        # the second line makes the first reduce to itself, so the `reclaimed`
+        # disjunct could not add coverage and read as if this call's return were
+        # still pinned. The OUTCOME is what is pinned — the call's own
+        # attribution is not, by design (`reclaimed` is kept in the failure
+        # message so a red still says whether this call named the root).
+        assert not os.path.exists(dead), (
+            f"a dead-marked root survived the sweep: {dead} "
+            f"(this call reclaimed {reclaimed!r})")
         assert os.path.exists(live), "a live suite's root must not be reclaimed"
     finally:
         shutil.rmtree(dead, ignore_errors=True)

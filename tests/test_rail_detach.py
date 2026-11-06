@@ -96,7 +96,58 @@ def launch(state_dir, co, pr=7, **kw):
     return rd.launch(pr, cwd=co, state_dir=state_dir, repo="o/r", **kw)
 
 
-def wait_state(state_dir, pr, want, timeout=15.0, pred=None):
+#: How long a rail STUB may take to reach the state/field under test.
+#:
+#: This bounds SPAWN LATENCY (fork + exec + `bash` startup + artifact write on a
+#: shared pool box), never a rail invariant: every assertion below is about the
+#: STATE the artifact records, so a wider deadline cannot make a defect green —
+#: only a loaded box is prevented from making correct code red. 15 s / 10 s were
+#: measured on an idle host against a stub that sleeps 1 s; on a nine-shard sweep
+#: the same wait has missed.
+#:
+#: Evidence, re-read from the run rather than from the branch's prose (#10610 review
+#: at `fdff8f432`, P3): `test (e)` on run 42006117288 (2026-11-05, head `192de3b5f`,
+#: PR #10610) reported `test_merged_state_names_the_sha_the_rail_printed` FAILED on
+#: `pi-runner-x64-4`, and that shard carries NO changed test file from the diff. The
+#: leg was then killed by its own WATCHDOG — banner: `WATCHDOG: pytest killed after
+#: 21m (2885 passed, 1 failed, 0 errored so far)` — while its last completed test
+#: lines stood at `[ 81%]`; **73%** is the progress stamp on the FAILED test itself,
+#: not the point of the kill, so it is not evidence about the box on its own. The
+#: kill is, and so is the peer red below: the box, not the rail.
+#:
+#: ⛔ `test (d)` WAS ALSO RED ON THE SAME RUN, and saying so is the point. This
+#: comment used to say "the run's other seven shards were green", which reads as "all
+#: of the others were green" — they were not. `gh api
+#: repos/daniel-ospina/tortoise/actions/runs/42006117288/jobs` reports NINE `test (…)`
+#: legs: SEVEN success (`(a)`,`(b)`,`(c)`,`(f)`,`(g)`,`(h)`,`(i)`) and TWO failures,
+#: `(e)` and `(d)`. `(d)`'s red is
+#: `tests/test_codex_capture_hook.py::test_hook_detaches_so_codex_cannot_kill_the_capture`
+#: — a SPAWN-LATENCY miss on the same seam (that file's `_WORKER_DEADLINE_S` records
+#: it). Two independent spawn-latency reds on one contended box is the measurement;
+#: one red beside a silently-dropped peer is the weaker, self-serving version.
+#: (Cycle 1 corrected only the wrong count and wrote "eight were green", which is
+#: also wrong — eight was the number of OTHER legs — so the count is now stated as
+#: what the job list prints: nine legs, seven green, two red, and nothing else.)
+#:
+#: ⛔ RE-APPLIED ON MAIN'S TREE (PR #10610's conflicted head, 2026-11-05).
+#: `origin/main` rewrote this file independently (#10777 → #10975): the `gh`-absent
+#: family was re-cut and one helper moved. The merge takes main's rewrite WHOLESALE
+#: and re-applies only this bound, because it is the one change here that is not
+#: main's to own — `timeout=15.0`/`10.0` at the call sites below is the *value the
+#: flake was measured against*, not a decision main has since revisited.
+#:
+#: The process-exit bounds elsewhere in this file are untouched — `lane.wait(
+#: timeout=10)` (a kill-and-join, below in
+#: `test_detachment_is_what_survives_the_lane`) and `a.wait(timeout=40)` /
+#: `b.wait(timeout=40)` (the two-worker exit pair): those are process-exit and
+#: negative windows, not state-arrival bounds. `_assert_no_worker_spawned`'s settle
+#: window is NOT in this file at all — it lives in `tests/test_codex_capture_hook.py`
+#: and `tests/test_cursor_capture_hook.py`, and nothing here widens it (the earlier
+#: version of this comment implied otherwise; #10610 review at `fdff8f432`, P3).
+_STATE_DEADLINE_S = 60.0
+
+
+def wait_state(state_dir, pr, want, timeout=_STATE_DEADLINE_S, pred=None):
     end = time.time() + timeout
     st = None
     while time.time() < end:
@@ -107,7 +158,7 @@ def wait_state(state_dir, pr, want, timeout=15.0, pred=None):
     return st
 
 
-def wait_field(path: Path, key: str, timeout=10.0) -> str:
+def wait_field(path: Path, key: str, timeout=_STATE_DEADLINE_S) -> str:
     end = time.time() + timeout
     while time.time() < end:
         value = rd.read_field(path.read_text(encoding="utf-8"), key)
@@ -141,7 +192,7 @@ def test_start_returns_immediately_and_collect_sees_it_waiting(tmp_path, monkeyp
     st = wait_state(sd, 7, rd.WAITING)
     assert st.state == rd.WAITING, st.as_dict()
     assert st.line().startswith("RAIL(#7, waiting,")
-    assert wait_state(sd, 7, rd.MERGED, timeout=20).state == rd.MERGED
+    assert wait_state(sd, 7, rd.MERGED, timeout=_STATE_DEADLINE_S).state == rd.MERGED
 
 
 def test_merged_state_names_the_sha_the_rail_printed(tmp_path):
@@ -221,7 +272,7 @@ def test_a_killed_wrapper_does_not_lose_a_live_rail(tmp_path, monkeypatch):
     time.sleep(0.2)
     st = rd.collect(sd, "o/r", 75)
     assert st.state != rd.LOST, st.as_dict()   # pre-fix: `lost` while it was merging
-    st = wait_state(sd, 75, rd.MERGED, timeout=25)
+    st = wait_state(sd, 75, rd.MERGED, timeout=_STATE_DEADLINE_S)
     assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
     assert st.exit_code is None
     assert "EXIT line was never written" in st.reason
@@ -2694,7 +2745,7 @@ def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path
     assert ln.pid > 0, "the rail did not start without `gh`"
     assert ln.head == "unreadable", ln.head
     assert "HEAD=unreadable" in Path(ln.artifact).read_text(encoding="utf-8")
-    assert wait_state(sd, 21, rd.MERGED, timeout=20).state == rd.MERGED
+    assert wait_state(sd, 21, rd.MERGED, timeout=_STATE_DEADLINE_S).state == rd.MERGED
 
 
 def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypatch):
@@ -3268,7 +3319,7 @@ def test_detachment_is_what_survives_the_lane(tmp_path, no_detach, expect):
     os.killpg(os.getpgid(lane.pid), signal.SIGKILL)   # the harness kills the lane + its group
     lane.wait(timeout=10)
 
-    st = wait_state(sd, pr, expect, timeout=25)
+    st = wait_state(sd, pr, expect, timeout=_STATE_DEADLINE_S)
     assert st.state == expect, (
         f"expected {expect} (no_detach={no_detach}): {st.as_dict()}\n{LANE_ENV_DOC}"
     )
@@ -3313,7 +3364,7 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     assert capsys.readouterr().out.strip() == "RAIL(#777, absent, -, -)"
     co = make_checkout(tmp_path)
     rd.main(["start", "42", "--repo", "o/r", "--cwd", str(co), "--state-dir", str(sd)])
-    wait_state(sd, 42, rd.MERGED, timeout=20)
+    wait_state(sd, 42, rd.MERGED, timeout=_STATE_DEADLINE_S)
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd)]) == 0
     # --assert-merged is the next fleet beat's gate: 0 only on a real merge
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),

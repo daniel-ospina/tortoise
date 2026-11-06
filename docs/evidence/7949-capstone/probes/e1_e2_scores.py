@@ -256,7 +256,11 @@ def _consistent_share(where: str, share, bare, objects) -> None:
         bare_n = float(bare)
         objects_n = float(objects)
         declared = float(share)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
+        # ⛔ `OverflowError` IS THE THIRD ARM (#10610 review at `fe77fb13f`, P2): an
+        # unbounded JSON integer (`10**400`) converts to no float, and only
+        # `TypeError`/`ValueError` were caught — so the guard raised a traceback
+        # (exit 1) on the one input it exists to refuse.
         raise _refuse(f"{where} carries bare_definite={bare!r} / "
                       f"objects={objects!r} / share={share!r}, which is not a "
                       f"share: {exc}") from exc
@@ -299,9 +303,58 @@ def _read_json(path: Path) -> dict:
         raise _refuse(f"{path} does not exist — a row cannot cite an artifact "
                       "the tree does not carry")
     try:
-        return json.loads(path.read_text())
+        text = path.read_text()
+    except UnicodeDecodeError as exc:
+        # ⛔ A RECORD THAT IS NOT UTF-8 IS CORRUPT INPUT, NOT A CRASH (#10610 review
+        # at `858675ade`, P2): the sibling `is not JSON` arm exists precisely to turn
+        # corrupt input into an exit-2 refusal, and a truncated or UTF-16 file raised
+        # `UnicodeDecodeError` -> exit **1** beside it. `read_text()` was called
+        # INSIDE the try but only `JSONDecodeError` was caught.
+        raise _refuse(f"{path} is not UTF-8 text, so it cannot be the record it "
+                      f"is cited as: {exc}") from exc
+    try:
+        payload = json.loads(text)
     except json.JSONDecodeError as exc:  # pragma: no cover - corrupt input
         raise _refuse(f"{path} is not JSON: {exc}") from exc
+    # ⛔ THE TOP LEVEL IS AN OBJECT OR IT IS REFUSED (#10610 review at `73382c7e6`,
+    # P2). Every reader below grades NAMED fields, so a file holding a list, a
+    # number or a string reached `.get(...)` as an `AttributeError` — exit **1**
+    # with a traceback, which an operator cannot tell from a crash, and not the
+    # exit-2 refusal this module's docstring promises. One guard here covers every
+    # record this driver reads, rather than one per field.
+    if not isinstance(payload, dict):
+        raise _refuse(f"{path} carries a {type(payload).__name__} at the top "
+                      "level, not a JSON object — this driver reads named "
+                      "fields, so a record of another type is an edited file")
+    return payload
+
+
+def _object_block(where: str, field: str, value: dict) -> dict:
+    """A record's named BLOCK must be a JSON object, or the reader refuses.
+
+    ⛔ `(value or {})` IS NOT A GUARD (#10610 review at `73382c7e6`, P2). A
+    non-empty STRING, number or list is truthy, so `value or {}` handed it to the
+    caller unchanged and the next `.get(...)` raised `AttributeError` — exit **1**
+    with a traceback instead of the exit-**2** refusal, the same class
+    `_unit_id_members`, `_count`, `_float_token` and `_consistent_share` already
+    convert-and-refuse. Measured at `73382c7e6` on copies of the shipped bundle:
+    `"with_anchor": "none"` and `"as_written": "none"` both exited 1 with
+    `AttributeError: 'str' object has no attribute 'get'` — at
+    `(record.get("with_anchor") or {}).get("graph")`, the graph-identity loop that
+    runs BEFORE the scored-block arms (which is why the first attempt at this fix,
+    applied only to those arms, left the escape reachable; #10610 review at
+    `858675ade` measured it there).
+
+    The empty case is the CALLER's, not this helper's: `{}` is a well-formed block
+    that wrote nothing, and each site refuses it with its own message ("present but
+    empty is not the flat shape").
+    """
+    if not isinstance(value, dict):
+        raise _refuse(f"{where} carries a {field} that is not a JSON object "
+                      f"({type(value).__name__}: {value!r}) — the reader grades "
+                      "that block field by field, so a value of another type is "
+                      "an edited record")
+    return value
 
 
 def _refuse(message: str) -> SystemExit:
@@ -342,7 +395,19 @@ def _count(where: str, field: str, value, ceiling: int | None = None) -> int:
         raise _refuse(f"{where} carries {field}={value!r}, which is not a number "
                       f"— a count is numeric, so this is an edited record or "
                       f"another producer's shape")
-    if not math.isfinite(value):
+    try:
+        finite = math.isfinite(value)
+    except OverflowError as exc:
+        # ⛔ AN ARBITRARY-PRECISION INTEGER IS THE INTEGER SIBLING OF `Infinity`
+        # (#10610 review at `fe77fb13f`, P2). `json.loads` returns an unbounded
+        # Python int for any integer literal, and `math.isfinite(10**400)` — like
+        # `float(10**400)` — raises `OverflowError: int too large to convert to
+        # float`, which is exit **1** with a traceback out of the guard whose whole
+        # job is to refuse rather than crash.
+        raise _refuse(f"{where} carries {field} at a magnitude no float can "
+                      f"hold ({len(str(abs(value)))} digits) — a count of a real "
+                      f"population, so this is an edited record: {exc}") from exc
+    if not finite:
         raise _refuse(f"{where} carries {field}={value!r}, which is not a finite "
                       f"number — a count of a real population cannot be nan or "
                       f"inf")
@@ -358,6 +423,38 @@ def _count(where: str, field: str, value, ceiling: int | None = None) -> int:
         raise _refuse(f"{where} carries {field}={value}, which is negative — no "
                       f"population counts back below zero")
     return int(value)
+
+
+def _unit_id_members(where: str, session_id, field: str, members: list) -> None:
+    """Every census member is a UNIT ID — a string, or a refusal.
+
+    ⛔ The census is compared as a SET, so a member of any other type raised
+    straight out of `set(ids)`: `TypeError: unhashable type: 'list'` — exit **1**
+    with a traceback, which an operator cannot tell from a crash, and NOT the exit
+    **2** refusal this module's docstring promises (#10610 review at
+    `ef4c448d7`, P2). It is the same class `_count`, `_float_token` and
+    `_consistent_share` already convert-and-refuse in this file; this is the one
+    guard the whole E2a partition rests on, so it cannot be the one that skips it.
+
+    A unit id is a string by construction: `e2a_value_units.py:150-153` writes
+    `value_ids` / `value_survived` / `value_lost`, the first two carried straight
+    from the `survived` comprehensions at `:124-125` (as-written) and `:143-144`
+    (with-anchor), and `value_lost` built on `:152` by
+    `[v for v in value_ids if v not in set(survived)]`; `value_bearing_ids` reads
+    `unit["id"]` out of the corpus gold — so a member that is not a string is an
+    edited record, not a shape this reader can grade.
+
+    (#10610 review at `858675ade`, P3: an earlier revision attributed `value_lost`
+    to those `:124`/`:143` comprehensions. Both of them build `survived`, i.e. the
+    `value_survived` list, and the miscitation left the one key this new guard
+    exists for — `value_lost` — with no provenance at all.)
+    """
+    for member in members:
+        if not isinstance(member, str):
+            raise _refuse(
+                f"{where}'s session {session_id!r} carries {field}={member!r}, "
+                "which is not a unit id — the census is a set of string ids, so "
+                "a member of another type is an edited record")
 
 
 def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
@@ -394,6 +491,13 @@ def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
             raise _refuse(f"{where} carries no value_ids/value_survived lists for "
                           f"session {session_id!r} — the census is what the "
                           "totals are summed from")
+        # ⛔ THE MEMBERS ARE CHECKED BEFORE THE SET OPERATIONS (#10610 review at
+        # `ef4c448d7`, P2): `set(ids)` on a list/dict member is an uncaught
+        # `TypeError`, so an edited census exited 1 with a traceback instead of
+        # the REFUSED line. Reading a member as a unit id is what makes the set
+        # relation below a comparison of units rather than of whatever JSON held.
+        _unit_id_members(where, session_id, "value_ids", ids)
+        _unit_id_members(where, session_id, "value_survived", kept)
         # ⛔ THE CENSUS IS A SET RELATION, not four lengths (#10610 review at
         # `f12471075`, P2). `e2a_value_units.py` writes `value_lost` beside the two
         # lists (`[v for v in value_ids if v not in survived]`), so a row that lists
@@ -412,21 +516,42 @@ def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
             raise _refuse(f"{where}'s session {session_id!r} reports surviving units "
                           "that are not among its own value_ids — a unit cannot "
                           "survive a population it was never in")
+        # ⛔ ABSENCE IS NOT A DEFAULT ONE (#10610 self-audit of the guards at
+        # `380a2b7a2`, P2). ⚠️ No review comment raised these: the review recorded
+        # at that head returned CLEAN, so this finding and its three siblings came
+        # from this lane's own audit of the pre-fix guards — a reader looking for a
+        # review that names them will not find one. The
+        # partition rule below was gated on `lost is not None`, so the ONE field a
+        # forger deletes was the one that switched the rule off: measured on the
+        # shipped bundle, deleting `value_lost` from every `per_session` row,
+        # setting `value_survived = value_ids` and mirroring the falsifier's
+        # `as_written` block wrote `E2 PASS — E2a 14/14`, exit 0 — the identical
+        # forgery this block's own docstring records having measured and closed for
+        # the row-present case. `e2a_value_units.py` writes `value_lost` on every
+        # row (`[v for v in value_ids if v not in set(survived)]`) and all 21 rows
+        # across the three shipped records carry it, so a row without it was edited,
+        # not produced — which is the rule the rest of this file already applies
+        # ("an absent provenance is not a default one").
         lost = row.get("value_lost")
-        if lost is not None:
-            if not isinstance(lost, list):
-                raise _refuse(f"{where}'s session {session_id!r} carries a "
-                              "value_lost that is not a list")
-            both = set(lost) & set(kept)
-            if both:
-                raise _refuse(f"{where}'s session {session_id!r} lists "
-                              f"{sorted(both)!r} as BOTH survived and lost — the row "
-                              "contradicts itself, so its totals describe no run")
-            if set(lost) | set(kept) != set(ids) or len(set(lost)) != len(lost):
-                raise _refuse(f"{where}'s session {session_id!r} does not partition "
-                              "its value_ids into survived + lost — the census is a "
-                              "partition of the population, not two independent "
-                              "lists")
+        if lost is None:
+            raise _refuse(f"{where}'s session {session_id!r} carries no "
+                          "value_lost — the census is a PARTITION of its "
+                          "value_ids, every producer writes the losing half, so "
+                          "an absent one is a deleted field and not an empty list")
+        if not isinstance(lost, list):
+            raise _refuse(f"{where}'s session {session_id!r} carries a "
+                          "value_lost that is not a list")
+        _unit_id_members(where, session_id, "value_lost", lost)
+        both = set(lost) & set(kept)
+        if both:
+            raise _refuse(f"{where}'s session {session_id!r} lists "
+                          f"{sorted(both)!r} as BOTH survived and lost — the row "
+                          "contradicts itself, so its totals describe no run")
+        if set(lost) | set(kept) != set(ids) or len(set(lost)) != len(lost):
+            raise _refuse(f"{where}'s session {session_id!r} does not partition "
+                          "its value_ids into survived + lost — the census is a "
+                          "partition of the population, not two independent "
+                          "lists")
         units += len(ids)
         survived += len(kept)
     stated = declared if declared is not None else (
@@ -504,9 +629,31 @@ def _parse_bars(prereg: dict) -> dict:
         _BARS_READER["module"] = module
     # An unparseable threshold is a `ValueError` in the reader (G0's refusal
     # contract); here it is this driver's refusal — exit 2, not a traceback.
+    #
+    # ⛔ `OverflowError` IS THE THIRD ARM (#10610 review at `ec7b5e7fe`, P2), and
+    # it is the one shape the rest of this file already refuses. Every floor is a
+    # number read out of JSON, and `json.loads` returns an UNBOUNDED Python int for
+    # any integer literal — so `denominator_floors.e1_min_before_share = 10**400`
+    # reached `share_floor`'s `float(value)` (`capstone_measure.py:519`) and raised
+    # `OverflowError: int too large to convert to float`, i.e. exit **1** with a
+    # traceback out of the one loader whose sibling `_count` converts the identical
+    # value into an exit-2 refusal ("AN ARBITRARY-PRECISION INTEGER IS THE INTEGER
+    # SIBLING OF `Infinity`"). Measured at the pre-fix head: exit 1; an
+    # `e1_objects` of the same magnitude beside it refused cleanly, so the asymmetry
+    # sat inside one record's floor map.
+    #
+    # ⚠️ DEFENCE IN DEPTH, NOT THE LOAD-BEARING GUARD (#10610 self-audit at
+    # `380a2b7a2`).
+    # `frozen_denominators` now validates all three floors (finite, numeric, and
+    # each floor > 0 — the positivity arm covers all THREE keys, not the share
+    # alone) BEFORE this call, so the `10**400` case is answered there with a
+    # message that names the field — and no test exercises this arm through the
+    # floors any more. It is kept because `parse_bars` is the bundle's shared reader
+    # and a bar path or a newly added floor could reach `float()` without passing
+    # that validation; a reader should not mistake it for the guard that fires today.
     try:
         return _BARS_READER["module"].parse_bars(prereg)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         raise _refuse(f"{PREREG}'s criteria cannot be parsed: {exc}") from exc
 
 
@@ -521,13 +668,95 @@ def frozen_denominators(repo: Path) -> dict:
     driver and the probe that scores the row cannot read two thresholds.
     """
     prereg = _read_json(repo / PREREG)
-    floors = prereg.get("denominator_floors") or {}
+    # ⛔ THE TWO SUB-OBJECTS ARE SHAPE-CHECKED, not truthiness-defaulted (#10610 review
+    # at `858675ade`, P2 — the same `(value or {})` shape cycle 3 fixed one level
+    # down). `prereg["denominator_floors"] = 7` reached
+    # `"e1_objects" not in floors` as `TypeError: argument of type 'int' is not
+    # iterable`, and `corpus = "sha256:dead"` reached `.get` as an `AttributeError`
+    # — both exit **1**, before any refusal. `None`/absent stay "missing", which the
+    # named-key refusals below report with their own wording.
+    floors = prereg.get("denominator_floors")
+    floors = {} if floors is None else _object_block(
+        str(PREREG), "denominator_floors", floors)
     for key in ("e1_objects", "e1_min_before_share", "e2b_surviving_units"):
         if key not in floors:
             raise _refuse(f"{PREREG} carries no denominator_floors.{key}")
-    corpus = prereg.get("corpus") or {}
+    # ⛔ A FLOOR THAT IS NOT A FINITE NUMBER IS NOT A FLOOR (#10610 self-audit of
+    # the guards at `380a2b7a2`, P2). These three are read RAW and then used as COMPARISON
+    # thresholds, and JSON carries the `NaN`/`Infinity` literals — so
+    # `denominator_floors.e1_min_before_share = NaN` made E1's floor describe
+    # nothing: every `share < nan` is False, so the floor silently stopped binding
+    # and a control arm too flat to measure E1 was accepted. Composed with a
+    # zero-share before arm (legal under `_consistent_share` when `bare_definite:
+    # 0`) the inert floor let the pairing through and the ratio at
+    # `after["share"] / arm["share"]` raised `ZeroDivisionError: float division by
+    # zero` — exit **1** with a traceback, the exact contract violation the two
+    # `OverflowError` arms above close, one function over. `inf` was refused only
+    # incidentally (`share < inf` happens to be True), which is luck and not a
+    # rule — the same reasoning `e079c8dd`'s NaN-share pin states for the log.
+    #
+    # EVERY floor is additionally required to be POSITIVE, for one reason that
+    # holds identically for all three (#10610 review at `120381532`, P2): each
+    # consumer refuses a measurement that falls BELOW its floor —
+    # `objects < floors["e1_objects"]` in `read_off_arms`, `after["objects"] <
+    # floors["e1_objects"]` in `e1_pairings`, `after["atomic_points"] <
+    # e2b_floor` in `score`, and `share < floors["e1_min_before_share"]` — and no
+    # count and no share falls below zero. So a floor of `0` is cleared by every
+    # reading, and the guard it feeds passes everything.
+    #
+    # Applied to the SHARE floor alone, this left the two COUNT floors as inert
+    # `if` statements three lines away: `e1_objects: 0` disables both the
+    # under-floor refusal in `read_off_arms` and the BLOCKED-vs-decided split in
+    # `e1_pairings`, and `e2b_surviving_units: 0` makes `below_floor` permanently
+    # False in `score` so the E2b REFUSED outcome can never fire. That is the same
+    # "a floor that binds nothing is not a floor" class the finite check above
+    # closes, one key over — closed here for all three keys, not just the share.
+    #
+    # For the share floor `0` also re-opens the zero division from the other side.
+    for key in ("e1_objects", "e1_min_before_share", "e2b_surviving_units"):
+        value = floors[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _refuse(f"{PREREG}'s denominator_floors.{key} is a "
+                          f"{type(value).__name__} ({value!r}), not a number — a "
+                          "floor is compared against a measurement, so a value of "
+                          "another type cannot be one")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError as exc:
+            raise _refuse(f"{PREREG}'s denominator_floors.{key} is at a magnitude "
+                          f"no float can hold — a floor that no reading can be "
+                          f"compared against: {exc}") from exc
+        if not finite:
+            raise _refuse(f"{PREREG}'s denominator_floors.{key} is {value!r} — a "
+                          "floor that is not finite binds nothing (every "
+                          "comparison against NaN is False), so it is not a "
+                          "floor")
+        if value <= 0:
+            raise _refuse(f"{PREREG}'s denominator_floors.{key} is {value!r} — a "
+                          "floor of zero or less binds nothing: its consumer "
+                          "refuses a measurement that falls BELOW the floor, "
+                          "and no count or share falls below zero, so every "
+                          "reading would clear it and the guard it feeds would "
+                          "pass everything")
+    corpus = prereg.get("corpus")
+    corpus = {} if corpus is None else _object_block(
+        str(PREREG), "corpus", corpus)
     if not corpus.get("fixtures_hash"):
         raise _refuse(f"{PREREG} carries no corpus.fixtures_hash")
+    # ⛔ A PIN THAT IS PRESENT BUT NOT A STRING IS REFUSED HERE (#10610 review at
+    # `73382c7e6`, P2). Truthiness accepted `12345`, `{"a": 1}`, `[1, 2]` and
+    # `true`, and every one of them then reached `normalise_pin`'s
+    # `value.startswith` as an `AttributeError` — exit **1**, not the exit-2
+    # refusal. It was the single unguarded member of an otherwise-guarded family
+    # (`value_bearing_units`, the three `denominator_floors` entries and E2a's
+    # `of` all refuse by type), so the pin the whole E1 corpus comparison rests on
+    # was the one value nobody type-checked.
+    if not isinstance(corpus["fixtures_hash"], str):
+        raise _refuse(f"{PREREG}'s corpus.fixtures_hash is a "
+                      f"{type(corpus['fixtures_hash']).__name__} "
+                      f"({corpus['fixtures_hash']!r}), not a string — it is "
+                      "compared against every record's pin, so a value of "
+                      "another type cannot be one")
     value_bearing = corpus.get("value_bearing_units")
     if not isinstance(value_bearing, int) or isinstance(value_bearing, bool):
         raise _refuse(f"{PREREG} carries no integer corpus.value_bearing_units "
@@ -575,6 +804,21 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     returns `None`, which stringifies to `"none"` — a token of the OFF
     vocabulary — so a block that wrote nothing would certify the arm it is
     supposed to prove.
+
+    ⚠️ WHAT THIS FUNCTION STILL CANNOT REFUSE, stated so the row is not read as
+    more than it is (#10610 self-audit at `380a2b7a2`, P1 second arm). Every guard here
+    reads ONE record. A before arm has no SECOND artifact about its own run —
+    `e1-gate-drops.json` exists precisely to witness the ON arm's census, and
+    nothing plays that part for the OFF arms — so a coherent MULTI-FIELD edit to a
+    single before record is undetectable in principle: measured, prefixing six
+    non-bare names with `the ` and reconciling `bare_definite` (28 -> 34) and
+    `share` (0.3590 -> 0.4359) exits 0 and moves E1's bound from 0.1795 to 0.2179,
+    above the after arm's 0.2131. Every field still agrees with every other field,
+    which is all a single artifact can be held to. What IS refused is every edit
+    that leaves the record internally incoherent (a count that disagrees with its
+    census, a duplicated name, a share its own counts refute) — which is why the
+    rows cite the RECORD's corpus pin and the reasoning travels to the README
+    rather than being implied here.
 
     ⛔ And the FOURTH refusal is the one every other guard in this file cannot
     reach, because it is the only place the mirror rule has to be INVERTED. The
@@ -672,14 +916,68 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                 f"{name} carries no `object_names`, so nothing in it establishes "
                 "a population of its own — a realization that names no population "
                 "cannot be told apart from a re-stamped copy of another")
+        # ⛔ THE IDENTITY IS THE POPULATION, NOT THE ORDER IT IS WRITTEN IN
+        # (#10610 review at `ec7b5e7fe`, P1). `prior["object_names"] == names` is a
+        # LIST comparison, so it was still one cheap edit wide: copying arm 2 over
+        # arm 1, giving it arm 1's graph stamp and REVERSING the name list left
+        # every later reconciliation green — `objects == len(names)` and the
+        # bare-definite count are both order-independent — and the bundle scored a
+        # DECIDED `E1 PASS` (`before spread 0.0 pp`, both pairings on one run,
+        # exit 0) off a single realization. That is the exact state this guard is
+        # documented to refuse, reached by `list(reversed(...))` instead of by a
+        # one-second epoch bump.
+        #
+        # `sorted` rather than `set`: a set would also collapse a DUPLICATED name,
+        # so `[a, a, b]` would match `[a, b]` — two populations of different size
+        # reported as one. Sorting is order-insensitive and keeps the multiplicity
+        # the census is counted over.
+        #
+        # The members are checked as object names FIRST: `sorted` over a list
+        # holding a dict or a list raises `TypeError` — exit **1** with a traceback,
+        # beside a guard whose failure mode must be the exit-**2** refusal (the class
+        # `_unit_id_members` already converts for the E2a census, which is the same
+        # shape: a list of string ids compared as a population). Written out rather
+        # than borrowed from `_unit_id_members` because that helper's message says
+        # "session" and a BEFORE ARM HAS NO SESSIONS — it would report the graph
+        # name as a session id and the offending member as the whole list, which is
+        # the one string an operator uses to find the bad field (#10610 self-audit at
+        # `380a2b7a2`, P3).
+        for member in names:
+            if not isinstance(member, str):
+                raise _refuse(
+                    f"{name} carries an `object_names` member {member!r}, which is "
+                    "not an object name — the population is the run's own list of "
+                    "`:Object` names, so a member of another type is an edited "
+                    "record")
+        # ⛔ A CENSUS HAS NO DUPLICATES (#10610 self-audit at `380a2b7a2`, P1). The
+        # identity guard below reasons about multiplicity ACROSS arms; nothing read
+        # it WITHIN one. `e1_paired_arm.py` writes one row per `:Object` node, so a
+        # name can appear once — and a duplicated population is self-consistent for
+        # every guard on the block: `objects == len(names)` (a duplicate is still a
+        # member), `bare_in_names`, `_consistent_share`, `label_counts`. Measured:
+        # replacing arm 1's 78 names with 78 copies of one name and reconciling
+        # `bare_definite: 78, share: 1.0, label_counts: 78` scored
+        # `E1 PASS decidable=True` at a 43.5 pp spread, exit 0 — a DECIDED row from a
+        # census no producer can write. The E2a census beside this one has refused
+        # the same shape since `f12471075` (`len(set(ids)) != len(ids)`); this is
+        # that rule, on the population E1's share is computed over.
+        if len(set(names)) != len(names):
+            raise _refuse(
+                f"{name} lists the same `object_names` member twice ({len(names)} "
+                f"members, {len(set(names))} distinct) — the population is a CENSUS "
+                "of `:Object` names, one row per node, so a duplicate cannot come "
+                "from a producer and would inflate the count the share is "
+                "computed over")
         same = next((prior for prior in arms
-                     if prior.get("object_names") == names), None)
+                     if sorted(prior["object_names"]) == sorted(names)), None)
         if same is not None:
             raise _refuse(
                 f"{name} and {same['artifact']} carry the SAME `object_names` — "
                 f"a fresh graph stamp ({graph!r} vs {same['graph']!r}) is not a "
                 "fresh realization, so the before arm still has n=1 and "
-                "`decidable` would be asserted from one reading")
+                "`decidable` would be asserted from one reading; the identity is "
+                "the POPULATION, so re-ordering the list does not make a second "
+                "run of it")
         # ⛔ …and the counts must BE that population (#10610 review at
         # `75bfd9c6`). `_consistent_share` reconciled the share against
         # `bare_definite`/`objects`, and nothing reconciled THOSE with the
@@ -796,7 +1094,14 @@ def read_on_arm(repo: Path) -> dict:
     path = repo / EVIDENCE / ON_ARM_LOG
     if not path.is_file():
         raise _refuse(f"{EVIDENCE / ON_ARM_LOG} does not exist")
-    text = path.read_text()
+    try:
+        text = path.read_text()
+    except UnicodeDecodeError as exc:
+        # Same class as `_read_json`'s (#10610 review at `858675ade`, P2): a log that
+        # is not UTF-8 was an uncaught traceback, not the exit-2 refusal the module
+        # promises for a corrupt input.
+        raise _refuse(f"{EVIDENCE / ON_ARM_LOG} is not UTF-8 text, so it cannot be "
+                      f"the log it is cited as: {exc}") from exc
     objects = _int_token(text, r"^e1-aux objects_in_graph=(\d+)",
                         what="e1-aux objects_in_graph")
     bare = _int_token(text, r"^e1-aux objects_in_graph=\d+ bare_definite=(\d+)",
@@ -1063,7 +1368,13 @@ def e2_score(repo: Path, floors: dict) -> dict:
     # the E2a record's. Checked here, AFTER the frozen-denominator refusal, so a
     # denominator defect in that block still gets the message that names the
     # pre-registered number — the more specific finding.
-    falsifier_as_written = falsifier.get("as_written") or {}
+    falsifier_as_written = {}
+    if "as_written" in falsifier:
+        # ⛔ A BLOCK IS AN OBJECT OR IT IS REFUSED (#10610 review at `73382c7e6`,
+        # P2): `falsifier.get("as_written") or {}` passed a non-empty string or
+        # list through to `.get(...)`, which is an `AttributeError` -> exit 1.
+        falsifier_as_written = _object_block(
+            E2A_FALSIFIER, "as_written", falsifier.get("as_written"))
     if "as_written" in falsifier and (
             falsifier_as_written.get("value_units"),
             falsifier_as_written.get("value_survived")) != (units, survived):
@@ -1092,12 +1403,17 @@ def e2_score(repo: Path, floors: dict) -> dict:
     # is for a flat record that declares no block at all. An EMPTY block is a
     # record that did not write its counter, and inheriting the top-level numbers
     # there would attribute the injected 14/14 to a provenance it does not carry.
-    if "with_anchor" in falsifier and not (falsifier.get("with_anchor") or {}):
-        raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
-                      "empty — the injected reading is the block this score is "
-                      "taken over, so an empty one is not the flat shape "
-                      "(e2_score)")
-    with_anchor = (falsifier.get("with_anchor") or falsifier)
+    if "with_anchor" in falsifier:
+        with_anchor_block = _object_block(
+            E2A_FALSIFIER, "with_anchor", falsifier.get("with_anchor"))
+        if not with_anchor_block:
+            raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
+                          "empty — the injected reading is the block this score is "
+                          "taken over, so an empty one is not the flat shape "
+                          "(e2_score)")
+        with_anchor = with_anchor_block
+    else:
+        with_anchor = falsifier
     # ⛔ The scored block must DECLARE the injection it is credited for. The
     # artifact carries `injected_anchor` precisely to say which reading this is
     # (`as_written.injected_anchor: false`, `with_anchor.injected_anchor: true`),
@@ -1198,11 +1514,20 @@ def score(repo: Path = _ROOT) -> dict:
         # two blocks; whichever it declares is checked, and a record that
         # declares TWO runs is caught by the headline (the field a reader sees
         # first) or, if the blocks disagree, by the scored-block arms below.
+        #
+        # ⛔ BOTH BLOCKS ARE SHAPE-CHECKED BEFORE THEY ARE READ (#10610 review at
+        # `73382c7e6`, P2): `(record.get("with_anchor") or {}).get("graph")`
+        # passed a non-empty STRING through to `.get` — the very `AttributeError`
+        # the scored-block arms below were guarded against, still reachable from
+        # HERE, which runs first. A guard applied at one of two call sites is not
+        # a guard; this arm is what the cycle-3 pin caught after the first fix.
+        blocks = ({}
+                  if name != E2A_FALSIFIER else
+                  {field: _object_block(name, field, record.get(field))
+                   for field in ("with_anchor", "as_written") if field in record})
         graph = str(record.get("graph")
-                    or ((record.get("with_anchor") or {}).get("graph")
-                        if name == E2A_FALSIFIER else "")
-                    or ((record.get("as_written") or {}).get("graph")
-                        if name == E2A_FALSIFIER else "") or "")
+                    or (blocks.get("with_anchor") or {}).get("graph")
+                    or (blocks.get("as_written") or {}).get("graph") or "")
         if not _names_head(graph, after["head"]):
             raise _refuse(f"{name} was taken on graph {graph!r}, which does not "
                           f"name head {after['head'][:_HEAD_PREFIX]}")
@@ -1221,13 +1546,17 @@ def score(repo: Path = _ROOT) -> dict:
     # record itself when that block is absent, exactly as `e2_score` reads it),
     # so that is the block whose graph must be checked — a record whose other
     # block names the head proves nothing about the run it was scored on.
-    if "with_anchor" in falsifier_record and not (
-            falsifier_record.get("with_anchor") or {}):
-        raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
-                      "empty — the injected reading is the block this score is "
-                      "taken over, so an empty one is not the flat shape "
-                      "(score)")
-    falsifier_scored = falsifier_record.get("with_anchor") or falsifier_record
+    if "with_anchor" in falsifier_record:
+        with_anchor_scored = _object_block(
+            E2A_FALSIFIER, "with_anchor", falsifier_record.get("with_anchor"))
+        if not with_anchor_scored:
+            raise _refuse(f"{E2A_FALSIFIER}'s with-anchor block is present but "
+                          "empty — the injected reading is the block this score is "
+                          "taken over, so an empty one is not the flat shape "
+                          "(score)")
+        falsifier_scored = with_anchor_scored
+    else:
+        falsifier_scored = falsifier_record
     falsifier_graph = str(falsifier_scored.get("graph") or "")
     if not _names_head(falsifier_graph, after["head"]):
         raise _refuse(f"{E2A_FALSIFIER}'s scored block was taken on graph "
@@ -1258,7 +1587,13 @@ def score(repo: Path = _ROOT) -> dict:
     # so the same graph. An ABSENT graph there is not a licence to inherit the
     # scored block's — that would assume the provenance this check exists to
     # prove, and report it as proven.
-    as_written_block = falsifier_record.get("as_written")
+    as_written_block = None
+    if "as_written" in falsifier_record:
+        # ⛔ `(as_written_block or {}).get("graph")` was the same unguarded read one
+        # function over: a string block passed the `or {}` and raised at `.get`
+        # (#10610 review at `73382c7e6`, P2).
+        as_written_block = _object_block(
+            E2A_FALSIFIER, "as_written", falsifier_record.get("as_written"))
     as_written_present = "as_written" in falsifier_record
     as_written_graph = str((as_written_block or {}).get("graph") or "")
     if as_written_present and not as_written_graph:
