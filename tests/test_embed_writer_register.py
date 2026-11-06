@@ -486,6 +486,12 @@ INVISIBLE_SHAPES = {
     "interpolated_property": (
         'def w(tx, prop, form):\n    q = "SET n." + prop + " = " + form\n'
     ),
+    # The two the LITERAL-slice AST pass cannot decide either (round-4 review): a container
+    # HELPER is a `Call`, not a store, and a COMPUTED key makes `part.slice` a `Name`, not a
+    # `Constant`. Both are live upstream (`sdk::_emit_event`, `sdk::update_point`), so they are
+    # pinned here rather than only described in the docstring.
+    "container_helper": 'def w(rec, v):\n    rec.setdefault("embedding", v)\n',
+    "computed_key": 'def w(rec, key, v):\n    rec[key] = v\n',
 }
 
 

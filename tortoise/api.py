@@ -381,7 +381,7 @@ class EventAPI:
         #
         # (The SDK surface does NOT refuse a caller-supplied `embedding`: `create_point`
         # and `update_point` store one VERBATIM by a recorded decision (PR #3018 review
-        # P2 — see `TortoiseSDK._sanitize_props`, which rejects the embedding IDENTITY
+        # P2 — see `tortoise.sdk::_sanitize_props`, which rejects the embedding IDENTITY
         # props but deliberately not `embedding` itself). So this path is reachable from
         # the MCP/SDK surfaces too, and the carry-with-no-attestation below is the ONLY
         # reason a foreign vector cannot forge an attestation here.)

@@ -73,14 +73,16 @@ for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a who
 COMPUTED-KEY forms a regex and a literal-slice test both miss
 (`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and two of those four are **live**: the
 interpolation in `tortoise.cache_projection::node_statement` and the helper in
-`tortoise.sdk::_emit_event`, whose direct analogue `tortoise.sdk::_journal_event_raw_write` IS
-declared only because it spells the same write as a literal subscript. A writer is also
+`tortoise.sdk::_emit_event`. ⚠️ Its direct analogue `tortoise.sdk::_journal_event_raw_write` is
+visible for a DIFFERENT reason — `_EMBED_WRITE` matches the `embedding=None` in its SIGNATURE — so
+it is not evidence that a literal subscript is what gets a carrier seen; the writer that genuinely
+owes its visibility to `#11274`'s AST pass is `tortoise.sdk::_write_capture_turns`. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
 *named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
 module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
 `tortoise.sdk::create_point` and `tortoise.sdk::update_point` reach `encode_for_row` on the normal
 path, so discovery classes them `gated` and owes them no declaration — yet **a caller-supplied
-`embedding` is stored VERBATIM by a recorded decision** (PR `#3018` review P2: `TortoiseSDK._sanitize_props`
+`embedding` is stored VERBATIM by a recorded decision** (PR `#3018` review P2: `tortoise.sdk::_sanitize_props`
 rejects the embedding IDENTITY props and deliberately not `embedding` itself, and
 `tortoise.sdk::create_point` assigns `_create_map["embedding"]` from `_embedding_expr` AFTER the
 props loop), i.e. the gate does not decide that path. Both are reachable from the MCP surface
@@ -361,7 +363,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its "
             "own entry). ⛔ The caller vector is NOT refused by the SDK — `create_point`/"
             "`update_point` store one VERBATIM by a recorded decision "
-            "(`TortoiseSDK._sanitize_props` rejects the embedding IDENTITY props, not "
+            "(`tortoise.sdk::_sanitize_props` rejects the embedding IDENTITY props, not "
             "`embedding` itself; `_create_map[\"embedding\"]` is assigned AFTER the props "
             "loop from `_embedding_expr`; PR `#3018` review P2), so this door is "
             "tenant-reachable through the MCP tools and this row is its JOURNAL-side half. "
