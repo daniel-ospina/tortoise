@@ -67,10 +67,48 @@ def test_contract_advertises_the_relations_channel():
     """
     assert '"relations"' in v2.OUTPUT_CONTRACT
     assert '"relations"' in v2.OUTPUT_CONTRACT_CORE_ONLY
-    # the four clauses the channel's validation actually enforces
-    for clause in ('"src": str, "dst": str, "predicate": str', "entities[]",
-                   "DROPPED", "declared relation verb"):
+    # the clauses the channel's validation actually enforces
+    for clause in ('"src": str, "dst": str, "predicate"', "entities[]",
+                   "DROPPED", "ALLOWLIST", "semantics"):
         assert clause in v2.OUTPUT_CONTRACT, clause
+
+
+def test_every_verb_the_contract_advertises_actually_survives_the_gate():
+    """#10999 review P1: the contract is the ONLY place the model learns the
+    accepted vocabulary, so the set it names must be exactly the set the gate
+    accepts.
+
+    This is the test that was missing: cycle 1 pinned clause STRINGS, so a
+    contract advertising one vocabulary while the gate enforced another — the
+    cycle-2 finding, where the contract's own example verb (`weakens`) was
+    dropped by the gate — passed unnoticed.
+    """
+    clause = v2.OUTPUT_CONTRACT.split('"predicate": "', 1)[1].split('"', 1)[0]
+    advertised = [p.strip() for p in clause.split("|") if p.strip()]
+    assert len(advertised) >= 13, advertised
+
+    for predicate in advertised:
+        emission = copy.deepcopy(EMISSION)
+        emission["relations"] = [{"src": "Retry Storm",
+                                  "dst": "Deadline Rule",
+                                  "predicate": predicate}]
+        result = _run(emission)
+        assert [r["predicate"] for r in result["relations"]] == [predicate], (
+            f"the contract advertises {predicate!r} but the gate drops it")
+
+    # ...and the same for the advertised Layer-2 meanings, which are refused
+    # INTO the record (the relation survives) rather than dropped whole.
+    sem_clause = v2.OUTPUT_CONTRACT.split('"semantics": "', 1)[1].split('"', 1)[0]
+    meanings = [m.strip() for m in sem_clause.split("|") if m.strip() and m != "null"]
+    assert meanings, sem_clause
+    for meaning in meanings:
+        emission = copy.deepcopy(EMISSION)
+        emission["relations"] = [{"src": "Retry Storm",
+                                  "dst": "Deadline Rule",
+                                  "predicate": "IMPL",
+                                  "semantics": meaning}]
+        result = _run(emission)
+        assert result["relations"][0].get("semantics") == meaning, meaning
 
 
 def test_shape_gate_covers_the_new_channel():
@@ -185,6 +223,72 @@ def test_case_insensitive_endpoint_resolves_to_the_emitted_spelling():
         ("Retry Storm", "Deadline Rule")]
 
 
+def test_the_composed_stage_agrees_with_the_resolver_about_ambiguity():
+    """#10999 review cycle 3 P2: `_apply_entity_resolution` and
+    `_resolve_relation_endpoint` must answer the SAME ambiguity question —
+    uniquely-one EMITTED entity, not uniquely-one resolved name.
+
+    Measured before this fix: with two entities differing only in case and a
+    resolution naming one of them, the D3 stage renamed the endpoint onto the
+    resolved node and S5 kept it with `relations_dropped == 0` and NO warning —
+    the edge attributed to the wrong node, silently. The resolver alone refuses
+    this case (`test_ambiguous_case_fold_resolves_to_nothing`); composing the
+    two stages must not launder it.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["entities"] = [
+        {"name": "Deadline Rule", "kind": "core:rule"},
+        {"name": "DEADLINE RULE", "kind": "core:rule"},
+        {"name": "Retry Storm", "kind": "core:event"},
+    ]
+    emission["relations"] = [{"src": "Retry Storm", "dst": "DEADLINE RULE",
+                              "predicate": "IMPL"}]
+    resolved = v2._apply_entity_resolution(
+        emission, {"Deadline Rule": {"name": "Deadline Rule (2024)"}})
+    # ⛔ The endpoint must NOT be attributed to the node the resolution map
+    # chose — that is the wrong node, and it is what measuring the fold over
+    # `name_map` produced. After the rename exactly ONE emitted entity is still
+    # spelled "deadline rule", so the surviving spelling is the right answer.
+    assert resolved["relations"][0]["dst"] != "Deadline Rule (2024)"
+    assert resolved["relations"][0]["dst"] == "DEADLINE RULE"
+    # ...and the two stages agree: the relation is kept, against that entity,
+    # with no false "does not resolve" warning.
+    result = _run(resolved)
+    assert result["stats"]["relations_dropped"] == 0
+    assert result["relations"][0]["dst"] == "DEADLINE RULE"
+
+
+def test_a_discarded_entity_named_only_by_a_relation_is_kept():
+    """#10999 review cycle 3 P2: the vet_gate referent fix needs a
+    DISCRIMINATING case — deleting the new loop must red something.
+
+    `apply_vet` downgrades a DISCARD to KEEP only for a REFERENCED entity, so
+    an entity whose sole tie to the emission is a relation endpoint was
+    discarded and S5 then dropped the relation as unresolvable.
+    """
+    from tortoise import vet_gate
+
+    emission = copy.deepcopy(EMISSION)
+    target = emission["entities"][1]           # "Deadline Rule"
+    item_id = vet_gate._item_id("entities", 1, target)
+    kept, warnings = vet_gate.apply_vet(
+        emission, {item_id: {"outcome": "DISCARD"}})
+    assert any(e.get("name") == "Deadline Rule" for e in kept["entities"])
+    assert any("referenced by a surviving candidate" in w for w in warnings)
+    # the relation survives the VET pass intact
+    assert kept["relations"] == emission["relations"]
+
+    # CONTROL: without the relation nothing references it, so it IS removed —
+    # i.e. the case above measures the new loop, not a general refusal to drop.
+    control = copy.deepcopy(EMISSION)
+    del control["relations"]
+    kept_c, _ = vet_gate.apply_vet(
+        control, {vet_gate._item_id("entities", 1, control["entities"][1]):
+                  {"outcome": "DISCARD"}})
+    assert not any(e.get("name") == "Deadline Rule"
+                   for e in kept_c["entities"])
+
+
 def test_ambiguous_case_fold_resolves_to_nothing():
     """Two entities differing only in case: guessing which one the story
     meant would attribute the edge to the WRONG node."""
@@ -264,6 +368,62 @@ def test_a_relation_survives_entity_resolution():
     assert [(r["src"], r["dst"]) for r in result["relations"]] == [
         ("Retry Storm (2024-05)", "Deadline Rule")]
     assert result["stats"]["relations_dropped"] == 0
+
+
+def test_a_case_variant_endpoint_survives_entity_resolution():
+    """#10999 review cycle 2 P2: the rename mirrors the resolver — exact first,
+    then a UNIQUE case-insensitive hit.
+
+    An exact-match-only rename left a case-variant endpoint behind, and the
+    moment resolution fired S5 reported a FALSE "does not resolve to an entity
+    this emission produced" for an entity it had produced.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "retry storm", "dst": "DEADLINE RULE",
+                              "predicate": "IMPL"}]
+    resolved = v2._apply_entity_resolution(
+        emission, {"Retry Storm": {"name": "Retry Storm (2024-05)"}})
+    assert resolved["relations"][0]["src"] == "Retry Storm (2024-05)"
+
+    result = _run(resolved)
+    assert result["stats"]["relations_dropped"] == 0
+    assert len(result["relations"]) == 1
+
+
+def test_out_of_vocabulary_semantics_is_dropped_from_the_record():
+    """#10999 review cycle 2 P2: `semantics` is a CLOSED vocabulary, and it is
+    the one field that would otherwise carry free text into an edge property.
+    The RELATION survives — only the meaning is refused."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "IMPL",
+                              "semantics": "x" * 300}]
+    result = _run(emission)
+    assert len(result["relations"]) == 1
+    assert "semantics" not in result["relations"][0]
+    assert any("closed Layer-2 vocabulary" in w for w in result["warnings"])
+
+
+def test_a_retired_semantics_spelling_is_canonicalised():
+    """The retired word is recorded as its canonical replacement (#7852), not
+    silently kept and not thrown away."""
+    from tortoise.pack_registry import SEMANTICS_TRANSITION
+
+    retired, canonical = next(iter(SEMANTICS_TRANSITION.items()))
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "IMPL", "semantics": retired}]
+    result = _run(emission)
+    assert result["relations"][0]["semantics"] == canonical
+    assert any("retired" in w for w in result["warnings"])
+
+
+def test_extract_session_v2_always_returns_the_channel():
+    """#10999 review cycle 2 P2: the empty-conversation return is a second
+    hand-enumerated result dict — a consumer must never have to distinguish
+    "no relations" from "the key is missing"."""
+    result = v2.extract_session_v2(None, [])
+    assert result["relations"] == []
 
 
 # ── 6. the S2 ∪ S4 union dedupes on the triple ───────────────────────────

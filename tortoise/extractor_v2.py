@@ -1715,7 +1715,7 @@ OUTPUT_CONTRACT = """{
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
-  "relations": [{"src": str, "dst": str, "predicate": str, "semantics": str|null}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states ("the retry storm weakened the deadline rule", "A changed because of B"). src/dst are entity NAMES that must ALSO appear in entities[] above — an endpoint is never invented here, and one this emission does not produce is DROPPED. predicate must be a declared relation verb (the same vocabulary create_operator accepts); semantics is the optional closed Layer-2 meaning (ONTOLOGY §8). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
+  "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
   "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
@@ -5388,13 +5388,49 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
                         if isinstance(s, dict) and s.get("name") in name_map:
                             s["name"] = name_map[s["name"]]
     # #10999: the entity↔entity channel names its endpoints, so a renamed
-    # entity must be renamed here too (see the docstring).
+    # entity must be renamed here too (see the docstring). The lookup answers
+    # the SAME question `_resolve_relation_endpoint` asks — exact first, then a
+    # UNIQUE case-insensitive hit over the EMITTED (post-rename) names — so the
+    # two stages cannot disagree about ambiguity: two emitted entities differing
+    # only in case leave the endpoint alone here, and the resolver refuses it
+    # downstream, instead of this stage guessing a node and S5 keeping it.
+    #
+    # The rename map is consulted only when NO emitted spelling matches: that is
+    # the one case the emitted set cannot answer, because the entity the model
+    # named was renamed out from under the endpoint. Folding over `name_map`
+    # FIRST — the shape that produced a wrong attribution — would ask "is
+    # exactly one RESOLVED name spelled like this", a different question.
+    emitted = {str(e.get("name")).strip() for e in out.get("entities") or []
+               if isinstance(e, dict) and e.get("name")}
+    folded_emitted: dict[str, list[str]] = {}
+    for _n in emitted:
+        folded_emitted.setdefault(_n.casefold(), []).append(_n)
+
+    def _canonical_endpoint(ref: str) -> str:
+        if ref in emitted:
+            return ref
+        hits = folded_emitted.get(ref.casefold()) or []
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            return ref                      # ambiguous: never pick a witness
+        renamed = ({name_map[ref]} if ref in name_map else set()) | {
+            new_name for old_name, new_name in name_map.items()
+            if isinstance(old_name, str) and isinstance(new_name, str)
+            and old_name.strip().casefold() == ref.strip().casefold()}
+        # A resolved name this emission never produced is not an endpoint —
+        # keeping the original spelling lets S5 drop it, rather than minting a
+        # name the emission does not carry.
+        renamed &= emitted
+        return renamed.pop() if len(renamed) == 1 else ref
+
     for rel in out.get("relations") or []:
         if not isinstance(rel, dict):
             continue
         for side in ("src", "dst"):
-            if isinstance(rel.get(side), str) and rel[side] in name_map:
-                rel[side] = name_map[rel[side]]
+            ref = rel.get(side)
+            if isinstance(ref, str) and ref.strip():
+                rel[side] = _canonical_endpoint(ref.strip())
     return out
 
 
@@ -8709,6 +8745,14 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
         folded.setdefault(n.casefold(), []).append(n)
 
     declared = _declared_relation_predicates()
+    # The closed Layer-2 vocabulary, imported lazily for the same reason as
+    # `declared` above. An unreadable vocabulary yields an empty set, and an
+    # EMPTY set must never be read as "nothing is valid" — that would drop
+    # every meaning on an import failure, which is the destructive direction.
+    try:
+        from tortoise.pack_registry import SEMANTICS_TRANSITION, SEMANTICS_VALUES
+    except Exception:
+        SEMANTICS_TRANSITION, SEMANTICS_VALUES = {}, frozenset()
     kept: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     dropped = 0
@@ -8766,7 +8810,30 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
         rel = {"src": r_src, "dst": r_dst, "predicate": predicate}
         semantics = item.get("semantics")
         if isinstance(semantics, str) and semantics.strip():
-            rel["semantics"] = semantics.strip()
+            semantics = semantics.strip()
+            # #10999 review: `semantics` is a CLOSED vocabulary (ONTOLOGY §8)
+            # exactly as the predicate is, and it is the one field on this
+            # channel that would otherwise carry free text into a record
+            # #11001 materialises as an edge property — the prose surface the
+            # channel exists to keep out. A retired spelling is canonicalised
+            # (as `sdk.create_operator` does); an out-of-vocabulary token drops
+            # the KEY and keeps the RELATION (the endpoints and the verb are
+            # still the story's own assertion), and is named.
+            if semantics in SEMANTICS_TRANSITION:
+                _original = semantics
+                semantics = SEMANTICS_TRANSITION[semantics]
+                warnings.append(
+                    f"relations[{i}] semantics '{_clip(_original, 40)}' is "
+                    f"retired — recorded as '{semantics}' (#7852)")
+            if SEMANTICS_VALUES and semantics not in SEMANTICS_VALUES:
+                warnings.append(
+                    f"relations[{i}] semantics '{_clip(semantics, 40)}' is not "
+                    "in the closed Layer-2 vocabulary — dropped from the "
+                    "record, the relation is kept (#7852)")
+            else:
+                # Including the unreadable-vocabulary case (`SEMANTICS_VALUES`
+                # empty): an import failure must never strip every meaning.
+                rel["semantics"] = semantics
         kept.append(rel)
 
     if dropped:
@@ -10573,6 +10640,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            "reason": "no conversation content"},
                 "payload": None, "chain_notes": [], "link_before_create": [],
                 "supersessions": [],
+                # #10999: the channel is present on EVERY return of this
+                # function, so a consumer never has to distinguish "no
+                # relations" from "the key is missing".
+                "relations": [],
                 "warnings": ["empty conversation — nothing extracted"],
                 "minted_kinds": [], "stats": {"llm": llm_stats,
                                                 "recovery": recovery_stats},
