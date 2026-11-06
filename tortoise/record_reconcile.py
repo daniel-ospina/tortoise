@@ -47,13 +47,26 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
   REFUSES by name and so can never hold. They are neither a mismatch nor
   invisible: :func:`reconcile_record_and_cache` partitions them into a named
-  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ TWO classes
+  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ THREE classes
   arrive here, and they differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
-  nothing to repair), and the projection-DECLINED pair an EPISODIC Source's
+  nothing to repair); the projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record
-  DOES hold, and which a record-sourced re-projection removes. Counting them as
+  DOES hold, and which a record-sourced re-projection removes; and the
+  NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
+  — which the record ALSO holds and which no projection may ever write, because
+  the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
+  ``record-restore`` / ``rebuild_from_record`` wipe the graph first
+  (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
+  legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
+  who does not want the wipe — and it has NO non-destructive route: nothing
+  writes the column any more, so no in-place repair can exist. That is WHERE IT
+  DIFFERS from the declined pair, which does have one, shipped:
+  ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
+  ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
+  node's other properties untouched. So the three classes differ in which lane
+  clears them, not only in why the name must be absent. Counting them as
   ``field_mismatches`` would make the clean verdict UNREACHABLE on a
   journal-projected cache — every folded point carries them — which is exactly
   the "a signal indistinguishable from noise is not observability" failure
@@ -288,7 +301,12 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
     # §9.1/D1's narrowed pair, in the CACHE's vocabulary — resolved ONCE per
     # read (it is table-derived, so it must not be a module constant: see
     # `cache_projection._episodic_source_kind_property` for the installed-wheel
-    # reason).
+    # reason). ⚠️ Two DISJOINT sets, not one nested in the other (measured: this
+    # pair is {summary, _searchText} and `cache_forbidden_columns("source")` is
+    # {story_arc}). `placeable` below omits MORE than this set does — a column in
+    # `CACHE_FORBIDDEN_COLUMNS` (§9.1/D1's narrative, #10394) is never projected
+    # either — so it reaches `graph_only` through `projected_properties` rather
+    # than through `declined`.
     declined = episodic_source_prose_properties()
     for label in wanted:
         # The names the record PLACES for this label: the placement table's
@@ -337,8 +355,10 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
             out[declared] = props
             # §9.1/D1 (#10853): the projection DECLINES this pair for an
             # episodic Source, so a cache node that still carries it holds what
-            # the projection will not write — cache-owned, the #9196 precedent,
-            # and counted as `graph_only` instead of as a divergence against a
+            # the projection will not write — CACHE-HELD, not "cache-owned"
+            # (`graph_only_total`'s retraction: the record DOES hold this pair, so
+            # the repair is a record-sourced clear, #11070), counted as
+            # `graph_only` instead of as a divergence against a
             # record that is correct. Without this the reconciler would report
             # every session the current capture writes as divergent forever,
             # which is the "signal indistinguishable from noise" the module's own
@@ -370,10 +390,13 @@ class RecordReconcileResult:
     declaration: ResidencyDeclaration
     not_hot: int = 0
     #: Properties the CACHE holds that this projection will not judge — §17.5's
-    #: EP/derived scalars (the record schema refuses them by name) PLUS the pair
+    #: EP/derived scalars (the record schema refuses them by name), PLUS the pair
     #: the §9.1/D1 narrowing declines for an EPISODIC Source
     #: (``cache_projection.episodic_source_prose_properties()``, which the RECORD
-    #: does hold) — as ``(name, node count)``. Kept OUT of ``field_mismatches``
+    #: does hold), PLUS the NOT-PROJECTABLE columns
+    #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
+    #: and the cache must not materialise, ``#10394``) — as
+    #: ``(name, node count)``. Kept OUT of ``field_mismatches``
     #: (counting them
     #: made the clean verdict unreachable on a journal-projected cache) and kept
     #: as its OWN count (a comparison that declines to judge a field has to say
@@ -383,7 +406,18 @@ class RecordReconcileResult:
 
     @property
     def graph_only_total(self) -> int:
-        """Cache-owned property occurrences the comparison did not judge."""
+        """Properties the CACHE holds that the comparison did not judge.
+
+        ⛔ NOT "cache-owned": `graph_only` carries THREE omission classes (see
+        the field's own declaration comment above, and :meth:`verdict` for how a
+        clean verdict is reached), and `owned` is §17.5's term for only ONE of
+        them — naming the total `owned` sends the operator to the wrong repair
+        for the other two, which is why the label :func:`log_result` renders says
+        `cache-held`. This docstring must not keep the term the label retracted.
+        ⚠️ Cited by SYMBOL, not by line: a line number in this module rots the
+        same way a line in a Markdown table does, and the citation that used to
+        be here already pointed one function away from the label it described.
+        """
         return sum(count for _, count in self.graph_only)
 
     @property
@@ -437,14 +471,33 @@ def reconcile_record_and_cache(
     where the cache is the whole graph — so an absent key really is divergence.
 
     ``placed`` is :attr:`CacheScan.placed` — per key, the property names the
-    record PLACES for its label. It enables the **cache-owned partition**: a
+    record PLACES for its label. It enables the **cache-HELD partition** (⛔ not
+    "cache-owned": the partition carries THREE omission classes, only the first of
+    which is §17.5-owned — ``_partition_cache_owned`` keeps its function name
+    for history, but the term in prose is `cache-held`, matching the label
+    :func:`log_result` renders): a
     property the cache holds that the record can neither place nor hold (the
     EP/derived scalars §17.5 assigns to the cache, which the record schema
     refuses by name) is NOT a field mismatch and is reported as its own named
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
-    a ``graph_only`` name has two possible repairs: none (schema-refused) or a
-    record-sourced re-projection (declined). ⚠️ **What the exclusion CAN and
+    a ``graph_only`` name has three possible repairs, one per omission class:
+    none (schema-refused), a record-sourced re-projection (declined), or the
+    graph-side purge for a not-projectable column (below).
+
+    ⛔ AND A THIRD OMISSION, from `#10394`: `cache_projection.
+    CACHE_FORBIDDEN_COLUMNS` subtracts the NOT-PROJECTABLE class from
+    `projected_properties`, so ``story_arc`` is not placeable either. That is a
+    statement about the CACHE, not about the record — the column is PRIMARY
+    there and §9.1/D1 forbids it only in the graph — so a legacy cache node
+    that still carries the prose reads as a ``graph_only`` occurrence (one
+    property the projection declines to write), NOT as a ``field_mismatches``
+    against a record that is correct. The repair for that occurrence is a
+    DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full
+    ``record-restore`` (whose wipe is whole-graph, so it clears the copy too;
+    measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm
+    (3)) — never a non-destructive one, which is the only sense in which this
+    class differs from the declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. For the DECLINED pair
@@ -502,7 +555,12 @@ def _partition_cache_owned(
         truth: Mapping[str, Mapping],
         placed: Mapping[str, frozenset[str]] | None,
         ) -> tuple[dict[str, Any], tuple[tuple[str, int], ...]]:
-    """Split the cache side into what is COMPARED and what is cache-owned.
+    """Split the cache side into what is COMPARED and what is CACHE-HELD.
+
+    ⛔ "cache-held" is the whole not-compared side, and it carries THREE
+    omission classes (see the module docstring's (5) and :meth:`verdict`);
+    "cache-owned" is §17.5's term for only ONE of them — the scalars the
+    record CANNOT hold — so it is not the name of this partition.
 
     A cache property is excluded only when it is **both**
 
@@ -579,7 +637,16 @@ def log_result(result: RecordReconcileResult,
         # number it did report reads as covering everything it saw.
         names = ", ".join(name for name, _ in result.graph_only[:4])
         more = ", …" if len(result.graph_only) > 4 else ""
-        line += (f" [graph_only={result.graph_only_total} cache-owned "
+        # ⚠️ "cache-HELD", not "cache-OWNED" (#10394 review, P3). All three
+        # omission classes are properties the CACHE holds — that is what
+        # `graph_only` counts — but "owned" is the §17.5 partition's term for
+        # ONE of them (the EP/derived scalars the record schema refuses, which
+        # only the cache has). The other two are record-owned: the §9.1/D1 pair
+        # the narrowing DECLINES (the record holds it, its repair is a
+        # re-projection) and the not-projectable column (the record holds it and
+        # the graph must NOT — its repair is #10017's purge). Calling them all
+        # "owned" sends the operator to the wrong repair.
+        line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
     line = f"{line} verdict={verdict}"

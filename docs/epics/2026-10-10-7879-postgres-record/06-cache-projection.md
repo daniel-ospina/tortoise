@@ -141,22 +141,51 @@ to have none.
   * **the read shape is total and lossless**: for every PRIMARY property in the
     placement table, `node_from_row` yields it **under its own name**; for every
     DERIVED/VOLATILE name, it yields nothing — the S3 contract, executable.
+    ⚠️ **One declared exception, and it is a THIRD class rather than a gap in
+    the rule (`#10394`):** a column can be PRIMARY in the record — authority the
+    record must store — and **not projectable** into the cache, because the
+    target store is where §9.1/D1 says the value must not live at all.
+    `cache_projection.CACHE_FORBIDDEN_COLUMNS` names them (`source.story_arc`,
+    `event.story_arc`: the S1 narrative, whose home for readers is
+    `public.session_narrative`). The two tests carry the gate rather than a
+    restatement: the set of PRIMARY rows that do not project must **equal** the
+    declared set, so any OTHER column that stops projecting reds.
   * **the keys are the contract's**, read from `node_identity`'s DDL rather
     than restated.
   * **one-way by construction**: the materializer's statement stream contains
     no read that could decide what to project — every statement is a `MERGE`,
     asserted over the plan's cypher (the endpoint `MATCH` inside a relation
     upsert is the one read, and it resolves a RECORD coordinate).
-  * **rebuild == record**: re-projecting the plan writes exactly the record's
-    key set and field set — **no extra field, no extra node** — asserted over
-    the plan's `Statement.params['props']`, not over the input model. ⚠️ **One
-    declared exception (#9634):** `cache_projection.FOLD_ON_CREATE_DEFAULTS`
-    applies the FOLD's `ON CREATE` constants (`subjectKind`/`objectKind` →
-    `'other'`, `Object.title` → `''`) where the record row is silent, so a
-    record-sourced node equals the node the live fold would build. Because the
-    assertion reads the VIEW, it cannot see this class — the drift pin in
-    `tests/test_cache_projection.py` is the bound, and the members the record
-    cannot decide are #9710.
+  * **rebuild == record VIEW**: re-projecting the plan writes exactly the record
+    **VIEW's** key set and field set — **no extra node**, and no field the view
+    does not carry — asserted over the plan's `Statement.params['props']`, not
+    over the input model. ⛔ "the VIEW's", not "the record's COLUMNS": the one
+    widening name is `status` (classes (2)/(3)), which has NO column — and reading
+    "no extra field" against the column names would have an implementer DELETE it,
+    leaving a superseded Object that answers LIVE (#9974). ⚠️ Class (1) must not
+    be read as widening: `objectKind`/`subjectKind`/`title` ARE projected columns
+    (`object_kind`, `subject_kind`, `title`), the fold only supplies a VALUE where
+    the row is silent — the field-set/VALUE conflation §17.2 exists to stop. Note
+    `_props_from_row` SKIPS a `None` column, so a sparse row's plan is a strict
+    SUBSET of the projected properties, and a column-name comparison reports a
+    projected name as "extra" purely on spelling (`objectKind` vs `object_kind`). ⚠️ The
+    assertion reads the VIEW, so it cannot see any class that is materialised in
+    the VIEW-BUILDING path; the bound on those is a drift pin, not this
+    assertion. ⛔ **The census is ONE, stated in full at
+    `STORAGE-ARCHITECTURE.md` §17.2 and in `cache_projection`'s module docstring
+    point 3; this section only names what this assertion is blind to.** The five
+    declared classes, by DIRECTION: ONE **value-filling**
+    (`cache_projection.FOLD_ON_CREATE_DEFAULTS`, #9634 — `subjectKind`/`objectKind`
+    → `'other'`, `Object.title` → `''`) supplies a constant where the record row
+    is SILENT; those columns are `P` in the placement table, so it adds a VALUE
+    for a field the record HAS and does **not** widen the field set, and reading
+    it as a widening is the field-set/value conflation §17.2 exists to avoid;
+    TWO **widening** (`cache_projection.DERIVED_FROM_RECORD`, #9974, and
+    `cache_projection.EVENT_STREAM_FOLDS`, #10198 — both mint `status`, which has
+    no record column); TWO **narrowing**
+    (`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS`, #10853, per ROW, and
+    `cache_projection.CACHE_FORBIDDEN_COLUMNS`, #10394, per TABLE). The members
+    the record cannot decide are #9710.
   * **idempotent**: projecting the same view twice yields the same statement
     multiset.
   * **not-hot, never empty**: an unmaterialized record key is `not-hot` and an
@@ -187,9 +216,21 @@ to have none.
 
 ## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853), except the space-less-run residual named below
 
-**A declared narrowing** of the field set — the only one — in the opposite
-direction from the three widening exceptions the module names
-(`FOLD_ON_CREATE_DEFAULTS`, `DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`):
+**A declared narrowing** of the field set — one of TWO — in the opposite
+direction from the TWO widening exceptions the module declares
+(`DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`). ⛔ `FOLD_ON_CREATE_DEFAULTS` is
+NOT a third widening: it fills a VALUE into a column the record already has
+(`subject_kind` on `Subject`, `object_kind`/`title` on `Object` — all three in
+their own table's `projected_columns`; the fold's KEYS are PROPERTY names like
+`subjectKind` while the columns are the row's snake_case spellings — the two
+namespaces §17.2 keeps apart), so
+the plan's FIELD SET is unchanged by it. §17.2 of `STORAGE-ARCHITECTURE.md` and
+`cache_projection`'s module-docstring point 3 state the full census BY DIRECTION
+— one value-filling, two widening, two narrowing — and this line previously
+contradicted it (#10394 review). The other narrowing is
+`cache_projection.CACHE_FORBIDDEN_COLUMNS` (`#10394`), which is **per TABLE
+rather than per row** and is stated at the end of this section
+(`:source`/`:event` `story_arc`):
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
 when the Source is a captured session **and the row holds the pre-#10000
 derivation**, so `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to
@@ -324,27 +365,36 @@ bounds, both deliberate:
   production caller sits behind the fresh-capture gate — **never runs** and the
   stale pair survives (pinned by
   `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`).
-  The ONE route that DOES clear it is a retry of a prior FAILED capture — that
-  arm re-runs the mint for the SAME node (`url = session:<id>`), so the
-  capture's `SET`s overwrite the pair. Two routes that read like repairs are NOT
-  (`#10852` review, P3): a capture under a NEW `session_id` MERGEs a DIFFERENT
-  node and leaves the old one alone, and a record-sourced re-projection is a
-  **prevention** route, not a clearing one (see the next bullet). Clearing an
-  existing node's pair otherwise needs an explicit property clear — `#11070`'s
-  work, not a replay's;
+  THREE routes DO clear it: (1) a retry of a prior FAILED capture — that arm
+  re-runs the mint for the SAME node (`url = session:<id>`), so the capture's
+  `SET`s overwrite the pair (route 1); (2)
+  `session_source_prose_migration.reconcile_session_source_prose` (`#11070`,
+  shipped via `#11152`), which repairs or CLEARS the PAIR IN PLACE from the
+  record **without a wipe** — the only NON-destructive route, and it leaves the
+  node's other properties untouched; and (3) a full `record-restore`, whose
+  `_wipe_all_nodes` is unconditional and whole-graph. Two routes that read like
+  repairs are NOT (`#10852` review, P3): a capture under a NEW `session_id`
+  MERGEs a DIFFERENT node and leaves the old one alone, and an INCREMENTAL
+  record-sourced re-projection is a **prevention** route, not a clearing one
+  (see the next bullet);
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
-  the cache-owned partition keeps every name the record side holds, so a drifted
+  the cache-held partition keeps every name the record side holds, so a drifted
   `_searchText` is compared and reds. `summary`, and a legacy row's whole pair,
-  are CACHE-OWNED for an episodic Source
+  are CACHE-HELD for an episodic Source (not "cache-owned": the record holds
+  them, and §17.5's term is for the scalars it cannot)
   (`cache_projection.episodic_source_prose_properties()`) and counted under their
   own `graph_only` bucket: visible, and not a divergence against a record that is
   correct. The graph side of a legacy node is repaired by a record-sourced
-  re-projection (`record-restore` / `rebuild_from_record`) — **for a node the
-  projection CREATES**: the write is additive (`MERGE … SET n += $props`), and
+  re-projection — **for a node the
+  projection CREATES**: the INCREMENTAL write is additive (`MERGE … SET n += $props`), and
   `summary` is declined on this door, so a node that ALREADY carries the pair
-  keeps it across a re-projection — the projection produces a prose-free node
+  keeps it across an incremental projection — it produces a prose-free node
   only where none existed, which PREVENTS the defect rather than clearing it.
+  ⛔ But `record-restore` / `rebuild_from_record` are NOT that path: they WIPE
+  the graph first (`_wipe_all_nodes`, *unconditional and whole-graph*), so a
+  FULL restore CLEARS an existing node's pair instead of preserving it —
+  measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3).
 
 ### The pin
 
@@ -385,3 +435,41 @@ pair SURVIVES a replay); and this section is itself guarded, in both directions,
 by `tests/test_10000_cache_projection_doc_pin.py` — the doc is the fourth
 artifact to have carried the retracted premise, and its guard is DB-free and
 registered in `tier1` because a docs-only edit runs `tier1` only.
+
+### The other narrowing — a column can be authoritative and NOT projectable (`#10394`)
+
+`cache_projection.CACHE_FORBIDDEN_COLUMNS` is the second declared narrowing, and the reason it is a
+separate mechanism rather than another entry in the per-row set above is that it answers a different
+question: **is there a column the RECORD must hold and the CACHE must never materialise?**
+
+`story_arc` on `public.source` and `public.event` is that column. §9.1/D1 puts the S1 narrative in
+Postgres and forbids it in the graph — and the record IS the Postgres half — so the placement rows keep
+their **PRIMARY** class (the record does store it, and `#7968`'s two-way pin keeps reading that class)
+and state **`not projected`** beside it with the reason. The narrative's one home for readers is
+`public.session_narrative`, which `record_text.serve_from_record` reads and the projection never
+consults; nothing a reader sees is lost by the deny.
+
+The entry is keyed by TABLE because the statement is about the two stores, not about a row's provenance:
+a row-derived test (the shape `_EPISODIC_SOURCE_PROSE_COLUMNS` uses) would answer the wrong question
+here. The placement class came first and the projection could not express it, which is exactly how the
+RECORD → CACHE restore re-materialised the prose on every rebuild and made `#10017`'s graph-side purge
+non-durable. **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
+rent the RAM for the duration of the write and would have to run on every restore forever.
+
+Three consumers align on the same constant rather than each re-deciding it, and all three are pinned:
+
+* `cache_projection.projected_columns` / `_props_from_row` — the deny itself, on the COLUMN door and on
+  the open-set `props` tail (copied verbatim, so a legacy row could otherwise use the back door);
+* `record_reconcile` — a legacy cache node still carrying the prose partitions as **`graph_only`** (one
+  property the projection declines to write), never as `field_mismatches` against a record that is
+  correct;
+* `record_serve.parity_difference` — the same pair is **`explained_missing`**, never an
+  `unexplained_missing` projection gap. ⛔ Both of the latter two matter because each rule's only
+  sanctioned repair for a gap is a re-projection, i.e. an instruction to re-open this door.
+
+Pins: `tests/test_9555_narrative_cache_rebuild.py::test_the_record_restore_writes_no_story_arc_on_any_node`
+(the seam, both anchors, the tail, and a real restore over a cache that still holds a legacy copy —
+`sum(size(n.story_arc))` ends at 0), its sibling
+`test_the_reconciler_reads_a_pre_purge_cache_copy_as_graph_only_not_divergence`, the parity arm in
+`tests/test_record_serve.py`, and the third-category equality gate in `tests/test_cache_projection.py`
+which makes any OTHER silent stop-projection red.

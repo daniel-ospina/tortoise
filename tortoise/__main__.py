@@ -11072,6 +11072,29 @@ def _cmd_pack_validate(args) -> int:
     for rel in relations:
         verdict_counts[rel["write_verdict"]] = (
             verdict_counts.get(rel["write_verdict"], 0) + 1)
+    # #11001: the pack's DECLARED business hierarchy, resolved. Until #11001
+    # this list was shape-checked at load and then dropped, so a pack could
+    # declare a map of the business and no surface could report it — let alone
+    # produce it. Reported here (not enforced): a declared entry that binds no
+    # write path is the same warn-not-block state as a `predicate-not-in-
+    # allowlist` relation (#2766), so it does not move `ok`. It is named, which
+    # is the whole point — an entry that produces nothing must not be silent.
+    from tortoise.pack_hierarchy import (
+        declared_hierarchy,
+        hierarchy_diagnostics,
+    )
+    hierarchy = [
+        {
+            "pack": e.pack,
+            "path": e.path,
+            "predicate": e.predicate,
+            "from_kind": e.from_kind,
+            "to_kind": e.to_kind,
+            "write_path": e.write_path,
+        }
+        for e in declared_hierarchy(reg)
+    ]
+    hierarchy_issues = [dict(d) for d in hierarchy_diagnostics(reg)]
     n_errors = sum(len(v) for v in errors.values())
     n_unresolved = sum(len(v) for v in unresolved.values())
     # An unresolved reference is NOT clean: the pack loaded, but what it
@@ -11088,6 +11111,10 @@ def _cmd_pack_validate(args) -> int:
             "relation_verdicts": {
                 "counts": verdict_counts,
                 "relations": relations,
+            },
+            "hierarchies": {
+                "declared": hierarchy,
+                "unbound": hierarchy_issues,
             },
         }, indent=2))
     else:
@@ -11115,6 +11142,17 @@ def _cmd_pack_validate(args) -> int:
                 paths = f" [{', '.join(rel['write_paths'])}]" if rel["write_paths"] else ""
                 print(f"    {mark} {rel['write_verdict']:28s} "
                       f"{rel['pack']}.{rel['predicate']}{paths}")
+        if hierarchy:
+            print("  declared hierarchies (ontology.hierarchies, #11001):")
+            for h in sorted(hierarchy, key=lambda r: (r["pack"], r["from_kind"],
+                                                      r["to_kind"])):
+                print(f"    ✓ {h['pack']}: {h['from_kind']} → "
+                      f"{h['to_kind']} "
+                      f"[{h['predicate']} via {h['write_path']}]")
+        if hierarchy_issues:
+            print("  ⚠ declared hierarchies that produce NO edge:")
+            for d in hierarchy_issues:
+                print(f"    {d['pack']}: {d.get('path')!r} — {d['reason']}")
         if ok:
             print("✓ Clean — pack(s) validate")
         else:
