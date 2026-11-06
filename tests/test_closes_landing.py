@@ -5657,3 +5657,72 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
     assert keyword_types(indented_html) == {"html_block"}, indented_html
     assert cl.parse_closing_refs(indented_html) == [100], indented_html
     assert cl.parse_closing_refs(indented_html, None, strict=True) == [], indented_html
+
+
+def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm():
+    """Round-53, P1 — a FAIL-OPEN in the `indented_code` arm, restored to `origin/main`'s answer.
+
+    §4.4's protection ("an indented code block cannot interrupt a paragraph") was applied to a line
+    that ADDS a blockquote marker. A lazy continuation may DROP a marker; one that adds it opens a
+    NEW block, and a 4+-column line in that new block is indented code. Measured against
+    `MarkdownIt("commonmark")`:
+
+        `Notes` + `>     Closes #100`                      renderer `code_block` in a blockquote
+        `Notes` + `>     IN FLIGHT: 3.2c — branch fix/x`   renderer `code_block` in a blockquote
+        `## Satisfies` + `Notes` + `>     - [ ] criterion`  renderer `code_block` in a blockquote
+
+    `origin/main` blanks all three in this arm; the pre-fix head credited all three — a fail-open
+    the branch introduced against `main`, which this restores.
+
+    ⛔ WHAT THIS FIX IS NOT (measured, not assumed — fresh-context review of this very change).
+    The two `issue_process_lint` consumers do NOT see these bodies: `IN_FLIGHT_RE` and `CHECKBOX_RE`
+    both anchor at `^[ \\t]*` (`tools/issue_process_lint.py:653`, `:637`), so a line beginning `>`
+    never reaches either predicate — a 7,200-pair sweep through both consumers found ZERO deltas
+    between the pre-fix and fixed states. So the justification is arm-level parity with
+    `origin/main` (§4.4 is the branch's own rule and it was answering it wrongly), NOT a reachable
+    consumer false PASS. The two consumer assertions below are REGRESSION PINS of that contract,
+    not demonstrations of the fix: they hold at both states, and they exist so a future change that
+    starts crediting a quoted block through a reachable shape is caught.
+
+    The term is one character: the depth comparison is EQUALITY, not `>=`. A deeper quote is not
+    this paragraph's continuation. The shallower direction keeps its own terms elsewhere
+    (`_lazy_marker`, `_dropped_quote_is_lazy`), which the CONTROL below pins.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def token_types_carrying(body: str, needle: str) -> set[str]:
+        return {t.type for t in md.parse(body) if needle in getattr(t, "content", "")}
+
+    closes = "Notes\n>     Closes #100\n"
+    inflight = "Notes\n>     IN FLIGHT: 3.2c — branch fix/x\n"
+    checkbox = "## Satisfies\nNotes\n>     - [ ] criterion\n"
+
+    for body in (closes, inflight, checkbox):
+        assert "code_block" in {t.type for t in md.parse(body)}, body
+    assert token_types_carrying(closes, "Closes #100") == {"code_block"}, closes
+    assert token_types_carrying(inflight, "IN FLIGHT:") == {"code_block"}, inflight
+    assert token_types_carrying(checkbox, "- [ ]") == {"code_block"}, checkbox
+
+    # The arm must hide what the renderer puts in code — this is the assertion the fix turns.
+    for body in (closes, inflight, checkbox):
+        assert "#100" not in cl.strip_code(body, indented_code=True), body
+        assert "IN FLIGHT:" not in cl.strip_code(body, indented_code=True), body
+        assert "- [ ]" not in cl.strip_code(body, indented_code=True), body
+    assert cl.parse_closing_refs(closes, None, strict=True) == [], closes
+
+    # REGRESSION PINS (not discriminating for this fix — see the docstring): the two consumers
+    # that read this arm swallow nothing here, and must keep swallowing nothing.
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl  # noqa: PLC0415
+
+    assert ipl.in_flight_markers([inflight]) == [], inflight
+    assert ipl.has_satisfies_checklist([checkbox]) is False, checkbox
+
+    # CONTROL — a lazy line that DROPS the marker is still that paragraph's text (§4.4), so the
+    # equality must not be paid for by refusing every quote-depth change. The credit comes from
+    # `_lazy_marker` / `_dropped_quote_is_lazy`, NOT from this term (disabling this term alone
+    # leaves this body credited — measured), so this pins them, not it.
+    prose = "- > q\n  > 2.     Closes #100\n"
+    assert [t.type for t in md.parse(prose) if "Closes" in getattr(t, "content", "")] == ["inline"], prose
+    assert cl.parse_closing_refs(prose) == [100], prose
