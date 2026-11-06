@@ -320,9 +320,12 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
   `refs/remotes/origin/reconcile/10984`, with **no local branch and no worktree** (a checkout that holds
   this record's own branch or worktree names those too: the same self-matching hazard this document warns
   about for its own `git grep`, in the tracker surface). ⛔ **And its exit status is not a stable verdict**:
-  the `who_is_on.py` run behind it answers **exit 0** with a complete holder list when the fleet board is
-  readable, and **exit 2** with the holder surface **UNQUERIED** when it is not — both observed on this box,
-  an hour apart — so it never certifies that no lane holds `#10984`. An unmeasured
+  by contract it exits **0** for a complete answer and **2** — never 1 — when a surface could not be
+  queried (`AGENTS.md`, the `who-is-on` verb), so the same command answers differently as the fleet
+  board's readability changes. Both states were measured on this box while this record was written:
+  **exit 0 / `2 holder(s) across 2 surface(s)`** (the open PR and the remote branch), reported on this PR
+  at 22:07Z, and **exit 2 / holder surface UNQUERIED** at 22:36Z, from *both* the hub checkout and this
+  worktree. So it never certifies that no lane holds `#10984`. An unmeasured
   surface is not a free one, which is the read-vs-verdict rule §0/§7 exist for. Treat `#10984` as
   dispatchable **subject to a clean `collision_preflight.py 10984` run** at dispatch time. The sequence is: census leg (§1(b)) → rollup query + ground truth
   (§1(c)) → re-run (d). ⛔ **Its `config/v4-mechanisms.yml` row does not exist today** — the file carries
@@ -373,8 +376,9 @@ git grep -n apply_hierarchy_edges                          # 9 in the test file 
 git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
 grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # 0
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
-tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer; exit 2 = holder
-                                                          # surface UNQUERIED (never "nobody")
+tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
+                                                          # clean checkout); exit 2 = a surface could not
+                                                          # be queried — never read either as "nobody"
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
