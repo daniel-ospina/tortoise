@@ -69,6 +69,7 @@ import ast
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
 from html import unescape
@@ -3957,3 +3958,204 @@ class TestARenderedCodeElementGetsAMonoFace:
             "element a mono family inside the emitter, or declare the file in `ROOTS` "
             "and extend the ratchet, so the exclusion stays deliberate:\n  "
             + "\n  ".join(grew))
+
+
+class TestSiteIconAndSocialPreviewContract:
+    """Every page must carry a real icon and a real preview image (PR #11092 era).
+
+    THE DEFECT THIS PINS. Both live origins answered `/favicon.ico` with **404**,
+    and the two pages that matter most (`index.html` for premiselabs.co,
+    `product.html` for tortoise.premiselabs.co — the host that serves it at `/`)
+    declared **no icon at all and no `og:image`**: a browser showed a blank tab,
+    and a link pasted into Slack/X/WhatsApp rendered as a bare title with no
+    card. Five other pages did declare an icon — `/logo.png`, a 400x244 WORDMARK
+    — which a tab renders as a squashed bar, so "there is a `rel=icon`" was
+    never the property that mattered.
+
+    So the contract is stated in the three parts a human actually sees, and each
+    part is checked against the file on disk rather than against the tag:
+
+    1. **The icon resolves.** `/favicon.ico`, `/favicon.png` and
+       `/apple-touch-icon.png` exist in the served tree, the PNG is SQUARE and
+       at least 180px (the apple-touch size), and the ICO is a real icon
+       container holding an embedded PNG — not a renamed image.
+    2. **The preview resolves and is the size it claims.** `og:image` maps to a
+       file in the tree, and `og:image:width`/`height` match the JPEG's actual
+       SOF header. A card whose declared size disagrees with the bytes is
+       cropped by the scraper that trusts the tag.
+    3. **No page re-uses the wordmark as an icon.** `/logo.png` is a wordmark;
+       it may appear in page content, never in a `rel=icon`.
+
+    The dimensions are read with `struct`/`re` over the SVG-free formats we
+    ship (PNG IHDR, JPEG SOF, ICO directory) — stdlib only, no imaging library,
+    so the guard runs in the fast lane.
+    """
+
+    WEB = REPO_ROOT / "website"
+    ICON_ICO = "favicon.ico"
+    ICON_PNG = "favicon.png"
+    ICON_APPLE = "apple-touch-icon.png"
+    # Declared once: every page's preview image is 1200x630 (the 1.91:1 the
+    # scrapers crop to), and the two bespoke pages below ship their own.
+    OG_SIZE = (1200, 630)
+
+    # --- format readers -------------------------------------------------
+
+    @staticmethod
+    def _png_size(data: bytes) -> tuple[int, int]:
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+        return struct.unpack(">II", data[16:24])
+
+    @staticmethod
+    def _jpeg_size(data: bytes) -> tuple[int, int]:
+        assert data[:2] == b"\xff\xd8", "not a JPEG"
+        i = 2
+        while i < len(data) - 9:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2):  # SOF0/SOF1/SOF2 carry the frame size
+                height, width = struct.unpack(">HH", data[i + 5:i + 9])
+                return width, height
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            length = struct.unpack(">H", data[i + 2:i + 4])[0]
+            i += 2 + length
+        raise AssertionError("no SOF marker in JPEG")
+
+    @staticmethod
+    def _ico_sizes(data: bytes) -> list[tuple[int, int, bool]]:
+        """(width, height, payload_is_png) for each icon in an .ico container."""
+        reserved, kind, count = struct.unpack("<HHH", data[:6])
+        assert (reserved, kind) == (0, 1), "not an icon container"
+        out = []
+        for n in range(count):
+            base = 6 + 16 * n
+            w, h, _cols, _res, _planes, _bpp, length, offset = struct.unpack(
+                "<BBBBHHII", data[base:base + 16])
+            payload = data[offset:offset + length]
+            out.append((w or 256, h or 256, payload[:8] == b"\x89PNG\r\n\x1a\n"))
+        return out
+
+    # --- helpers --------------------------------------------------------
+
+    def _pages(self):
+        pages = sorted(self.WEB.glob("*.html"))
+        assert pages, "no pages found — the guard would pass vacuously"
+        return pages
+
+    @staticmethod
+    def _head(html: str) -> str:
+        start = html.index("<head>")
+        return html[start:html.index("</head>", start)]
+
+    @staticmethod
+    def _og(head: str, prop: str) -> str | None:
+        m = re.search(
+            rf'<meta property="og:{re.escape(prop)}" content="([^"]*)"', head)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _twitter(head: str, name: str) -> str | None:
+        m = re.search(
+            rf'<meta name="twitter:{re.escape(name)}" content="([^"]*)"', head)
+        return m.group(1) if m else None
+
+    # --- 1. the icon resolves ------------------------------------------
+
+    def test_every_page_declares_the_icon_trio(self):
+        """Two `rel=icon` rows (ICO + PNG) plus the apple-touch icon, every page."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            for href in (f"/{self.ICON_ICO}", f"/{self.ICON_PNG}", f"/{self.ICON_APPLE}"):
+                assert f'href="{href}"' in head, (
+                    f"{page.name} does not declare {href} — a page with no icon "
+                    "shows a blank tab and, on a share, no avatar")
+
+    def test_the_icon_files_exist_and_are_usable(self):
+        """Every icon a page points at exists, and has the shape the tag implies."""
+        for name in (self.ICON_ICO, self.ICON_PNG, self.ICON_APPLE):
+            assert (self.WEB / name).is_file(), f"website/{name} is missing — every page links it"
+
+        png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        assert png_w == png_h, f"favicon.png is {png_w}x{png_h} — a tab icon must be square"
+        assert png_w >= 180, (
+            f"favicon.png is {png_w}px; the apple-touch slot needs >=180 and a "
+            "smaller source is upscaled blurry by the OS")
+
+        apple_w, apple_h = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        assert (apple_w, apple_h) == (180, 180), (
+            f"apple-touch-icon.png is {apple_w}x{apple_h}; iOS reads 180x180")
+
+        icons = self._ico_sizes((self.WEB / self.ICON_ICO).read_bytes())
+        assert len(icons) >= 2, f"favicon.ico holds {len(icons)} image(s) — ship 32 and 48"
+        assert all(is_png for _, _, is_png in icons), (
+            "favicon.ico carries a raw DIB image — this repo's builder writes PNG "
+            "payloads, and a DIB rewrite means the container was replaced by hand")
+        assert {w for w, _, _ in icons} >= {32, 48}, (
+            f"favicon.ico sizes are {sorted(w for w, _, _ in icons)}; Windows uses 32 and 48")
+
+    def test_the_wordmark_is_never_used_as_an_icon(self):
+        """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            for tag in re.findall(r"<link[^>]*rel=\"(?:apple-touch-)?icon\"[^>]*>", head):
+                assert "/logo.png" not in tag, (
+                    f"{page.name} uses the wordmark as an icon: {tag}")
+
+    # --- 2. the preview resolves and is the size it claims ---------------
+
+    def test_every_page_declares_a_social_preview(self):
+        """`og:image` + its size + alt, and the Twitter mirror, on every page."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            image = self._og(head, "image")
+            assert image, f"{page.name} declares no og:image — a shared link renders no card"
+            assert self._og(head, "image:width") and self._og(head, "image:height"), (
+                f"{page.name} declares og:image without its dimensions; scrapers that "
+                "trust the tag then request an assumed size")
+            assert self._og(head, "image:alt"), (
+                f"{page.name} declares no og:image:alt — the card is unreadable to a "
+                "screen reader and to any client that suppresses remote images")
+            assert self._twitter(head, "card") == "summary_large_image", (
+                f"{page.name} twitter:card is {self._twitter(head, 'card')!r}; without "
+                "summary_large_image the 1200x630 image is cropped to a square thumbnail")
+            assert self._twitter(head, "image") == image, (
+                f"{page.name} twitter:image ({self._twitter(head, 'image')}) disagrees "
+                f"with og:image ({image}) — one of the two platforms gets the wrong picture")
+
+    def test_the_declared_preview_size_matches_the_file(self):
+        """The tag is a promise about bytes; check it against the bytes."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            image = self._og(head, "image")
+            declared_w = int(self._og(head, "image:width"))
+            declared_h = int(self._og(head, "image:height"))
+
+            path = self.WEB / image.split("//", 1)[-1].split("/", 1)[-1]
+            assert path.is_file(), (
+                f"{page.name} points og:image at {image}, which is not in the served "
+                f"tree (looked for {path}) — the scraper fetches a 404 and shows no card")
+
+            actual = self._jpeg_size(path.read_bytes())
+            assert (declared_w, declared_h) == actual, (
+                f"{page.name} declares {declared_w}x{declared_h} but {path.name} is "
+                f"{actual[0]}x{actual[1]}")
+
+    def test_the_shared_preview_is_the_agreed_size(self):
+        """1200x630 is the size the scrapers crop to; the shared image must be it."""
+        shared = self.WEB / "assets" / "og-tortoise.jpg"
+        assert shared.is_file(), "the shared preview image is missing"
+        assert self._jpeg_size(shared.read_bytes()) == self.OG_SIZE, (
+            f"assets/og-tortoise.jpg is not {self.OG_SIZE[0]}x{self.OG_SIZE[1]}")
+
+    def test_both_origins_root_pages_carry_the_preview(self):
+        """The two URLs that get pasted into a chat: premiselabs.co and the product root."""
+        for name, expected_origin in (("index.html", "https://premiselabs.co/"),
+                                      ("product.html", "https://tortoise.premiselabs.co/")):
+            head = self._head((self.WEB / name).read_text())
+            assert self._og(head, "image").startswith(expected_origin), (
+                f"{name} serves {expected_origin} but points its preview at "
+                f"{self._og(head, 'image')} — the card must come from the host it is on")
