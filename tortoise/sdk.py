@@ -7174,9 +7174,13 @@ def _key_seek_term(key: object) -> object:
     is refused downstream exactly as before.
 
     ⛔ THE TRIM SET IS THE ENGINE'S, NOT PYTHON'S — ``\\t\\n\\v\\f\\r`` and a
-    space, exactly, never bare ``str.strip()``. Measured on the embedded engine
+    space, exactly, never bare ``str.strip()``. Measured on the EMBEDDED engine
     (review finding, #10481): the index trims those SIX ASCII characters and no
-    others, so for a pad the engine does NOT trim — ``"\\u00a0PK\\u00a0"``
+    others. That measurement is re-taken as a SEPARATE pin on the engine CI
+    actually runs — ``falkordb-server:v4.20.6``, in
+    ``tests/test_indexes.py::test_docker_lane_key_index_serves_the_SDK_seek_term``
+    — which is why the two tests name one set each rather than one test standing
+    for both engines. So for a pad the engine does NOT trim — ``"\\u00a0PK\\u00a0"``
     (NBSP), ``\\u2003`` (em space), ``\\u3000`` (ideographic), ``\\x1f`` — the
     seek matches the RAW term verbatim. ``str.strip()`` uses Python's much
     wider ``str.isspace()`` class, so it would rewrite an NBSP pad to ``"PK"``
@@ -7264,7 +7268,8 @@ def _item_stored_key(item: dict) -> str | None:
     to its own spelling and two ``create_point(dedup=True, key="  PK  ")``
     calls now FOLD onto one carrier instead of minting two (#6110). The writer
     stores the padded value and resolves it by the trimmed term — i.e. this
-    simulation still models the writer as it is.    """
+    simulation still models the writer as it is.
+    """
     val = _item_supplied_key(item)
     return val if isinstance(val, str) and val else None
 
