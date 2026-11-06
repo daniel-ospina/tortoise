@@ -205,9 +205,16 @@ def run(uri: str, *, seed: int = SEED_NODES, keep: bool = False) -> dict:
         before_meter = measure_graph_storage(client, graph_name, samples=100, repeats=3)
 
         budget = max(1, before_nodes // BUDGET_RATIO)
+        # ⛔ NO FABRICATED CEILING. An earlier version passed
+        # `ceiling_bytes=used_memory // 2` purely to force the census to `PLAN`, which
+        # (a) invented the one number the reading is about and (b) hid that the ENTRY
+        # bound was gated by a BYTE verdict. The census now publishes the LICENCE on
+        # every verdict, so the natural state is used: `ceiling=None` means the
+        # instance's own `maxmemory`, and the node budget below is the enforced bound.
+        # `census_verdict` is reported so a reader sees which state armed the pass.
         assessment = assess(
             client, graph, graph_name,
-            ceiling_bytes=max(1, before_resident["used_memory"] // 2),
+            ceiling_bytes=None,
             parity_reports={
                 PARITY_INSTRUMENTS[POPULATION]: ParityReport(
                     instrument=PARITY_INSTRUMENTS[POPULATION],
@@ -268,7 +275,21 @@ def run(uri: str, *, seed: int = SEED_NODES, keep: bool = False) -> dict:
             "recall": {
                 "after_eviction": sum(1 for ok in recall.values() if ok),
                 "sampled": len(recall),
-                "all_served": all(recall.values()) if recall else None,
+                # ⛔ `all_served` is a COPY CHECK, not indicator (b), and it is NOT
+                # reported as an invariant. The stand-in record is built from EVERY
+                # seeded key, so `record.get(key) is not None` cannot be False: as a
+                # measurement of "the record served this after eviction" it is a
+                # tautology. Indicator (b) needs a REAL record leg (Postgres), which
+                # #10976 gates on #10593 + #7879 — both open. See `invariants`.
+                "all_served_THE_TAUTOLOGY_NOT_A_MEASUREMENT": (
+                    all(recall.values()) if recall else None
+                ),
+                "not_measured": (
+                    "indicator (b) — 'an evicted node is served from the record' — is "
+                    "NOT measured here: the stand-in leg holds every key by "
+                    "construction, so it cannot miss. A real reading needs the record "
+                    "(#10593 + #7879, both open)."
+                ),
             },
             "safety": {
                 "unservable_declared": len(unservable),
@@ -288,8 +309,10 @@ def run(uri: str, *, seed: int = SEED_NODES, keep: bool = False) -> dict:
                 "a_resident_fell": after_resident["used_memory"]
                                    < before_resident["used_memory"],
                 "a_nodes_at_or_below_budget": after_nodes <= budget,
-                "b_every_evicted_served": (all(recall.values()) if recall
-                                           else None),
+                # ⛔ `None`, NOT `True`. The `None`-not-fabricated-value discipline
+                # the rest of this PR applies: a tautology counted as a pass is a false
+                # PASS, which is the failure class the census exists to prevent.
+                "b_every_evicted_served": None,
                 "c_meter_reported": before_meter.ok and after_meter.ok,
                 "zero_unservable_evicted": not unservable_evicted,
                 "unservable_retained": unservable <= alive,

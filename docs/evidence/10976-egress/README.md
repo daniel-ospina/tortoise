@@ -19,8 +19,9 @@ touches a graph anyone reads.
 
 | | |
 |---|---|
-| **measures** | the EXECUTOR (`tortoise/cache_evictor.py`): does a licensed, record-gated pass bound the cache, and does it hold back every node the record cannot serve? |
-| **does NOT measure** | the record's readiness. `#10593` (hosted record writes rejected `22P02`) and `#7879` are **open**, which is why `tortoise/cache_eviction.py` answers `REFUSED` in production and why `record_leg` and `parity_report` in the output are labelled `stand-in` / `synthetic`. |
+| **measures** | the EXECUTOR (`tortoise/cache_evictor.py`): does a licensed, record-gated pass bound the cache, and does it hold back every node the probe refuses? Indicators **(a)** and **(c)**, plus the safety invariant. |
+| **does NOT measure** | indicator **(b)** — "an evicted node is served from the record". A stand-in leg that holds every key cannot miss, so there is nothing to measure until the record can serve. |
+| **also does not measure** | the record's readiness. `#10593` (hosted record writes rejected `22P02`) and `#7879` are **open**, which is why `tortoise/cache_eviction.py` answers `REFUSED` in production and why `record_leg` and `parity_report` in the output are labelled `stand-in` / `synthetic`. |
 
 A measurement that hid that would be the "false PASS" the census exists to prevent.
 
@@ -31,19 +32,26 @@ A measurement that hid that would be the "false PASS" the census exists to preve
 | | before | after |
 |---|---|---|
 | `:Point` turn-shaped nodes | **4,000** | **1,333** |
-| `INFO memory used_memory` (exact) | **4,691,328 B** (4.47 M) | **3,762,072 B** (3.59 M) |
-| `GRAPH.MEMORY USAGE` (sampling estimate, 100 samples × 3 repeats) | **1.0 MB** (range 1.0–1.0) | **0.0 MB** (range 0.0–0.0) |
+| `INFO memory used_memory` (exact) | **4,948,344 B** (4.72 M) | **3,944,920 B** (3.76 M) |
+| `GRAPH.MEMORY USAGE` (sampling estimate, 100 samples × 3 repeats) | **1.0 MB** | **0.0 MB** |
 
 - evicted **2,667** nodes toward a budget of **1,333** — the budget was **reached**
   (`verdict: EVICTED`, 6 passes).
+- **`census_verdict: CLEAN`** — and the pass ran anyway, which is the point. `CLEAN`
+  is the census's **byte** state ("within the declared byte ceiling"); the bound this
+  pass enforces is **entries**. Gating the licence on the byte verdict made the entry
+  bound unenforceable in exactly this population shape (many small turn nodes), so the
+  census now publishes `plan["evictable"]` on **every** verdict and the consumer applies
+  its own unit. No ceiling is fabricated to force a `PLAN`: `ceiling=None` is the
+  instance's own `maxmemory`.
 ⚠️ **This run is reproducible, and the byte figure moves between runs** — the graph is
-minted fresh each time and the allocator's baseline is not. A re-run recorded through
-`tools/worktree_report.py` measured **4,932,744 B → 3,929,320 B (−1,003,424 B, −20.3%)**
-for the same 4,000 → 1,333 nodes, all six invariants true and 0 unservable evicted. The
+minted fresh each time and the allocator's baseline is not. An earlier run measured
+**4,691,328 B → 3,762,072 B (−19.8%)** for the same 4,000 → 1,333 nodes, so the byte
+delta has been observed at **−19.8 % to −20.3 %**; the *node* count is exact each time. The
 *node* count is deterministic; the byte delta is a range, which is the same reason the
 enforced bound is entries and bytes are only reported.
 
-- **929,256 B / 2,667 nodes ≈ 348 B returned per evicted node** — *more* than the
+- **1,003,424 B / 2,667 nodes ≈ 376 B returned per evicted node** — *more* than the
   ~156 B/node the graph allocated on creation. That is allocator noise in the other
   direction, and it is exactly why one measured per-node figure must not be read as a
   cost: node deletion returns *some* memory, not a predictable amount, and the index
@@ -51,7 +59,7 @@ enforced bound is entries and bytes are only reported.
 
 ### Indicator (a) — the resident size actually falls
 
-✅ `used_memory` 4.69 MB → 3.76 MB (**−929,256 B, −19.8%**) while the node count fell by
+✅ `used_memory` 4.72 MB → 3.76 MB (**−1,003,424 B, −20.3%**) while the node count fell by
 two thirds. The byte drop is **sub-linear** in the node drop, and that is the measured
 finding behind the executor's choice of bound: creating 20,000 nodes on this container
 raised `used_memory` by 3,113,176 B; deleting **all** of them returned only 1,368,808 B
@@ -63,8 +71,14 @@ eviction cannot satisfy a byte ceiling.
 
 ### Indicator (b) — an evicted node is served from the record
 
-✅ **50 / 50** sampled evicted keys answered from the record leg with **no graph
-re-read** (`recall.all_served: true`).
+⛔ **NOT MEASURED HERE — `invariants.b_every_evicted_served` is `null`, not `true`.**
+The stand-in record leg is built from **every** seeded key, so a lookup in it cannot
+miss: reporting "50/50 served" as a green indicator would be a tautology dressed as a
+measurement — a false PASS, the exact failure class the census exists to prevent. The
+copy check is still recorded under its own honest key
+(`recall.all_served_THE_TAUTOLOGY_NOT_A_MEASUREMENT`) so a reader can see what was, and
+was not, established. A real reading needs the Postgres record, which `#10976` gates on
+`#10593` + `#7879` — both open.
 
 ### Indicator (c) — the meter reads the cache's real size
 

@@ -21,6 +21,9 @@ from tools import cache_evict
 
 MUTATING = ("DETACH DELETE", "DELETE", "CREATE", "MERGE", "SET ", "REMOVE", "DROP")
 
+#: The production seam loader, captured before any fixture stubs it.
+_REAL_LOAD_CALLABLE = cache_evict._load_callable
+
 
 class _Result:
     def __init__(self, rows=()):
@@ -227,13 +230,31 @@ def test_a_report_with_no_instrument_is_refused_rather_than_attributed(
 
 
 @pytest.mark.parametrize("flag", ["--selector", "--record-probe"])
-def test_a_seam_that_is_not_a_callable_is_a_usage_error(wired, flag):
-    """A defaulted seam would arm the delete path with the two decisions we refuse."""
-    extra = {"--selector": "m:f", "--record-probe": "m:g"}
-    extra[flag] = "no_colon_here"
-    code = cache_evict.main(_argv("--population", "turn", "--max-nodes", "10",
-                                  *[x for pair in extra.items() for x in pair]))
-    assert code == 1
+def test_a_seam_that_is_not_a_callable_is_a_usage_error(
+        wired, tmp_path, capsys, monkeypatch, flag):
+    """A defaulted seam would arm the delete path with the two decisions we refuse.
+
+    ⛔ This must reach the SEAM loader. An earlier version of this test omitted
+    `--parity-report`, so `main` returned at the parity guard long before
+    `_load_callable` ever ran and the gate had zero coverage — the same "asserts
+    nothing" defect the review flagged. So: a valid report, the REAL loader restored,
+    and the message asserted.
+    """
+    report = _parity_report(tmp_path, instrument="tools/turn_parity_census.py")
+    # Put the REAL seam loader back: the fixture stubs it so the other arms do not need
+    # importable callables, and leaving the stub in place is exactly what made this test
+    # assert nothing.
+    monkeypatch.setattr(cache_evict, "_load_callable", _REAL_LOAD_CALLABLE)
+    # Real importables for the OTHER seam, so the target seam is the one that fails.
+    seam = {"--selector": "os.path:join", "--record-probe": "os.path:join"}
+    seam[flag] = "no_colon_here"
+    with pytest.raises(SystemExit) as exit_info:
+        cache_evict.main(_argv(
+            "--population", "turn", "--max-nodes", "10", "--ceiling-bytes", "1",
+            "--parity-report", str(report), "--parity-graph", "tortoise",
+            *[x for pair in seam.items() for x in pair]))
+    assert exit_info.value.code == 1
+    assert "module:callable" in capsys.readouterr().err
 
 
 def test_an_unlicensed_population_is_refused_and_deletes_nothing(wired, tmp_path):

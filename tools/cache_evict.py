@@ -59,7 +59,10 @@ Exit codes (the census's own table, so a scheduler can key on ONE vocabulary):
                   a sweep of a licensed population, so nodes may have been deleted.
                   ⚠️ 0 and 2 are therefore the whole `deleted == 0` / `> 0` split —
                   a completed sweep never reports 0
-    3  REFUSED    nothing may go — the census refused, or the executor did
+    3  REFUSED    nothing may go AND nothing went — the census refused, or the
+                  executor did. ⚠️ A refusal that already DELETED nodes (a store
+                  fault mid-sweep) reports 2, never 3: `deleted > 0` outranks the
+                  verdict word, because an exit code is what a scheduler acts on
     4  UNBOUNDED  no ceiling anywhere; "over budget" cannot be evaluated
     1  usage      a flag, import or IO mistake
 
@@ -138,11 +141,23 @@ def _usage_error(message: str) -> int:
 
 
 def _emit(report: dict[str, Any], out: Path | None) -> None:
+    """Emit the report — and NEVER lose it to a failing `--out`.
+
+    ⛔ The report is the only record of what a destructive run did. An unwritable
+    `--out` must fall back to stdout rather than raise: unguarded it turned a REFUSED
+    (3) into a traceback and exit 1 — this file's USAGE code, telling the operator to
+    retry FLAGS — and on the executing arm it destroyed the record after the deletes
+    had already landed. Same reasoning as the executor's post-delete re-measure guard.
+    """
     text = json.dumps(report, indent=2, sort_keys=True, default=str)
-    if out is None:
-        print(text)
-    else:
-        out.write_text(text + "\n", encoding="utf-8")
+    if out is not None:
+        try:
+            out.write_text(text + "\n", encoding="utf-8")
+            return
+        except OSError as exc:
+            print(f"cache-evict: --out {out} could not be written ({exc}); "
+                  f"writing to stdout instead", file=sys.stderr)
+    print(text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -334,21 +349,19 @@ def main(argv: list[str] | None = None) -> int:
         "metric": report.metric(),
         "census": assessment.as_dict(),
     }
-    try:
-        _emit(body, args.out)
-    except OSError as exc:
-        # ⛔ THE REPORT IS THE ONLY RECORD OF WHAT WAS DELETED. A failing `--out` must
-        # not swallow it: falling back to stdout keeps the record (the same reasoning as
-        # the executor's post-delete re-measure guard), and the exit code still names
-        # what happened.
-        print(f"cache-evict: --out {args.out} could not be written ({exc}); "
-              f"writing to stdout instead", file=sys.stderr)
-        _emit(body, None)
+    _emit(body, args.out)
 
     # ⛔ EXIT 0 MEANS "NOTHING WAS EVICTED". A completed sweep that DID delete nodes
     # must not share it, or a scheduler cannot tell "nothing to do" from "deleted a
     # batch" — and the destructive half is the half it needs. An UNMEASURED after-count
     # is `None`, never a fabricated 0.
+    # ⛔ BEFORE the refusal arm: `evict`'s abort path returns `verdict="REFUSED"` WITH
+    # `deleted` populated (a store fault mid-sweep, after nodes were committed). Reading
+    # that as exit 3 — "nothing may go" — records "nothing happened" for a destructive
+    # run whose after-state is UNKNOWN, which is the same conflation exit 0 was fixed
+    # for. Nodes went, so the code must say so.
+    if report.deleted:
+        return CACHE_EVICTION_EXIT_PLAN
     if report.verdict == "REFUSED":
         return CACHE_EVICTION_EXIT_REFUSED
     if report.verdict == "CLEAN":

@@ -832,6 +832,40 @@ def assess(
 
     plan: dict[str, Any] = {}
     eligible = [c for c in classes if c.eligible]
+    # ⛔ THE LICENCE IS EMITTED FOR EVERY VERDICT, NOT ONLY FOR `PLAN`.
+    #
+    # `over_ceiling` is a BYTE test (`resident_bytes > bound_bytes`), and this module's
+    # byte instrument is the sampling estimate that is BLIND to the HNSW index (#5331).
+    # A consumer that enforces an ENTRY bound (`TORTOISE_CACHE_MAX_NODES`) therefore
+    # had its licence gated by a different unit: a cache 50x over its node budget but
+    # under its byte ceiling answered `CLEAN`, the licence was `{}`, and the executor
+    # refused — so the entry bound this exists to enforce was silently unenforceable in
+    # exactly the population shape #10976 describes (many small turn nodes). Measured
+    # symptom: 1,000,000 nodes against a declared budget of 20,000 -> verdict REFUSED,
+    # `deleted: 0`.
+    #
+    # ⇒ The two answers are SEPARATED and both published: `verdict` is the BYTE state
+    # ("is this cache over its declared byte ceiling?"), and `plan["evictable"]` is the
+    # LICENCE ("which populations are proven record-served, and how many nodes each
+    # proof covers"). A consumer enforcing a node budget reads the licence and its own
+    # budget; it must not infer a licence from the byte verdict.
+    #
+    # ⚠️ This does NOT widen what may be swept: every gate a consumer applies is
+    # unchanged, and a `REFUSED` verdict (nothing proven) still yields an EMPTY
+    # `evictable`, so the refusal is as sharp as it was.
+    licence = [
+        # ⛔ `population_name`, NEVER a fallback to `label`. A fallback re-merges the
+        # two namespaces this PR separated: a label row and a population row that share
+        # a word would collapse into ONE licence key, which is exactly the confusion the
+        # display form exists to prevent. Unreachable today (only `eligible` rows reach
+        # here, and label rows are built `eligible=False`), but the day a label becomes
+        # provable the fallback would silently re-merge them. `label` is emitted beside
+        # it for display, so the fallback buys nothing.
+        {"population": c.population_name, "nodes": c.nodes,
+         "instrument": c.instrument, "label": c.label}
+        for c in eligible
+    ]
+    not_evictable = [c.label for c in classes if not c.eligible]
     if state.bound_bytes is None:
         # ⛔ The one state that most needs naming must not share the "bounded and
         # fine" exit. A monitor keyed on exit 0 would otherwise conclude this cache
@@ -842,7 +876,7 @@ def assess(
         # for this verdict for the same reason.
         plan = {
             "evictable": [],
-            "not_evictable": [c.label for c in classes if not c.eligible],
+            "not_evictable": not_evictable,
             "resident_bytes": state.resident_bytes,
             "bound_bytes": None,
             "⚠️ no bound": (
@@ -852,34 +886,43 @@ def assess(
         }
     elif not state.over_ceiling:
         verdict = "CLEAN"
+        # The cache is within its BYTE ceiling — but a consumer enforcing an ENTRY
+        # budget still needs the licence, because those two units are not the same
+        # question and the byte instrument cannot see the answer to the other one.
+        plan = {
+            "evictable": licence,
+            "not_evictable": not_evictable,
+            "resident_bytes": state.resident_bytes,
+            "bound_bytes": state.bound_bytes,
+            "over_by_bytes": 0,
+            "⚠️ licence vs byte verdict": (
+                "`CLEAN` is the BYTE state only. `plan['evictable']` is the licence, "
+                "and a consumer enforcing a NODE budget may still have work to do."
+            ),
+        }
     elif not eligible:
         # ⛔ THE REFUSAL. Over the bound and NOTHING is proven — so nothing may go.
         # This is the correct answer today: #10593 + #7879 are open, so the record
         # cannot serve, and a sweep would destroy the only copy of a node.
         verdict = "REFUSED"
+        plan = {
+            "evictable": [],
+            "not_evictable": not_evictable,
+            "resident_bytes": state.resident_bytes,
+            "bound_bytes": state.bound_bytes,
+            "over_by_bytes": max(0, state.resident_bytes - (state.bound_bytes or 0)),
+        }
     else:
         # A partial plan is safe: it lists ONLY the proven populations, so evicting
         # exactly them still satisfies "0 evictions of a node the record cannot
         # serve". The unproven classes stay listed in `problems` with their reason.
         verdict = "PLAN"
         plan = {
-            "evictable": [
-                # ⛔ `population_name`, NEVER a fallback to `label`. A fallback
-                # re-merges the two namespaces this PR separated: a label row and a
-                # population row that share a word would collapse into ONE licence key,
-                # which is exactly the confusion the display form exists to prevent.
-                # Unreachable today (only `eligible` rows reach here, and label rows are
-                # built `eligible=False`), but the day a label becomes provable the
-                # fallback would silently re-merge them. `label` is emitted beside it
-                # for display, so the fallback buys nothing.
-                {"population": c.population_name, "nodes": c.nodes,
-                 "instrument": c.instrument, "label": c.label}
-                for c in eligible
-            ],
+            "evictable": licence,
             "resident_bytes": state.resident_bytes,
             "bound_bytes": state.bound_bytes,
             "over_by_bytes": max(0, state.resident_bytes - (state.bound_bytes or 0)),
-            "not_evictable": [c.label for c in classes if not c.eligible],
+            "not_evictable": not_evictable,
             "mechanism": "application-side sweep",
             "⚠️ population vs label": (
                 "a proven population is a SUBSET of a label (turns are `:Point` nodes "

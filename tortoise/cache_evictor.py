@@ -553,11 +553,26 @@ def evict(
     # UNBOUNDED, so "not refused" would ARM the DELETE path for a verdict this module
     # has never heard of (a typo, a future census verdict) whenever the caller also
     # supplied a populated plan. The licence is issued by exactly one verdict word.
-    if assessment.verdict != "PLAN":
+    # ⛔ ALLOW-LIST, AND IT ADMITS TWO WORDS — `PLAN` AND `CLEAN`.
+    #
+    # The census's `verdict` is its BYTE state: `CLEAN` means "within the declared byte
+    # ceiling", NOT "there is nothing to do". This pass enforces an ENTRY budget, and
+    # the two units are not the same question — a cache 50x over its node budget but
+    # under its byte ceiling answers `CLEAN` (measured: 1,000,000 nodes against a
+    # declared budget of 20,000). Refusing on `CLEAN` made the enforced bound
+    # unreachable in exactly the population shape #10976 describes (many small turn
+    # nodes, which is why the byte figure lags the node count).
+    #
+    # ⛔ THIS WIDENS NOTHING. The licence is what gates the sweep and it is read from
+    # `plan["evictable"]` by gate 2 below, unchanged; `REFUSED` and `UNBOUNDED` still
+    # yield an EMPTY `evictable`, and every other word — a typo, a future census verdict
+    # this module has never heard of — still refuses, because this is an allow-list.
+    if assessment.verdict not in ("PLAN", "CLEAN"):
         return _refuse(
-            f"census verdict {assessment.verdict!r} — only a PLAN licenses a sweep. "
-            f"The record is not proven to serve, so nothing may go (#10976: 'A pass "
-            f"that cannot answer that must refuse, never sweep')",
+            f"census verdict {assessment.verdict!r} — only a PLAN or a CLEAN census "
+            f"can license a sweep, and neither licenses one without a proven "
+            f"population. The record is not proven to serve, so nothing may go "
+            f"(#10976: 'A pass that cannot answer that must refuse, never sweep')",
             nbytes=assessment.state.resident_bytes,
         )
 
@@ -729,6 +744,18 @@ def evict(
                     held_record_ids.add(candidate.node_id)
                     held_record.append(candidate)
                 continue
+            # ⛔ A NODE THAT BECOMES SERVABLE LEAVES THE HELD LIST. Without this a
+            # candidate held in pass N and reported servable in pass N+1 is DELETED
+            # while still listed in `skipped_record_cannot_serve`, so `metric()`'s
+            # `held_record_cannot_serve` over-reports and any monitor that intersects
+            # `deleted` with `skipped_record_cannot_serve` (the probe's own
+            # `unservable_evicted` pattern) raises a false alarm on the one invariant
+            # that matters most.
+            if candidate.node_id in held_record_ids:
+                held_record_ids.discard(candidate.node_id)
+                held_record[:] = [
+                    c for c in held_record if c.node_id != candidate.node_id
+                ]
             local.append(candidate)
             local_ids.add(candidate.node_id)
 
@@ -787,7 +814,25 @@ def evict(
             # answer is "a reader is holding these", which no population query reveals.
             stop_reason = "leased"
             break
-        removed, survivors = _delete_nodes(graph, final, key_prop)
+        try:
+            removed, survivors = _delete_nodes(graph, final, key_prop)
+        except Exception as exc:  # noqa: BLE001 — any store fault aborts, never raises
+            # ⛔ THE PASS MAY ALREADY HAVE DELETED NODES. Unguarded, a fault here
+            # escaped `evict()` after earlier passes had committed deletes, so the
+            # caller lost the entire report — no `deleted`, no `nodes_after` — and the
+            # CLI turned it into a traceback (exit 1 = the USAGE code). This is the
+            # same class as the post-delete re-measure guard, one statement earlier.
+            # The abort path returns the record (`nodes_after=None`: UNMEASURED,
+            # never a fabricated value), naming the deletions already made.
+            delete_unverified = True
+            after_measured = False
+            bytes_measured = False
+            abort_reason = (
+                f"the delete statement raised ({type(exc).__name__}: {exc}) after "
+                f"{len(deleted)} node(s) were already removed by this pass — the "
+                f"after-state is UNMEASURED"
+            )
+            break
         if removed != len(final):
             delete_unverified = True
         # ⛔ Count from the STATEMENT's own number. `survivors` is the complement of a

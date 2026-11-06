@@ -286,6 +286,29 @@ def test_a_non_clean_verdict_never_proves(verdict):
     assert result.verdict == "REFUSED"
 
 
+def test_a_clean_byte_verdict_still_publishes_the_licence():
+    """⛔ The negative case: `CLEAN` with a PROVEN population must carry the licence.
+
+    This is the state that made the entry bound unenforceable — under the byte ceiling,
+    so `CLEAN`, but the entry budget a consumer enforces may be exceeded by orders of
+    magnitude (many small turn nodes, the shape #10976 describes).
+    """
+    g = _FakeGraph({"Point": 10})
+    c = _FakeClient(used=500, maxmemory=10_000)
+    report = ParityReport(
+        instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+        measured_nodes=10, total_nodes=10, graph_name="tortoise",
+    )
+
+    result = assess(c, g, "tortoise", ceiling_bytes=1_000,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: report})
+
+    assert result.verdict == "CLEAN", result.problems
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
+    assert result.plan["over_by_bytes"] == 0
+    assert g.mutated == []
+
+
 def test_under_the_bound_is_clean_and_proposes_nothing():
     g = _FakeGraph({"Point": 10})
     c = _FakeClient(used=500, maxmemory=10_000)
@@ -293,7 +316,15 @@ def test_under_the_bound_is_clean_and_proposes_nothing():
     result = assess(c, g, "tortoise", ceiling_bytes=1_000)
 
     assert result.verdict == "CLEAN"
-    assert result.plan == {}
+    # ⛔ `CLEAN` IS THE BYTE STATE, NOT "NOTHING TO DO", and the plan now says so on
+    # every verdict. A consumer enforcing an ENTRY budget cannot be gated by the byte
+    # verdict: a cache far over its node budget but under its byte ceiling answered
+    # CLEAN with `plan == {}`, so the entry bound was unenforceable (measured: 1,000,000
+    # nodes against a 20,000-node budget -> REFUSED, 0 deleted). This fake has no proven
+    # population, so the licence is EMPTY and the refusal is as sharp as it was.
+    assert result.plan["evictable"] == []
+    assert result.plan["over_by_bytes"] == 0
+    assert "not_evictable" in result.plan
     assert g.mutated == []
 
 
