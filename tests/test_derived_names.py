@@ -1056,6 +1056,7 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
         'str(f"evict_{os.urandom(6).hex()}")',            # wrapper call
         '_mk(f"evict_{os.urandom(6).hex()}")',            # helper call
         '"evict_%s" % os.urandom(6).hex()',               # percent-format
+        '"evict_{}".format(os.urandom(6).hex())',          # str.format
     ):
         site.write_text(
             "def test_evictor_lane():"
@@ -1152,6 +1153,27 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
     )
     assert not _raw_detach_violations(root=tmp_path), (
         f"a handle with no readable literal was reported: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # DECLARED fail-open: a name whose LITERAL is one hop away inside an
+    # f-string field (`p = "evict_"; f"{p}{hex}"`) — the name begins in a
+    # value, so its prefix is not decidable without constant propagation, and
+    # the arm must not guess one (a guess here would also false-block every
+    # `f"{owned}{hex}"`). Pinned so the fail-open stays deliberate.
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    p = \"evict_\""
+        "\n    name = f\"{p}{os.urandom(6).hex()}\""
+        "\n    _journal_append(name)"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        f"a variable-prefix name was reported as a violation: "
         f"{_raw_detach_violations(root=tmp_path)}")
 
     # PROSE is not a site in either direction (#11182): a comment showing an
