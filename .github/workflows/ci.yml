@@ -518,6 +518,15 @@ jobs:
                   # skips the job (skipped, not failed). Same #3501 rationale as
                   # the auth-suite entries under `website` above.
                   isfile("tests/e2e/test_dashboard_onboarding.py"),
+                  # #11057: the browser-free half of the coming-soon dialog's
+                  # "which tile did that actually open" observation is its own
+                  # importable module (`tile_key_for_dialog_name`), for the same
+                  # reason as `preview_preflight.py` above and the same #4221
+                  # inversion if it is omitted: a PR touching ONLY this module
+                  # would leave the job `skipped` (reported as Success) while
+                  # never running the spec that consumes it,
+                  # `test_dialog_tile_key_reads_the_opened_dialog_not_the_requested_key`.
+                  isfile("tests/e2e/dialog_tile_key.py"),
                   # #2809: the identity spec is wired into the job now, and it
                   # spawns its own Supabase-bound preview — so a PR touching
                   # ONLY the spec, or only the mock it depends on, must run the
