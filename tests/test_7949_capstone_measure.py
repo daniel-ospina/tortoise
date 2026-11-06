@@ -9799,7 +9799,7 @@ def test_gate_drops_total_is_a_count_or_a_refusal(value, tmp_path, capsys):
     `gate_drops_total` and renders it into the scored E1 note as
     `reports value_gate drops <N> of <M> Objects with its positive controls alive`
     — a mechanism claim nothing measured. The ceiling is the same run's `objects`
-    (`e1_gate_drops.py:84` writes `len(drops)` over a dict keyed by object name).
+    (`e1_gate_drops.py`'s `measure` writes `drops_total` as `len(drops)` over a dict keyed by object name).
 
     Non-vacuity, measured rather than assumed: ALL NINE arms exit 0 at this head's
     predecessor and exit 2 here. The two JSON-literal arms are `true`/`null` and NOT
@@ -9882,8 +9882,8 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
 
     `_count(..., ceiling=gate_objects)` refuses a total above the 61-Object
     population, which is necessary and not sufficient: the SAME record carries the
-    drop census itself (`e1_gate_drops.py:83` writes `value_gate_drops` as a
-    name-keyed dict, `:84` writes `len(drops)` beside it) and nothing read it — so
+    drop census itself (`e1_gate_drops.py`'s `measure` writes `value_gate_drops` as a
+    name-keyed dict and `drops_total` as `len(drops)` beside it) and nothing read it — so
     the field was a trusted integer anywhere inside `[0, objects]`.
 
     Measured at the pre-fix head, on a copied bundle whose shipped pair is
@@ -10076,7 +10076,8 @@ def test_a_forged_drop_census_cannot_size_its_own_ceiling(tmp_path, capsys):
     longer vouch for itself: a census larger than `objects`; a key that is not one of
     the run's `object_names`; a non-string `rule_id`; and
     `drops_among_bare_definite` — the record's second statement of the same drops,
-    written unconditionally by the producer and read by nothing before this.
+    written by the producer on every run whose Objects census is non-empty and
+    read by nothing before this.
     """
     repo = _bundle(tmp_path / "forged")
     path = repo / "docs/evidence/9889/e1-gate-drops.json"

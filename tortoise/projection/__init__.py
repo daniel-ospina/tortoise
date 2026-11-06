@@ -11234,6 +11234,15 @@ class FalkorProjection(
         # "what does the catalog say right now" (a READ-path measurement). They
         # can disagree in the fail-open lane and that is correct.
         self._vector_indexed_labels: set[str] | None = None
+        # #11087 (S4): the OTHER half of that pair — the labels the vector leg
+        # SERVES, retained so the store can state the contract instead of only
+        # its shortfall. Same three-valued semantics as `_vector_indexed_labels`
+        # and assigned on the same successful read, so the pair can never be
+        # half-populated: None means NOT MEASURED (gate skipped or read failed),
+        # never "serves nothing". Read BOTH halves to answer "is this graph fully
+        # indexed for what it serves" — an empty `_vector_indexed_labels` with a
+        # populated served set is a fully-unindexed store, not an unknown one.
+        self._vector_index_served_labels: set[str] | None = None
         # #5434: the rows `_schema_is_current()` read, published so the
         # vector-index inventory can reuse them instead of issuing a second
         # `CALL db.indexes()`. Initialised HERE and read via `getattr` at the
@@ -18555,14 +18564,58 @@ class FalkorProjection(
 
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
-        index on this engine, and report the gap. (#4997)
+        index on this engine, and REPORT THE PAIR — then the gap. (#4997, #11087)
 
-        Sets ``self._vector_indexed_labels`` to the INTERSECTION of the served
-        label set with the engine's VECTOR-indexed labels, or to ``None`` when
-        the set could not be measured. Never raises and never writes:
-        ``_ensure_indexes`` is reached unguarded from ``FalkorProjection.__init__``
-        as well as from two ``hosted_api`` per-request paths, so a hostile or
-        unavailable catalog must not break store construction.
+        #11087 (S4): the contract is reported POSITIVELY. This method retains
+        the served set (``self._vector_index_served_labels``) beside the measured
+        indexed set (``self._vector_indexed_labels``) and emits the pair at INFO
+        on EVERY successful read, whether or not there is a gap. Before #11087
+        the report was gated on ``if gap:``, so "setup reports what it serves and
+        what it indexes" held only in the DEFICIENT case: an operator asking "is
+        this store fully indexed for what it serves?" got an answer only when
+        the answer was "no". A report that can only name failures is unusable at
+        the call site. The INFO is deliberately NOT latched (the issue's scope
+        deduplicates the WARNING only): a latched INFO could never tell an
+        operator that a previously-gapped store has become fully indexed, which
+        is the whole point of reporting the pair.
+
+        Sets ``self._vector_index_served_labels`` to the declared served set and
+        ``self._vector_indexed_labels`` to its INTERSECTION with the engine's
+        VECTOR-indexed labels. The THREE lanes, stated exactly, because a pair is
+        only readable if a caller can tell them apart:
+
+        * **measured** — ``db.indexes()`` RETURNED rows: both halves are SET.
+          That includes the deliberately-empty case: a catalogue with no VECTOR
+          index anywhere gives ``indexes=set()``, which means "measured, and
+          nothing is indexed" — never "unknown".
+        * **NOT MEASURED** — the catalogue could not be read (the call raised, or
+          it answered ``None``): BOTH halves are ``None``, so the pair is never
+          half-populated. ``None`` never means "serves nothing".
+        * **NOT APPLICABLE** — the gate-skip lane (an embedded engine, or a <4.x
+          engine with no index API) returns BEFORE touching either half, so the
+          pair is left exactly as it was. That is safe rather than sloppy only
+          because both gates read init-immutable attributes (``_is_embedded``,
+          ``_falkordb_version``): a projection that skips here never measured
+          earlier, so there is no stale pair for it to leave behind.
+
+        ⛔ Malformed ROWS are a separate, PRE-EXISTING lane and are **NOT**
+        "not measured": rows are parsed PER ROW and an unparseable row is
+        skipped (#4997, pinned by ``test_malformed_rows_are_skipped_per_row``).
+        A catalogue that is RETURNED but parses to nothing therefore reports
+        ``serves=<every declared label> indexes=[]`` — "measured and empty" —
+        and warns on the gap. That is the pre-existing half's semantic and
+        #11087 does not change it; what #11087 changes is that this lane is now
+        REPORTED POSITIVELY too, instead of only warned about. Separating
+        "returned but unparseable" from "measured empty" would be a behaviour
+        change to the pinned half, deliberately not made here.
+
+        Never raises and never writes: ``_ensure_indexes`` is reached unguarded
+        from ``FalkorProjection.__init__`` as well as from two ``hosted_api``
+        per-request paths, so a hostile or unavailable catalog must not break
+        store construction.
+
+        ⛔ The served set is READ from ``security.ENTITY_TYPE_LABELS`` (the one
+        declaration, #4997); this method introduces no second label vocabulary.
 
         ⛔ This does NOT create an index and does NOT assert that the served set
         and the indexed set SHOULD be equal. Whether Object/Event/Source vectors
@@ -18609,9 +18662,12 @@ class FalkorProjection(
                 # NOT the same thing as [] — see the attribute's docstring.
                 log.debug(
                     "#4997: vector-index inventory unavailable (empty response) "
-                    "— _vector_indexed_labels stays None"
+                    "— the serves/indexes pair stays None"
                 )
                 self._vector_indexed_labels = None
+                # #11087: BOTH halves of the pair are None — the pair is never
+                # half-populated, so `served is None` alone means "not measured".
+                self._vector_index_served_labels = None
                 return
 
             served = set(ENTITY_TYPE_LABELS.values())
@@ -18632,11 +18688,36 @@ class FalkorProjection(
                     # A malformed row must not abort the scan — skip it.
                     continue
 
+            self._vector_index_served_labels = served
             self._vector_indexed_labels = measured & served
+            # #11087: sort INSIDE the guard. `sorted()` runs the labels'
+            # `__lt__`, and `measured & served` does NOT sanitise the type:
+            # when the catalogue is the shorter operand CPython keeps ITS
+            # objects, so an exotic label (a `str` subclass without a total
+            # order) reaches `sorted()` here. Outside this guard that would
+            # raise out of a method whose contract is "never raises" — the
+            # store would fail to construct. A sort failure is a read failure:
+            # both halves go None (below) and setup stays healthy.
+            serves_reported = sorted(served)
+            indexes_reported = sorted(self._vector_indexed_labels)
         except Exception as e:  # fail-open: never break store setup
             log.debug("#4997: vector-index inventory read failed: %s", e)
             self._vector_indexed_labels = None
+            self._vector_index_served_labels = None
             return
+
+        # #11087 (S4): REPORT THE PAIR, unconditionally. This is the positive
+        # half the store could not state before — "these labels are served, and
+        # THESE of them are indexed" — emitted on every measured setup so a
+        # fully-indexed store answers the operator too, not only a deficient
+        # one. Deliberately unlatched (see the docstring): the latch covers the
+        # WARNING, never the report.
+        log.info(
+            "#11087: vector contract on %s: serves=%s indexes=%s",
+            self._graph_name,
+            serves_reported,
+            indexes_reported,
+        )
 
         gap = served - self._vector_indexed_labels
         if gap:
@@ -18651,7 +18732,7 @@ class FalkorProjection(
                     "governs; indexing those labels is NOT done here.",
                     self._graph_name,
                     sorted(gap),
-                    sorted(self._vector_indexed_labels) or "none",
+                    indexes_reported or "none",
                 )
 
     def _get_falkordb_version(self):
@@ -19382,14 +19463,16 @@ class FalkorProjection(
           * the VECTOR index on ``Point.embedding`` ONLY, resolved or created by
             ``_ensure_vector_index_api``, which then MEASURES the engine's
             vector-index inventory against the labels the vector leg SERVES
-            (``ENTITY_TYPE_LABELS.values()``) and reports the gap (#4997).
+            (``ENTITY_TYPE_LABELS.values()``), REPORTS THE PAIR at INFO on every
+            setup and warns on the gap (#4997, #11087).
 
         ⛔ The vector index stays ``Point``-only ON PURPOSE. Whether the other
         served labels (``Object`` / ``Event`` / ``Subject`` / ``Source``) should
         carry one is the owner's OPEN decision V1
         (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c / §14.3, raised
-        2026-09-24) — this store MAKES THE GAP A FACT (``_vector_indexed_labels``;
-        every served label absent from that set full-scans) and never spends that
+        2026-09-24) — this store MAKES THE RELATIONSHIP A FACT
+        (``_vector_index_served_labels`` vs ``_vector_indexed_labels``; every
+        served label absent from the latter full-scans) and never spends that
         decision. See ``_record_vector_index_inventory``.
 
         Wraps CREATE INDEX in try/except because FalkorDB raises
