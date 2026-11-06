@@ -30,8 +30,9 @@ measurement, not a reading of the log:
 at all — it fails first with `ProjectRefNotLinkedError` on BOTH the old and the new config, so it
 cannot discriminate and was the wrong command to cite here.
 
-The second arm fails only for want of the access token that CI supplies; the config gate — the
-thing that was blocking every apply — is gone. So the pin, not a config rewrite, is the minimal
+The second arm fails at its DB-inspect leg (the quoted `StatusDbInspectError`), not for want of a
+token; the config gate — the thing that was blocking every apply — is gone. So the pin, not a
+config rewrite, is the minimal
 root-cause repair: a production deploy path must not depend on an unpinned MAJOR of a tool whose
 major versions change the config schema this repo commits.
 
@@ -101,7 +102,11 @@ def _setup_cli_block(workflow_text: str) -> list[str]:
     """
     lines = workflow_text.splitlines()
     uses_idx = next(
-        (i for i, line in enumerate(lines) if "supabase/setup-cli" in line and "uses" in line),
+        (
+            i
+            for i, line in enumerate(lines)
+            if re.match(r"^\s*(?:-\s*)?uses:\s*['\"]?supabase/setup-cli", line)
+        ),
         None,
     )
     assert uses_idx is not None, "no `uses: supabase/setup-cli` line found — the migration door moved"
@@ -127,6 +132,38 @@ def _literal_version_lines(workflow_text: str) -> list[str]:
         for line in _setup_cli_block(workflow_text)
         if (match := re.match(r"^\s*version:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$", line))
     ]
+
+
+def _structural_duplicate_keys(text: str) -> list[str]:
+    """Every duplicated mapping key in the document, found STRUCTURALLY, not by text matching.
+
+    ⛔ A text scan for `with:` cannot decide this: YAML lets the same key be spelled `"with"`,
+    `'with'`, or `with :`, and review demonstrated all three hiding a second pin
+    (`"with": {version: 3.0.0}` plus a literal `version: 2.122.1`) while a regex-based refusal
+    reported one `with:` and stayed green. `yaml.compose()` sees the mapping, so the spelling is
+    irrelevant — and the same arm then covers `uses:` and `<<` at every level for free.
+    """
+
+    def walk(node: object, path: str = "<root>") -> list[str]:
+        duplicates: list[str] = []
+        if isinstance(node, yaml.MappingNode):
+            seen: dict[str, int] = {}
+            for key_node, value_node in node.value:
+                key = key_node.value if isinstance(key_node, yaml.ScalarNode) else repr(key_node)
+                if key in seen:
+                    duplicates.append(
+                        f"{path}: duplicate key {key!r} "
+                        f"(lines {seen[key] + 1} and {key_node.start_mark.line + 1})"
+                    )
+                else:
+                    seen[key] = key_node.start_mark.line
+                duplicates += walk(value_node, f"{path}.{key}")
+        elif isinstance(node, yaml.SequenceNode):
+            for index, item in enumerate(node.value):
+                duplicates += walk(item, f"{path}[{index}]")
+        return duplicates
+
+    return walk(yaml.compose(text))
 
 
 def _requested_version(workflow_text: str) -> str:
@@ -155,16 +192,13 @@ def _requested_version(workflow_text: str) -> str:
         "to remove"
     )
     resolved = str(version).strip()
-    with_keys = [
-        line
-        for line in _setup_cli_block(workflow_text)
-        if re.match(r"^\s*(?:-\s*)?with:\s*", line)
-    ]
-    assert len(with_keys) == 1, (
-        f"the setup-cli step declares `with:` {len(with_keys)} times. A duplicate key's tie-break is "
-        "not measured against GitHub's parser (PyYAML takes the LAST value), so a flow mapping "
-        "carrying one pin and a literal line carrying another could have this reader assert a pin "
-        "CI does not install. Declare `with:` once."
+    duplicates = _structural_duplicate_keys(workflow_text)
+    assert not duplicates, (
+        "the workflow declares a duplicate mapping key: "
+        + "; ".join(duplicates)
+        + ". A duplicate key's tie-break is not measured against GitHub's parser (PyYAML takes the "
+        "last value), so a second pin could be the one CI installs while this reader asserts the "
+        "first. Declare each key once."
     )
     literals = _literal_version_lines(workflow_text)
     assert literals, (
@@ -345,6 +379,12 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     search while the setup-cli step carried none, and a duplicated `version:` key left two values
     where the reader takes one and GitHub's tie-break is unmeasured. "Some matching line exists in
     the file" was never the claim the guard needed to make.
+
+    ⛔ The mutations below rewrite the CANONICAL step shape (`- uses:` then `with:`). If the real
+    workflow is ever reordered (e.g. `with:` before `uses:`), this arm fails LOUDLY with "mutation
+    did not apply" rather than quietly proving nothing — fail-closed on purpose. The live-tree arm
+    still guards the reordered shape, so the reorder cannot slip through unguarded; the loud
+    failure is the signal to update these mutations.
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
@@ -377,7 +417,9 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         "step-scoped on purpose: a FILE-wide search is satisfied by this workflow's own prose, "
         "which quotes `version: latest` while explaining #10593"
     )
-    with pytest.raises(AssertionError, match="literal `version:` lines"):
+    # Two `version:` keys in one mapping is a DUPLICATE KEY, which the structural check refuses
+    # before the count does — the count remains for the case of two pins in different mappings.
+    with pytest.raises(AssertionError, match="duplicate mapping key"):
         _requested_version(duplicated)
 
     # (c) a duplicated `with:` key must be refused: one flow mapping pinning 3.0.0 and one literal
@@ -389,8 +431,20 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         count=1,
     )
     assert twice.count("with: {version: 3.0.0}") == 1, "mutation did not apply — vacuous"
-    with pytest.raises(AssertionError, match="declares `with:`"):
+    with pytest.raises(AssertionError, match="duplicate mapping key"):
         _requested_version(twice)
+
+    # (d) the refusal must be STRUCTURAL: YAML lets the same key be spelled `"with"`, `'with'`, or
+    #     `with :`, and a text scan misses every one of them while the second pin hides behind it.
+    for respelled in ('"with": {version: 3.0.0}', "'with': {version: 3.0.0}", "with : {version: 3.0.0}"):
+        smuggled = workflow.replace(
+            "        with:\n          version: 2.122.1",
+            f"        {respelled}\n        with:\n          version: 2.122.1",
+            1,
+        )
+        assert respelled in smuggled, f"mutation did not apply for {respelled!r} — vacuous"
+        with pytest.raises(AssertionError, match="duplicate mapping key"):
+            _requested_version(smuggled)
 
 
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
