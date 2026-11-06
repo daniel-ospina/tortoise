@@ -376,6 +376,39 @@ def test_an_unreadable_object_stays_unreadable_when_the_sentence_continues(tail,
     assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]], why
 
 
+def test_a_decline_list_stops_at_the_clause_end():
+    """Measured at `0e785300b` (review, P2): `_REF_LIST`'s separator was `_DECLINE_TAIL`, whose class
+    contains `.` `;` `:` and `—` — the CLAUSE ENDS — so a list continued straight through a full stop
+    and swept the NEXT sentence's reference into the decline, where it silently disappeared:
+
+        Refs #300, #100 — deliberately not closing #100. #300     -> NOTHING FLAGGED, rc 0
+        Part of #100 — deliberately not closing #100; #200        -> rc 0
+
+    A list separator is a comma or a conjunction (`and`/`or`) and nothing else. The retained comment
+    that claimed "the region stops at the clause end" was false at that head; the grammar now makes
+    it true.
+    """
+    # The trailing `#300` is NOT swept into the decline any more, so the line no longer reports
+    # CLEAN: the claim the author made and never resolved survives to be flagged. (The decline
+    # itself is not recognised either, because the sentence has no clause terminator — the flag is
+    # the safe direction for both refs.)
+    body = "Refs #300, #100 — deliberately not closing #100. #300\n"
+    assert 300 not in L.claims(body, 1)["declined"]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100, 300]]
+
+
+@pytest.mark.parametrize("body", [
+    "Refs #100, #200 — deliberately not closing #100, #200.\n",
+    "Refs #100, #200 — deliberately not closing #100 and #200.\n",
+    "Refs #100, #200 — deliberately not closing #100 or #200.\n",
+    "Refs #100, #200, #300 — deliberately not closing #100, #200, #300.\n",
+])
+def test_a_written_out_object_list_declines_every_ref_in_it(body):
+    """`or` was missing from the separator while `and` was admitted, so the SAME honest sentence
+    written with `or` was not a decline at all (measured at `0e785300b`, review P3)."""
+    assert L.classify_pr(body, 1) == []
+
+
 def test_a_plural_decline_clears_the_whole_list_it_names():
     """`them` was added as an object in round 13 but resolved by proximity, so a PLURAL sentence
     cleared one ref and flagged the other (measured at `e7dd41058`, review P3).
