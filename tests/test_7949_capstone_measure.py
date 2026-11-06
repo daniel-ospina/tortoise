@@ -1487,6 +1487,40 @@ def test_the_scores_probe_refuses_a_denominator_off_the_frozen_fourteen(
     assert "froze 14" in capsys.readouterr().err
 
 
+def test_an_overflowing_SHARE_FLOOR_refuses_instead_of_tracebacking(
+        tmp_path, capsys):
+    """#10610 review at `ec7b5e7fe` (P2): the third arm of the refusal contract.
+
+    Every floor this driver reads is a number out of JSON, and `json.loads` returns
+    an UNBOUNDED Python int for any integer literal. `_parse_bars` converted only
+    `ValueError`, so `denominator_floors.e1_min_before_share = 10**400` reached
+    `capstone_measure.share_floor`'s `float(value)` and raised
+    `OverflowError: int too large to convert to float` — exit **1** with a traceback,
+    from the one loader whose sibling `_count` converts the IDENTICAL value into an
+    exit-2 refusal ("AN ARBITRARY-PRECISION INTEGER IS THE INTEGER SIBLING OF
+    `Infinity`"). The asymmetry sat inside a single record's floor map.
+
+    Non-vacuity: measured at the pre-fix head (`.venv/bin/python
+    docs/evidence/7949-capstone/probes/e1_e2_scores.py --repo <mutated>`) the run
+    exited **1** with that traceback; post-fix it exits 2 naming the criteria.
+    """
+    repo = _copied_bundle(tmp_path)
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    assert "e1_min_before_share" in prereg["denominator_floors"], (
+        "E1's share floor moved — this pin's subject is gone, move the pin with it")
+    prereg["denominator_floors"]["e1_min_before_share"] = 10 ** 400
+    path.write_text(json.dumps(prereg))
+    # …and the INT floor of the same magnitude is already refused, which is the
+    # asymmetry this pin closes. Arm it ALONE so the share floor cannot answer for it.
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "criteria cannot be parsed" in err, err
+    assert "too large to convert to float" in err, err
+
+
 def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys):
     """#10610 review issue 4: the invariant's other half, actually implemented.
 
@@ -5413,9 +5447,12 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     """A document that routes a reader to E1/E2 must state the verdict the record gives.
 
     #10610 review issue 1 (P2): the change re-pointed both rows at
-    `docs/evidence/9889/e1-e2-scores.json` and moved E2 from BLOCKED to RED, and the two
-    documents a reader is routed to kept asserting the superseded reading IN THE PRESENT
-    TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
+    `docs/evidence/9889/e1-e2-scores.json` — so a RE-RUN now scores E2 `RED 8/14`
+    where the committed row still reads `BLOCKED` (a row moves only by re-running
+    the probe; the correction on `_E2_VERDICT_ROW` above records that an earlier
+    revision of THIS docstring wrongly said the change had already moved it) — and
+    the two documents a reader is routed to kept asserting the superseded reading
+    IN THE PRESENT TENSE — `docs/00_index.md`'s `#9080` row (`3 RED + 2 BLOCKED`, "E1 … its only artifact
     is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
     `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
     the frozen 14-unit denominator is carried by no committed artifact"), whose
@@ -5864,11 +5901,21 @@ def test_the_e2_routing_claim_cites_the_row_it_describes():
         f"the docstring cites README.md:{cited_line}, past the end of the "
         f"{len(readme)}-line README")
     cited = re.sub(r"[*`]", "", readme[cited_line - 1])
-    names_something = [tok for tok in readings if tok in cited]
-    assert names_something, (
-        f"the docstring cites README.md:{cited_line} for {readings}, but that line reads "
-        f"{cited[:160]!r} — the cite and the row it describes have drifted apart, and "
-        "the numbered claim resolves to nothing")
+    # ⛔ EVERY quoted reading, not "any one of them" (#10610 review at `ec7b5e7fe`,
+    # P3). The assertion here was `names_something` — a SINGLE match satisfied it —
+    # and this window happens to quote TWO readings, `RED 8/14` and
+    # `⛔ BLOCKED (#10360)`. So editing `RED 8/14` to `RED 9/14` left the pin GREEN
+    # on the strength of the second quote: the load-bearing number, the one the row
+    # exists to state, was the half nothing held. The docstring above claims "moving
+    # either side alone reds", and with an any-match test that was measurably false
+    # for one of the two sides it names — a pin whose subject can be falsified while
+    # it stays green is the class this whole bundle exists to refuse.
+    missing = [tok for tok in readings if tok not in cited]
+    assert not missing, (
+        f"the docstring cites README.md:{cited_line} for {readings}, but {missing} "
+        f"appear on no such line — that line reads {cited[:160]!r} — the cite and the "
+        "row it describes have drifted apart, and the numbered claim resolves to "
+        "nothing")
 
 
 # ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
@@ -8163,6 +8210,57 @@ def test_a_re_stamped_copy_of_one_before_arm_is_still_one_realization(tmp_path, 
     err = capsys.readouterr().err
     assert "SAME `object_names`" in err, err
     assert "n=1" in err, err
+
+
+def test_a_RE_ORDERED_copy_of_one_before_arm_is_still_one_realization(
+        tmp_path, capsys):
+    """#10610 review at `ec7b5e7fe` (P1): the identity is the POPULATION, not its ORDER.
+
+    The re-stamp guard compared `object_names` with `==`, i.e. as an ORDERED LIST, so
+    it was still one cheap edit wide. Copying arm 2 over arm 1, giving it arm 1's
+    graph stamp (so the graph-equality guard legitimately passes — it IS a different
+    name) and REVERSING the name list left every later reconciliation green, because
+    `objects == len(names)` and the bare-definite count are both order-independent:
+
+        E1 PASS decidable=True (before spread 0.0 pp)
+           before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS
+           before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS
+        EXIT=0
+
+    — a DECIDED row asserted from the replication the design requires and never got,
+    with `before_spread_pp: 0.0` reading as perfect agreement rather than as the
+    absent replication it is. That is the exact state `read_off_arms` documents this
+    guard to refuse, reached by `list(reversed(...))` instead of by a one-second epoch
+    bump — the pseudoreplication #9889's own O/I/T forbids.
+
+    Non-vacuity: measured at the pre-fix head (`git show HEAD:e1_e2_scores.py` run over
+    the same mutated bundle) the run exited **0** and wrote that DECIDED record; at
+    this head it exits 2. `assert attack["object_names"] != arm2["object_names"]`
+    keeps the pin honest — if reversing ever became a no-op the pin would be inert.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    second = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
+    arm1 = json.loads(first.read_text())
+    arm2 = json.loads(second.read_text())
+    assert arm1["object_names"] != arm2["object_names"], (
+        "the SHIPPED before arms already carry one population — re-derive this pin")
+    attack = json.loads(json.dumps(arm2))
+    attack["graph"] = arm1["graph"]
+    attack["object_names"] = list(reversed(attack["object_names"]))
+    assert attack["object_names"] != arm2["object_names"], (
+        "reversing the list must CHANGE it, or this pin cannot tell an "
+        "order-insensitive identity from an order-sensitive one")
+    assert attack["object_names"] != arm1["object_names"], (
+        "the reversal must differ from arm 1's order too — otherwise the ordered "
+        "comparison would refuse for the wrong reason")
+    first.write_text(json.dumps(attack))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "SAME `object_names`" in err, err
+    assert "re-ordering the list" in err, err
 
 
 def test_the_before_arms_counts_are_the_population_they_count(tmp_path, capsys):

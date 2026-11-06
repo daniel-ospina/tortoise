@@ -609,9 +609,21 @@ def _parse_bars(prereg: dict) -> dict:
         _BARS_READER["module"] = module
     # An unparseable threshold is a `ValueError` in the reader (G0's refusal
     # contract); here it is this driver's refusal — exit 2, not a traceback.
+    #
+    # ⛔ `OverflowError` IS THE THIRD ARM (#10610 review at `ec7b5e7fe`, P2), and
+    # it is the one shape the rest of this file already refuses. Every floor is a
+    # number read out of JSON, and `json.loads` returns an UNBOUNDED Python int for
+    # any integer literal — so `denominator_floors.e1_min_before_share = 10**400`
+    # reached `share_floor`'s `float(value)` (`capstone_measure.py:519`) and raised
+    # `OverflowError: int too large to convert to float`, i.e. exit **1** with a
+    # traceback out of the one loader whose sibling `_count` converts the identical
+    # value into an exit-2 refusal ("AN ARBITRARY-PRECISION INTEGER IS THE INTEGER
+    # SIBLING OF `Infinity`"). Measured at the pre-fix head: exit 1; an
+    # `e1_objects` of the same magnitude beside it refused cleanly, so the asymmetry
+    # sat inside one record's floor map.
     try:
         return _BARS_READER["module"].parse_bars(prereg)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         raise _refuse(f"{PREREG}'s criteria cannot be parsed: {exc}") from exc
 
 
@@ -802,14 +814,38 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                 f"{name} carries no `object_names`, so nothing in it establishes "
                 "a population of its own — a realization that names no population "
                 "cannot be told apart from a re-stamped copy of another")
+        # ⛔ THE IDENTITY IS THE POPULATION, NOT THE ORDER IT IS WRITTEN IN
+        # (#10610 review at `ec7b5e7fe`, P1). `prior["object_names"] == names` is a
+        # LIST comparison, so it was still one cheap edit wide: copying arm 2 over
+        # arm 1, giving it arm 1's graph stamp and REVERSING the name list left
+        # every later reconciliation green — `objects == len(names)` and the
+        # bare-definite count are both order-independent — and the bundle scored a
+        # DECIDED `E1 PASS` (`before spread 0.0 pp`, both pairings on one run,
+        # exit 0) off a single realization. That is the exact state this guard is
+        # documented to refuse, reached by `list(reversed(...))` instead of by a
+        # one-second epoch bump.
+        #
+        # `sorted` rather than `set`: a set would also collapse a DUPLICATED name,
+        # so `[a, a, b]` would match `[a, b]` — two populations of different size
+        # reported as one. Sorting is order-insensitive and keeps the multiplicity
+        # the census is counted over.
+        #
+        # The members are checked as unit ids FIRST: `sorted` over a list holding a
+        # dict or a list raises `TypeError` — exit **1** with a traceback, beside a
+        # guard whose failure mode must be the exit-**2** refusal (the class
+        # `_unit_id_members` already converts for the E2a census, which is the same
+        # shape: a list of string ids compared as a population).
+        _unit_id_members(str(EVIDENCE / name), graph, "object_names", names)
         same = next((prior for prior in arms
-                     if prior.get("object_names") == names), None)
+                     if sorted(prior["object_names"]) == sorted(names)), None)
         if same is not None:
             raise _refuse(
                 f"{name} and {same['artifact']} carry the SAME `object_names` — "
                 f"a fresh graph stamp ({graph!r} vs {same['graph']!r}) is not a "
                 "fresh realization, so the before arm still has n=1 and "
-                "`decidable` would be asserted from one reading")
+                "`decidable` would be asserted from one reading; the identity is "
+                "the POPULATION, so re-ordering the list does not make a second "
+                "run of it")
         # ⛔ …and the counts must BE that population (#10610 review at
         # `75bfd9c6`). `_consistent_share` reconciled the share against
         # `bare_definite`/`objects`, and nothing reconciled THOSE with the
