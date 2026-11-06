@@ -69,17 +69,20 @@ def _path_with_tortoise(bindir: Path) -> str:
 
 def _write_mock_tortoise(bindir: Path, log: Path, *, context_rc: int = 0,
                          probe_rc: int = 0, context_sleep: float = 0.0,
+                         probe_sleep: float = 0.0,
                          probe_noise: bool = False) -> None:
     """A fake ``tortoise`` on PATH.
 
     It appends its argv to ``log`` FIRST, then behaves as the caller asked:
     ``context`` optionally sleeps, prints ``DIGEST_MARKER`` on success, and
-    exits ``context_rc``; anything else (i.e. the probe) exits ``probe_rc``,
-    optionally writing ``PROBE_MARKER`` to BOTH stdout and stderr first.
-    Logging first is what makes the dispatch-order tests observable: a line in
-    ``log`` is proof the process RAN."""
+    exits ``context_rc``; anything else (i.e. the probe) optionally sleeps,
+    optionally writes ``PROBE_MARKER`` to BOTH stdout and stderr, and exits
+    ``probe_rc``.  Logging first is what makes the dispatch-order tests
+    observable: a line in ``log`` is proof the process RAN, and a sleep AFTER
+    that line models a slow step whose DISPATCH has already happened."""
     bindir.mkdir(parents=True, exist_ok=True)
     sleep_line = f"  sleep {context_sleep}\n" if context_sleep else ""
+    probe_sleep_line = f"sleep {probe_sleep}\n" if probe_sleep else ""
     noise = (f"echo '{PROBE_MARKER}'\n"
              f"echo '{PROBE_MARKER}' >&2\n") if probe_noise else ""
     mock = bindir / "tortoise"
@@ -92,6 +95,7 @@ def _write_mock_tortoise(bindir: Path, log: Path, *, context_rc: int = 0,
         '  echo "embedded store busy" >&2\n'
         f"  exit {context_rc}\n"
         "fi\n"
+        f"{probe_sleep_line}"
         f"{noise}"
         f"exit {probe_rc}\n",
         encoding="utf-8")
@@ -162,16 +166,19 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
     bound must not delay the beacon's DISPATCH.
 
     The mock's ``context`` sleeps 30 s; the beacon logs its argv and returns
-    immediately.  The hook is started, NOT waited on, and we poll for the
-    beacon's log line.  Two assertions carry the whole test:
+    immediately.  The hook is started, NOT waited on, and we poll for BOTH log
+    lines — the beacon's and the digest's.  Three assertions carry the test:
 
-      * the line appears within the poll budget, and
-      * the hook is STILL RUNNING when it does.
+      * the beacon's line appears within the poll budget,
+      * the digest's line appears too (a dispatched beacon must not REPLACE it), and
+      * the hook is STILL RUNNING when the beacon's line appears.
 
-    The second is the one that distinguishes dispatch from sequence: if the
-    probe had merely been dispatched first and then awaited, or left until
-    after the digest, the line could only appear once the 30 s sleep finished —
-    at which point ``proc.poll()`` is not ``None``.
+    The third distinguishes dispatch from sequence: if the probe had been left
+    until after the digest, the beacon's line could only appear once the 30 s
+    sleep finished — at which point ``proc.poll()`` is not ``None``.  (A probe
+    dispatched first and then AWAITED is a DIFFERENT mutation, and it starves
+    the DIGEST rather than the beacon, so it passes here by construction —
+    ``test_the_digest_is_not_serialized_behind_a_slow_probe`` catches it.)
 
     Mutation: move the ``_run_probe … &`` dispatch below the ``_run_digest``
     call (the pre-#3796 order) — the line never appears inside a 5 s window
@@ -182,14 +189,18 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
     legitimately lands in ``log`` before the digest's does — a loop that BREAKS
     on the probe line reads a log that is merely MID-WRITE, and the ``"context"``
     assertion then fires on a hook that is behaving correctly.  That is a false
-    RED on a REQUIRED check: measured in CI run `42165985062` shard (h) as
-    ``the digest should also have been dispatched: 'session probe --harness
+    RED that blocks the merge gate: measured in CI run `42165985062` shard (h)
+    as ``the digest should also have been dispatched: 'session probe --harness
     claude\\n'`` — the exact single-line snapshot this loop produced.  It is
-    invisible on an idle box (both appends usually land inside the first
-    50 ms poll) and opens on a loaded runner, which is where it failed.
+    invisible on an idle box (the two appends were measured 0.23 ms apart, well
+    inside the first 50 ms poll) and opens on a loaded runner, which is where it
+    failed.
     Liveness is therefore sampled at the moment the beacon's line APPEARS, not
     after both have — waiting for the digest must not degrade that assertion
-    into "the hook was alive 5 s in"."""
+    into "the hook was alive 5 s in".  The digest's wait gets its OWN budget,
+    armed at that same instant: sharing the original deadline left it only the
+    remainder of the beacon's 5 s, which is a residual false RED on a box slow
+    enough for the gap to eat the budget."""
     home = tmp_path / "home"
     home.mkdir()
     log = tmp_path / "calls.log"
@@ -215,11 +226,19 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
                     # concurrency claim is about the dispatch instant and not
                     # about how long the poll kept running afterwards.
                     beacon_seen_alive = proc.poll() is None
+                    # …and the digest gets its OWN budget from this instant: a
+                    # shared deadline would hand it only the remainder of the
+                    # beacon's 5 s (review P3).
+                    deadline = max(deadline, time.monotonic() + 5.0)
                 # BOTH markers, not just the beacon (#11149): breaking on the
                 # beacon alone asserts on a log that is still being appended to.
                 if PROBE_CALL in calls and "context" in calls:
                     break
             time.sleep(0.05)
+        # One final read, so no assertion below is made against a snapshot up to
+        # one poll interval stale.
+        if log.exists():
+            calls = log.read_text(encoding="utf-8")
         assert PROBE_CALL in calls, (
             "the install-probe beacon was not dispatched while the digest was "
             "still running (#3796): after 5 s the mock had been invoked with "
@@ -227,12 +246,70 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
             "QUEUED BEHIND it, which is the defect")
         assert "context" in calls, (
             "the digest should also have been dispatched: "
-            f"{calls!r} — waited the full 5 s for it, so this is absence, not "
-            "a snapshot taken mid-write (#11149)")
+            f"{calls!r} — waited a full 5 s for it after the beacon was seen, "
+            "so this is absence, not a snapshot taken mid-write (#11149)")
         assert beacon_seen_alive, (
             "the hook had already exited when the beacon line appeared, so "
             "this observed SEQUENCE, not concurrency — the assertion proves "
             "nothing about starvation")
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait(timeout=30)
+
+
+def test_the_digest_is_not_serialized_behind_a_slow_probe(tmp_path):
+    """The MIRROR of the defect: a slow beacon must not delay the DIGEST.
+
+    ``_run_probe … &`` followed by an immediate ``wait`` would dispatch the
+    beacon first and then BLOCK on it, so the digest — whose stdout is the
+    injection channel — could not start until an unbounded POST returned.  That
+    is the same starvation class #3796 is about, one step over, and the
+    acceptance test above cannot see it: the beacon's line still appears while
+    the hook is alive, so every one of its assertions holds.
+
+    The mock's probe logs its argv and then sleeps 30 s; the digest logs and
+    returns immediately.  The digest's line must appear inside the poll budget,
+    and the probe must still be in flight when it does.
+
+    Mutation: insert ``wait "$PROBE_PID" || true`` immediately after the
+    ``_run_probe … &`` dispatch — the digest's line cannot appear for 30 s and
+    this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    log = tmp_path / "calls.log"
+    bindir = tmp_path / "bin"
+    _write_mock_tortoise(bindir, log, probe_sleep=30)
+
+    proc = subprocess.Popen(
+        ["/bin/bash", str(SESSION_START)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, env=_env(_path_with_tortoise(bindir), home),
+        # Own process group: the 30 s probe must be killable with the hook.
+        start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5.0
+        calls = ""
+        digest_seen_alive = False
+        while time.monotonic() < deadline:
+            if log.exists():
+                calls = log.read_text(encoding="utf-8")
+                if "context" in calls:
+                    digest_seen_alive = proc.poll() is None
+                    break
+            time.sleep(0.05)
+        if log.exists():
+            calls = log.read_text(encoding="utf-8")
+        assert "context" in calls, (
+            "the digest did not start while a slow probe was in flight: after "
+            f"5 s the mock had been invoked with {calls!r} — the beacon was "
+            "AWAITED instead of overlapped, so an unbounded POST now starves "
+            "the injection channel (#3796's mirror)")
+        assert PROBE_CALL in calls, (
+            f"the beacon must still be dispatched first: {calls!r}")
+        assert digest_seen_alive, (
+            "the hook had already exited when the digest line appeared, so this "
+            "observed SEQUENCE, not concurrency")
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
