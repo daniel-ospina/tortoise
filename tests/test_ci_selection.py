@@ -608,8 +608,6 @@ def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
     )
 
 
-
-
 def test_the_8503_docs_pins_run_on_a_docs_only_diff():
     """#8503 round 9 (P1): the bundle's own pins must run on the bundle.
 

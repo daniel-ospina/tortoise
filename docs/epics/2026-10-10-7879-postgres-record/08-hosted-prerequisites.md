@@ -1124,9 +1124,11 @@ three surfaces above, and boot-time arming output is not part of it. What the ol
 wrong twice over. *At `ff6379eb2`* the name was **documented, and nowhere on an arming surface** — 5 lines in the runbook, and
 none in `fly.toml`, `entrypoint.sh` or `.github/` (`git grep TORTOISE_RECORD_DSN ff6379eb2 -- fly.toml
 entrypoint.sh .github/` returns nothing), so `NOT_ARMED`: not staged, not provisioned. (⛔ **Not "the runbook
-only"** — `git grep -c TORTOISE_RECORD_DSN ff6379eb2` also matches `.env.example`, `docs/00_index.md`, this
-file, `09-record-tenancy-decision.md` and the migrations/tests. The *arming-surface* claim is the one the
-grep supports.) *After #9548 landed the surfaces* the name was **staged** and the secret still absent.
+only"** — `git grep -l TORTOISE_RECORD_DSN ff6379eb2` matches **21 files**: `.env.example`,
+`config/ci-surfaces.yml`, `docs/00_index.md`, this file, `09-record-tenancy-decision.md`, the
+`supabase/migrations/…` pair, the tests — and, the part a "runbook only" reading hides, **the code that
+READS it**: `tortoise/__main__.py`, `record_writer.py`, `record_projection.py`, `cache_projection.py`,
+`record_backup.py`, `sdk.py`. The *arming-surface* claim is the one the grep supports.) *After #9548 landed the surfaces* the name was **staged** and the secret still absent.
 ⛔ **Neither is the state now:** the GitHub and Fly secrets both exist and `/health` reports `armed: true`, so this
 paragraph is the census point's evidence, not a present-tense fact. ⛔ **The remaining census
 lines were re-measured at this head, not assumed unchanged — and two of them no longer return what
