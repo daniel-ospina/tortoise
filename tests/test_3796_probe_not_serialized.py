@@ -175,7 +175,21 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
 
     Mutation: move the ``_run_probe … &`` dispatch below the ``_run_digest``
     call (the pre-#3796 order) — the line never appears inside a 5 s window
-    while a 30 s digest is in flight, and this REDs on the timeout."""
+    while a 30 s digest is in flight, and this REDs on the timeout.
+
+    ⛔ The poll waits for BOTH lines, and it must (#11149, found as #11134's CI
+    red).  The beacon is forked FIRST and the digest SECOND, so the probe's line
+    legitimately lands in ``log`` before the digest's does — a loop that BREAKS
+    on the probe line reads a log that is merely MID-WRITE, and the ``"context"``
+    assertion then fires on a hook that is behaving correctly.  That is a false
+    RED on a REQUIRED check: measured in CI run `42165985062` shard (h) as
+    ``the digest should also have been dispatched: 'session probe --harness
+    claude\\n'`` — the exact single-line snapshot this loop produced.  It is
+    invisible on an idle box (both appends usually land inside the first
+    50 ms poll) and opens on a loaded runner, which is where it failed.
+    Liveness is therefore sampled at the moment the beacon's line APPEARS, not
+    after both have — waiting for the digest must not degrade that assertion
+    into "the hook was alive 5 s in"."""
     home = tmp_path / "home"
     home.mkdir()
     log = tmp_path / "calls.log"
@@ -192,10 +206,18 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
     try:
         deadline = time.monotonic() + 5.0
         calls = ""
+        beacon_seen_alive = False
         while time.monotonic() < deadline:
             if log.exists():
                 calls = log.read_text(encoding="utf-8")
-                if PROBE_CALL in calls:
+                if PROBE_CALL in calls and not beacon_seen_alive:
+                    # Sampled HERE, at first sight of the beacon line, so the
+                    # concurrency claim is about the dispatch instant and not
+                    # about how long the poll kept running afterwards.
+                    beacon_seen_alive = proc.poll() is None
+                # BOTH markers, not just the beacon (#11149): breaking on the
+                # beacon alone asserts on a log that is still being appended to.
+                if PROBE_CALL in calls and "context" in calls:
                     break
             time.sleep(0.05)
         assert PROBE_CALL in calls, (
@@ -204,8 +226,10 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
             f"{calls!r} — with a 30 s digest that means the beacon is still "
             "QUEUED BEHIND it, which is the defect")
         assert "context" in calls, (
-            f"the digest should also have been dispatched: {calls!r}")
-        assert proc.poll() is None, (
+            "the digest should also have been dispatched: "
+            f"{calls!r} — waited the full 5 s for it, so this is absence, not "
+            "a snapshot taken mid-write (#11149)")
+        assert beacon_seen_alive, (
             "the hook had already exited when the beacon line appeared, so "
             "this observed SEQUENCE, not concurrency — the assertion proves "
             "nothing about starvation")
