@@ -10331,7 +10331,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     separately because they lose opposite things: ``hold_abandoned_no_claim``
     (the hold is abandoned, the entity stays — fail-open) and
     ``channel_refused_no_claim`` (a model-emitted mention with no resolvable
-    claim is dropped and named).
+    claim is dropped, and the surface is named in
+    ``channel_refused_surfaces``).
 
     Returns a NEW embed list — the caller's dicts are never mutated, so a
     failure after this point cannot leave claims stripped of their aboutness with
@@ -10373,14 +10374,21 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             hold[name] = verdict
     # a surface already carrying a record is held again without a live
     # reference — the union pass's idempotence depends on this.
+    # A surface already carrying a record is held again without a live reference
+    # — the union pass's idempotence depends on this. ⛔ ONLY a CUE rule may re-arm
+    # it: `RULE_CHANNEL` is this module's own output marker, so re-arming from it
+    # made the two passes disagree (pass 1 kept a surface the model also mentioned,
+    # pass 2 removed it and stripped it from every claim — a 70-reference must-keep
+    # referent deleted on a model-supplied entry; #11021 review cycle 2, P1).
     for m in channel:
         if not isinstance(m, dict):
             continue
         surface = str(m.get("surface") or "").strip()
-        if surface and surface in hold:
+        if not surface or surface in hold:
             continue
-        if surface and str(m.get("rule_id") or "").startswith("referentiality."):
-            hold.setdefault(surface, (str(m.get("rule_id")),
+        recorded_rule = str(m.get("rule_id") or "")
+        if recorded_rule in _referentiality.RULES[:-1]:      # the three cue rules
+            hold.setdefault(surface, (recorded_rule,
                                       "already recorded on a claim"))
 
     def _claims_naming(surface: str) -> list[dict]:
@@ -10395,22 +10403,27 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
                      and any(str(a).strip() == surface for a in e["about_entities"])]
         return carriers
 
-    stats: dict = {"held": 0, "hold_abandoned_no_claim": 0,
-                   "channel_refused_no_claim": 0, "channel_ignored": 0,
+    stats: dict = {"held_surfaces": 0, "hold_abandoned_no_claim": 0,
+                   "channel_refused_no_claim": 0, "channel_entry_is_entity": 0,
+                   "mention_carrier_is_event": 0,
                    "events_stripped": 0, "operators_dropped": 0,
-                   "by_rule": {}, "armed": True}
+                   "by_rule": {}}
     # ── copy what we touch: the caller's dicts are never mutated ────────────
     #: surfaces already carrying a record — the union pass re-enters with NO
     #: live reference (the first pass removed it), so this set is what keeps the
     #: hold from being abandoned and re-minted one pass later.
     recorded_surfaces = {str(m.get("surface") or "").strip() for m in channel
                          if isinstance(m, dict)}
+    #: entity-candidate surfaces — a channel entry whose surface is one of these
+    #: is NOT taken as a hold: the model said "entity" in `entities[]` and
+    #: "mention" in `mentions[]`, and the fail-open direction is the entity.
+    candidate_surfaces = {str(e.get("name") or "").strip()
+                          for e in entities if isinstance(e, dict)}
     kept_entities: list = []
     kept_points: list = []
     kept_events: list = []
     records: list[dict] = []
     held_surfaces: set[str] = set()
-    abandoned: set[str] = set()
 
     for entity in entities:
         if not isinstance(entity, dict):
@@ -10425,7 +10438,6 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             # Nothing to record it against. Keep the entity (fail-open) and NAME
             # the refusal so the rate is visible.
             stats["hold_abandoned_no_claim"] += 1
-            abandoned.add(name)
             kept_entities.append(entity)
             continue
         if not carriers:
@@ -10437,10 +10449,13 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         rule_id, reason = hold[name]
         kind_guess = str(entity.get("kind") or "").strip() or None
         for carrier in carriers:
+            if "pointKind" not in carrier and "eventKind" in carrier:
+                stats["mention_carrier_is_event"] += 1
+                continue
             records.append(_mention_record(
                 surface=name, claim=carrier, kind_guess=kind_guess,
                 rule_id=rule_id, reason=reason, narrative=narrative,
-                quote=str(carrier.get("quote") or "") if "quote" in carrier else ""))
+                quote=str(carrier.get("quote") or "")))
 
     for point in (embed_list.get("points") or []):
         if not isinstance(point, dict):
@@ -10470,6 +10485,14 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         else:
             kept_events.append(event)
 
+    # ── operator endpoints: judged too, never only the entity candidates ────
+    # An endpoint surface that is in nobody's `entities[]` is still materialised
+    # as a statement Point by mint-before-wire (#2552), so the cue is consulted on
+    # the endpoints themselves (review cycle 2, P2).
+    for surface in _operator_endpoint_surfaces(embed_list.get("operators")):
+        if surface and surface not in held_surfaces \
+                and _referentiality.judge(surface) is not None:
+            held_surfaces.add(surface)
     kept_operators, dropped = _prune_held_operators(
         embed_list.get("operators"), held_surfaces)
     stats["operators_dropped"] = dropped
@@ -10486,11 +10509,17 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         surface = str(entry.get("surface") or "").strip()
         if not surface:
             continue
+        if surface in candidate_surfaces:
+            # contradictory channel use: `entities[]` says node, `mentions[]` says
+            # phrase. The entity wins (fail-open) and the conflict is counted.
+            stats["channel_entry_is_entity"] += 1
+            continue
         claim_ref = str(entry.get("claim_ref") or "").strip()
         claim = claims_by_ref.get(_norm(claim_ref))
         if claim is None:
             # A mention with no resolvable claim is not a record (contract row).
             stats["channel_refused_no_claim"] += 1
+            stats.setdefault("channel_refused_surfaces", []).append(surface)
             continue
         carrier = next((p for p in kept_points
                         if isinstance(p, dict)
@@ -10513,8 +10542,29 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     if "operators" in embed_list:
         out["operators"] = kept_operators
     out["mentions"] = _dedupe_mentions(records)
-    stats["held"] = len(held_surfaces)
+    stats["held_surfaces"] = len(held_surfaces)
     out["mention_stats"] = stats
+    return out
+
+
+def _operator_endpoint_surfaces(operators: object) -> set[str]:
+    """Every surface an operator names as an endpoint (``target_edge`` included)."""
+    out: set[str] = set()
+    if not isinstance(operators, list):
+        return out
+    for op in operators:
+        if not isinstance(op, dict):
+            continue
+        for k in ("src", "dst"):
+            v = str(op.get(k) or "").strip()
+            if v:
+                out.add(v)
+        target = op.get("target_edge")
+        if isinstance(target, dict):
+            for k in ("src", "dst"):
+                v = str(target.get(k) or "").strip()
+                if v:
+                    out.add(v)
     return out
 
 
@@ -10530,7 +10580,10 @@ def _prune_held_operators(operators: object,
     drops ``MITIGATES.target_edge`` endpoints too (the same reason).
     """
     if not isinstance(operators, list):
-        return (operators if operators is not None else []), 0
+        # A non-list section is dropped, never echoed back: returning it would
+        # flip the section's type (dict/str) on the way to `execute_embed`
+        # (review cycle 2, P3).
+        return [], 0
     kept: list = []
     dropped = 0
     for op in operators:
@@ -10576,7 +10629,8 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
         # model-emitted offsets: accepted only as a COMPLETE pair of ints
         try:
             s0, s1 = span.get("span_start"), span.get("span_end")
-            if isinstance(s0, int) and isinstance(s1, int) and s1 > s0 >= 0:
+            if (isinstance(s0, int) and isinstance(s1, int)
+                    and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
                 span_start, span_end = s0, s1
                 span_source = "model"
         except Exception:
@@ -10609,7 +10663,10 @@ def _mention_span(haystack: str, surface: str) -> tuple[int, int] | None:
     """
     if not haystack or not surface:
         return None
-    pattern = re.compile(r"(?<![A-Za-z])" + re.escape(surface) + r"(?![A-Za-z])")
+    # `\w` is "a word character in any script"; `[A-Za-z]` let `it` match inside
+    # `itération`, `it2` and `_it`, which is a recorded address naming the wrong
+    # bytes (review cycle 2, P3).
+    pattern = re.compile(r"(?<!\w)" + re.escape(surface) + r"(?!\w)")
     found = list(pattern.finditer(haystack))
     if len(found) != 1:
         return None
@@ -10633,9 +10690,10 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
     return out
 
 
-#: The fields ``commit_schema.Mention`` carries — one list, so a field added to
-#: the model without being added here is caught by validation rather than
-#: silently dropped on the way to the payload.
+#: The fields ``commit_schema.Mention`` carries that this module forwards. ⚠️ It
+#: is a COPY FILTER, not a validation list: a field present here but absent from
+#: the model fails validation loudly, while a model field absent from here is
+#: dropped silently — so this tuple and the model must be changed together.
 _MENTION_FIELDS: tuple[str, ...] = (
     "surface", "claim_ref", "quote", "span_start", "span_end", "span_source",
     "kind_guess", "rule_id",
@@ -10646,6 +10704,16 @@ _MENTION_FIELDS: tuple[str, ...] = (
 #: ``mentions[]`` entries are still copied (review P1: an over-long surface or a
 #: half span from a hallucinated field 422'd the entire payload).
 _MENTION_CAPS: dict[str, int] = {"surface": 200, "quote": 200, "kind_guess": 60}
+#: The only values ``commit_schema.Mention.span_source`` accepts.
+_MENTION_SPAN_SOURCES = ("quote", "narrative", "model")
+#: Mirrors ``commit_schema.SPAN_OFFSET_MAX`` (the store's int64 ceiling). ONE
+#: home for the rule is the schema; this copy exists because `extractor_v2` does
+#: not import `commit_schema` at module scope (the commit module is imported
+#: lazily on the write path), and
+#: ``tests/test_referentiality_11021.py::test_the_span_ceiling_mirrors_the_schema``
+#: fails the moment the two disagree — a mirrored constant with no drift pin is
+#: how the address ceiling rots.
+_SPAN_OFFSET_MAX = 2**63 - 1
 
 
 def _mentions_for_claim(embed_list: dict, content: str,
@@ -10682,10 +10750,17 @@ def _mentions_for_claim(embed_list: dict, content: str,
             record[k] = v
         if not record.get("surface"):
             continue
-        # A half span is not an address: drop BOTH halves rather than 422.
-        if ("span_start" in record) != ("span_end" in record):
+        # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
+        # one the model declares — otherwise `commit_schema.Mention` rejects the
+        # whole payload. Both halves are dropped rather than 422 (review cycle 2,
+        # P1: an over-cap pair and a junk `span_source` each lost the session).
+        s0, s1 = record.get("span_start"), record.get("span_end")
+        if not (isinstance(s0, int) and isinstance(s1, int)
+                and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
             record.pop("span_start", None)
             record.pop("span_end", None)
+        if record.get("span_source") not in _MENTION_SPAN_SOURCES:
+            record.pop("span_source", None)
         out.append(record)
     return out
 
@@ -12691,7 +12766,10 @@ _OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
     # #11021: the mention channel. `surface` ONLY is required — `claim_ref` and
     # `quote` are contract-nullable, and `_is_primitive(None)` is False, so
     # requiring them would reject the contract's own shape.
-    "mentions": ("surface",),
+    # No REQUIRED key: a truncated tail that reached a mention must not turn a
+    # salvageable partial payload into a `_ParseError` (review cycle 2, P3). The
+    # reader already drops an entry with no `surface`.
+    "mentions": (),
 }
 
 #: D5: primitive types for the required keys (structural strictness only).

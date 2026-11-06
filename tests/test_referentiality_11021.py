@@ -156,7 +156,7 @@ def test_T1_a_mention_is_recorded_on_its_claim_and_mints_no_object():
     #    `entities[]` before the mint loop runs, so the no-mint guarantee does not
     #    depend on the mint loop remembering to ask.
     assert "it" not in {e["name"] for e in ctx["held"]["entities"]}
-    assert ctx["held"]["mention_stats"]["held"] == 1
+    assert ctx["held"]["mention_stats"]["held_surfaces"] == 1
 
     # 1. the mention never became an entity
     assert "it" not in _entity_names(payload), (
@@ -283,6 +283,7 @@ def test_a_hold_also_strips_an_EVENT_about_list():
                      "about_entities": ["it", "the admin-merge rail"]}]
     payload, ctx = _mint(el)
     assert ctx["held"]["mention_stats"]["events_stripped"] == 1
+    assert ctx["held"]["mention_stats"]["mention_carrier_is_event"] == 1
     assert payload["events"][0]["about_entities"] == ["the admin-merge rail"]
     verdict, _ = validate_payload_dict(payload)
     assert verdict.ok is True, verdict.errors
@@ -312,12 +313,17 @@ def test_an_operator_naming_a_held_surface_is_dropped():
     el = _embed_list("it", "the admin-merge rail")
     el["points"].append({"content": "a second claim", "pointKind": "statement",
                          "about_entities": ["the admin-merge rail"]})
-    el["operators"] = [{"src": "it", "dst": "the admin-merge rail",
+    # ⚠️ The endpoint must be one ONLY the hold can prune: if `dst` were the held
+    # entity the operator would drop anyway (an entity endpoint is unresolvable),
+    # and the row would pass with the prune disabled (review cycle 2, P3).
+    el["operators"] = [{"src": "it",
+                        "dst": "a claim that uses it in its own sentence",
                         "op_type": "IMPL"}]
     payload, ctx = _mint(el)
     assert ctx["held"]["mention_stats"]["operators_dropped"] == 1
     assert payload["operators"] == []
-    assert "it" not in {p["content"] for p in payload["points"]}
+    assert "it" not in {p["content"] for p in payload["points"]}, (
+        "mint-before-wire fabricated a claim Point from a pronoun endpoint")
 
 
 def test_S4_cannot_overwrite_a_held_record_s_rule_and_span():
@@ -366,6 +372,10 @@ def test_a_span_is_a_whole_word_address_and_says_which_text():
     assert _mention_span("the usual thing", "us") is None
     assert _mention_span("we said it twice: it", "it") is None     # ambiguous
     assert _mention_span("we said it", "it") == (8, 10)
+    # a non-ASCII letter or a digit blocks the match: `it` inside `itération`
+    # names different bytes than the surface does (review cycle 2, P3)
+    assert _mention_span("itération", "it") is None
+    assert _mention_span("it2", "it") is None
 
     el = _embed_list("it")
     payload, _ = _mint(el)
@@ -390,7 +400,8 @@ def test_the_counters_do_not_conflate_opposite_outcomes():
     stats = routed["mention_stats"]
     assert stats["hold_abandoned_no_claim"] == 1
     assert stats["channel_refused_no_claim"] == 1
-    assert stats["held"] == 0
+    assert stats["channel_refused_surfaces"] == ["the thing"]
+    assert stats["held_surfaces"] == 0
     assert [e["name"] for e in routed["entities"]] == ["it"], "fail-open: kept"
 
 
@@ -430,6 +441,74 @@ def test_route_mentions_never_mutates_the_callers_lists():
     assert el == before
 
 
+def test_the_contract_carries_the_channel():
+    """Decomposition row J's contract pin: `mentions[]` must be IN the prompt
+    contract and IN the shape gate, or the channel is a decoration on
+    `entities[]` and the model is never asked for it."""
+    from tortoise.extractor_v2 import _OUTPUT_SCHEMA, OUTPUT_CONTRACT
+    assert '"mentions":' in OUTPUT_CONTRACT
+    assert "mentions" in _OUTPUT_SCHEMA
+    assert _OUTPUT_SCHEMA["mentions"] == (), (
+        "a required key here turns a salvageable partial response into a "
+        "_ParseError on the default path")
+
+
+def test_an_unarmed_run_reports_no_record_it_did_not_make():
+    """With the flag OFF the channel is ignored, so the accounting must not claim
+    records it never wrote, and must not warn about a fold that never happened
+    (review cycle 2, P2)."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "the problem", "claim_ref": None}]
+    res = execute_embed(route_mentions(el, ""), {}, session_id="unarmed-accounting")
+    assert res["stats"]["mentions_recorded"] == 0
+    assert res["stats"]["mentions_unresolved"] == 0
+    assert not any("did not emit" in w for w in res["warnings"])
+
+
+def test_the_span_ceiling_mirrors_the_schema():
+    """A mirrored constant with no drift pin is how the address ceiling rots."""
+    from tortoise.commit_schema import SPAN_OFFSET_MAX
+    from tortoise.extractor_v2 import _SPAN_OFFSET_MAX
+    assert _SPAN_OFFSET_MAX == SPAN_OFFSET_MAX
+
+
+def test_an_over_cap_or_junk_span_cannot_422_the_payload():
+    """`commit_schema.Mention` caps offsets at the int64 ceiling and pins
+    `span_source` to a Literal; the model path copied both verbatim, so one bad
+    pair lost the whole payload (review cycle 2, P1)."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "a thing", "claim_ref": el["points"][0]["content"],
+                       "span_start": 0, "span_end": 10**19,
+                       "span_source": "paragraph"}]
+    payload, _ = _mint(el)
+    rec = _mentions_of(payload)[0]
+    assert "span_start" not in rec and "span_end" not in rec
+    assert "span_source" not in rec
+    verdict, _ = validate_payload_dict(payload)
+    assert verdict.ok is True, verdict.errors
+
+
+def test_an_entity_and_a_channel_entry_for_one_surface_do_not_disagree_across_passes():
+    """The re-arm must never let the module's OWN channel marker remove an entity:
+    a surface the model called both an entity and a mention is an entity in every
+    pass, or a 70-reference must-keep referent is deleted one pass later (review
+    cycle 2, P1)."""
+    el = _embed_list("the admin-merge rail")
+    el["mentions"] = [{"surface": "the admin-merge rail",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "the admin-merge rail"}]
+    once = route_mentions(copy.deepcopy(el), "")
+    twice = route_mentions(copy.deepcopy(once), "")
+    assert [e["name"] for e in once["entities"]] == ["the admin-merge rail"]
+    assert [e["name"] for e in twice["entities"]] == ["the admin-merge rail"], (
+        "the second pass removed a referent the first pass kept")
+    assert once["mention_stats"]["channel_entry_is_entity"] == 1
+    # the conflict is resolved on pass 1 (no record is written), so pass 2 has no
+    # entry to disagree with — the point being that neither pass removes the entity
+    assert twice["mention_stats"]["channel_entry_is_entity"] == 0
+    assert twice["mention_stats"]["held_surfaces"] == 0
+
+
 def test_the_domain_nouns_a_corpus_measurement_excluded_are_excluded():
     """The first GENERIC_HEADS draft carried this repo's own node types, and
     `the point` alone occurs 893 times in `docs/` + `tortoise/` (measured at
@@ -437,7 +516,7 @@ def test_the_domain_nouns_a_corpus_measurement_excluded_are_excluded():
     review P1)."""
     for surface in ("the point", "the points", "the question", "the number",
                     "the step", "the steps", "the result", "the case", "the time",
-                    "the part"):
+                    "the part", "the instance", "the instance of", "the detail"):
         assert ref.judge(surface) is None, (
             f"{surface!r} is a referent in this corpus and must mint")
 
@@ -545,4 +624,4 @@ def test_the_25_row_label_set_is_the_ARBITERS_class_not_this_cue_s():
     assert [n for n in definite if ref.judge(n) is not None] == [], (
         "the cue claimed a definite description — that class is the arbiter's, "
         "and the must-keep arm contains rows of the identical shape")
-    assert [n for n in held if n in definite] == []
+    assert len(held) == 0

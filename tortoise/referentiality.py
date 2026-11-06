@@ -176,6 +176,8 @@ DEICTIC_HEADS: frozenset[str] = frozenset({
 #: ``the case``                143   ⛔ EXCLUDED — "the case where …" introduces a case
 #: ``the time``                103   ⛔ EXCLUDED — a timestamp is a referent
 #: ``the part``                 47   ⛔ EXCLUDED — a component is a referent
+#: ``the instance``            134   ⛔ EXCLUDED — a deployed instance is a referent
+#: ``the detail``               51   ⛔ EXCLUDED — `the detail has label_breaches`
 #: ``the thing``               100   ✅ kept — anaphoric to the text, not a thing named
 #: ``the problem``             111   ✅ kept — anaphoric to the text
 #: =======================  ======  ==========================================
@@ -190,8 +192,7 @@ GENERIC_HEADS: frozenset[str] = frozenset({
     "one", "ones", "rest", "remainder", "lot", "lots", "bit", "bits",
     "piece", "pieces", "amount", "amounts", "situation", "situations",
     "problem", "problems", "matter", "matters", "example", "examples",
-    "instance", "instances", "reason", "reasons", "difference", "differences",
-    "detail", "details",
+    "reason", "reasons", "difference", "differences",
 })
 
 #: Modifiers that carry no reference of their own — they may sit between the
