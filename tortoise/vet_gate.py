@@ -1128,7 +1128,8 @@ def apply_vet(embed_list: Mapping[str, Any],
     # now needs, and reconcile the reference's SPELLING. Computed BEFORE the
     # prune: a restored name is present again, so it must not be pruned as if
     # it were discarded.
-    present = set(_entity_map(out))
+    present_map = _entity_map(out)
+    present = set(present_map)
     # #10999: relation endpoints DO count for the restore — a relation naming an
     # entity an earlier pass removed is exactly the cross-pass case Rule 4
     # exists for (S4 supplies the conclusion between the two passes). The
@@ -1150,6 +1151,28 @@ def apply_vet(embed_list: Mapping[str, Any],
     present_folded = {key.casefold() for key in present}
     for ref_name in sorted(to_restore):
         name = ref_name
+        # A casefold-equal entity this pass ALREADY holds is the same entity,
+        # whatever spelling it kept — restoring the prior copy would put two
+        # Objects (or two list entries) for one entity in the emission and make
+        # S5's fold arm ambiguous, so the very edge the restore exists to save
+        # would then be dropped. Tested BEFORE both lookups: the exact `_norm`
+        # branch is itself a collision case when the two spellings differ only
+        # in casefold space.
+        #
+        # ⛔ Skipping the APPEND must not skip the RECONCILIATION: a Layer-1
+        # reference written in the divergent fold is not less valid because the
+        # entity is already present. Record the HELD spelling in `canonical` so
+        # `_rewrite_entity_references` repairs `about_entities`/`slots` —
+        # otherwise the reference names a spelling no entity carries and
+        # `validate_layer1` reports "about_entities reference unknown entities"
+        # (a 422-class failure) where the pre-fix tree was valid.
+        if name.casefold() in present_folded:
+            for _key, _item in present_map.items():
+                if _key.casefold() == name.casefold() \
+                        and str(_item.get("name") or "").strip():
+                    canonical[name] = str(_item["name"]).strip()
+                    break
+            continue
         original = prior_entities.get(name)
         if original is None:
             folded = [key for key in prior_entities
@@ -1164,6 +1187,9 @@ def apply_vet(embed_list: Mapping[str, Any],
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
+            # Re-stamp the guard: two divergent spellings can both be in
+            # `to_restore`, and the second must not restore the same entity.
+            present_folded.add(name.casefold())
             if ref_name in layer1_referenced or name in layer1_referenced:
                 warnings.append(
                     f"vet: entity {name!r} was discarded by an earlier pass "
