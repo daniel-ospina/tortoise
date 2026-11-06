@@ -1367,23 +1367,26 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     #     `Notes` + `2. -` + `2.     Closes #100`   renderer ONE `<p>` -> PROSE, `[100]` both arms
     # Also why the ROUND-51 STATE FIX cannot simply be un-gated: this answer clears `prev_prose`, so
     # the indent-pop below must record the dropped item from the POP rather than from `prev_prose`.
-    # ⚠️ GATED ON `prev_prose` BEING CLOSED ALREADY (round-52 review, P1 — the collateral of the
-    # un-gated version). The ladder answers a fact about the ITEM, but it is read as "the marker line
-    # below is code", and where a paragraph IS open above this line the renderer's answer for that
-    # line comes from the block that is already swallowing it — `- Text` + `> <br />` + `> <span>` +
-    # `> - *` + `>   2.     Closes #100` is ONE `html_block` whose raw text is the marker line
-    # (PROSE, `[100]` on `origin/main`), and the un-gated ladder blanked it in both arms. With a
-    # paragraph already closed there is nothing to swallow the line, and the ladder's answer is the
-    # one that decides it — which is exactly the `- -` family it was written for.
-    if not prev_prose:
-        _inner = body
-        while True:
-            _inner_col = _content_column(_inner)
-            if _inner_col is None:
-                break
-            _inner = _inner[_inner_col:]
-            if not _inner.strip():
-                return True
+    # ⛔ UNCONDITIONAL, AND THAT IS A MEASURED CHOICE (round-52 review, P0 — the `not prev_prose`
+    # gate this block carried for one commit RE-OPENED, in BOTH arms, the fail-open the ladder exists
+    # to close, for every body with a prose line above the item):
+    #     `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
+    #         `origin/main` `[]` both arms; the gated head `[100]` in LENIENT and `strict`
+    #     (`strict` is the `issue_process_lint` PASS arm, so that is a false PASS in the gate)
+    # Measured on a 9,560-body grid: gated = 31 new fail-opens in each arm, un-gated = 0, with
+    # 3 new lenient lost closes at the gate and 0 without it. The ONLY body the gate protected is
+    # `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`, where this module's
+    # `_html_here` is False on every line — i.e. a shape it already models wrongly — so a
+    # paragraph-state discriminator here protects nothing real. The ordering guards above
+    # (`lazy_marker`, §4.4) are what the `Notes` + `2. -` control needs, and they are untouched.
+    _inner = body
+    while True:
+        _inner_col = _content_column(_inner)
+        if _inner_col is None:
+            break
+        _inner = _inner[_inner_col:]
+        if not _inner.strip():
+            return True
     # ⛔ A BARE MARKER OPENS AN EMPTY ITEM (round 49 review, P1). §5.2 lets a list marker be followed
     # by the END OF THE LINE, and such an item has no content, so it has no paragraph — the same
     # answer the test above gives the `- ` spelling. `_content_column` returns the marker's width + 1
@@ -1874,13 +1877,12 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #         (pinned by `test_a_PHANTOM_item_needs_FOUR_columns_and_the_SETEXT…`)
                 # `prev_prose` is what makes that safe: the record only claims a paragraph was open
                 # above this line, which is the condition the record is read under anyway.
-                # ⛔ NOT GATED ON `prev_prose` (round-52 review, P0). The fact is about the ITEM --
-                # "the item that held the paragraph is gone" -- and `prev_prose` describes the
-                # paragraph ABOVE this line, which a marker whose own content is a bare marker
-                # (`- 2.`) has already ended. Gating on it lost the record and `_is_lazy_marker` then
-                # read the next wide-gap marker as a lazy continuation of nothing:
-                #     `- 2.` + `    - x` + `x` + `2.     Closes #100`
-                #         renderer `<pre><code>` -> CODE; `issue_process_lint.claims()` `[] -> [100]`
+                # ⚠️ GATED ON `prev_prose`, AND THE GATE IS LOAD-BEARING HERE (measured: un-gating it
+                # changes 93 of 60,000 fuzz bodies, +98 lenient / +39 strict lost closes). The record
+                # only says anything while a paragraph is open above this line, which is what the
+                # gate states — the residual it leaves (`- 2.` + `    - x` + `x` + wide-gap marker)
+                # needs the record to survive the one-line clearing at the top of the loop, a
+                # separate mechanism, and is declared open rather than paid for with ~110 lost closes.
                 if prev_prose and prev_container is _popped and _popped.real:
                     dropped_paragraph_item = _popped
             # An item that was empty on its marker line gains CONTENT from the first line that stays
@@ -2438,13 +2440,12 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #     `- 2.` + `    - x` + `x` + `2.     Closes #100`
                 #         renderer `<pre><code>` -> CODE, and `issue_process_lint.claims()` went
                 #         `[] -> [100]` — a false PASS in the arm-1 gate
+                # ⚠️ BOTH TERMS ARE GATED ON `prev_prose`, MEASURED: un-gating this one changes 0 of
+                # 60,000 fuzz bodies (it is unobservable — the record only matters when a paragraph
+                # was open above, which is what the gate says), and un-gating the DEDENT pop at the
+                # top of the loop costs +98 lenient / +39 strict lost closes (round-52 review, P2).
                 if _popped_by_indent.real and prev_prose:
                     prev_container = _popped_by_indent
-                    dropped_paragraph_item = _popped_by_indent
-                    # …and the NEXT line's paragraph may still be lazily inside it, one line after
-                    # the blanked marker (`Summary.` continues the abandoned `<li>`), so the pop
-                    # records the item the same way the dedent pop does:
-                    #     `- a bullet` + `     - x` + `Summary.` + `2.     Closes #100`
                     dropped_paragraph_item = _popped_by_indent
             out.append("")
             # ⛔ AN INDENTED CODE BLOCK CANNOT INTERRUPT A PARAGRAPH (§4.4), SO A LINE BLANKED ONLY BY

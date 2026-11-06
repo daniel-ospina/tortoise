@@ -5486,11 +5486,26 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
     def keyword_types(body: str) -> set[str]:
         return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
 
-    for body in ("Notes\n2. -\n2.     Closes #100\n",
-                 "- Text\n> <br />\n> <span>\n> - *\n>   2.     Closes #100\n"):
-        assert keyword_types(body) <= {"inline", "html_block"}, body
-        assert cl.parse_closing_refs(body) == [100], body
-        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    body = "Notes\n2. -\n2.     Closes #100\n"
+    assert keyword_types(body) == {"inline"}, body
+    assert cl.parse_closing_refs(body) == [100], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # ⛔ …AND THE LADDER MUST STAY UNCONDITIONAL (round-52 review, P0). Gating it on "a paragraph was
+    # already closed above" re-opened, in BOTH arms, the fail-open it exists to close — every body
+    # with a prose line above the item. `strict` is the `issue_process_lint` PASS arm, so the second
+    # arm being wrong is a false PASS in that gate:
+    #     `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
+    #         `origin/main` `[]` both arms; the gated head `[100]` in both.
+    # ⚠️ The gate did protect ONE body — `- Text` + `> <br />` + `> <span>` + `> - *` +
+    # `>   2.     Closes #100` — where this module's `_html_here` is False on every line, i.e. a shape
+    # it already models wrongly; no paragraph-state discriminator here protects anything real.
+    for body in ("x\n- 1.\n  2.     Closes #100\n",
+                 "Notes\n- 2.\n  2.     Closes #100\n",
+                 "Summary of the change.\n- 2.\n  2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
 
 
 def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
