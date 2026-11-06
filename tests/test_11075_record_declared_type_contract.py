@@ -58,6 +58,32 @@ DB-FREE. The declared types come from `supabase/migrations/`, the values from
 `replay_plan` over the registry's producer-shaped corpus. No connection, no
 graph, no extra dependency — so it rides `TORTOISE_TEST_CARVE_OUT=1`.
 
+⚠️ WHAT THIS PIN COULD NOT SEE AT ITS FIRST HEAD, AND THE TWO ARMS THAT CLOSE IT
+(#11075, measured). A pin is only as discriminating as the SHAPES in its
+population, and two of them were missing:
+
+  * `point.search_keys` was judged only as the already-flattened STRING. The
+    record boundary's flatten rule (`record_projection._record_column_value`)
+    is skipped for a `str`, so deleting it left this file 11/11 GREEN while a
+    raw snapshot's ARRAY reached the `text` column as `_jsonb_or_scalar`'s JSON
+    text — accepted, so no refusal: the #10620 second-representation class, a
+    row written with the WRONG VALUE. Closed by
+    `test_the_RAW_array_form_of_search_keys_is_bound_as_the_flat_string`, which
+    replays the raw array and asserts the bound value IS the graph's flat form.
+  * `session_narrative.capture_redactions` was exempted as "not bound by a
+    Python value", because the corpus spelled the count `captureRedactions`
+    (camelCase, which binds `public.session` only). The producer's own spelling
+    is `capture_redactions` (`sdk._emit_event("SessionRecorded",
+    capture_redactions=redacted_total)`), and it binds BOTH columns — so a
+    narrative column of a type that cannot hold the count dropped every
+    narrative row with this file 11/11 GREEN. Closed by the snake_case corpus
+    record plus `test_the_narrative_arm_reds_when_its_column_cannot_hold_the_
+    count`, and by removing that false exemption.
+
+Both arms are the same rule: judge the value the WRITER BINDS for the shape a
+PRODUCER actually emits, and assert the consequence (the refused type, or the
+wrong stored value) rather than an incidental shape.
+
 READING OF THE WRITER: `replay_plan` emits `Statement(sql, params)`; `columns`
 is deliberately `None` whenever a `_SqlExpr` shifts the pairing (#10620), so the
 enumeration below pairs columns to parameters from the STATEMENT TEXT (four
@@ -245,22 +271,51 @@ def _cross_check(statement: Any, authoritative: tuple[str, ...]) -> None:
     )
 
 
+#: The producer's RAW `search_keys` shape: an ARRAY. `sparse.py` states the
+#: contract in words — *"writes `search_keys` as a flat space-joined STRING …
+#: raw graph values may still be arrays"* — and #10620 put the flatten rule AT
+#: THE RECORD BOUNDARY (`record_projection._record_column_value`) precisely
+#: because a raw snapshot can hand the column a list. The elements are prose
+#: tokens, not a JSON-looking string, so a mutant that stores the LIST instead of
+#: its flat form is distinguishable from the value the graph holds.
+RAW_SEARCH_KEYS: tuple[str, ...] = ("err4032", "release", "gate")
+
+#: The record that carries that raw shape. Named (not inlined) because the
+#: discriminating arm below replays THIS record on its own.
+RAW_SEARCH_KEYS_RECORD: dict[str, Any] = {
+    "type": "PointAdded", "ts": "2026-11-06T00:00:00Z", "id": "p-11075-raw",
+    "point": {"id": "p-11075-raw", "content": "c",
+              "searchKeys": list(RAW_SEARCH_KEYS)},
+}
+
+
 def _corpus() -> list[dict[str, Any]]:
-    """The registry's one-record-per-type payloads, plus the two incident shapes.
+    """The registry's one-record-per-type payloads, plus the incident shapes.
 
     `_everything_records()` is the corpus that pins TOTALITY over the declared
     record types, reused here so this pin cannot drift to a hand-made fixture
     set. It is the MINIMAL payload per type, though, so it carries neither of
-    the two columns whose disagreement with the schema dropped 302 rows. The two
+    the two columns whose disagreement with the schema dropped 302 rows. The
     records added below are the PRODUCERS' own shapes, not invented values:
 
-      * `SessionRecorded.captureRedactions` — the capture receipt's count, an
-        integer (#9264's emitted value);
-      * `PointAdded.point.searchKeys` — the graph's flat space-joined string
-        (`projection/entities.py::flatten_search_keys_prop` is the only
-        flattener, #10593's emitted value).
+      * `SessionRecorded.capture_redactions` — the capture receipt's count, an
+        integer (#9264's emitted value). ⚠️ The SPELLING is part of the fixture:
+        `sdk._emit_event("SessionRecorded", capture_redactions=redacted_total)`
+        is snake_case, and that is what binds BOTH columns the record reaches —
+        `public.session.capture_redactions` and `public.session_narrative.
+        capture_redactions`. A camelCase `captureRedactions` binds the `session`
+        column ONLY (measured), so a corpus written that way leaves the
+        narrative column outside the pin entirely — which is exactly the hole
+        that made a `boolean` narrative column invisible (#11075).
+      * `PointAdded.point.searchKeys`, TWICE — once as the flat space-joined
+        string (`projection/entities.py::flatten_search_keys_prop` is the only
+        flattener, #10593's emitted value), and once as the RAW ARRAY a raw
+        graph value can still carry. The array shape is what the boundary
+        flatten rule governs; a corpus carrying only the flattened string
+        cannot see that rule go away, so the pin would certify a stored
+        `["err4032", …]` JSON text (#11075).
 
-    A fixture that cannot be produced pins nothing; these two can.
+    A fixture that cannot be produced pins nothing; these can.
     """
     # ⚠️ `ts` is REWRITTEN on every record: `journal_event.recorded_at` is bound
     # from `record["ts"]` (through `%s::timestamptz`), so the registry corpus's
@@ -270,10 +325,18 @@ def _corpus() -> list[dict[str, Any]]:
     records = [{**record, "ts": stamp} for record in _everything_records()]
     return [*records,
         {"type": "SessionRecorded", "ts": stamp, "id": "sess-11075",
-         "turn_count": 2, "is_episodic": True, "captureRedactions": 3},
+         "turn_count": 2, "is_episodic": True, "capture_redactions": 3},
         {"type": "PointAdded", "ts": stamp, "id": "p-11075",
          "point": {"id": "p-11075", "content": "c",
                    "searchKeys": "alpha beta gamma"}},
+        # A FRESH nested dict per call: `_corpus()` is re-entered by every
+        # `_enumeration()` (i.e. by every `_mismatches()`), so handing out the
+        # module-level record's own `point` dict would let any in-place
+        # normalisation in the writer rewrite the shape a later arm judges,
+        # order-dependently (#11075 review).
+        {**RAW_SEARCH_KEYS_RECORD, "ts": stamp,
+         "point": {**RAW_SEARCH_KEYS_RECORD["point"],
+                   "searchKeys": list(RAW_SEARCH_KEYS)}},
     ]
 
 
@@ -592,6 +655,16 @@ def test_the_pin_judges_a_real_population():
         "the #9264 column is not judged — the pin says nothing about the shape "
         "that dropped rows"
     )
+    # ⚠️ The narrative table's copy of the SAME column, which the #9264 carrier
+    # (`SessionRecorded.capture_redactions`) binds on the same statement batch.
+    # It is reachable ONLY through the producer's snake_case spelling; a corpus
+    # that spells it camelCase leaves it outside the pin with every test green
+    # (#11075, measured with a `boolean` column and 11 tests passing).
+    assert ("session_narrative", "capture_redactions") in columns, (
+        "the narrative table's `capture_redactions` is not judged — the corpus "
+        "has lost the producer's snake_case spelling, so a declared type that "
+        "cannot hold the count would drop every narrative row unseen"
+    )
     assert ("point", "search_keys") in columns, (
         "the #10593 column is not judged — the pin says nothing about the shape "
         "that dropped rows"
@@ -738,8 +811,6 @@ NOT_BOUND_BY_A_PYTHON_VALUE: frozenset[str] = frozenset({
     "session.updated_at",
     "session.value_nodes_created",
     "session.value_nodes_held",
-    # ── session_narrative ───────────────────────────────────────────
-    "session_narrative.capture_redactions",
     # ── source ──────────────────────────────────────────────────────
     "source._search_text",
     "source.about_entities",
@@ -1030,7 +1101,8 @@ def test_the_9264_arm_reds_when_the_capture_column_is_jsonb_again(tmp_path):
     ⚠️ This is the arm that still CAN drop rows: `_jsonb_or_scalar` encodes a
     `dict`/`list`/`str`, but passes a numeric scalar through untouched, so an
     integer bound to a `jsonb` column is refused by Postgres exactly as it was
-    in #9264. The value is the corpus's producer value (`captureRedactions: 3`),
+    in #9264. The value is the corpus's producer value
+    (`capture_redactions: 3`, the producer's own spelling — see `_corpus`),
     so what reds is the real bound parameter, not a value built for the test.
     """
     reverted = rp.column_types(_tree_without_narrowings(tmp_path))
@@ -1108,6 +1180,140 @@ def test_the_10593_arm_is_CLOSED_AT_THE_WRITER_and_that_is_pinned(tmp_path):
     assert _accepts("integer", 3), "an integral float is an assignment cast"
     assert _accepts("integer", 3.0), "float8 → int4 is an assignment cast"
     assert _accepts("integer", "3"), "an untyped literal is coerced"
+
+
+def _bound_value_for(record: dict[str, Any], table: str, column: str) -> Any:
+    """The value the WRITER binds to `table.column` when replaying `record`.
+
+    A one-record replay, so an arm reads the SAME path the enumeration reads
+    (`replay_plan`) instead of re-deriving the value beside it — including the
+    fallback: a statement whose builder declines to attribute its columns
+    (`param_columns == ()`) is paired from the STATEMENT TEXT by `_bindings`,
+    exactly as `_enumeration` does, so this helper cannot false-red on a writer
+    refactor that only changes which derivation is available.
+    """
+    for statement in rp.replay_plan([record], org_id="o", graph_id="g"):
+        if f"INSERT INTO public.{table} " not in statement.sql:
+            continue
+        columns = statement.param_columns
+        if columns:
+            if column in columns:
+                return statement.params[columns.index(column)]
+            continue
+        params = list(statement.params)
+        offset = 0
+        for bound_table, bound_column, item in _bindings(statement.sql):
+            wanted = item.count("%s")
+            chunk = params[offset:offset + wanted]
+            offset += wanted
+            if bound_table == table and bound_column == column and chunk:
+                return chunk[0]
+    raise AssertionError(
+        f"replaying {record.get('type')!r} wrote no {table}.{column} — the arm "
+        "has lost its subject"
+    )
+
+
+def test_the_RAW_array_form_of_search_keys_is_bound_as_the_flat_string():
+    """The `search_keys` arm, on the shape the boundary rule exists to flatten.
+
+    ⚠️ WHY AN ARRAY AND NOT A STRING. A corpus carrying only the flattened
+    string cannot see `record_projection._record_column_value`'s flatten rule go
+    away: the rule is skipped for a `str`, so deleting it leaves every assertion
+    green while a raw snapshot's array reaches the column as
+    `_jsonb_or_scalar`'s JSON text (`'["err4032", "release", "gate"]'`) —
+    which `text` ACCEPTS, so no row is dropped and the value is simply the
+    SECOND representation of the datum #10620 exists to remove (the graph's
+    fulltext index matches the flat string, never the array). Measured at
+    `090c81a59f`: removing that arm left this file 11/11 GREEN (#11075).
+    """
+    sent = _bound_value_for(RAW_SEARCH_KEYS_RECORD, "point", "search_keys")
+    expected = " ".join(RAW_SEARCH_KEYS)
+    # ⚠️ The arm pins its OWN INPUT first. A fixture that degraded to the
+    # already-flattened string would satisfy every assertion below even with the
+    # flatten rule deleted (measured: `sent == expected`, the population
+    # assertion true, `_mismatches == []` — the exact regression this arm exists
+    # to catch, GREEN). The subject must be the raw shape or the arm is vacuous.
+    raw_form = RAW_SEARCH_KEYS_RECORD["point"]["searchKeys"]
+    assert not isinstance(raw_form, str) and list(raw_form) == list(
+        RAW_SEARCH_KEYS), (
+        "the raw-array arm's own fixture is not an ARRAY any more — the flatten "
+        f"rule is then skipped and this arm pins nothing: {raw_form!r}"
+    )
+    assert sent == expected, (
+        "the raw ARRAY form of `search_keys` must be bound as the graph's flat "
+        f"space-joined string ({expected!r}); the writer bound "
+        f"{type(sent).__name__} {sent!r}. The column is `text` and it accepts a "
+        "JSON array's text, so this is the #10620 second-representation class — "
+        "the row is written and the VALUE is wrong."
+    )
+    # …and the pin's own population carries it, so this is the declared-type
+    # gate judging the value rather than an arm standing beside it.
+    judged, _expressions = _enumeration()
+    assert expected in [value for table, column, value in judged
+                        if (table, column) == ("point", "search_keys")], (
+        "the raw-array record is not in the JUDGED population — the declared-"
+        "type gate says nothing about the shape the flatten rule governs"
+    )
+
+
+def test_the_narrative_arm_reds_when_its_column_cannot_hold_the_count(tmp_path):
+    """The `capture_redactions` arm, on the column the camelCase corpus missed.
+
+    The #9264 carrier binds `capture_redactions` to TWO columns —
+    `public.session.capture_redactions` and `public.session_narrative.
+    capture_redactions` — and this arm proves the pin judges the second one. It
+    rewrites the NARRATIVE column's declared type to one the integer count
+    cannot be coerced into (`boolean` is inside the vocabulary, so the column is
+    not skipped): every `SessionRecorded` would then refuse its narrative row
+    (42804, dropped) while the `session` row lands.
+
+    ⚠️ Measured at `090c81a59f`: this exact mutant left the file 11/11 GREEN,
+    because the corpus spelled the count `captureRedactions` — camelCase, which
+    binds the `session` column only — and `session_narrative.capture_redactions`
+    was listed in `NOT_BOUND_BY_A_PYTHON_VALUE`, an exemption that is simply
+    false for the producer's own spelling (#11075).
+    """
+    copy = tmp_path / "migrations"
+    shutil.copytree(MIGRATIONS, copy)
+    target = copy / "20261023000001_record_session_narrative.sql"
+    text = target.read_text(encoding="utf-8")
+    # The WHOLE column definition is rewritten, not just the type token: the
+    # landed definition carries `CHECK (capture_redactions IS NULL OR
+    # capture_redactions >= 0)`, and `boolean >= 0` has no operator, so a
+    # type-token-only rewrite describes a schema Postgres would refuse to CREATE
+    # — the arm would then pin a column that could never exist (#11075 review).
+    mutated, replaced = re.subn(
+        r"\n\s+capture_redactions integer CHECK \([^;]*?\),\n",
+        "\n    capture_redactions boolean,\n",
+        text,
+    )
+    assert replaced == 1, "the fixture no longer carries the narrative column"
+    assert "capture_redactions boolean," in mutated
+    assert "CHECK (capture_redactions" not in mutated, (
+        "the mutant kept the landed CHECK over the column — that definition is "
+        "not a schema Postgres could create, so it would never refuse a row"
+    )
+    target.write_text(mutated, encoding="utf-8")
+    mutated_types = rp.column_types(copy)
+    assert mutated_types["session_narrative"]["capture_redactions"] == "boolean", (
+        "the mutation did not take"
+    )
+    mismatches = _mismatches(mutated_types)
+    assert any(
+        m.startswith("session_narrative.capture_redactions: declared 'boolean'")
+        for m in mismatches
+    ), (
+        "the pin did NOT red on a narrative column that cannot hold the "
+        "producer's count — it is vacuous for the #9264 carrier on the "
+        f"narrative table. reported: {mismatches}"
+    )
+    # …and the LIVE tree is green on the same value for BOTH bindings, so the arm
+    # discriminates on the DECLARED TYPE rather than on the corpus.
+    live = [m for m in _mismatches(rp.column_types())
+            if m.startswith(("session.capture_redactions: ",
+                             "session_narrative.capture_redactions: "))]
+    assert live == [], live
 
 
 def test_the_scalar_arms_are_pinned_in_BOTH_directions():
