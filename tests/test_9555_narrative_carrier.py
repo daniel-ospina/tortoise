@@ -1843,15 +1843,19 @@ _AFFIRMATIVE_ADVERBS = (
 #: the optional article is part of the class (measured: it left the ENTIRE pin
 #: green while stating §12.1b's inverse).
 #:
-#: ⛔ `not so much X as Y` is NOT in this class, and an earlier cut put it here by
-#: mistake. It is a MITIGATED DENIAL of X — the very term these guards are bound
-#: to — so excluding it turned two correct re-wordings RED with the inverted
-#: diagnosis *"no longer states the NEGATION"*. Measured both ways; it is now an
-#: ACCEPT case in both objects' re-wording lists.
+#: ⛔ `not so much … as` IS excluded, and that is a DECLARED FALSE RED — not a
+#: claim that it asserts its first term. It DENIES its first term, so these guards
+#: SHOULD accept it; but they bind POSITIONALLY (`cue + span + object`) and cannot
+#: tell the denied term from the asserted one. Every attempt to resolve it by ROLE
+#: opened a FAIL-OPEN instead — measured twice: a §9.4 sentence reading the trap and
+#: a §12.1b footnote saying `summary` IS the narrative both left the whole file
+#: GREEN. Fail-closed is the direction this pin chooses, so the construction is
+#: refused outright, DECLARED, and pinned by
+#: `test_the_declared_not_so_much_over_block_is_the_documented_one`.
 _AFFIRMATIVE_EXCLUSION = (
-    rf"(?!(?:\s+(?:the\s+)?(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b))"
+    rf"(?!(?:\s+(?:the\s+)?(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b"
+    rf"|\s+so\s+(?:much|many)\b))"
 )
-
 #: The SAME exclusion applied AFTER the object. English writes the family in the
 #: natural order too — `not the narrative alone` / `not from `:Source.summary`
 #: only` — and that spelling was measured to leave the whole pin GREEN over a
@@ -1894,44 +1898,6 @@ _NEGATION_CUE = (
 #: ACCEPTED (the pin certifying the exact instruction it exists to forbid).
 _NEG_ADVERSATIVE = r"(?:\bbut\b|\brather\b|\binstead\b)"
 
-#: Markdown emphasis, stripped before the guards read a line (see
-#: `_negation_bound_to`). Asterisks only — underscores live inside identifiers.
-_EMPHASIS_RE = re.compile(r"\*{1,2}")
-
-#: ⛔ `not so much A as B` (`than` works too) is a MITIGATED DENIAL of A and an
-#: ASSERTION of B — and the guards bind POSITIONALLY (`cue + span + object`), so
-#: they cannot tell the two terms apart by shape. Both directions were measured:
-#: excluding the construction refused the CORRECT sentence (A denied), and simply
-#: dropping the exclusion certified the INVERSE (a §9.4 sentence reading the trap,
-#: and a §12.1b footnote saying `summary` IS the narrative, both left the whole
-#: file GREEN). Handled by POSITION, not vocabulary: the object is the denied term
-#: only when it PRECEDES the pivot.
-_NOT_SO_MUCH_RE = re.compile(r"\bnot\s+so\s+(?:much|many)\b", re.IGNORECASE)
-_PIVOT_RE = re.compile(r"\b(?:as|than)\b", re.IGNORECASE)
-
-
-def _object_is_the_ASSERTED_term(line: str, object_regex: str) -> bool:
-    """Is `object` the ASSERTED half of a `not so much A as B`?
-
-    True means the cue must NOT be read as negating this object. False for every
-    line without the construction, so the rule costs nothing elsewhere.
-    """
-    nsm = _NOT_SO_MUCH_RE.search(line)
-    if nsm is None:
-        return False
-    pivot = _PIVOT_RE.search(line, nsm.end())
-    if pivot is None:
-        return False
-    # \u26d4 NOT "the first occurrence in the line". The footnote names \"the S1
-    # narrative\" (the HOME) several clauses before this construction, so a
-    # first-match test read the wrong occurrence and left the inverted clause
-    # certified (measured). The question is which ROLE this object plays in THIS
-    # construction: if it sits in the DENIED span it is the negated term; if it
-    # only appears AFTER the pivot it is the ASSERTED one.
-    if re.search(object_regex, line[nsm.end():pivot.start()], re.IGNORECASE):
-        return False
-    return re.search(object_regex, line[pivot.end():], re.IGNORECASE) is not None
-
 #: What a negation may NOT cross on its way to the object it negates: another
 #: backticked name, or a clause boundary (`. , ; : ( — –`). The BACKTICK half
 #: keeps a negation of a DIFFERENT name from reaching this one — in *"never from
@@ -1953,6 +1919,10 @@ _NEG_READ_VERB = (
 #: `:Source.summary`"* the cue is followed by a backtick, not by one of these, so
 #: that negation belongs to the other name and this object is not negated.
 _NEG_TRAILING_SUBJECT = r"(?:\s+(?:be|is|was|were|the|what|it|this|that)\b)"
+
+#: Markdown emphasis, stripped before the guards read a line (see
+#: `_negation_bound_to`). Asterisks only — underscores live inside identifiers.
+_EMPHASIS_RE = re.compile(r"\*{1,2}")
 
 
 def _neg_span(n: int) -> str:
@@ -2034,8 +2004,6 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
     #: over a §12.1b footnote stating the inverse. Asterisks are stripped before
     #: matching; backticks are NOT, because the guards bind objects BY them.
     line = _EMPHASIS_RE.sub("", line)
-    if _object_is_the_ASSERTED_term(line, object_regex):
-        return False
     pattern = f"(?:{leading}{object_regex}{_AFFIRMATIVE_EXCLUSION_POST})"
     if trailing:
         pattern += (f"|(?:{object_regex}{_neg_span(30)}"
@@ -2569,11 +2537,6 @@ _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     #: the same ruling, and the leading-only guard REFUSED it (measured).
     ("the trap as the subject of the negation",
      "`:Source.summary` is never what the vector reads"),
-    #: ⛔ `not so much X as Y` DENIES X — the trap is the denied term, so the
-    #: guard MUST accept it. An earlier cut excluded it and turned this correct
-    #: re-wording RED with the inverted diagnosis (measured).
-    ("the `not so much … as` mitigated denial",
-     "not so much from `:Source.summary` as from the S1 narrative"),
 ]
 
 #: Lines that NAME the trap with NO negation cue applied to it, or apply one to
@@ -2587,10 +2550,10 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "⛔ not `public.session_narrative`; it is `:Source.summary`"),
     ("the negation in a neighbouring clause",
      "⛔ the narrative is not on the node; `:Source.summary`"),
-    #: ⛔ The MIRROR: the trap is the ASSERTED term — a sentence telling the vector
-    #: to read it. Refused by POSITION, not vocabulary (see
-    #: `_object_is_the_ASSERTED_term`): merely dropping the construction from the
-    #: exclusion list certified this, measured GREEN on the whole file.
+    #: ⛔ The MIRROR, where the trap is the ASSERTED term — a sentence telling the
+    #: vector to read it. It is refused for the SAME reason as the denied form: the
+    #: guards bind positionally and cannot tell the two roles apart, so the whole
+    #: construction is excluded (declared in `_AFFIRMATIVE_EXCLUSION`).
     ("the `not so much … as` with the trap ASSERTED",
      "not so much from the S1 narrative as from `:Source.summary`"),
     #: ⛔ AN AFFIRMATIVE `not only`. The `not` is not a cue there — what follows
@@ -2621,7 +2584,7 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 @pytest.mark.parametrize(
     "why,clause", _SUMMARY_NEGATION_REWORDINGS,
     ids=["head-document-wording", "and-not-from", "must-not-be",
-         "never-the-field", "trap-as-negated-subject", "not-so-much-as"])
+         "never-the-field", "trap-as-negated-subject"])
 
 
 def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str):
@@ -2701,10 +2664,6 @@ _NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     #: did not carry — the same widening `_SUMMARY_NEGATION_INVERSIONS` pins for
     #: the other object, read in the ACCEPT direction here.
     ("cannot, cue before the object", "cannot be the narrative"),
-    #: ⛔ `not so much X as Y` DENIES X: the narrative is the denied term here, so
-    #: the guard must ACCEPT it (an earlier cut excluded it — measured false red).
-    ("the `not so much … as` mitigated denial",
-     "not so much the narrative as a lexicon"),
     #: ⛔ `rather than` / `instead of` belong HERE in spirit and are NOT admitted:
     #: see `_NEGATION_CUE`. In this guard's `cue + span + object` shape they bind
     #: the negation across the term they negate, and the shape
@@ -2754,8 +2713,7 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "the narrative is not the vector's text"),
     #: ⛔ And the MIRROR must stay refused: there the narrative is the ASSERTED
     #: term, so the sentence says `summary` IS the narrative (§12.1b's inverse).
-    #: Handled by position (`_object_is_the_ASSERTED_term`); merely dropping the
-    #: construction from the exclusion list certified this.
+    #: Merely dropping the construction from the exclusion list certified this.
     ("the `not so much … as` with the narrative ASSERTED",
      "not so much a lexicon as the narrative"),
     #: ⛔ THE AFFIRMATIVE CUES the shared vocabulary counted as negations. Each
@@ -2794,8 +2752,7 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 
 @pytest.mark.parametrize(
     "why,clause", _NARRATIVE_NEGATION_REWORDINGS,
-    ids=["head-document-wording", "not-no-conjunction", "cannot-cue",
-         "not-so-much-as"])
+    ids=["head-document-wording", "not-no-conjunction", "cannot-cue"])
 
 
 def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
@@ -3092,6 +3049,40 @@ def test_the_declared_rather_than_over_block_is_the_documented_one():
         f"never mentions the trap's negation in the shape the guard needs — is "
         f"now accepted: {line!r}. That is the trade `_NEGATION_CUE` refuses; if it "
         f"is being revisited, the two measured fail-opens must be replayed first")
+
+
+#: The false red `_AFFIRMATIVE_EXCLUSION`'s `so much|many` arm declares. The
+#: construction DENIES its first term, so these guards SHOULD accept it — but they
+#: bind positionally, and every role-based attempt opened a measured fail-open.
+#: Declared and pinned so that closing it is a visible, deliberate change.
+_DECLARED_OVER_BLOCK_SO_MUCH = (
+    "the S1 narrative read from `{home}` — not so much from `:Source.summary` "
+    "as from the transcript")
+
+
+def test_the_declared_not_so_much_over_block_is_the_documented_one():
+    """*What value makes this test fail?* A declared limit with no code behind it.
+
+    Both guards REFUSE a sentence that merely mitigates its denial. That is
+    fail-CLOSED and chosen deliberately: resolving the construction by role was
+    tried twice and each time certified the INVERSE (a §9.4 sentence reading the
+    trap; a §12.1b footnote saying `summary` IS the narrative — the whole file
+    GREEN). A future cycle that reads the roles correctly must delete this case
+    and the `so much` arm together.
+    """
+    line = _DECLARED_OVER_BLOCK_SO_MUCH.format(home=_HOME)
+    assert f"read from `{_HOME}`" in line, (
+        f"the declared over-block no longer carries the home phrase, so it would "
+        f"be refused for the WRONG reason: {line!r}")
+    assert _negates_the_home(line, _HOME) is False, (
+        f"`not so much … as` is no longer treated as a non-negation of the HOME: "
+        f"{line!r} — the role handling came back, and it must come back WITH the "
+        f"two fail-open replays")
+    assert _negates_the_summary(line) is False, (
+        f"`not so much … as` is now read as negating the trap: {line!r}. That "
+        f"sentence DENIES the trap, so the read is correct — and it is exactly the "
+        f"role distinction that fail-OPENed twice. Remove this case and the `so "
+        f"much` arm together, with the replays")
 
 
 def test_the_declared_leading_cue_residual_is_the_measured_one():
