@@ -1148,48 +1148,51 @@ def apply_vet(embed_list: Mapping[str, Any],
     # 'Straße', 'İ' vs 'i') restored nothing and S5 then dropped the edge as
     # unresolvable. Unique-or-nothing, and never a SECOND copy of an entity
     # this pass already holds under a different casefold.
-    present_folded = {key.casefold() for key in present}
+    # Held spellings, by casefold, kept CURRENT as restores land (a restore
+    # appends to `out["entities"]`, and a stale snapshot is how a later
+    # reference in the same loop is left unreconciled).
+    held_folded: dict[str, str] = {}
+    for _key, _item in present_map.items():
+        _spelling = str(_item.get("name") or "").strip()
+        if _spelling:
+            held_folded.setdefault(_key.casefold(), _spelling)
     for ref_name in sorted(to_restore):
         name = ref_name
-        # A casefold-equal entity this pass ALREADY holds is the same entity,
-        # whatever spelling it kept — restoring the prior copy would put two
-        # Objects (or two list entries) for one entity in the emission and make
-        # S5's fold arm ambiguous, so the very edge the restore exists to save
-        # would then be dropped. Tested BEFORE both lookups: the exact `_norm`
-        # branch is itself a collision case when the two spellings differ only
-        # in casefold space.
-        #
-        # ⛔ Skipping the APPEND must not skip the RECONCILIATION: a Layer-1
-        # reference written in the divergent fold is not less valid because the
-        # entity is already present. Record the HELD spelling in `canonical` so
-        # `_rewrite_entity_references` repairs `about_entities`/`slots` —
-        # otherwise the reference names a spelling no entity carries and
-        # `validate_layer1` reports "about_entities reference unknown entities"
-        # (a 422-class failure) where the pre-fix tree was valid.
-        if name.casefold() in present_folded:
-            for _key, _item in present_map.items():
-                if _key.casefold() == name.casefold() \
-                        and str(_item.get("name") or "").strip():
-                    canonical[name] = str(_item["name"]).strip()
-                    break
+        # A RELATION endpoint whose entity this pass already holds under another
+        # casefold is the same entity: restoring the prior copy would put two
+        # Objects in the emission, make S5's fold index ambiguous, and drop the
+        # very edge the arm exists to save. Layer-1 references are NOT skipped
+        # — payload identity is EXACT (`(str(name).strip(), kind)`), so when
+        # `prior` can supply the spelling a point/`slots` reference actually
+        # names, restoring it is correct and re-pointing the reference at a
+        # casefold sibling would silently attribute the statement to a
+        # DIFFERENT entity (this module's own doctrine: guessing is worse than
+        # a miss).
+        if ref_name not in layer1_referenced \
+                and name.casefold() in held_folded:
+            # The append is skipped, but the REFERENCE is still reconciled:
+            # `canonical` is keyed by the reference's own `_norm` form, which is
+            # what `_rewrite_entity_references` looks up.
+            canonical[ref_name] = held_folded[name.casefold()]
             continue
         original = prior_entities.get(name)
         if original is None:
             folded = [key for key in prior_entities
                       if key.casefold() == name.casefold()]
-            if len(folded) == 1 and folded[0].casefold() not in present_folded:
+            if len(folded) == 1 and folded[0].casefold() not in held_folded:
                 name = folded[0]
                 original = prior_entities[name]
         if original is not None and str(original.get("name") or ""):
             # STRIP, as above: the emitted name is stripped (see the downgrade
-            # branch for why).
-            canonical[name] = str(original["name"]).strip()
+            # branch for why). Stamped on the REFERENCE's key: the folded prior
+            # key is not what a reference's `_norm` form looks up.
+            canonical[ref_name] = str(original["name"]).strip()
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
-            # Re-stamp the guard: two divergent spellings can both be in
-            # `to_restore`, and the second must not restore the same entity.
-            present_folded.add(name.casefold())
+            # Re-stamp: two divergent spellings can both be in `to_restore`, and
+            # the second must not restore the same entity again.
+            held_folded.setdefault(name.casefold(), canonical[ref_name])
             if ref_name in layer1_referenced or name in layer1_referenced:
                 warnings.append(
                     f"vet: entity {name!r} was discarded by an earlier pass "

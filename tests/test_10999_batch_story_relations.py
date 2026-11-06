@@ -1279,17 +1279,31 @@ def test_a_mistyped_section_never_displaces_a_valid_list_from_the_other_side():
         {"entities": "garbage"})
     assert [e["name"] for e in merged2["entities"]] == ["A"]
 
-    # and when NEITHER side carries a list, the mistype rides through (S5 counts)
+    # and when NEITHER side carries a NON-EMPTY list, the mistype rides through
+    # (S5 counts) — an EMPTY list is the normal "no gaps" delta, not a carrier
     merged3 = v2.merge_embed_lists({"relations": {"src": "A"}},
                                    {"relations": {"src": "B"}})
     assert merged3["relations"] == {"src": "B"}
+    merged4 = v2.merge_embed_lists(
+        {"relations": {"src": "A", "dst": "B", "predicate": "IMPL"}},
+        {"relations": []})
+    assert merged4["relations"] == {"src": "A", "dst": "B",
+                                    "predicate": "IMPL"}
+    assert v2.execute_embed(copy.deepcopy(merged4), {},
+                            session_id="s-e")["stats"]["relations_dropped"] == 1
 
 
-def test_the_restore_guard_still_reconciles_a_divergent_fold_reference():
-    """Round-7 P1 (a regression the VGATE verifier caught): skipping the append
-    for an already-held entity also skipped `canonical`, so a Layer-1 reference
-    written in the divergent fold was never re-spelled and `validate_layer1`
-    rejected the payload ("about_entities reference unknown entities")."""
+def test_a_layer1_reference_is_restored_exactly_not_re_pointed_at_a_sibling():
+    """Round-7 P2 (re-review): the duplicate-guard must NOT skip a LAYER-1
+    reference.
+
+    Payload identity is EXACT (`(str(name).strip(), kind)`), so when `prior` can
+    supply the very spelling a point's `about_entities` names, restoring it is
+    correct; re-pointing the reference at a casefold sibling would silently
+    attribute the statement to a DIFFERENT entity — and a Layer-1-valid payload
+    surfaces nothing. Measured pre-fix: the reference was rewritten to
+    `Straße` with no warning.
+    """
     emission = {
         "entities": [{"name": "Straße", "kind": "core:rule"}],
         "points": [{"content": "a point", "about_entities": ["STRASSE"]}],
@@ -1297,6 +1311,29 @@ def test_the_restore_guard_still_reconciles_a_divergent_fold_reference():
     }
     prior = {"removed_entities": {
         "strasse": {"name": "STRASSE", "kind": "core:rule"}}}
-    out, _warns = vg.apply_vet(emission, {}, prior=prior)
-    assert [e["name"] for e in out["entities"]] == ["Straße"]
-    assert out["points"][0]["about_entities"] == ["Straße"]
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Straße", "STRASSE"]
+    assert out["points"][0]["about_entities"] == ["STRASSE"]
+    assert any("restored" in w for w in warns), warns
+
+
+def test_a_relation_endpoint_already_held_in_another_case_is_reconciled():
+    """...while a RELATION endpoint whose entity the pass already holds is the
+    same entity: no second copy, and the endpoint spelling is reconciled to the
+    held name (so the edge survives and nothing names an absent spelling)."""
+    emission = {
+        "entities": [{"name": "Straße", "kind": "core:rule"},
+                     {"name": "Other", "kind": "core:rule"}],
+        "points": [], "events": [], "operators": [],
+        "relations": [{"src": "STRASSE", "dst": "Other",
+                       "predicate": "IMPL"}],
+    }
+    prior = {"removed_entities": {
+        "strasse": {"name": "STRASSE", "kind": "core:rule"}}}
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Straße", "Other"]
+    assert not [w for w in warns if "restored" in w], warns
+    # the endpoint is resolved by S5's fold, so the edge survives with the
+    # emission's own spelling
+    assert [(r["src"], r["dst"]) for r in _run(out)["relations"]] == [
+        ("Straße", "Other")]
