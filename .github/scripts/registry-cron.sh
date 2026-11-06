@@ -1707,14 +1707,36 @@ case "$RUN_STATUS" in
       last_ts="$(date -d "$LAST_SWEEP_AT" +%s 2>/dev/null || echo 0)"
     fi
     if [ "$last_ts" != "0" ]; then
-      last_age_min=$(( ($(date +%s) - last_ts) / 60 ))
-      if [ "$last_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
-        log "sweep lock held but the last real sweep was ${last_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
-        file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock stuck" \
-          "the app reported already_running (lock held) and last_sweep.last_sweep_at is ${last_age_min}m old (> ${DRIVER_DOWN_MIN}m). The lock appears stuck; backups are NOT running. Check the app's sweep lock." ""
+      # #10234 review P2 (round 20): the SAME field and the SAME hazard the
+      # driver_timeout/empty_response arm handles below — a stamp in the FUTURE
+      # makes the age negative, and a negative age is never `> DRIVER_DOWN_MIN`,
+      # so a skewed or corrupt ops/state.json read as `healthy` from THIS arm
+      # forever (exit 0, nothing filed, and an age printed that cannot be true).
+      # The two arms must not disagree about the same field, so corruption is
+      # classified here too, and it reds regardless of the pool — exactly as
+      # below. The tolerated side of the same 300s grace clamps the age rather
+      # than publishing a negative one.
+      LOCK_NOW_S="$(date +%s)"
+      if [ "$last_ts" -gt $(( LOCK_NOW_S + 300 )) ]; then
+        log "sweep lock held and last_sweep_at is dated in the FUTURE (${last_ts} > now) — corrupt or skewed state, filing SWEEP_NO_COVERAGE (job red)"
+        file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — last_sweep_at is in the future" \
+          "the app reported already_running (lock held) and /status reports last_sweep.last_sweep_at dated in the FUTURE, which no clock-consistent writer can produce. A completion stamp in the future makes the age negative, so the held lock would otherwise read as healthy forever — this is corruption or clock skew in ops/state.json, not a healthy held lock. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
         NO_COVERAGE=1
       else
-        log "sweep lock held; last real sweep ${last_age_min}m ago — healthy"
+        last_age_min=$(( (LOCK_NOW_S - last_ts) / 60 ))
+        LOCK_SKEW_NOTE=""
+        if [ "$last_age_min" -lt 0 ]; then
+          LOCK_SKEW_NOTE=" (that stamp is $(( last_ts - LOCK_NOW_S ))s AHEAD of this runner — inside the 300s skew grace, so the age is reported as 0m)"
+          last_age_min=0
+        fi
+        if [ "$last_age_min" -gt "$DRIVER_DOWN_MIN" ]; then
+          log "sweep lock held but the last real sweep was ${last_age_min}m ago (> ${DRIVER_DOWN_MIN}m) — filing SWEEP_NO_COVERAGE (job red)"
+          file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep lock stuck" \
+            "the app reported already_running (lock held) and last_sweep.last_sweep_at is ${last_age_min}m old (> ${DRIVER_DOWN_MIN}m). The lock appears stuck; backups are NOT running. Check the app's sweep lock." ""
+          NO_COVERAGE=1
+        else
+          log "sweep lock held; last real sweep ${last_age_min}m ago${LOCK_SKEW_NOTE} — healthy"
+        fi
       fi
     elif [ "$R2_LIST_OK" != "1" ] || [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
       # An UNMEASURED pool is never "empty" (review P1, three reviewers):

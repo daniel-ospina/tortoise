@@ -307,8 +307,11 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 > `driver_timeout`**, which is why that shape means "may still be running
 > server-side (or queued behind a restore)", not "did nothing". Worst case a run
 > holds the job for roughly 1500 + 300 + 120 s of leg ceilings plus overhead
-> (≈33 min), against the workflow's `timeout-minutes: 45` job ceiling — so the
-> legs can exhaust the driver's budget without the *job* being killed mid-file.
+> (≈33 min) — and ≈1800 + 300 + 120 + 20 + 20 s ≈ 37 min at the knob's own 1800 s
+> maximum — against the workflow's `timeout-minutes: 45` job ceiling (#10234 r20:
+> the arithmetic at the ceiling is stated too, because the knob is the value ops
+> actually sets), so the legs can exhaust the driver's budget without the *job*
+> being killed mid-file.
 > A leg timeout is therefore a **reported** condition, never a silent one: it files
 > `PURGE_FAILED`/`RECONCILE_FAILED` with the curl exit and the derived shape.
 > ⚠️ **Except the sweep's own timeout, which now skips both ride-alongs on a GREEN run**
