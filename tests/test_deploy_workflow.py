@@ -4769,14 +4769,35 @@ def test_the_runbook_field_row_documents_the_positive_pair():
         "however correct the `/health` payload is; a renamed key leaves this row "
         "naming a field that no longer exists"
     )
-    # Non-vacuity MEASURED against the real head cells, not asserted: the same
-    # predicate, run against a coherently renamed payload while the runbook (and so
-    # every head cell) is untouched, must report every renamed key missing. That is
-    # precisely the state this pin exists to catch, and precisely the state the
-    # literal-membership form it replaces stayed green on.
-    renamed = {f"{name}_renamed" for name in record_keys}
-    assert _record_keys_missing_a_row(heads, renamed) == renamed, (
+    # Non-vacuity MEASURED, and it must be a measurement that can FAIL (#11128 review
+    # P3): the earlier form asserted `_record_keys_missing_a_row(heads, {f"{n}_renamed"})
+    # == {f"{n}_renamed"}` — which holds for ANY `heads` that mention no `*_renamed` cell,
+    # including `heads=[]`, so it could not red on the mutation its message described.
+    # This mutates the REAL head cells instead: rename the pair where the section
+    # documents it, and require the predicate to report exactly those two names
+    # missing and to stop reporting them once the mutation is reverted. Vacuous
+    # passes are impossible by construction — the mutation is asserted to have
+    # changed a cell, and the survivor check proves the cells are LIVE input, not an
+    # empty list the predicate would agree with.
+    mutated = [
+        head.replace("`record_writes_applied`", "`record_applied_writes`").replace(
+            "`record_last_write_at`", "`record_last_write_instant`"
+        )
+        for head in heads
+    ]
+    assert mutated != heads, (
+        "the rename mutation changed no head cell — the arming section no longer "
+        "documents either name in a head cell, so this measurement has no subject"
+    )
+    assert _record_keys_missing_a_row(mutated, record_keys) == {
+        "record_writes_applied",
+        "record_last_write_at",
+    }, (
         "this pin would stay GREEN on a coherent rename of `metrics()`'s record "
         "keys — the runbook would keep documenting the retired names while the "
         "suite passed, the paper-only claim #9548 exists to end"
     )
+    # …and the predicate reads the cells given to it (so it is not a constant):
+    # with the REAL head cells, neither name is missing.
+    assert not _record_keys_missing_a_row(heads, {"record_writes_applied",
+                                                "record_last_write_at"})
