@@ -135,7 +135,7 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 | **T8** | E2E-4 (negative) | pairs the packs do **not** declare — e.g. `dev:theme --hasPart--> dev:issue` (⚠️ **not** the direct `theme → epic` hop: `packs/dev/manifest.yaml:148-153` declares it, `:192-194` lists it in `hierarchies:`, and no ruling retires it) | the emitter runs | **zero** edges are emitted for the pair (the universe is the emitted edge list, not the graph) | #11001 | SF13 |
 | **T9** | E2E-8 | a partial against-graph check | the run commits | the item is held; held/committed/discarded are three distinct counts | #10998 | SF7 |
 | **T10** | E2E-6 | the frozen corpus, all doors | the census runs | ≥5 doors; every cell carries a writer symbol; an unmeasured door reads `UNMEASURED`; the artifact re-derives | #10995 | SF12 |
-| **T11** | E2E-1 (record) | a **referentiality** DISCARD | the run | it carries `rule_id` **naming the referentiality rule** and a `counterfactual` that **names the removed mention** — ⚠️ the generic `rule_id`/`counterfactual` already exist on every DISCARD, so the assertion must key on those two specifics or it passes today | #10996 | SF3 |
+| **T11** | E2E-1 (record) | a **referentiality** DISCARD | the run | it carries `rule_id` **naming the referentiality rule** and a `counterfactual` that **names the removed mention** — ⚠️ the generic `rule_id`/`counterfactual` already exist on every DISCARD, so the assertion must key on those two specifics or it passes today. Owner **re-pointed to `#11021`** by `#11201`: this is `ref-v1`'s question, which `#10996` withdrew rather than answered | #11021 | SF3 |
 | **T12** | E2E-1 (order) | a candidate consolidation will `DELETE` — ⛔ **withdrawn** (`#10996`): no `DELETE` verdict is producible (D5; see :51), so this `given` is unconstructible today and the case stands only as the shape to re-open if a producer lands | classification runs | it is **not** classified | #10996 | SF4 |
 | **T13** | E2E-4 (vocabulary) | `dev:issue` **and** `dev:initiative` | `expand_kind` | `dev:issue` includes `WorkItem`; `dev:initiative` exists and expands; the classifier index carries parents; **and** an initiative narrative classifies to `dev:initiative`, not `dev:theme`/`dev:epic` | #11000, #11001 | SF4, SF13 |
 | **T14** | E2E-1 (retry) | a poor batch verdict | the run | exactly one re-narrate; a tie keeps the first narrative | #11002 | SF1, SF3 |
@@ -151,7 +151,7 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 | layer | tests | file | runs | cost added |
 |---|---|---|---|---|
 | **hermetic gate** (scripted model, `sdk=None`, no net, no DB) | T1, T2 | `test_mention_gate.py` | every PR touching the named sources | **3 files, 8 tests, ≤ 15 s total** |
-| | T11, T12, T13, T14 | `test_selection_step.py` | | |
+| | T13, T14 | `test_selection_step.py` | | |
 | | T8, T15 | `test_pack_logic.py` | | |
 | **DB gate** (FalkorDB lane container, scripted model, ≤ 30 s/test) | T3, T5, T7 | `test_identity_hierarchy.py` | PRs touching the extractor/writer (diff-selected) | **2 files, 4 tests, ≤ 3 min** |
 | | T6 | `test_partial_commit.py` | | |
@@ -159,6 +159,8 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 | **eval lane** (`tests/eval/**`, dispatch-only, **never a PR gate**) | T10, T15b, T5b, and every real-model re-score of `#7949`'s **six** rows | — | manual dispatch | **0 on the gating path** |
 
 **Three consequences that are part of the plan, not commentary on it:**
+
+⛔ **`tests/test_selection_step.py` does not exist** (`#11201`). The routing row above used to send **T11, T12, T13 and T14** to it; T11 is now `#11021`'s (its `ref-v1` question, which owes its own file), T12 is **withdrawn** in place (no `DELETE` is producible, `:51` + `#10996`'s Claim 2), and **T13/T14 have no committed home yet** — they keep that row as the plan's own statement of where they are meant to run, rather than a path a reader can execute. ⚠️ **Most files this table names do not exist yet**: they are the plan's routing decision, and the issue in each row owes its file. `#10996`'s own case is **V3** (the default arm armed and witnessed), a verification row, not a case here.
 
 1. **T10, T15b and T5b are eval tests and are never gated.** The census reads the whole corpus, and T15b/T5b need the shipped module to actually run; putting any of them on the gating path is exactly the failure the owner named. Their guard against rot is that the artifact is **committed and re-derivable**, not that it runs per PR.
 1a. **Two gate jobs, not one, because the held set is Postgres.** T4/T4b/T9 run in `test-record-postgres`; T3/T5/T6/T7 run on the FalkorDB lane. Collapsing them into "the DB gate" would put a held-count assertion in a job with no held store — which is how that defect got into the first draft. **Totals: 8 hermetic (3 files) + 4 FalkorDB (2 files) + 3 record-DB (1 file) = 15 tests, 6 files.** ⚠️ **Honest cost of the third job:** `test-record-postgres` is an **always-run** job — it has no diff gate and adding one would be new machinery (`.github/workflows/python-ci.yml`'s own comment says so). So these 3 tests add to every PR, in a job that already runs in parallel; the hermetic and FalkorDB legs stay diff-selected, and the budget claim is corrected here rather than left as "none on every PR".

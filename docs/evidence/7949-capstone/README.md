@@ -156,9 +156,9 @@ the arm — and then **reads the values back out of `os.environ`**. The log's `a
 read-back, never a typed literal, and a flag that does not read back as set REFUSES the run.
 ⛔ **`"0"`, not `<unset>`** (`#10996`): the value gate DEFAULTS ON, so an absent value pins nothing —
 absence IS the ON arm. The committed log in this bundle was taken at a PRE-flip head, where absence
-genuinely was OFF; its `<unset>` spelling is admitted by `e1_e2_scores.py` only under that
-campaign-head licence (disclosed as `value_gate_pin` in `docs/evidence/9889/e1-e2-scores.json`) and
-does not license a re-take. The
+genuinely was OFF; its `<unset>` spelling is **history, and no licence follows from it here** — `e1_e2_scores.py`
+is scoped to **9889** (`ON_ARM_LOG = "on-arm.log"`) and never reads this bundle's log, so the `value_gate_pin` in
+`docs/evidence/9889/e1-e2-scores.json` describes that bundle's arms only (`#11201`). The
 earlier stamp of this bundle printed `arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1` while setting
 neither: a re-run following a recipe that exported only `TORTOISE_DB_URI` measured the **OFF**
 population under a log declaring both ON. Pinned by

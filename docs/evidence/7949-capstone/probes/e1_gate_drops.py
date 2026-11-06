@@ -7,8 +7,38 @@ touched it: two runs of the same arm differ by more than the bar's whole width
 (measured 12.0% and 54.0% on the same corpus). This driver answers the
 deterministic question instead, with ZERO model calls: apply the EXACT predicate
 the S2.2 pass applies (`tortoise.value_gate.mechanical_verdict`, called from
-`tortoise/vet_gate.py` at the `TORTOISE_VALUE_GATE` seam) to the Object names a
-run actually wrote, and count the drops.
+`tortoise/vet_gate.py` at the `TORTOISE_VALUE_GATE` seam) to the candidate text
+a run actually wrote, and count the drops.
+
+⚠️ **`--sections` is not a convenience, it is the pass condition (#11201).**
+`#10996` made the predicate default-ON at the fleet door, and its scope's Step 4
+pass condition is written over the sections that pass JUDGES — `entities`,
+`events`, `points` (`vet_gate.SECTIONS`) — not over Objects alone:
+
+    "0 drops over points+events, or every non-zero drop named with its text and
+     accepted by a reviewer as a `#2453` incidental. A non-zero, non-incidental
+     count blocks the flip."
+
+An Objects-only reading cannot evaluate that sentence, and the harm it hides is
+concrete: a claim that is nothing but a reference is discarded, and no survivor
+is left to reference the entity it named, so Rule 2 has nothing to preserve —
+one Discard, two nodes gone (`tests/test_9889_capstone_probes.py::
+test_the_mechanical_predicate_drops_a_claim_and_its_entity_together`). The
+default is therefore EVERY section the pass judges, and `SECTION_LABELS`' keys
+are pinned to `vet_gate.SECTIONS` by
+`test_e1_gate_drops_defaults_to_every_section_the_pass_judges`, so the
+instrument cannot silently cover less than the pass does.
+
+⛔ **The graph must come from a run that pinned the predicate OFF.** `apply_vet`
+REMOVES what the predicate discards before the payload is written
+(`tortoise/extractor_v2.py`, the `_vet_gate.apply_vet(...)` call in
+`_run_vet_pass`), so a run with `TORTOISE_VALUE_GATE` ON writes only SURVIVORS:
+its graph cannot contain a drop, and a `0` read off it is vacuous rather than
+reassuring. Since `#10996` "unset" IS the ON arm, the OFF arm has to be pinned
+explicitly — that is what `capstone_measure.measured_arm()` does (`ARM_OFF` sets
+`TORTOISE_VALUE_GATE` and `TORTOISE_S2_DECISION_SEAM` to an explicit `"0"`). The
+record carries this as `arm_precondition` so a reader cannot take the number for
+a different run shape.
 
 The positive controls are not decoration. A probe that reports "0 drops" without
 showing that the predicate CAN drop would be indistinguishable from one whose
@@ -22,9 +52,21 @@ Usage::
     python docs/evidence/7949-capstone/probes/e1_gate_drops.py \\
         --graph capstone_measure_<head8>_<epoch> --out /tmp/e1-gate.json
 
+    # the Step-4 pass condition (default: every section the pass judges):
+    python docs/evidence/7949-capstone/probes/e1_gate_drops.py \\
+        --graph capstone_on_<head8>_<epoch> --sections objects,points,events \\
+        --out e1-gate-drops-sections.json
+
 Exit status: 0 when the measurement was taken (whatever the number is — a gate
-that drops nothing is a RESULT, not a failure); 2 when the graph yields no
-Object names, because a zero-denominator reading of "0 drops" is not a result.
+that drops nothing is a RESULT, not a failure); 2 when no selected section
+yields any candidate text in the graph, because a zero-denominator reading of
+"0 drops" is not a result; 2 when `--sections` names a section (or nothing) this
+instrument does not census.
+
+⚠️ A section that yielded ZERO candidates is reported `measured: false` (and
+named in `unmeasured_sections`), never as "0 drops": an empty section is a zero
+denominator for that half of the pass condition, and `coverage_complete` says so
+in the record. Read `coverage_complete` before reading `drops_total`.
 
 ⚠️ What a 0-drop RESULT does NOT say. `vet_gate.apply_vet` Rule 2 downgrades a
 discard whose Object is still REFERENCED by a statement, and every audited Object
@@ -48,14 +90,84 @@ _PROBES = Path(__file__).resolve().parent
 if str(_PROBES) not in sys.path:
     sys.path.insert(0, str(_PROBES))
 
-from capstone_measure import census, graph_uri  # noqa: E402
+from capstone_measure import graph_uri  # noqa: E402
 
 #: Two names the predicate MUST drop and one it MUST keep. If the first pair
 #: stops dropping, the predicate is dead and the zero below means nothing.
 CONTROLS = ("#4118", "a/b/c.py", "the admin-merge rail")
 
+#: The candidate sections this instrument censuses, each mapped to the graph
+#: label(s) its candidates land on. ⛔ The KEYS are this instrument's section
+#: names; `PASS_SECTION_OF` maps them onto `vet_gate.SECTIONS`, and that mapping
+#: is what makes "the instrument covers the pass" checkable rather than
+#: asserted. Sections follow the pass's own order (`vet_gate.SECTIONS`: entities,
+#: events, points).
+#:
+#: ⚠️ ``:GraphEvent`` is deliberately NOT here: it is the claim-transition journal
+#: store, created with ``seq``/``ts``/``type``/``event_id``/``payload`` and NO
+#: ``name``/``content`` (`tortoise/event_store.py`'s ``CREATE (e:GraphEvent
+#: {...})``), so it can contribute no candidate text — querying it would
+#: full-scan the journal and always yield nothing. The census still COUNTS it
+#: (``census()["graph_events"]``) as a population fact; it is not a candidate
+#: class the predicate judges.
+SECTION_LABELS: dict[str, tuple[str, ...]] = {
+    "objects": ("Object",),
+    "events": ("Event",),
+    "points": ("Point",),
+}
 
-def measure(graph: str) -> dict:
+#: Instrument section -> the section name `vet_gate.SECTIONS` uses. A section the
+#: pass judges with NO entry here is the blind spot #11201 exists to close, and
+#: `test_e1_gate_drops_defaults_to_every_section_the_pass_judges` reds on it.
+PASS_SECTION_OF: dict[str, str] = {
+    "objects": "entities",
+    "events": "events",
+    "points": "points",
+}
+
+#: EVERY section the pass judges — the default, because an Objects-only default
+#: is exactly the reading that cannot evaluate the scope's pass condition.
+DEFAULT_SECTIONS: tuple[str, ...] = tuple(PASS_SECTION_OF)
+
+
+def _text_of(label: str, name: object, content: object) -> str:
+    """The text the pass would judge for this node, mirroring `_item_text`.
+
+    `vet_gate._item_text` is ``name or content`` for every section; a graph
+    `:Object` carries its identity in ``name`` and an `:Event`/`:Point` carries
+    its claim in ``content``, so the ORDER differs by node class while
+    the authority (the pass's own rule) does not. An empty answer is skipped, as
+    the pass skips it.
+    """
+    first, second = ((name, content) if label == "Object" else (content, name))
+    return str(first or second or "").strip()
+
+
+def section_population(uri: str) -> dict[str, list[str]]:
+    """Every candidate text per section, read from the graph — ONE graph seam.
+
+    Kept as a single function so a test can stub the whole graph side (the
+    assertions in `tests/test_9889_capstone_probes.py` are DB-free), and so the
+    section list has exactly ONE definition to pin.
+    """
+    from tortoise.projection import FalkorProjection
+
+    projection = FalkorProjection.from_uri(uri)
+    population: dict[str, list[str]] = {}
+    for section, labels in SECTION_LABELS.items():
+        texts: list[str] = []
+        for label in labels:
+            rows = projection.g.query(
+                f"MATCH (n:{label}) RETURN n.name, n.content").result_set
+            for name, content in rows:
+                text = _text_of(label, name, content)
+                if text:
+                    texts.append(text)
+        population[section] = texts
+    return population
+
+
+def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
     from tortoise import value_gate
     from tortoise.definite_description_backfill import (
         is_bare_definite_description,
@@ -64,19 +176,62 @@ def measure(graph: str) -> dict:
     base = os.environ.get("TORTOISE_DB_URI") or ""
     if not base.strip():
         raise SystemExit("REFUSED: TORTOISE_DB_URI is not set")
-    names = census(graph_uri(base, graph))["object_names"]
+    unknown = [s for s in sections if s not in SECTION_LABELS]
+    if unknown or not sections:
+        print(f"REFUSED: --sections names {unknown or 'nothing'} — this "
+              f"instrument censors {sorted(SECTION_LABELS)}")
+        raise SystemExit(2)
+    population = section_population(graph_uri(base, graph))
+
+    def verdicts(texts: list[str]) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for text in texts:
+            verdict = value_gate.mechanical_verdict(text)
+            if verdict is not None:
+                found[text] = verdict["rule_id"]
+        return found
+
+    per_section: dict[str, dict] = {}
+    for section in sections:
+        texts = list(population.get(section) or [])
+        drops = verdicts(texts)
+        per_section[section] = {
+            "candidates": len(texts),
+            "measured": bool(texts),
+            "drops": drops,
+            "drops_total": len(drops),
+        }
+
+    # The Objects half is read even when it is not requested: `object_names` /
+    # `bare_definite` are this record's legacy keys and a downstream validator
+    # (`e1_e2_scores.py`) reads an EMPTY `object_names` as an edit rather than a
+    # producer shape, so "objects not requested" must not manufacture one.
+    names = list(population.get("objects") or [])
     bare = [name for name in names if is_bare_definite_description(name)]
-    drops = {}
-    for name in names:
-        verdict = value_gate.mechanical_verdict(name)
-        if verdict is not None:
-            drops[name] = verdict["rule_id"]
+    drops = verdicts(names) if "objects" in sections else {}
     controls = {name: value_gate.mechanical_verdict(name) for name in CONTROLS}
     alive = (controls["#4118"] is not None
              and controls["a/b/c.py"] is not None
              and controls["the admin-merge rail"] is None)
+    # Coverage is judged against EVERY section the PASS judges, not against what
+    # this invocation asked for: `--sections objects` must not be able to stamp
+    # `coverage_complete: true` on the very Objects-only reading #11201 condemns.
+    pass_sections = list(PASS_SECTION_OF)
+    unmeasured = [section for section in pass_sections
+                  if not (per_section.get(section) or {}).get("measured")]
     return {
         "graph": graph,
+        "arm_precondition": (
+            "the graph must be written by a run that pinned the predicate OFF "
+            "(TORTOISE_VALUE_GATE=0): apply_vet removes what it discards before "
+            "the write, so an ON-arm graph cannot contain a drop and any 0 read "
+            "off it is vacuous (#11201)"),
+        "sections_requested": list(sections),
+        "sections": per_section,
+        "coverage_complete": not unmeasured,
+        "unmeasured_sections": unmeasured,
+        "sections_not_requested": [s for s in pass_sections
+                                   if s not in per_section],
         "objects": len(names),
         "bare_definite": len(bare),
         "bare_definite_share": (len(bare) / len(names)) if names else None,
@@ -86,24 +241,47 @@ def measure(graph: str) -> dict:
         "controls": controls,
         "predicate_alive": alive,
         "object_names": names,
+        "candidates_total": sum(b["candidates"] for b in per_section.values()),
+        "drops_across_sections": sum(b["drops_total"]
+                                     for b in per_section.values()),
     }
+
+
+def _sections_line(record: dict) -> str:
+    parts = []
+    for section, block in record["sections"].items():
+        flag = "" if block["measured"] else "/UNMEASURED"
+        parts.append(f"{section}={block['candidates']}{flag}"
+                     f"(drops={block['drops_total']})")
+    return "sections: " + " ".join(parts)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--graph", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--sections", default=",".join(DEFAULT_SECTIONS),
+        help="comma-separated candidate sections to census — default is EVERY "
+             f"section the S2.2 pass judges ({','.join(DEFAULT_SECTIONS)}); "
+             "an Objects-only reading cannot evaluate #10996's Step-4 pass "
+             "condition (#11201)")
     args = parser.parse_args(argv)
-    record = measure(args.graph)
+    sections = tuple(part.strip() for part in args.sections.split(",")
+                     if part.strip())
+    record = measure(args.graph, sections)
     Path(args.out).write_text(json.dumps(record, indent=1))
     print(f"objects={record['objects']} bare_definite={record['bare_definite']} "
           f"share={record['bare_definite_share']}")
+    print(_sections_line(record))
     print(f"value_gate drops: {record['drops_total']} "
           f"(among bare_definite: {len(record['drops_among_bare_definite'])}) "
-          f"controls alive={record['predicate_alive']}")
-    if not record["objects"]:
-        print("REFUSED: the graph yields no Object names — 0 drops would be a "
-              "zero-denominator reading, not a result")
+          f"controls alive={record['predicate_alive']} "
+          f"across sections: {record['drops_across_sections']} "
+          f"coverage_complete={record['coverage_complete']}")
+    if not record["candidates_total"]:
+        print("REFUSED: no selected section yields candidate text — 0 drops "
+              "would be a zero-denominator reading, not a result")
         return 2
     if not record["predicate_alive"]:
         print("REFUSED: the positive controls no longer drop — the predicate is "

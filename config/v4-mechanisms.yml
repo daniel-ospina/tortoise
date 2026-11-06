@@ -267,7 +267,13 @@ mechanisms:
       predicate never runs'"*) now that its rate is measured and committed
       (`docs/evidence/9889/e1-gate-drops.json`: 0 drops of 61 Objects, 0 of 13
       bare-definite, positive controls firing) — the residual is the point/event
-      rate, which that artifact does not cover (`#10996` V8).
+      rate, which that artifact does not cover (`#10996` V8). The INSTRUMENT now
+      can cover it: `e1_gate_drops.py --sections` censuses exactly the sections
+      this pass judges (`entities`/`events`/`points`), defaults to all three, and
+      refuses to print a drop count over a section that yielded no candidates
+      (`measured: false`, `coverage_complete: false`) — but **the points+events
+      number is still NOT taken**: the ON-arm graph is ephemeral, so Step 4's
+      pass condition is now *evaluable* and not yet *evaluated* (`#11201`).
       The ARBITER half stays OPT-IN. `TORTOISE_VET` runs the pass but supplies
       NO arbiter, so it adds no spend; the paid network call arrives only with
       the seam below (or an injected arbiter), which is why arming a

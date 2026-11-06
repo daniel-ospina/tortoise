@@ -188,13 +188,43 @@ n >= 2 **per arm**, not just a second arm. E2a below carries the same caveat.
 
 `capstone_measure.py` can report a *share*; a share cannot say whether the v4
 selection path touched the class at all. This probe applies the exact predicate
-the S2.2 pass applies (`tortoise.value_gate.mechanical_verdict`) to the Object
-names the run wrote — zero model calls, so no LLM non-determinism.
+the S2.2 pass applies (`tortoise.value_gate.mechanical_verdict`) to the candidate
+text the run wrote — zero model calls, so no LLM non-determinism.
 
 ```bash
 uv run python docs/evidence/7949-capstone/probes/e1_gate_drops.py \
     --graph capstone_on_54922a800_1793378318 --out e1-gate-drops.json
 ```
+
+⚠️ **That artifact covers `:Object` names only, and that is a known gap — not a
+pass condition** (`#11201`). The pass judges three sections (`entities`,
+`events`, `points`: `vet_gate.SECTIONS`), and `#10996`'s Step-4 condition is
+written over **points+events**. The probe now takes `--sections`
+(`objects,points,events`, and that is its DEFAULT), records per-section
+candidate counts and drops, and marks a section that yielded no candidates
+`measured: false` / `coverage_complete: false` instead of printing a zero over
+it:
+
+```bash
+uv run python docs/evidence/7949-capstone/probes/e1_gate_drops.py \
+    --graph capstone_on_<head8>_<epoch> --sections objects,points,events \
+    --out e1-gate-drops-sections.json
+```
+
+The ON-arm graph is ephemeral and its container is gone, so **the points+events
+half of the pass condition is still UNMEASURED** — re-take it before treating
+Step 4 as evaluated. ⛔ **Mind the arm:** `apply_vet` REMOVES what the predicate
+discards before the payload is written, so a graph from a run with
+`TORTOISE_VALUE_GATE` ON contains only SURVIVORS and any `0` read off it is
+vacuous. The measurement needs a graph written by a run that pinned the
+predicate **OFF** (`TORTOISE_VALUE_GATE=0` — since `#10996` "unset" is the ON
+arm), which is what `capstone_measure.measured_arm()` does; the probe's record
+carries that precondition as `arm_precondition`. Why the gap matters, measured with no
+DB at all: an identifier-only *claim* is discarded and takes the entity only it
+named with it (Rule 2 has no survivor left to reference), so one Discard removes
+two nodes while an Objects-only census shows one
+(`tests/test_9889_capstone_probes.py::
+test_the_mechanical_predicate_drops_a_claim_and_its_entity_together`).
 
 Measured on the ON arm's graph (matches that run's own census exactly — 61
 Objects, 13 bare-definite, 0.2131):

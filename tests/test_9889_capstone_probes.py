@@ -72,21 +72,38 @@ e2a_value_units = _load("e2a_value_units")
 
 # ── e1_gate_drops: the two refusals, and the measurement between them ───────
 
-def _fake_census(object_names: list[str]):
-    def census(uri: str) -> dict:
+def _fake_population(**sections: list[str]):
+    """Stub the ONE graph seam: the section -> candidate-text population."""
+
+    def section_population(uri: str) -> dict[str, list[str]]:
         assert "/" in uri, f"a graph URI was expected, got {uri!r}"
-        return {"object_names": list(object_names)}
-    return census
+        return {name: list(texts) for name, texts in sections.items()}
+
+    return section_population
 
 
-def _run_gate_drops(monkeypatch, tmp_path, *, object_names: list[str],
+def _run_gate_drops(monkeypatch, tmp_path, *, object_names: list[str] | None = None,
+                    population: dict[str, list[str]] | None = None,
+                    sections: str | None = None,
                     verdict=None) -> int:
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
-    monkeypatch.setattr(e1_gate_drops, "census", _fake_census(object_names))
+    stub = population if population is not None else {"objects": list(object_names or [])}
+    monkeypatch.setattr(e1_gate_drops, "section_population", _fake_population(**stub))
     if verdict is not None:
         import tortoise.value_gate as value_gate
         monkeypatch.setattr(value_gate, "mechanical_verdict", verdict)
-    return e1_gate_drops.main(["--graph", "g", "--out", str(tmp_path / "o.json")])
+    argv = ["--graph", "g", "--out", str(tmp_path / "o.json")]
+    if sections is not None:
+        argv += ["--sections", sections]
+    return e1_gate_drops.main(argv)
+
+
+def _measure(monkeypatch, tmp_path, *, population: dict[str, list[str]],
+             verdict=None, sections: str | None = None) -> tuple[int, dict]:
+    """Run the instrument and return `(exit_code, record)`."""
+    exit_code = _run_gate_drops(monkeypatch, tmp_path, population=population,
+                                verdict=verdict, sections=sections)
+    return exit_code, json.loads((tmp_path / "o.json").read_text())
 
 
 def test_e1_gate_drops_refuses_when_the_positive_controls_stop_dropping(
@@ -105,13 +122,53 @@ def test_e1_gate_drops_refuses_when_the_positive_controls_stop_dropping(
 
 
 def test_e1_gate_drops_refuses_a_zero_denominator(monkeypatch, tmp_path, capsys):
-    """Zero Object names is a missing denominator, never "0 of 0 drops passed"."""
+    """No candidate text in ANY section is a missing denominator, never a pass.
+
+    Widened from Objects to the whole selection in #11201: with `points` and
+    `events` selectable, a graph that yields nothing anywhere is still the same
+    zero-denominator reading the probe has always refused.
+    """
     exit_code = _run_gate_drops(monkeypatch, tmp_path, object_names=[])
 
     assert exit_code == 2
     out = capsys.readouterr().out
-    assert "no Object names" in out
+    assert "no selected section yields candidate text" in out
     assert "objects=0" in out
+
+
+def test_e1_gate_drops_refuses_an_unknown_section_with_exit_2(monkeypatch, tmp_path):
+    """A misspelt `--sections` is a REFUSAL (2), not a traceback or a silent skip."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
+    monkeypatch.setattr(e1_gate_drops, "section_population",
+                        _fake_population(objects=["the deploy rail"], points=[],
+                                         events=[], bogus=[]))
+
+    with pytest.raises(SystemExit) as caught:
+        e1_gate_drops.main(["--graph", "g", "--sections", "objects,bogus",
+                            "--out", str(tmp_path / "o.json")])
+
+    assert caught.value.code == 2
+
+
+def test_e1_gate_drops_coverage_is_judged_over_the_pass_not_the_request(
+        monkeypatch, tmp_path):
+    """`--sections objects` must not stamp `coverage_complete: true` (#11201).
+
+    The flag exists to stop an Objects-only reading from passing as the whole
+    Step-4 condition; scoping it to the REQUEST re-introduces exactly that.
+    """
+    exit_code, record = _measure(
+        monkeypatch, tmp_path, population={"objects": ["the deploy rail"]},
+        sections="objects")
+
+    assert exit_code == 0
+    assert record["coverage_complete"] is False
+    assert record["unmeasured_sections"] == ["events", "points"]
+    assert record["sections_not_requested"] == ["events", "points"]
+    assert record["sections"] == {"objects": record["sections"]["objects"]}, (
+        "only the requested section is measured — the rest are disclosed, not invented")
+    assert "TORTOISE_VALUE_GATE=0" in record["arm_precondition"], (
+        "the record must state that the graph has to come from a gate-OFF run")
 
 
 def test_e1_gate_drops_measures_when_both_halves_are_alive(
@@ -147,6 +204,147 @@ def test_e1_gate_drops_controls_are_the_real_predicates_behaviour():
     assert verdicts["#4118"] is not None
     assert verdicts["a/b/c.py"] is not None
     assert verdicts["the admin-merge rail"] is None
+
+
+# ── e1_gate_drops: the SECTIONS the pass judges, not just its Objects ───────
+
+def test_e1_gate_drops_accepts_the_sections_flag_the_eval_lane_needs(
+        monkeypatch, tmp_path, capsys):
+    """`--sections` is the Step-4 pass condition's own switch (#10996, #11201).
+
+    Without it the instrument can only census `:Object` names, so the scope's
+    "0 drops over points+events, or each named and accepted" is not evaluable —
+    the precise gap a default-on flip must never ship with.
+    """
+    exit_code = _run_gate_drops(
+        monkeypatch, tmp_path,
+        population={"objects": ["the deploy rail"],
+                    "points": ["#4118", "timeout is not on macOS"],
+                    "events": ["the lease landed"]},
+        sections="objects,points,events")
+
+    assert exit_code == 0
+    record = json.loads((tmp_path / "o.json").read_text())
+    assert set(record["sections"]) == {"objects", "points", "events"}
+    assert record["sections"]["points"]["candidates"] == 2
+    assert record["sections"]["points"]["drops_total"] == 1
+    assert set(record["sections"]["points"]["drops"]) == {"#4118"}
+    assert record["sections"]["objects"]["drops_total"] == 0
+    assert record["sections"]["events"]["drops_total"] == 0
+    assert record["coverage_complete"] is True
+    out = capsys.readouterr().out
+    assert "points=2" in out, "the per-section population must be printed, not only Objects"
+
+
+def test_e1_gate_drops_defaults_to_every_section_the_pass_judges(
+        monkeypatch, tmp_path):
+    """The DEFAULT must be the pass's coverage — Objects-only is the bug (#11201).
+
+    Pinned to `vet_gate.SECTIONS`, which is the authority for what the pass
+    iterates: if a section is added there and not here, this reds instead of the
+    instrument silently measuring less than the pass judges.
+    """
+    from tortoise import vet_gate
+
+    pass_sections = {section for section, _f, _k, _fam in vet_gate.SECTIONS}
+    assert pass_sections == {"entities", "events", "points"}, (
+        "the pass's section table moved — re-derive the instrument's coverage")
+
+    _, recorded = _measure(monkeypatch, tmp_path, population={
+        "objects": ["the deploy rail"], "points": ["the lease fix"], "events": ["the retro"]})
+
+    assert set(recorded["sections"]) == set(e1_gate_drops.DEFAULT_SECTIONS)
+    assert set(e1_gate_drops.DEFAULT_SECTIONS) == set(e1_gate_drops.SECTION_LABELS)
+    assert (set(e1_gate_drops.PASS_SECTION_OF.values())
+            == pass_sections), (
+        "every section the pass judges needs an instrument section mapped to it — "
+        "an unmapped pass section is the blind spot #11201 exists to close")
+
+
+def test_e1_gate_drops_discloses_an_empty_section_instead_of_zero(monkeypatch, tmp_path,
+                                                                  capsys):
+    """A section with no candidates is UNMEASURED, never "0 drops" (#11201).
+
+    `points+events` on a graph that wrote no events is not a clean pass
+    condition; it is a zero denominator, and printing `0` over it is the same
+    class of false PASS the probe's Object-side refusal already forbids.
+    """
+    exit_code = _run_gate_drops(
+        monkeypatch, tmp_path,
+        population={"objects": ["the deploy rail"], "points": ["#4118"], "events": []})
+
+    assert exit_code == 0
+    record = json.loads((tmp_path / "o.json").read_text())
+    assert record["sections"]["events"]["measured"] is False
+    assert record["coverage_complete"] is False
+    assert record["unmeasured_sections"] == ["events"]
+    out = capsys.readouterr().out
+    assert "events=0/UNMEASURED" in out
+
+
+def test_e1_gate_drops_point_drops_come_from_the_predicate_not_a_constant(
+        monkeypatch, tmp_path):
+    """MUTATION PROOF: invert the predicate and the point count must move.
+
+    A per-section counter that does not read `mechanical_verdict` would report
+    the same numbers whatever the predicate does — the shape this whole issue is
+    about. With the predicate forced to "never fire" the SAME population yields
+    zero drops, so the counter is provably the predicate's.
+    """
+    population = {"objects": ["the deploy rail"], "points": ["#4118", "a/b/c.py"],
+                  "events": ["the retro"]}
+
+    _, live = _measure(monkeypatch, tmp_path, population=population)
+    assert live["sections"]["points"]["drops_total"] == 2
+
+    _, dead = _measure(monkeypatch, tmp_path, population=population,
+                       verdict=lambda text: None)
+    assert dead["sections"]["points"]["drops_total"] == 0, (
+        "the point counter did not follow the predicate — it is a constant")
+
+
+def test_the_mechanical_predicate_drops_a_claim_and_its_entity_together(monkeypatch):
+    """THE BLIND SPOT, reproduced: an identifier-only CLAIM takes its shield with it.
+
+    `apply_vet` Rule 2 keeps a discarded entity only while a SURVIVING candidate
+    names it (`vet_gate._referenced_entity_names`). So once the mechanical
+    predicate discards an identifier-only *claim*, the entity that claim alone
+    named loses its shield and is removed too — one discard, two nodes gone.
+    The 9889 artifact censuses `:Object` names only, so this direction is
+    invisible to it; `#11201` is that gap, not the Objects number.
+    """
+    from tortoise import vet_gate
+
+    embed = {
+        "entities": [{"name": "#4118"}],
+        "points": [{"content": "closes #4118"}, {"content": "the lease fix"}],
+        "events": [],
+    }
+
+    # PINNED, not ambient: `TORTOISE_VALUE_GATE=0` is a documented value a lane
+    # may have exported, and this test exists BECAUSE the default arms the gate.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+    armed = vet_gate.vet_candidates(embed)
+    # BOTH halves fire: the claim `closes #4118` and the entity it names. That
+    # composition is the point — the claim that would have shielded the entity
+    # is itself identifier-only, so no survivor is left to reference it and
+    # Rule 2 has nothing to protect.
+    assert armed["stats"]["mechanical"]["fired"] == 2, armed["stats"]["mechanical"]
+    discarded = sorted(d["text"] for d in armed["decisions"].values()
+                       if d["outcome"] == vet_gate.DISCARD)
+    assert discarded == ["#4118", "closes #4118"]
+    assert {d["rule_id"] for d in armed["decisions"].values()
+            if d["outcome"] == vet_gate.DISCARD} == {"value.identifier_only.reference"}
+
+    kept, warnings = vet_gate.apply_vet(embed, armed["decisions"])
+    gone = [e["name"] for e in kept["entities"]]
+    assert gone == [], (
+        "the claim's discard must cost the entity it alone named — that is the "
+        "memory-loss direction the point/event rate measures")
+    assert [p["content"] for p in kept["points"]] == ["the lease fix"]
+    assert not any("referential integrity" in w for w in warnings), (
+        "Rule 2 did not fire, so the entity went with the claim — the shield "
+        "was the discarded claim, and nothing else named it")
 
 
 # ── e1_paired_arm: a mislabelled arm must be worse than no arm ──────────────
