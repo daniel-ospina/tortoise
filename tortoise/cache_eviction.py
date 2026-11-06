@@ -307,10 +307,22 @@ class ClassReading:
     proven: bool            # the instrument ran, was CLEAN, and covered the class
     eligible: bool          # proven ⇒ may be evicted
     reason: str
+    #: The BARE population name (``turn``) when this row is a population rather than
+    #: a label, else ``None``. ⛔ ``label`` is a DISPLAY string (``"turn
+    #: (population)"``) precisely so a label row and a population row that name the
+    #: same nodes are distinguishable in the report; a licence keyed on the display
+    #: string is not the same word the consumer is asked for, so
+    #: ``plan["evictable"][i]["population"]`` reads THIS field. Measured on the
+    #: executor (``tortoise/cache_evictor.py``, adopted from its branch): its
+    #: population gate compares for equality, so a licence naming ``"turn
+    #: (population)"`` refused the ``turn`` sweep it had just licensed — fail-closed,
+    #: but a licence no consumer can spend is not a licence.
+    population_name: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "label": self.label,
+            "population": self.population_name,
             "nodes": self.nodes,
             "authority": self.authority,
             "instrument": self.instrument,
@@ -793,6 +805,7 @@ def assess(
             proven=proven,
             eligible=proven,
             reason=reason,
+            population_name=population,
         )
         classes.append(entry)
         if not proven:
@@ -851,7 +864,16 @@ def assess(
         verdict = "PLAN"
         plan = {
             "evictable": [
-                {"population": c.label, "nodes": c.nodes, "instrument": c.instrument}
+                # ⛔ `population_name`, NEVER a fallback to `label`. A fallback
+                # re-merges the two namespaces this PR separated: a label row and a
+                # population row that share a word would collapse into ONE licence key,
+                # which is exactly the confusion the display form exists to prevent.
+                # Unreachable today (only `eligible` rows reach here, and label rows are
+                # built `eligible=False`), but the day a label becomes provable the
+                # fallback would silently re-merge them. `label` is emitted beside it
+                # for display, so the fallback buys nothing.
+                {"population": c.population_name, "nodes": c.nodes,
+                 "instrument": c.instrument, "label": c.label}
                 for c in eligible
             ],
             "resident_bytes": state.resident_bytes,

@@ -236,7 +236,11 @@ def test_the_truth_labels_are_never_silently_treated_as_evictable():
         "a proven POPULATION must never make a LABEL eligible: turns are `:Point` "
         "nodes, so this is the licence-to-delete-every-Point regression"
     )
-    assert [e["population"] for e in result.plan["evictable"]] == ["turn (population)"]
+    # ⛔ The LICENCE names the BARE population ("turn"), not the display label
+    # ("turn (population)"): the executor's population gate compares for
+    # equality, so a licence naming the display string refused the sweep it
+    # had just licensed. `label` still carries the display form.
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
     assert "Point" in " ".join(result.problems)
     assert "Object" in " ".join(result.problems)
     assert g.mutated == []
@@ -1108,7 +1112,11 @@ def test_exit_two_licenses_only_the_listed_populations():
 
     assert result.verdict == "PLAN"
     assert result.plan["not_evictable"] == ["Point", "Object"]
-    assert [e["population"] for e in result.plan["evictable"]] == ["turn (population)"]
+    # ⛔ The LICENCE names the BARE population ("turn"), not the display label
+    # ("turn (population)"): the executor's population gate compares for
+    # equality, so a licence naming the display string refused the sweep it
+    # had just licensed. `label` still carries the display form.
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
 
 
 # --------------------------------------------------------------------------- #
