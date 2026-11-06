@@ -454,6 +454,48 @@ def test_query_answers_for_every_ref_of_a_sequence_born_point(prov):
     assert sdk.query(extractedFrom="https://example.com/seq-c") == []
 
 
+def test_a_LIST_filter_value_answers_or_is_empty_but_never_raises(prov):
+    """A LIST filter value must answer or return ``[]`` — never raise (#11038).
+
+    ``query(extractedFrom=[a, b])`` is a LEGAL call shape pre-#10063: the old
+    clause was ``n.`extractedFrom` = $extractedFrom``, and array-valued
+    equality made it answer for a sequence-born Point's own property. The fix
+    additionally binds the same value into a node pattern map —
+    ``(:Source {url: $extractedFrom})`` — where a STRING ``url`` meets a LIST.
+
+    So this pins the property that makes the widening safe: the edge arm
+    degrades to *false* for a list, it does not raise. If a future engine (or a
+    rewritten clause) made that comparison raise, every list-valued ref filter
+    would start raising where it used to return rows — a regression INVENTED by
+    the fix, and one no in-repo caller would notice (nothing outside test
+    fixtures passes a list — see the ``query(extractedFrom=[...])`` call shape
+    below, which no product caller uses).
+    """
+    sdk, _events = prov
+    a, b = (f"https://example.com/listref-{n}" for n in ("a", "b"))
+    pid = sdk.create_point("statement",
+                           "a claim asked for by a LIST of refs",
+                           extractedFrom=[a, b])["id"]
+    proj = sdk._get_proj()
+    assert _prop_refs(proj, pid) == [a, b], \
+        "guard: a sequence-create stores an ARRAY property"
+
+    # The array-equality answer that existed BEFORE the fix must survive it.
+    assert [p["id"] for p in sdk.query(extractedFrom=[a, b])] == [pid], (
+        "a LIST filter value must still answer by array equality — the "
+        "equality arm is kept for exactly this shape")
+    page = sdk.paginated_query(extractedFrom=[a, b])
+    assert [p["id"] for p in page["results"]] == [pid]
+    assert page["total"] == 1, (
+        "`total` uses the same predicate, so it cannot drift from the rows"
+    )
+
+    # A list that matches nothing is a NO-MATCH, not an error.
+    absent = ["https://example.com/listref-absent"]
+    assert sdk.query(extractedFrom=absent) == []
+    assert sdk.paginated_query(extractedFrom=absent)["total"] == 0
+
+
 def test_a_prop_only_ref_still_answers_by_equality(prov):
     """NO caller loses a match: the equality arm is KEPT, not replaced.
 

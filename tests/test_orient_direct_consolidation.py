@@ -171,9 +171,24 @@ async def test_every_row_section_ships_structured_content(sdk, mcp_sdk,
     """The defect was per-TOOL, not per-section: every ROW-returning section
     lost its structured payload, so the fix must not special-case `graphs`.
 
-    Rows only: `taxonomy` and `structure` return MAPPINGS, which already shipped
-    structured content before the fix (no schema + dict), so they prove nothing
-    here — `taxonomy` is pinned as a mapping in the next test instead.
+    ⛔ MEASURED, not assumed — the six parametrized below are ALL of them.
+    Every member of `_OVERVIEW_SECTIONS` was called through `mcp.call_tool` and
+    classified by the wire shape it answers with:
+
+      ROW (`{"result": [...]}` envelope — the #10085 defect) — graphs,
+        pointkinds, tags, sources, namespaces, structure_check;
+      MAPPING (its own dict, never wrapped) — taxonomy, structure, topics,
+        health, status, stale, validate_domain, audit, dream_health.
+
+    A mapping section already shipped structured content before the fix (no
+    output schema + a dict return ⇒ dict structured content, #10085), so it
+    proves nothing here and is deliberately excluded — `taxonomy` is pinned as
+    a mapping in the next test instead. `topics` and `stale` are MAPPINGS, not
+    rows (`tortoise_list_topics() -> dict` via `taxonomy.list_topics`,
+    `stale_points()` -> `{"stale": …, "count": …}`): a #11038 review filed
+    them as missing rows and they are recorded `⛔ DO NOT APPLY` with this
+    measurement on the PR — adding them here would assert a LIST over a dict.
+    If a section starts returning rows later, add it HERE and to this list.
     """
     from tortoise.mcp_server import mcp
 
