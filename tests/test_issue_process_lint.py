@@ -2081,3 +2081,79 @@ def test_the_clause_end_admission_still_does_not_reach_a_later_sentence_s_claim(
     body = "Refs #100 — not closing it. Refs #300 is separate.\n"
     assert L.claims(body, 1)["declined"] == [100]
     assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[300]]
+
+
+@pytest.mark.parametrize("body, expected, why", [
+    ("Closes #100 (the parent), #200 (the child).\n",
+     {"closing": [100], "weak": [200], "continued_resolving": [200]},
+     "a gloss on the FIRST ref does not end the list"),
+    ("Refs #10892 (the served-but-unusable blind spot), #10602 (graph latency).\n",
+     {"weak": [10602, 10892]}, "the live #11093 body shape"),
+    ("Part of #100 (a) and #200 (b)\n", {"weak": [100, 200]}, "conjunction with glosses"),
+])
+def test_a_parenthetical_gloss_does_not_end_the_claim_list(body, expected, why):
+    """Measured at `06bc97f30` (review P2): the continuation required a `#N` immediately after the
+    separator, so ONE parenthetical gloss between the first ref and the comma ended the list —
+    `#200` was never evaluated, `Closes #100 (the parent), #200 (the child).` claimed `#100` alone,
+    and arm 1 read CLEAN on a reference the author named under a closing keyword GitHub does not
+    close. Not hypothetical: #11093's body carries the shape.
+
+    The gloss is `_GLOSS` — ONE balanced parenthetical holding no `#` — shared with the decline's
+    list and the plural run, so the three cannot drift. The control below pins that a gloss naming a
+    reference does NOT bridge: `(see #999)` is a different clause, and treating it as a list
+    continuation would claim `#200` on the strength of a sentence about `#999`.
+    """
+    got = {k: v for k, v in L._claims_in(L.strip_code(body)[0], None).items() if v}
+    assert got == expected, why
+    assert L._claims_in(L.strip_code("Closes #100 (see #999), #200.\n")[0], None)["weak"] == []
+
+
+def test_a_glossed_list_is_one_list_for_the_decline_and_the_plural_run_too():
+    """The same token, read by all three: the list a claim CONTINUES, the list a decline NAMES and
+    the run a plural decline CLEARS. Admitting a gloss in one reader and not the others is the drift
+    this module keeps re-discovering — and each direction has its own failure: a decline that cannot
+    name the glossed list FLAGS an honest sentence, and a run that cannot bridge the gloss CLEARS
+    one reference of a plural decline's list.
+    """
+    named = "Refs #100 (a), #200 (b) — deliberately not closing #100 (a) and #200 (b).\n"
+    assert L.claims(named, 1)["declined"] == [100, 200]
+    assert L.classify_pr(named, 1) == []
+
+    plural = "Refs #100 (a), #200 (b) — deliberately not closing them.\n"
+    assert L.claims(plural, 1)["declined"] == [100, 200]
+    assert L.classify_pr(plural, 1) == []
+
+
+@pytest.mark.parametrize("body", [
+    "Part of #11000 — does not close<!-- #11078 --> because it is a measurement PR.\n",
+    "Part of #11000 — deliberately not closing<!-- #11078 --> (measurement only).\n",
+])
+def test_a_comment_object_that_abuts_the_stem_is_still_unreadable(body):
+    """An HTML comment object leaves NO whitespace of its own, so the run test that separates a
+    blanked object from an honest reason was defeated when the comment abutted the closing stem
+    (measured at `06bc97f30`, review P2):
+
+        does not close<!-- #11078 --> because …   -> deleted: `does not close because …`, ONE space
+                                                      -> `honest_reason` -> proximity -> CLEAN
+
+    `strip_code` now BLANKS a comment to equal-length spaces instead of deleting it — offsets
+    survive, and a blanked object always leaves a run of two or more. RED against the deleting
+    implementation: both bodies decline `#11000` and arm 1 reports CLEAN.
+    """
+    assert L.claims(body, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]]
+
+
+@pytest.mark.parametrize("body", [
+    "Refs <!-- prettier-ignore --> #1234\n",
+    "Refs <!-- tracking: #4282 --> #1234\n",
+])
+def test_a_blanked_comment_between_a_claiming_word_and_its_ref_still_claims(body):
+    """The regression the blanking fix could have introduced, pinned: a comment between `Refs` and
+    the reference is now a run of SPACES longer than the 16-character window, so the window alone
+    would stop matching and the claim would silently disappear — a false PASS created by a
+    false-PASS fix. `CLAIM_RE`'s `mid` therefore also admits a run of HORIZONTAL whitespace of any
+    length (never `\\s`, which would let a claim cross a newline — asserted here).
+    """
+    assert L.claims(body, 1)["weak"] == [1234]
+    assert L.claims("Refs\n#1234\n", 1)["weak"] == [], "a claim must not cross a newline"

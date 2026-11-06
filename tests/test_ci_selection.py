@@ -3154,6 +3154,17 @@ def test_issue_process_lint_tool_change_selects_core_not_tier1():
     assert "test_issue_process_lint.py" in r["test_files"], r
     assert r["full"] is False, r
 
+    # ⛔ AND THE DOC IS THE OTHER HALF OF THE SAME CONTRACT (measured at `06bc97f30`, review P2):
+    # `docs/` is a flat NON_PYTHON_PREFIXES entry too, so a DOC-ONLY edit selected `surfaces=[]`,
+    # 74 tier-1 files and NO suite — and the two pins whose whole purpose is "the paste-ready block
+    # cannot drift" (`test_the_doc_block_matches_the_template`,
+    # `test_every_bash_example_in_the_doc_parses`) would then never run on the one PR that edits
+    # that block or a `bash` example. The template side is already covered (a `.github/` change
+    # selects `full: True`); this asserts the docs side.
+    d = _sel(["docs/ops/ISSUE-WORKING-PROCESS.md"])
+    assert "core" in d["surfaces"], d
+    assert "test_issue_process_lint.py" in d["test_files"], d
+
 
 def test_ci_catch_history_tool_change_selects_core_not_tier1():
     """A change to the catch-history instrument must run the rules it pins (#10131 review P1).
