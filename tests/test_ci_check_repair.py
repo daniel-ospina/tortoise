@@ -1901,6 +1901,12 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     here is how the coordinate drifts unnoticed (done once already, by #6744's §7 insert —
     it moved §6 down and the span with it, and the numbers in the paragraph above are the
     PRE-#6744 ones by design).
+
+    Arm (3) derives the span from the doc's own text, so the next red NAMES the number to
+    write instead of only reporting that the citation is stale: arms (1) and (2) accept any
+    span wide enough to contain the measurement (they pass on `368-371`), which is not the
+    same thing as the span the sentence occupies — and on a red the fixer had to re-derive
+    the offset by hand, twice.
     """
     root = Path(__file__).resolve().parents[1]
     src = (root / "tools" / "ci_check_repair.py").read_text()
@@ -1927,6 +1933,24 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     assert doc[first - 1].strip().startswith("document's own §1 measurement") or (
         "derived from this" in quoted), (
         "the cited span must open on the sentence the docstring quotes")
+
+    # 3. The cited span must be the span the QUOTED SENTENCE actually occupies, derived
+    #    from the doc's own text — so a shift reds with the number to write instead of
+    #    leaving the next lane to re-derive it. The span has moved twice already (`326-332`
+    #    before `a7436214f`, `342-344` while `main` said so, `369-371` after #6744's §7
+    #    insert), and arms (1)-(2) cannot tell a wide-enough span from the right one.
+    opens = [i + 1 for i, line in enumerate(doc)
+             if "The budget's default is derived from this" in line]
+    closes = [i + 1 for i, line in enumerate(doc)
+              if "measured-normal population rather than on it." in line]
+    assert len(opens) == 1 and len(closes) == 1 and opens[0] <= closes[0], (
+        f"the sentence this citation quotes is no longer locatable in ci-wall-clock.md §6 "
+        f"(opening line {opens}, closing line {closes}) — re-quote the derivation the tool "
+        f"cites rather than deleting the span assertion")
+    assert (first, last) == (opens[0], closes[0]), (
+        f"ci-wall-clock.md §6 moved: the sentence tools/ci_check_repair.py quotes now "
+        f"occupies lines {opens[0]}-{closes[0]}, but the citation says {first}-{last}. "
+        f"Change it to `(lines {opens[0]}-{closes[0]})`.")
 
 
 def test_a_run_at_the_measured_median_queue_wait_is_not_cancelled():
