@@ -5576,7 +5576,9 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
     # with a prose line above the item. `strict` is the `issue_process_lint` PASS arm, so the second
     # arm being wrong is a false PASS in that gate:
     #     `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
-    #         `origin/main` `[]` both arms; the gated head `[100]` in both.
+    #         `origin/main` `[]` both arms at `1177c6708` (`[100]` at the branch point `80c912244`,
+    #         so in the strict arm the gate restored a fail-open that predates this branch); the
+    #         gated head `[100]` in both.
     for body in ("x\n- 1.\n  2.     Closes #100\n",
                  "Notes\n- 2.\n  2.     Closes #100\n",
                  "Summary of the change.\n- 2.\n  2.     Closes #100\n"):
@@ -5684,8 +5686,8 @@ def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm
     The two `issue_process_lint` consumers do NOT see these bodies: `IN_FLIGHT_RE` and `CHECKBOX_RE`
     both anchor at `^[ \\t]*` (`tools/issue_process_lint.py:653`, `:637`), so a line beginning `>`
     never reaches either predicate — a 7,200-pair sweep through both consumers found ZERO deltas
-    between the pre-fix and fixed states. So the justification is arm-level parity with
-    `origin/main` (§4.4 is the branch's own rule and it was answering it wrongly), NOT a reachable
+    between the pre-fix and fixed states. So the justification is arm-level parity with the BRANCH
+    POINT `80c912244` (§4.4 is the branch's own rule and it was answering it wrongly), NOT a reachable
     consumer false PASS. The two consumer assertions below are REGRESSION PINS of that contract,
     not demonstrations of the fix: they hold at both states, and they exist so a future change that
     starts crediting a quoted block through a reachable shape is caught.
