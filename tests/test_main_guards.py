@@ -78,19 +78,27 @@ def _guard_subprocess_budget() -> float:
     does not use, inflating every attempt by 180 s. The probe below asks a
     child-shaped interpreter what it will actually apply.
     """
-    return _bounded_process_cold_load_bound() + _INGEST_WORK_ALLOWANCE_S
+    return _bounded_process_cold_load_bound()[0] + _INGEST_WORK_ALLOWANCE_S
 
 
 @functools.lru_cache(maxsize=1)
-def _bounded_process_cold_load_bound() -> float:
-    """``_LOAD_TIMEOUT_S`` as the BOUNDED subprocess resolves it (#11054).
+def _bounded_process_cold_load_bound() -> tuple[float, str]:
+    """``(bound, provenance)`` for the BOUNDED subprocess's cold-load bound.
 
-    The test lane's 270 s override is in-process only, so the child gets the
-    product default. Probed once per session in a fresh interpreter — the same
-    shape ``_run_guard_subprocess`` spawns — so raising the PRODUCT default still
-    moves this budget (the property #3349's fix exists for) while the test-lane
-    override no longer does. Falls back to the documented default when the probe
-    cannot run; a failed probe must never SHRINK the budget below the bound.
+    The bound is ``_LOAD_TIMEOUT_S`` as a FRESH interpreter resolves it: the test
+    lane's 270 s override (#6960) is in-process only, so the child gets the
+    product default. Probing it once per session keeps the property #3349's fix
+    exists for — raising the PRODUCT default still moves the budget.
+
+    ⛔ THE PROVENANCE IS RETURNED, NOT SWALLOWED (#11054 review P2). The fallback
+    exists so a broken probe cannot SHRINK the budget, but with the fallback
+    indistinguishable from a real read, a probe that never ran certifies the
+    budget with the very hard-coded number #3349 names — measured: substituting
+    a hard-coded probe left every assertion in
+    ``test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound``
+    green. ``provenance`` is ``"child"`` only when a real child answered, and
+    that test asserts it, so a silently-fallen-back probe REDS instead of
+    certifying.
     """
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
@@ -104,10 +112,10 @@ def _bounded_process_cold_load_bound() -> float:
                      [repo_root] + [p for p in os.environ.get("PYTHONPATH", "")
                                     .split(os.pathsep) if p])})
         if proc.returncode == 0:
-            return float(proc.stdout.strip().splitlines()[-1])
-    except Exception:  # pragma: no cover — a failed probe must not shrink it
-        pass
-    return 90.0  # the documented product default (#1349)
+            return float(proc.stdout.strip().splitlines()[-1]), "child"
+        return 90.0, f"fallback: child exited {proc.returncode}"
+    except Exception as exc:  # a failed probe must not SHRINK the budget
+        return 90.0, f"fallback: probe raised {type(exc).__name__}"
 
 
 def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
@@ -128,8 +136,18 @@ def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
     # fresh interpreter that override never reaches. Comparing against the
     # in-process value is what let a budget for 90 s pass a test that claimed to
     # certify a budget for 270 s.
-    declared = _bounded_process_cold_load_bound()
+    declared, provenance = _bounded_process_cold_load_bound()
     budget = _guard_subprocess_budget()
+    # ⛔ AND THE PROBE MUST HAVE ACTUALLY RUN (#11054 review P2, cycle 5).
+    # `declared` and `budget` are derived from the SAME call, so the arithmetic
+    # below is a tautology — it stayed green under a hard-coded probe, i.e. under
+    # the exact "second hard-coded number" #3349 names. This is the assertion
+    # that can fail for that defect; the arithmetic pins the SHAPE, this pins the
+    # SOURCE.
+    assert provenance == "child", (
+        f"the cold-load bound was not read from the bounded child ({provenance}) "
+        "— so the budget certifies a number the child never uses, which is the "
+        "second hard-coded number #3349 names")
     assert budget > declared, (
         f"a {budget}s subprocess budget cannot absorb a {declared}s cold load "
         "plus the ingest work (#3349)")
@@ -229,6 +247,15 @@ def _run_guard_subprocess(argv, cwd, timeout=None):
             f"guard subprocess timed out after {timeout}s on BOTH attempts "
             f"(#3349: the budget is the embedded cold-load bound + "
             f"{_INGEST_WORK_ALLOWANCE_S}s of ingest work)")
+    # ⛔ A MIXED OUTCOME KEEPS BOTH HALVES (#11054 review P2). Attempt 1 returning
+    # non-zero and attempt 2 timing out is the #3349 shape — a loaded runner's
+    # slow spawn — and reporting only attempt 1's rc presents it to whoever
+    # triages the shard as an ordinary failure.
+    if timed_out is not None:
+        raise AssertionError(
+            f"guard subprocess failed (rc={last.returncode}) on the first "
+            f"attempt and TIMED OUT after {timeout}s on the second:\n"
+            f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
     raise AssertionError(
         f"guard subprocess failed (rc={last.returncode}):\n"
         f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
