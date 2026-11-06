@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:7bf3b7be6230b701f1fa530175f111620d81f65ec48afed32111e155c741a27b",
+  "document_sha256": "sha256:f9d0b314feea068e1a694c8ab49a77783e94be6af05b2830ac7a8fba6301ba7b",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -286,7 +286,7 @@
     "E1b": {
       "corpus": "tests/eval/write_path",
       "claim": "anti-gaming control: planted units survive the deterministic m2 lane (90/90 at this fixtures_hash)",
-      "not_a_proof_of": "anything about the v2 door — the m2 lane is a DIFFERENT extractor whose operator edges come from its own relation model (tortoise/extractor.py), not from the v2 lane's connect step",
+      "not_a_proof_of": "anything about the v2 door: E1b is measured on the m2 lane (tests/eval/write_path/baselines/m2.json, posture 'm2'), a DIFFERENT extractor, so unit survival there says nothing about what the v2 lane writes",
       "lane": "m2"
     },
     "E2a": {
