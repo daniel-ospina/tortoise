@@ -57,12 +57,15 @@ Exit codes (the census's own table, so a scheduler can key on ONE vocabulary):
     0  CLEAN      the cache is within its budget — NOTHING was evicted
     2  PLAN       the cache is over budget; this run produced (dry run) or EXECUTED
                   a sweep of a licensed population, so nodes may have been deleted.
-                  ⚠️ 0 and 2 are therefore the whole `deleted == 0` / `> 0` split —
-                  a completed sweep never reports 0
-    3  REFUSED    nothing may go AND nothing went — the census refused, or the
-                  executor did. ⚠️ A refusal that already DELETED nodes (a store
-                  fault mid-sweep) reports 2, never 3: `deleted > 0` outranks the
-                  verdict word, because an exit code is what a scheduler acts on
+                  ⛔ THREE cases report 2, and `deleted > 0` is only one of them:
+                  a dry run with a plan; an executed sweep that removed nodes; and a run
+                  whose `DETACH DELETE` was ISSUED but UNVERIFIED (`delete_unverified`,
+                  whose `nodes_evicted` is 0 and whose `nodes_after` is `None`). So
+                  `deleted == 0` alone does NOT mean nothing happened
+    3  REFUSED    no mutating statement was ISSUED and nothing was removed. ⚠️ This
+                  is the assertion, not the verdict word: a run that deleted nodes, or
+                  whose DELETE was issued but unverified, reports 2 — because an exit
+                  code is what a scheduler acts on
     4  UNBOUNDED  no ceiling anywhere; "over budget" cannot be evaluated
     1  usage      a flag, import or IO mistake
 
@@ -72,16 +75,18 @@ assert that a refused/errored pass issued none.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.cache_eviction import (  # noqa: E402
+from tortoise.cache_eviction import (
     CACHE_EVICTION_EXIT_CLEAN,
     CACHE_EVICTION_EXIT_PLAN,
     CACHE_EVICTION_EXIT_REFUSED,
@@ -91,7 +96,7 @@ from tortoise.cache_eviction import (  # noqa: E402
     assess,
     load_parity_report,
 )
-from tortoise.cache_evictor import (  # noqa: E402
+from tortoise.cache_evictor import (
     EvictionConfigError,
     EvictionPolicy,
     evict,
@@ -124,7 +129,7 @@ def _load_callable(spec: str, *, flag: str) -> Callable[..., Any]:
     module_name, _, attr = spec.partition(":")
     try:
         module = importlib.import_module(module_name)
-    except Exception as exc:  # noqa: BLE001 — any import failure is a usage error
+    except Exception as exc:  # any import failure is a usage error
         raise SystemExit(_usage_error(
             f"{flag} {spec!r}: cannot import {module_name!r} "
             f"({type(exc).__name__}: {exc})")) from exc
@@ -290,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             client, graph = _connection(endpoint)
-        except Exception as exc:  # noqa: BLE001 — any dial fault is a store refusal
+        except Exception as exc:  # any dial fault is a store refusal
             # ⛔ A REFUSAL (3), not a traceback and not exit 1. The census this tool
             # composes from already draws this line ("An unreachable cache is a
             # refusal (3), not a typo"); unguarded here, a dial failure escaped as a
@@ -298,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
             # retry FLAGS against a store nobody could reach.
             _emit({"verdict": "REFUSED",
                    "reason": (f"the cache could not be reached "
-                              f"({type(exc).__name__}: {exc}) — nothing is claimed")},
+                              f"({type(exc).__name__}: {exc})  # nothing is claimed")},
                   args.out)
             return CACHE_EVICTION_EXIT_REFUSED
         # ⛔ A graph that is not on the instance is REFUSED, never opened: reading a
@@ -311,14 +316,14 @@ def main(argv: list[str] | None = None) -> int:
             assessment = assess(client, graph, args.graph,
                                 ceiling_bytes=args.ceiling_bytes,
                                 parity_reports=reports)
-        except Exception as exc:  # noqa: BLE001 — any measurement fault is a refusal
+        except Exception as exc:  # any measurement fault is a refusal
             # ⛔ A cache nobody could MEASURE is a refusal (3), never a traceback: the
             # census guards this exact call the same way, and this file's own table
             # reserves exit 1 for a flag/IO mistake — which would tell the operator to
             # retry FLAGS against a store that did not answer.
             _emit({"verdict": "REFUSED",
                    "reason": (f"the cache could not be measured "
-                              f"({type(exc).__name__}: {exc}) — nothing is claimed")},
+                              f"({type(exc).__name__}: {exc})  # nothing is claimed")},
                   args.out)
             return CACHE_EVICTION_EXIT_REFUSED
         if assessment.verdict == "UNBOUNDED":
@@ -341,10 +346,9 @@ def main(argv: list[str] | None = None) -> int:
         for handle in (client, graph):
             closer = getattr(handle, "close", None)
             if callable(closer):
-                try:
+                # A close failure is not the verdict: the sweep already happened.
+                with contextlib.suppress(Exception):
                     closer()
-                except Exception:  # noqa: BLE001 — a close failure is not the verdict
-                    pass
 
     body = {
         "graph": args.graph,

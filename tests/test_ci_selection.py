@@ -16513,6 +16513,49 @@ def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
         assert "test_cache_eviction_census.py" in r["test_files"], (path, r["test_files"])
 
 
+def test_cache_evict_runs_on_a_tools_only_change():
+    # #10976: `tests/test_cache_evict_cli.py` + `tests/test_cache_eviction_evictor.py` +
+    # `tests/test_cache_eviction_evictor_pins.py` pin the egress EXECUTOR — the DELETE
+    # gates (the census licence, the per-node record probe, the id+key bind) and the
+    # operator verb that is the ONE file in the repo able to issue a `DETACH DELETE`
+    # against the cache on purpose.
+    #
+    # ⛔ Both halves are needed, and each has its own failure mode:
+    #  * the MODULE arm is the `core` surface row. Without those three rows the files are
+    #    in NO surface and `ci_selection.py --integrity` lists them as manifest drift,
+    #    redding the REQUIRED `manifest-integrity` leg — measured before the rows were
+    #    added: `❌ manifest drift: ['test_cache_evict_cli.py',
+    #    'test_cache_eviction_evictor.py', 'test_cache_eviction_evictor_pins.py']`.
+    #  * the TOOL arm needs `CORE_ALSO`: `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    #    no SOURCE_PATTERNS row matches `tools/cache_evict.py`, so before that entry a
+    #    tool-only diff filtered to `changed == []` and took the docs-only early return
+    #    (measured: surfaces=[], zero egress files) — the #1349/#3332/#3616 silent-drop
+    #    class, on the file where a weakened gate would let a delete happen.
+    #    Mutation check: removing the CORE_ALSO entry fails the first case below.
+    #
+    # ⚠️ `test_cache_eviction_evictor.py` module-skips without a URI, so it is ALSO
+    # declared under `uri_requiring:` — registering it `core` without that declaration
+    # reintroduces the #6884 collect-nothing leg (the file collects 0 items and the leg
+    # passes having run nothing).
+    for path in ("tools/cache_evict.py", "tortoise/cache_evictor.py"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r["full"])
+        assert r["surfaces"] == ["core"], (path, r["surfaces"])
+        # The two HERMETIC suites must be selected. `test_cache_eviction_evictor.py`
+        # is deliberately NOT asserted here: it is declared `uri_requiring`, so the
+        # selector subtracts it from a URI-less lane by design — the assertion below
+        # is what keeps that subtraction from becoming a silent drop.
+        for suite in ("test_cache_evict_cli.py",
+                      "test_cache_eviction_evictor_pins.py"):
+            assert suite in r["test_files"], (path, suite, r["test_files"])
+    # ⛔ The URI-requiring declaration, asserted rather than assumed: registering the
+    # file `core` WITHOUT this declaration makes it collect 0 items on the URI-less
+    # pool and the leg passes green having run nothing (#6884).
+    assert "test_cache_eviction_evictor.py" in (load_manifest()["uri_requiring"] or []), (
+        "test_cache_eviction_evictor.py must be declared under `uri_requiring:` — it "
+        "module-skips without TORTOISE_DB_URI")
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate

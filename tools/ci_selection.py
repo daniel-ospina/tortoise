@@ -2852,6 +2852,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `core`. Pinned by
              # tests/test_ci_selection.py::test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it.
              "tools/cache_eviction_census.py",
+             # #10976: the egress EXECUTOR's operator verb, the same shape one level
+             # further out. `tools/cache_evict.py` is a flat NON_PYTHON_PREFIXES entry
+             # with no SOURCE_PATTERNS row, so a tools-only change filtered to
+             # `changed == []` and took the docs-only early return: MEASURED at the head
+             # that added it, `select(["tools/cache_evict.py"], "pull_request",
+             # load_manifest())` -> surfaces=[], zero egress files. That is the ONE file
+             # in this PR that can issue a `DETACH DELETE` against the cache, and a
+             # weakened gate there (the `--confirm-graph` token, the `deleted or
+             # delete_unverified` exit split, the refusal arms) would merge with every
+             # pin green-by-omission. CORE_ALSO for the same reason as the census entry
+             # directly above: the suite is hermetic (a statement-recording fake, no
+             # network) and `core` is where it is registered. Pinned by
+             # tests/test_ci_selection.py::test_cache_evict_runs_on_a_tools_only_change.
+             "tools/cache_evict.py",
              # #10920: the CI runner-label coverage gate. `tools/` is a flat
              # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
              # `tools/ci_runner_labels.py`, so a TOOL-ONLY change filtered to

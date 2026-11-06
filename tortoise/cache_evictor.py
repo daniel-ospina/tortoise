@@ -32,10 +32,19 @@ module enforces an **ENTRY** budget, and the two are not the same question — a
 over its node budget can sit under its byte ceiling (measured: 1,000,000 nodes against a
 declared 20,000-node budget -> ``CLEAN``). Gating the licence on the byte verdict made
 the enforced bound unreachable in exactly the population shape #10976 describes. Every
-gate below is unchanged, and ``REFUSED``/``UNBOUNDED`` still yield an EMPTY licence. Both record gates — #10593 and #7879 — are open as of
-this writing, so every production assessment is ``REFUSED`` and this module issues no
-mutating statement at all. The day the record can serve, the census flips to ``PLAN``
-by itself and this executor becomes reachable without a second decision.
+gate below is unchanged, and ``REFUSED``/``UNBOUNDED`` still yield an EMPTY licence.
+
+Both record gates — #10593 and #7879 — are open as of this writing, so in production the
+LICENCE is EMPTY (``REFUSED`` over the byte ceiling, ``CLEAN`` under it, with
+``plan["evictable"] == []`` either way) and this module issues no mutating statement at
+all.
+
+⚠️ Note WHICH gate refuses: **gate 2** (the licence is empty because no population is
+proven record-served), NOT gate 1. Gate 1 admits ``CLEAN`` on purpose — a production
+cache under its byte ceiling answers ``CLEAN`` — so reading *"production can only ever be
+REFUSED"* would attribute the refusal to the verdict word and make a licence widening
+look harmless. The day the record can serve, the licence populates and this executor
+becomes reachable without a second decision.
 
 ⛔ FOUR INDEPENDENT GATES, and each one alone refuses
 ----------------------------------------------------
@@ -452,7 +461,7 @@ def _key_property(key_prop: str) -> str:
     if not quoted.startswith("`") and not re.fullmatch(_BARE_SAFE, quoted):
         raise EvictionConfigError(
             f"key property {key_prop!r} is not a safe Cypher identifier "
-            f"(shared quoting returned it bare as {quoted!r}) — refusing rather than "
+            f"(shared quoting returned it bare as {quoted!r})  # refusing rather than "
             f"interpolating it into a DELETE"
         )
     return quoted
@@ -594,7 +603,7 @@ def evict(
     if population not in licensed:
         return _refuse(
             f"population {population!r} is not licensed by the census plan "
-            f"(evictable: {sorted(licensed) or 'none'}) — an unproven population may "
+            f"(evictable: {sorted(licensed) or 'none'})  # an unproven population may "
             f"not be swept"
         )
 
@@ -606,10 +615,10 @@ def evict(
     # is what a future sweeper consumes.
     try:
         before_nodes = node_total(graph)
-    except Exception as exc:  # noqa: BLE001 — any store fault refuses the pass
+    except Exception as exc:  # any store fault refuses the pass
         return _refuse(
             f"the resident node count could not be read "
-            f"({type(exc).__name__}: {exc}) — an unreadable cache cannot be measured, "
+            f"({type(exc).__name__}: {exc})  # an unreadable cache cannot be measured, "
             f"so nothing may be swept"
         )
     before_bytes = _resident_bytes(client)
@@ -706,7 +715,7 @@ def evict(
             offered = list(selector(graph, window, population))
         except Exception as exc:
             abort_reason = (
-                f"selector failed ({type(exc).__name__}: {exc}) — an unreadable "
+                f"selector failed ({type(exc).__name__}: {exc})  # an unreadable "
                 f"selection is a refusal, not an empty one"
             )
             break
@@ -829,7 +838,7 @@ def evict(
             break
         try:
             removed, survivors = _delete_nodes(graph, final, key_prop)
-        except Exception as exc:  # noqa: BLE001 — any store fault aborts, never raises
+        except Exception as exc:  # any store fault aborts, never raises
             # ⛔ THE PASS MAY ALREADY HAVE DELETED NODES. Unguarded, a fault here
             # escaped `evict()` after earlier passes had committed deletes, so the
             # caller lost the entire report — no `deleted`, no `nodes_after` — and the
@@ -876,7 +885,7 @@ def evict(
         except Exception as exc:
             abort_reason = (
                 f"the cache could not be re-measured after {len(deleted)} node(s) were "
-                f"evicted ({type(exc).__name__}: {exc}) — the deletions above are "
+                f"evicted ({type(exc).__name__}: {exc})  # the deletions above are "
                 f"recorded, but the remaining state is UNKNOWN"
             )
             after_measured = False
@@ -907,7 +916,7 @@ def evict(
         # for the whole one, and the verdict word is the only thing contradicting it.
         abort_over = after_nodes - resolved.max_nodes
         suffix = (
-            f" — {len(deleted)} node(s) were evicted by pass(es) of this call"
+            f"  # {len(deleted)} node(s) were evicted by pass(es) of this call"
             if deleted
             else ""
         )

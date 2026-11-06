@@ -18,6 +18,7 @@ import json
 import pytest
 
 from tools import cache_evict
+from tortoise.cache_evictor import Candidate
 
 MUTATING = ("DETACH DELETE", "DELETE", "CREATE", "MERGE", "SET ", "REMOVE", "DROP")
 
@@ -39,11 +40,18 @@ class _Graph:
     #: unreachable from this harness.
     NODES = 10
 
-    def __init__(self):
+    def __init__(self, *, fail_delete: bool = False):
         self.statements: list[str] = []
+        #: Raise INSIDE the `DETACH DELETE` — the statement was ISSUED and its effect is
+        #: unknown, which is the one case the exit code must not call "nothing happened".
+        self.fail_delete = fail_delete
 
     def _answer(self, statement):
         low = statement.lower()
+        if "detach delete" in low:
+            if self.fail_delete:
+                raise RuntimeError("RUNTIME reset on the delete")
+            return _Result([])
         if "call db.labels" in low:
             return _Result([("Point",)])
         if "size(labels(n)) = 0" in low:
@@ -115,12 +123,15 @@ def wired(monkeypatch):
 
 
 def _never_called_load(spec, *, flag):
-    """A selector/probe seam that must never be needed by the arms under test."""
+    """A stand-in seam the non-destructive arms never reach."""
 
-    def _fn(*args, **kwargs):
-        return True
+    if flag == "--selector":
+        def _select(graph, limit, population):
+            return [Candidate(node_id=i, key=f"k{i}", population=population)
+                    for i in range(int(limit))]
 
-    return _fn
+        return _select
+    return lambda candidate: True
 
 
 BASE = ["--graph-uri", "docker://:pw@h:6379/tortoise", "--graph", "tortoise"]
@@ -284,8 +295,8 @@ def test_a_licensed_population_dry_runs_and_the_metric_is_a_MEASUREMENT(wired, t
     machine-readable record of a sweep. This asserts the SHAPE, which is what a monitor
     keys on.
     """
-    import io
     import contextlib
+    import io
 
     report = _parity_report(tmp_path, instrument="tools/turn_parity_census.py")
     buf = io.StringIO()
@@ -311,3 +322,46 @@ def _parity_report(tmp_path, *, instrument: str):
         "dry_run": {"would_delete_turn_nodes": 4, "held_back_turn_nodes": 0},
     }), "utf-8")
     return path
+
+
+# ── the exit-code vocabulary on the DESTRUCTIVE arm ───────────────────────────
+#
+# ⛔ The producer's flag (`delete_unverified`) is pinned in the executor's pins file; what
+# these cover is the CLI's CONSUMPTION of it. Reverting `if report.deleted or
+# report.delete_unverified:` to `if report.deleted:` merged green before them — the exact
+# cycle-3 P1, reproduced in the file whose own comment describes it.
+
+
+def test_an_UNVERIFIED_delete_reports_2_not_3(wired, tmp_path, capsys):
+    """The DELETE was ISSUED; the server may have applied it. That is not "nothing went"."""
+    client, _unused_graph = wired
+    graph = _Graph(fail_delete=True)
+    import tools.cache_eviction_census as census
+
+    census._connection = lambda ep: (client, graph)  # type: ignore[assignment]
+    report = _parity_report(tmp_path, instrument="tools/turn_parity_census.py")
+
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(report), "--parity-graph", "tortoise",
+        "--execute", "--confirm-graph", "tortoise"))
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["metric"]["delete_unverified"] is True, body["metric"]
+    assert body["metric"]["nodes_evicted"] == 0
+    assert code == 2, ("an issued-but-unverified DELETE must not read as 'nothing "
+                       "happened' (exit 3)")
+
+
+def test_a_REFUSED_run_that_deleted_nothing_still_reports_3(wired, tmp_path):
+    """The control that keeps 3 meaning what the table says it means."""
+    _client, graph = wired
+    code = cache_evict.main(_argv(
+        "--population", "Point", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise"))
+    assert code == 3
+    assert graph.mutations == []
