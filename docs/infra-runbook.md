@@ -3541,10 +3541,11 @@ operator who read the line above as "CI defends this" would never run it.
 >
 >   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z). ⛔ **And no
 >   run in that table can be the one that first RECORDED them:** the two runs inside the window died
->   in `Apply migrations` — which **is** the `supabase db push --linked --include-all --yes` in that
->   workflow, so there is no earlier `db push` for them to have died "before" — when that push
->   refused `supabase/config.toml` (`[inbucket]` is no longer supported, exit 1) before opening a
->   connection,
+>   in `Apply migrations` — which **is** the step that runs `supabase db push --linked --include-all`
+>   in that workflow (the `--yes` this file quotes elsewhere was added on 2026-11-06 by #11104, after
+>   every run in this table), so there is no earlier `db push` for them to have died "before" — when
+>   that push refused `supabase/config.toml` (`[inbucket]` is no longer supported, exit 1) before
+>   opening a connection,
 >   and the two that could have applied — the cancelled one and the 00:55 one — were both CREATED
 >   after 23:07:38Z (the cancelled run 56 minutes after it), so they postdate the reading that first
 >   saw the rows. The recorder is therefore an act **this run history does not contain**: an

@@ -4150,12 +4150,71 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # documentation hits arrived on top of #9556/R8's invocation). The stated
     # number and the enumerated hits must be ONE measurement, or a later lane
     # re-runs the census and gets a different answer than the record of record.
-    stated = re.search(r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\*", note)
-    assert stated, (
-        "the note no longer states how many lines the pre-#9548 census returned, "
-        "so `NOT empty` is all it claims and the count can drift to any number"
+    # ⛔ The tree matters at least as much as the number, and this pin had the WRONG
+    # TREE (#11064 review r11, P2): it forced the pre-#9548 reading to be the
+    # `ff6379eb2` one. `ff6379eb2` is the #9601 merge — an ancestor of the base, 12
+    # commits and three runbook-touching commits BEFORE the #9548 arming (`785bb2b59`)
+    # — so the reading "immediately before #9548" is that commit's parent,
+    # `047c91f7a`, where the same path set returns 10. The pin therefore asserted a
+    # number that was true of a different tree than the sentence claimed, which is
+    # the stale-flag class this whole note exists to close. It now REQUIRES the tree
+    # to be named, MEASURES the count at that tree with git rather than trusting a
+    # numeral, and keeps the `ff6379eb2` enumeration pinned separately.
+    stated = re.search(
+        r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\* at `([0-9a-f]{7,40})`",
+        note,
+        re.I,
     )
-    count = int(stated.group(1))
+    assert stated, (
+        "the note no longer states how many lines the pre-#9548 census returned AT A "
+        "NAMED TREE, so `NOT empty` is all it claims and both the count and the tree "
+        "can drift"
+    )
+    pre_count, pre_sha = int(stated.group(1)), stated.group(2)
+    assert pre_sha != "ff6379eb2", (
+        "the note is back to calling `ff6379eb2` the tree immediately before #9548 — "
+        "that is the #9601 merge, three runbook-touching commits before the arming "
+        "commit `785bb2b59`"
+    )
+    # ... and the number is EXECUTED at the tree it names, not asserted: the same
+    # census the doc publishes, over the same path set, against the named sha.
+    import subprocess
+
+    _git = subprocess.run(
+        [
+            "git",
+            "grep",
+            "-c",
+            "TORTOISE_RECORD_DSN",
+            pre_sha,
+            "--",
+            "fly.toml",
+            "entrypoint.sh",
+            ".github/workflows/",
+            "docs/infra-runbook.md",
+        ],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    measured = 0
+    for line in _git.stdout.splitlines():
+        tail = line.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            measured += int(tail)
+    assert measured == pre_count, (
+        f"the note states {pre_count} line(s) at {pre_sha}, but running the census "
+        f"there returns {measured} — the number and the tree are then two different "
+        "measurements of the same claim"
+    )
+    # The `ff6379eb2` reading the note ENUMERATES is pinned to the enumeration below,
+    # so the two numbers cannot be quietly swapped back.
+    ff = re.search(r"that tree reads\s+\*\*(\d+) lines\*\*", note)
+    assert ff, (
+        "the note no longer states the `ff6379eb2` reading it enumerates, so the "
+        "enumeration below has no number to agree with"
+    )
+    count = int(ff.group(1))
     # \d{3,5}, not \d{4,5}: the runbook's early sections cite THREE-digit lines
     # (`docs/infra-runbook.md:382` is R9's `record-backup` section, and :528 its
     # drill commentary), and the narrower pattern silently dropped them while the

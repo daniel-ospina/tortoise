@@ -1082,9 +1082,9 @@ grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_bac
 (`fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md`) it now returns the deploy
 workflow's bind/probe/stage lines, the runbook's row and section, and `fly.toml`'s `[env]` comment.
 ⛔ **It was NOT empty immediately before #9548 — and it was not one line either.** Measured over
-that command's own path set at **`ff6379eb2`** — the `origin/main` this branch merged, i.e. the tree
-"immediately before #9548" actually means — the pre-#9548 reading is **5 lines**, all in the
-runbook, none of them an arming surface:
+that command's own path set at **`ff6379eb2`** — an ancestor of this branch's base (the #9601
+merge, 2026-10-23), and **NOT** the tree immediately before #9548 — that tree reads
+**5 lines**, all in the runbook, none of them an arming surface:
 
 1. `docs/infra-runbook.md:382` — #9557/R9's `record-backup` section: the DSN is read from the
    environment. **Documentation** of a verb, one lane over;
@@ -1098,9 +1098,13 @@ runbook, none of them an arming surface:
 
 ⚠️ **The count is per tree — pin the tree or the number is a stale flag, and pin BOTH ends of an
 interval or it silently re-stales.** It is **0** at this branch's start point `d5c71a470`, **1** at
-`473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), and
-**5** at `ff6379eb2` (#9601/R9 added the two `record-backup` mentions) — which is the tree this
-branch merges, so **5** is the number the "before #9548" comparison is against. An earlier version of
+`473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554);
+**5** at `ff6379eb2` (an ancestor of this branch's base — the #9601 merge, 2026-10-23 — which
+added the two `record-backup` mentions), **10** at `047c91f7a` (the commit immediately before
+the #9548 arming landed in `785bb2b59`), and **20** after it. The pre-#9548 reading is
+**10 lines** at `047c91f7a` — the number the "before #9548" comparison is against, and it is
+NOT the 5 this note used to quote (that is the `ff6379eb2` ancestor, 12 commits earlier, which
+is the "pin one end of an interval" error this paragraph exists to warn about). An earlier version of
 this note pinned `c5cbcbb4f` and **3**, and was stale by the very next main-side doc edit: R9's two
 lines were invisible to the pin because nothing bound the interval's upper end. ⚠️ The `:NNNN`
 above are `ff6379eb2`'s line numbers and they drift as the runbook grows — re-measure by grepping
