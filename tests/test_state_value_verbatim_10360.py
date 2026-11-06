@@ -1396,6 +1396,15 @@ _RESIDUAL_CLOSED_VERDICT = (
     # because it takes no auxiliary.
     r"\b(?:has|have|had|is|are|was|were)\s+(?:yet|still)\s+to\s+be\s+closed\b",
     r"\bremains?\s+(?:yet\s+|still\s+)?to\s+be\s+closed\b",
+    # ⛔ THE PRESENT-TENSE VERB, not only the participle (#11258 review round 10,
+    # MEASURED): `the ADJACENCY half doesn't close the gap` asserts the gap is
+    # still open and was GREEN at every head before this one, because the whole
+    # `closed` family reads only the PARTICIPLE. It sits in the ANCHORED arm and
+    # NOT in `_RESIDUAL_OPENNESS` on purpose: `the tables do not close the
+    # SPELLING gap` is the row's own honest disclosure, and only the anchor
+    # separates the two (measured both ways).
+    r"\b(?:does|do|did|would|will|can|could)n['\u2019]?t\s+(?:yet\s+)?close[sd]?\b",
+    r"\b(?:does|do|did|would|will|can|could)\s+not\s+(?:yet\s+)?close[sd]?\b",
     r"\b(?:far\s+from|anything\s+but)\s+closed\b",
 )
 
@@ -1456,11 +1465,21 @@ _RESIDUAL_OPENNESS = (
     # closed` / `can't be closed` RED. An enumeration will keep acquiring holes
     # because the language has one, so the arm is now the SHAPE: any word whose
     # contraction ends the negation, plus `cannot`.
-    # ⛔ THE APOSTROPHE IS MANDATORY on the contraction form — `\b\w+n['\u2019]?t\b`
-    # with `?` also matches `point`, `count`, `account`, and `the account is
-    # closed` would then be a false block (measured). `cannot` is the one
-    # contraction written without an apostrophe, so it is named.
-    r"\b(?:\w+n['\u2019]t|cannot)\b[^.;]{0,30}\bclosed\b",
+    # ⛔ THE APOSTROPHE IS OPTIONAL ONLY ON A KNOWN STEM (#11258 review round 10
+    # `P1`, MEASURED). Round 9 made it MANDATORY to avoid `point`/`count`/
+    # `account`, and that NARROWED the arm: `isnt closed`, `wasnt closed`,
+    # `hasnt been closed`, `hadnt been closed` were RED at the previous head and
+    # GREEN at round 9's — an undisclosed fail-open REGRESSION introduced by the
+    # fix, in the same direction the last two rounds were closing. The collision
+    # only exists on the UNBOUNDED stem (`\w+n['’]?t` matches `point`), so the
+    # arm has two contraction branches:
+    #   (a) apostrophe MANDATORY, any stem — every contraction spelling;
+    #   (b) apostrophe OPTIONAL, KNOWN auxiliary stems only — the sloppy
+    #       apostrophe-less spellings a lane actually types;
+    #   (c) `cannot`, the one contraction written without either.
+    r"\b(?:\w+n['\u2019]t|"
+    r"(?:isn|aren|wasn|weren|hasn|haven|hadn|doesn|don|didn|wouldn|shouldn|"
+    r"couldn|mustn|needn|can|shan|won|ain)['\u2019]?t|cannot)\b[^.;]{0,30}\bclosed\b",
     # ⛔ `never … closed`, `<aux> yet to be closed`, `far from closed` and
     # `anything but closed` assert the gap is open for the same reason `not …
     # closed` does — but they are in the ANCHORED arm and NOT here, because unlike
@@ -2044,6 +2063,18 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # pins that pattern by.
     "the ADJACENCY half is no longer closed.",
     "the ADJACENCY half is no longer judged.",
+    # ⛔ THE APOSTROPHE-LESS CONTRACTIONS (#11258 review round 10 `P1`, MEASURED):
+    # these four were RED, then went GREEN when round 9 made the apostrophe
+    # mandatory to avoid `point`/`count` — a REGRESSION introduced by a fix. They
+    # are the reason the arm's second branch is a KNOWN-STEM list rather than an
+    # optional apostrophe on an unbounded stem.
+    "the ADJACENCY half isnt closed.",
+    "the ADJACENCY half wasnt closed.",
+    "the ADJACENCY half hasnt been closed.",
+    "the ADJACENCY half hadnt been closed.",
+    # the present-tense verb: `closed` is not the only form that asserts openness
+    "the ADJACENCY half doesn't close the gap.",
+    "the ADJACENCY half does not close the gap.",
     "the ADJACENCY result is unclosed",
     # the SPELLING clause is honest; a `;`/`, and`-joined second clause is not
     "the SPELLING gap is not closed and `minute` no longer fuses",
@@ -2398,10 +2429,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 94, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 100, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (94), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (100), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -2478,6 +2509,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # two branches (apostrophe-contraction, `cannot`) from being re-listed.
             "the ADJACENCY half cannot be closed.",
             "the ADJACENCY half shan't be closed.",
+            # ⛔ AND THE APOSTROPHE-LESS FORM (#11258 review round 10 `P1`): the
+            # arm's KNOWN-STEM branch exists for these, so narrowing back to a
+            # mandatory apostrophe has to red here, not just in the mutations.
+            "the ADJACENCY half wasnt closed.",
             # ⛔ THE `no longer …` ARM (#11258 review round 9 `P1`, MEASURED): this
             # pattern loses SIX exclusive proofs and the membership loop pinned
             # none of them, so it could be deleted with its proofs inside the
