@@ -2033,6 +2033,33 @@ def test_a_deduped_pair_keeps_the_entry_that_carries_the_ADDRESS():
     assert merged[0]["rule_id"] == ref.RULE_PRONOUN and merged[0]["reason"] == "cue derived", (
         f"the cue's provenance was replaced by the duplicate's: {merged!r}")
 
+    # ⛔ THE ADDRESS TRAVELS WITH ITS QUOTE. The pair was verified against the
+    # DUPLICATE's quote, so filling the quote only "when absent" shipped
+    # `span_source: "quote"` beside the survivor's different quote — offsets that
+    # index bytes the record does not name, i.e. the forgery the clamp exists to
+    # refuse, and no later clamp can catch it because every published surface
+    # clamps BEFORE deduping (review at `2a1153519`, P2).
+    survivor = _mention_record(surface="it", claim={"content": account},
+                               kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                               reason="cue derived", narrative="",
+                               # ⛔ no whole-word `it` here, or the survivor gets its
+                               # OWN quote span and the merge never runs (first cut of
+                               # this row used "nobody mentioned it here", measured green
+                               # over the broken rule: `_mention_span` found `it` at 17)
+                               quote="nobody mentioned that here")
+    with_addr = _mention_record(surface="it", claim={"content": account},
+                                kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                                reason="carried", narrative="", quote="he said it loudly",
+                                span={"span_start": 8, "span_end": 10,
+                                      "span_source": "quote"})
+    assert with_addr["quote"][8:10] == "it"
+    merged2 = _dedupe_mentions([survivor, with_addr])
+    assert len(merged2) == 1
+    rec = merged2[0]
+    assert rec["span_source"] == "quote" and rec["quote"][rec["span_start"]:rec["span_end"]] == "it", (
+        "the adopted quote-space address indexes the SURVIVOR's quote, not the "
+        f"text it was verified against: {rec!r}")
+
 
 def test_an_over_cap_claim_is_not_reported_as_CLAIMLESS():
     """⛔ `claims_by_ref` is keyed on the CUT identity (`_mention_ref`), but the

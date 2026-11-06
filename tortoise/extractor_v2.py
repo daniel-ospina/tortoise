@@ -11171,9 +11171,15 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             stats["channel_refused_no_claim"] += 1
             stats.setdefault("channel_refused_surfaces", []).append(surface)
             continue
+        # ⛔ BOTH sides through the write's window here too: a cut key compared to the
+        # model's RAW ref never matched an over-cap claim, so the unstripped `claim`
+        # fallback was used. Not observable today (only `claim["content"]` is read
+        # and both yield the same `claim_ref`), but the comment above claims a
+        # uniformity this line did not have (review at `2a1153519`, P3).
         carrier = next((p for p in kept_points
                         if isinstance(p, dict)
-                        and _norm(_mention_ref(p)) == _norm(claim_ref)), claim)
+                        and _norm(_mention_ref(p))
+                        == _norm(_mention_ref({"content": claim_ref}))), claim)
         # ⛔ THE DECISION ALREADY TAKEN WINS OVER THE MODEL'S SILENCE. The channel
         # loop ABOVE wrote the cue's `(rule_id, reason)` into `hold` for this
         # surface; stamping `entry.rule_id or RULE_CHANNEL` here overrode it, so a
@@ -11594,42 +11600,47 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
             # the surface) while `_clamped_mention` POPS them, so a presence test was
             # inert on the builder where the defect was observed and the rule did
             # nothing on the normal path (review at `9561959ed7`, P2).
-            # ⛔ ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX. Copying
-            # ⛔ (and the ADDRESS is merged into the FIRST record rather than
-            # swapping the record: a whole-record swap replaced the cue's
-            # `rule_id`/`reason` with the duplicate's channel-labelled ones — it
-            # fixed the address by losing the provenance that says the cue derived it.)
-            # `span_source` and the offsets while keeping the FIRST record's
-            # `quote` (the old code only adopted the winner's quote when the kept
-            # one was EMPTY) shipped a `"quote"`-labelled address into a text it
-            # does not index: `quote[start:end]` read bytes the surface never
-            # occupied, and `Mention._span_is_an_address` cannot see it (it checks
-            # completeness, order and range only). Measured on the fail-open path,
-            # where the clamp runs BEFORE this dedupe: `{'quote': 'the budget is
-            # 40k', 'span_start': 2, 'span_end': 4, 'span_source': 'quote'}` →
+            # ⛔ The ADDRESS is merged into the FIRST record rather than swapping the
+            # record: a whole-record swap replaced the cue's `rule_id`/`reason` with
+            # the duplicate's channel-labelled ones — it fixed the address by losing
+            # the provenance that says the cue derived it.
+            # ⛔ ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX. Copying the
+            # offsets and `span_source` while keeping the FIRST record's `quote`
+            # (the old code adopted the winner's quote only when the kept one was
+            # EMPTY) shipped a `"quote"`-labelled address into a text it does not
+            # index: `quote[start:end]` read bytes the surface never occupied, and
+            # `Mention._span_is_an_address` cannot see it (it checks completeness,
+            # order and range only). Measured on the fail-open path, where the clamp
+            # runs BEFORE this dedupe: `{'quote': 'the budget is 40k',
+            # 'span_start': 2, 'span_end': 4, 'span_source': 'quote'}` →
             # `quote[2:4] == 'e '` for surface `it` — the fabricated-address class
-            # #5007 forbids (review at `d59000f10`, P2).
-            # A `quote` pair is copied when it VERIFIES against the text this
-            # record already carries, or when this record carries NO quote at all —
-            # in that case the winner's quote comes WITH its address, so the pair is
-            # still self-consistent. A record that already carries a DIFFERENT quote
-            # keeps it and stays honestly spanless. `narrative`/`model` pairs are
-            # copied as-is: the narrative is not replaced here, and `model` claims
-            # nothing verified.
+            # #5007 forbids (review at `d59000f10`, P2; the peer lane found the same
+            # defect independently at `2a1153519`). The adopted pair therefore takes
+            # ITS OWN quote with it; a `narrative`/`model` pair needs none, since the
+            # narrative is not replaced here and `model` asserts nothing verified.
+            # Pinned as a PROPERTY by
+            # `test_a_deduped_address_must_INDEX_the_text_the_record_carries`: a
+            # shipped `"quote"` address must index its own surface in its own quote,
+            # whichever entry won.
             kept = out[at[key]]
             if kept.get("span_start") is None and m.get("span_start") is not None:
-                pair = (m["span_start"], m["span_end"])
-                label = str(m.get("span_source") or "")
-                kept_quote = str(kept.get("quote") or "")
-                adoptable = (label != "quote" or not kept_quote
-                             or _mention_span(kept_quote,
-                                              str(m.get("surface") or "")) == pair)
-                if adoptable:
-                    for field in ("span_start", "span_end", "span_source"):
-                        if m.get(field) is not None:
-                            kept[field] = m[field]
-                    if not kept_quote and m.get("quote"):
-                        kept["quote"] = m["quote"]
+                for field in ("span_start", "span_end", "span_source"):
+                    if m.get(field) is not None:
+                        kept[field] = m[field]
+                # ⛔ A `quote`-space address travels WITH its quote: the offsets were
+                # verified against the DUPLICATE's text, so filling the quote only
+                # "when absent" shipped `span_source: "quote"` beside the survivor's
+                # different quote — offsets that index bytes the record does not
+                # name, which is the forgery the whole clamp exists to refuse, and
+                # no later clamp can catch it because every published surface
+                # clamps BEFORE deduping (review at `2a1153519`, P2; found
+                # independently as the round-7 blocker at `d59000f10`).
+                # ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX: the shipped
+                # quote is therefore the one that indexes the shipped pair, and the
+                # surviving record's own quote is kept when it already indexes it.
+                if m.get("quote") and (kept.get("span_source") == "quote"
+                                       or not kept.get("quote")):
+                    kept["quote"] = m["quote"]
             continue
         at[key] = len(out)
         out.append(m)
