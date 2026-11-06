@@ -1864,9 +1864,10 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
     and `ci-wall-clock.md` §6 lines 440-442 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
-    population rather than on it"; no line span quoted here on purpose — §6's offset moves
-    with any insert above it, and the mechanical pin below reads the ONE span out of
-    `tools/ci_check_repair.py`). The floor was
+    population rather than on it"). This docstring carries the SECOND citation of that same
+    span, and the mechanical pin below holds it EQUAL to the one in
+    `tools/ci_check_repair.py` — so a re-cut of either alone reddens, and the span is never
+    restated from memory. The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
     cancel-then-rerun: at the median it makes the median run slower and adds one more
     run to the queue it is starved behind.
