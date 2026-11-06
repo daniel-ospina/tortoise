@@ -5142,10 +5142,15 @@ surfaces:
   - test_pack_cli.py
   - test_pack_content_v3.py
   - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
-  # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, below: three PRs each repaired
-  # `main`'s missing row independently and the union left THREE duplicate `core` entries,
-  # which `tools/ci_selection.py --integrity` then refused as manifest drift
-  # (`duplicate entry ... at .surfaces.core[]`). Do not re-add a row here.
+  # #11001 landed `tests/test_pack_hierarchy_11001.py` WITHOUT a registration, so
+  # from that merge `--integrity` reported `manifest drift: ['test_pack_hierarchy_11001.py']`
+  # on EVERY PR's merged tree — the #3153/#2876 main-side drift class, this time
+  # blocking #11210's merge. Registered here, beside the pack suites it belongs
+  # with: the module under test (`tortoise/pack_hierarchy.py`) matches no
+  # SOURCE_PATTERN and falls through to `core`, which is the surface that runs
+  # this file. Measured: `select(['tortoise/pack_hierarchy.py']) -> ['core']`,
+  # this file selected.
+  - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
   # #2818: the per-kind VALUE-FIELD declaration surface — `values` in
