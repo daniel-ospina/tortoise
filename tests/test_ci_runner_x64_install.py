@@ -3752,7 +3752,7 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 #: head, and the citation that accompanies them is read from the file rather than from this note.
 #: ⚠ The `:1891` half of that sentence is now off by the rebase's own inserts: at this head `:1891`
 #: is the `test` job's `orphan-bound.sh --count` invocation and the teardown comment it used to
-#: point at is `:1896-1898` — the same drift, one layer out, and unpinned prose is why it is note
+#: point at is `:1897-1898` — the same drift, one layer out, and unpinned prose is why it is note
 #: rather than assertion.)
 _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
 
@@ -3962,7 +3962,7 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     #
     # Mutation: revert either number to its pre-#6744 value (`:1891`) -> RED naming the line it
     # actually hit, which at THIS head is the `test` job's `orphan-bound.sh --count` invocation
-    # (`:1891`); the FalkorDB-teardown comment that `:1891` used to land on is now `:1896-1898`.
+    # (`:1891`); the FalkorDB-teardown comment that `:1891` used to land on is now `:1897-1898`.
     workflow_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
     for rel in _REFUSAL_CITATION_SITES:
         text = (REPO_ROOT / rel).read_text()
