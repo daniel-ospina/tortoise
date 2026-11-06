@@ -3169,21 +3169,34 @@ def _manifest_of(manifest_text: str) -> dict:
     # callers must therefore MAP this to exit 2, which they do at the CLI
     # boundary — see `refresh_durations` and `paid_vs_selected_cli`.
     try:
-        # #10790: the SELECTOR's parse, not a bare `safe_load` — it refuses a
-        # duplicate mapping key, which `safe_load` silently collapses to its
-        # last value. This is the refresh's PRE-WRITE gate, and it was the one
-        # half of the writer that could not see a duplicate: `_locate_durations_block`
-        # already refused a repeat INSIDE the `durations:` block when it RENDERS
-        # (that is #10855's "the sole writer refuses them"), but this gate
-        # parsed with `safe_load`, so a hand-edited or union-merged input could
-        # still be rendered from a map whose rows were already collapsed — and
-        # a duplicate OUTSIDE `durations:` was invisible to both.
-        parsed = cs.parse_manifest_text(manifest_text)
-    except cs.DuplicateManifestKeyError as exc:
-        raise DurationsBridgeError(
-            "the rendered manifest repeats a mapping key, so a loader would "
-            "silently keep only one of the rows: " + "; ".join(exc.issues)
-        ) from exc
+        # ⛔ LENIENT ON PURPOSE — do NOT "harden" this to
+        # `cs.parse_manifest_text` (#10790 merge conflict, resolved toward the
+        # design that SURVIVED on main).
+        #
+        # A duplicate mapping key IS refused on the write path, but by the
+        # COMPOSED walk in `integrity_problems`
+        # (`cs.duplicate_mapping_key_issues(text=manifest_text, …)`), which
+        # names the key in the returned problem list — a RED, not a
+        # could-not-evaluate. Raising here instead was tried on this branch and
+        # is wrong twice over:
+        #
+        #   1. it breaks `validate_refreshed_manifest`'s documented contract:
+        #      that helper reports the DURATION checks and deliberately does
+        #      NOT report the duplicate class — `test_integrity_problems_
+        #      catches_a_duplicate_durations_key`'s second arm ASSERTS that
+        #      leniency is the premise making the composed walk load-bearing
+        #      ("if this ever starts catching the shape, this arm's premise
+        #      changed");
+        #   2. it pre-empts that walk, so `integrity_problems` would raise
+        #      instead of returning its full list — the contract its own
+        #      docstring states ("The FULL problem list `--integrity` composes")
+        #      and that this module's callers map to exit 2 rather than to a
+        #      named red.
+        #
+        # The parse here is therefore the plain loader, and `safe_load` keeps
+        # the LAST of two duplicate rows — which is exactly the silent-collapse
+        # the composed walk above exists to make loud.
+        parsed = yaml.safe_load(manifest_text)
     except yaml.YAMLError as exc:
         raise DurationsBridgeError(
             f"the manifest is not readable as YAML "

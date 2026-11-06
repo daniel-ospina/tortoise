@@ -5854,22 +5854,42 @@ def test_the_manifest_validator_calls_a_duplicate_RED_not_UNKNOWN(tmp_path, caps
 
 
 def test_the_writer_refuses_to_render_a_duplicate_mapping_key():
-    """The refresher's PRE-WRITE gate must refuse the render, not publish it.
+    """The refresher's PRE-WRITE gate must NAME a duplicate key, not collapse it.
 
-    `ci_timing._manifest_of` is what `refresh_durations` parses its own output
-    through before writing `config/ci-surfaces.yml`. #10855 records that the
-    writer already refused a duplicate INSIDE `durations:` — that is
-    `_locate_durations_block`, which runs when it RENDERS — but this gate parsed
-    with a bare `safe_load`, so an input whose rows were already collapsed (or
-    a duplicate outside `durations:` at all) reached it unseen.
+    ⛔ THE MECHANISM CHANGED AT THE `origin/main` MERGE, and this test is the
+    pin that keeps it from swinging back (#10790). This branch first hardened
+    `ci_timing._manifest_of` to parse through the strict
+    `ci_selection.parse_manifest_text`, so a duplicate raised
+    `DurationsBridgeError` there. `origin/main` landed the SAME hole fixed the
+    other way — `integrity_problems` composes
+    `ci_selection.duplicate_mapping_key_issues(text=…)` and returns the key in
+    its problem list, a NAMED RED. Merged, the raise pre-empted that walk, so
+    `integrity_problems` threw instead of returning its full list, and
+    `validate_refreshed_manifest` refused the top-level-`durations:` shape that
+    main's own arm asserts it must NOT report.
+
+    So the surviving contract is main's, and it is also the better one: a
+    duplicate is a RED the writer reports BY NAME, not a could-not-evaluate.
+    What this test adds over main's `test_integrity_problems_catches_a_duplicate_
+    durations_key` is the direction that was reverted — it fails if anyone
+    re-hardens `_manifest_of`, which is exactly the regression the merge
+    produced.
+
+    Non-vacuous: `_manifest_of` is asserted LENIENT first (it silently keeps the
+    last row — the collapse the walk exists to make loud), so re-adding the
+    raise reds the first arm, and dropping the composed term reds the second.
     """
     from tools import ci_selection as cs
     from tools import ci_timing
 
     poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
-    with pytest.raises(ci_timing.DurationsBridgeError) as excinfo:
-        ci_timing._manifest_of(poisoned)
-    assert repr(key) in str(excinfo.value), str(excinfo.value)
+    # (1) The bridge parse stays LENIENT — the silent collapse is the premise.
+    assert ci_timing._manifest_of(poisoned)["durations"][key] is not None
+    # (2) …and the writer's pre-write gate still NAMES the key.
+    problems = ci_timing.integrity_problems(poisoned)
+    assert any("duplicate mapping key" in p and repr(key) in p for p in problems), (
+        f"the refresh's pre-write gate must compose the duplicate-key walk and "
+        f"name {key!r}; it returned {problems!r}")
 
 
 def test_the_real_manifest_has_no_duplicate_mapping_key():
