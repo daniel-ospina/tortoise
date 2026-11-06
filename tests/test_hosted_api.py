@@ -6191,6 +6191,67 @@ class TestSessionFloodGate:
             "the 402 CHARGED the ingest window, so an org at its cap is told "
             "\"retry shortly\" for a request that can never fit (#10175)")
 
+    def test_the_ingest_window_does_not_run_ahead_of_the_cohort_cap(
+            self, client, monkeypatch):
+        """The COHORT 402 is a permanent refusal too, and is also upstream.
+
+        The charge's own comment claims it sits "after every refusal that mints
+        nothing (the 409/400/422 boundary gates and the 402 points/cohort gates
+        above)". `test_the_ingest_window_does_not_run_ahead_of_the_points_cap`
+        pins the POINTS one; a charge moved into the gap BETWEEN the two 402s
+        would pass every other leg in this file while turning a permanent
+        `cohort_cost_cap` refusal into a retryable 429 — the same #10175 class.
+
+        The cohort gate is stubbed (it would otherwise need a real spend/period
+        row) and raises the SAME 402 shape the real
+        `CohortCostCapExceeded` maps to. Same discriminator as its sibling: the
+        window is armed at exactly one capture's charge, so an early charge
+        spends it and the SECOND POST answers 429 instead of the same 402.
+        """
+        from fastapi import HTTPException
+
+        import tortoise.cohort_cost as cohort_mod
+        import tortoise.quota as quota_mod
+        from tortoise.hosted_api import (
+            SessionRequest,
+            capture_ingest_charge_bytes,
+            get_current_org,
+        )
+
+        def _refuse_cohort(_org):
+            raise HTTPException(
+                status_code=402,
+                detail={"code": "quota_exceeded", "resource": "cohort_cost_cap"})
+
+        monkeypatch.setattr(cohort_mod, "enforce_cohort_cost_cap", _refuse_cohort)
+        # The POINTS gate must PASS here, or the 402 under test is its own: the
+        # dense 51-turn window would otherwise 402 on `est` before the cohort
+        # gate is ever reached (that is what the sibling leg exercises).
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, max_points=10 ** 9)
+
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conv = [{"role": "user", "content": dense}] * 51
+        bodies = [
+            {"session_id": "cohort-order-1", "conversation": conv},
+            {"session_id": "cohort-order-2", "conversation": conv},
+        ]
+        unit = max(capture_ingest_charge_bytes(SessionRequest(**b))
+                   for b in bodies)
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG", unit)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+
+        first = client.post("/v1/sessions", json=bodies[0])
+        assert first.status_code == 402, (
+            f"the cohort refusal answered {first.status_code} — the permanent "
+            "402 must precede the ingest charge")
+        retry = client.post("/v1/sessions", json=bodies[1])
+        assert retry.status_code == 402, (
+            f"the retry after a cohort refusal answered {retry.status_code} — "
+            "the charge sits BETWEEN the two 402s, so a permanent refusal is "
+            "reported as a retryable throttle (#10175)")
+
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
