@@ -11579,9 +11579,10 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
         record.pop("span_start", None)
     if record.get("span_end") is None:
         record.pop("span_end", None)
-    surface = str(record.get("surface") or "")
+    surface = str(record.get("surface") or "").strip()
     if not surface:
         return None
+    record["surface"] = surface
     # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
     # one `commit_schema.Mention` accepts — otherwise the whole payload 422s.
     # Both halves are dropped rather than 422 (review cycle 2, P1: an over-cap
@@ -11597,7 +11598,19 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
     declared = record.get("span_source")
     if declared not in _MENTION_SPAN_SOURCES:
         record.pop("span_source", None)
-    elif declared in ("quote", "narrative") and "span_start" in record:
+    if "span_start" in record and "span_source" not in record:
+        # ⛔ A bare offset pair is NOT an address: `commit_schema.Mention`'s own
+        # field doc says so ("a bare offset that does not say which space it is
+        # in is not an address"), and `_clamped_mention` was sanitising a PRESENT
+        # space without ever requiring one — so a consumer resolving the span per
+        # `span_source` had nothing to resolve in (review at `5da3575b7a`, P3).
+        record.pop("span_start", None)
+        record.pop("span_end", None)
+    if "span_source" in record and "span_start" not in record:
+        # …and the converse: a space with no offsets names nothing. It shipped as
+        # `span_source: "quote"` beside no address (same review).
+        record.pop("span_source", None)
+    if record.get("span_source") in ("quote", "narrative"):
         haystack = (str(record.get("quote") or "") if declared == "quote"
                     else str(narrative or ""))
         if _mention_span(haystack, surface) != (record["span_start"],
@@ -11636,7 +11649,12 @@ def _mentions_for_claim(embed_list: dict, content: str,
         record = _clamped_mention(m, narrative=narrative)
         if record is not None:
             out.append(record)
-    return out
+    # ⛔ `_dedupe_mentions` runs INSIDE `route_mentions`, which is exactly the call
+    # that may have raised: on the fail-open path the merged list is the model's
+    # raw channel and nothing deduped it, so one hold was counted twice on both
+    # surfaces (`mentions_recorded == 2` for one mention — review at `5da3575b7a`,
+    # P3). Idempotent, so the normal path is unaffected.
+    return _dedupe_mentions(out)
 
 
 def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
@@ -12212,10 +12230,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # said `referentiality.pronoun`, for one run).
     result["mentions"] = {
         "stats": mention_s2_stats,
-        "records": ([r for r in (_clamped_mention(m, narrative=story)
-                                 for m in (complete_list.get("mentions") or [])
-                                 if isinstance(m, dict))
-                     if r is not None]
+        "records": (_dedupe_mentions([r for r in (
+            _clamped_mention(m, narrative=story)
+            for m in (complete_list.get("mentions") or [])
+            if isinstance(m, dict)) if r is not None])
                     if _referentiality.enabled() else []),
     }
     # #1933 (E2E-4 negative a): the chain-completeness evidence surface +

@@ -1287,9 +1287,16 @@ def test_the_mention_record_is_payload_only_and_says_so():
 # ── the channel-only response must reach the LAST BUILDER, not just the door ──
 # The `rule_id` clamp lives in `_mentions_for_claim` and runs on every record, so
 # it kept the row above green even when `route_mentions` still returned early —
-# which meant the OTHER half (`_mention_record`: span verification, dedupe, the
-# quote clamp) was pinned by nothing. These two rows pin that half: they red only
-# when a channel-only response bypasses the builder.
+# which meant the OTHER half (`_mention_record`: dedupe, the quote clamp) was
+# pinned by nothing.
+#
+# ⚠️ WHAT THESE ROWS ACTUALLY PIN, measured one half at a time at `5da3575b7a`
+# (review P3 — the earlier comment claimed each row reds for its own half, and
+# that is false): the dedupe row and the carried-hold row red on the
+# `route_mentions` half alone; the `verified_by_the_last_builder` row reds only
+# when BOTH halves go, because `_clamped_mention` verifies the declared span too.
+# The builder's own verification is pinned at the ROUTED level, below, since the
+# payload is downstream of two verifiers and cannot say which one ran.
 
 def test_a_mention_only_response_is_verified_by_the_last_builder():
     """⛔ The security half of the channel-only fix is `_mentions_for_claim`'s
@@ -1299,10 +1306,11 @@ def test_a_mention_only_response_is_verified_by_the_last_builder():
     mention-only response ships `span_source: "quote"` on offsets nothing supports:
     the exact provenance forgery `de036f2e` closed for the `entities[]` path.
 
-    Measured before this row existed: reverting ONLY the `route_mentions` half left
-    the suite green (81 passed) while shipping
-    `span_source='quote' span_start=0 span_end=5` for a quote that does not contain
-    the surface."""
+    ⚠️ This row pins the CONJUNCTION, not the builder alone: it stays green when
+    either verifier alone is removed, because `_clamped_mention` verifies the
+    declared span too (measured at `5da3575b7a`: E1 → green, E5 → green). The
+    builder's own verification is pinned by
+    `test_the_builder_verifies_a_declared_span_at_the_ROUTED_level`."""
     el = _embed_list("config/ci-surfaces.yml")
     el["mentions"] = [{
         "surface": "the admin-merge rail",
@@ -1484,3 +1492,79 @@ def test_the_evidence_surface_does_not_carry_an_unverified_span(monkeypatch):
     assert records[0]["span_source"] == "model", (
         "the evidence surface shipped an address whose declared provenance names "
         f"a text it does not index: {records[0]!r}")
+
+
+# ── the address contract, and the half the payload alone cannot pin ────────
+
+def test_a_bare_offset_pair_is_not_an_address(monkeypatch):
+    """`Mention.span_source`'s own field doc: *"a bare offset that does not say
+    which space it is in is not an address"*. `_clamped_mention` sanitised a
+    PRESENT space without ever requiring one, so `{span_start, span_end}` and no
+    `span_source` shipped as an address a consumer has no space to resolve in
+    (review at `5da3575b7a`, P3). The converse — a space with no offsets — is the
+    same defect mirrored, and both are dropped.
+
+    ⚠️ Driven through the FAIL-OPEN path on purpose: on the normal path
+    `_mention_record` DERIVES the address from the quote, so the entry gets a
+    space whether or not the last door requires one — a payload row built with
+    `_mint` passed with the rule removed (measured)."""
+    out = _fail_open_session(monkeypatch, [
+        {"surface": "the admin-merge rail", "claim_ref": "the budget is 40k",
+         "quote": "the admin-merge rail", "span_start": 0, "span_end": 5},
+        {"surface": "it", "claim_ref": "the budget is 40k",
+         "quote": "it", "span_source": "quote"},
+    ])
+    records = out["mentions"]["records"]
+    assert [m["surface"] for m in records] == ["the admin-merge rail", "it"], (
+        f"a record was dropped: {records!r}")
+    for rec in records:
+        assert ("span_start" in rec) == ("span_source" in rec), (
+            f"a half address shipped: {rec!r}")
+
+
+def test_a_whitespace_surface_is_not_a_surface(monkeypatch):
+    """`min_length=1` accepts `"   "`, so a padded entry became a record with no
+    name to resolve — one more shape of an address that names nothing (same
+    review). Fail-open: the builder never sees these entries."""
+    out = _fail_open_session(monkeypatch, [{"surface": "   ",
+                                            "claim_ref": "the budget is 40k"}])
+    assert out["mentions"]["records"] == [], (
+        f"a whitespace surface became a record: {out['mentions']['records']!r}")
+
+
+def test_the_builder_verifies_a_declared_span_at_the_ROUTED_level():
+    """⛔ `_mention_record`'s declared-span verification is shadowed at the payload
+    by `_clamped_mention`, so no PAYLOAD row can pin it: removing it leaves the
+    suite green (measured — 0 failed / 87 passed, review at `5da3575b7a`, P3). It
+    is still the only verification on the merged list, which
+    `result["embed_list"]` and `result["s2_embed"]` publish. Asserted at the
+    ROUTED level for the same reason the slot rows are: the payload is downstream
+    of two verifiers, so it cannot say which one ran."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{
+        "surface": "the admin-merge rail",
+        "claim_ref": el["points"][0]["content"],
+        "quote": "a totally unrelated sentence with no rail in it",
+        "span_source": "quote",
+        "span_start": 0,
+        "span_end": 5,
+        "rule_id": ref.RULE_CHANNEL,
+    }]
+    routed = route_mentions(copy.deepcopy(el), "")
+    assert routed["mentions"][0]["span_source"] == "model", (
+        "the builder honoured an unverified declared space, so the merged list — "
+        f"which `result[\"embed_list\"]` publishes — carries a forged address: {routed['mentions'][0]!r}")
+
+
+def test_the_fail_open_path_dedupes_too(monkeypatch):
+    """`_dedupe_mentions` runs inside `route_mentions` — the call that may have
+    RAISED. On the fail-open path nothing deduped the model's raw channel, so one
+    hold was counted twice on both surfaces (`mentions_recorded == 2` for one
+    mention; review at `5da3575b7a`, P3). The number is plan R1's arming
+    measurement, so a double count is a doubled evidence claim."""
+    entry = {"surface": "the admin-merge rail", "claim_ref": "the budget is 40k",
+             "quote": "the admin-merge rail", "rule_id": ref.RULE_CHANNEL}
+    out = _fail_open_session(monkeypatch, [dict(entry), dict(entry)])
+    records = out["mentions"]["records"]
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        f"the fail-open path double-counted one hold: {records!r}")

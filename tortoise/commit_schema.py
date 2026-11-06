@@ -575,11 +575,23 @@ class Mention(BaseModel):
     ``claim_id``**, because the point carrying the property IS the claim.
 
     ⛔ **PAYLOAD-ONLY TODAY — this is not graph state, and must not be read as it.**
-    The record reaches two in-memory surfaces and then STOPS: the extraction payload
-    (``points[].mentions``, built by ``extractor_v2._mentions_for_claim``) and the
-    run's own evidence block (``result["mentions"]["records"]``, assembled in
-    ``extract_session_v2``; both go through ``extractor_v2._clamped_mention``, so
-    neither can carry an unverified ``rule_id`` or span). Neither declared write
+    The record reaches FOUR in-memory surfaces and then STOPS — two of them
+    CLAMPED and two not, which is the distinction that matters:
+
+    - ``points[].mentions`` (built by ``extractor_v2._mentions_for_claim``) and
+      ``result["mentions"]["records"]`` (assembled in ``extract_session_v2``) both
+      go through ``extractor_v2._clamped_mention``, so NEITHER can carry an
+      unverified ``rule_id`` or span;
+    - ``result["embed_list"]["mentions"]`` and ``result["s2_embed"]["mentions"]``
+      publish the MERGED list as the selection left it. On the normal path that is
+      already the builder's output (``_mention_record`` verified it). ⚠️ On the
+      FAIL-OPEN path — ``route_mentions`` raised, so ``execute_embed`` kept the
+      model's raw channel — those two carry the model's unverified claims verbatim.
+      Measured at `5da3575b7a` (review P3): a lane reading ``embed_list["mentions"]``
+      for plan R1's arming count gets the raw entry. Read those two as "what the
+      selection produced", never as "what was verified".
+
+    Neither declared write
     door carries it. ``hosted_api``'s ``create_point`` calls enumerate their
     properties — ``CreatePointRequest`` has no ``mentions`` field at all — and the
     SDK capture whitelist
