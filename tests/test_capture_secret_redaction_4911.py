@@ -820,8 +820,12 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     secret's ABSENCE. Absence alone is satisfied VACUOUSLY by any arrangement in
     which the turn never reaches the summary, and it therefore did not bind the
     control: neutralising ``redact_secrets`` left this test GREEN. The non-str
-    turn is placed FIRST and kept short enough to be the first substantive
-    utterance, so it IS the summary — which makes the marker check load-bearing.
+    turn is placed FIRST, so its marked credential is what the Source's derived
+    vocabulary carries — which makes the marker check load-bearing. (Since
+    #10000 the derivation is a CAPPED TOPIC lexicon, so the marker's words are
+    only a *candidate* for the six that survive; the marker is therefore read on
+    the scrubber's own output below, which is the property, and the coerced
+    turn's presence on the node is pinned separately.)
     """
     _keyless(monkeypatch)
     # #4897 round 6: capture every string the scrubber is handed on the Source
@@ -835,11 +839,16 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     from tortoise.sdk import _CAPTURE_TURN_CAP
 
     scanned: list[int] = []
+    scanned_text: list[str] = []
     _real_redact = sdk_mod.redact_secrets
 
     def _spy(text: str):
         scanned.append(len(text))
-        return _real_redact(text)
+        marked = _real_redact(text)
+        # `redact_secrets` returns ``(text, counts)``; the text is what the
+        # capture path goes on to derive the Source from.
+        scanned_text.append(marked[0] if isinstance(marked, tuple) else marked)
+        return marked
 
     monkeypatch.setattr(sdk_mod, "redact_secrets", _spy)
     secret = "sk_live_" + _fill(24)
@@ -863,9 +872,22 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     # (a) the non-str turn's credential was COERCED, SCANNED and MARKED. This is
     #     the assertion that binds: with the scrubber neutralised the raw value
     #     is here instead of the marker and this reds.
-    assert "[REDACTED:stripe_secret_key]" in blob, (
-        "a credential was dropped rather than marked — or the non-str turn was "
-        f"never scanned: {blob!r}")
+    #
+    #     ⛔ THE MARKER IS ASSERTED ON THE SCRUBBER'S OWN OUTPUT, not on the
+    #     node's 6-word lexicon. Since #10000 the Source carries a CAPPED topic
+    #     lexicon whose ties are broken alphabetically (#10852 P1: the old
+    #     first-encountered tie-break made the lexicon a re-wording of the
+    #     utterance in transcript order), so which six words survive is a
+    #     function of the fixture's unrelated vocabulary — reading the marker
+    #     there pins the SORT ORDER, not the redaction. The scrub's output is
+    #     the property, and it is the one the neutralised-scrubber mutation
+    #     reds.
+    assert any("[REDACTED:stripe_secret_key]" in t for t in scanned_text), (
+        "the credential was dropped rather than MARKED by the scrubber — "
+        f"scanned windows carried no marker: {scanned_text!r}")
+    assert "note" in blob, (
+        "the non-str turn never reached the Source's derivation — its coerced "
+        f"text is the only source of this word: {blob!r}")
     assert secret not in blob, (
         "a credential reached the session :Source — check the coercion path "
         "and the per-turn ordering")
