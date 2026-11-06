@@ -3747,7 +3747,9 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 #: refusal paragraph. Both were exactly right on `main` (`:1891`) and #6744's +70-line insert in the
 #: `test` job's `strategy` block moved the paragraph to `:1961` — and NOTHING read either file, so the
 #: drift shipped green: a reader (or a fixer) sent to `:1891` lands one job earlier on the `test`
-#: job's FalkorDB-teardown comment and never finds the refusal it was sent to read.
+#: job's FalkorDB-teardown comment and never finds the refusal it was sent to read. (`origin/main`
+#: moved it once more during the #11032 rebase, to `:1967`; the numbers below are re-derived at THIS
+#: head, and the citation that accompanies them is read from the file rather than from this note.)
 _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
 
 #: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
@@ -3757,10 +3759,10 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: save-arm note — the last one added with the `test-track-b` launch, whose save surface is a
 #: `setup-python cache: pip` argument rather than an `actions/cache` step of its own.)
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4312", ("pip install -e '.[test,postgres]'",)),
-    ("python-ci.yml:2734-2739", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4304-4306", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
-    ("python-ci.yml:3015", ("cache: pip",)),
+    ("python-ci.yml:4355", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2755-2760", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4347-4349", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3036", ("cache: pip",)),
 )
 
 #: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
