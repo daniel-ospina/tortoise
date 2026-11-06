@@ -3150,8 +3150,12 @@ def _hold_endpoint(hold_store: object | None, held: list[dict], *,
         stored = hold_store.hold(
             _identity_hold.HOLD_ENDPOINT, content, where=where,
             session_ref=session_ref, operator=rec["operator"], ref=rec["ref"])
-        rec["persisted"] = True
         rec["reopened"] = bool(stored.get("reopened"))
+        # ⛔ `persisted` means the STORE NOW HOLDS THIS EDGE, not "the call did not
+        # raise" (#10997 review round 5): for an already-RESOLVED key `hold()`
+        # writes nothing at all, so claiming `persisted: True` there would make the
+        # run's own census say an edge was carried when the store wrote nothing.
+        rec["persisted"] = rec["reopened"]
         # ⛔ AN ALREADY-RESOLVED KEY IS NOT A HOLD (#10997 review round 4, P2).
         # `hold()` refuses to reopen a RESOLVED key and returns the record it
         # already has — carrying the id it minted on an earlier resolved run.
@@ -9621,27 +9625,58 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # store recorded is the idempotent-consumer "return the recorded
             # outcome" arm, and it is the only one that neither re-holds a
             # committed identity (#10997 review round 4, P2) nor drops the edge
-            # (I2). The recorded id was committed against THIS graph (the store is
-            # per-graph), so the endpoint it names exists there.
+            # (I2).
+            #
+            # ⛔ BUT ONLY WHEN THIS RUN CAN SEE THAT ID (#10997 review round 5,
+            # P3). `confirm` runs inside `execute_embed`, i.e. BEFORE the caller
+            # commits, so a resolved run whose commit never landed leaves the
+            # store naming an id the graph does not hold. Wiring to it looks
+            # successful here and then loses the edge SILENTLY at commit time —
+            # `create_operator`'s existence check discards an operator whose
+            # endpoints are missing with a logger line and nothing on the run's
+            # own `warnings` — so the extractor would report "wired" over an edge
+            # the commit dropped. The id must therefore be present in this run's
+            # priors or its own payload; otherwise the honest disposition is the
+            # ordinary HOLD, with a warning that names the missing id.
             if rec.get("already_resolved") and rec.get("minted_id"):
                 pid = str(rec["minted_id"])
-                point_ids[n] = pid
-                _full_prev = _norm(ref)
-                if _full_prev != n:
-                    point_ids.setdefault(_full_prev, pid)
-                # It is not held and it is not dropped, so it is not in `held`:
-                # the census stays the epic's own acceptance (a resolved identity
-                # returns the held count to zero).
-                held.remove(rec)
+                _visible = any(str(_p.get("id") or "") == pid
+                               for _p in (idx.get("points") or [])
+                               if isinstance(_p, dict))
+                _visible = _visible or any(
+                    str(_p.get("id") or "") == pid for _p in payload_points
+                    if isinstance(_p, dict))
+                if _visible:
+                    point_ids[n] = pid
+                    _full_prev = _norm(ref)
+                    if _full_prev != n:
+                        point_ids.setdefault(_full_prev, pid)
+                    # It is not held and it is not dropped, so it is not in
+                    # `held`: the census stays the epic's own acceptance (a
+                    # resolved identity returns the held count to zero).
+                    held.remove(rec)
+                    warnings.append(
+                        f"operator endpoint WIRED, not re-held (#10997 S3 HOLD): "
+                        f"{where} named {content[:60]!r}, whose identity was already "
+                        f"resolved to {pid} by an earlier run against this graph — "
+                        "the edge is wired to it and nothing is held")
+                    return pid
                 warnings.append(
-                    f"operator endpoint WIRED, not re-held (#10997 S3 HOLD): "
-                    f"{where} named {content[:60]!r}, whose identity was already "
-                    f"resolved to {pid} by an earlier run against this graph — "
-                    "the edge is wired to it and nothing is held")
-                return pid
+                    f"already-resolved identity NOT WIRED (#10997 S3 HOLD): "
+                    f"{where} named {content[:60]!r}, recorded as resolved to "
+                    f"{pid} by an earlier run, but {pid} is in neither this run's "
+                    "priors nor its payload — wiring an edge to it would be "
+                    "dropped at commit with no warning on this run, so the ref is "
+                    "HELD instead")
+                rec.pop("already_resolved", None)
             if rec.get("persist_error"):
                 _carried = (", and the hold store write FAILED ("
                             f"{rec['persist_error']}) so it is NOT carried forward")
+            elif rec.get("reopened") is False:
+                # the store had already RESOLVED this key, so it wrote nothing:
+                # the record it re-holds is its own, not a new carry
+                _carried = (", re-held on the store's EXISTING record (it was recorded "
+                            "as resolved on an earlier run, so nothing was written now)")
             elif rec["persisted"]:
                 _carried = " in the hold store"
             else:
@@ -10010,6 +10045,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # numerators — counted one edge twice. The `#4971` probe keeps the graph
     # write itself idempotent, so this was census/budget inflation, not a
     # duplicate node.
+    #
+    # ⛔ The identity is `identity_hold.drain_identity` — pass 2's OWN (#10997
+    # review round 5), which folds a MITIGATES' TARGET PAIR (so two dampeners on
+    # one edge attacking DIFFERENT edges both survive, the silent drop I2 forbids)
+    # and case-folds the endpoints the way `_norm` does (so a re-emission spelled
+    # in a different case is recognised as its own twin instead of being emitted
+    # twice). The store keeps its own wider `operator_identity`; the drain must
+    # fold exactly what pass 2 emits.
     _run_op_ids = {_op_identity(o) for o in _run_ops}
     _dropped_ids: set[tuple] = set()
     _all_ops = list(_run_ops)

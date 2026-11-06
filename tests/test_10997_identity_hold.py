@@ -262,27 +262,59 @@ class TestTheHoldIsDrainable:
         arm — three false signals at once, and the epic's acceptance ("the held
         count returns to zero") unreachable, because every ambiguous run after a
         resolution re-inflated it by one.
+
+        ⛔ Review round 5 P3: the wiring must not be blind. `confirm` runs BEFORE
+        the caller commits, so the recorded id can name a point the graph never
+        received; wiring to it looks successful here and loses the edge silently
+        at commit (`create_operator`'s existence check drops it with a logger line
+        only). The id is therefore wired ONLY when this run can see it — in its
+        priors or its own payload — and otherwise re-held with a warning naming it.
         """
         store = hold.HoldStore(tmp_path / "hold.jsonl")
         v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
         key = store.pending()[0]["key"]
         store.claim(key)
         store.confirm(key, "pt_canonical")
-        again = v2.execute_embed(_EMBED, {}, session_id="s2", hold_store=store)
+
+        # (a) the recorded id IS visible in this run's priors → wire it. The
+        #     lookup must be `partial` (NOT resolved): the already-resolved arm
+        #     is only reachable where the mint pre-pass is gated, and a resolved
+        #     run would mint instead and never consult the store.
+        visible_search = _search(True)
+        visible_search["query_coverage"]["ran"]["point"] = 0
+        assert fp.lookup_state(visible_search) == fp.LOOKUP_PARTIAL
+        visible_search = {**visible_search,
+                          "points": [{"id": "pt_canonical",
+                                      "content": "an earlier canonical claim"}]}
+        wired = v2.execute_embed(_EMBED, visible_search, session_id="s2",
+                                 hold_store=store)
         assert store.get(key)["state"] == hold.HOLD_RESOLVED
         assert store.pending() == [], (
             "a resolved identity came back into the drainable population")
-        assert again["held"] == [], (
+        assert wired["held"] == [], (
             "an identity resolved on an earlier run was reported as newly held: "
-            f"{again['held']}")
-        assert again["stats"]["held"] == 0, again["stats"]
-        # …and the EDGE is not dropped: the ref is wired to the id the store
-        # already recorded for this graph (idempotent consumer: return the
-        # recorded outcome for a completed key).
-        assert [o["src"] for o in again["payload"]["operators"]] == ["pt_canonical"], \
-            again["payload"]["operators"]
-        assert any("already resolved" in w for w in again["warnings"]), \
-            again["warnings"]
+            f"{wired['held']}")
+        assert wired["stats"]["held"] == 0, wired["stats"]
+        assert [o["src"] for o in wired["payload"]["operators"]] == ["pt_canonical"], \
+            wired["payload"]["operators"]
+        assert any("already resolved" in w for w in wired["warnings"]), \
+            wired["warnings"]
+
+        # (b) the recorded id is NOT visible → HOLD, and SAY so (never a silent
+        #     wire to an id whose edge the commit would drop).
+        store2 = hold.HoldStore(tmp_path / "hold2.jsonl")
+        v2.execute_embed(_EMBED, {}, session_id="s3", hold_store=store2)
+        key2 = store2.pending()[0]["key"]
+        store2.claim(key2)
+        store2.confirm(key2, "pt_not_in_this_graph")
+        blind = v2.execute_embed(_EMBED, {}, session_id="s4", hold_store=store2)
+        assert blind["payload"]["operators"] == [], (
+            "the run wired an edge to an id neither its priors nor its payload "
+            f"carry — the commit would drop it silently: {blind['payload']['operators']}")
+        assert blind["stats"]["held"] == 1, blind["stats"]
+        assert any("already-resolved identity NOT WIRED" in w
+                   and "pt_not_in_this_graph" in w for w in blind["warnings"]), \
+            blind["warnings"]
 
 
 class TestEveryHeldEdgeIsCarried:
@@ -377,6 +409,55 @@ class TestEveryHeldEdgeIsCarried:
                              "op_type": "IMPL"})
         assert len(store.get(key)["operators"]) == 2, (
             "a re-asserted identical edge was appended as a second operator")
+
+    def test_two_MITIGATES_over_one_edge_but_different_targets_both_survive(
+            self, tmp_path):
+        """⛔ Review round 5 P2: the held-set dedupe must use the STORE's identity.
+
+        `identity_hold.operator_identity` folds in a MITIGATES' `target`, so two
+        dampeners over the SAME edge but against DIFFERENT target edges are
+        distinct operators — the store keeps both (its own dedupe is the wider
+        one) and then the narrower `(src, dst, op_type)` filter in the operator
+        pass `continue`d over the second with NO warning. A silent drop is the one
+        shape I2 forbids outright.
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        embed = {"entities": [], "events": [], "chain_notes": [],
+                 "points": [], "link_before_create": [],
+                 "operators": [
+                     {"src": "dampen x", "dst": "dampen y", "op_type": "MITIGATES",
+                      "strength": 0.3,
+                      "target": {"src": "claim a", "dst": "claim b",
+                                 "op_type": "IMPL"}},
+                     {"src": "dampen x", "dst": "dampen y", "op_type": "MITIGATES",
+                      "strength": 0.4,
+                      "target": {"src": "claim c", "dst": "claim d",
+                                 "op_type": "IMPL"}},
+                 ]}
+        first = v2.execute_embed(embed, {}, session_id="s1", hold_store=store)
+        assert first["held"], first["held"]
+        # the store carries both operators for the one ref
+        rec = store.get(hold.hold_key(hold.HOLD_ENDPOINT, "dampen x"))
+        assert rec is not None and len(rec["operators"]) == 2, \
+            (rec or {}).get("operators")
+
+        second = v2.execute_embed(
+            {"entities": [], "events": [], "points": [], "chain_notes": [],
+             "link_before_create": [], "operators": []},
+            _search(True), session_id="s2", hold_store=store)
+        dampeners = [o for o in second["payload"]["operators"]
+                     if o["op_type"] == "MITIGATES"]
+        assert len(dampeners) == 2, (
+            "one of two DISTINCT dampeners was dropped silently — the held-set "
+            f"dedupe used a key narrower than the store's: {second['payload']['operators']}")
+        # the targets resolve to graph ids, so the claim is that they are TWO
+        # distinct dampeners over one edge — not that they keep the raw refs
+        assert len({(d["target"]["src"], d["target"]["dst"]) for d in dampeners}) == 2, \
+            dampeners
+        impl_targets = {(o["src"], o["dst"]) for o in second["payload"]["operators"]
+                        if o["op_type"] == "IMPL"}
+        assert len(impl_targets) == 2, (
+            f"both target IMPLs must be materialized: {impl_targets}")
 
     def test_one_operator_with_two_unresolved_endpoints_drains_once(self, tmp_path):
         """P2: the dedupe must also run AMONG the held operators.
