@@ -3589,7 +3589,13 @@ def test_the_CONTAINER_a_paragraph_lives_in_is_not_the_depth_a_line_REMEMBERS():
     def in_code(body: str) -> bool:
         def walk(tokens):
             for token in tokens:
-                if token.type in ("code_block", "html_block", "fence") and text in token.content:
+                # ⛔ `html_block` IS NOT "HIDDEN" HERE (round 43 review, P3). Raw HTML text
+                # is READ by the module (`_leaves_no_paragraph`: only FENCED content is
+                # blanked; `strip_code` now carries the same rule for `own_code`), so counting
+                # an `html_block` as code in this oracle would pin the opposite of the rule
+                # the code follows. No body in either sweep is an `html_block` today, so the
+                # clause was inert — removing it keeps it inert and keeps it honest.
+                if token.type in ("code_block", "fence") and text in token.content:
                     return True
                 if walk(token.children or []):
                     return True
@@ -3643,7 +3649,13 @@ def test_a_NEW_CONTAINER_can_interrupt_a_paragraph_and_an_EMPTY_content_opens_no
     def in_code(body: str) -> bool:
         def walk(tokens):
             for token in tokens:
-                if token.type in ("code_block", "html_block", "fence") and text in token.content:
+                # ⛔ `html_block` IS NOT "HIDDEN" HERE (round 43 review, P3). Raw HTML text
+                # is READ by the module (`_leaves_no_paragraph`: only FENCED content is
+                # blanked; `strip_code` now carries the same rule for `own_code`), so counting
+                # an `html_block` as code in this oracle would pin the opposite of the rule
+                # the code follows. No body in either sweep is an `html_block` today, so the
+                # clause was inert — removing it keeps it inert and keeps it honest.
+                if token.type in ("code_block", "fence") and text in token.content:
                     return True
                 if walk(token.children or []):
                     return True
@@ -3829,5 +3841,105 @@ def test_the_PARAGRAPHS_container_is_not_always_the_ITEM():
                 for indent in range(0, 7):
                     candidate = (prep + prefix + " " * indent + marker + " " * gap
                                  + "Closes #100\n")
+                    expected = [] if token_type(candidate) == "code_block" else [100]
+                    assert cl.parse_closing_refs(candidate) == expected, candidate
+
+
+def test_a_paragraph_TWO_quotes_deep_keeps_its_lazy_continuation():
+    """Round 43 review (P2) — the round-42 branch covered ONE level of nesting and stopped.
+
+    At two levels the real lazy continuation drops ONE `>` and the renderer keeps it in the same
+    `<p>`, but neither the round-42 branch (depth EQUAL to the paragraph's) nor
+    `_dropped_quote_is_lazy` (whose markers must be the ITEM's own) answered for it, so `own_code`
+    blanked the close:
+
+        `- > > q` + `  >     -     Closes #100`
+            renderer ONE `<p>` inside the inner quote; `origin/main` `[100]`, before this fix `[]`
+
+    Measured at the pre-fix head over 47,250 bodies of that family: 1,025 lost closes, every one
+    credited by `origin/main` and every one an `inline` token. The bound is ONE marker: dropping any
+    number of them credits bodies the renderer puts in `<pre><code>` (measured: +650 fail-opens on
+    `- > > > q` + a depth-1 line), which is why the third control below stays CODE.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    body = "- > > q\n  >     -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+
+    # Controls: dropping TWO markers is not a lazy continuation (the renderer makes it code), and
+    # the item's own space is still measured by the round-39/41/42 pins.
+    for control in ("- > > > q\n  >     -     Closes #100\n",   # two markers dropped -> CODE
+                    "- > > q\n  2.     Closes #100\n",          # at the item's content column
+                    "- > q\n  >     -     Closes #100\n"):      # the round-42 pin, unchanged
+        assert cl.parse_closing_refs(control) == ([] if token_type(control) == "code_block" else [100]), control
+    assert token_type("- > > > q\n  >     -     Closes #100\n") == "code_block"
+
+    # The sweep pins the two shapes where the tool agrees with the renderer at EVERY gap/indent.
+    # The out-of-item shapes (`> - > > q`, `1. > > q`) carry a PRE-EXISTING lenient divergence
+    # (measured in the same pass: 0 new fail-opens and 0 lost prose closes against `origin/main`),
+    # so they are not pinned here — a test that asserted the renderer's answer there would pin a
+    # behaviour change nobody made.
+    for prep, prefix in (("- > > q\n", "  > "), ("- > > q\n  > pre\n", "  > ")):
+        for marker in ("-", "*", "1.", "2.", "10."):
+            for gap in range(1, 10):
+                for indent in range(0, 7):
+                    candidate = (prep + prefix + " " * indent + marker + " " * gap
+                                 + "Closes #100\n")
+                    expected = [] if token_type(candidate) == "code_block" else [100]
+                    assert cl.parse_closing_refs(candidate) == expected, candidate
+
+
+def test_an_HTML_blocks_own_text_is_READ_not_hidden():
+    """Round 43 review (P2) — a LOST close this module introduced AGAINST `origin/main`.
+
+    §4.6 makes an HTML block a LEAF block: a `- ` inside it opens no list, so the line is raw HTML
+    text and not code — the rule this module already states for the paragraph question
+    (`_leaves_no_paragraph`: only FENCED content is blanked). `own_code` did not know that, so a
+    wide-gap marker line inside the block was blanked:
+
+        `<div>` + `-     Closes #100`      renderer `html_block` (text), `origin/main` `[100]`, before `[]`
+
+    Measured at the pre-fix head over the 32-opener grid (indents 0-8, every marker, gaps 1-9): 90
+    lost closes per opener family. Types 2-6 (and 7) END at the next blank line (§4.6), so the state
+    needs no closer scan — the control below that puts a blank line before the marker line stays
+    CODE, and a FENCE inside nothing is still blanked.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body in ("<div>\n-     Closes #100\n",
+                 "<details>\n-     Closes #100\n</details>\n",
+                 "<p>\n-     Closes #100\n",
+                 "<table>\n*     Closes #100\n",
+                 "- item\n\n<div>\n2.     Closes #100\n"):
+        assert token_type(body) == "html_block", body
+        assert cl.parse_closing_refs(body) == [100], body
+
+    # Controls. The block ENDS at the next blank line, so the same marker line after one is CODE;
+    # a wide-gap marker line OUTSIDE any HTML block is still CODE; and a fenced body still is too.
+    for control in ("<div>\n\n-     Closes #100\n",
+                    "-     Closes #100\n"):
+        assert token_type(control) == "code_block", control
+        assert cl.parse_closing_refs(control) == [], control
+    assert token_type("```\n-     Closes #100\n```\n") == "fence"
+    assert cl.parse_closing_refs("```\n-     Closes #100\n```\n") == []
+
+    for opener in ("<div>\n", "<p>\n", "<table>\n", "<details>\n<summary>x</summary>\n", "<li>\n"):
+        for marker in ("-", "*", "+", "1.", "2.", "10."):
+            for gap in range(1, 10):
+                for indent in range(0, 5):
+                    candidate = opener + " " * indent + marker + " " * gap + "Closes #100\n"
                     expected = [] if token_type(candidate) == "code_block" else [100]
                     assert cl.parse_closing_refs(candidate) == expected, candidate

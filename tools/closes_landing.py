@@ -1258,6 +1258,19 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     prev_prose = False
     prev_quote_depth = 0
     prev_container: _ListItem | None = None
+    # ⛔ AN HTML BLOCK'S OWN TEXT IS READ, NOT HIDDEN (round 43 review, P2 — a LOST close this module
+    # introduced AGAINST `origin/main`). §4.6 makes an HTML block a LEAF BLOCK: a `- ` written inside
+    # it opens no list, so the line is raw HTML text, not code — the same rule this module already
+    # states for the paragraph question (`_leaves_no_paragraph`: "WHAT AN HTML BLOCK DOES NOT DO IS
+    # HIDE ITS OWN TEXT … only FENCED content is blanked"). `own_code` did not know that, so any
+    # wide-gap marker line inside the block was blanked:
+    #     `<div>` + `-     Closes #100`      renderer `html_block` (text), `origin/main` `[100]`, head `[]`
+    # MEASURED at this head over the 32-opener grid (indents 0-8, every marker, gaps 1-9): 90 lost
+    # closes per opener family (`<div>`, `<p>`, `<table>`, `<details><summary>`), none of them a code
+    # block. Types 2-6 (and 7) END at the next blank line (§4.6), so the state needs no closer scan;
+    # the start condition is the SAME `_HTML_BLOCK_INTERRUPT_RE` the paragraph rule uses — types 1-6,
+    # which are exactly the HTML blocks that can interrupt a paragraph.
+    in_html_block = False
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.
     hidden_lines = 0
@@ -1363,6 +1376,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             container = None
             own_gap = 0
             _lazy_push = False
+            # §4.6: an HTML block (types 2-6, and 7) ends at the next blank line. Reset here, at the
+            # one place that already owns "this line is blank", rather than in a second scan.
+            in_html_block = False
+        if line.strip() and not in_html_block and _HTML_BLOCK_INTERRUPT_RE.match(rest):
+            in_html_block = True
         if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
@@ -1534,15 +1552,30 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         #         renderer ONE `<p>` inside the inner quote (`q\n    -     Closes #100`)
         #         origin/main `[100]`; head `[]` — 60 such bodies per marker family, all lost
         # The paragraph's depth is `prev_quote_depth` (it already carries lazy continuation), so when
-        # it is DEEPER than the item and the line is written at exactly that depth, the line is
-        # inside that quote: consume the line's own markers and measure from the quote's content
-        # column, which in that space is 0. Swept over 22,176 + 9,072 bodies against
+        # it is DEEPER than the item and the line is written at or one marker below that depth, the
+        # line is inside that quote: consume the line's own markers and measure from the quote's
+        # content column, which in that space is 0. Swept over 22,176 + 9,072 bodies against
         # `MarkdownIt("commonmark")`: lost closes 120 -> 0 and 45 -> 0, no fail-open moved, 0
         # regressions.
+        # ⛔ ONE LEVEL OF NESTING WAS ONE LEVEL SHORT (round 43 review, P2 — a lost close against
+        # `origin/main` again, in the family this branch was written for). The equality above only
+        # covered a paragraph ONE quote deep inside the item. At TWO (`- > > q`) the real lazy
+        # continuation drops ONE `>` — the renderer keeps it in the same `<p>` — and neither this
+        # branch nor `_dropped_quote_is_lazy` (which requires the dropped markers to be the ITEM's
+        # own) answered for it, so `own_code` blanked it:
+        #     `- > > q` + `  >     -     Closes #100`
+        #         renderer ONE `<p>` (`q\n    -     Closes #100`); `origin/main` `[100]`, head `[]`
+        # Measured at this head over 47,250 bodies of that family: 1,025 lost closes, every one
+        # credited by `origin/main` and every one an `inline` token.
+        # ⛔ THE ONE-MARKER BOUND IS LOAD-BEARING. Dropping ANY number of markers credits bodies the
+        # renderer puts in `<pre><code>` (measured: +650 fail-opens on `- > > > q` + a depth-1 line),
+        # while `> container.depth` keeps the item's own `>` from being re-measured.
+        _line_depth = _quote_depth(prefix)
         if (container is not None
                 and prev_quote_depth > container.depth
-                and _quote_depth(prefix) == prev_quote_depth):
-            _line_residual = _fence_line_column(line, prev_quote_depth)[1]
+                and container.depth < _line_depth <= prev_quote_depth
+                and _line_depth >= prev_quote_depth - 1):
+            _line_residual = _fence_line_column(line, _line_depth)[1]
             _indent_base = 0
         _lazy_indent = (prev_prose
                         and _line_residual > _indent_base + _MAX_FENCE_INDENT
@@ -1560,7 +1593,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         ordered_continuation = (_lazy_indent or _lazy_marker
                                 or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                           prev_container, rest_indent, indent))
-        own_code = own_gap > 4 and not ordered_continuation
+        own_code = own_gap > 4 and not ordered_continuation and not in_html_block
         indent_code = rest_indent > _MAX_FENCE_INDENT and (
             strict or (indented_code
                        and (container is None
