@@ -577,21 +577,42 @@ def test_a_not_projectable_column_is_EXPLAINED_and_not_a_projection_gap():
     # The explanation is the DECLARATION's, not a list curated here.
     assert set(diff.explained_missing) <= cache_forbidden_columns("source")
 
-    # ⚠️ AND IT IS SPELLED IN GRAPH VOCABULARY, not column vocabulary: every
-    # spelling the placement table declares for a forbidden column is explained.
-    # Non-vacuous for the future rather than today — `story_arc` spells one way,
-    # so this leg passes on a set of one; its job is to red the moment a
-    # forbidden AMBIGUOUS column (`ambiguities()`) is explained at the
-    # `props`-tail door but reported as a projection gap here, the shape that
-    # arrives the day `CACHE_FORBIDDEN_COLUMNS` grows a second entry.
-    from tortoise.cache_projection import placement_spellings
+    # ⚠️ AND IT IS SPELLED IN GRAPH VOCABULARY: `parity_difference` compares
+    # `cache_props` keys (GRAPH property names) while `CACHE_FORBIDDEN_COLUMNS`
+    # holds RECORD COLUMN names, so the arm widens through the placement table —
+    # the contract `cache_projection.cache_forbidden_columns` states and the
+    # `props`-tail filter honours.
+    # ⛔ NON-VACUOUS BY CONSTRUCTION, not by promise. A leg over the DECLARED set
+    # would pass on a column-names-only comparison too: today's only entry
+    # (`story_arc`) spells one way on both tables, so it would pin nothing and a
+    # revert of the widen would stay green. This leg installs a real AMBIGUOUS
+    # column as a stand-in — `source.session_id` → `sessionId` / `session_id` —
+    # and asserts BOTH spellings, the same shape
+    # `test_9555_narrative_cache_rebuild.py` arm (2c) uses, so the two graph-side
+    # consumers are pinned by one method rather than by two promises.
+    import tortoise.cache_projection as _cp
 
-    for column in cache_forbidden_columns("source"):
-        for spelled in placement_spellings().get("source", {}).get(column, ()):
-            only_cache = rs.parity_difference({spelled: prose}, {"url": "u"},
+    original = _cp.CACHE_FORBIDDEN_COLUMNS
+    ambiguous_spellings = _cp.placement_spellings().get("source", {}).get(
+        "session_id", ())
+    assert len(ambiguous_spellings) > 1, (
+        "`source.session_id` is no longer a multi-spelled column, so this leg's "
+        f"stand-in proves nothing about ambiguity (spellings: {ambiguous_spellings})")
+    try:
+        _cp.CACHE_FORBIDDEN_COLUMNS = dict(original)
+        _cp.CACHE_FORBIDDEN_COLUMNS["source"] = (
+            frozenset(original.get("source", frozenset())) | {"session_id"})
+        for spelled in ambiguous_spellings:
+            only_cache = rs.parity_difference({spelled: "S"}, {"url": "u"},
                                               label="Source")
-            assert spelled in only_cache.explained_missing, (spelled,
-                                                            only_cache.as_dict())
+            assert spelled in only_cache.explained_missing, (
+                "the parity arm matched only the COLUMN spelling, so an AMBIGUOUS "
+                "not-projectable column is reported as an unexplained PROJECTION "
+                "GAP — whose only sanctioned repair is a re-projection, i.e. "
+                f"#10394's door re-opened. spelling={spelled!r} "
+                f"got {only_cache.as_dict()}")
+    finally:
+        _cp.CACHE_FORBIDDEN_COLUMNS = original
 
     # …and the amnesty is exactly that class, not every absence.
     gap = rs.parity_difference({"url": "u", "unexplained_prop": "x"},

@@ -2127,7 +2127,7 @@ exact key now, and the note was rewritten in the same edit so the section does n
 and its negation. (2) `tortoise/projection/entities.py`'s `_DOC_PASSTHROUGH_HANDLED` comment read *"no reader or restore
 lane reads it (door 2 restores the `story_arc` column only)"*. It was first left alone on the belief
 that `#11070`/`#11152` were still folding in that file; **a reviewer measured that belief and it was
-false** — both landed at `98df3bd4cf` (`HEAD~2`), neither touches `tortoise/projection/entities.py`,
+false** — both landed at `98df3bd4cf`, neither touches `tortoise/projection/entities.py`,
 there is no live `refs/claims/` entry for either, and `.worktrees/fix-11070` is clean for that path. The
 one-line comment correction is therefore made here, in the same change that falsifies it: a route-map
 sentence that names the wrong mechanism is exactly what this section exists to prevent, and deferring it
