@@ -1927,3 +1927,126 @@ a correct line from a wrong one. §9.1(b) now names a symbol per route
 pins both directions, each measured on the pre-fix text: a `file.py:NNNN` in the section reds (all
 four converted citations named), and a symbol that no longer resolves reds (measured by renaming
 `_upsert_document`).
+
+## §12.1c's label count and §14.3's V1 row numbers — the corrected figures stayed, the change narration left (`#5090`, 2026-11-04)
+
+Two register corrections landed in the design document. Both **figures** are right and stay there; what
+did not belong there was the narration of what each passage used to say, which is this file's job.
+
+**§12.1c — the per-label index count.** The section read that indexing the objects means *"a SECOND … and
+a THIRD"* resident HNSW index. That count is not an artifact of a widening served set: it was reasoned
+from the two labels the 2026-09-24 measurement actually found vectors on — the pre-edit sentence named
+*"a SECOND HNSW index for `:Object` and a THIRD for `:Event`"* — while the vector leg already addressed
+**six** distinct labels on that date (`Point` via `operator`, plus `Event`, `Subject`, `Document`,
+`Object`, `Source`: `tortoise/security.py`'s `VALID_ENTITY_TYPES` and
+`tortoise/search_engine.py:860`'s `label = "Point" if entity_type == "operator" else
+entity_type.capitalize()`, **both read at `e083c972`** — that derivation now lives in
+`security.entity_label()`).
+The five-label set below is that six with `Document` folded into `Source`, so the served set NARROWED to
+five rather than later "reaching" it — the count was wrong on its own date, which is what
+`01-align.md:53-54` already says.
+`tortoise/security.py` `ENTITY_TYPE_LABELS` maps seven entity types onto five labels, and
+`_record_vector_index_inventory` serves exactly `{Point, Event, Object, Source, Subject}`; only `Point`
+carries a vector DDL/index (`tortoise/projection/__init__.py`, both the procedure and the Cypher form).
+So **four** served labels are unindexed today — `Event`, `Object`, `Source`, `Subject` — and the argument
+is correspondingly stronger than it read. The design document now states the four-label count and the
+four-further conclusion with no reference to the passage's previous wording. ⚠️ **The count is
+incremental, and both conclusion sentences now say so in one frame:** the four are *on top of* the one
+`Point` index that exists today, i.e. **five resident HNSW structures in total** against Postgres's one
+filtered index. The pre-edit passage was arithmetically a total (1 `Point` + a `SECOND` + a `THIRD` = three,
+stated as *"Three resident HNSW indexes vs one filtered index"*), so correcting the derivation from two
+unindexed labels to four while leaving the conclusion in the total frame would have *undercounted by one* —
+`01-align.md`, `02-research.md` and `05-decompose.md` all count *four further*, and §12.1c is the register
+a lane reads to take V1, so it is the last artifact that may carry its own arithmetic.
+
+**§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
+45 MB index total, on 141 MB"*. Two independent problems: the 141/45 MB pair is the dated 2026-09-24
+reading taken on a **capped** base (the 2026-09-25 block: 24,978 quota-counted against 89,701 resident — a different reading again), so it is not a growth baseline — by **that** reading's own numbers the increase is index-driven (+52 MB total, 143 → 195 MB; +47 MB of indices, 46 → 93 MB) while the resident count **fell** 89,701 → 68,526; and the ≈50 MB payload is that same dated measurement's
+additive estimate over three labels — it was never a current payload reading either. The row now carries
+the **2026-11-04 graph reading** from `live-v4` (`#10976`): **93 MB of index total on a 195 MB graph**,
+with the 93 MB named as the TOTAL index size of which only part is HNSW; and it names the payload axis as
+§12.1a's **2026-09-24** measurement — **33,580 embeddings ≈ 51.6 MB**, of which the unindexed
+`Object`+`Event` population (**12,657 ≈ 19.4 MB, 38 % of every vector stored**) is the removable subset
+`#5090`'s 2026-10-08 arithmetic justifies. **No decision changed: V1 remains OPEN and the row says so.**
+
+**One figure of that first draft was wrong, and the correction is recorded here.** It quoted *"19.4 MB of
+stored vector payload (12,657 × 1,536 B)"* as a **2026-11-04** measurement of the live graph. It is
+neither: 12,657 is the **2026-09-24** count of the `:Object` 7,859 + `:Event` 4,798 embeddings — the
+**unindexed** population, 38 % of every vector stored — and `#5090`'s 2026-10-08 comment reaches it as a
+SCOPE correction (*"the 50 MB figure requires counting the `:Point` leg — the one leg that IS indexed and
+working …"*),
+not as a re-measurement. `#10976`'s measured block carries no vector count and no 19.4 MB line, and
+`tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure *"2026-09-24 numbers and are **not to be re-quoted**"* (verbatim from `:70-71`, emphasis included — a de-bolded form does not resolve) — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a
+2026-11-04 graph reading is exactly the mixing of readings this whole correction exists to stop.
+
+**And §12.1c no longer contradicts §14.3.** Before this correction the two disagreed *inside one
+register* — §12.1c's context line and its option table quoted 50 MB / 45 MB / 141 MB while §14.3's V1
+row quoted 93 MB of indices on 195 MB, a 2× disagreement on the index quantity, in the exact section a
+lane reads to make the decision. The 2026-09-24 figures are **dated and kept** (they are a real
+measurement of a smaller graph, and deleting them would erase the evidence the $73/GiB cost argument
+rests on), with the 2026-11-04 graph reading named beside them so the two sections can no longer be read
+as disagreeing about one graph — and each figure now states WHICH reading it belongs to, including the
+payload, which only the 2026-09-24 measurement supplies.
+
+**Why the narration moved here.** The first draft wrote *"⚠️ Corrected 2026-11-04: this paragraph
+previously read …"* into both places. `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
+reds on that shape — its `_CHANGE_NARRATION` dated-stamp arm matches `CORRECTED 20xx-`, which is exactly
+the before/after narration `#8542` moved out of the three design documents. The guard is the executable
+half of the rule stated at the top of this file: the design document states the design and the
+measurement; this file keeps the record of how it got there. Measured at the PR head: 0 `_CHANGE_NARRATION`
+hits in `STORAGE-ARCHITECTURE.md` after the move, against 2 before it (lines 1090 and 1518) — at
+`9f5a41939`, this branch's first draft, which is the ref to reproduce it at.
+
+## The rest of the register still cited the retracted figures — each now carries the date of the reading it belongs to (`#5090`, 2026-11-05)
+
+The entry above recorded the two corrected rows and dated §12.1c. Correcting those left the rest of the
+register asserting the **retracted** figures as its current basis, so one document still read 45 MB of
+indices on 141 MB in §12.1c's neighbourhood while §14.3's V1 row read 93 MB on 195 MB — a 2× disagreement
+on the index quantity and 2.6× on the payload, inside one register, in the section a lane reads to make
+the decision. This entry records the second pass that closed it, and why each figure was stale in the
+place it stood.
+
+**The figures, and what was wrong with them.** The ≈50 MB payload figure is an additive estimate from the
+2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. **Every leg
+is a VECTOR COUNT × bytes-per-vector, not an attribute line** — `Object` 7,859 and `Event` 4,798 are the
+two counts the measurement found (§12.1b), and the third leg is the remainder the estimate attributed to
+`Point`, 20,923 of 33,580. At the exact `1,536 B` per vector (384 × float32 — §5.2 states that width at `:418`), those are
+12.1 / 7.4 / 32.1 MB — sum **≈51.6 MB**, which is the `33,580 embeddings ≈ 51.6 MB` §12.1a reports; the
+head-line **≈50 MB** is that same population at the rounded `1.5 KB = 1,500 B` the original estimate used,
+**not a second reading.** ⚠️ **Two things the
+legs do not say.** (1) The ≈50 MB is not §12.1's `Point` **node-attributes** line of 50 MB — that line is
+ALL attributes of the label, no leg reads it, and the numerical agreement is a **coincidence**. (2) The
+three legs are the labels the 2026-09-24 count FOUND vectors on, **not the only labels that store them** —
+a `:Source` writes an `embedding` too (§12.1's footnote), so the third leg is an inventory inference whose
+`Point` attribution only `--census` can settle, and it can. The `Object` and `Event` legs DO exist: those
+labels store 7,859 and 4,798 embeddings respectively, and the
+whole defect this epic exists for is that they store them with **no vector index behind them** (`Object`
+and `Event` carry no vector DDL — only `Point` does). The part of the ≈50 MB that is *removable* is
+therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B = 19.4 MB** — **19.0 MB of
+the ≈50 MB frame above, 19.4 MB of the ≈51.6 MB one** — which is **38 % of every
+vector stored**, which is `#5090`'s 2026-10-08 SCOPE correction — not a re-measurement, and not a
+2026-11-04 figure. The 2026-11-04 reading of `live-v4` (`#10976`) is a **graph** reading:
+`indices_sz_mb` **93** on a **195 MB** graph, with per-label attribute bytes and no vector count; the
+probe's own docstring says the 12,657 count is *"2026-09-24 numbers and are **not to be re-quoted**"* — quoted **verbatim including the source's own emphasis markers**, from `tools/dod_5090_probe.py:70-71`, because de-bolding it makes the quotation unresolvable and a reader who greps the clean form finds nothing. `--census`
+re-measures it per label on a named graph at a timestamp.
+
+**The places that still cited it, all now dated** — named by their ACTUAL section, because the first
+draft of this list named six and got five of them wrong: **§2.2**'s *"45 MB of
+indices + 51.6 MB of embeddings + 16 MB of text"* line (`:175`) and the unnumbered subsection that follows
+it, *"The class that dominates our bill — measured"* (`:185`); **§12.1**'s *"Stored vector
+properties ≈ 50 MB"* sentence (`:945`); **§12.1a**'s per-node ratio (`:1030`); **§12.2**'s *"≈50 MB …
+against 141 MB"* (`:1129`); **§12.8**'s attribute-byte sentence (`:1395`); and **§13**'s V3 bullet
+(`:1476`), which still stated the 12,657 count and *"13.5 % of the graph"* with no date at all — now
+dated to the 141 MB graph it was measured on. Two cross-references that would otherwise have gone stale
+in the other direction are fixed the same way: the §0 ruling block's *"§2 and §12 state 141 MB and 45 MB"* (now
+`§12.1's 2026-09-24 table`) and the cost model's *"on a ~141 MB graph"* (kept as that date's reading,
+with the 2026-11-04 reading named beside it).
+
+**What was deliberately NOT done: no per-node ratio from the new reading.** The 2026-09-24 ratio,
+1.34 embeddings per node, is over **capped** nodes (~25,000). The 2026-11-04 reading's node base is
+68,526 **resident** nodes, a different denominator, and §0's own rule is that a per-node figure is never
+quoted without its base — deriving 0.49/ node (33,580 over 68,526) — or 0.18/ node for the 12,657 removable
+subset — would have repeated the exact error class the section exists to warn about. The ratio stays attached to the reading it was measured on.
+
+**No decision moved.** V1 remains `OPEN` and owner-owned, `#4333` remains its architecture home, and the
+correction changes the size of the question, not its answer.

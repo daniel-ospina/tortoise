@@ -1648,12 +1648,21 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # `public.session_narrative`, not `:Source.summary`; a section later, §12.1b's
 # `:Source` footnote — the section that decides WHERE vectors live — used to tell
 # a designer that vector *"would be **indexing an existing field**"*, i.e. embed
-# the `summary` the Source already holds. Under `#10000` that field BECOMES a
-# topic lexicon once `#10852` lands (six content words behind a constant display
+# the `summary` the Source already holds. Under `#10000` that field IS a topic
+# lexicon (`#10852`, landed: six content words behind a constant display
 # prefix), so the blurry section orders exactly the bag-of-words vector §9.4
 # forbids. The reader who lands on §12.1b gets the wrong instruction for the same
 # vector, and nothing reds: both sentences are prose, and the graph stays green
 # while a designer embeds a word list and calls it a summary.
+# ⛔ THE TENSE FLIPPED WITH THE FIX, and the pin follows it. `#10978` wrote §9.4
+# in the FUTURE tense ("`#10852` … WILL replace that derivation with a topic
+# lexicon") because at ITS head `_session_source_metadata` still returned the
+# transcript's first substantive utterance. On THIS tree the lexicon IS the
+# derivation, so the future tense is now a falsehood with a negative expiry —
+# and it also read as though the recovery door still dropped the indexed field,
+# which is the opposite of what `#10852` changed. §9.4 therefore states it in
+# the present tense, and the future-tense phrasing is pinned ABSENT below so a
+# well-meaning merge cannot restore it.
 #
 # ⛔ BOTH DIRECTIONS, and THREE SCOPES, each stated because one check cannot cover
 # the others. The narrative's home is read from `record_projection.NARRATIVE_TABLE`
@@ -1701,6 +1710,12 @@ _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
 #: below, and the count/absence asserts in the pin body) must spell it the same
 #: way, or they measure different objects under the same name.
 _SUMMARY_OBJECT = ":Source.summary"
+#: #10852 review (P2): §9.4 announced that change as a FUTURE one while naming
+#: the derivation it was about to retire. Both clauses are false on the tree the
+#: lexicon landed on, and the second one told a reader the recovery door still
+#: drops `_searchText` — the behaviour `#10852` removes, i.e. the most expensive
+#: possible mis-reading of the ruling doc.
+_RETIRED_FUTURE_DERIVATION = "will replace that derivation with a topic lexicon"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
 #: §9.4's DECIDING sentence — the one line that says what the vector reads. Carries
 #: BOTH the pointer and the negation, so both are asserted on THIS LINE (resolved
@@ -3359,6 +3374,19 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f" (asserted over the WHOLE document, not just §9.4: the sentence is "
         f"false wherever it appears, and scoping it would let it return in §10 "
         f"unremarked)")
+    assert _RETIRED_FUTURE_DERIVATION not in text, (
+        f"a section is back to *\"{_RETIRED_FUTURE_DERIVATION}\"* — it announces "
+        "`#10852` as a future change (the lexicon has LANDED: §9.4 states it in "
+        "the present tense, and `TOPIC LEXICON` is asserted below) and it names "
+        "the OLD derivation as the current one, so a reader holding this line "
+        "concludes the record→cache door still drops `_searchText` — the "
+        "behaviour `#10852` removed")
+    assert "TOPIC LEXICON" in s94, (
+        "§9.4 no longer states what a captured session's `:Source.summary` "
+        "VALUE now is — a display descriptor over the session's TOPIC LEXICON. "
+        "Without it the paragraph leaves the pre-#10000 derivation (the "
+        "transcript's first substantive utterance) as the only one named, "
+        "which is the prose §9.1/D1 forbids")
 
     # ── §12.1b: the section that decides WHERE vectors live may not order the
     #    design §9.4 forbids ──
