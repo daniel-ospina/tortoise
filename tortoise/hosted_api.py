@@ -3159,8 +3159,9 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         # `ClientDisconnect`, and an aborted send reaches no handler at all. An
         # exact-named reset here is an app/upstream failure, and calling it benign
         # costs the ERROR record (this DEBUG write is dropped in the hosted
-        # deployment) and the `method`/`path` tags — the event itself still goes
-        # out via the Starlette re-raise. Accepted for round 4's reason; the full
+        # deployment) and nothing else — the tags are dropped either way and the
+        # delivered event still carries the `request` interface; the event itself
+        # goes out via the Starlette re-raise. Accepted for round 4's reason; the
         # statement and the alternative are in `REQUEST_LAYER_DISCONNECT_NAMES`'
         # note.
         _benign = _is_benign(exc, inbound_request=True)

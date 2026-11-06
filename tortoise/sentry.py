@@ -60,16 +60,22 @@ BENIGN_EXCEPTION_NAMES = frozenset({"ClientDisconnect", "BrokenResourceError"})
 #: raised while the body is streamed); and uvicorn's `send` returns early when the
 #: client is already gone, so an aborted send reaches no handler at all. An
 #: EXACT-NAMED reset arriving in `_unhandled_exception_handler` is therefore
-#: evidence of an app/upstream failure, and treating it as benign costs (a) the
-#: ERROR record — the DEBUG write is dropped in the hosted deployment, see
-#: `hosted_api` — and (b) the `method`/`path` tags on the capture. The EVENT
-#: itself still goes out through the Starlette re-raise, so this is an
-#: attribution cost, not a blind spot.
+#: evidence of an app/upstream failure, and treating it as benign costs ONE
+#: record: the handler's own ERROR line on `tortoise.api`, because the benign
+#: branch writes only the sub-ERROR DEBUG line and the hosted deployment drops
+#: that (see `hosted_api`). It does NOT cost the `method`/`path` tags (review
+#: round 11, measured): the logging-integration event for the exception is
+#: delivered first, and `DedupeIntegration` drops the handler's own TAGGED
+#: `capture_exception` for the same exception instance — so those tags reach
+#: Sentry in neither classification. Attribution is not lost either: the
+#: delivered event carries the `request` interface (`transaction`,
+#: `request.url`). The EVENT itself still goes out through the Starlette
+#: re-raise, so the misclassification is a lost ERROR record, not a blind spot.
 #:
 #: That cost is ACCEPTED rather than reversing round 4's decision (keep these
-#: names out of the client-global set). The alternative, if the lost tags ever
-#: bite, is to drop them from this set too — `ClientDisconnect` already covers
-#: the caller-hang-up case.
+#: names out of the client-global set). The alternative, if that lost record
+#: ever bites, is to drop them from this set too — `ClientDisconnect` already
+#: covers the caller-hang-up case.
 REQUEST_LAYER_DISCONNECT_NAMES = BENIGN_EXCEPTION_NAMES | frozenset(
     {"ConnectionResetError", "BrokenPipeError"}
 )
@@ -224,14 +230,14 @@ def is_benign_exception(exc: BaseException, *, inbound_request: bool = False) ->
     `HTTPError`/`URLError` and `URLError` is a SIBLING of `ConnectionResetError`
     under `OSError`. The residual is bounded: neither name is in the client-global
     `ignore_errors`, so a reset misclassified here still delivers ONE event — for
-    the ABORTED UPSTREAM CALL — via the `ServerErrorMiddleware` re-raise (that
-    capture carries no `method`/`path`). A caller HANG-UP is different: it arrives
-    as `ClientDisconnect`, which IS in `ignore_errors`, so it delivers ZERO events
-    — `init`'s note records exactly that ("at this head, 0 events and 0 source
-    reads"). What a misclassification costs is THIS handler's sub-ERROR line —
-    dropped in the hosted deployment, see `hosted_api` — plus those missing tags;
-    the full statement and the alternative are in
-    `REQUEST_LAYER_DISCONNECT_NAMES`' note.
+    the ABORTED UPSTREAM CALL — via the `ServerErrorMiddleware` re-raise. A caller
+    HANG-UP is different: it arrives as `ClientDisconnect`, which IS in
+    `ignore_errors`, so it delivers ZERO events — `init`'s note records exactly
+    that ("at this head, 0 events and 0 source reads"). What a misclassification
+    costs is THIS handler's sub-ERROR line — dropped in the hosted deployment, see
+    `hosted_api` — and nothing else: the tags do not reach Sentry in either
+    classification, and attribution survives on the `request` interface (both
+    measured; see `REQUEST_LAYER_DISCONNECT_NAMES`' note).
 
     ⛔ The name match is EXACT on purpose (review round 3, P3). Walking the MRO
     makes this helper broader than the SDK's own `ignore_errors` — and broader is
