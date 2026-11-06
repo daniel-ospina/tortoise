@@ -5714,7 +5714,7 @@ def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm
     # REGRESSION PINS (not discriminating for this fix — see the docstring): the two consumers
     # that read this arm swallow nothing here, and must keep swallowing nothing.
     sys.path.insert(0, str(ROOT))
-    from tools import issue_process_lint as ipl  # noqa: PLC0415
+    from tools import issue_process_lint as ipl
 
     assert ipl.in_flight_markers([inflight]) == [], inflight
     assert ipl.has_satisfies_checklist([checkbox]) is False, checkbox
