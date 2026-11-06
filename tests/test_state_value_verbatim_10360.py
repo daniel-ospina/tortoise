@@ -1289,11 +1289,22 @@ _UNIT_TOKEN = re.compile(
 
 
 #: The marker that opens the residual list inside the `state_value_carve_out`
-#: row. The region it opens — the marker → THE END OF ITS ROW — is the artifact a
-#: lane reads ("read this before improving a number"), and it is the region the
-#: reopening scan covers, because a reopening is a reopening wherever it is
-#: appended (#11223).
+#: row — the artifact a lane reads ("read this before improving a number").
+#: ⛔ IT IS A LOCATOR, NOT THE SCAN'S BOUND (#11258 review, round 3): the marker
+#: sits 12,908 chars into a 50,850-char row, so a scan that STARTED here read
+#: 37,914 chars — 74.6% of the row — and reported PASS over a reopening written
+#: into the row's own narrative above it (MEASURED at `(2b) the ADJACENCY half is
+#: open again.` inserted just above the marker: marker bound `[]` → GREEN, row
+#: bound 1 claim → RED). That is #11223's own defect one bound further in
+#: (`[:1200]` → the `(d)` block → the marker → the row), so `_residual_region`
+#: starts at `_RESIDUAL_ROW_START`; the marker keeps two jobs — it names the
+#: residual list, and it is one of the two anchors the region must still carry.
 _RESIDUAL_MARKER = "⛔ WHAT IS STILL NOT ENFORCED"
+
+#: The row's own entry start — where the scanned region BEGINS. Deliberately a
+#: LITERAL, like `_RESIDUAL_ROW_END` below, so the region cannot move with the
+#: function the proof test checks.
+_RESIDUAL_ROW_START = "\n  - id: state_value_carve_out\n"
 
 #: What marks a claim as being about THIS row's closed gap: the adjacency class
 #: (the word itself, a time/length UNIT token or its abbreviation, `time-unit`),
@@ -1397,6 +1408,34 @@ _RESIDUAL_OPENNESS = (
     r"\b(?:has|have|had|is|are|was|were)\s+yet\s+to\s+be\s+closed\b",
     r"\b(?:far\s+from|anything\s+but)\s+closed\b",
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    # ⛔ THE PARTICIPLE, SUBJECT-GATED, and the gate is split by TENSE because the
+    # honest shapes are historical. The `no longer` arm above carries only the 3sg
+    # `fuses`, so "the ADJACENCY half is no longer fused" — the row's OWN register
+    # (`the unit word IS fused`, `THE FUSION ITSELF MULTIPLIES`) — stayed GREEN
+    # while "… is no longer judged" RED: the arm was reached and only the
+    # inflection was missing (#11258 review round 3, MEASURED). It cannot simply
+    # join the arm: this arm is UNANCHORED, so an ungated participle FALSE-BLOCKS
+    # the row's own honest `(d)` prose — "`percent`/`pct` is no longer fused:
+    # fusing it REFUSED the truthful pair" and "`miles` was no longer fused at
+    # that revision" both RED (measured, and both are must-stay-GREEN proof
+    # statements below, so the gate has a falsifier).
+    # ⛔ TWO GATES, because one gate cannot be both wide enough for the row's own
+    # closed-class vocabulary and narrow enough for its historical disclosures: an
+    # earlier revision gated `units?` with NO tense requirement, which let
+    # "`minute` is no longer fused" through GREEN (the same inflection asymmetry
+    # this arm exists to close, still open for every SPACING the row enumerates —
+    # measured) while FALSE-BLOCKING "the units were no longer fused at
+    # `origin/main` `525fde4a9`" (measured). So:
+    #   (a) the non-unit class words, tense-free — the row never discloses their
+    #       fusion historically in this shape;
+    #   (b) the unit vocabulary, PRESENT copula only — which is what the row's
+    #       historical disclosure (`were` / `was`) is excluded by.
+    r"\b(?:adjacency|the\s+half|carve-?out|value\s+class|numeric\s+side|"
+    r"time[- ]unit)\b[^.;]{0,80}?\bno\s+longer\s+(?:fused|fusing)\b",
+    r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
+    r"week|weeks|month|months|year|years|mile|miles|millisecond|milliseconds|"
+    r"min|ms|km)\b[^.;]{0,20}?\b(?:is|are|remains?|stays?)\b[^.;]{0,20}?"
+    r"\bno\s+longer\s+(?:fused|fusing)\b",
     r"\bunclosed\b",
     # ⛔ NEGATION IS NOT A REOPENING, and this arm is the UNANCHORED one — so it is
     # where a plain `not` would otherwise reach an `open` phrase: `the ADJACENCY
@@ -1530,25 +1569,70 @@ _RESIDUAL_ROW_END = "\n  - id: atomic_point_write"
 
 
 def _residual_region(text: str) -> str:
-    """The residual list's own text: its marker → THE END OF ITS ROW.
+    """The `state_value_carve_out` row's own text: its `  - id: ` entry → the next.
 
-    The row ends at the next top-level list entry (`  - id: …`). Bounding the
-    region to the row — rather than to the next marker, which is the end of the
-    file — is what makes an appended sentence part of it: the append point was
-    the leak (#11223), because a region that stops at `(e) the` never reads it.
+    ⛔ THE BOUND IS THE ROW, NOT THE MARKER, and every earlier bound was defeated
+    by writing OUTSIDE it (#11223): `[:1200]` → the `(d)` block (10,019 chars) →
+    the residual marker (37,914 of 50,850 chars = 74.6% of the row). A reopening
+    is a reopening wherever in the row it is written, so the region is the whole
+    row and the marker is only a locator. MEASURED that covering the marker's
+    12,908-char prefix costs nothing at this revision: the real row carries 0
+    claims on the whole row and every entry of both proof lists below is
+    unchanged, and a reopening inserted into the prefix
+    (`(2b) the ADJACENCY half is open again.`) is GREEN under the marker bound
+    and RED under this one.
     """
     assert text.count(_RESIDUAL_MARKER) == 1, (
-        f"the registry must carry exactly ONE {_RESIDUAL_MARKER!r} list "
-        f"(found {text.count(_RESIDUAL_MARKER)}) — this pin scans that one, so a "
-        "second copy would silently narrow it")
-    region = text.split(_RESIDUAL_MARKER, 1)[1]
-    nxt = re.search(r"\n  - id: ", region)
+        f"the registry must carry exactly ONE {_RESIDUAL_MARKER!r} residual list "
+        f"(found {text.count(_RESIDUAL_MARKER)}) — this pin is the guard for "
+        "that one, so a second copy is a second, UNGUARDED residual list")
+    # ⛔ AND THE ROW ITSELF MUST BE UNIQUE: a second `  - id:
+    # state_value_carve_out` entry leaves the scan reading whichever copy comes
+    # first while the other publishes its own, unguarded residual list — measured
+    # on a duplicate appended at the end of the file: both residual tests stayed
+    # GREEN. This file family has exactly that history (`b1751f9d80` deduped a
+    # three-row duplicate of another entry).
+    # ⛔ The count is BRANCHED (#11258 review round 3, `P2`): `0` is not a
+    # duplicate, and it is the case a lane most needs diagnosed — the row was
+    # renamed, re-indented or wrapped, so the pin must be moved, not narrowed.
+    row_copies = text.count(_RESIDUAL_ROW_START)
+    assert row_copies == 1, (
+        ("the `state_value_carve_out` row is GONE (0 matches for "
+         f"{_RESIDUAL_ROW_START!r}) — it was renamed, re-indented or wrapped; move "
+         "this pin with it rather than narrowing the scan to something it can "
+         "still reach")
+        if row_copies == 0 else
+        (f"the registry must carry exactly ONE `state_value_carve_out` row "
+         f"(found {row_copies}) — this pin scans that row, so a second copy is a "
+         "second, UNGUARDED residual list"))
+    start = text.find(_RESIDUAL_ROW_START)
+    # ⛔ the terminator is searched AFTER the row's own entry start, or the start
+    # line itself matches `\n  - id: ` and truncates the region to nothing.
+    tail = text[start + len(_RESIDUAL_ROW_START):]
+    nxt = re.search(r"\n  - id: ", tail)
     assert nxt is not None, (
         "could not find the END of the `state_value_carve_out` row (the next "
-        "`  - id: ` entry) after the residual marker — without it this scan "
-        "would read the REST OF THE FILE and red on other rows' prose, which "
-        "is how a pin gets deleted rather than fixed")
-    return region[:nxt.start()]
+        "`  - id: ` entry) — without it this scan would read the REST OF THE "
+        "FILE and red on other rows' prose, which is how a pin gets deleted "
+        "rather than fixed")
+    region = _RESIDUAL_ROW_START + tail[:nxt.start()]
+    # ⛔ ANTI-SILENT-NARROWING: the region must still carry the row's load-bearing
+    # literals, or a `  - id: ` written into the row's PROSE truncates this region
+    # early while every assertion above still passed. MEASURED reach: a decoy at
+    # row+200 / +8,000 / +12,900 REDs here, so this assert covers truncation up to
+    # `(e) the` (row+24,386) — a decoy LATER in the row (+20,000 / +40,000) passes
+    # it, and is caught by the append fixture in
+    # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` instead, which
+    # inserts at the row's `_RESIDUAL_ROW_END` literal and asserts the sentence is
+    # inside the region. Two anchors rather than one because the row is 50,850
+    # chars and a single early literal leaves the tail unguarded here.
+    assert (_RESIDUAL_MARKER in region and "(d) a RATE unit" in region
+            and "(e) the" in region), (
+        "the scanned region does not run from the residual marker through "
+        f"residual (e) — it truncated early at {len(region)} chars (prose inside "
+        "the row containing `  - id: `?), so the scan would silently cover less "
+        "than the row it claims to guard")
+    return region
 
 
 #: The clause boundary the scan splits on before matching. ⛔ `while`/`whereas`/
@@ -1705,7 +1789,8 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # The block's own structural half is asserted here; the reopening half lives
     # in `_residual_reopening_claims`, whose proof list is `len()` of the two
     # tuples below (`_RESIDUAL_REOPENING_MUTATIONS` must all RED,
-    # `_RESIDUAL_TRUTHFUL_STATEMENTS` must all stay GREEN) and is
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` must all stay GREEN) and is PINNED by shape
+    # and floor in that test, and is
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` below — that test
     # is what makes the list above a checked claim rather than a docstring.
     # — plus the structural rule that the still-open SPELLING disclosure must be
@@ -1851,6 +1936,30 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # by one of them shared a segment and the waiver swallowed the second claim.
     "the SPELLING gap is open while the remaining gap is not closed.",
     "the SPELLING gap is open although the remaining gap is not closed.",
+    # ⛔ THE PARTICIPLE OF THE ROW'S OWN VERB, SUBJECT-GATED (#11258 review round
+    # 3, MEASURED: `no longer fused` was GREEN because the arm carried only the
+    # 3sg `fuses`, while `no longer judged` RED — the arm was reached and only
+    # the inflection was missing). The second shape names the class in open words
+    # rather than the anchor word, so it exercises the subject gate too.
+    "the ADJACENCY half is no longer fused",
+    "the units are no longer fused",
+    # ⛔ ONE PARTICIPLE SHAPE PER GATE ALTERNATIVE (#11258 review round 3 `P2`,
+    # MEASURED: only 2 of the gate's 7 alternatives were exercised by any
+    # mutation, so an alternative could be deleted and its shape SUBSTITUTED for
+    # one of the four membership-pinned ones — `len` and uniqueness both held and
+    # the test stayed GREEN). These close the remaining five; with them, every
+    # alternative in the gate is pinned by a shape that REDs through it.
+    "the half is no longer fused",
+    "the carve-out is no longer fused",
+    "the value class is no longer fused",
+    "the numeric side is no longer fused",
+    "the time-unit half is no longer fused",
+    # ... and the unit VOCABULARY the row itself enumerates, which the first
+    # revision of the gate missed entirely (`minute` is no longer fused was GREEN
+    # while `` `minute` no longer fuses `` was RED — the same inflection asymmetry
+    # this arm exists to close, still open for the ten spellings the row names).
+    "`minute` is no longer fused",
+    "`km` is no longer fused",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -1896,6 +2005,20 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     # round 3 `P1`, measured).
     "splitting it would re-open that false refusal on every two-group decimal.",
     "that needs the owner's decision reopened there, not a rung bolted on here.",
+    # ⛔ THE GATE'S OWN FALSIFIERS (#11258 review round 3 `P2`, MEASURED): the
+    # subject gate on the participle is justified by the claim "an UNGATED
+    # `fused|fusing` false-blocks the row's own honest prose", and that claim had
+    # no executable proof — the whole gate could be deleted and this test stayed
+    # GREEN. These four are GREEN under the gated arm and RED under an ungated
+    # one (both measured), so the must-stay-GREEN loop is now the gate's own
+    # falsifier. The last two are HISTORICAL (`were` / `was`), which is what the
+    # present-copula half of the gate exists to admit: a first revision gated
+    # `units?` with no tense requirement and FALSE-BLOCKED both (measured).
+    "`percent`/`pct` is no longer fused: fusing it REFUSED the truthful pair",
+    "`miles` was no longer fused at that revision",
+    "the units were no longer fused at `origin/main` `525fde4a9`, which is why "
+    "that pair was refused",
+    "the unit word was no longer fused in the revision the widen replaced",
 )
 
 
@@ -1930,6 +2053,44 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     GREEN. This test is what makes "the scan is region-wide" a checked claim: it
     appends each shape where a lane appends and requires the scan to find it.
     """
+    # ⛔ THE PROOF LISTS ARE PINNED, and by SHAPE rather than by size alone
+    # (#11258 review round 3, MEASURED: gutting `_RESIDUAL_REOPENING_MUTATIONS` to
+    # its first two entries left this test GREEN while both docstrings still
+    # claimed the full count — a proof list that can be deleted without reddening
+    # anything is the drift `[pin-defensive-claim]` names).
+    # ⛔ AN EQUALITY-ONLY SIZE PIN IS NOT ENOUGH EITHER (round-2 reviewer, MEASURED:
+    # reverting the participle and duplicating two existing entries keeps
+    # `len == N` and stays GREEN — and this branch's lists are still GROWING, so an
+    # equality pin also drops one side's proofs in a merge conflict). So: pin
+    # UNIQUENESS (substitution cannot pay for a deletion), pin MEMBERSHIP for the
+    # shape each arm exists for, and use a `>=` FLOOR for size.
+    assert len(set(_RESIDUAL_REOPENING_MUTATIONS)) == len(
+        _RESIDUAL_REOPENING_MUTATIONS), (
+        "the reopening proof list has duplicate entries — a duplicate pays for a "
+        "deleted shape while the length stays constant, so the list can be "
+        "gutted without reddening anything")
+    assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
+        _RESIDUAL_TRUTHFUL_STATEMENTS), (
+        "the truthful-statement proof list has duplicate entries — see above")
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 49, (
+        "the reopening proof list SHRANK below its floor — re-derive the count "
+        "in the docstrings/comments rather than deleting shapes")
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 22, (
+        "the truthful-statement proof list SHRANK below its floor — a false-block "
+        "list that can be deleted silently is not coverage")
+    for required in (
+            # the issue's own mutation, and the append-point arm
+            "the ADJACENCY half is open again",
+            # the `no longer` participle, subject-gated (#11258 round 3)
+            "the ADJACENCY half is no longer fused",
+            # the clause-anchored `fails open` arm
+            "the ADJACENCY half fails open.",
+            # the emphatic negations the veto must NOT swallow
+            "the ADJACENCY half is not only open, it is unfused."):
+        assert required in _RESIDUAL_REOPENING_MUTATIONS, (
+            f"the proof list no longer carries {required!r} — that shape is the "
+            "reason its arm exists; a lane reading this list must be able to run "
+            "the shape, so deleting it is a silent coverage regression")
     text = (pathlib.Path(__file__).resolve().parent.parent
             / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
     assert _residual_reopening_claims(text) == [], (
@@ -1944,6 +2105,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     # the fixture assertion below fires).
     region = _residual_region(text)
     old_bound = text.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
+    # ⛔ AND IT MUST START AT THE ROW'S OWN ENTRY — the marker sits ~12.9k chars
+    # in, and a scan that starts there reads 74.6% of the artifact and reports PASS
+    # over a reopening written into the row's narrative above it (#11258 review
+    # round 3, MEASURED). `region` here is the SCANNER's own output, deliberately:
+    # a bound that moves back to the marker reds this assert (measured); the
+    # assertion on the append point below is the one that stays on a FIXTURE
+    # literal, so a narrowing bound cannot move it.
+    assert region.startswith(_RESIDUAL_ROW_START), region[:60]
     assert len(region) > len(old_bound), (
         "the residual region must reach PAST the pre-#11223 bound (the `(d)` "
         "block): that bound is the defect this pin exists to remove")
@@ -1971,6 +2140,24 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert missed == [], (
         "these reopenings appended after the residual list stayed GREEN — the "
         f"region-wide scan does not cover the append point: {missed}")
+    # ⛔ AND THE PREFIX IS COVERED TOO, or "region-wide" still means "from the "
+    # marker onward": a reopening written into the row's own narrative, ABOVE the
+    # marker, is the shape #11223's bound would still miss one step further in.
+    # Inserted at the row's start — before the marker — so the assertion fails if
+    # the bound ever moves back to `_RESIDUAL_MARKER`.
+    prefix_mutation = "the ADJACENCY half is open again"
+    prefix_at = text.index(_RESIDUAL_ROW_START) + len(_RESIDUAL_ROW_START)
+    assert prefix_at < text.index(_RESIDUAL_MARKER), (
+        "the row's entry start is now AFTER its own residual marker, so this "
+        "fixture no longer inserts above it — re-measure the prefix claim")
+    prefixed = text[:prefix_at] + "      ⛔ (2b) " + prefix_mutation + ".\n" + text[prefix_at:]
+    assert _residual_reopening_claims(prefixed), (
+        "a reopening inserted into the row's narrative ABOVE the residual marker "
+        "stayed GREEN — the scanned region still starts at "
+        f"{_RESIDUAL_MARKER!r}, so it reads only "
+        f"{len(region) - region.find(_RESIDUAL_MARKER)} of the row's "
+        f"{len(region)} chars and publishes PASS over the rest (#11223's own "
+        "defect, one bound further in)")
     false_alarms = [
         sentence for sentence in _RESIDUAL_TRUTHFUL_STATEMENTS
         if _residual_reopening_claims(_with_appended(text, sentence))]
