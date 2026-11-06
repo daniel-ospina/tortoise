@@ -1588,3 +1588,95 @@ def test_the_narrative_amnesty_does_not_extend_to_an_absent_QUOTE():
     ok = {"surface": "it", "claim_ref": "c", "quote": "x it y",
           "span_source": "quote", "span_start": 2, "span_end": 4}
     assert _clamped_mention(ok, narrative="")["span_source"] == "quote"
+
+
+# ── the hold may not wait for the model to echo an internal rule id ────────
+# `_MENTION_CONTRACT_LINE` asks for `{surface, claim_ref, quote, kind_guess}` —
+# NO `rule_id` — and `merge_embed_lists` says the same of S4's contract-shaped
+# entry ("it carries NO rule_id and NO span"). Requiring the model's string to
+# equal the cue's was therefore a gate on an input the prompt never requests.
+
+def test_a_mention_only_response_is_held_at_the_CONTRACT_shape():
+    """⛔ The arm required `verdict[0] == recorded_rule`, so it was INERT for the
+    only shape the prompt asks the model to emit: measured at `d785f3da8`,
+    `{surface: "the thing", claim_ref: <a live claim>}` produced
+    `held_surfaces: 0`, the surface stayed in `about_entities`, and Layer-1
+    rejected the whole session ("about_entities reference unknown entities") —
+    the exact failure the channel-only fix exists to close, still open for a
+    model that follows the contract.
+
+    The CUE decides. `judge()` returning a verdict IS the cue's decision to hold;
+    the model's `rule_id` string cannot add or remove it (`verdict is None` still
+    never holds — the row below — which is the cycle-3 P1 protection)."""
+    el = _embed_list("it")
+    el["mentions"] = [{"surface": "it",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "it"}]          # the prompt shape: no rule_id
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 1, held["mention_stats"]
+    assert held["points"][0]["about_entities"] == [], (
+        "the held surface is still named by the claim — Layer-1 rejects that")
+    assert held["mention_held"] == [{"surface": "it",
+                                     "rule_id": ref.RULE_PRONOUN}], (
+        "a model-supplied surface with no rule string carried no cue rule: "
+        f"{held.get('mention_held')!r}")
+
+    payload, _ = _mint(el)
+    verdict, _parsed = validate_payload_dict(payload)
+    assert verdict.ok is True, (
+        f"the contract-shaped mention-only payload broke Layer-1: {verdict.errors}")
+
+
+def test_the_contract_shape_still_cannot_hold_a_REFERENT():
+    """The negative control for the row above: the relaxation is the CUE's, not
+    the model's. An entry with NO `rule_id` naming a must-keep referent is still
+    not held, so a model cannot delete a 70-reference surface by omitting a
+    field (`the admin-merge rail` is this repo's measured must-keep), and an
+    entry whose `claim_ref` resolves to no claim is not a hold either — a
+    mention no claim can carry is refused, not enacted."""
+    el = _embed_list("the admin-merge rail")
+    el["mentions"] = [{"surface": "the admin-merge rail",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": None}]
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 0, held["mention_stats"]
+    assert held["points"][0]["about_entities"] == ["the admin-merge rail"]
+
+    # …and a resolvable CLAIM is part of the decision, not just the cue's verdict
+    orphan = _embed_list("it")
+    orphan["mentions"] = [{"surface": "it", "claim_ref": "a claim this run never emits"}]
+    del orphan["entities"]
+    routed = route_mentions(copy.deepcopy(orphan), "")
+    assert routed["mention_stats"]["held_surfaces"] == 0, routed["mention_stats"]
+    assert routed["mention_stats"]["channel_refused_no_claim"] == 1
+
+
+# ── the clamp may not publish HALF an address ─────────────────────────────
+
+def test_the_clamp_never_publishes_half_an_address():
+    """⛔ A space label and its offset pair are ONE address. `_mention_record`
+    can emit neither half alone (its label exists only inside the valid-pair
+    branch, and an undeclared pair becomes `"model"`); `_clamped_mention` — which
+    the evidence surface now goes through, so this is what
+    `result["mentions"]["records"]` publishes — produced both halves (review at
+    `d785f3da8`, P2), and `Mention._span_is_an_address` only checks
+    completeness/order/range, so Layer-1 accepts either."""
+    from tortoise.extractor_v2 import _clamped_mention
+
+    # (a) the pair survived and nothing declared its space → the honest label
+    undeclared = _clamped_mention({"surface": "it", "claim_ref": "c", "quote": "it",
+                                   "span_start": 0, "span_end": 2}, narrative="")
+    assert undeclared["span_source"] == "model", (
+        f"a bare offset shipped with no space label: {undeclared!r}")
+
+    # (b) a declared space whose offsets did NOT survive → the label goes with it
+    for bad in ({"span_source": "quote", "span_start": 5},          # half a pair
+                {"span_source": "quote", "span_start": 5, "span_end": 2},  # inverted
+                {"span_source": "quote", "span_start": True, "span_end": 2}):  # bool
+        half = _clamped_mention({"surface": "it", "claim_ref": "c", "quote": "it",
+                                 **bad}, narrative="")
+        assert "span_start" not in half and "span_end" not in half, half
+        assert "span_source" not in half, (
+            f"a space label outlived the address it describes: {half!r}")

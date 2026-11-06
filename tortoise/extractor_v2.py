@@ -10844,6 +10844,12 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     #: `about_entities reference unknown entities` — carried no `mention_held`
     #: into the union pass, and reported `held_surfaces: 0` while writing a
     #: record that named the cue rule (review at `5da3575b7a`, P1).
+    #: The claims a mention can attach to, keyed by the identity the WRITE keeps
+    #: (`_mention_ref`). Built HERE, before the channel is read, because the hold
+    #: itself is gated on it: "a mention no claim can carry is refused" is the
+    #: contract row, and "refused" must mean not-held, not held-but-unrecorded.
+    claims_by_ref = {_norm(_mention_ref(p)): p for p in points
+                     if str(p.get("content") or "").strip()}
     channel_held: set[str] = set()
     for m in channel:
         if not isinstance(m, dict):
@@ -10851,15 +10857,25 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         surface = str(m.get("surface") or "").strip()
         if not surface or surface in hold:
             continue
-        recorded_rule = str(m.get("rule_id") or "")
-        # ⛔ The model's `rule_id` is a CLAIM. Trusting it let an entry tagged
-        # "referentiality.pronoun" remove a surface `judge()` says is a referent —
-        # a 70-reference must-keep deleted on model say-so (review cycle 3, P1).
-        # The cue is RE-RUN and must agree with the claim.
+        # ⛔ The model's `rule_id` is a CLAIM and is not trusted — but it is not
+        # REQUIRED either, and requiring it was a gate on an input the prompt
+        # never asks for: `_MENTION_CONTRACT_LINE` is
+        # `{surface, claim_ref, quote, kind_guess}` and carries NO `rule_id`
+        # (`merge_embed_lists` says the same of S4's contract-shaped entry), so
+        # `verdict[0] == recorded_rule` held only for a model that echoed this
+        # module's internal id. Measured at `d785f3da8`: the prompt shape gave
+        # `held_surfaces: 0`, the surface stayed in `about_entities`, and Layer-1
+        # rejected the session ("about_entities reference unknown entities") —
+        # the failure this fix exists to close, open for every compliant model.
+        # ⛔ The CUE decides, and the rule id comes from the CUE: `judge()` is
+        # re-run, and a `None` verdict (a REFERENT) still never holds — that is
+        # the cycle-3 P1 protection (a model-supplied pronoun tag cannot delete a
+        # 70-reference must-keep), not the model's string.
+        if _norm(str(m.get("claim_ref") or "")) not in claims_by_ref:
+            continue                       # no claim to carry it — refused below
         verdict = _referentiality.judge(surface)
-        if (verdict is not None and verdict[0] == recorded_rule
-                and recorded_rule != _referentiality.RULE_CHANNEL):
-            hold.setdefault(surface, (recorded_rule,
+        if verdict is not None:
+            hold.setdefault(surface, (verdict[0],
                                       "recorded on the mention channel"))
             channel_held.add(surface)
 
@@ -11039,8 +11055,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # claim over `_MAX_CONTENT` keys apart from its own record and the mention is
     # lost at the union pass while being reported as a fold that never happened
     # (review cycle 4, P1-c).
-    claims_by_ref = {_norm(_mention_ref(p)): p for p in points
-                     if str(p.get("content") or "").strip()}
+    # …`claims_by_ref` is built ABOVE the channel loop: the hold is gated on the
+    # same resolution the record loop uses.
     # A record this module WROTE is CARRIED verbatim, never re-derived: pass 2
     # would otherwise relabel a `quote`/`narrative` span as `model` and overwrite
     # the cue's reason (review at 41fb0c65e, P1). A model entry (no cue rule, or a
@@ -11650,6 +11666,21 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
         checkable = declared == "quote" or bool(haystack)
         if checkable and _mention_span(haystack, surface) != want:
             record["span_source"] = "model"
+    # ⛔ A SPACE LABEL AND ITS OFFSET PAIR ARE ONE ADDRESS, and this clamp used to
+    # publish either half alone (review at `d785f3da8`, P2): a surviving pair with
+    # no declared space shipped with NO `span_source` — and `Mention`'s own field
+    # comment says "a bare offset that does not say which space it is in is not an
+    # address" — while a declared space whose pair did not survive kept its label.
+    # `_mention_record` can emit neither state (its label exists only inside the
+    # valid-pair branch, and an undeclared pair becomes `"model"`), and
+    # `Mention._span_is_an_address` checks only completeness/order/range, so
+    # Layer-1 accepted both. Mirror the record builder: an undeclared pair is
+    # `"model"` (the model asserted these bytes), and a label never outlives the
+    # address it describes.
+    if "span_start" in record:
+        record.setdefault("span_source", "model")
+    else:
+        record.pop("span_source", None)
     return record
 
 
