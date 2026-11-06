@@ -2732,6 +2732,47 @@ class TestCommitPointsGate:
         # the replay minted nothing beyond the first commit's chain
         assert self._chain_counts("sGateReplay") == (1, 1, 1)
 
+    def test_the_points_cap_refuses_before_the_ingest_window(self, client, monkeypatch):
+        """The PERMANENT 402 outranks the retryable 429, and is checked first.
+
+        #10175's held cap is a state the customer can only leave by upgrading or
+        pruning; the #4051 ingest window self-heals in 60 s. If the throttle ran
+        ahead of the cap, an org AT ``max_points`` would be told "retry shortly"
+        for a request that can never fit — the unbreakable-loop class
+        ``quota.py``'s over-allowance note warns about — and the client would
+        spin instead of seeing the one refusal that names the real problem.
+
+        ⛔ NO OTHER LEG COVERS THIS ORDERING: `TestCommitPointsGate` never arms
+        the ingest window and `TestCommitOrgIngestBound` never arms
+        ``max_points``, so moving the charge above ``_check_org_limit`` would red
+        nothing without this test. THE DISCRIMINATOR is the second commit: the
+        window is armed at exactly ONE charge plus a byte, so a 402 that charged
+        first would leave it too full to admit that second commit (429), while a
+        402 that charged nothing leaves it empty (200).
+        """
+        raw = _raw_payload(0, session_id="sGateOrder", points=[], entities=[],
+                           provenance_refs=[])
+        unit = TestCommitOrgIngestBound._charge_of(raw)
+        TestCommitOrgIngestBound._allow(monkeypatch, unit + 1)
+
+        self._set_max_points(1)
+        self._seed_points(1)  # count == limit → the 402 fires
+        r = _commit(client, raw)
+        assert r.status_code == 402, (
+            f"an org at max_points was answered {r.status_code} — the ingest "
+            "throttle ran ahead of the held cap (#10175), so the refusal says "
+            "\"retry shortly\" for a request that can never fit")
+        assert r.json()["detail"]["resource"] == "points"
+        assert self._chain_counts("sGateOrder") == (0, 0, 0)
+
+        self._set_max_points(10_000)
+        r2 = _commit(client, _raw_payload(
+            1, session_id="sGateOrder2", points=[], entities=[],
+            provenance_refs=[]))
+        assert r2.status_code == 200, (
+            "the 402 refusal SPENT the ingest window — the charge must sit "
+            "AFTER the held cap, not before it")
+
 
 class TestCommitOrgIngestBound:
     """#4051 §3.1 — the per-ORG ingest bound on the commit lane.
