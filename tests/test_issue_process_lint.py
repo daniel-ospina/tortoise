@@ -242,6 +242,76 @@ def test_the_object_of_an_honest_decline_may_be_the_reference_itself(body, why):
     assert L.classify_pr(body + "\n", 1) == [], why
 
 
+def test_a_decline_that_names_its_object_clears_that_object_not_its_neighbour():
+    """Measured at `e7dd41058` (review, P2): a NEW false PASS the round-13 widening introduced.
+
+    Admitting a literal `#N` as the decline's object made `deliberately not closing #N` match, but
+    the target was still resolved by PROXIMITY — so a sentence about `#11078` cleared the claim on
+    `#11000`, the ref before it, and arm 1 read CLEAN. The module's own doctrine one line above the
+    code says a decline "clears the refs it names and NO OTHERS"; a named object is the strongest
+    statement of what the sentence is about, so it overrides proximity.
+    """
+    body = "Part of #11000 — deliberately not closing #11078.\n"
+    # The decline belongs to `#11078`, so it says NOTHING about the `#11000` claim beside it — which
+    # is therefore still claimed and still unresolved (rc 3). Before the fix this read CLEAN.
+    assert L.claims(body, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]]
+    # The positive control: when the named object IS one of the claims, exactly that one clears and
+    # the sibling stays flagged.
+    body2 = "Refs #100, #11078 — deliberately not closing #11078.\n"
+    assert L.claims(body2, 1)["declined"] == [11078]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body2, 1)] == [[100]]
+    body3 = "Refs #100 — deliberately not closing #999.\n"
+    assert L.claims(body3, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body3, 1)] == [[100]]
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #1234 — deliberately does not close the issue.", "the convention word in idiomatic order"),
+    ("Refs #1234 — this deliberately does not close the issue.", "subject + convention word"),
+    ("Refs #1234 — this PR does not close the issue.", "a two-word subject"),
+    ("Refs #1234 — we deliberately do not close the issue.", "first-person plural"),
+    ("Refs #1234 — the author deliberately does not close the issue.", "article + agent + convention"),
+])
+def test_the_conventions_own_word_order_is_still_a_decline(body, why):
+    """Measured at `e7dd41058` (review, P2): the round-13 bridge admitted exactly ONE subject word
+    and ONE copula, so every natural way of writing the SAME honest sentence after it was FLAGGED.
+
+    `deliberately` is called "the AUTHOR-FACING convention" by this module's own comment, and
+    `Refs #1234 — this does not close the issue.` is one of the suite's own green controls —
+    inserting the word the convention is NAMED AFTER flipped that control to a finding. The bridge
+    now admits a short closed vocabulary (subject words, copulas, the article that introduces
+    `the author`, and `deliberately` itself), which fixes these without re-admitting the round-12
+    negatives (`the sprint is not closed`, `does not close the delta`).
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [1234], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
+def test_a_plural_decline_clears_the_whole_list_it_names():
+    """`them` was added as an object in round 13 but resolved by proximity, so a PLURAL sentence
+    cleared one ref and flagged the other (measured at `e7dd41058`, review P3).
+
+    `them` can only refer to the list it follows, so it takes the whole preceding run on the line.
+    The singular control stays put: `it` is about one reference, by construction.
+    """
+    body = "Refs #100, #200 — deliberately not closing them.\n"
+    assert L.claims(body, 1)["declined"] == [100, 200]
+    assert L.classify_pr(body, 1) == []
+    assert L.classify_pr("Refs #100, #200 — deliberately not closing it.\n", 1) != []
+
+
+def test_two_declines_on_one_line_each_own_their_reference():
+    """Two independent declines joined by `and`: alternative (a)'s clause-terminal lookahead
+    admitted `$` and `[,;]` but not a conjunction, so the FIRST sentence was not recognised and its
+    reference was flagged (measured at `e7dd41058`, review P3; that body was rc 0 at `d580a3401`).
+    """
+    body = ("Refs #100, #200 — #100 is deliberately not Closes and "
+            "#200 is deliberately not Closes.\n")
+    assert L.claims(body, 1)["declined"] == [100, 200]
+    assert L.classify_pr(body, 1) == []
+
+
 def test_the_prs_own_number_is_never_a_claim():
     assert L.classify_pr("Refs #77\n", 77) == []
 

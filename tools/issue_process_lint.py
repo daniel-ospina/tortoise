@@ -254,10 +254,11 @@ DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
-    rf"|{_EMPH}{_DET}{_CLOSING_STEM}(?:{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}(?:$|[,;]))"
+    rf"|{_EMPH}{_DET}{_CLOSING_STEM}(?P<obj_a>{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}"
+    rf"(?:$|[,;]|{_EMPH}and{_EMPH}))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
-    rf"(?:{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}$",
+    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}$",
     re.IGNORECASE,
 )
 # ⛔ A DECLINE IS ABOUT *ITS OWN* REFERENCE — the two properties the grammar alone cannot express,
@@ -271,17 +272,30 @@ DECLINE_RE = re.compile(
 #   2. WHETHER the clause is about it at all. Anchoring the negation's TAIL left its SUBJECT free:
 #      `Refs #1234 — the sprint is not closed.` still read CLEAN, because any `<not|no|non-> <verb>.`
 #      at end of line declined the line whatever preceded it. The bridge between the reference and
-#      the negation now admits punctuation, an optional one-word subject of the reference (`this`,
-#      `it`, `that`, `which`) and an optional copula (`is`, `does`, `was`, …) — and nothing else. A
-#      real subject noun there (`the sprint is`, `the outage on the other box is`) is prose about
-#      that subject, so the reference is NOT declined and the claim stays flagged.
+#      the negation now admits a SHORT closed vocabulary — subject words that can only be the
+#      reference (`this`, `it`, `that`, `which`, `this PR`, `we`, `the author`), a copula, and the
+#      convention word `deliberately` in its idiomatic position — and NOTHING ELSE. A real subject
+#      noun there (`the sprint is`, `the outage on the other box is`) is prose about that noun, so
+#      the reference is NOT declined and the claim stays flagged.
+#
+# ⛔ WHY AN ALLOW-LIST AND NOT `\w+`-TOLERANCE. The measured false-negative pair at `e7dd41058`
+# (review, P2) was `Refs #1234 — deliberately does not close the issue.` and
+# `Refs #1234 — this PR does not close the issue.` — both the honest convention, both FLAGGED
+# because the bridge admitted ONE subject word and ONE copula, so the adverb or the two-word
+# subject broke it. Admitting `pr`/`we`/`author`/`deliberately` fixes those without re-admitting
+# `the sprint is` / `the estimate does` (the round-12 negatives), which still fail the bridge.
 _DECLINE_TAIL_BRIDGE = _DECLINE_TAIL
-_SUBJECT_WORD = r"(?:this|it|that|which)"
+_SUBJECT_WORD = r"(?:this|it|that|which|we|i|they|author|pr|prs)"
 _COPULA = (r"(?:is|was|are|were|does|do|did|has|have|had|will|would|should|must|could|can"
            r"|may|might)")
+# Every word the bridge may contain: the human subjects/copulas above, plus the article that can
+# only introduce `the author`, plus `deliberately` (which `DECLINE_RE`'s ordinary-English
+# alternatives do NOT start on, so it lands here: `— deliberately does not close the issue.`).
+_BRIDGE_WORD = rf"(?:{_SUBJECT_WORD}|{_COPULA}|the|a|an|deliberately)"
+_BRIDGE_WORDS_MAX = 3
 _DECLINE_BRIDGE_RE = re.compile(
     rf"^{_DECLINE_TAIL_BRIDGE}"
-    rf"(?:(?:{_SUBJECT_WORD}{_EMPH})?(?:{_COPULA}{_EMPH})?)?"
+    rf"(?:{_BRIDGE_WORD}{_EMPH}){{0,{_BRIDGE_WORDS_MAX}}}"
     rf"{_DECLINE_TAIL_BRIDGE}$",
     re.IGNORECASE,
 )
@@ -396,11 +410,34 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             continue
         targets: set[int] = set()
         for m in DECLINE_RE.finditer(line):
+            # The OBJECT the sentence names, when it names one. Both alternatives capture it into
+            # a group (`obj_a` lives inside alternative (a)'s lookahead — a group in a lookahead is
+            # still captured), because the match TEXT of `deliberately not …` stops at `not` and
+            # searching the match for a ref would find nothing.
+            obj = (m.group("obj_a") or m.group("obj_b") or "")
+            # ⛔ A DECLINE THAT NAMES ITS OBJECT OWNS IT. `_REF_OBJ` admits a literal `#N`, so
+            # `Part of #11000 — deliberately not closing #11078.` declined `#11000` — the ref
+            # BEFORE the sentence — and cleared it. Measured at `e7dd41058` (review, P2): the claim
+            # `#11000` was silently dropped and arm 1 read CLEAN. A named object is the strongest
+            # possible statement of what the sentence is about, so it OVERRIDES the proximity rule.
+            named = [int(x) for x in _REF_POS_RE.findall(obj)]
+            if named:
+                targets.update(named)
+                continue
             before = [r for r in refs if r[1] <= m.start()]
             if not before:
                 continue
             _, end, num = max(before, key=lambda r: r[1])
-            if _DECLINE_BRIDGE_RE.match(line[end:m.start()]):
+            if not _DECLINE_BRIDGE_RE.match(line[end:m.start()]):
+                continue
+            # `them` is PLURAL by construction, so it is about every reference in the list it
+            # follows — `Refs #100, #200 — deliberately not closing them.` declined only `#200`,
+            # leaving `#100` flagged on a sentence that answers both (measured at `e7dd41058`,
+            # review P3). A singular object keeps the proximity rule; a plural one takes the whole
+            # preceding run on that line, which is the only thing `them` can refer to.
+            if re.search(r"\bthem\b", obj, re.IGNORECASE):
+                targets.update(r[2] for r in before)
+            else:
                 targets.add(num)
         if targets:
             out[i] = targets
