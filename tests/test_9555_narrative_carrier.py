@@ -1357,6 +1357,13 @@ _PLACEMENT_DOC = (
     / "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md"
 )
 _STORAGE_DOC = REPO_ROOT / "docs/architecture/STORAGE-ARCHITECTURE.md"
+#: The architecture document's ONE record of what was corrected and by WHICH PR.
+#: Read by this module since `b328e65db`'s review: the two files may not disagree
+#: about a referenced change's STATE any more than they may about the vector's
+#: input, and until then nothing in this file read it at all.
+_STORAGE_CHANGELOG = (
+    REPO_ROOT / "docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md"
+)
 
 
 def _placement_row(table: str, column: str) -> str:
@@ -1696,6 +1703,13 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 #     footnote phrase to §12.1b's ONE footnote line would let it return in the
 #     paragraph immediately above that line, which is where a designer reads the
 #     same instruction (measured: line-scoped, that re-add stayed GREEN).
+#   • ACROSS THE TWO FILES (`test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_
+#     landed`): the CHANGELOG states the SAME corrections, and until `b328e65db`'s
+#     review this module never read it — so the record could call a LANDED change
+#     *"the still-open follow-up"* (`#10852`, merged `ba87797c4`, on BOTH of its
+#     lines) while §9.4 stated that same change in the present tense and every
+#     suite stayed green. One file saying *is* and the other saying *not yet* is
+#     this pin's own defect, one file over.
 #
 # A presence-only `in` check over the whole document would stay green while §9.4
 # itself was reverted, as long as one copy of the correct sentence survived
@@ -1731,6 +1745,16 @@ _S121C_HEADING = "### 12.1c "
 def _storage_doc_text() -> str:
     """§9.4 and §12.1b both live in the ONE storage architecture document."""
     return _STORAGE_DOC.read_text(encoding="utf-8")
+
+
+def _storage_changelog_text() -> str:
+    """The second file that states the same corrections, read since `b328e65db`'s review.
+
+    The CHANGELOG's §9.4 row and its `#10000` entry both describe the change this
+    pin guards, and NOTHING read them, so the record and the pin could disagree
+    about a referenced PR's STATE with every suite green.
+    """
+    return _STORAGE_CHANGELOG.read_text(encoding="utf-8")
 
 
 def _anchored_line(text: str, anchor: str, where: str, *, unique: bool = False) -> str:
@@ -3478,7 +3502,8 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # while the footnote itself was reverted.
     assert _RETIRED_VECTOR_FOOTNOTE not in text, (
         f"the document is back to *\"§9.4's summary vector "
-        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — once `#10852` lands an episodic "
+        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — now that `#10852` has landed an "
+        f"episodic "
         f"`:Source.summary` is a topic lexicon, so that sentence would tell a "
         f"designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
@@ -3564,3 +3589,121 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"under `{summary_section}`, so a footnote citing any other section "
         f"sends a reader to a different type (the pre-rebase wording here said "
         f"§4.4, which is `Document`)")
+
+
+#: The status vocabulary a record uses when it believes a change has NOT landed.
+#: `#10852` (the episodic-`:Source.summary` topic lexicon) carried exactly this
+#: framing in BOTH of the CHANGELOG lines that name it, at `b328e65db` — *"`#10852`
+#: is the **still-open follow-up** …"* — while `docs/architecture/STORAGE-
+#: ARCHITECTURE.md` §9.4 and this module both state the lexicon in the PRESENT
+#: tense, because `ba87797c4` merged 36 minutes before that head. Two files, two
+#: answers about one change's STATE is the defect this pin exists to close, one
+#: file over — and no assertion in this module read the CHANGELOG at all.
+_UNLANDED_STATUS_CUES = (
+    "still-open",
+    "still open",
+    "still pending",
+    "remains open",
+    "not yet landed",
+    "has not landed",
+    "is open",
+)
+
+
+def _lines_claiming_unlanded(text: str, issue: str) -> list[str]:
+    r"""The lines that NAME `issue` and call it unlanded — bound to the issue, not to the file.
+
+    ⛔ BOUND, because the CHANGELOG legitimately records genuinely-open items and
+    the phrase *"still open"* about a DIFFERENT issue is the record working. What
+    may not happen is a LANDED change recorded as pending: `#10852` merged as
+    `ba87797c4`, so *"still-open"* of it is false wherever it appears.
+
+    The trade is stated rather than hidden, the same way `_RETIRED_SUMMARY_BLUR`'s
+    is: the cue set is a SPELLING set, so a third spelling (*"awaiting"*,
+    *"unmerged"*) would evade it — a fail-OPEN residual, filed with the rest of
+    this file's. It cannot over-block, because the claim it refuses can never be
+    true of a merged PR: the only cost of the exact set is a false NEGATIVE, and
+    the accept cases below pin that the corrected wording is not among them.
+    """
+    lowered = text.lower()
+    return [
+        line
+        for line in lowered.splitlines()
+        if issue.lower() in line
+        and any(cue in line for cue in _UNLANDED_STATUS_CUES)
+    ]
+
+
+def test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed():
+    """The record and the pin may not disagree about `#10852`'s state.
+
+    *What value makes this test fail?* Measured at `b328e65db`, the head this pin
+    was written at: `_lines_claiming_unlanded(changelog, "`#10852`")` returned
+    **2** lines (`:55`, `:1835`), each asserting *"`#10852` is the still-open
+    follow-up that makes an episodic `:Source.summary` a topic lexicon"* — while
+    `gh pr view 10852` reads `state=MERGED` (`ba87797c4`, 2026-11-06T02:36:52Z, an
+    ancestor of this head's tree) and this module states the lexicon as LANDED
+    (`_RETIRED_FUTURE_DERIVATION` is asserted ABSENT for exactly that reason).
+    At this head the same call returns **0**, and the pre-fix wording is a control
+    case below, so the pin is not vacuous in the direction it claims.
+
+    ⚠️ It reads the CHANGELOG and nothing else: the architecture document's own
+    present-tense statement is pinned by `test_the_source_vector_reads_the_
+    narrative_and_BOTH_doc_sections_say_so` (`TOPIC LEXICON` in §9.4), and the two
+    checks are deliberately separate — one proves the DOCUMENT says it, this one
+    proves the RECORD does not deny it.
+    """
+    changelog = _storage_changelog_text()
+    #: Anchored, never assumed: a CHANGELOG rewrite that drops the mentions would
+    #: otherwise pass this pin by having nothing left to inspect.
+    assert "`#10852`" in changelog, (
+        "the CHANGELOG no longer names `#10852` at all — this pin checks what the "
+        "record SAYS about that change, so the mention must exist before the "
+        "claim can be checked; re-derive where the record states it")
+    offenders = _lines_claiming_unlanded(changelog, "`#10852`")
+    assert not offenders, (
+        f"the record calls `#10852` unlanded on {len(offenders)} line(s): "
+        f"{offenders} — it merged as `ba87797c4` (2026-11-06T02:36:52Z), 36 "
+        f"minutes before this head, and BOTH files state the lexicon as landed: "
+        f"§9.4 says it in the present tense and `_RETIRED_FUTURE_DERIVATION` is "
+        f"pinned absent for the same reason. A record that says \"still-open\" "
+        f"beside a document that says \"is\" is the two-answers defect this PR "
+        f"exists to close, one file over. State the landed fact (and name the "
+        f"merge) and keep any genuinely-open work on its own issue")
+    #: NON-VACUITY, both directions. The refuse list is the wording MEASURED at
+    #: `b328e65db` plus two re-spellings; the accept list is the correction and
+    #: two re-wordings of it, so a future loosening of the cue set cannot quietly
+    #: start refusing the sentence this pin requires.
+    for _refused in (
+        "| §9.4 source summary vector | — | `#10852` is the still-open follow-up "
+        "that makes an episodic `:Source.summary` a topic lexicon |",
+        "… whose marker now names `#10978` too**; `#10852` is the still open "
+        "follow-up that makes an episodic `:Source.summary` a topic lexicon).",
+        "…`#10852` remains open: it makes an episodic `:Source.summary` a topic "
+        "lexicon…",
+        "…`#10852` has not landed yet, so `:Source.summary` is still prose…",
+    ):
+        assert _lines_claiming_unlanded(_refused, "`#10852`"), (
+            f"the unlanded detector ACCEPTED the pre-fix framing {_refused!r} — "
+            f"it is the claim this pin exists to refuse, so a loosening of "
+            f"`_UNLANDED_STATUS_CUES` has to red here rather than on a docs-only "
+            f"PR")
+    for _accepted in (
+        "…`#10852` — the follow-up that makes an episodic `:Source.summary` a "
+        "topic lexicon — has since landed as well (merged `ba87797c4`)…",
+        "…`#10852` (merged `ba87797c4`, 2026-11-06) makes an episodic "
+        "`:Source.summary` a topic lexicon…",
+        "…see `#10852`, which covers the episodic `:Source.summary` lexicon…",
+    ):
+        assert not _lines_claiming_unlanded(_accepted, "`#10852`"), (
+            f"the unlanded detector REFUSED a landed statement {_accepted!r} — "
+            f"that is the correction this pin requires, and refusing it is a "
+            f"false red on the record the CHANGELOG actually carries")
+    #: …and the SAME cue about a DIFFERENT issue is untouched: the binding to
+    #: `#10852` is what keeps this pin from policing the record's genuinely-open
+    #: rows, which are most of the file.
+    assert not _lines_claiming_unlanded(
+        "| §12.1b unindexed embeddings | `#4997` | the defect is still open |",
+        "`#10852`"), (
+        "the detector is not bound to `#10852`: it refused a row about ANOTHER "
+        "issue, so it would red on the CHANGELOG's ordinary open-item rows")
