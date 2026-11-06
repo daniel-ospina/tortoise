@@ -4438,13 +4438,42 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # `git rev-list --count ff6379eb2..047c91f7a` → 12, and the row's own parenthetical
     # already said "an ancestor of this branch's base", so the clause contradicted
     # the sentence it was attached to.
-    assert not re.search(r'what\s+"?immediately before #9548"?\s+means', row, re.I), (
-        "§A8's evidence cell calls ff6379eb2 what \"immediately before #9548\" "
-        "means — that is the #9601 merge, 12 commits and three runbook-touching "
-        "commits BEFORE the arming commit `785bb2b59`; the tree immediately "
-        "before it is `047c91f7a`, where the same path set returns 10, not the "
-        "5 this cell states at ff6379eb2"
-    )
+    # ⛔ AND NEITHER MAY THE PHRASE ITSELF BE BANNED, nor the claim be re-keyed past
+    # (#11064 review r17, P3 — the two directions the r16 shape got wrong that the
+    # r17 sha-exemption above does NOT cover). Both were measured by running the arm
+    # as it stood against candidate cells:
+    #   * the blanket `assert not re.search(r'what "?immediately before #9548"?
+    #     means')` that opened this pin REDDED `ff6379eb2 is not what "immediately
+    #     before #9548" means; that tree is `047c91f7a`` — a repair that BOTH denies
+    #     the equivalence AND names the true tree. Banning a phrasing is not the same
+    #     check as banning a claim: a guard that reds the fix teaches the next lane to
+    #     delete the guard, and this file warns about exactly that false-RED class.
+    #   * the predicate keyed on `immediately`, so `ff6379eb2 — the tree before #9548
+    #     — reads 5 lines` — the same FALSE claim with one word paraphrased away —
+    #     PASSED. A fail-open is the worse direction, so the key is `before #9548`.
+    #
+    # One predicate, four executed controls below: RED on the bare equivalence and on
+    # the paraphrase, GREEN on a positive correction, on a denial-shaped correction,
+    # and on the three truthful shapes the r17 review measured.
+    def _refuses_before_9548(sentence: str) -> bool:
+        """True when the sentence NAMES "before #9548" and neither denies nor corrects it.
+
+        Kept as a predicate (not inlined) so the arm can be exercised in BOTH
+        directions on fixed strings — the red direction (the bare equivalence and its
+        paraphrase) and the green one (a correction naming the true pre-#9548 tree,
+        in both its positive and its denial phrasing). A predicate that is only ever
+        run against the artefact it guards can go vacuous without anything reding;
+        these controls are what make its greenness a measurement.
+        """
+        if not re.search(r"\bbefore\s+#9548", sentence, re.I):
+            return False
+        if "047c91f7a" in sentence:
+            return False  # names the TRUE pre-#9548 tree — a correction, not the defect
+        # ADJACENT-anchored, not "anywhere in the sentence": the PRE-FIX cell carries
+        # "not empty and not one" AFTER the false clause, which is exactly what
+        # satisfied a whole-sentence test (the trap the manifest denial is windowed for).
+        return not re.search(r"\bnot\b[^.]{0,60}?before\s+#9548", sentence, re.I)
+
     # ... and a cell that still NAMES the phrase must DENY the equivalence. Deleting
     # the clause is equally correct, so both shapes pass — what may not pass is the
     # bare equivalence, which is what the cell carried before this pin existed. The
@@ -4460,41 +4489,44 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # purpose is to stop false GREENs, the same class this file warns about ~130
     # lines above. A sentence that names `047c91f7a` is exempt, and the three
     # truthful shapes are EXECUTED below so the exemption cannot be the whole arm.
-    def _refuses_immediately_before_9548(sentence: str) -> bool:
-        """True when the sentence NAMES the phrase and neither denies nor corrects it.
-
-        Split out of the loop below so the arm can be exercised in BOTH directions
-        on fixed strings — the red direction (the bare equivalence) and the green
-        one (a correction naming the true pre-#9548 tree). A predicate that is only
-        ever run against the artefact it guards can go vacuous without anything
-        reding; these controls are what make its greenness a measurement.
-        """
-        if not re.search(r"immediately\s+before\s+#9548", sentence, re.I):
-            return False
-        if "047c91f7a" in sentence:
-            return False  # names the TRUE pre-#9548 tree — a correction, not the defect
-        return not re.search(
-            r"\b(?:not|never|isn't|is not)\b[^.]{0,40}?immediately\s+before\s+#9548",
-            sentence,
-            re.I,
-        )
-
     offenders = [
         sentence
         for sentence in re.split(r"(?<=\.)\s+", row)
-        if _refuses_immediately_before_9548(sentence)
+        if _refuses_before_9548(sentence)
     ]
     assert not offenders, (
-        "§A8's evidence cell names \"immediately before #9548\" without "
-        "denying it applies to ff6379eb2:\n  " + "\n  ".join(offenders)
+        "§A8's evidence cell dates a figure to \"before #9548\" without either "
+        "denying it applies to `ff6379eb2` or naming `047c91f7a` (the arming "
+        "commit `785bb2b59`'s parent, where the same path set returns 10 lines, "
+        "not the 5 stated at `ff6379eb2`):\n  " + "\n  ".join(offenders)
     )
     # Controls, executed — the arm must still RED on the shape it was written for …
-    assert _refuses_immediately_before_9548(
+    assert _refuses_before_9548(
         "`grep -rn TORTOISE_RECORD_DSN …` → 5 lines at `ff6379eb2`, which is "
         'what "immediately before #9548" means.'
     ), (
         "the denial arm no longer reds on the bare equivalence it exists to catch — "
         "the exemption above has swallowed the finding (#11064 review r17, P2)"
+    )
+    # … and on the PARAPHRASE that drops `immediately` — the fail-open the r16 key
+    # left open (#11064 review r17, P3).
+    assert _refuses_before_9548(
+        "ff6379eb2 — the tree before #9548 — reads 5 lines."
+    ), (
+        "the arm is keyed on `immediately before` again: the same false claim with "
+        "that one word paraphrased away passes, which is a fail-open (#11064 review "
+        "r17, P3)"
+    )
+    # … and must NOT red on a DENIAL-shaped correction that also names the true tree
+    # — the false RED the r16 blanket substring ban produced (#11064 review r17, P3).
+    _denial_shaped = (
+        'ff6379eb2 is not what "immediately before #9548" means; that tree is `047c91f7a`.',
+    )
+    _refused_denials = [s for s in _denial_shaped if _refuses_before_9548(s)]
+    assert not _refused_denials, (
+        "the arm refuses a DENIAL-shaped correction — `is not what ... means` is a "
+        "repair, and banning that phrasing reds the fix (#11064 review r17, P3):\n  "
+        + "\n  ".join(_refused_denials)
     )
     # … and must NOT red on any of the three truthful corrections the r17 review
     # measured RED before the exemption.
@@ -4503,7 +4535,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "`047c91f7a` is the tree immediately before #9548.",
         "Measured at `047c91f7a` — the tree immediately before #9548 — the census returns 10.",
     )
-    _false_reds = [s for s in _truthful if _refuses_immediately_before_9548(s)]
+    _false_reds = [s for s in _truthful if _refuses_before_9548(s)]
     assert not _false_reds, (
         "the denial arm refuses a TRUTHFUL correction — naming the true pre-#9548 "
         "tree is the fix, so it may not be the shape this pin rejects:\n  "
