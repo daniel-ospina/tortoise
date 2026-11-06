@@ -666,6 +666,28 @@ def _reset_falkordb_version_cache() -> None:
 _VECTOR_INDEX_GAP_WARNED: set[tuple] = set()
 _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 
+# ── #11087: the last serves/indexes PAIR reported per (endpoint, graph) ──
+#
+# The positive report is an INFO on every non-embedded store setup, and that
+# includes the hosted PER-REQUEST path (`_data_sdk_offloaded(...,
+# attach_projection=True)` builds a projection per request) — the same reason
+# the #4997 WARNING above is latched rather than repeated. An unlatched INFO
+# here would put two label lists on the INFO stream at full request rate on the
+# paid tier.
+#
+# ⛔ The latch is on the PAIR VALUE, not merely on the key — and that is the
+# difference between deduplication and silence:
+#   * an unchanged pair (the steady state, and every per-request rebuild from
+#     the same catalogue) reports ONCE, which is all a repeated identical line
+#     can say;
+#   * a pair that CHANGES — the store was repaired, or a label lost its index —
+#     reports AGAIN, which is the only case where the line is news, and the
+#     case an over-eager latch would hide forever.
+# `_VECTOR_INDEX_GAP_WARNED` cannot express this (a set of keys with no value),
+# which is why it is a separate register rather than a reuse.
+_VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
+_VECTOR_INDEX_PAIR_LOCK = threading.Lock()
+
 
 def _reset_vector_gap_warnings() -> None:
     """Test hook: drop the warned-graph latch (mirrors
@@ -674,6 +696,8 @@ def _reset_vector_gap_warnings() -> None:
     warning in the next one on the same (endpoint, graph)."""
     with _VECTOR_INDEX_GAP_LOCK:
         _VECTOR_INDEX_GAP_WARNED.clear()
+    with _VECTOR_INDEX_PAIR_LOCK:
+        _VECTOR_INDEX_PAIR_REPORTED.clear()
 
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
@@ -18569,25 +18593,36 @@ class FalkorProjection(
         #11087 (S4): the contract is reported POSITIVELY. This method retains
         the served set (``self._vector_index_served_labels``) beside the measured
         indexed set (``self._vector_indexed_labels``) and emits the pair at INFO
-        on EVERY successful read, whether or not there is a gap. Before #11087
-        the report was gated on ``if gap:``, so "setup reports what it serves and
-        what it indexes" held only in the DEFICIENT case: an operator asking "is
-        this store fully indexed for what it serves?" got an answer only when
-        the answer was "no". A report that can only name failures is unusable at
-        the call site. The INFO is deliberately NOT latched (the issue's scope
-        deduplicates the WARNING only): a latched INFO could never tell an
-        operator that a previously-gapped store has become fully indexed, which
-        is the whole point of reporting the pair.
+        on every successful read whose pair has changed, whether or not there is
+        a gap. Before #11087 the report was gated on ``if gap:``, so "setup
+        reports what it serves and what it indexes" held only in the DEFICIENT
+        case: an operator asking "is this store fully indexed for what it
+        serves?" got an answer only when the answer was "no". A report that can
+        only name failures is unusable at the call site.
+
+        ⛔ The INFO is deduplicated on the PAIR VALUE, not left unlatched and not
+        latched on the key alone (``_VECTOR_INDEX_PAIR_REPORTED``). Both halves of
+        that choice are load-bearing: this method runs on the hosted PER-REQUEST
+        path, so a line emitted on every call would put two label lists on the
+        INFO stream at full request rate; and a key-only latch — the shape the
+        ``#4997`` WARNING uses — could never say that a previously-gapped store
+        has become fully indexed, because it records that a graph was reported,
+        not what it reported. Value-latching says exactly the news and nothing
+        else.
 
         Sets ``self._vector_index_served_labels`` to the declared served set and
         ``self._vector_indexed_labels`` to its INTERSECTION with the engine's
         VECTOR-indexed labels. The THREE lanes, stated exactly, because a pair is
         only readable if a caller can tell them apart:
 
-        * **measured** — ``db.indexes()`` RETURNED rows: both halves are SET.
-          That includes the deliberately-empty case: a catalogue with no VECTOR
+        * **measured** — a ROW LIST was returned: both halves are SET. That
+          includes the deliberately-empty case: a catalogue with no VECTOR
           index anywhere gives ``indexes=set()``, which means "measured, and
-          nothing is indexed" — never "unknown".
+          nothing is indexed" — never "unknown". "Measured" is decided by the
+          SHAPE of the response, not by whether anything in it parsed: a
+          response that is not a row list at all (a bare string, a mapping, a
+          reshaped catalogue after an engine change) also lands here, because
+          the per-row walk skips what it cannot read — see the ⛔ below.
         * **NOT MEASURED** — the catalogue could not be read (the call raised, or
           it answered ``None``): BOTH halves are ``None``, so the pair is never
           half-populated. ``None`` never means "serves nothing".
@@ -18607,7 +18642,15 @@ class FalkorProjection(
         #11087 does not change it; what #11087 changes is that this lane is now
         REPORTED POSITIVELY too, instead of only warned about. Separating
         "returned but unparseable" from "measured empty" would be a behaviour
-        change to the pinned half, deliberately not made here.
+        change to the pinned half, deliberately not made here. ⚠️ Scope line,
+        stated rather than implied: #11087's "a raising **or malformed**
+        ``db.indexes()`` … the attribute absent/``None``" is met for the RAISING
+        and ANSWERED-``None`` inputs (``test_raising_inventory_read_is_fail_open``
+        + ``test_unmeasured_pair_is_none_in_both_halves``); for the
+        returned-but-unparseable input it is **not** ``None``, and this docstring
+        plus ``test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty``
+        are the record of that difference rather than a claim that it does not
+        exist.
 
         Never raises and never writes: ``_ensure_indexes`` is reached unguarded
         from ``FalkorProjection.__init__`` as well as from two ``hosted_api``
@@ -18646,6 +18689,7 @@ class FalkorProjection(
             return
 
         log = logging.getLogger(__name__)
+        key = None
         try:
             # Everything that can throw lives inside this guard — including
             # the latch-key computation, because `_falkordb_version_cache_key`
@@ -18668,6 +18712,12 @@ class FalkorProjection(
                 # #11087: BOTH halves of the pair are None — the pair is never
                 # half-populated, so `served is None` alone means "not measured".
                 self._vector_index_served_labels = None
+                # …and the pair register is DROPPED for this key: the store no
+                # longer knows its contract, so the next measured read is news
+                # rather than a repeat, even if it reports the same pair as
+                # before the read failed.
+                with _VECTOR_INDEX_PAIR_LOCK:
+                    _VECTOR_INDEX_PAIR_REPORTED.pop(key, None)
                 return
 
             served = set(ENTITY_TYPE_LABELS.values())
@@ -18704,20 +18754,33 @@ class FalkorProjection(
             log.debug("#4997: vector-index inventory read failed: %s", e)
             self._vector_indexed_labels = None
             self._vector_index_served_labels = None
+            # #11087: as in the answered-`None` lane — an unmeasured store has no
+            # pair to have already reported, so the register entry goes.
+            if key is not None:
+                with _VECTOR_INDEX_PAIR_LOCK:
+                    _VECTOR_INDEX_PAIR_REPORTED.pop(key, None)
             return
 
-        # #11087 (S4): REPORT THE PAIR, unconditionally. This is the positive
-        # half the store could not state before — "these labels are served, and
-        # THESE of them are indexed" — emitted on every measured setup so a
-        # fully-indexed store answers the operator too, not only a deficient
-        # one. Deliberately unlatched (see the docstring): the latch covers the
-        # WARNING, never the report.
-        log.info(
-            "#11087: vector contract on %s: serves=%s indexes=%s",
-            self._graph_name,
-            serves_reported,
-            indexes_reported,
-        )
+        # #11087 (S4): REPORT THE PAIR whenever it has CHANGED — the positive
+        # half the store could not state before, "these labels are served, and
+        # THESE of them are indexed". Emitted on every measured setup whose pair
+        # differs from the last one reported for this (endpoint, graph), so a
+        # fully-indexed store answers the operator too, and a repaired store
+        # announces the repair — while a repeated identical line (the hosted
+        # per-request rebuild, the steady state) does not repeat. See
+        # `_VECTOR_INDEX_PAIR_REPORTED` for why the latch is on the VALUE.
+        pair = (frozenset(serves_reported), frozenset(indexes_reported))
+        with _VECTOR_INDEX_PAIR_LOCK:
+            changed = _VECTOR_INDEX_PAIR_REPORTED.get(key) != pair
+            if changed:
+                _VECTOR_INDEX_PAIR_REPORTED[key] = pair
+        if changed:
+            log.info(
+                "#11087: vector contract on %s: serves=%s indexes=%s",
+                self._graph_name,
+                serves_reported,
+                indexes_reported,
+            )
 
         gap = served - self._vector_indexed_labels
         if gap:
