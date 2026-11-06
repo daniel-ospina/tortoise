@@ -821,8 +821,9 @@ def test_the_cause_form_withholds_the_drivers_detail_and_context():
 
     # …and the line stays DIAGNOSABLE: the SQLSTATE and the terse `M` field.
     assert "22P02" in text, (
-        f"`_driver_fault` carries the SQLSTATE — the ONE datum the 302 lost rows "
-        f"WERE reported as (`InvalidTextRepresentation`); naming no column is "
+        f"`_driver_fault` carries the SQLSTATE — the datum the pre-fix line did "
+        f"NOT have; the 302 lost rows were reported as nothing but the cause's "
+        f"CLASS NAME (`InvalidTextRepresentation`), and naming no column is "
         f"what made them unreadable: {text}")
     assert "invalid input syntax for type json" in text, (
         f"the driver's PRIMARY message is the other half of the fault: {text}")
