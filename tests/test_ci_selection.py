@@ -11903,7 +11903,7 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
     # ── A1 — the same decoy above, and a FALSE attribution inside the REAL block ───
     banned = "      # #7612's payload is in `~/.cache/uv`."
     arm_at = next(i for i, ln in enumerate(decoyed) if re.match(r"\s*#\s*ARM 2", ln))
-    degraded = decoyed[:arm_at] + [banned] + decoyed[arm_at:]
+    degraded = [*decoyed[:arm_at], banned, *decoyed[arm_at:]]
     # Pre-fix: reads the decoy, sees no claim -> GREEN while the real block asserts the
     # exact falsehood that reddens a payload-SHRINKING change. That is the fail-open.
     assert _overrides_payload_misattribution(_pre_fix_locator(degraded)) is None, (
@@ -11924,9 +11924,11 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
     # on "this block" and a pin on "whatever marker came first".
     real_marker = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
     jobs_at = next(i for i, ln in enumerate(wf_lines) if ln.rstrip() == "jobs:")
-    dropped = (wf_lines[:real_marker]
-               + [wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)")]
-               + wf_lines[real_marker + 1:])
+    dropped = [
+        *wf_lines[:real_marker],
+        wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)"),
+        *wf_lines[real_marker + 1:],
+    ]
     detached = dropped[:jobs_at] + decoy + dropped[jobs_at:]
     with pytest.raises(AssertionError, match="different block"):
         _test_job_cache_overrides_block(detached, prune_name)
