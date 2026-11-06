@@ -847,6 +847,12 @@ def _patch_proj(monkeypatch, g, graphs=("g", "tortoise")):
             return list(graphs)
 
     class _Proj:
+        # The pre-check asks about the projection's OWN resolved name (a redirect
+        # or a URI path can change which graph is addressed), so the fake has to
+        # carry one like the real projection does — without it the leg refuses a
+        # graph it cannot name (fail-closed) instead of exercising the read.
+        graph_name = _graph_name = "g"
+
         def __init__(self, inner):
             self.g = inner
             self.db = _DB()
@@ -1114,7 +1120,7 @@ def test_the_embedded_leg_honours_graph_name(monkeypatch):
 # being distinguishable in practice, not just in the message).
 
 def _embedded_store_with_tortoise(tmp_path, monkeypatch):
-    """A real embedded store holding exactly one graph, `tortoise`."""
+    """A real embedded store holding exactly one graph, `tortoise`, with ONE node."""
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     from tortoise.projection import FalkorProjection
 
@@ -1125,6 +1131,27 @@ def _embedded_store_with_tortoise(tmp_path, monkeypatch):
         proj.g.query("CREATE (:Point {id:'s1_t1', is_episodic:true, "
                      "pointKind:'event'})")
         assert sorted(proj.db.list_graphs()) == ["tortoise"]
+    finally:
+        proj.close()
+    return db_path
+
+
+def _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch):
+    """A real embedded store holding exactly one graph, `tortoise`, and ZERO nodes.
+
+    This is #10017's own post-purge state: the drain has happened, the graph
+    still EXISTS. It is the state the presence check must NOT refuse.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_empty.db")
+    # default bind kwargs: the graph is created, no node is ever written.
+    proj = FalkorProjection(db_path, graph_name="tortoise")
+    try:
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+        n = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
+        assert n == 0, f"fixture is not empty: {n} node(s)"
     finally:
         proj.close()
     return db_path
@@ -1150,17 +1177,116 @@ def test_a_wrong_graph_name_is_REFUSED_before_it_creates_the_graph(
         proj.close()
 
 
+def test_a_NAMELESS_target_is_REFUSED_not_verified_as_some_other_graph(
+        tmp_path, monkeypatch):
+    """⛔ The guard must ask about the name the run will OPEN (#11113 review P2).
+
+    Before the fix `wanted` was an `or`-chain, so a FALSY resolved name fell
+    through to `requested` / `"tortoise"`: the guard verified a graph this run
+    would not open, PASSED, and the read then created the nameless one. Measured
+    on this exact fixture: `FalkorProjection(path, graph_name="")` keeps
+    `_graph_name == ""` (and `resolve_db_endpoint(uri, "")` returns `""`), the
+    guard passed for `"tortoise"`, and `GRAPH.LIST` went `['tortoise']` →
+    `['tortoise', '']` — the #11112 defect one layer down.
+
+    Unreachable from either CLI (both pre-refuse an empty `--graph-name`), so
+    this pins the LIBRARY arm, where an environment lookup like
+    `os.environ.get("TORTOISE_GRAPH", "")` produces exactly this name.
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(db_path, graph_name="", skip_health_check=True,
+                            ensure_indexes=False)
+    try:
+        with pytest.raises(tpc.CensusError) as exc:
+            tpc._refuse_unless_graph_present(proj, "")
+        assert "no NAME" in str(exc.value)
+
+        # And it is the HANDLE, not the argument, that decides: a caller that
+        # passes a perfectly good name must still be refused, because the
+        # projection addresses `""` regardless of what the caller believes.
+        with pytest.raises(tpc.CensusError):
+            tpc._refuse_unless_graph_present(proj, "tortoise")
+
+        # The ROW is the measurement: the nameless graph was never created.
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+    finally:
+        proj.close()
+
+
+def test_an_ABSENT_name_refuses_rather_than_assuming_the_default(
+        monkeypatch):
+    """No name anywhere is not `tortoise` — the same rule, one spelling over.
+
+    A fake without a name and a caller without an argument used to fall through
+    to `"tortoise"` and verify THAT, which is a presence claim about a graph the
+    object never proved it addresses.
+    """
+
+    class _DB:
+        @staticmethod
+        def list_graphs():
+            return ["tortoise"]
+
+    class _Proj:
+        db = _DB()
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc._refuse_unless_graph_present(_Proj(), None)
+    assert "no NAME" in str(exc.value)
+
+
 def test_a_present_graph_is_never_refused_by_the_presence_check(
         tmp_path, monkeypatch):
-    """A drained/existing graph still reads — presence is not emptiness.
+    """A present graph holding a turn node reads — the check does not gate on content.
 
-    `--expect-empty` is #10017's own post-purge re-run: after the delete the
-    graph legitimately holds zero turn nodes but must still EXIST, or the
-    presence check would refuse the exact run the issue ends on.
+    Scope, stated so this pin is not read as more than it is: THIS test proves
+    presence does not refuse a graph that has something in it. The
+    presence-vs-emptiness case (#11112/#11113 review cycle 1, finding 1) is
+    pinned separately, on a DRAINED graph, by
+    `test_a_present_but_EMPTY_graph_passes_presence_and_reaches_the_emptiness_verdict`
+    — this file's other half of the same property.
     """
     db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
     graph = tpc.read_graph_turns(None, db_path, "tortoise")
     assert "s1_t1" in graph["nodes"]
+
+
+def test_a_present_but_EMPTY_graph_passes_presence_and_reaches_the_emptiness_verdict(
+        tmp_path, monkeypatch, capsys):
+    """⛔ PRESENCE IS NOT EMPTINESS, and #10017's post-purge re-run depends on it.
+
+    #11113 review cycle 1, finding 1: the pin that NAMED this property seeded a
+    node, so it never exercised the drained graph — a future guard that refused
+    an existing-but-empty graph passed it green, and the run #10017 ends on
+    (delete happened, graph now empty, `--expect-empty`) would start exiting 3.
+    This test is that graph: it exists, it holds zero nodes.
+
+    Two assertions, because the failure has two halves:
+      (a) the READ must not raise — presence, not content, is the question;
+      (b) the CLI with `--expect-empty` must reach the EMPTINESS verdict and must
+          NOT print the presence refusal ("does not exist").
+    """
+    db_path = _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch)
+
+    # (a) read side: no CensusError, and it really is empty.
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}
+    assert graph.get("unidentifiable") == []
+
+    # (b) CLI side: with --expect-empty the drained graph certifies (exit 0),
+    # and the message it would print if presence had refused is absent.
+    rc = tpc.main([
+        "--db-path", db_path, "--graph-name", "tortoise",
+        "--local-record-dir", str(tmp_path / "no-record"),
+        "--expect-empty",
+    ])
+    err = capsys.readouterr().err
+    assert "does not exist" not in err, (
+        "the presence check refused a graph that EXISTS and is drained — this "
+        "is exactly #10017's post-purge re-run: " + err)
+    assert rc == 0, err
 
 
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(
