@@ -2071,7 +2071,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           # ⛔ `~/.cache/uv` ALONE. Adding `~/.cache/pip` here is what made the
-          # payload 3.88 GB; that half is written by FOUR other jobs and is read
+          # payload 3.88 GB; that half is written by THREE other jobs and is read
           # above, so a second writer would only re-upload 3.6 GB per miss shard.
           path: ~/.cache/uv
           key: uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -4646,10 +4646,10 @@ jobs:
         # withheld a REQUIRED check on a diff that never touched this job.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`) and is written on EVERY run by `test`
-        # (90m cap, unconditional), `test-slow` (60m) and `test-d14-hosted-api`
-        # (50m) — all three have the headroom this job does not. This job only
-        # ever READ it, which is what `actions/cache/restore@` still does.
+        # (`pip-<os>-<hash uv.lock>`) and is written by ONLY `test-slow` (60m) and
+        # `test-d14-hosted-api` (50m) — both have the headroom this job does not.
+        # ⛔ NOT `test`: restore-only on this path since #11063, it saves
+        # `.pytest_cache` and `~/.cache/uv`. This job only ever READ the key.
         uses: actions/cache/restore@v4
         continue-on-error: true
         with:

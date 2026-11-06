@@ -254,7 +254,7 @@ document's own rule is to move a cap from a measurement instead of on suspicion.
 are still in that state — `test-slow`, `test-carve-out` and `test-concurrency-falkor`.
 `test-record-postgres` was the FIRST of them (22 m against 20 on the arm-2 estimate), and it
 false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its cap rose: #11063
-took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the four. `test-slow` sits exactly AT its
+took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its
 cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
 `test-carve-out` is 9 m past it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against
 30). The last has the least headroom of all:

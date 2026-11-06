@@ -11854,6 +11854,41 @@ def test_the_wall_clock_record_states_no_cap_the_workflow_does_not_ship():
 #: Arm 1's floor, exactly as `ci-wall-clock.md` §2 states it ("floored at 15 m").
 _WALL_CLOCK_ARM1_FLOOR_MIN = 15
 
+#: Every wording the record uses to CREDIT a row to arm 1. ⛔ WIDENED from `arm-1 shaped`
+#: alone (#11195 review, P2): the shipped doc says "not an arm-1 **reading**", so a set keyed
+#: on one phrasing was EMPTY on the very tree it audits — `grep -c 'arm-1 shaped'` returned 0 —
+#: and "empty by phrasing" is not "closed". The guard below is what lets this alternation cover
+#: the document's own vocabulary without reddening on the sentence that REFUTES arm 1 for the row.
+_ARM1_ATTRIBUTION = re.compile(
+    r"arm[- ]?1\s+(?:shaped|reading|row|attributed)", re.IGNORECASE)
+
+#: A negation ADJACENT to the attribution — `not an`, `no longer`, `never a` — with at most an
+#: article between. ⛔ IT MUST BE ADJACENT, and that is not a detail: the pre-#11195 wording this
+#: pin exists to catch reads "so it no longer pays a save and **now IS arm-1 shaped**", so a
+#: window-wide `no longer` would excuse the exact sentence that must red. The negation has to
+#: attach to the attribution, not merely sit somewhere earlier in the paragraph.
+_ARM1_NEGATION = re.compile(
+    r"(?:\bnot|\bnever|\bnor|\bn't|\bno\s+longer|cannot)\s+(?:an?\s+)?$",
+    re.IGNORECASE)
+
+
+def _arm1_attributions(text: str) -> list[tuple[int, str]]:
+    """`(offset, job)` for every row the record CREDITS to arm 1 — negation-guarded.
+
+    `job` is the nearest backticked job name before the attribution (the doc names the row
+    and then credits it), or `""` when none is in range. The caller decides what to do with
+    an unattributable credit; this helper only reports what the text says.
+    """
+    out: list[tuple[int, str]] = []
+    for claim in _ARM1_ATTRIBUTION.finditer(text):
+        window = text[max(0, claim.start() - 48):claim.start()]
+        if _ARM1_NEGATION.search(window):
+            continue
+        named = re.findall(r"`([a-z0-9][a-z0-9-]+)`",
+                           text[max(0, claim.start() - 700):claim.start()])
+        out.append((claim.start(), named[-1] if named else ""))
+    return out
+
 
 def _arm1_cap(measured_max: float) -> int:
     """Arm 1 of the doc's own rule: `2 × max`, nearest 5 m, floored at 15 m.
@@ -11893,6 +11928,149 @@ def _wall_clock_table_rows() -> dict[str, tuple[float, int]]:
     return rows
 
 
+#: Which workflow each row that is NOT a `python-ci.yml` job comes from. Every other row in
+#: the record's tables resolves against `python-ci.yml`. ⛔ The mapping is asserted EXACT below:
+#: a row in neither is a hard failure, never a skip — a skipped row is precisely how the `cap`
+#: column drifted with every sibling pin green (#11195 review, P1).
+_WALL_CLOCK_ROW_WORKFLOWS = {
+    "legal-e2e": "ci.yml",
+    "docs": "ci.yml",
+    "pricing-artifact": "ci.yml",
+    "test-isolation": "ci.yml",
+    "license-surface": "ci.yml",
+    "ai-review-gate": "ai-review-gate.yml",
+    "drift-guard": "drift-guard.yml",
+}
+
+#: `python-ci.yml` jobs the record's table deliberately publishes no single `cap` for.
+_WALL_CLOCK_TABLE_EXEMPT_JOBS = {
+    # Shard AGGREGATES: the table publishes `test (a…i)` / `test-slow (a…e)` as ONE row for 9
+    # and 5 jobs that each carry their own `timeout-minutes`, so there is no single shipped
+    # cap for a published cell to be compared against (their bounds are pinned instead by
+    # `test_every_bounded_pytest_job_caps_above_its_watchdog` and the shard-budget pin).
+    "test",
+    "test-slow",
+    # `push`-only and `needs: test`, so it never runs on a PR and is outside the merge gate's
+    # `pull_request`-dominated measurement set that §1 is derived from.
+    "canary-streak",
+}
+
+
+def _workflow_jobs(workflow: str) -> dict:
+    """`{job: job-doc}` for one file under `.github/workflows/`."""
+    return yaml.safe_load(
+        (REPO / ".github" / "workflows" / workflow).read_text())["jobs"]
+
+
+def _wall_clock_cap_rows(text: str | None = None) -> dict[str, int]:
+    """`{job: published cap}` for every 6-column row that publishes one.
+
+    The CAP-only sibling of `_wall_clock_table_rows`. That reader also requires a measured
+    `max`, which drops `ci-introduced-failure` ("not yet measured") — and its cap is exactly
+    what this pin is about, since a cap can move without the max moving. The job-cell filter
+    is the same one, so the shard aggregate rows stay excluded by construction.
+
+    `text` is accepted so a control can feed a MUTATED document; it defaults to the real one.
+    """
+    text = ((REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+            if text is None else text)
+    rows: dict[str, int] = {}
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        if len(cells) != 6:
+            continue
+        named = re.fullmatch(r"`([a-z0-9][a-z0-9-]+)`(?: \(.*\))?",
+                             cells[0].replace("**", ""))
+        cap_digits = re.findall(r"\d+", cells[5].replace("**", ""))
+        if named and cap_digits:
+            rows[named.group(1)] = int(cap_digits[0])
+    return rows
+
+
+def test_every_cap_the_record_publishes_is_the_cap_its_workflow_ships():
+    """P1 (#11195 review): §1's `cap` column was pinned by NOTHING.
+
+    Reproduced by the reviewer, not taken on trust: patching the `test-record-postgres` row's
+    cap cell back to the PRE-#11063 value the sibling pins exist to forbid
+
+        | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | **50** |
+
+    left `tests/test_ci_selection.py -k 'wall_clock or arm_1'` at **2 passed** — because
+    `_wall_clock_cap_claims` scans `X → Y` prose MOVES only, and the arm-1 pin reads a
+    published cap for the rows arm 1's bullet NAMES plus any row called "arm-1 shaped" (and
+    no row is). The table's `cap` column therefore could re-assert the exact cap the code
+    reversed while every wall-clock pin stayed green — the defect state this PR exists to fix.
+
+    So the column is compared to the workflow, for EVERY row, mechanically: a row resolves to
+    its own workflow (`_WALL_CLOCK_ROW_WORKFLOWS` for the non-`python-ci.yml` tables), and the
+    published number must equal that job's literal `timeout-minutes`. Coverage is asserted in
+    both directions — a row that resolves to no capped job reds, and a `python-ci.yml` job the
+    table silently STOPS publishing a row for reds too — so neither a wrong number nor a
+    deleted row can shrink this pin into passing.
+    """
+    python_ci = _load_python_ci()["jobs"]
+    doc_rows = _wall_clock_cap_rows()
+    assert doc_rows, (
+        "ci-wall-clock.md publishes no comparable `cap` cell at all — this pin would assert "
+        "nothing, so re-anchor it rather than letting it pass on an empty table")
+
+    unresolved: list[str] = []
+    mismatched: list[str] = []
+    for job, published in sorted(doc_rows.items()):
+        workflow = _WALL_CLOCK_ROW_WORKFLOWS.get(job, "python-ci.yml")
+        jobs = python_ci if workflow == "python-ci.yml" else _workflow_jobs(workflow)
+        job_doc = jobs.get(job)
+        shipped = job_doc.get("timeout-minutes") if isinstance(job_doc, dict) else None
+        if not isinstance(shipped, int) or shipped <= 0:
+            unresolved.append(
+                f"`{job}` — the table publishes {published} m, but {workflow} has no job "
+                f"`{job}` with a literal `timeout-minutes`")
+            continue
+        if shipped != published:
+            mismatched.append(
+                f"`{job}` — the table publishes {published} m, {workflow} ships {shipped} m")
+
+    assert not unresolved, (
+        "docs/ops/ci-wall-clock.md publishes a cap for a job that does not exist (or carries no "
+        "literal bound) in the workflow it is attributed to. Add the row to "
+        "`_WALL_CLOCK_ROW_WORKFLOWS` if it lives in another workflow, or delete the row:\n  "
+        + "\n  ".join(unresolved))
+
+    assert not mismatched, (
+        "docs/ops/ci-wall-clock.md's `cap` column disagrees with the workflow it describes — the "
+        "record then states a bound the tree does not ship, and the next cap lane re-derives (or "
+        "re-litigates) the wrong number. Change the cell, or change the workflow:\n  "
+        + "\n  ".join(mismatched))
+
+    unlisted = sorted(set(python_ci) - set(doc_rows) - _WALL_CLOCK_TABLE_EXEMPT_JOBS)
+    assert not unlisted, (
+        f"python-ci.yml job(s) {unlisted} no longer publish a `cap` row in "
+        "docs/ops/ci-wall-clock.md, so this pin stops covering them the moment anyone deletes "
+        "a row. Publish the row, or add the job to `_WALL_CLOCK_TABLE_EXEMPT_JOBS` with the "
+        "reason its cap cannot be stated as one number.")
+
+    stale_mapping = sorted(set(_WALL_CLOCK_ROW_WORKFLOWS) - set(doc_rows))
+    assert not stale_mapping, (
+        f"`_WALL_CLOCK_ROW_WORKFLOWS` maps {stale_mapping}, which no longer publish a cap row — "
+        "a mapping for a row that is gone is dead weight that hides the row's deletion. "
+        "Remove the mapping.")
+
+    # Non-vacuity, executable: the reader must SEE the cell the finding patched, and the value
+    # it reads must DISCRIMINATE against the workflow — so a green here cannot be a reader that
+    # matched nothing. `50` is the pre-#11063 value, i.e. the exact defect state.
+    doc_text = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    mutated = doc_text.replace("| 15.43 | 20 |", "| 15.43 | **50** |", 1)
+    assert mutated != doc_text, (
+        "the `test-record-postgres` row this control mutates is no longer in the shape it "
+        "mutates — re-anchor the control so it still proves the reader reads the cell")
+    assert _wall_clock_cap_rows(mutated)["test-record-postgres"] == 50, (
+        "the cap reader did not see the mutated cell, so a green run of this pin cannot be it "
+        "reading the table")
+    assert python_ci["test-record-postgres"]["timeout-minutes"] != 50, (
+        "the workflow now ships 50 for `test-record-postgres`, so the mutation above no longer "
+        "discriminates — pick a value the workflow does not ship")
+
+
 def test_every_row_the_record_attributes_to_arm_1_satisfies_arm_1s_arithmetic():
     """P3 (#11195 review, ISSUE 2): arm 1 must reproduce the cap it is credited with.
 
@@ -11918,17 +12096,21 @@ def test_every_row_the_record_attributes_to_arm_1_satisfies_arm_1s_arithmetic():
       §1 row: the stated doubling must equal `2 × published max`, and `_arm1_cap` of that
       max must equal the stated cap. This set KEEPS THE PIN ALIVE on the shipped tree (if
       it empties, this reds) and it reds if any of those maxima drift.
-    - **arm-1 attributions.** Any job the doc calls "arm-1 shaped" must satisfy
-      `_arm1_cap(<its published max>) == <its published cap>`. ⛔ NON-VACUOUS ON THE
+    - **arm-1 attributions.** Any job the doc CREDITS to arm 1 (`_arm1_attributions`, which
+      reads every wording in `_ARM1_ATTRIBUTION` and skips a credit the sentence NEGATES) must
+      satisfy `_arm1_cap(<its published max>) == <its published cap>`. ⛔ NON-VACUOUS ON THE
       PRE-FIX TREE, verified by running it against `8aac7cb8d`'s document: it reds with
-      `assert 30 == 20` for `test-record-postgres`. On the shipped tree that phrasing is
-      gone (the bullet now says "not an arm-1 reading" and names the disagreement), so
-      this set is legitimately empty — which is why the first set carries the liveness.
+      `assert 30 == 20` for `test-record-postgres`. On the shipped tree every arm-1 credit is
+      negated (the bullet says "not an arm-1 reading" and names the disagreement), so this set
+      is legitimately empty — which is why the first set carries the liveness, and why
+      `test_the_arm_1_attribution_set_is_closed_on_the_records_own_vocabulary` below proves the
+      emptiness comes from that GUARD rather than from a phrase the set never matched.
 
-    Not covered, declared rather than hidden: an arm-1 claim phrased in words neither arm
-    matches (there is no lexical definition of "credits to arm 1"). The two sets above are
-    the wordings this document actually uses; a third one re-enters by adding it here, and
-    the liveness assertion on the first set makes that failure loud rather than silent.
+    Not covered, declared rather than hidden: an arm-1 claim phrased in words no arm's
+    vocabulary covers (there is no lexical definition of "credits to arm 1"). The two sets above
+    are the wordings this document actually uses; a third one re-enters by adding it to
+    `_ARM1_ATTRIBUTION`, and the closure test below reds if the document's own wording leaves
+    that alternation.
     """
     doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
     rows = _wall_clock_table_rows()
@@ -11968,19 +12150,75 @@ def test_every_row_the_record_attributes_to_arm_1_satisfies_arm_1s_arithmetic():
             "it does not reproduce (#11195 review, ISSUE 2).")
 
     # (2) anything CALLED arm-1 shaped must survive arm 1's own arithmetic.
-    for claim in re.finditer(r"arm-1 shaped", doc):
-        named = re.findall(r"`([a-z0-9][a-z0-9-]+)`", doc[max(0, claim.start() - 700):claim.start()])
-        if not named or named[-1] not in rows:
+    for offset, job in _arm1_attributions(doc):
+        if not job or job not in rows:
             continue
-        job = named[-1]
         published_max, published_cap = rows[job]
         assert _arm1_cap(published_max) == published_cap, (
-            f"ci-wall-clock.md calls `{job}` arm-1 shaped, but arm 1 (2 × max, nearest "
+            f"ci-wall-clock.md calls `{job}` arm-1 shaped (offset {offset}), but arm 1 (2 × max, nearest "
             f"5 m, floored at {_WALL_CLOCK_ARM1_FLOOR_MIN}) turns the max it publishes "
             f"({published_max} m) into {_arm1_cap(published_max)} m, not the "
             f"{published_cap} m that ships. Attribute the number to the derivation that "
             "produces it — the arm-2 SUM, if the row still saves — instead of asserting "
             "two justifications for one cap (#11195 review, ISSUE 2).")
+
+
+def test_the_arm_1_attribution_set_is_closed_on_the_records_own_vocabulary():
+    """P2 (#11195 review): the arm-1 attribution set must key on the record's OWN words.
+
+    The sibling pin's set (2) matched the literal phrase `arm-1 shaped`, and at this head
+    `grep -c 'arm-1 shaped' docs/ops/ci-wall-clock.md` is **0** — the doc's current wording is
+    "not an arm-1 **reading**" (`:309`). The set was therefore empty on the tree it audits, and
+    "empty by phrasing" is not "closed": the same defect re-expressed in the document's own
+    vocabulary passed both pins.
+
+    ⛔ The obvious widening is wrong, and this test is what says so. `arm-1 (?:shaped|reading|…)`
+    alone reds the SHIPPED document, on the very sentence that refutes arm 1 for the row
+    ("not an arm-1 reading"). The set needs a negation guard — and the guard must be ADJACENT
+    to the attribution, because the pre-fix wording that must red reads "so it **no longer** pays
+    a save and **now IS arm-1 shaped**": a paragraph- or window-wide `no longer` would excuse
+    the exact sentence the pin exists to catch.
+
+    Executable, not argued: three probes below, so a pass cannot be the predicate matching
+    nothing and a red cannot be it matching everything.
+    """
+    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+
+    assert _ARM1_ATTRIBUTION.search(doc), (
+        "ci-wall-clock.md uses no wording `_ARM1_ATTRIBUTION` recognises, so this pin would be "
+        "vacuous — re-anchor the alternation on the document's vocabulary rather than letting "
+        "it pass on an empty set")
+
+    assert not _arm1_attributions(doc), (
+        "ci-wall-clock.md now CREDITS a row to arm 1 without negating it: "
+        + ", ".join(
+            f"`{job or '<unnamed>'}` at offset {offset}"
+            for offset, job in _arm1_attributions(doc))
+        + ". Either state the derivation that produces the cap (arm 2's SUM, when the row still "
+        "saves) or negate the attribution — every row this doc credits to arm 1 must satisfy "
+        "arm 1's own arithmetic")
+
+    # Probe 1 — the PRE-FIX wording must be seen. This is the sentence at `8aac7cb8d`:309, which
+    # is what set (2) of the arithmetic pin reds on (`assert 30 == 20` for `test-record-postgres`).
+    pre_fix = (
+        "`test-record-postgres` mounts that path but is **restore-only since #11063**, so it no "
+        "longer pays a save and now IS arm-1 shaped — which is why its cap is 20 and not 50."
+    )
+    assert _arm1_attributions(pre_fix), (
+        "the arm-1 attribution set no longer sees "
+        "'so it no longer pays a save and now IS arm-1 shaped' — the pre-fix wording this pin "
+        "exists to catch would pass silently")
+
+    # Probe 2 — the doc's OWN wording with only the negation removed must be seen, which is what
+    # proves the empty set above is the GUARD's doing and not a phrase the set never matched.
+    mutated = doc.replace("not an arm-1", "an arm-1", 1)
+    assert mutated != doc, (
+        "ci-wall-clock.md no longer carries the negated 'not an arm-1 …' wording this control "
+        "mutates — re-anchor the control on the sentence the document actually uses")
+    assert _arm1_attributions(mutated), (
+        "stripping the negation from the document's own 'not an arm-1 reading' left the "
+        "attribution set empty, so the guard is not what excused it — the set is matching the "
+        "wrong words")
 
 
 def test_every_required_merge_check_carries_an_outer_cap():
@@ -13232,7 +13470,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert save_paths == ["~/.cache/uv"], (
         f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
-        "measured 3,616,385,308 B and is written by FOUR other jobs.")
+        "measured 3,616,385,308 B and is written by THREE other jobs.")
     gate = str(uv_save.get("if") or "").strip()
     # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
     # finding 3). The literal let a rename or a deletion read GREEN — and a
