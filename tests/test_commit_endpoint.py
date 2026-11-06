@@ -3613,7 +3613,7 @@ class TestCaptureOrgIngestBound:
         rides a field that costs nothing to keep, while 200 KB of turn text IS
         stored and extracted. The pre-fix fallback set the term to ``0`` and the
         charge collapsed to the node floor: MEASURED at that head, this exact
-        request was charged 4,096 B instead of 200,220 B and was ADMITTED (200)
+        request was charged 5,120 B instead of 200,220 B and was ADMITTED (200)
         on a window that refused the identical surrogate-free capture (429) —
         the fail-open direction #4051 names.
 
@@ -3635,7 +3635,11 @@ class TestCaptureOrgIngestBound:
             "text it stores — the fallback is under-charging (fail-open)")
 
         def post(session_id: str, body: dict):
-            raw = _json.dumps(body, ensure_ascii=True).encode("utf-8")
+            # `session_id` is part of the POSTED body, not a decoration: without
+            # it every leg is an anonymous capture and the four labels below
+            # name nothing.
+            raw = _json.dumps({**body, "session_id": session_id},
+                              ensure_ascii=True).encode("utf-8")
             return client.post("/v1/sessions", content=raw,
                                headers={"Content-Type": "application/json"})
 
@@ -3658,8 +3662,8 @@ class TestCaptureOrgIngestBound:
         assert r1.status_code == 200, (
             f"the over-sized rule admits ONE over-allowance request on an empty "
             f"window ({r1.status_code}) — {r1.text[:200]}")
-        # ⛔ THE DISCRIMINATOR. Pre-fix the hostile charge was 4,096 B, so this
-        # second request (8,192 B total) fit a 12,288 B window and was ADMITTED —
+        # ⛔ THE DISCRIMINATOR. Pre-fix the hostile charge was 5,120 B, so this
+        # second request (10,240 B total) fit a 12,288 B window and was ADMITTED —
         # 400 KB of stored text against a 12 KB allowance. Post-fix the first
         # request spends the window on its real charge, so the second is refused.
         r = post("sCapSurrHostile2", {
@@ -3698,6 +3702,66 @@ class TestCaptureOrgIngestBound:
         assert detail["used"] == cap, (
             "the commit lane's `used` does not include the capture's charge — "
             "the window is not shared")
+
+
+class TestPayloadEnvelopeBytes:
+    """The charge's byte term can never be driven to 0 (#4051 §3.1).
+
+    Both session write lanes charge ``max(payload bytes, declared nodes × 1024)``
+    against ONE per-org window, so an under-count on either is a free write on
+    both. The fast path is ``model_dump_json``, which RAISES on a value it cannot
+    render as UTF-8 — a lone surrogate does it — and the fallback used to return
+    ``0``, collapsing the charge to the node floor while the body's real text was
+    still written. These pin the ONE shared implementation.
+    """
+
+    def test_a_surrogate_rides_a_field_the_request_is_not_charged_for(self):
+        """The hostile payload is exactly what the throttle must still bound.
+
+        ``telemetry``'s free-form strings are excluded from ``canonical_payload``
+        (so ``client_commit_id`` is unaffected) and are never metered, so a lone
+        surrogate there used to make a 500 KB ``summary`` free: measured
+        pre-fix, ``commit_ingest_charge_bytes`` returned 4,096 (the floor) for a
+        body whose clean twin returned 500,696.
+        """
+        from tortoise.commit_schema import (
+            CommitPayload,
+            commit_ingest_charge_bytes,
+        )
+        raw = {**_raw_payload(0, session_id="sEnvelope"),
+               "client_commit_id": "0" * 64}
+        clean = CommitPayload(**{**raw, "summary": "S" * 500_000})
+        hostile = CommitPayload(**{
+            **raw,
+            "summary": "S" * 500_000,
+            # A free-form string on a field that is never metered and is
+            # excluded from `canonical_payload` — the cheapest place to hide it.
+            "telemetry": {**raw.get("telemetry", {}),
+                          "last_error_code": "\ud800"},
+        })
+        clean_bytes = commit_ingest_charge_bytes(clean)
+        hostile_bytes = commit_ingest_charge_bytes(hostile)
+        assert clean_bytes > 400_000, clean_bytes
+        assert hostile_bytes >= 400_000, (
+            f"a body the fast serializer cannot render was charged "
+            f"{hostile_bytes} B where its clean twin is {clean_bytes} B — the "
+            "payload term fell back to 0, which is the fail-open direction for "
+            "a throttle (#4051)")
+        assert hostile_bytes >= clean_bytes, (
+            "the escape route is charged LESS than the clean body it hides in; "
+            "the fallback must over-count the escape, never under-count the "
+            "write")
+
+    def test_the_shared_helper_is_the_one_both_lanes_use(self):
+        """One implementation, so the two lanes cannot drift on the fallback."""
+        from tortoise.commit_schema import payload_envelope_bytes
+        from tortoise.hosted_api import SessionRequest, _capture_payload_envelope_bytes
+
+        body = SessionRequest(conversation=[{"role": "user", "content": "hi"}],
+                              metadata={"k": "\ud800"})
+        assert _capture_payload_envelope_bytes(body) == payload_envelope_bytes(body)
+        assert _capture_payload_envelope_bytes(body) >= len("hi"), (
+            "the capture fallback came out under the text it stores")
 
 
 class TestDeclaredCommitWriteCount:

@@ -17163,27 +17163,20 @@ def declared_capture_write_count(body: SessionRequest) -> int:
 def _capture_payload_envelope_bytes(body: SessionRequest) -> int:
     """Bytes of the posted capture request — and it can never come out ``0``.
 
-    The fast path is ``model_dump_json`` (the canonical re-serialization). It
-    RAISES on a value it cannot render as UTF-8 — measured: a lone surrogate
-    (``"\ud800"``, carried as a JSON escape, accepted by the schema, and never
-    stored by this lane) raises ``PydanticSerializationError``. Before this
-    helper the ``except`` branch set the term to ``0``, so such a body was
-    charged only the node floor and a 200 KB capture slipped a window that
-    refused its identical, surrogate-free twin — under-charging is the one
-    direction a throttle must not fail (it removes the bound, #4051).
-
-    The fallback renders the SAME validated model through ``json.dumps`` with
-    ``ensure_ascii`` — which ESCAPES a lone surrogate instead of raising — and
-    encodes with ``surrogatepass``, which cannot fail on any ``str`` a JSON body
-    can produce. It therefore over-counts the escape rather than under-counting
-    the write, and there is no remaining path to a free charge.
+    Delegates to ``commit_schema.payload_envelope_bytes``, the ONE implementation
+    both session write lanes' charges use: they spend one per-org window, so an
+    under-count on either lane is a free write on both. The fast path is
+    ``model_dump_json``; a value it cannot render (a lone surrogate, carried as a
+    JSON escape by any body and accepted by the schema) falls back to
+    ``json.dumps(ensure_ascii=True)`` + ``surrogatepass``, which ESCAPES the
+    surrogate instead of raising and cannot fail on any ``str`` a JSON body can
+    produce. That over-counts the escape rather than under-counting the write —
+    before it, a 200 KB capture was charged the node floor (5,120 B) instead of
+    200,220 B and slipped a window that refused its surrogate-free twin, the
+    fail-OPEN direction #4051 names.
     """
-    try:
-        return len(body.model_dump_json().encode("utf-8"))
-    except Exception:  # a charge must never fail a capture — or shrink to 0
-        return len(_json.dumps(body.model_dump(), default=str,
-                               ensure_ascii=True)
-                   .encode("utf-8", "surrogatepass"))
+    from tortoise.commit_schema import payload_envelope_bytes
+    return payload_envelope_bytes(body)
 
 
 def capture_ingest_charge_bytes(body: SessionRequest) -> int:
