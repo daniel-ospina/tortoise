@@ -1652,6 +1652,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
              "tools/worktree_report.py",
+             # #10936 review round 3, BLOCKING: tools/ci_cancel_guard.py owns
+             # tests/test_ci_cancel_guard.py (registered `core`), and the same silent
+             # drop bit it: `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change selected NO
+             # surface, took the docs-only early return and landed on tier-1 smoke,
+             # where that file is not registered. That is the worst possible diff to
+             # drop: the file being edited is the gate in front of POST /cancel, so the
+             # PR that deletes the CURRENT-HEAD arm, the job allow-list or the sentinel
+             # refusal would merge green with every case in it never selected, and the
+             # guard would then cancel the open PR's current head. MEASURED before this
+             # entry: `--changed-files tools/ci_cancel_guard.py --event pull_request` ->
+             # surfaces=[], full=False, test_ci_cancel_guard.py ABSENT; after ->
+             # surfaces=['core'], present. Same
+             # #1349/#3332/#3616 class as the entries above. Pinned by
+             # tests/test_ci_selection.py::test_ci_cancel_guard_tool_change_selects_core_not_tier1.
+             "tools/ci_cancel_guard.py",
              # #11026: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py
              # (registered `core`), and it hit the SAME silent drop: `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY
@@ -1662,7 +1678,6 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # MEASURED before this entry: `select(["tools/gh_write_preflight.py"],
              # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
              # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
-             # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
              # Pinned by TWO cases, and they do not cover the same thing:
              # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
              # (the entry EXISTS; green under either the exact path or the prefix) and
@@ -1707,24 +1722,6 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # does not exist" class (the prefix case's docstring states the same boundary; a
              # rename-detection pin belongs with the diff that performs the rename).
              "tools/gh_write_preflight",
-             # #11052 review P0: tools/gh_read_cache.py owns
-             # tests/test_gh_read_cache.py (registered `core`), and the same silent
-             # drop bit it: `tools/` is swallowed by NON_PYTHON_PREFIXES and no
-             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change selected
-             # NO surface, took the docs-only early return and landed on tier-1
-             # smoke, where that file is not registered. The very PR that can weaken
-             # the refusal denylist, drop the `--jq` projection or drop an identity
-             # field would then be the one that never ran the cases pinning them
-             # (the count grows with the suite — re-measure it, do not trust a number
-             # here; `grep -c 'def test_' tests/test_gh_read_cache.py`).
-             # MEASURED before this entry: `select(["tools/gh_read_cache.py"],
-             # "pull_request", load_manifest())` -> surfaces=[], full=False,
-             # test_gh_read_cache.py ABSENT; after -> surfaces=['core'], present.
-             # ⚠️ the n_test_files count is a SNAPSHOT taken at the head that measured
-             # it — re-measure, do not trust the count. Same #1349/#3332/#3616 class as
-             # the entries above. Pinned by
-             # tests/test_ci_selection.py::test_gh_read_cache_tool_change_selects_core_not_tier1.
-             "tools/gh_read_cache.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -2814,7 +2811,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # file in this PR and no `core`-registered test guards it, so its
              # `api` registration downgrades nothing (#10727 review).
              "tortoise/mcp_client.py",
-             # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # [agent-infra#2148](dispatch): `tools/` is a flat NON_PYTHON_PREFIXES entry and no
              # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
              # TOOL-ONLY change filtered to `changed == []` and took the
              # docs-only early return — the durability pin registered under
@@ -2869,7 +2866,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # load_manifest())` -> surfaces=[], tier-1 files, the pin ABSENT. CORE_ALSO (not
              # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
              # graph, no URI, no network) and `core` is where its suite is registered.
-             "tools/ci_runner_labels.py")
+             "tools/ci_runner_labels.py",
+             # #11047: `tools/gh_read_cache.py` is the SAME shape — a hermetic tool whose entire
+             # guard (`tests/test_gh_read_cache.py`) lives in `core`. ⛔ No case count is stated:
+             # this note said "241 collected cases" while the suite already collected 276 at
+             # `8edc371f3`, and a count in a comment re-stales on the next added case
+             # (`--collect-only` is the authority). `tools/`
+             # is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches it, so a
+             # TOOL-ONLY change — e.g. a maintenance edit to a `_project_*` helper, which the
+             # module's own `-v2` id-bump rule says MUST be paired with a bump — filtered to
+             # `changed == []` and took the docs-only early return, so the pins that fence the
+             # fail-closed contract (scope in the filename AND the envelope, `0 <= age < ttl` as one
+             # comparison, projection in the cache identity) never ran on the file that defines
+             # them. That is the #1349/#3332/#3616 silent-drop class, and the #4348 trap is doubled
+             # here: the `core` row is CLASSIFICATION only, so a name in a surface's test_files runs
+             # only when that surface is ALREADY selected. CORE_ALSO (not TOOL_CARVEOUTS) because
+             # the suite is hermetic (stdlib-only, injected clock and reader, temp dirs).
+             "tools/gh_read_cache.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

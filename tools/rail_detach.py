@@ -269,7 +269,22 @@ _PS_USABLE: bool | None = None
 
 # ── paths ────────────────────────────────────────────────────────────────────
 def _slug(repo: str) -> str:
-    return repo.replace("/", "-")
+    """The artifact/lock name for a repo — ONE name per repo, whatever its spelling.
+
+    ⛔ THE DUPLICATE-RAIL GUARD IS THE LOCK, AND A LOCK IS ONLY AS GOOD AS THE
+    IDENTITY IT IS KEYED ON (`flock(2)`: locks are held on the open FILE, so two
+    spellings that produce two paths are two locks). Keying this on the raw repo
+    string made `o/r` and `github.com/o/r` two different artifacts — measured, both
+    `launch()` calls started and ran concurrently, i.e. TWO LIVE RAILS ON ONE PR,
+    the #3061 collision the guard exists to refuse, while a third launch with the
+    SAME spelling was correctly refused.
+
+    So the name is derived from `_repo_key` — the module's ONE canonicaliser, which
+    lowercases and drops an attestable host prefix — and every consumer of this
+    function (`artifact_path`, `log_path`, and the `.lock` which is derived from the
+    artifact) inherits the single key without repeating it.
+    """
+    return _repo_key(repo).replace("/", "-")
 
 
 def artifact_path(state_dir: Path, repo: str, pr: int) -> Path:
@@ -864,7 +879,7 @@ def _names_this_pr(found: str, pr: int) -> bool:
 
 
 def _repo_key(value: str) -> str:
-    """`owner/name`, lower-cased, with any host prefix dropped.
+    """`owner/name`, lower-cased, with any transport prefix and `.git` dropped.
 
     ⛔ BOTH SIDES OF THE REPO COMPARISON MUST BE IN THE SAME FORM. The rail
     NORMALISES its target before printing it (`rail_normalize_slug` drops an
@@ -872,9 +887,31 @@ def _repo_key(value: str) -> str:
     writes `REPO=` exactly as it was given. Comparing those raw made a REAL merge
     read `refused`, with a reason ("the rail did not merge (e.g. --dry-run)") that
     says the opposite of what happened. Same two fields, one form.
+
+    ⛔ `.git` IS PART OF A CLONE URL'S SPELLING, NOT OF THE REPO'S NAME, and a clone
+    URL is what an operator pastes. Keeping the suffix made `_slug` produce
+    `rail-o-r.git-7.md` beside `rail-o-r-7.md` — a SECOND record and a SECOND
+    `flock`, i.e. TWO LIVE RAILS ON ONE PR, the #3061 collision this module's lock
+    exists to refuse. The same paste produces the SCP form
+    (`git@github.com:o/r.git`), whose colon glues the host to the owner inside one
+    `/`-segment, so that prefix is stripped here too — this function is the ONE
+    canonicaliser, and a spelling it cannot fold is a spelling the lock cannot see.
     """
-    parts = [p for p in value.strip().split("/") if p]
-    return "/".join(parts[-2:]).lower() if parts else ""
+    raw = value.strip()
+    # SCP-style clone URL (`git@github.com:o/r[.git]`): no `://`, and the colon is a
+    # path separator rather than part of the slug. A `://` form needs nothing — its
+    # scheme segment is dropped by the `[-2:]` slice below.
+    if "://" not in raw and ":" in raw:
+        raw = raw.rsplit(":", 1)[-1]
+    parts = [p for p in raw.split("/") if p]
+    if not parts:
+        return ""
+    name = parts[-1]
+    if name.lower().endswith(".git"):
+        name = name[:-4]
+    if len(parts) < 2:
+        return name.lower()
+    return f"{parts[-2]}/{name}".lower()
 
 
 def _names_this_repo(log: str, repo: str) -> bool:
@@ -932,6 +969,33 @@ class RailState:
             "artifact": self.artifact,
             "log": self.log,
         }
+
+
+def _absent_document(pr: int, as_json: bool) -> str:
+    """The ABSENT answer, in whichever shape the caller asked for.
+
+    ⛔ A MACHINE SURFACE MUST ANSWER MACHINE-READABLY ON *EVERY* PATH. Both absent
+    returns printed a bare `RAIL(...)` line even under `--json`, so a consumer doing
+    `json.loads(stdout)` CRASHED on the answer a lane hits most often — "this PR was
+    never railed here" — while the exit code (3) was already correct, which is
+    precisely why a key-on-exit-code caller never saw it.
+
+    ⛔ The values carry the SAME TYPES as `RailState.as_dict()`, not just the same
+    keys: emitting `None` where a real status emits `""` (and `0` for `pid`/`child`)
+    makes `int(doc["pid"])` raise for a consumer that learned the schema from the
+    normal path — the same break the JSON fix exists to remove, moved one level down.
+
+    Pinned by `tests/test_rail_detach.py::test_absent_collect_answers_json_when_json_was_asked_for`,
+    which compares key sets AND per-key types against a real `RailState`.
+    """
+    if not as_json:
+        return f"RAIL(#{pr}, absent, -, -)"
+    return json.dumps({
+        "pr": pr, "state": "absent",
+        "run_ids": [], "run_id": "-", "since": "",
+        "head": "", "pid": 0, "child": 0, "exit_code": None,
+        "merge_sha": "", "reason": "", "artifact": "", "log": "",
+    })
 
 
 @dataclass
@@ -1003,7 +1067,12 @@ def _read_snapshot(art: Path, logp_default: Path,
         text = art.read_text(encoding="utf-8", errors="replace")
     logp = Path(read_field(text, "LOG", str(logp_default)))
     log = ""
-    if logp.exists():
+    # ⛔ `.is_file()`, NOT `.exists()`: a torn `LOG=` line (a header write cut at
+    # `LOG=`) resolves to `Path(".")`, which EXISTS — and `read_text()` then
+    # raises `IsADirectoryError` out of `collect`, so `collect --assert-merged`
+    # exited 1 ("the state is NOT merged") for a crash, which is the one signal
+    # the tool's own docstring says must never wear that code.
+    if logp.is_file():
         full = logp.read_text(encoding="utf-8", errors="replace")
         # ⛔ THE LOG IS APPEND-ONLY ACROSS ATTEMPTS. Parsing the whole file lets a
         # DEAD attempt inherit a PREVIOUS attempt's `✅ merged` line and be
@@ -1053,11 +1122,11 @@ def _identity(snap: _Snapshot) -> tuple[str, int, int]:
     return (read_field(snap.text, "ATTEMPT_ID"), snap.pid, snap.child)
 
 
-def _exit_verdict(st: RailState, snap: _Snapshot) -> RailState:
+def _exit_verdict(st: RailState, snap: _Snapshot, repo: str = "") -> RailState:
     """The verdict for an artifact that carries this attempt's `EXIT=`."""
     code = _int_or_none(snap.exits[-1])
     st.exit_code = code
-    merged, sha = _merge_evidence(snap.log, st.pr, st.repo)
+    merged, sha = _merge_evidence(snap.log, st.pr, st.repo or repo)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         if not sha:
@@ -1077,7 +1146,8 @@ def _exit_verdict(st: RailState, snap: _Snapshot) -> RailState:
     return st
 
 
-def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
+def collect(state_dir: Path, repo: str, pr: int,
+            artifact: Path | None = None) -> RailState | None:
     """Read the artifact and the rail's log. NO side effects: no writes, no
     network, no process signals. The only external call is a local `ps` state
     read, and only on a box without procfs. Returns None when no artifact
@@ -1092,18 +1162,242 @@ def collect(state_dir: Path, repo: str, pr: int) -> RailState | None:
     trust. The honest answer for a record that no longer exists is `absent` (3).
     """
     try:
-        return _collect_read(state_dir, repo, pr)
+        return _collect_read(state_dir, repo, pr, artifact)
     except FileNotFoundError:
         return None
 
 
-def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
+def _candidate_records(state_dir: Path, repo: str, pr: int) -> list[Path]:
+    """Every record for `pr` that names THIS repo — canonical first, then legacy."""
+    art = artifact_path(state_dir, repo, pr)
+    key = _repo_key(repo or "")
+    sd = Path(state_dir)
+    cands = [art] if art.exists() and _record_names_repo(art, repo) else []
+    if key and sd.exists():
+        for cand in sorted(sd.glob(f"rail-*-{pr}.md")):
+            if cand == art:
+                continue
+            try:
+                text = cand.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _repo_key(read_field(text, "REPO") or "") == key:
+                cands.append(cand)
+    return cands
+
+
+def _artifact_for_any_spelling(state_dir: Path, repo: str, pr: int) -> Path | None:
+    """This PR's artifact, whether it was written under `repo`'s CURRENT name or
+    an OLDER one. `None` when no record for `pr` names this repo.
+
+    ⛔ CANONICALISING `_slug` RENAMED EVERY RECORD THAT ALREADY EXISTED, AND A
+    RENAME THE GUARD CANNOT SEE IS THE GUARD BEING BYPASSED. Before this module
+    keyed on `_repo_key`, `_slug` was `repo.replace("/", "-")` on the RAW string,
+    so a record written then lives at `rail-github.com-o-r-7.md`. Reading only
+    `artifact_path(...)` would miss it — and the miss is not cosmetic, it is BOTH
+    halves of the #3061 collision this module exists to refuse:
+
+      * `launch` calls `collect` for its duplicate-rail guard, so a miss means a
+        SECOND rail on one PR (`collect` answers `absent`);
+      * `collect --assert-merged` — the fleet's MACHINE GATE — would answer 3/1
+        about a rail whose record is sitting on disk with a LIVE pid in it.
+
+    The trigger is a version boundary, not an exotic spelling: the state dir is
+    shared and long-lived, rail processes legitimately outlive a code update, and
+    a peer lane can still be running an older copy of this tool (farm drift is
+    routine — see AGENTS.md). So the read is spelling-INSENSITIVE even though
+    every new write is canonical.
+
+    ⛔ AND THE SCAN IS ANCHORED ON `REPO=`, NOT ON THE FILENAME. Matching the file
+    name would re-derive the identity from the thing that was wrong; the record
+    already carries the repo it rails, and `_repo_key` is the module's ONE way to
+    decide two spellings are one repo. A candidate whose `REPO=` cannot be read,
+    or names a different repo, is not this PR's record and is skipped.
+
+    ⛔ TWO RECORDS CAN COEXIST DURING THE ROLLOUT, SO THE CHOICE IS BY LIVENESS,
+    NOT BY NAMING. Once an old copy of this tool has written its legacy-named
+    record beside the canonical one, "prefer the canonical path and return" reads
+    a DEAD canonical record `lost` while the legacy record names the rail that is
+    still merging — the module's own P1 (a live rail reported `lost`), and the
+    state `launch`'s guard accepts, i.e. a SECOND rail on one PR. So when there
+    is more than one candidate, the first one whose pid/child still answers wins.
+    Nothing dead answering: canonical if there is one, else the newest
+    `STARTED_AT` (the last attempt), else the first.
+
+    ⛔ THE COMPATIBILITY IS ONE-DIRECTIONAL — this is the residual, stated so no
+    reader mistakes "spelling-INSENSITIVE" for "the collision is closed both
+    ways". An OLD copy of this tool reads only `artifact_path()` with the RAW-repo
+    slug, so the canonical record this code writes is invisible to it: during the
+    rollout an old-copy `launch` can still start a second rail on a PR the new
+    code is already railing, and an old-copy `collect --assert-merged` can answer
+    3 about a new rail that is live. The lock does not close that either — a
+    `flock` is keyed on the file, and the legacy and canonical locks are different
+    files. Dual-writing the legacy alias was rejected: it would resurrect the
+    second lock this change exists to remove, and a compatibility artefact that
+    the pre-fix reader WRITES to is not something the new code can keep correct.
+    The direction that can be closed without re-introducing the collision is
+    closed here, and the other one ends when the fleet is past this commit.
+    """
+    art = artifact_path(state_dir, repo, pr)
+    cands = _candidate_records(state_dir, repo, pr)
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    # ⛔ TERMINAL EVIDENCE OUTRANKS LIVENESS, BECAUSE A MERGE IS MONOTONE. Ranking
+    # by liveness alone (cycle-2 fix) regressed the other direction, measured: a
+    # canonical record carrying this attempt's `✅ merged` was outranked by a STALE
+    # legacy record whose pid read live through `_rail_alive`'s group fallback, so
+    # `collect --assert-merged` answered 1 ("did NOT merge") about a merged PR and
+    # the merge sha became unreachable — the durable-wrong-verdict class #2235
+    # forbids, aimed at the fleet's machine gate. Nothing can un-merge a PR, while
+    # `waiting`/`lost`/`refused` are all still in flight in the sense that matters
+    # here. So: merged first, then live, then canonical, then newest.
+    for cand in cands:
+        if _record_is_merged(cand, pr, repo):
+            return cand
+    for cand in cands:
+        if _record_is_live(cand):
+            return cand
+    if art in cands:
+        return art
+    # Nothing answers: the newest attempt is the one to report, and `STARTED_AT`
+    # orders attempts. An unreadable/garbled timestamp sorts last rather than
+    # crashing the read-only verb (`_int_or_none`'s contract).
+    def _started(p: Path) -> str:
+        try:
+            return read_field(p.read_text(encoding="utf-8", errors="replace"),
+                              "STARTED_AT") or ""
+        except OSError:
+            return ""
+
+    return sorted(cands, key=_started, reverse=True)[0]
+
+
+def _record_is_merged(art: Path, pr: int, repo: str = "") -> bool:
+    """Does this record carry THIS attempt's terminal merge?
+
+    ⛔ SCOPED TO THE ATTEMPT, with the same two rules the verdict path uses —
+    `_attempt_log` for the evidence boundary and `_merge_evidence` for "the rail
+    SAID merged about THIS PR and THIS repo". Read unscoped, the log is
+    append-only across attempts, so one old `✅ merged` line would make every later
+    record for the same PR read merged (evidence forged by concatenation).
+    """
+    try:
+        text = art.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    logp = Path(read_field(text, "LOG", str(art.with_suffix(".log"))))
+    if not logp.exists():
+        return False
+    try:
+        full = logp.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    scoped = _attempt_log(full, read_field(text, "ATTEMPT_ID"))
+    # ⛔ THE REQUESTED REPO IS THE FALLBACK, because a TORN record names none. A
+    # header write cut before its `REPO=` line (SIGKILL/ENOSPC mid-`write_text`) is
+    # admitted by `_record_names_repo` on purpose — a torn record must still read —
+    # but the record's EMPTY repo was then handed to `_merge_evidence`, whose repo
+    # cross-check is one-sided (`_names_this_repo`: an empty repo has nothing to contradict), so the
+    # log's own `admin-merge: repo <other>` line — the reason that check exists — was
+    # skipped, and `collect --assert-merged` certified a merge for a repo that never
+    # merged. A torn record of the SAME repo still reads: the log names it.
+    state, _sha = _merge_evidence(scoped, pr, read_field(text, "REPO") or repo)
+    return state == MERGED
+
+
+def _waiting_record(state_dir: Path, repo: str, pr: int) -> RailState | None:
+    """The record of this PR (under ANY spelling) that says a rail is WAITING.
+
+    ⛔ `collect` ANSWERS A VERDICT, AND THE DUPLICATE-RAIL GUARD NEEDS A LIVENESS
+    FACT. When a merged record coexists with a live one — the rollout state this
+    module exists for — `collect` correctly returns the MERGED one, so a guard
+    reading `collect(...).state == WAITING` saw "not live" and started a SECOND rail
+    on the same PR, truncating the live record on the way (measured). So the guard
+    asks each candidate, and refuses on the first one that is waiting.
+    """
+    for cand in _candidate_records(state_dir, repo, pr):
+        st = collect(state_dir, repo, pr, artifact=cand)
+        if st is not None and st.state == WAITING:
+            return st
+    return None
+
+
+def _record_names_repo(art: Path, repo: str) -> bool:
+    """Does this record's own `REPO=` name `repo` (or name nothing at all)?
+
+    ⛔ THE CANONICAL PATH MUST BE ADMITTED BY `REPO=`, NOT BY ITS FILENAME. `_slug`
+    folds `/` to `-`, so `a/b-c` and `a-b/c` BOTH resolve to `rail-a-b-c-9.md`:
+    trusting the path served `a-b/c#9` the merged record of `a/b-c#9`, and `collect
+    --assert-merged` exited 0 for a repo that never merged.
+
+    ONE-SIDED, exactly like `_names_this_repo`: a record whose `REPO=` is absent or
+    unreadable has nothing to contradict it — a torn canonical write must still read
+    — while a record that names a DIFFERENT repo is not this repo's record.
+    """
+    try:
+        text = art.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    named = _repo_key(read_field(text, "REPO") or "")
+    return not named or named == _repo_key(repo or "")
+
+
+def _record_is_live(art: Path) -> bool:
+    """Does this record name a process that is still running?
+
+    A THIN probe on one record — deliberately not `collect`: the resolver is called
+    BY `collect`, and a resolver that ran a full two-pass verdict would recurse.
+    `EXIT=` is honoured: a record whose writer has exited is finished, whatever its
+    (possibly recycled) pid answers, so this never resurrects a completed attempt.
+    """
+    try:
+        text = art.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if _attempt_exits(text):
+        return False
+    leader = _int_or_none(read_field(text, "PID")) or 0
+    child = _int_or_none(read_field(text, "CHILD_PID")) or 0
+    age = _age_seconds(read_field(text, "STARTED_AT"))
+    if leader <= 0 and child > 0 and read_field(text, "SPAWNING"):
+        # ⛔ THE FORK-WINDOW CARRIER — `SPAWNING=1` + `CHILD_PID` with no `PID`, the
+        # documented shape a launcher killed between `Popen` returning and its
+        # `PID=` append leaves behind (`launch` writes those in two steps). It is a
+        # LIVE rail for its whole (queue-length) life and `_collect_read` protects
+        # it through this same test; without it here the resolver's live pass skips
+        # the record, the canonical fallback reports `lost`, and `launch` starts a
+        # SECOND rail — measured. Same one-sided stranger test as the verdict path:
+        # it can only say "not ours", never "ours".
+        if not _pid_alive(child, ""):
+            return False
+        return not _pid_is_a_stranger(child, read_field(text, "CHILD_STARTED"),
+                                      read_field(text, "CHILD_START_TICKS"))
+    if leader <= 0 and child <= 0:
+        # A bare `SPAWNING=1` sentinel: the launch is mid-fork, so it IS live until
+        # its own TTL expires — the same bound `_collect_read` applies, and for the
+        # same reason (an unexpired sentinel would refuse every later `start`
+        # forever). A record with neither a pid nor the sentinel names nothing.
+        return bool(read_field(text, "SPAWNING")) and age is not None \
+            and age <= SPAWNING_TTL_S
+    return _rail_alive(leader, child, str(art), age=age)
+
+
+def _collect_read(state_dir: Path, repo: str, pr: int,
+                  artifact: Path | None = None) -> RailState | None:
     """The read itself (see `collect` for the contract, the two passes and the
     attempt-scoping rationale)."""
-    art = artifact_path(state_dir, repo, pr)
-    if not art.exists():
+    art = artifact if artifact is not None else _artifact_for_any_spelling(
+        state_dir, repo, pr)
+    if art is None:
         return None
-    logp_default = log_path(state_dir, repo, pr)
+    # ⛔ DERIVED FROM THE RECORD, NOT RE-SLUGGED FROM `repo`: a record written under
+    # an older spelling has its log under that spelling too (`rail-<slug>-<pr>.log`
+    # is the artifact's path with `.md` → `.log`), so re-slugging would pair a legacy
+    # record with a canonical log that does not exist — the rail's own output
+    # unreadable, which reads as `lost`/`refused` with no reason.
+    logp_default = art.with_suffix(".log")
     # ⛔ TWO PASSES, AND THE SECOND IS NOT A RETRY OF A FAILURE — it closes a
     # STALE READ. The artifact is read BEFORE the liveness probe, so a rail that
     # writes `EXIT=` and exits *while* that probe runs is seen as GONE holding a
@@ -1141,7 +1435,7 @@ def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
     while True:
         st = _state_from(snap, pr, art)
         if snap.exits:
-            return _exit_verdict(st, snap)
+            return _exit_verdict(st, snap, repo)
 
         # No EXIT line yet. Alive ⇒ waiting; gone ⇒ lost (NEVER merged). ⛔ ALIVE
         # IS "THE WRAPPER **OR** THE RAIL": a killed wrapper leaves the rail
@@ -1310,7 +1604,7 @@ def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
                                   "would lift only when it exits — clear with "
                                   f"`rm {st.artifact}`")
                 return st
-        merged, sha = _merge_evidence(log, pr, st.repo)
+        merged, sha = _merge_evidence(log, pr, st.repo or repo)
         if merged == MERGED:
             st.state, st.merge_sha = MERGED, sha
             st.reason = ("the rail's log records the merge"
@@ -1341,7 +1635,7 @@ def _collect_read(state_dir: Path, repo: str, pr: int) -> RailState | None:
     # `state=MERGED`. Reading it is not a gate being relaxed: the rail's gates ran
     # to completion, only the bookkeeping line was lost. Anything short of that
     # announcement stays `lost` (a vanished rail has NO verdict — #2235).
-    merged, sha = _merge_evidence(log, pr, st.repo)
+    merged, sha = _merge_evidence(log, pr, st.repo or repo)
     if merged == MERGED:
         st.state, st.merge_sha = MERGED, sha
         st.reason = ("the rail's log records the merge"
@@ -1794,7 +2088,13 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
                 "a bypass. Unset it and re-run: detachment changes who outlives whom, "
                 "never what is checked"
             )
-    repo = repo or _resolve_repo(Path(cwd))
+    repo = _repo_key(repo or _resolve_repo(Path(cwd)))
+    # ⛔ CANONICALISED ONCE, AT THE TOP, because `repo` is the identity THREE
+    # things key on: the artifact/lock path (via `_slug`), the `REPO=` line written
+    # into it, and every `gh` call that reads the PR head. Writing the raw spelling
+    # while the path is canonical is how the duplicate-rail guard was bypassed —
+    # `o/r` and `github.com/o/r` produced two artifacts, two locks and two live
+    # rails on one PR (#10691 review). One form, everywhere.
     # ⛔ RESOLVE, because the child runs with `cwd=<checkout>`: a relative
     # `--state-dir` would otherwise resolve the artifact/log against the CHECKOUT
     # while the launcher writes them against the lane's own cwd — splitting one
@@ -1815,7 +2115,71 @@ def launch(pr: int, *, cwd: Path, state_dir: Path, repo: str | None = None,
     with lock.open("a+") as lockfh:
         fcntl.flock(lockfh.fileno(), fcntl.LOCK_EX)
         state_dir.mkdir(parents=True, exist_ok=True)
-        prior = collect(state_dir, repo, pr)
+        # ⛔ REFUSE A SHARED PATH OCCUPIED BY ANOTHER REPO'S RECORD, BEFORE ANY WRITE.
+        # `_slug` folds `/` to `-`, so `a/b-c#9` and `a-b/c#9` are ONE artifact, ONE
+        # log and ONE `.lock`, and the write below is unconditional (`write_text` of
+        # the artifact, TRUNCATION of the log). Once `collect` correctly declined to
+        # serve `a-b/c` the record naming `a/b-c`, `prior` was None — so the guard
+        # passed and the launch REWROTE that live record's `REPO=`, truncated its log
+        # (destroying a real `✅ merged …` line for good) and ran a second rail whose
+        # appends interleave in the same two files. Silent destruction of a live
+        # record AND two rails on one PR: measured, and both are the classes this
+        # module exists to refuse. `origin/main` refused this launch only because it
+        # read the shared record as this repo's own — the refusal was the right
+        # answer for the wrong reason, and it must not be re-opened by making the
+        # identity check correct.
+        # ⛔ WHAT THE ARTIFACT **ATTESTS**, resolved once, because "the artifact is
+        # present" does NOT mean "it attests THIS repo". `_record_names_repo` is
+        # one-sided by design — a header write cut before its `REPO=` line must still
+        # read — so a TORN record is admitted, and gating the log check on
+        # `not art.exists()` let exactly that shape skip BOTH guards and truncate the
+        # colliding repo's log. `art_key` is therefore the positive attestation: ""
+        # means the path names nothing (absent, torn, or unreadable), which is not a
+        # claim this repo may act on.
+        art_key = ""
+        if art.exists():
+            try:
+                art_key = _repo_key(read_field(
+                    art.read_text(encoding="utf-8", errors="replace"), "REPO") or "")
+            except OSError:
+                art_key = ""
+            if art_key and art_key != repo:
+                raise Refused(
+                    f"the artifact path {art} is occupied by ANOTHER repo's record — the "
+                    "path, the log and the lock are shared, so launching here would "
+                    "overwrite that rail's record and truncate its log; two repos whose "
+                    "`owner/name` slug identically cannot be railed separately in one "
+                    "--state-dir. Use a separate --state-dir for this repo."
+                )
+        # ⛔ AND THE LOG IS THE OTHER HALF OF THAT SHARED PATH — checked whenever the
+        # artifact does not POSITIVELY attest this repo: absent (the state this tool's
+        # OWN remedy creates — `rm <artifact>` clears a stale claim and stops nothing)
+        # or torn (no `REPO=` to attest with). The log is not removed with either, and
+        # the write below TRUNCATES it (`logp.open("w")`), so another repo's
+        # `✅ merged …` line would go silently. One-sided, through the rail's own
+        # evidence line: a log with no attributable `repo <x>` line contradicts
+        # nothing (the same-repo `rm` residual stays exactly what it documents), while
+        # one naming a DIFFERENT repo is provably not ours to truncate.
+        if art_key != repo and logp.exists():
+            try:
+                said = logp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                said = ""
+            if said and not _names_this_repo(said, repo):
+                raise Refused(
+                    f"the log {logp.name} belongs to ANOTHER repo's rail (its own "
+                    "`admin-merge: repo <x>` line names a different target) — the "
+                    f"artifact {art.name} does not attest this repo, and launching "
+                    "here would truncate that rail's output, including any merge "
+                    "evidence it holds. Use a separate --state-dir for this repo."
+                )
+        # ⛔ AND THE GUARD ASKS A LIVENESS QUESTION, NOT A VERDICT ONE. `collect`
+        # answers with the MERGED record when a merged one coexists with a live one
+        # (correct: a merge is monotone), and reading that as "not WAITING ⇒ free"
+        # let `launch` truncate the LIVE record and start a second rail — the #3061
+        # collision this guard exists to refuse, measured. So the guard looks for ANY
+        # record of this PR that is waiting, and refuses on that.
+        prior = _waiting_record(state_dir, repo, pr)
         if prior is not None and prior.state == WAITING:
             # ⛔ THE HINT IS PER-ARM, because `pid == 0` covers TWO waiting arms and
             # only ONE of them has no clock: an un-pid'd launch that has named NO
@@ -1977,10 +2341,32 @@ def main(argv: list[str] | None = None) -> int:
         # ⛔ `collect` is the verb that must work WHEN THE NETWORK DOES NOT — the
         # artifact already names its repo, so resolve from disk first and only
         # fall back to `gh`. A status read must not depend on an API call.
+        #
+        # ⛔ AND THE COUNT IS OF REPOS, NOT OF FILES. Two records for one PR and
+        # one repo is now the NORMAL shape while the fleet is part way through the
+        # spelling change: an old copy of this tool wrote `rail-github.com-o-r-7.md`
+        # beside the canonical `rail-o-r-7.md`. Counting FILES read that
+        # compatibility state as ambiguity and fell through to `gh` — so the verb
+        # that exists to work without the network exited 2 ("gh cannot resolve this
+        # repo") about a record that names its repo on disk. Grouping by
+        # `_repo_key` keeps "two REPOS for one PR number" as the only ambiguity, and
+        # that is the case the `>1` arm is actually for.
         cands = sorted(Path(sd).glob(f"rail-*-{a.pr}.md")) if Path(sd).exists() else []
-        if len(cands) == 1:
-            repo = read_field(cands[0].read_text(encoding="utf-8", errors="replace"),
-                              "REPO") or None
+        by_repo: dict[str, str] = {}
+        for cand in cands:
+            try:
+                text = cand.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            raw = read_field(text, "REPO") or ""
+            key = _repo_key(raw)
+            # The RAW value is kept as the repo to resolve, so the `REPO=` line the
+            # record already carries is what `collect` is asked about — `_repo_key`
+            # decides identity here, it does not rewrite the target.
+            if key and key not in by_repo:
+                by_repo[key] = raw
+        if len(by_repo) == 1:
+            repo = next(iter(by_repo.values()))
         elif not cands:
             # ⛔ ZERO CANDIDATES IS AN ANSWER, NOT A REASON TO ASK GITHUB. The
             # artifact filename is `<repo slug>-<pr>`, so an artifact this glob does
@@ -1988,9 +2374,9 @@ def main(argv: list[str] | None = None) -> int:
             # here, and that is `absent` (3) whatever `gh` would have said. Asking
             # `gh` first made the answer depend on the network: with `gh` failing,
             # an empty state dir exited 2 (environment error) instead of 3. The
-            # `>1` case still resolves, because two repos' artifacts for one PR
+            # `>1 REPO` case still resolves, because two repos' artifacts for one PR
             # number genuinely does not name a target.
-            print(f"RAIL(#{a.pr}, absent, -, -)")
+            print(_absent_document(a.pr, a.json))
             return 3
     if not repo:
         try:
@@ -2000,7 +2386,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     st = collect(sd, repo, a.pr)
     if st is None:
-        print(f"RAIL(#{a.pr}, absent, -, -)")
+        print(_absent_document(a.pr, a.json))
         return 3
     if a.json:
         print(json.dumps(st.as_dict()))
