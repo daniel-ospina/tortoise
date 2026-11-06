@@ -6410,6 +6410,37 @@ top:
     assert cs.parse_manifest_text(doc) == expected
 
 
+def test_an_unhashable_key_is_refused_with_pyyaml_OWN_exception():
+    """`safe_load` parity is a claim of this module's own docstrings, and it is
+    the claim a caller catching pyyaml's error relies on.
+
+    Re-implementing `construct_mapping` instead of delegating to it drops
+    `BaseConstructor`'s `isinstance(key, collections.abc.Hashable)` arm, so a
+    sequence used as a mapping key surfaced as a bare
+    `TypeError: unhashable type: 'list'` — a DIFFERENT exception type for the
+    same document, from a loader that documents itself as a subclass keeping
+    `safe_load` parity (#10790 review note 1). MEASURED pre-fix: this document
+    raised `TypeError` here and `yaml.constructor.ConstructorError` there.
+
+    Not a bypass fix — every CLI caller ends non-zero either way
+    (`ci_manifest.main` maps any failure to exit 2) — so this pins parity, and
+    it reds if the guard is dropped again.
+    """
+    from tools import ci_selection as cs
+
+    doc = "[1, 2]: a\n[1, 2]: b\n"
+    with pytest.raises(yaml.constructor.ConstructorError) as safe:
+        yaml.safe_load(doc)
+    with pytest.raises(yaml.constructor.ConstructorError) as strict:
+        cs.parse_manifest_text(doc)
+    assert "found unhashable key" in safe.value.problem, safe.value.problem
+    assert "found unhashable key" in strict.value.problem, strict.value.problem
+    # Same input character pointed at, so the two refusals are the same refusal.
+    assert strict.value.problem == safe.value.problem
+    assert strict.value.context == safe.value.context, (
+        strict.value.context, safe.value.context)
+
+
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
 # The test (a)/(b) halves in python-ci.yml are a second source of truth next

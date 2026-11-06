@@ -60,6 +60,7 @@ import json
 import math
 import os
 import re
+from collections.abc import Hashable
 from pathlib import Path
 
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
@@ -3536,13 +3537,25 @@ def _duplicate_key_loader():
             mapping = {}
             for pair in node.value:
                 key_node, value_node = pair
+                key = self.construct_object(key_node, deep=deep)
+                if not isinstance(key, Hashable):
+                    # `BaseConstructor.construct_mapping` refuses an unhashable
+                    # key with THIS exception, and re-implementing the loop
+                    # without the arm made the same document raise a bare
+                    # `TypeError: unhashable type: 'list'` instead — a
+                    # different exception type for the same input, which any
+                    # caller catching pyyaml's own error would not see, and a
+                    # divergence from the `safe_load` parity the docstrings
+                    # above claim (#10790 review note 1). Guarded before the
+                    # `inherited` branch because BOTH arms put `key` in a dict.
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping", node.start_mark,
+                        "found unhashable key", key_node.start_mark)
                 if id(pair) in inherited:
                     # Introduced by `<<:`: an inherited pair, never a repeat of
                     # one this document wrote, so it cannot be data loss.
-                    mapping[self.construct_object(key_node, deep=deep)] = (
-                        self.construct_object(value_node, deep=deep))
+                    mapping[key] = self.construct_object(value_node, deep=deep)
                     continue
-                key = self.construct_object(key_node, deep=deep)
                 line = key_node.start_mark.line + 1
                 if key in seen:
                     self.duplicate_keys.append((str(key), seen[key], line))
