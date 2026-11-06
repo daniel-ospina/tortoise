@@ -4949,7 +4949,8 @@ _TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
 #:
 #: WHO publishes the replacement patience, by class — the two differ, and the
 #: record must not flatter the weaker one:
-#:   * CRON callers, in `registry-cron.sh`: sweep `-m 600`, purge `-m 300`,
+#:   * CRON callers, in `registry-cron.sh`: sweep `-m $SWEEP_TIMEOUT_S` (default
+#:     1500 s, bounded 60-1800 s by #10234), purge `-m 300`,
 #:     reconcile `-m 120`, drill `-m 900`, drill-scheduled `-m 1200`.
 #:   * OPERATOR-run curls, in `docs/ops/registry-backup-dr.md` and
 #:     `docs/ops/669-post-flip-verification.md`: these carried NO `--max-time`
