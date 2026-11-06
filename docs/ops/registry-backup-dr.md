@@ -330,7 +330,10 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 > ceiling moved 30 → 45 min. **Raising it does NOT remove `driver_timeout`** —
 > 1500 s still sits below the sweep's upper bound, which is fine, because the
 > verdict no longer rests on the timeout: a timeout is judged against the age of
-> the last **completed** sweep, and reds only when that age exceeds
+> the last **completed** sweep (⚠️ the stamp records that sweep's **start**, written only
+> when the roll-up ends, so the age is an **upper bound** of the completion age —
+> overstated by the sweep's own ≈19–34 min; it can only red earlier, never green later,
+> which is the safe direction), and reds only when that age exceeds
 > `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240 m), when there is no completion stamp at
 > all and the pool is not measured empty, or when the stamp is future-dated
 > by more than a 300 s clock-skew grace (corruption, which reds regardless of the

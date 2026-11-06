@@ -148,6 +148,8 @@
 #  78k. #10234: the unparseable COUNT is real (two teams => "2 team(s)"), not a
 #      hardcoded 1
 #  78l. #10234: an UNMEASURABLE pool never reads as measured-empty
+#  78m/78n. #10234: the arm's bound is DRIVER_DOWN_MIN (150m green, red at 120m)
+#  78o. #10234: a 2-minute-old stamp is USABLE — pins the skew grace's lower side
 #  78i. #10234: a MIXED pool (one stale team AND one unparseable timestamp) files
 #      a POOL_STALE whose body names the corrupt stamp and whose title covers both
 #      causes — the placeholder bullet must not be gated on the stale count
@@ -561,7 +563,11 @@ TS_STALE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.ti
 # DRIVER_DOWN_MIN (240). Without one, the arm's central comparison could be
 # mutated to STALE_MIN — or to a hardcoded literal — and every case stayed green.
 TS_MID="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=150)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
-export TS_RECENT TS_STALE TS_MID
+# Round 15: a stamp comfortably INSIDE the 300s skew grace. Without one, the grace's
+# sign could be inverted (+300 -> -300) and any stamp minutes old would be read as
+# corruption — a red on a healthy pipeline — with the suite green.
+TS_FRESH="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export TS_RECENT TS_STALE TS_MID TS_FRESH
 
 # ── driver env ──────────────────────────────────────────────────────────────
 export INTERNAL_API_URL="https://api.example.test"
@@ -2298,6 +2304,21 @@ run_driver
 assert_eq "$RC" 1 "78n. the same age reds when the declared window is narrower (the bound follows the knob)"
 assert_contains "$OUT" "> 120m" "78n. the red names the effective bound, not a literal"
 unset BACKUP_DRIVER_DOWN_THRESHOLD_MIN
+
+# ── 78o. #10234 review P2 (round 15): a 2-minute-old stamp is USABLE ────────
+# The grace was pinned only from above, so its sign could be inverted (+300 ->
+# -300): any stamp minutes old would then read as corruption, filing
+# "last_sweep_at is in the future" against a healthy pipeline. This pins the
+# lower side — a recent stamp must be usable, and the green line must carry it.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_FRESH")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78o. a 2-minute-old completion stamp is usable, not corruption"
+assert_not_contains "$(cat "$LOG")" "in the future" "78o. it does NOT file a future-stamp incident"
+assert_contains "$OUT" "the last COMPLETED sweep was 2m ago" "78o. the green line carries the real age"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case

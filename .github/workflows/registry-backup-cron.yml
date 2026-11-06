@@ -36,9 +36,11 @@ jobs:
     # + listing 20s ≈ 1960s ≈ 33 min, plus checkout and runner overhead. The job
     # ceiling has to be ABOVE that or the runner kills the driver mid-leg and
     # the run reports a timeout for work the runner never let finish. NOTE the
-    # ceiling does NOT remove `driver_timeout`: the server-side sweep measures
-    # ≈19-34 min (next run's last_sweep_at minus the posting run's start), so a
-    # 1500s client will still occasionally give up. That is WHY the script gates
+    # ceiling does NOT remove `driver_timeout`: the server-side sweep takes
+    # ≈19-34 min (a later run's `last_sweep_at` records the posting run's START, and
+    # the delta between consecutive runs' stamps is one interval, so the duration is
+    # inferred from the gap between a POST and the next stamped value), so a 1500s
+    # client will still occasionally give up. That is WHY the script gates
     # a timeout on completion age instead of reding on it.
     timeout-minutes: 45
     env:

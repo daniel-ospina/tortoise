@@ -1770,12 +1770,15 @@ case "$RUN_STATUS" in
     # false red sat on the trunk continuously from at least 08:26Z.
     #
     # What this leg CAN prove is narrower, and it is already in hand: how old
-    # the last COMPLETED sweep is. `last_sweep_at` is written only at the end of
-    # the roll-up (tortoise/backup_sweep.py ~1837-1842), so it is completion
-    # evidence, not a start stamp. Gate on it exactly as the held-lock arm above
-    # does, and with the SAME bound (`DRIVER_DOWN_MIN`) the direct-R2 leg below
-    # already uses — so this arm cannot widen the outage blind spot, it only
-    # stops calling a measured-healthy pipeline an outage. Fail-closed is kept:
+    # the last COMPLETED sweep is. `last_sweep_at` is written only when the
+    # roll-up REACHES ITS END (tortoise/backup_sweep.py ~1837-1842), so its
+    # presence/advance proves completion — but the VALUE it carries is the
+    # roll-up's START (`now` is captured at function entry, ~:1666, and the
+    # hosted caller passes no `now`), so `timeout_age_min` is an UPPER BOUND of
+    # the completion age, overstated by the sweep's own duration (~19-34 min).
+    # That direction is fail-closed (it can only red EARLIER, never green
+    # later), which is why the same bound the held-lock arm and the direct-R2
+    # leg use is still the right one. Fail-closed is kept:
     # an unusable `last_sweep_at` with a pool that is not measured-empty is red
     # (a timeout plus no completion evidence is exactly the #2790 class), and a
     # completed sweep older than the bound is red with an age attached.
