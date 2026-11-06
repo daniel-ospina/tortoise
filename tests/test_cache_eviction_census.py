@@ -30,6 +30,7 @@ from tortoise.cache_eviction import (
     TRUTH_LABELS,
     Assessment,
     CacheReadError,
+    CacheState,
     ParityReport,
     assess,
     classify,
@@ -1885,3 +1886,44 @@ def test_an_unwritable_out_path_is_a_usage_error_not_a_traceback(tmp_path, capsy
     assert code == 1, err
     assert "--out" in err, err
     assert "Traceback" not in err, err
+
+
+def test_the_cli_PRINTS_the_licence_on_a_CLEAN_verdict(monkeypatch, capsys, tmp_path):
+    """⛔ `CLEAN` is the BYTE state, not "nothing to evict".
+
+    The CLI returned on CLEAN before printing the licence it had just published, so an
+    operator following the documented two-step (census, then the executor) read "nothing
+    to evict" from step 1 and then watched thousands of nodes go in step 2. Nothing
+    consumed that print: deleting the whole `LICENSED (byte-clean)` loop left the suite at
+    248 passed. This asserts the line an operator actually reads.
+    """
+    cli = _cli()
+
+    # Drive the CLI to a CLEAN verdict with a PROVEN population, without a store: the
+    # census's own `assess` is replaced, and everything upstream of it is stubbed.
+    class _Endpoint:
+        host, port, username, password, ssl = "h", 1, None, None, False
+        graph_name = "tortoise"
+
+    state = CacheState(
+        graph_name="tortoise", resident_bytes=500, maxmemory_bytes=10_000,
+        maxmemory_policy="noeviction", ceiling_bytes=1_000, ceiling_source="declared",
+        graph_key_ttl_seconds=-1, keys_per_graph=1,
+        graph_memory_usage_mb=None, graph_memory_usage_note=None)
+    census = Assessment(
+        state=state, classes=(), verdict="CLEAN",
+        plan={"evictable": [{"population": "turn", "nodes": 7,
+                             "instrument": PARITY_INSTRUMENTS["turn"]}]})
+
+    monkeypatch.setattr(cli, "_endpoint", lambda uri: _Endpoint())
+    monkeypatch.setattr(cli, "_connection", lambda ep: (object(), object()))
+    monkeypatch.setattr(cli, "_absent_graph_refusal", lambda client, name: None)
+    monkeypatch.setattr(cli, "assess", lambda *a, **k: census)
+
+    code = cli.main(["--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise"])
+
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "LICENSED (byte-clean)" in err, err
+    assert "turn" in err and "7 nodes" in err, err
+    assert "BYTE" in err, err
