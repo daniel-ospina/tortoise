@@ -99,8 +99,11 @@ resurrected population, logs how many nodes carry the pair, and writes nothing.
 
 ⛔ Consequence, stated plainly because it is the operator's instruction: after any
 whole-journal replay (``rebuild``, ``rebuild_all``, ``recover_from_log``,
-``backup.restore``) the repair must be RE-RUN with ``--record-dsn``. A replay does
-not restore it. The alternative — clearing at replay — would un-index every
+``backup.restore``) the repair must be RE-RUN with ``--record-dsn`` AND with
+``--graph`` naming the CACHE graph the replay just wrote — without it the CLI
+addresses ``derive_uri_graph($TORTOISE_DB_URI)``, which on a hosted or multi-graph
+box is not the graph the record scope names, so it finds 0 candidates and prints
+``Repair complete.`` over the unrepaired graph. A replay does not restore it. The alternative — clearing at replay — would un-index every
 pre-#10852 session irreversibly (the record's row cannot prove the lexicon on the
 recovery door, so nothing can re-derive it there) and would then report
 ``census == 0``, a false PASS; that trade is refused here.
@@ -496,7 +499,14 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
         # (#11152 review round 4).
         count = getattr(answer, "turn_count", None)
         short_count = isinstance(count, int) and len(turns) < count
-        gap = bool(held) and sorted(held) != list(range(min(held), max(held) + 1))
+        # ⛔ THE GAP ARM MEASURES FROM ZERO, NOT FROM `min(held)`.
+        # `record_read._shortfall` computes `span = max(held) + 1` and
+        # `missing_count = span - len(held)`, so a run whose EARLIEST rows are
+        # missing is a gap there and contiguous to a `range(min(held), max+1)`
+        # comparison — which misdiagnosed exactly that case as the cache mark's
+        # fault, quoting the record's own "no turn row for index 0" and then
+        # blaming the cache in the next sentence (#11152 review round 5, P2).
+        gap = bool(held) and (max(held) + 1) != len(held)
         tail_suspect = bool(
             not getattr(answer, "answered", False) and turn_max_index is not None
             and held and max(held) < int(turn_max_index)
@@ -650,6 +660,7 @@ def reconcile_session_source_prose(
         "no_session_id": [],
         "unaddressable": [],
         "left_alone": [],
+        "written": [],
         "notes": {},
         "census_before": len(found),
         "census_after": len(found),
@@ -760,6 +771,12 @@ def reconcile_session_source_prose(
         # `_REPAIR_PAIR`'s ⛔).
         g.query(_REPAIR_PAIR,
                 params={"url": url, "sum": values["sum"], "st": values["st"]})
+        # ⛔ The count the hook reports must come from the WRITE, not from
+        # arithmetic over the buckets: `no_record` and `left_alone` overlap
+        # (`left_alone` also holds `no_session_id`/`no_reader` nodes), so
+        # subtracting one from the other reported fewer repairs than were made
+        # and contradicted its own parenthetical (#11152 review round 5, P2).
+        report["written"].append(url)
     if not dry_run and found:
         # Re-MEASURED, never decremented — see the docstring's `census_after`.
         # Only when something was written: on an empty candidate set the value is
@@ -815,15 +832,20 @@ def reconcile_after_replay(projection, *, engine: str,
                 "this replay engine has no record handle, so NOTHING was "
                 "written (a clear here would be irreversible and would hide the "
                 "population). Run graph-scripts/11070_repair_session_source_prose"
-                ".py --repair --record-dsn … --org-id … --graph-id … (#11070)",
+                ".py --repair --graph <THE CACHE GRAPH THIS REBUILD JUST WROTE> "
+                "--record-dsn … --org-id … --graph-id … (#11070). "
+                "⛔ NAME THE CACHE GRAPH: without --graph the CLI reads "
+                "derive_uri_graph($TORTOISE_DB_URI), which on a hosted or "
+                "multi-graph box is NOT the graph --graph-id names — it finds 0 "
+                "candidates and prints 'Repair complete.' over the unrepaired "
+                "graph (#11152 review round 5, P1).",
                 engine, len(report["candidates"]))
         else:
             logger.info(
                 "%s: repaired the pre-#10852 prose pair on %d of %d session "
                 "Source(s) (%d re-derived from the record, %d the record did "
                 "not answer, %d left alone) (#11070)", engine,
-                len(report["repaired"]) + len(report["empty_sessions"]) +
-                (len(report["no_record"]) - len(report.get("left_alone") or [])),
-                len(report["candidates"]), len(report["repaired"]),
-                len(report["no_record"]), len(report.get("left_alone") or []))
+                len(report["written"]), len(report["candidates"]),
+                len(report["repaired"]), len(report["no_record"]),
+                len(report.get("left_alone") or []))
     return report

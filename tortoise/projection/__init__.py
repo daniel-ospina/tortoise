@@ -17741,9 +17741,12 @@ class FalkorProjection(
         # #11070: rebuild-DETECTED, not repaired. The pre-#10852 `SourceCreated`
         # record still holds the utterance, so THIS replay re-mints the prose
         # pair — and with no record handle the hook is PLAN-ONLY (writes
-        # nothing), so a rebuild does not restore the repair. Re-run the CLI with
-        # `--record-dsn` after any rebuild (`session_source_prose_migration`
-        # docstring: REBUILD DETECTION, NOT REBUILD REPAIR). Never raises.
+        # nothing), so a rebuild does not restore the repair. Re-run the CLI after
+        # any rebuild with `--graph <this cache graph>` AND `--record-dsn`
+        # (`session_source_prose_migration` docstring: REBUILD DETECTION, NOT
+        # REBUILD REPAIR) — without `--graph` the CLI addresses the URI's default
+        # graph, which on a hosted box is not the tenant graph this replay wrote.
+        # Never raises.
         from tortoise import session_source_prose_migration as sspm
 
         sspm.reconcile_after_replay(self, engine="rebuild_all")

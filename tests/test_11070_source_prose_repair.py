@@ -1219,3 +1219,84 @@ def test_a_candidate_with_no_usable_url_is_REPORTED_not_silently_dropped():
     assert any("no usable url" in n for n in report["notes"].values()), (
         "the run exits 1 forever with no explanation of the pinning candidate")
     assert graph.writes == []
+
+
+def test_a_LEADING_GAP_partial_is_not_blamed_on_the_cache_mark():
+    """⛔ `_shortfall`'s gap arm measures from ZERO, not from `min(held)`.
+
+    Its `span = max(held) + 1` / `missing_count = span - len(held)` treats a run
+    whose EARLIEST rows are missing as a gap, while a `range(min(held), …)`
+    comparison calls it contiguous — so that case quoted the record's own "no turn
+    row for index 0" and then blamed the cache's mark in the next sentence
+    (#11152 review round 5, P2).
+    """
+    from tortoise import record_read
+    from tortoise import session_source_prose_migration as m
+
+    # Indices [1, 2]: contiguous to a min-based check, a GAP to `_shortfall`.
+    held = (record_read.Turn(turn_id="t1", index=1, content="[user] a"),
+            record_read.Turn(turn_id="t2", index=2, content="[user] b"))
+    answer = record_read.TurnAnswer(
+        answered=False, turns=held, turn_count=None,
+        reason=record_read._shortfall(held, None, 5),
+        kind=record_read.TurnAnswer.PARTIAL)
+    assert "no turn row for index 0" in answer.reason, (
+        "this test is vacuous unless the reason is the LEADING-GAP arm")
+
+    def fake(conn, *, org_id, graph_id, session_id, turn_max_index=None):
+        return answer
+
+    reader = m.record_turn_reader(object(), org_id="o", graph_id="g")
+
+    class _Patch:
+        def __enter__(s):
+            s._real = record_read.session_turns
+            record_read.session_turns = fake
+
+        def __exit__(s, *exc):
+            record_read.session_turns = s._real
+
+    graph = _RecordingGraph([(_session_node(turn_max_index=5),)])
+    with _Patch():
+        report = m.reconcile_session_source_prose(
+            graph, read_transcript=reader, dry_run=True)
+
+    note = report["notes"]["session:s-11070"]
+    assert "MAY BE THE CACHE'S FAULT" not in note, (
+        "the record reported a LEADING gap itself; the cache's mark is irrelevant")
+
+
+def test_the_repair_count_comes_from_the_WRITES_not_from_bucket_arithmetic():
+    """`left_alone` overlaps the other buckets, so subtracting mis-counts.
+
+    `left_alone` also holds `no_session_id`/`no_reader` nodes, which are not in
+    `no_record` — the old count reported 1 repaired on a run that wrote 2.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    legacy = {"url": "legacy.md", "sourceKind": "agentSession",
+              "summary": PROSE, "_searchText": PROSE}
+    graph = _RecordingGraph([
+        (_session_node(sessionId="s1", url="session:s1"),),
+        (_session_node(sessionId="s2", url="session:s2"),),
+        (legacy,),
+    ])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=_reader("User: friday rebuild plan"),
+        dry_run=False)
+
+    assert len(report["repaired"]) == 2
+    assert report["left_alone"] == ["legacy.md"]
+    assert report["written"] == ["session:s1", "session:s2"], (
+        "the report's own write log is the only honest repair count")
+    assert len(graph.writes) == len(report["written"])
+
+
+def test_a_dry_run_writes_nothing_and_reports_no_writes():
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=_reader("User: friday plan"))
+    assert report["written"] == []
+    assert graph.writes == []

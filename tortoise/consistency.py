@@ -4113,7 +4113,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # #11070: rebuild-DETECTED, not repaired (see `projection.rebuild`'s call).
     # With no record handle the hook is PLAN-ONLY and writes nothing, so a
     # recovery replay does not restore the repair — re-run the CLI with
-    # `--record-dsn`. The
+    # `--graph <the cache graph>` and `--record-dsn` (without `--graph` it
+    # addresses the URI's default graph, not the one this replay wrote). The
     # pre-#10852 `SourceCreated` record carries the utterance, so this replay
     # re-mints the `summary`/`_searchText` prose pair. PLAN-ONLY here (no record
     # handle): the clear arm is destructive and not self-correcting, so it never
