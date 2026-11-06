@@ -17,9 +17,17 @@ silently, and the spec then waited 30 s for a primary a recorded tile never
 renders.
 
 So the observation is split out here, browser-free, the way #10305 split the
-readiness gate into `preview_preflight.py`: the mapping can be exercised (and
-its red direction proven) without the RUN_DASHBOARD_E2E opt-in, without the two
-wrangler previews and without a browser.
+readiness gate into `preview_preflight.py` — but the SPLIT ALONE did not make it
+cheap, and this docstring used to claim it did. A module with no `test_*`
+function collects zero items, and the only test of the mapping sat in
+`tests/e2e/test_dashboard_onboarding.py`, which `pytest.skip`s itself at import
+unless `RUN_DASHBOARD_E2E=1` — so "exercisable without the opt-in" was false,
+and the case only ever ran inside the dashboard-e2e job it was extracted to
+avoid.
+
+Its browser-free arm now lives in `tests/test_dialog_tile_key.py`, which the
+`core` surface selects and every default python lane runs (#11057 review
+ISSUE-1); this module stays the single home of the mapping itself.
 """
 from __future__ import annotations
 

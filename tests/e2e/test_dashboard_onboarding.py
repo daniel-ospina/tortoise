@@ -831,9 +831,14 @@ def _tile_key_for_dialog_name(name: str, rendered: list) -> str:
     """Map the tile NAME a dialog renders to its integration key.
 
     Kept as a module-level alias so a spec reads as one walk; the body (and its
-    own docstring) live in `tests/e2e/dialog_tile_key.py`, where it can be
-    exercised without the RUN_DASHBOARD_E2E opt-in, the two wrangler previews or
-    a browser (#10305's split, applied to this observation).
+    own docstring) live in `tests/e2e/dialog_tile_key.py` (#10305's split,
+    applied to this observation), and that body's browser-free TEST lives in
+    `tests/test_dialog_tile_key.py`.
+
+    ⛔ Deliberately NOT re-tested here. A test in THIS module runs only under
+    `RUN_DASHBOARD_E2E=1`, so a copy below the opt-in would be the exact
+    claim/reality mismatch #11057 review ISSUE-1 found — a "cheap arm" that only
+    ever executes inside the expensive dashboard-e2e job it was extracted from.
     """
     return tile_key_for_dialog_name(name, rendered)
 
@@ -846,32 +851,23 @@ def _dialog_tile_key(page: Page, dialog) -> str:
     return _tile_key_for_dialog_name(name, rendered)
 
 
-def test_dialog_tile_key_reads_the_opened_dialog_not_the_requested_key() -> None:
-    """The non-vacuity of `_open_coming_soon`'s key, with no browser.
+def test_the_dialog_tile_key_alias_delegates_to_the_shared_mapping() -> None:
+    """The module-level alias is the shared mapping — nothing more.
 
-    `dashboard-e2e` redded at `6962fe46f` (#11057) inside
-    `test_every_coming_soon_tile_captures_its_click`: the previous tile's
-    deferred focus restore ran after the harness's `focus()`, Enter re-opened an
-    already RECORDED tile, and the old helper returned the key it had been ASKED
-    for — so `assert opened_key == key` compared the request with itself, passed,
-    and the spec spent 30 s waiting for a primary a recorded tile never renders.
+    The CASES that pin `tile_key_for_dialog_name` (the dialog decides the key,
+    an unnameable name raises, whitespace/punctuation, the em-dash separator)
+    live in `tests/test_dialog_tile_key.py`, which runs in every default python
+    lane. They used to live HERE, below this module's `RUN_DASHBOARD_E2E`
+    opt-in, where they reported `1 skipped` and executed nothing — the "cheap
+    arm" only ever ran in this expensive job (#11057 review ISSUE-1).
 
-    These cases pin the replacement: the DIALOG decides, and a name that matches
-    no rendered tile REDS instead of echoing the argument back.
+    This module keeps the path exercised (the grid walk that calls the alias)
+    without duplicating the mapping's suite in a place that cannot run it.
     """
     rendered = [("supabase_org", "Supabase \u2014 coming soon"),
                 ("slack", "Slack \u2014 coming soon"),
                 ("linear", "Linear \u2014 coming soon")]
-
-    # the dialog's `<strong>{tile.name}.</strong>` — sentence punctuation included
     assert _tile_key_for_dialog_name("Slack.", rendered) == "slack"
-    # THE CASE THE OLD HELPER COULD NOT SEE: the caller asked for `linear` and the
-    # dialog that opened belongs to `slack`. Observed, that is a mismatch; echoed,
-    # it was an equality.
-    assert _tile_key_for_dialog_name("Slack.", rendered) != "linear"
-    # an unrendered name is a red, never a silent fall-through to the request
-    with pytest.raises(AssertionError):
-        _tile_key_for_dialog_name("Notion.", rendered)
 
 
 def _hold_demand_response(page: Page, delay_ms: int = 900) -> None:

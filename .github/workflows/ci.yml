@@ -524,8 +524,13 @@ jobs:
                   # reason as `preview_preflight.py` above and the same #4221
                   # inversion if it is omitted: a PR touching ONLY this module
                   # would leave the job `skipped` (reported as Success) while
-                  # never running the spec that consumes it,
-                  # `test_dialog_tile_key_reads_the_opened_dialog_not_the_requested_key`.
+                  # never running the spec that consumes it (`_dialog_tile_key`
+                  # → `_tile_key_for_dialog_name` in
+                  # `test_every_coming_soon_tile_captures_its_click`).
+                  # ⛔ NOT because a test of the mapping runs here: those cases
+                  # live in `tests/test_dialog_tile_key.py` (registered on `core`)
+                  # precisely so they run WITHOUT this job's `RUN_DASHBOARD_E2E`
+                  # opt-in — see #11057 review ISSUE-1.
                   isfile("tests/e2e/dialog_tile_key.py"),
                   # #2809: the identity spec is wired into the job now, and it
                   # spawns its own Supabase-bound preview — so a PR touching
