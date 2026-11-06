@@ -1115,6 +1115,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # declared rather than fixed: teaching the rule about paragraph interruption
         # needs the block state the fence pass does not keep, and guessing it the other
         # way re-opens the class-A false PASS this mode exists to close.
+        # ⚠️ DECLARED RESIDUAL 2 (round 33 review, P3) — §5.2's OTHER interruption rule, the one on the
+        # CONSUMER side: a list item can interrupt a paragraph only if it is a bullet or starts at 1,
+        # so `To be derived.\n2. [ ] x` renders as a PARAGRAPH and `CHECKBOX_RE` still counts the box.
+        # Measured at 160 of 160 such bodies, identical at `ee01b70f6e`; declared for the same reason as
+        # residual 1 — deciding it needs paragraph state this pass does not keep.
         # ⛔ A LINE THIS FUNCTION BLANKS AS CODE OPENS NO ITEM, SO THE ITEM IT JUST PUSHED IS
         # UNDONE (round 31 review, P2 — a class-A false PASS). The `container` capture above kept this
         # CODE LINE from being measured against the item it opens itself, but the item stayed on the
@@ -1149,19 +1154,25 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # it either). Arm-independent: this is a fact about the renderer, not a strictness choice.
         # `gap <= 4` stays prose, which is the control the pin asserts.
         own_code = own_gap > 4
-        blank = own_code or (rest_indent > _MAX_FENCE_INDENT and (
+        indent_code = rest_indent > _MAX_FENCE_INDENT and (
             strict or (indented_code
                        and (container is None
-                            or rest_indent > container.rest_col + _MAX_FENCE_INDENT))))
+                            or rest_indent > container.rest_col + _MAX_FENCE_INDENT)))
+        blank = own_code or indent_code
         if blank:
-            # ⛔ A LINE BLANKED FOR ITS INDENT IS CODE INSIDE THE CONTAINER THAT IS ALREADY OPEN, so it
-            # opens no item — undo the push (round 31). A MARKER LINE whose own CONTENT is code is a
-            # different case: the renderer still opens the `<li>` (content column 2, the code inside
-            # it), so its push STAYS and the next line is measured against a real item rather than
-            # against nothing — popping it there made a genuine nested list look like a top-level
-            # indented block and blanked a real criterion (measured: `-     item` + `     - [ ] x`
-            # renders as a nested `<ul>`, and the pop made arm 2 say "no criteria").
-            if pushed and not own_code:
+            # ⛔ WHETHER THE LINE OPENS AN ITEM DEPENDS ON WHICH RULE BLANKED IT (rounds 31-33).
+            # * `indent_code` — the line is code INSIDE THE CONTAINER ALREADY OPEN, or indented past
+            #   the allowance with NO container at all (`    -     item` at top level is a top-level
+            #   indented code block, so the renderer opens no `<li>`). Either way it opens no item: the
+            #   push is UNDONE, or the next line of the same block is measured against a phantom
+            #   content column and comes out as prose — the class-A false PASS round 31 closed, which
+            #   round 32 RE-OPENED for the sub-case where both rules fire on one line.
+            # * `own_code` alone — a marker line at a LEGAL position whose own CONTENT is code
+            #   (`-     item`). The renderer DOES open the `<li>` (content column 2, the code inside it),
+            #   so the push STAYS and the following line is measured against a real item: popping it
+            #   made a genuine nested list look like a top-level indented block and blanked a real
+            #   criterion (`-     item` + `     - [ ] x` renders as a nested `<ul>`).
+            if pushed and indent_code:
                 list_items.pop()
             out.append("")
             continue
