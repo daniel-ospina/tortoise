@@ -82,6 +82,15 @@ may be safely evicted from the cache. ⛔ **Do not read `/health`'s `migrations_
 APPLIED.** The unapplied state is evidenced by the drift gate's refusal itself, which reads prod's
 `supabase_migrations.schema_migrations` and names the two migrations as `BLOCKING repo-ahead`.
 
+> ⛔ **DATED — NO LONGER CURRENT (this paragraph is the historical verdict, kept as written).** Both halves were
+> re-measured on 2026-11-06 and neither holds today: the drift gate ran at **2026-11-06T01:02:43Z** inside run
+> `42135045025` and answered **`OK (no blocking drift)`** with **no** `BLOCKING repo-ahead` line, and a deploy
+> **has landed** since the tallies (`c3af2d018`, started 2026-11-06T01:24:49Z). So *"the drift gate's refusal
+> itself"* is not available as evidence any more — read **§1's *the two migrations* and *the deploy* rows**, not
+> this paragraph, for the current state (and note that neither shows the DDL physically ran). The reconciliation
+> of this verdict with those rows is **#11129**, which is OPEN: until it lands, treat *"one blocked deploy"* as a
+> dated summary of the window it was written in, never as a description of today.
+
 **⇒ The ordering consequence, stated plainly.** The lane brief said *"#10593 is the first child, gated."* It is
 the right name for the **symptom** and the epic's first deliverable — but its **prerequisite is #10896**, which
 the brief did not name. Decomposing around #10896 would parallelise across the one gate that makes every other
@@ -326,7 +335,7 @@ has already paid for once, so the decomposition's product is **navigation and or
 | 23 | **#9558** pooling + column-map cache | G4 | OPEN (`FOLLOW`) | linked |
 | 24 | **#10600** the census docs still read "not armed yet" | G4 | OPEN, docs-only | linked |
 | 25 | **#10977** hosted-graph cost/structure | G5 | OPEN, cross-epic **tracking** | linked — **but it is not G5's deliverable** (below) |
-| 26 | **#11129** the "blocked deploy / 2 migrations unapplied" premise vs. the deploy that shipped `c3af2d018` | G1 | **NEW** | **filed** by PR #11128 — §1's *the two migrations* and *the deploy* rows and the one-sentence verdict defer to it |
+| 26 | **#11129** the "blocked deploy / 2 migrations unapplied" premise vs. the deploy that shipped `c3af2d018` | G1 | **NEW** | **filed** by PR #11128 — §1's *the two migrations* and *the deploy* rows defer to it, and the one-sentence verdict below now carries a dated pointer to it |
 
 ### 5.1 G5 has no closable carrier yet — and the ruling names FIVE measurements, not three
 
@@ -401,7 +410,11 @@ it.
 
 ---
 
-## 7. The one new child (#11075) — and the failure it names
+## 7. The new children — #11075 (specified below) and #11129 (reconciliation carrier)
+
+**#11129 is the second new child** (§5 row 26). It carries the reconciliation of §1's dated rows and the
+one-sentence verdict above; it names no code change, so this section does not specify it further. Everything
+below specifies **#11075**.
 
 **`test(record): pin the write path's declared-type contract`** — a test that fails when a producer emits a
 value the column's **declared** type cannot hold.
@@ -499,7 +512,7 @@ it, and §7.1's and this section's text are authoritative until it lands.
 
 | cycle | scope | verdict |
 |---|---|---|
-| 1 | plan coherence + MECE + the new issue (fresh context) | **15 issues: 10 × P1, 5 × P2.** All 15 verified against the tree and fixed: (1) `jsonb_columns()` does not exist — §7.1; (2) `#10620` misattributed — §1.1; (3) narrowing credited to the wrong PR — §1; (4) MECE gap #9129/#9997 — §5 rows 19–20; (5) criterion 3 wrongly "met" — §2; (6) missing `#9567 → #9548` edge — §3; (7) #8607 wrongly escalated — §3; (8) G2 blocked by an out-of-scope #10000 route — §2.1; (9) G5 has no closable carrier — §5.1; (10) #9559 conditional — §3; (11) #11075 wrongly serialised — §3; (12) two counts not reproducible — §0/§1; (13) #10683's wrong migration filename — §6; (14) deleted-vocabulary disclosure — §7.2; (15) carve-out config rating — #11075 body |
+| 1 | plan coherence + MECE + the new issue (fresh context — #11075, the only new child at that round; #11129 was filed later, by PR #11128) | **15 issues: 10 × P1, 5 × P2.** All 15 verified against the tree and fixed: (1) `jsonb_columns()` does not exist — §7.1; (2) `#10620` misattributed — §1.1; (3) narrowing credited to the wrong PR — §1; (4) MECE gap #9129/#9997 — §5 rows 19–20; (5) criterion 3 wrongly "met" — §2; (6) missing `#9567 → #9548` edge — §3; (7) #8607 wrongly escalated — §3; (8) G2 blocked by an out-of-scope #10000 route — §2.1; (9) G5 has no closable carrier — §5.1; (10) #9559 conditional — §3; (11) #11075 wrongly serialised — §3; (12) two counts not reproducible — §0/§1; (13) #10683's wrong migration filename — §6; (14) deleted-vocabulary disclosure — §7.2; (15) carve-out config rating — #11075 body |
 | 2 | MECE re-verification + fix verification (fresh context) | **12 issues (4 × P1, 8 × P2).** All verified and fixed: (1) the `:Source.summary` carrier §2.1 promised was absent from §5 and mis-grouped — new **§5.2**; (2) #10593's body was never corrected — comment `6663361035` posted, row re-worded; (3) the class was named by `22P02` while #9264 measured `DatatypeMismatch` — §7 re-stated by property; (4) G5's ruling names **five** measurements, not three — §5.1; (5) the §5 preamble count did not reproduce — 24 existing + 1 new; (6) #9129/#9997 were claimed linked but were not — **now linked**; (7) #10896 carried **zero** labels — now labelled; (8) #11075 was still drawn inside the deploy subtree — **hoisted**; (9) present-tense production state — §1 now dates every reading and notes `{}` is not green without #9994; (10) `db: complex` rested on a claim the code contradicts — §7.1 corrected and the closure claim bounded by the 7-term vocabulary. ⚠️ **The round logged as row 6 below** (branch commit titled "review cycle 4", `e16697a92`) **then falsified the wording that correction introduced** (`_COLUMN_RE` does *not* capture the type — see §7.1), and **#11075's body still carries that falsified wording**: it reads *"its `_COLUMN_RE` **does** capture the declared type and then keeps only the column **name** — so capturing the type is a small change"*. §7.1 is authoritative; a lane must not act on the issue text alone, and the correction was posted on #11075 (comment `6668307013`) — the body still carries the text; (11) "the owner approved the shape" had no artifact — replaced with the relay that exists, citing the #7879 comment; (12) "the misnumbering stops here" was false — the migration header still carries `#10620` and is append-only, so §1.1 now says where the correction does and does not travel |
 | 2b | `[VGATE]` content verification of the two committed artifacts (fresh context, before commit) | **5 issues, all in this document's own text and four of them introduced BY the cycle-2 fixes:** (i) §5 row 6 still read `#10683 OPEN` while this lane had already closed it; (ii) §0's "added 21" was the pre-cycle-2 figure — measured 23 added, 36 total, 22 open; (iii) `01-test-design.md` §10 and §7.1 **contradicted each other** on whether type extraction is built or captured — reconciled to "capture one, build three", stated once in §7.1 and cross-cited; (iv) §7.1 carried a truncated sentence (`the reader must be.`); (v) `#9264`'s duration cell said "closed same day" while its timestamps give **2.9 days** — corrected, and `#10593`'s cell now reads "~3 days and counting". This is the class a commit-gate exists for: every one was a self-inflicted staleness produced by fixing the previous round |
 | 2c | `[VGATE]` round 3 **+ the existing-work census the owner asked for** | **One BLOCKING finding: F1 — this plan carried #9548's SUPERSEDED "hosted postponed" ruling as live.** The owner authorised arming on 2026-11-03T19:06Z with its own `OVERRIDES:` marker, the record is live-armed (`"armed": true`), and **PR #11064** (open, `BLOCKED`) exists precisely to purge that superseded instruction from docs — which this plan would have re-seeded. Fixed in §2.1, §3 (the "TWO serialisation points" claim was **wrong**: there is ONE, and #9548 is a dependent) and §5 row 9. **F2**: a quote dropped `this form` mid-phrase against `record_projection.py:220`. **Census (§1.2)**: open-issue population measured at **1691**, not the 300 a capped sweep returns; no issue or PR proposes a declared-type guard; `collision_preflight 7879` → **CLEAN**; and it surfaced **#10852** (the `:Source.summary` carrier was called an orphan and is in fact an open PR) and **#11004** (the egress census, which must not be folded into G5). |
