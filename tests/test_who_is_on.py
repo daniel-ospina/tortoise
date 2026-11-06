@@ -34,6 +34,7 @@ import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "who_is_on.py"
@@ -45,6 +46,23 @@ ISSUE = 4242
 SLUG = "acme/example"
 
 _GATE = None
+#: `fleet_state`, cached beside `_GATE` so a guard can be pinned by patching the
+#: MODULE OBJECT (patching by name only resolves once something else imported it).
+_FLEET = None
+
+
+def _fleet_state():
+    """`fleet_state` — the module that OWNS the cwd-reader seam these tests ask.
+
+    Loaded once for the same reason as `_gate_module`: putting `tools/` on
+    `sys.path` is a side effect these tests should pay once, not per test.
+    """
+    global _FLEET
+    if _FLEET is None:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import fleet_state as _fs
+        _FLEET = _fs
+    return _FLEET
 
 
 def _gate_module():
@@ -491,8 +509,48 @@ exec {real} "$@"
         self.assertIn("VERDICT: CLEAN", out_gate)
         self.assertIn("EMPTY-CLAIM", out_gate)
 
-    @unittest.skipUnless(Path("/proc/self/cwd").exists(),
-                         "the census fixture needs /proc (the kernel's own cwd read)")
+    def _require_proc_cwd_reads(self) -> None:
+        """SKIP where the kernel does not hand us a pid's cwd (`/proc` absent).
+
+        The deleted-cwd census fixture is a property of the KERNEL (the ` (deleted)`
+        marker on `/proc/<pid>/cwd`), not of the change under test. On a box with no
+        `/proc` — macOS, where `fleet_state` reads a cwd through `lsof` instead — the
+        shape cannot be built at all, so a hard assertion there reds a mac lane's
+        local run FOR ITS PLATFORM: the same ambient-input class this fixture exists
+        to remove. A named precondition that FAILS is still a red suite.
+
+        ⛔ THE QUESTION IS ASKED OF THE SEAM, NOT RE-SPELLED. Asking
+        `fleet_state._proc_cwd_is_readable()` rather than `Path("/proc/self/cwd").
+        exists()` keeps ONE definition of it: that seam is what decides whether the
+        production read even takes the `/proc` branch, so a re-spelled copy here can
+        drift away from the behaviour the test is supposed to track (review, #10777).
+        It is a RUNTIME guard rather than a `skipUnless` decorator for the same
+        reason: a decorator evaluates at import, so
+        `test_the_deleted_cwd_guard_asks_the_seam` could not force it.
+        """
+        if not _fleet_state()._proc_cwd_is_readable():
+            self.skipTest(
+                "this fixture builds a live process whose cwd the KERNEL marks "
+                "' (deleted)', which needs /proc; on this box "
+                "fleet_state._proc_cwd_is_readable() is False, so the shape cannot "
+                "be built (not a defect in the code under test)")
+
+    def test_the_deleted_cwd_guard_asks_the_seam(self):
+        """The skip is pinned, and it is asked of `fleet_state`'s own seam.
+
+        Two silent regressions are possible and neither is visible on Linux: the
+        guard is dropped again (a mac lane goes red for its platform), or it is
+        re-spelled as `Path("/proc/self/cwd").exists()` and quietly diverges from
+        the seam the production read uses. Forcing the module's OWN seam to `False`
+        is the only way to exercise that branch on a Linux box, so this arm reddens
+        on both. Non-vacuity, measured: with the guard removed from
+        `_require_proc_cwd_reads`, this arm FAILS (1 failed); restored, 1 passed.
+        """
+        with (mock.patch.object(_fleet_state(), "_proc_cwd_is_readable",
+                               return_value=False),
+              self.assertRaises(unittest.SkipTest)):
+            self._require_proc_cwd_reads()
+
     def test_a_live_pi_process_with_an_unreadable_cwd_is_never_an_empty_claim(self):
         """⛔ THE STUBBED CENSUS STILL FAILS CLOSED (#10814).
 
@@ -505,6 +563,7 @@ exec {real} "$@"
         reported as an empty claim. The row is served through the SAME stub, from a
         real process whose directory is really gone.
         """
+        self._require_proc_cwd_reads()
         self.reachable_origin()
         self.local_branch(f"fix/{ISSUE}-census", ahead=0)
         gone = self.tmp / "reaped-worktree"
@@ -526,6 +585,62 @@ exec {real} "$@"
         self.assertIn("UNREADABLE", out)
         self.assertIn("NOT treated as an empty claim", out)
         self.assertNotIn("EMPTY-CLAIM", out)
+
+    def test_an_ambient_process_table_cannot_change_an_answer(self):
+        """A `ps` on the INHERITED `PATH` must not win over the fixture's stub.
+
+        `setUp` owns the census by PREPENDING its stub dir to `PATH`. That is the
+        load-bearing half of the fix — a `ps` that merely exists is not enough —
+        and it is invisible on a clean host, where the real table names no `pi`
+        and the answer is the same either way. So the leak is SIMULATED: a host
+        `PATH` carrying a gap-serving `ps` of its own (the 2026-11-03 shape, one
+        live `pi` whose cwd reads back ` (deleted)`) must still answer
+        EMPTY-CLAIM. Drop the prepend in `_git_env` and this arm answers
+        UNREADABLE instead.
+
+        ⛔ THE AMBIENT STUB SERVES ITS OWN ROWS, deliberately. A copy of
+        `_write_ps_stub` here would ALSO inherit the fixture's `PS_STUB_ROWS`
+        indirection, which `_git_env` points at the FIXTURE's table — so a dropped
+        prepend would still answer EMPTY-CLAIM and the arm would be VACUOUS.
+        Measured: with `_write_ps_stub` and the prepend removed this arm PASSED,
+        i.e. it pinned nothing. Hence a hard-coded `cat` of the ambient rows.
+        """
+        self._require_proc_cwd_reads()
+        self.reachable_origin()
+        self.local_branch(f"fix/{ISSUE}-empty", ahead=0)
+        ambient = self.tmp / "ambient-bin"
+        ambient.mkdir()
+        gone = self.tmp / "ambient-gone"
+        gone.mkdir()
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", 'cd "$0" && rmdir "$0" && exec sleep 120', str(gone)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self._wait_for_deleted_cwd(proc.pid)
+            rows = ambient / "ambient-rows"
+            rows.write_text(f"{proc.pid} 1 {os.getuid()} pi\n")
+            stub = ambient / "ps"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                '# An ambient (host-PATH) stub: its OWN rows, not the fixture\'s.\n'
+                'case "$*" in\n'
+                f'  *command=*) cat "{rows}" ;;\n'
+                "  *time=*)    printf '0 0 00:00:00\\n' ;;\n"
+                "  *)          exit 1 ;;\n"
+                "esac\n")
+            stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+                       | stat.S_IXOTH)
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith("COLLISION_PREFLIGHT_")}
+            env["PATH"] = f"{ambient}{os.pathsep}{env.get('PATH', '')}"
+            with mock.patch.dict(os.environ, env, clear=True):
+                rc, out = self.run_tool(ISSUE)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("EMPTY-CLAIM", out)
+        self.assertNotIn("could not resolve the cwd", out)
 
     @staticmethod
     def _wait_for_deleted_cwd(pid: int, timeout: float = 10.0) -> None:
@@ -626,6 +741,37 @@ exec {real} "$@"
         rc, out = self.run_tool("--inventory")
         self.assertEqual(rc, 0, out)
         self.assertNotIn("pushed/thing", out)
+
+    def test_a_failed_git_remote_refuses_the_inventory_instead_of_answering(self):
+        """The fail-closed guard in `pushed_branch_names` (#8881) had no test.
+
+        With `remotes=[]` — what a FAILED `git remote` used to be read as — the
+        no-prefix arm strips one path component, so a never-pushed branch could
+        be credited as pushed and hidden from `--inventory`: stranded work
+        reported as FREE. The read is therefore refused, and the refusal must
+        reach the caller as INCOMPLETE (exit 2), never as a decided "all clear"
+        (exit 0 — what the pre-fix run answered) and never as exit 1, which is
+        this repo's COLLISION code.
+
+        The shim fails `git remote` but NOT `git remote -v`, so the earlier
+        slug-resolution guard cannot answer for the branch under test.
+        """
+        self.local_branch(f"fix/{ISSUE}-strand")
+        real = shutil.which("git")
+        stub = self.tmp / "gitremote" / "git"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub = self._write_exec(stub, f'''#!/usr/bin/env bash
+if [ "${{1:-}}" = "remote" ] && [ "${{2:-}}" != "-v" ]; then
+  echo "git-shim: refusing the remote list" >&2; exit 128
+fi
+exec {real} "$@"
+''')
+        rc, out = self.run_tool("--inventory", git_bin=stub)
+        self.assertEqual(rc, 2, out)          # INCOMPLETE, never a decided answer
+        self.assertNotEqual(rc, 1, out)       # exit 1 is COLLISION — never a crash
+        self.assertNotIn("Traceback", out)
+        self.assertIn("could not be read", out)
+        self.assertIn("UNKNOWN", out)
 
     def test_inventory_dirty_only_excludes_clean_local_only_branch(self):
         self.local_branch("fix/clean-but-unpushed")
@@ -901,6 +1047,57 @@ exit 0
         self.assertEqual(rc, 2, out)
         self.assertIn("OPEN PULL REQUEST", out)
         self.assertNotIn("unexpected", out)
+
+    def test_a_pr_number_resolves_to_its_work_item_and_answers(self):
+        """#9976: the PR-number shape ANSWERS instead of abstaining.
+
+        The gate resolves an OPEN pull request to the work item(s) it serves
+        (#9957); this verb used to stop at `ANSWER INCOMPLETE: … is an OPEN PULL
+        REQUEST`, so the two verbs disagreed about the same number — which
+        AGENTS.md says they cannot, because this verb reuses the gate's own
+        enumeration. Here the PR's closing reference names ISSUE, so the answer
+        for ISSUE is computed and printed under its own heading, at rc 0.
+        """
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([{
+            "number": 9999,
+            "title": "fix: something unrelated in its title",
+            "body": "",
+            "state": "open",
+            "url": "https://example.invalid/pulls/9999",
+            "headRefName": "feat/some-pr",
+            "mergedAt": None,
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }]))
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("is an OPEN PULL REQUEST — resolved via", out)
+        self.assertIn(f"to #{ISSUE}", out)
+        self.assertIn(f"who is on #{ISSUE}?", out)
+        # It answers — it does not abstain with the old refusal.
+        self.assertNotIn("not a work item", out)
+        self.assertNotIn("INCOMPLETE", out)
+        # …and the resolution is REPORTED, so a reader knows which item answered.
+        self.assertIn("the same resolution the pre-flight uses", out)
+
+    def test_a_pr_number_whose_work_items_cannot_be_resolved_still_refuses(self):
+        """The fail-closed half: no resolvable work item is rc 2, never `nobody`.
+
+        `release_pull_request_work_items` is the gate's own resolver; when it
+        finds nothing there is no work item to answer for, and a half-answer
+        would be worse than the refusal. The gate's own sentence stays first so
+        the shape is recognisable.
+        """
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([{
+            "number": 9999, "title": "fix: nothing names the issue", "body": "",
+            "state": "open", "url": "https://example.invalid/pulls/9999",
+            "headRefName": "feat/some-pr", "mergedAt": None,
+            "closingIssuesReferences": [],
+        }]))
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("OPEN PULL REQUEST", out)
+        self.assertIn("This is NOT", out)
+        self.assertNotIn("ANSWER: nobody", out)
 
     def test_a_control_sequence_in_a_refname_cannot_reach_the_output(self):
         """Ref names are untrusted input and this report NAMES them, so a
@@ -1277,6 +1474,61 @@ exec {self.gh} "$@"
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"fix/{ISSUE}-strand", proc.stdout)
+
+    def test_the_ancestry_walk_uses_the_PS_binary_not_git(self):
+        """Cycle-2 review, MEDIUM: `_ancestor_pids(ps_bin, …)` got `git_bin`.
+
+        On Linux `/proc` masks the mistake; on a host WITHOUT procfs the macOS
+        fallback runs `<binary> -o ppid= -p <pid>`, so `git -o ppid= …` fails and
+        the ancestry set collapses to `{getpid()}` — the caller's own `pi`
+        ancestor is then invisible and the verb reports the caller as its own
+        holder (the #10684 defect, one verb over, on macOS). The seam is driven
+        here so the finding cannot come back on any host: the binary handed to
+        `_ancestor_pids` must be the PS binary, never the git one.
+        """
+        import importlib.util
+        from types import SimpleNamespace
+        from unittest import mock as _mock
+
+        cp = _gate_module()
+        spec = importlib.util.spec_from_file_location("who_is_on_ps_binary", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        used: list[str] = []
+        captured: list[object] = []
+
+        class _Captured(Exception):
+            pass
+
+        def fake_ancestors(binary, timeout):
+            used.append(binary)
+            return frozenset({424242})
+
+        def fake_preflight(issue, target, gh, git, timeout, **kw):
+            captured.append((kw.get("identity"), kw.get("ps_bin")))
+            raise _Captured("identity captured")
+
+        with _mock.patch.object(
+                cp, "_resolve_target",
+                return_value=(SimpleNamespace(path=None, slug=SLUG), 0)), \
+             _mock.patch.object(cp, "_ambiguity_refusal", return_value=None), \
+             _mock.patch.object(cp, "_ancestor_pids", fake_ancestors), \
+             _mock.patch.object(cp, "run_preflight", fake_preflight):
+            mod.who_holds(ISSUE, None, "gh", "git-binary-not-a-ps", 5.0)
+
+        self.assertEqual(len(used), 1, used)
+        self.assertNotIn("git-binary-not-a-ps", used)
+        self.assertTrue(used[0].endswith("ps"),
+                        f"the ancestry walk was handed {used[0]!r}, not a ps binary")
+        self.assertEqual(captured[0][0].self_pids, frozenset({424242}))
+        # ⛔ THE SAME RESOLUTION MUST REACH `run_preflight` TOO (cycle-3 review).
+        # It defaults to the literal `"ps"`, so `COLLISION_PREFLIGHT_PS` meant two
+        # different things inside one `who_holds` run while `_ps_bin`'s docstring
+        # claimed parity with the gate (which resolves `ps` once and passes it to
+        # BOTH uses, `collision_preflight.py:9840` and `:9860`).
+        self.assertEqual(captured[0][1], used[0],
+                         "run_preflight was not handed the same ps binary")
 
 
 if __name__ == "__main__":

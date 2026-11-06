@@ -993,7 +993,13 @@ def test_capture_metadata_creates_document_no_points():
     t = _tmp("sess.md")
     Path(t).write_text(
         "---\ntitle: Test\ntopics: licensing, AGPL\nsummary: Compared\n"
-        "sessionId: s1\ndoc_status: captured\n---\n\n## User\nDiscuss licensing\n",
+        "sessionId: s1\ndoc_status: captured\n---\n\n## User\nDiscuss licensing\n"
+        # #8447 C3: the body carries a `Name: …` line ON PURPOSE. Without one
+        # the session extractor produces nothing from this fixture, so the
+        # "ZERO Points" assertion below passed even while `--capture-metadata`
+        # was running that extractor (measured: 2 statements + 2 operators).
+        # A fixture that cannot produce a Point cannot prove none was created.
+        "Alice: we should raise prices because margins matter.\n",
         encoding="utf-8")
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
     args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,

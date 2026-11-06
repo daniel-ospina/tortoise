@@ -12,16 +12,6 @@ Runs in the docker lane (TORTOISE_DB_URI) — real FalkorDB graph assertions
 (Subject kinds, memberOf edge, onboards edge/org_subject_id, step-edge
 created signals). URI-less runs (tier-2 embedded legs, carve-out) SKIP at
 module level — mirror of the four test_onboarding_state_split_* modules' guard.
-
-⛔ The client is `tests._verdict.verdict_client`, never a bare `TestClient`:
-`POST /v1/onboarding/seed` is NOT in `_TRANSPORT_WAIT_BOUND_EXEMPT`, so
-`WaitBoundMiddleware` answers a seed that outlives the 10 s transport bound
-with its legible 504 refusal — and under shard load that seed really does
-(measured: `test (i)` on #10833, `29.43s call` then `assert 504 == 200`). A
-wall-clock refusal is a NON-ANSWER (#5049 rule 1), so reading it as a product
-verdict is the load-dependent FAIL the seam exists to convert; it becomes an
-INCONCLUSIVE skip that names the bound instead. Pinned deterministically (no
-load, no wait) by `test_a_wait_bound_refusal_is_inconclusive_not_a_fail`.
 """
 from __future__ import annotations
 
@@ -41,13 +31,27 @@ if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
 
 from fastapi.testclient import TestClient
 
-from tests._verdict import INCONCLUSIVE_PREFIX, verdict_client
+from tests._verdict import verdict_client
 from tortoise.hosted_api import _make_sdk, app
 from tortoise.onboarding import state as onboarding_state
 
 
 def _registered():
-    """Verdict-seam client (#5049/#8582) + a freshly registered team + email."""
+    """Verdict client + a freshly registered team (registry lane) + email.
+
+    ⛔ The client is built through `tests._verdict.verdict_client`, not a plain
+    `TestClient` (#9001, #5049 rule 1, the residual of the #8582 sweep).
+    `POST /v1/onboarding/seed` sits behind `WaitBoundMiddleware` with a 10 s
+    budget (`tortoise/hosted_api.py`, `mcp_auth._TRANSPORT_WAIT_BOUND_S`) and
+    under shard load it exceeds that budget and REFUSES instead of answering —
+    no response at all, so the property under test was never observed. A plain
+    client turns that non-answer into `assert 504 == 200`, i.e. a load-dependent
+    FAIL that names whichever test lost the race (measured: CI `test (i)` at
+    54545ec70 failed `test_ref_less_same_name_person_collision`, and one local
+    run of this same module failed `test_org_name_falls_back_to_teams_name`).
+    The seam converts ONLY the refusal ENVELOPE, so every assertion in this
+    module is unchanged and a genuine answered 4xx/5xx still reaches it.
+    """
     tc = verdict_client(app)
     tc.__enter__()
     email = f"w3s-{uuid.uuid4().hex[:10]}@example.com"
@@ -84,6 +88,53 @@ def _seed(tc, **body):
     r = tc.post("/v1/onboarding/seed", json=body or {})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
+        monkeypatch):
+    """#9001: the deterministic refusal pin for this module's client seam.
+
+    No load and no wall-clock wait: the bound is forced to 0 s, so the refusal
+    comes from the REAL `WaitBoundMiddleware`. The conversion is on the client
+    CONSTRUCTION, so the seam covers every read built from it — not one route.
+
+    Leg 1 (control) is the NON-VACUITY leg for the route: it is the exact
+    `assert 504 == 200` shape this conversion removes, and it also reds if the
+    route is ever added to `_TRANSPORT_WAIT_BOUND_EXEMPT` (the middleware would
+    stop refusing).
+
+    Leg 2 is the NON-VACUITY leg for THIS change: the client `_registered()`
+    hands every test in this module must itself be the seam client. Against the
+    pre-fix module — `_registered()` building a bare `TestClient` — the 0 s bound
+    returns a raw 504, `require_answered` never runs, no skip is raised, and this
+    pin REDS on exactly the code it was written to remove.
+    """
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    route = ("POST", "/v1/onboarding/seed")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
+
+    # Leg 2's subject, built at the REAL bound so the register call answers.
+    module_client, _org_id, _email = _registered()
+    try:
+        monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+
+        # Leg 1 — the refusal is real, and a plain client reads it as a FAIL.
+        with TestClient(app) as raw:
+            assert raw.post(route[1], json={}).status_code == 504
+        with verdict_client(app) as seam, \
+                pytest.raises(pytest.skip.Exception) as excinfo:
+            seam.post(route[1], json={})
+        message = str(excinfo.value)
+        assert "INCONCLUSIVE [#5049]" in message
+        assert f"{route[0]} {route[1]} answered" in message
+
+        # Leg 2 — the client the whole module shares is converted.
+        with pytest.raises(pytest.skip.Exception):
+            module_client.post(route[1], json={})
+    finally:
+        module_client.__exit__(None, None, None)
 
 
 class TestSeedEndpoint:
@@ -642,35 +693,3 @@ class TestDigestExcludesDemo:
                 pid for pid, _c in _DEMO_EPISODIC_TURNS}
         finally:
             tc.__exit__(None, None, None)
-
-
-def test_a_wait_bound_refusal_is_inconclusive_not_a_fail(monkeypatch):
-    """#5049/#8582 — the seed reads through the verdict seam, so the product's
-    transport wait-bound refusal is a NON-ANSWER, never a product FAIL.
-
-    Measured on #10833 (`test (i)`): the shard reached
-    `TestSeedJourney::test_build_fork_completes_on_the_seed_plus_connected`,
-    the seed outlived the 10 s bound under load (`29.43s call`), and
-    `_seed`'s `assert r.status_code == 200` read the refusal as a defect.
-    `POST /v1/onboarding/seed` is not exempt from the bound, so this module
-    needs the same seam the four `test_onboarding_state_split_*` modules use.
-
-    Deterministic: no load and no wall-clock wait. The bound is forced to 0 s,
-    so the refusal comes from the REAL `WaitBoundMiddleware`. The plain-client
-    control is the non-vacuity leg — it is the exact `assert 504 == 200` shape
-    this conversion removes, and it goes RED if the route is ever exempted (the
-    middleware then stops refusing and the 504 assertion fails).
-    """
-    from tortoise import mcp_auth
-    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
-
-    route = ("POST", "/v1/onboarding/seed")
-    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT
-    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
-    with TestClient(app) as raw:
-        assert raw.post(route[1], json={}).status_code == 504
-    with verdict_client(app) as tc, pytest.raises(pytest.skip.Exception) as excinfo:
-        tc.post(route[1], json={})
-    message = str(excinfo.value)
-    assert INCONCLUSIVE_PREFIX in message
-    assert "POST /v1/onboarding/seed answered" in message

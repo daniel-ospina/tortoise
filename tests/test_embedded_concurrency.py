@@ -6,13 +6,18 @@ SIGKILL mid-sweep, lock release on SIGKILL).
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
+import queue
+import re
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -26,12 +31,16 @@ from tests._tmpdir_hygiene import SessionRedisResidue, scan_root
 pytest.importorskip("redislite")
 
 
-# #10333: every writer below computes an EMBEDDING per write (a truthy
-# ``content`` takes the dense-retrieval leg through ``compute_embedding``), so
-# each of these tests runs N processes doing bge-small forward passes at once.
-# Left at torch's default, EACH writer spawns its own intra-op pool sized to the
-# host's core count, so five writers on a 4-core host oversubscribe it ~5x and
-# the forward pass degrades ~4x.
+# #10333: a writer's truthy ``content`` takes the dense-retrieval leg through
+# ``compute_embedding``, so a spawner that leaves the real encoder in place runs
+# N processes doing bge-small forward passes at once. Left at torch's default,
+# EACH writer spawns its own intra-op pool sized to the host's core count, so
+# five writers on a 4-core host oversubscribe it ~5x and the forward pass
+# degrades ~4x. Which spawners hit the REAL encoder is stated where it matters:
+# ``_spawn_live_writer`` does (it never stubs the seam), ``_spawn_writer`` does
+# NOT (it installs ``_WRITER_EMBEDDER_STUB`` — see the measurement there). Both
+# still pass the pin below, because a writer that later regrows an encoder path
+# must not inherit an unbounded pool.
 #
 # MEASURED, the exact shape of
 # ``test_concurrent_writers_live_falkor_no_lost_writes`` (5 writers x 10 writes
@@ -58,6 +67,78 @@ _WRITER_THREAD_ENV = {
 }
 
 
+# How long a writer may go SILENT before it is a hang. This is a PROGRESS
+# bound, not a wall-clock budget for the child (see `_WriterProgress`):
+# `_spawn_writer`'s child prints `WROTE <i>` only AFTER each write is applied
+# server-side (#819), so "a line every N seconds" is a slow host and "no line
+# for N seconds" is a hang.
+#
+# MEASURED, and the reason this constant exists: the writer-death test used a
+# flat `w.wait(timeout=60)` on a spawn that first imports torch, boots a
+# redislite daemon and loads the embedding model. On an 8-core box at
+# `a8e75c45e` the whole test costs **57.38 s** against that 60 s bound —
+# **1.05x**, i.e. the bound sat ON the measured cost, so it was measuring how
+# loaded the host was. It reddened the REQUIRED `test-carve-out (c)` leg on a
+# head that changed nothing in the write path (`subprocess.TimeoutExpired ...
+# timed out after 60 seconds`, run 42021088549, job 127259234037), and #10045
+# recorded the same test at 232 s on a starved runner. This module already
+# carries the identical lesson for the concurrent writers (#10333: "the bound
+# was measuring thread thrash, not a lost write or a hang").
+#
+# 40 s, not 120 s, and the difference is an AGGREGATE property: a per-line
+# bound is only attributive if the WHOLE test still finishes before pytest
+# gives up. The writer-death test takes FIVE bounded waits (4 staggering
+# survivors + the pre-kill read) plus ~9 s of settle sleeps, so the test's
+# worst case is 5 x bound + 9 s. At 120 s that is 609 s against the shard's
+# per-test `--timeout=300` (`.github/workflows/python-ci.yml:3333`) — pytest
+# would fire FIRST, which is exactly the unattributable failure #10045 is
+# about, so a per-LINE comparison against the harness (the pin below used to
+# stop there) cannot see it. 40 s keeps the aggregate at ~205 s, leaving ~95 s
+# of harness headroom, and it is honest because the child no longer pays a
+# cold embedder load: measured in this worktree, a child is 0.84 s (0.41 s
+# import + FalkorProjection boot, 0.13 s for 10 writes + 10 SAVEs, 0.30 s
+# close), so 40 s is ~48x the measured cost of the whole child — several
+# times the slowest single line. Pinned by
+# `test_the_writer_progress_bound_stays_under_the_suite_per_test_timeout`,
+# which asserts the AGGREGATE as well as the per-line bound.
+_WRITER_PROGRESS_BOUND_S = 40.0
+
+
+# #10914 / #10045: the embedded writers must NOT pay a cold bge-small load.
+#
+# ``_upsert`` with truthy ``content`` reaches ``encode_for_row`` ->
+# ``encode_for_store`` -> ``compute_embedding``, and the FIRST write in a fresh
+# child therefore does the whole cold load in-process. MEASURED here: 6.9 s of
+# a 7.6 s child, i.e. 90% of the child's life is the model, not the write. On
+# the CI pool that same load is not a constant — ``tests/conftest.py`` (#6960)
+# records it at 50.5 s, and 133.55 s / 204.64 s on the runs that forced the
+# pytest lane's own load budget to 270 s, while ``tortoise/embeddings.py:552``
+# budgets 90 s for the load ALONE. #10045 measured this very test at 232.12 s
+# on a starved runner.
+#
+# A progress bound alone cannot fix that: the child's first line comes only
+# AFTER the load, so its FIRST silent interval IS the load — any per-line bound
+# that tolerates the documented 204.64 s is already over the harness's 300 s
+# once multiplied by five waits, and any bound under it still calls a cold
+# runner a hang. So the cost has to come out, which is the same remedy #10333
+# applied to the sibling thread bound ("Bounding the pool keeps the bound
+# honest: it is a HANG detector again, with ~5x headroom over the measured cost
+# instead of sitting below it").
+#
+# The stub keeps the write path intact — the vector still goes through the same
+# ``_degrade_to_width`` leg and is still STORED, pinned by
+# ``test_a_writer_child_carries_a_vector_without_loading_the_model``; only the
+# 384-dim bge-small forward pass is replaced, and ID durability across writer
+# death never depended on its provenance. The REAL encoder keeps its
+# multi-process coverage in
+# ``test_concurrent_writers_live_falkor_no_lost_writes`` via
+# ``_spawn_live_writer``.
+_WRITER_EMBEDDER_STUB = """
+import tortoise.embeddings as _emb
+_emb.compute_embedding = lambda _content: [0.05] * _emb.EMBEDDING_DIM
+"""
+
+
 def _writer_env():
     """This process's env with each writer's intra-op pool bounded to 1 thread.
 
@@ -80,6 +161,8 @@ def _spawn_writer(canonical_path, writer_id, writes=5):
 import os, sys, time
 os.environ.pop("TORTOISE_DB_URI", None)
 os.environ["TORTOISE_DB_PATH"] = {canonical_path!r}
+# #10914: no cold embedder load in the child — see _WRITER_EMBEDDER_STUB.
+{_WRITER_EMBEDDER_STUB}
 from tortoise.projection import FalkorProjection
 proj = FalkorProjection()
 try:
@@ -103,6 +186,11 @@ try:
     print("DONE", {writer_id}, flush=True)
 finally:
     proj.close()
+    # #10914: report the encoder state by EXECUTION on the child's OWN last
+    # line, so a regression that restores the real encoder (and with it the
+    # cold load) reds a named arm rather than silently re-arming the cost.
+    print("EMBEDDER", "loaded" if _emb.EmbeddingModel._instance is not None
+          else "none", flush=True)
 """
     return subprocess.Popen(
         [sys.executable, "-c", code],
@@ -115,6 +203,83 @@ finally:
     # killpg's the writer. The redis-server child is daemonized (fork +
     # setsid, own session) and SURVIVES the killpg — that's exactly the
     # contract the writer-death test documents (see #879).
+
+
+class _WriterProgress:
+    """Read a `_spawn_writer` child's progress, bounded by SILENCE not by the clock.
+
+    The pre-fix shape was a flat `subprocess.Popen.wait(timeout=60)`, which
+    answers "did this host run the child in 60 s" and calls a starved runner a
+    deadlock (see `_WRITER_PROGRESS_BOUND_S` for the measurement). Here the
+    deadline is reset by every line the child emits, so a slow-but-progressing
+    writer passes and a genuinely wedged one fails in `bound_s` seconds,
+    naming the label, the bound, the lines seen so far and the child's stderr
+    — the pre-fix failure named none of them.
+
+    Every terminal path KILLS a child that is still alive, so a timed-out
+    writer can never outlive the failure and trip the tests' own
+    "orphans remain" teardown assertion.
+    """
+
+    def __init__(self, proc, label, bound_s=None):
+        self.proc = proc
+        self.label = label
+        self.bound_s = _WRITER_PROGRESS_BOUND_S if bound_s is None else bound_s
+        self._lines: list[str] = []
+        self._q: queue.Queue[str | None] = queue.Queue()
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self):
+        try:
+            for line in self.proc.stdout:
+                self._q.put(line)
+        finally:
+            self._q.put(None)  # EOF sentinel
+
+    def _fail(self, why):
+        self.kill()
+        err = ""
+        with contextlib.suppress(OSError, ValueError):
+            err = (self.proc.stderr.read() or "").strip()
+        seen = "".join(self._lines).strip() or "<none>"
+        raise AssertionError(
+            f"{self.label}: {why} (bound {self.bound_s:g}s per line). "
+            f"lines seen: {seen!r}. stderr: {err or '<empty>'!r}"
+        )
+
+    def next_line(self):
+        """The child's next stdout line; fails if it stays silent too long."""
+        try:
+            line = self._q.get(timeout=self.bound_s)
+        except queue.Empty:
+            self._fail(f"no progress for {self.bound_s:g}s — a hang, not slowness")
+        if line is None:
+            self._fail("stdout closed with no further progress")
+        self._lines.append(line)
+        return line
+
+    def drain(self):
+        """All remaining lines up to EOF, then require a clean exit."""
+        while True:
+            try:
+                line = self._q.get(timeout=self.bound_s)
+            except queue.Empty:
+                self._fail(f"no progress for {self.bound_s:g}s — a hang, not slowness")
+            if line is None:
+                break
+            self._lines.append(line)
+        rc = self.proc.wait(timeout=self.bound_s)
+        if rc != 0:
+            self._fail(f"writer exited rc={rc}")
+        return self._lines
+
+    def kill(self):
+        """Kill the child's process group if it is still alive (idempotent)."""
+        if self.proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.proc.wait(timeout=10)
 
 
 def _count_redis_servers(path=None):
@@ -305,6 +470,204 @@ def test_every_writer_spawner_passes_the_bounded_env():
             assert env.get(var) == "1", (
                 f"a writer spawner handed its child {var}={env.get(var)!r}; "
                 "every writer must be bounded to one intra-op thread (#10333)")
+
+
+def _fake_writer(lines=6, gap=0.3, tail_sleep=0):
+    """Spawn a stand-in writer that prints `lines` WROTE lines `gap` apart.
+
+    Cheaper than the real writer by three orders of magnitude (no torch, no
+    redislite, no graph) — it exists to exercise the BOUND, not the write path.
+    """
+    code = (
+        "import time\n"
+        f"for i in range({lines}):\n"
+        "    print('WROTE', i, flush=True)\n"
+        f"    time.sleep({gap})\n"
+        f"time.sleep({tail_sleep})\n"
+        "print('DONE', flush=True)\n"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", code], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, start_new_session=True)
+
+
+def test_the_writer_wait_is_a_progress_bound_not_a_wall_clock():
+    """#10045: the survivor wait must bound SILENCE, not the host's speed.
+
+    The pre-fix shape was `w.wait(timeout=60)` — a total elapsed budget on a
+    spawn that imports torch and loads an embedding model. Measured at
+    `a8e75c45e`: 57.38 s against that 60 s bound (1.05x), and on a starved
+    runner it exceeded it, reddening the required `test-carve-out (c)` leg on
+    a head that touches nothing in the write path.
+
+    Both halves are measured on the SAME child shape so the discriminating
+    power is shown, not asserted: a flat 0.6 s `wait()` on a ~1.8 s child
+    raises `TimeoutExpired` (the pre-fix semantics), while `_WriterProgress`
+    with a 0.6 s per-line bound reads it to completion because the child never
+    goes silent for 0.6 s.
+    """
+    bound = 0.6
+
+    flat = _fake_writer()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            flat.wait(timeout=bound)
+    finally:
+        os.killpg(flat.pid, signal.SIGKILL)
+        flat.wait()
+
+    progressing = _fake_writer()
+    seen = _WriterProgress(progressing, "progressing writer", bound_s=bound).drain()
+    assert [ln for ln in seen if ln.startswith("WROTE")] == [
+        f"WROTE {i}\n" for i in range(6)], seen
+    assert seen[-1].startswith("DONE"), seen
+
+
+def test_a_silent_writer_is_a_named_hang_not_a_blank_timeout():
+    """#10045: a wedged child must fail FAST, BY NAME, and leave no orphan.
+
+    The pre-fix failure was a bare `subprocess.TimeoutExpired` naming neither
+    the writer, the bound, the lines seen, nor the child's stderr — which is
+    why #10045's leg was unattributable. This child prints one line then stalls
+    30 s; under a 0.5 s per-line bound the helper must raise inside ~5 s with
+    the label and the bound in the message, and the child must be dead by the
+    time it raises (an un-reaped writer would trip the tests' own
+    `orphans remain` teardown assertion instead).
+    """
+    proc = _fake_writer(lines=1, gap=0.0, tail_sleep=30)
+    prog = _WriterProgress(proc, "stalled writer w9", bound_s=0.5)
+    assert prog.next_line() == "WROTE 0\n"
+    start = time.monotonic()
+    with pytest.raises(AssertionError) as exc:
+        prog.next_line()
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"the silence bound did not trip promptly ({elapsed:.1f}s)"
+    msg = str(exc.value)
+    assert "stalled writer w9" in msg, msg
+    assert "no progress for 0.5s" in msg, msg
+    assert "WROTE 0" in msg, f"the failure does not show what the child did emit: {msg}"
+    assert proc.poll() is not None, "the stalled writer was left alive to orphan"
+
+
+def test_the_writer_progress_bound_stays_under_the_suite_per_test_timeout():
+    """#10045: our bound must fire BEFORE pytest's, or the leg is unattributable.
+
+    The whole point of bounding the writer here is that a hang is reported as
+    `test_writer_death_keys_survive_reconnect`, not as a bare pytest-timeout
+    that `--maxfail` then turns into a shard-level kill. That only holds while
+    every `--timeout=` the workflow passes to pytest is above our bound.
+    Derived from the workflow, never from a remembered number.
+
+    #10914: and above the AGGREGATE, not just the per-line bound. The
+    writer-death test takes five bounded waits plus its settle sleeps, so a
+    per-line bound 5x under the harness can still sum PAST it — which is how
+    the 120 s value this pin used to bless would have handed the reporting back
+    to pytest (`5 x 120 s + 9 s = 609 s` against `--timeout=300`). Both halves
+    are asserted here so neither bound can drift back over the harness.
+    """
+    workflow = (Path(__file__).resolve().parent.parent
+                / ".github" / "workflows" / "python-ci.yml")
+    assert workflow.exists(), f"missing {workflow}"
+    # Comment-stripped: the workflow header narrates the HISTORY ("--timeout=300
+    # (was 90)"), and a remembered/retired value is not a declaration.
+    declared = "\n".join(line.split("#", 1)[0] for line in workflow.read_text().splitlines())
+    per_test = {int(n) for n in re.findall(r"--timeout=(\d+)", declared)}
+    assert per_test, "the workflow declares no per-test --timeout= at all"
+    assert min(per_test) > _WRITER_PROGRESS_BOUND_S, (
+        f"_WRITER_PROGRESS_BOUND_S={_WRITER_PROGRESS_BOUND_S:g}s is not below "
+        f"every per-test --timeout= in python-ci.yml ({sorted(per_test)}) — a "
+        "hang would land as a pytest-timeout and kill the shard (#10045)")
+
+    # The aggregate: derive the REAL number of bounded waits from the test's
+    # own source — the survivor loop runs one `_WriterProgress` site once per
+    # id in its literal tuple, so counting source occurrences ALONE would
+    # report 2 where the test actually takes 5 waits (and would then bless a
+    # 120 s bound: 2 x 120 s + 30 s = 270 s < 300 s, the false green this arm
+    # exists to prevent).
+    src = inspect.getsource(test_writer_death_keys_survive_reconnect)
+    sites = src.count("_WriterProgress(")
+    assert sites >= 2, (
+        "could not find the bounded waits in the writer-death test — this arm "
+        f"would otherwise pass vacuously: {sites} found")
+    loop = re.search(r"for\s+\w+\s+in\s+\(([\d,\s]*)\)\s*:", src)
+    assert loop, (
+        "could not find the survivor loop's literal tuple — refusing to guess "
+        "the multiplier behind the aggregate bound")
+    survivor_ids = [x for x in loop.group(1).split(",") if x.strip()]
+    bounded_waits = len(survivor_ids) + (sites - 1)  # survivors + the pre-kill read
+    settle_margin_s = 30  # the test's 7 s of sleeps, reconnect + orphan scan
+    worst_case_s = bounded_waits * _WRITER_PROGRESS_BOUND_S + settle_margin_s
+    assert worst_case_s < min(per_test), (
+        f"the writer-death test's worst case is {worst_case_s:g}s "
+        f"({bounded_waits} bounded waits x {_WRITER_PROGRESS_BOUND_S:g}s + "
+        f"{settle_margin_s}s of settles) against a per-test --timeout= of "
+        f"{min(per_test)}s — pytest would fire before our bound, returning the "
+        "leg to the unattributable pytest-timeout #10045 is about (#10914)")
+
+
+def test_the_writer_death_test_bounds_every_wait():
+    """#10045: the SITES, not just the helper.
+
+    `_WriterProgress` is worthless if the writer-death test keeps calling
+    `w.wait(timeout=60)` or blocking on `for line in k.stdout` — both are the
+    pre-fix shapes and both reddened (or stalled) a required leg. Pinned by
+    reading the test's own source, the same way
+    `test_every_writer_spawner_passes_the_bounded_env` pins the spawners.
+    """
+    src = inspect.getsource(test_writer_death_keys_survive_reconnect)
+    assert "wait(timeout=" not in src, (
+        "the writer-death test still bounds a writer by total wall clock; that "
+        "bound measures host load, not a hang (#10045)")
+    assert not re.search(r"for\s+\w+\s+in\s+\w+\.stdout", src), (
+        "the writer-death test still blocks on the child's stdout with no "
+        "bound; a starved child stalls the shard's whole watchdog (#10045)")
+    assert src.count("_WriterProgress(") >= 2, (
+        "both the survivor waits and the pre-kill wait must go through "
+        "_WriterProgress; found " + str(src.count("_WriterProgress(")))
+
+
+def test_a_writer_child_carries_a_vector_without_loading_the_model(monkeypatch):
+    """#10914 / #10045: the embedded writer must pay NO cold embedder load — and
+    must still STORE a vector.
+
+    The progress bound above can only be honest if the child's silent intervals
+    are short: its FIRST one is the cold bge-small load (measured here at 6.9 s
+    of a 7.6 s child; up to 204.64 s on the CI pool per ``tests/conftest.py``,
+    and #10045 measured this very test at 232.12 s). This pin is what keeps that
+    cost from creeping back under a bound that now has to fit five waits inside
+    the harness's 300 s.
+
+    Non-vacuous by EXECUTION at both halves:
+
+    * the child reports its own ``EmbeddingModel._instance`` state on its last
+      line, so restoring the real encoder reds here. Verified against the
+      pre-#10914 helper: the child prints no such line and costs 8.58 s.
+    * the point still carries a vector, so the cheap encoder cannot be mistaken
+      for "vectors silently turned off": a fixture that stopped writing vectors
+      would leave the durability assertion green while measuring less than it
+      claims (the #4280 degrade class). Verified non-vacuous: with a
+      None-returning encoder the stored property is NULL and this arm fails.
+    """
+    canonical = _canonical_path()
+    monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
+    seen = _WriterProgress(_spawn_writer(canonical, 0, writes=2),
+                           "vector writer w0").drain()
+    assert "EMBEDDER none\n" in seen, (
+        "the writer child loaded the embedding model — a cold load is back in "
+        f"the child's critical path (#10914). lines seen: {seen!r}")
+
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection()
+    try:
+        rows = proj.g.query(
+            "MATCH (n:Point) RETURN n.id, n.embedding IS NOT NULL").result_set
+        assert {r[0] for r in rows} == {"w0-k0", "w0-k1"}, rows
+        assert all(r[1] for r in rows), (
+            "the stubbed encoder produced no stored vector — the write path "
+            f"degraded instead of encoding: {rows!r}")
+    finally:
+        proj.close()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -608,17 +971,26 @@ def test_writer_death_keys_survive_reconnect(monkeypatch):
     python writer — the redis-server survives and a fresh projection REUSES
     it via redislite's .settings registry. "Pre-crash keys survive" here
     means "survive in the daemon's LIVE MEMORY", NOT "reloaded from the
-    RDB". This test does NOT exercise the RDB-load / crash-recovery path,
-    and the per-write SAVE that would mask that gap is deliberately absent.
-    The real embedded-mode durability gap (kill -9 of the server loses the
-    whole graph; JSONL rebuild covers only log-backed writes) is tracked in
-    #915 — do not add SAVE-per-write or RDB assertions to this test."""
+    RDB". This test does NOT exercise the RDB-load / crash-recovery path: the
+    shared ``_spawn_writer`` helper DOES issue a per-write ``SAVE`` (added for
+    the survivor-reconnect determinism in #879), so a reload assertion here
+    would be measuring the helper, not the contract — that is why the RDB path
+    is out of scope rather than unguarded. The real embedded-mode durability
+    gap (kill -9 of the server loses the whole graph; JSONL rebuild covers only
+    log-backed writes) is tracked in #915. (#10914: this paragraph used to
+    claim the SAVE was "deliberately absent", which the helper has contradicted
+    since #879 — a false statement about the fixture is worse than no note.)"""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
-    # Staggered survivors (safe embedded pattern): each writes 10, closes
+    # Staggered survivors (safe embedded pattern): each writes 10, closes.
+    # Bounded by PROGRESS, not wall clock — every survivor must actually print
+    # its 10 `WROTE` lines and `DONE`, or the run is a hang. See
+    # `_WRITER_PROGRESS_BOUND_S` for the boundary measurement (#10045).
     for i in (0, 1, 3, 4):
         w = _spawn_writer(canonical, i, writes=10)
-        w.wait(timeout=60)
+        seen = _WriterProgress(w, f"survivor w{i}").drain()
+        wrote = [ln for ln in seen if ln.startswith("WROTE")]
+        assert len(wrote) == 10, f"survivor w{i} reported {len(wrote)} writes: {seen!r}"
         time.sleep(1)  # stagger so each persists before the next
 
     # SIGKILL writer 2's process group mid-run (writer-death): the python
@@ -627,12 +999,16 @@ def test_writer_death_keys_survive_reconnect(monkeypatch):
     # reuse, not RDB reload. Wait for the first WROTE line so >=1 write
     # completed before the kill — killing on a blind sleep raced server
     # boot and made this test flaky (#819).
+    # The read that waits for it is bounded too: the pre-fix `for line in
+    # k.stdout` had NO bound at all, so a starved writer stalled this test
+    # until pytest's own 300 s timeout and left the leg unattributable
+    # (#10045).
     k = _spawn_writer(canonical, 2, writes=10)
-    for line in k.stdout:
-        if line.startswith("WROTE"):
-            break
+    prog = _WriterProgress(k, "killed writer w2")
+    first = prog.next_line()
+    assert first.startswith("WROTE"), f"expected a completed write before the kill, got {first!r}"
     os.killpg(k.pid, signal.SIGKILL)
-    k.wait()
+    prog.kill()  # idempotent: killpg already fired, this reaps the child
     time.sleep(2)  # let the daemon settle before reconnecting
 
     os.environ["TORTOISE_DB_PATH"] = canonical
@@ -937,6 +1313,19 @@ def test_kill9_warm_db_aof_carries_post_save_writes(monkeypatch):
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
     monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
+    # ⛔ The SUBJECT here is DURABILITY — does the AOF carry the post-RDB-save
+    # writes across a SIGKILL — not latency. The reopen below restarts the
+    # embedded daemon, which replays the AOF, and the product's read bound
+    # (``projection._DB_SOCKET_TIMEOUT_DEFAULT`` = 10 s) decides that restart on
+    # a contended host: measured 2026-11-05 on run 42076633842, this test redded
+    # at the `fresh = FalkorProjection()` line with
+    # `redis.exceptions.TimeoutError: Timeout reading from socket` — the boot
+    # window does NOT retry it, because #10447 retries only REFUSED connects,
+    # not a server that accepted the connection and has not answered yet. Pin
+    # the read bound through the documented knob (its ceiling is 60 s) so a
+    # latency budget stops deciding a durability assertion. The 8/8 assertion
+    # is untouched — a lost write still fails it.
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "60")
     from tortoise.projection import FalkorProjection
 
     # Graceful close → RDB saved

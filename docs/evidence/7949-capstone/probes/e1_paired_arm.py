@@ -236,12 +236,6 @@ def main(argv: list[str] | None = None) -> int:
     # not a refusal (`sysexits`: malformed INPUT is `EX_DATAERR`, not an internal
     # error, #10610 review at `2d9e8608`). `object_floor` stays the bar READER for
     # the count floor; it is simply no longer the first thing to touch the share.
-    #
-    # Restored at #10833: the fold's own reconcile commit (`0e2437786`) put the
-    # map-backed read back in front, which re-reds
-    # `tests/test_9889_capstone_probes.py::test_the_min_before_share_refuses_an_unreadable_floor`
-    # in this very tree — a merge artifact, not the "pre-existing #7949 drift" that
-    # commit's message reported.
     share_floor = min_before_share(prereg)
     floor = object_floor(prereg)
     print(f"corpus fixtures_hash={corpus_sha} head={head}", flush=True)
