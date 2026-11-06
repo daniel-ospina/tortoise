@@ -1193,7 +1193,11 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
 
 
 def _jsonl_names(events_dir: str, *, strict: bool = False) -> list[str]:
-    """The `*.jsonl` entries in `events_dir`, sorted (`[]` on any error).
+    """The `*.jsonl` entries in `events_dir`, sorted.
+
+    Answers `[]` on error, EXCEPT under `strict=True`, where only
+    `FileNotFoundError` answers `[]` and every other listing failure RAISES
+    `CensusError` (see below).
 
     ⛔ `strict=True` re-raises instead of answering `[]` (#11113 review cycle 9,
     P2). `[]` means "no logs here", and one caller refuses on that answer — so
@@ -1254,9 +1258,12 @@ def _one_replayable_log(events_dir: str) -> str | None:
     ⛔ AND THE LOADER'S THIRD ANSWER IS A REFUSAL HERE TOO (#11113 review
     cycle 9, P2). `None` means "recovery would have nothing to replay", and the
     caller proceeds on it — so it is only ever a genuine NEGATIVE: zero or 2+
-    `*.jsonl`, an empty/garbage log, or `not S_ISREG` (a FIFO, where "not
+    `*.jsonl`, an empty/garbage log, `not S_ISREG` (a FIFO, where "not
     replayable" is the honest answer precisely because a plain open would
-    block). A log that `os.listdir` has just shown to EXIST but that this
+    block), or a name whose target VANISHED between the listing and the open
+    (ENOENT — a dangling symlink, or a writer rotating the log: the state is
+    KNOWN ABSENT there, unlike the EACCES arm below, which is UNASKABLE). A log
+    that `os.listdir` has just shown to EXIST but that this
     process cannot OPEN or READ is the third answer, and it was being reported
     here as the second: measured on the parent of this commit, a 0-node store
     with a readable log REFUSED while the identical store with the same log at
@@ -1303,8 +1310,16 @@ def _one_replayable_log(events_dir: str) -> str | None:
             return None           # FIFO/device/directory: not a log we can read
         if info.st_size > _LOST_LOG_MAX_BYTES:
             return path           # too big to read, but it certainly has events
-        with os.fdopen(os.dup(fd), "rb") as fh:
-            raw = fh.read()
+        # The dup'd descriptor must not survive a failure in `fdopen` itself —
+        # the `with` closes it only AFTER `fdopen` returns one.
+        dup_fd = os.dup(fd)
+        try:
+            with os.fdopen(dup_fd, "rb") as fh:
+                dup_fd = None     # `fdopen` took ownership; the `with` closes it
+                raw = fh.read()
+        finally:
+            if dup_fd is not None:
+                os.close(dup_fd)
     except OSError as exc:
         # The same third answer, one frame down: a read that DIES mid-file is
         # "could not ask", not "nothing to replay". The handler also covers the
