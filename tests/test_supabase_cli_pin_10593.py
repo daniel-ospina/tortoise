@@ -257,47 +257,11 @@ def _normalized_input_collisions(with_mapping: dict) -> list[str]:
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
-def _setup_cli_node(workflow_text: str) -> yaml.MappingNode:
-    """The setup-cli step's COMPOSED node, before PyYAML resolves any construct away.
-
-    `yaml.safe_load` is the wrong reader for a question about CONSTRUCTS: by the time a dict exists,
-    merge keys are flattened and aliases are followed, so no probe over the dict can see them. That
-    is the whole reason this function exists next to `_setup_cli_step` — one answers "what did this
-    parse to", the other answers "what did the author write".
-    """
-    doc = yaml.compose(workflow_text)
-    assert isinstance(doc, yaml.MappingNode), "workflow did not parse as a mapping"
-    nodes: list[yaml.MappingNode] = []
-    for top_key, top_value in doc.value:
-        if not (isinstance(top_key, yaml.ScalarNode) and top_key.value == "jobs"):
-            continue
-        for _job_key, job_node in getattr(top_value, "value", []) or []:
-            if not isinstance(job_node, yaml.MappingNode):
-                continue
-            for job_key, job_value in job_node.value:
-                if not (isinstance(job_key, yaml.ScalarNode) and job_key.value == "steps"):
-                    continue
-                for item in getattr(job_value, "value", []) or []:
-                    if not isinstance(item, yaml.MappingNode):
-                        continue
-                    for item_key, item_value in item.value:
-                        if (
-                            isinstance(item_key, yaml.ScalarNode)
-                            and item_key.value == "uses"
-                            and isinstance(item_value, yaml.ScalarNode)
-                            and _is_setup_cli_step(item_value.value)
-                        ):
-                            nodes.append(item)
-    assert nodes, "no `supabase/setup-cli` step found — the migration door changed shape"
-    assert len(nodes) == 1, f"expected exactly one setup-cli step, found {len(nodes)}"
-    return nodes[0]
-
-
 def _construct_refusals(workflow_text: str) -> list[str]:
     """Every YAML CONSTRUCT inside the setup-cli step that PyYAML resolves and GitHub Actions does not.
 
     Scoped to the step and walked over composed nodes, because a check over the parsed dict cannot
-    see these at any level (see `_setup_cli_node`). Two constructs, both found live in review:
+    see these at any level (see `_setup_cli_step_node`). Two constructs, both found live in review:
 
     * a **merge key** — plain `<<`, tagged `tag:yaml.org,2002:merge`. Refused at EVERY depth, because
       `with: {version: …}` supplied by a step-level `<<:` is the same fail-open as one inside `with:`:
@@ -315,7 +279,7 @@ def _construct_refusals(workflow_text: str) -> list[str]:
     is not a divergence and refusing it would be a false block.
     """
     found: list[str] = []
-    step_node = _setup_cli_node(workflow_text)
+    step_node = _setup_cli_step_node(workflow_text)
     first_line, last_line = step_node.start_mark.line, step_node.end_mark.line
 
     def walk(node: object) -> None:
@@ -388,9 +352,13 @@ def _requested_version(workflow_text: str) -> str:
     )
     literals = _literal_version_lines(workflow_text)
     assert literals, (
-        f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step — PyYAML "
-        "resolved it from a construct (merge key, alias) that GitHub reads differently, so the "
-        "value asserted here is not necessarily the CLI CI installs"
+        f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step. Two shapes land "
+        "here and this message must not send a reader hunting for the wrong one: a YAML CONSTRUCT "
+        "this reader resolves differently from CI (merge key, alias — `_construct_refusals` refuses "
+        "those first), or a step written on ONE LINE as a flow mapping "
+        "(`- {uses: …, with: {version: …}}`), which has no `version:` line of its own for any reader "
+        "to check. In both cases the value asserted here is not provably the value installed; write "
+        "`version:` on its own line inside the step."
     )
     assert len(literals) == 1, (
         f"the setup-cli step carries {len(literals)} literal `version:` lines ({', '.join(literals)}) "
