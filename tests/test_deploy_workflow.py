@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -4021,6 +4022,96 @@ def test_the_health_build_block_is_documented_for_operators():
     )
 
 
+#: Depths at which the census's historical tree is sought in a SHALLOW clone, mirroring
+#: `tests/test_9397_about_edge_properties.py::_SHALLOW_DEPTHS`. Bounded on purpose: the cost is
+#: one shallow branch fetch and the bound is the point at which the tree is genuinely too old to
+#: reach — reported as a SKIP that says so, never as a measurement of zero.
+_CENSUS_SHALLOW_DEPTHS = (120, 400, 1500)
+
+
+def _census_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """A read-only git command in `repo`; a git that cannot run reports a NON-ZERO exit.
+
+    Never raises: every caller decides what a failure means, and none of them may read it as
+    "the command returned nothing" (#4309's fail-open shape).
+    """
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - no git at all
+        return subprocess.CompletedProcess([*args], 127, stdout="", stderr=str(exc))
+
+
+def _census_commit_available(repo: Path, rev: str) -> bool:
+    """True when `rev` resolves to a commit in THIS checkout's history."""
+    return _census_git(repo, "cat-file", "-e", f"{rev}^{{commit}}").returncode == 0
+
+
+def _census_is_shallow(repo: Path) -> bool:
+    """True when this checkout is a SHALLOW clone (`--is-shallow-repository`)."""
+    done = _census_git(repo, "rev-parse", "--is-shallow-repository")
+    return done.returncode == 0 and done.stdout.strip() == "true"
+
+
+def _census_deepen_to(
+    repo: Path, rev: str, depths: tuple[int, ...] = _CENSUS_SHALLOW_DEPTHS
+) -> bool:
+    """Make `rev` reachable IF the checkout is shallow — bounded, best effort.
+
+    ⛔ Gated exactly like `tests/test_9397_about_edge_properties.py::_ensure_commit`, whose
+    docstring records the measurement: `git fetch --depth=N` on a NON-shallow clone turns
+    `--is-shallow-repository` from `false` to `true` and cuts `git rev-list --count
+    origin/main` from 6106 to 120 — it TRUNCATES a developer's full history. So a full clone
+    that lacks the rev is never shallow-ified: this returns False and the caller SKIPS with a
+    message, rather than failing on a tree that structurally cannot carry the object.
+
+    The refspec is explicit so the fetch does not depend on `remote.origin.fetch` being
+    configured — a `actions/checkout@v4` clone of a PR does not set it up the way a developer
+    clone does, and `git fetch origin main` alone would then leave no `refs/remotes` entry.
+    """
+    if _census_commit_available(repo, rev):
+        return True
+    if not _census_is_shallow(repo):
+        return False
+    for depth in depths:
+        _census_git(
+            repo,
+            "fetch",
+            "--quiet",
+            f"--depth={depth}",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main",
+        )
+        if _census_commit_available(repo, rev):
+            return True
+    return False
+
+
+def _census_count_at(repo: Path, rev: str, paths: list[str]) -> int:
+    """The census's line count at `rev` — FAIL-CLOSED on a git failure.
+
+    `git grep` exits **1** when it selects nothing (the legitimate "0 lines" reading) and
+    **128** when the object is missing. Summing stdout without looking at the exit code reads
+    the second as the first: a command that never ran would then satisfy a note that states 0,
+    which is the #4309 shape this whole block exists to close, reproduced inside its own pin.
+    """
+    done = _census_git(repo, "grep", "-c", _RECORD_DSN_ENV, rev, "--", *paths)
+    assert done.returncode in (0, 1), (
+        f"`git grep` at {rev} failed (exit {done.returncode}) instead of selecting nothing "
+        f"(exit 1), so its stdout is NOT a census of zero lines:\n{done.stderr.strip()}"
+    )
+    measured = 0
+    for line in done.stdout.splitlines():
+        tail = line.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            measured += int(tail)
+    return measured
+
+
 def _superseded_census_note() -> str:
     """The epic's #9548 supersession note for the first census command, verbatim.
 
@@ -4177,31 +4268,32 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "commit `785bb2b59`"
     )
     # ... and the number is EXECUTED at the tree it names, not asserted: the same
-    # census the doc publishes, over the same path set, against the named sha.
-    import subprocess
-
-    _git = subprocess.run(
-        [
-            "git",
-            "grep",
-            "-c",
-            "TORTOISE_RECORD_DSN",
-            pre_sha,
-            "--",
-            "fly.toml",
-            "entrypoint.sh",
-            ".github/workflows/",
-            "docs/infra-runbook.md",
-        ],
-        cwd=str(_REPO_ROOT),
-        capture_output=True,
-        text=True,
-    )
-    measured = 0
-    for line in _git.stdout.splitlines():
-        tail = line.rsplit(":", 1)[-1]
-        if tail.isdigit():
-            measured += int(tail)
+    # census the doc publishes, over the same path set (`paths`, read out of the doc
+    # above rather than retyped here), against the named sha.
+    #
+    # ⛔ AND IT MUST NOT RED ON A TREE THAT CANNOT SEE THE OBJECT (#11064 review, HIGH).
+    # This file is `tier1` (`config/ci-surfaces.yml:7593`), so it runs in python-ci's `test`
+    # job, and that job's ONLY checkout is a bare `actions/checkout@v4`
+    # (`.github/workflows/python-ci.yml:680` job header, `:898` the checkout) — the default
+    # `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`
+    # belongs to the separate `changes` job (`:279`), which does not share a working tree.
+    # `047c91f7a` is 386 commits behind `origin/main`, so a depth-1 checkout does not carry it
+    # and `git grep` exits 128 with EMPTY stdout — the un-guarded form then summed that to
+    # `measured == 0` and failed `measured == pre_count` on a CORRECT tree on every PR, a
+    # false RED produced by a guard whose purpose is to stop false GREENs. The repo already
+    # records this environment fact (`tests/test_capstone_preregistration_9075.py:550-566`:
+    # "CI test jobs check out at `fetch-depth: 1`") and carries five `--is-shallow-repository`
+    # guards for it; this is the sixth, in `_ensure_commit`'s shape (bounded deepen when
+    # SHALLOW only, else an explicit skip — never a silent pass, never a false red).
+    if not _census_deepen_to(_REPO_ROOT, pre_sha):
+        pytest.skip(
+            f"`{pre_sha}` is not an object in this checkout (shallow: "
+            f"{_census_is_shallow(_REPO_ROOT)}) and a bounded fetch to depth "
+            f"{_CENSUS_SHALLOW_DEPTHS[-1]} did not reach it, so the census cannot be "
+            "MEASURED here. The textual pins above still ran; this SKIP is not a pass, and "
+            "the executed half of this pin needs a checkout carrying its history"
+        )
+    measured = _census_count_at(_REPO_ROOT, pre_sha, paths)
     assert measured == pre_count, (
         f"the note states {pre_count} line(s) at {pre_sha}, but running the census "
         f"there returns {measured} — the number and the tree are then two different "
@@ -4284,6 +4376,99 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     assert "3 lines immediately before #9548" not in row, (
         "§A8's evidence cell still carries the retired 3-line reading — the "
         "figure the census note's own last paragraph calls stale"
+    )
+
+
+def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp_path):
+    """#11064 review (HIGH): the executed census must not read a git failure as zero lines.
+
+    Two defects, both MEASURED here on a throwaway repo — no network, no DB, no docker:
+
+    1. FAIL-OPEN — `git grep` at an object this checkout does not carry exits **128** with
+       EMPTY stdout. The pre-fix block summed stdout and got `0`, so a note that ever states
+       `0` would be satisfied by a command that never ran: the `#4309` shape this block exists
+       to close, reproduced inside its own pin.
+    2. FALSE RED — that same empty stdout was compared against a real count, so on python-ci's
+       depth-1 `test` job (`.github/workflows/python-ci.yml:898`, a bare
+       `actions/checkout@v4`) this pin failed on a CORRECT tree on every PR. The depth-1 clone
+       below reproduces the shape: the old tree is absent, and `_census_deepen_to` reaches it
+       with a bounded fetch instead of reddening — while a FULL clone that lacks the rev is
+       never shallow-ified, because `tests/test_9397_about_edge_properties.py::_ensure_commit`
+       measured that `git fetch --depth=N` truncates a developer's history.
+
+    Non-vacuity: on the pre-fix tree none of these helpers exists (the logic was inline and
+    unguarded), so this test reds at its first call — the defect, not the fixture. The two
+    `pytest.raises` arms are the ones the pre-fix code could not produce at all.
+    """
+    repo = tmp_path / "census-repo"
+    runbook = repo / "docs" / "infra-runbook.md"
+    runbook.parent.mkdir(parents=True)
+    # A path in the census set that selects NOTHING (the legitimate exit-1 reading), committed
+    # so the "git grep exits 1 when it selects nothing" arm is measured on a real path.
+    (repo / "fly.toml").write_text('[app]\nname = "fixture"\n', encoding="utf-8")
+    assert _census_git(repo, "init", "-q", "-b", "main").returncode == 0
+
+    def commit(n_lines: int, message: str) -> str:
+        runbook.write_text(
+            "".join(f"export TORTOISE_RECORD_DSN=line{i}\n" for i in range(n_lines)),
+            encoding="utf-8",
+        )
+        for args in (
+            ("add", "-A"),
+            (
+                "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "-m", message,
+            ),
+        ):
+            done = _census_git(repo, *args)
+            assert done.returncode == 0, f"fixture git {args} failed: {done.stderr}"
+        head = _census_git(repo, "rev-parse", "HEAD")
+        assert head.returncode == 0, head.stderr
+        return head.stdout.strip()
+
+    census_paths = ["docs/infra-runbook.md"]
+    old_sha = commit(2, "two census lines")
+    commit(5, "five census lines")
+
+    # The reachability predicate the old block never asked.
+    assert _census_commit_available(repo, old_sha)
+    assert not _census_commit_available(repo, "0" * 40)
+    # A legitimate "selects nothing" (exit 1) is a measurement of ZERO, not a failure...
+    assert _census_count_at(repo, old_sha, ["fly.toml"]) == 0
+    # ...while an object the checkout does not have is a FAILURE, never a zero.
+    with pytest.raises(AssertionError) as excinfo:
+        _census_count_at(repo, "0" * 40, census_paths)
+    assert "failed" in str(excinfo.value) and "NOT a census of zero" in str(excinfo.value)
+    # The real counts, at the tree each was measured at.
+    assert _census_count_at(repo, old_sha, census_paths) == 2
+    assert _census_count_at(repo, "HEAD", census_paths) == 5
+
+    # ── the CI shape: a depth-1 checkout ────────────────────────────────────
+    shallow = tmp_path / "shallow"
+    clone = _census_git(
+        tmp_path, "clone", "-q", "--depth", "1", f"file://{repo.resolve()}", str(shallow)
+    )
+    assert clone.returncode == 0, clone.stderr
+    assert _census_is_shallow(shallow)
+    assert not _census_commit_available(shallow, old_sha), (
+        "the depth-1 fixture must not carry the old tree — otherwise it does not reproduce "
+        "the environment the HIGH finding was measured in"
+    )
+    # The PRE-FIX reading of that state: `git grep` fails, stdout is empty, and the sum is 0.
+    with pytest.raises(AssertionError):
+        _census_count_at(shallow, old_sha, census_paths)
+    # The guard's answer is to DEEPEN (bounded), not to red: measured, not asserted.
+    assert _census_deepen_to(shallow, old_sha, depths=(2, 4, 8))
+    assert _census_count_at(shallow, old_sha, census_paths) == 2
+
+    # ── and the deepen arm must never touch a FULL clone ────────────────────
+    # A bogus rev on a full clone returns False WITHOUT fetching: if the shallow gate were
+    # dropped, `git fetch --depth=1` would truncate this repo's history and
+    # `--is-shallow-repository` would flip to true — the destructive side effect
+    # `_ensure_commit` documents.
+    assert not _census_deepen_to(repo, "0" * 40, depths=(1,))
+    assert not _census_is_shallow(repo), (
+        "the deepen arm shallow-ified a FULL clone — that truncates a developer's history"
     )
 
 
