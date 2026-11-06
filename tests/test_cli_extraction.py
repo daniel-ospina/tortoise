@@ -1520,11 +1520,16 @@ class TestWriterContract(unittest.TestCase):
         self.assertEqual(receipt["folded_onto_other_sources"], 1)
         # #7704: the fold KEEPS the new source instead of dropping it. Two
         # surfaces, pinned separately: the `extractedFrom` property stays the
-        # survivor's OWN creating source — a SCALAR, so the equality-filtered
-        # read-back keeps answering for it — and the folded SET rides
-        # `extractedFromAll` (#7704 review P1; writing the set into the
-        # equality-matched property hid the survivor from the read door, which
-        # is why `folded_onto_other_sources` is derived from the write result).
+        # survivor's OWN creating source — a SCALAR, so the property-equality
+        # arm of the read door keeps answering for it (and since #10063 the
+        # `:Source` edge arm does too) — and the folded SET rides
+        # `extractedFromAll` (#7704 review P1; writing the set into that
+        # property DID hide the survivor from the read door, which is why
+        # `folded_onto_other_sources` is derived from the write result and never
+        # from what a read happens to return. ⛔ That hiding was the pre-#10063
+        # world: the edge arm answers now, so this sentence is the record of why
+        # the write shape is pinned by the PROPERTY assertion below, not a claim
+        # that a set written into the property would be unreadable today).
         check = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
         try:
             hits = check.query(content=shared, include_retracted=True)
