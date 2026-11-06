@@ -191,6 +191,21 @@ MAX_SLOW_SHARDS = 26
 SLOW_LEG_WALL_TARGET_MIN = 10.0
 SLOW_LEG_SETUP_ALLOWANCE_MIN = 2.0
 
+# #6744: `SLOW_LEG_WALL_TARGET_MIN` is the PER-LEG share, and a cap turns the
+# JOB's wall into `waves x (max_leg + setup)`. Once `test-slow` declares
+# `max-parallel: 3` over 5 legs (`ceil(5/3)` = 2 waves), a guard that holds only
+# the per-leg number stays green while asserting a wall the job cannot hit —
+# exactly the defect its own docstring names for the per-leg fixed cost. So the
+# projection takes the cap and reports the wave band, and the guard holds the
+# BAND to this constant.
+#
+# OVERRIDES: the 10 m house guideline (#9539, the owner's #6792 form ruling) as
+# the slow JOB's ceiling — capping the matrix at 3 buys cross-PR fairness with
+# two waves, 9.02 m per leg -> 18.04 m band from the committed `durations` map
+# (measured ~9 m -> ~18 m, `docs/ops/ci-wall-clock.md` §7), so this ceiling is
+# that band's own 1.11x rather than a quieter 10 m.
+SLOW_LEG_CAPPED_WALL_TARGET_MIN = 20.0
+
 # #6135: the per-shard WATCHDOG budget. The watchdog is PER-LEG, so a smaller
 # shard needs a smaller budget — inheriting the old 55m means a hung 6.6-minute
 # shard is detected 8× later than it should be, holding the REQUIRED aggregate
@@ -4373,23 +4388,36 @@ def slow_matrix_include(entries: list[dict]) -> dict:
 
 
 def slow_wall_projection(manifest: dict,
-                         entries: list[dict] | None = None) -> dict:
+                         entries: list[dict] | None = None,
+                         max_parallel: int | None = None) -> dict:
     """#9539: the projected slow-leg wall, from the committed `durations` map.
 
     `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This is
     the number the wall guard holds to `SLOW_LEG_WALL_TARGET_MIN`; it is a
     PROJECTION from the map (never a measurement), which is why the setup
     allowance is a measured constant rather than an assumption inside it.
+
+    #6744: it is the PER-LEG wall, and with the matrix capped it is not the
+    job's. Pass the job's `max_parallel` and the projection also reports
+    `waves = ceil(legs / cap)` and `projected_job_wall_min = waves x per-leg` —
+    the number the guard holds to `SLOW_LEG_CAPPED_WALL_TARGET_MIN`. Left None
+    (the uncapped shape, and every pre-#6744 caller) `waves` is 1 and the two
+    walls are equal.
     """
     entries = slow_shard_entries(manifest) if entries is None else entries
     legs = sorted(((e["est_seconds"] / 60.0) for e in entries), reverse=True)
     pool = sum(e["est_seconds"] for e in entries) / 60.0
+    per_leg = (legs[0] if legs else 0.0) + SLOW_LEG_SETUP_ALLOWANCE_MIN
+    waves = 1 if not max_parallel else -(-len(legs) // int(max_parallel))
     return {"legs_min": [round(x, 2) for x in legs],
             "pool_min": round(pool, 2),
             "max_leg_min": round(legs[0], 2) if legs else 0.0,
             "setup_allowance_min": SLOW_LEG_SETUP_ALLOWANCE_MIN,
-            "projected_wall_min": round((legs[0] if legs else 0.0)
-                                        + SLOW_LEG_SETUP_ALLOWANCE_MIN, 2),
+            "projected_wall_min": round(per_leg, 2),
+            "max_parallel": max_parallel,
+            "waves": waves,
+            "projected_job_wall_min": round(waves * per_leg, 2),
+            "capped_target_min": SLOW_LEG_CAPPED_WALL_TARGET_MIN,
             "target_min": SLOW_LEG_WALL_TARGET_MIN}
 
 
