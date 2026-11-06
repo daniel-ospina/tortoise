@@ -7595,14 +7595,17 @@ tier1:
 # `test_record_schema_placement.py` now reads TWO doc paths that select NO
 # surface at all — `docs/infra-runbook.md` (§"Secrets Matrix" / the §9 drill row)
 # and `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
-# (the `_ARMED_SOURCE_OF_TRUTH` anchors) — while it is registered only on `core`
-# (`:2725`). `docs/` is in NON_PYTHON_PREFIXES and neither path matches a
-# SOURCE_PATTERNS row, so a runbook-only OR 09-only diff filters to
-# `changed == []` and takes the docs-only early return: tier1 ONLY. Measured on
-# this tree BEFORE this entry (`tools.ci_selection.select`): `[docs/infra-runbook.md]` →
-# `surfaces=[]`, 73 tier1 files, pin NOT selected; same for the 09 path. (74 and
-# pin SELECTED once the entry below is in — re-measure, do not read 73 as now.) So its
-# runbook pin (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which
+# (the `_ARMED_SOURCE_OF_TRUTH` anchors) — while its only registration is the
+# `core` surface's own entry, which no docs-only diff can reach. `docs/` is in
+# NON_PYTHON_PREFIXES and neither path matches a SOURCE_PATTERNS row, so a
+# runbook-only OR 09-only diff filters to `changed == []` and takes the docs-only
+# early return: tier1 ONLY. Measured on the authoring tree BEFORE this entry
+# (`tools.ci_selection.select`): `[docs/infra-runbook.md]` → `surfaces=[]`, pin
+# NOT selected; same for the 09 path. (The tier-1 COUNT is not load-bearing and
+# grows whenever `main` adds a tier1 file — re-measure it rather than trusting a
+# number here. What matters is that the pin becomes SELECTED once the entry below
+# is in.) So its runbook pin
+# (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which
 # requires the §9 drill row to still name a `captured` session and a `direct`
 # DSN) and its 09 anchor were ASLEEP on the only diffs that can break them —
 # delete `captured`/`direct` from that row, or drop the 09 arming anchor, and the
