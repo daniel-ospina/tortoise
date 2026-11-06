@@ -49,16 +49,19 @@ recorded, because each one on its own is a trap:
 | `#11211` | (part of `#11021` — **not** a PR close) | **MERGED** 2026-11-06T20:27:05Z | `aa414b4d5` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` IS the `origin/main` tip** — but ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
 
-⛔ **`git merge-base --is-ancestor` is not a landing test, in EITHER direction.** At `af864a42a` the
-branch commit `78e8abae6` was genuinely not an ancestor (the PR was open) and the check answered
-correctly by accident. After the squash merge it answers **1 for a PR that HAS landed** — the branch
-commit is not in the squashed merge commit's history at all. So the same command reads "not landed" both
-before and after, and a lane trusting it would park `#10985` on a seam that is already in the tree. **The
-load-bearing read is the tree**: `git cat-file -e origin/main:tortoise/identity_hold.py` → **PRESENT**
-(it was absent at `af864a42a`, hence the earlier text), and `gh issue view 10997 --json state` →
-`CLOSED 2026-11-06T21:33:55Z`. `git log --all --grep='#10997'` finds the commits either way — `--all`
-walks every ref, so it cannot distinguish a landing from a branch. **Neither grep of history nor an
-ancestry check answers "is it in the tree"; only a read of the tree does.**
+⛔ **`git merge-base --is-ancestor` is a ONE-SIDED landing test: exit `1` is not a landing test, and
+`0` is.** Exit **0** is sound — the commit is in `origin/main`'s history, so it landed, and that is what
+the two ✅ rows above rest on (`e918f3d6d` and `aa414b4d5` both answer 0). Exit **1** proves nothing: at
+`af864a42a` the branch commit `78e8abae6` was genuinely not an ancestor (the PR was open) and the check
+answered correctly by accident; after the squash merge it *still* answers **1 for a PR that HAS landed**,
+because the branch commit is not in the squashed merge commit's history at all. So a lane reading `1` as
+"not landed" would park `#10985` on a seam that is already in the tree — and that is the trap, one
+direction only. **The load-bearing read is the tree**: `git cat-file -e
+origin/main:tortoise/identity_hold.py` → **PRESENT** (it was absent at `af864a42a`, hence the earlier
+text), and `gh issue view 10997 --json state` → `CLOSED 2026-11-06T21:33:55Z`. `git log --all
+--grep='#10997'` finds the commits either way — `--all` walks every ref, so it cannot distinguish a
+landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to answer "did it land"; a
+`0` does answer it, and only a read of the tree answers "is its content here".**
 
 ⚠️ **`#11211` did not close `#11021`** — `gh pr view 11211 --json closingIssuesReferences` is empty
 and its own body says `Part of #11021 — not Closes`, routing the remaining row to `#11239` (OPEN).
@@ -363,9 +366,9 @@ git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch
                                                           # without this the next line exits 128
                                                           # "Not a valid object name" — a sha read is
                                                           # reproducible only while the branch ref lives
-git merge-base --is-ancestor 78e8abae6 origin/main; echo $?   # 1 EVEN THOUGH IT LANDED (squashed)
-                                                          # (128 = "cannot even ask" — also NOT a
-                                                          # landing; either way, never 0-for-landed)
+git merge-base --is-ancestor 78e8abae6 origin/main; echo $?   # 1 EVEN THOUGH IT LANDED (the landing
+                                                          # was squashed). 0 WOULD be conclusive; 1 and
+                                                          # 128 ("cannot even ask") are both no-verdict
 git cat-file -e origin/main:tortoise/identity_hold.py && echo PRESENT   # not `ls` — that reads the checkout
 gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
