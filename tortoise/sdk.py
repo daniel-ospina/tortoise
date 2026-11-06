@@ -13311,15 +13311,24 @@ class TortoiseSDK:
                                 "the identity; pass a fresh key with "
                                 "dedup=False to mint a second point (#6110)",
                                 _supplied_key, pid)
-                        # ⛔ #10481 made the KEY match trim-aware, so the
-                        # supplied spelling can differ from the one this point
-                        # was MINTED with ("  PK  " now hits a holder of "PK").
-                        # The key IS the identity and the FIRST-WRITER spelling
-                        # is what the graph holds (#6110: a dedup hit never
-                        # silently reassigns an existing key) — so the incoming
-                        # spelling is NOT applied. Relaying it would rewrite the
-                        # stored value on a pure dedup hit, bump ``updatedAt`` on
-                        # every alternating re-run (#490 churn), and be LIVE-ONLY:
+                        # The supplied spelling can differ from the one this
+                        # point was MINTED with, in BOTH directions — and only
+                        # one of them is #10481's:
+                        #   * PADDED supplied → TRIMMED holder is #10481's new
+                        #     reach (the seek is trim-aware now, so "  PK  "
+                        #     hits a holder of "PK");
+                        #   * TRIMMED supplied → PADDED holder was ALREADY
+                        #     reachable pre-fix, because the raw term matched
+                        #     the engine's trimmed index entry (#10481's own
+                        #     measurement). That half closes a PRE-EXISTING
+                        #     silent reassignment, not a #10481 consequence.
+                        # Either way the key IS the identity and the
+                        # FIRST-WRITER spelling is what the graph holds (#6110:
+                        # a dedup hit never silently reassigns an existing
+                        # key) — so the incoming spelling is NOT applied.
+                        # Relaying it would rewrite the stored value on a pure
+                        # dedup hit, bump ``updatedAt`` on every alternating
+                        # re-run (#490 churn), and be LIVE-ONLY:
                         # ``PointRevised`` folds no ``key`` arm, so a rebuild
                         # reverts the spelling (#9732).
                         _existing_key = _existing.get("key")

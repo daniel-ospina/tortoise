@@ -2315,6 +2315,42 @@ def test_a_padded_key_never_REASSIGNS_the_stored_spelling(sdk):
         "a pure dedup hit bumped updatedAt (#490 churn)")
 
 
+def test_a_TRIMMED_key_never_REASSIGNS_a_PADDED_stored_spelling(sdk):
+    """THE MIRROR DIRECTION — a PRE-EXISTING reassignment, not a #10481 one.
+
+    The other half of the same fold. On the PRE-FIX tree the seek sent the raw
+    term and the index holds the TRIMMED one, so a TRIMMED supplied key already
+    hit a holder stored PADDED — #10481's own measurement, taken on pre-fix
+    code. That arm had no ``key`` pop, so ``props`` kept ``key="PK"`` and
+    ``create_point`` ran ``update_point(pid, key="PK", updatedAt=now)``: a
+    pure dedup hit silently REWROTE the stored spelling and bumped
+    ``updatedAt`` (#6110 first-writer-wins violated; live-only, since
+    ``PointRevised`` folds no ``key`` arm — a rebuild reverts it, #9732).
+
+    ⛔ Both directions are asserted for the same reason the bundle pair is
+    (``test_the_bundle_key_identity_holds_in_the_OTHER_padding_direction``):
+    the commentary explains the padded-supplied case at length, so a future
+    narrowing of the condition to "only when the SUPPLIED spelling is padded"
+    would read as consistent with it and silently restore the overwrite with
+    the suite green.
+    """
+    a = sdk.create_point("statement", "MIRROR-A", key="  PK  ", dedup=True)
+    before = sdk.get_point(a["id"]).get("updatedAt")
+    folds = [sdk.create_point("statement", "MIRROR-B", key="PK", dedup=True)
+             for _ in range(3)]
+    assert [f["id"] for f in folds] == [a["id"]] * 3, (
+        "a trimmed re-run did not fold onto the padded holder: "
+        f"{[f['id'] for f in folds]} vs {a['id']}")
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key, n.updatedAt",
+        params={"id": a["id"]}).result_set
+    assert stored[0][0] == "  PK  ", (
+        "a trimmed dedup hit rewrote the PADDED stored spelling to "
+        f"{stored[0][0]!r} — the first-writer spelling must stand (#6110)")
+    assert stored[0][1] == before, (
+        "a pure dedup hit bumped updatedAt (#490 churn)")
+
+
 def test_a_bundle_naming_ONE_key_by_TWO_paddings_is_the_SAME_identity(sdk):
     """#10481 (review finding 1) — the bundle-order SIMULATION and the seek must
     agree on what one key IS.
