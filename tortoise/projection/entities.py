@@ -2039,8 +2039,12 @@ class _EntityHandlers:
         # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
         # Another spelling (`storyArc`) still lands, exactly as any unknown key
         # does — that is #228's passthrough contract, not a narrative route, and
-        # no reader or restore lane reads it (door 2 restores the `story_arc`
-        # column only).
+        # no reader or restore lane reads it: the RECORD → CACHE restore is
+        # denied by `cache_projection.CACHE_FORBIDDEN_COLUMNS` as well (#10394
+        # door 2), so THAT route cannot materialise the key. ⛔ Scoped to that
+        # route on purpose — the `:Point` REPLAY half of the same door is still
+        # open (`_upsert_point_props`, #10429), and a `storyArc` spelling lands on
+        # any passthrough route, as the sentence above says.
         "story_arc",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of

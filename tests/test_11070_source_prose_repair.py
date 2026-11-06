@@ -6,7 +6,7 @@ WHAT IS BROKEN (measured, not reasoned)
 A capture that ran BEFORE #10852 wrote the transcript's first substantive
 utterance into ``Source.summary`` and derived ``_searchText`` from that same
 value. #10852 stopped the writer doing it again; it deliberately did not heal
-the nodes already holding the pair, and no route reaches them:
+the nodes already holding the pair, and no OTHER route reaches them:
 
 * a re-capture is the #1727 no-op replay (the mint gate), pinned in
   ``tests/test_10000_source_prose.py``;

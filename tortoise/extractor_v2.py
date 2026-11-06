@@ -12497,10 +12497,10 @@ def _s2_seam_armed() -> bool:
     """Whether `TORTOISE_S2_DECISION_SEAM` is truthy — the seam's ONE arming read.
 
     ⚠️ **Arming the seam ARMS VET unconditionally.** `_vet_enabled` ORs this in,
-    because the seam *is* S2.2's arbiter: with `TORTOISE_VET` unset and no
-    arbiter injected, `extract_session_v2` would skip the VET passes entirely
-    and the seam would never be consulted — an armed seam that no gate runs is
-    the inert-enforcer failure class (it reports itself as protection and
+    because the seam *is* S2.2's arbiter: with the mechanical half killed
+    (`TORTOISE_VALUE_GATE=0`, `#10996`) and no arbiter injected, this term is
+    the only thing that runs the pass — without it the seam is never consulted,
+    which is the inert-enforcer failure class (it reports itself as protection and
     protects nothing). Two consequences, stated because they surprise a reader:
     this flag **overrides an explicit `TORTOISE_VET=0`** (it is a new contributor
     to `_vet_enabled`, not a rider on it), and it does **not** by itself arm S2.3
