@@ -1822,27 +1822,24 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
 #: `home`"* was ACCEPTED (cycle 17 widened the SPAN, not the vocabulary — the
 #: span fix and the cue fix are different halves). Pinned in both directions by
 #: `_VECTOR_INVERSIONS` and `_SUMMARY_NEGATION_INVERSIONS`.
+#: ⛔ **THE EXCLUSIVITY-ADVERB SET.** `not X` becomes `not ONLY X` — X asserted —
+#: when one of these follows the cue, so the cue is not a negation there. The set
+#: is DATA rather than a hand-written alternation so that its completeness is a
+#: test (`test_every_affirmative_adverb_is_refused_on_BOTH_guards`) rather than a
+#: claim in a comment: the previous two cuts each enumerated the family PARTIALLY
+#: (`only|unlike|mind`, then `+just|merely|solely|simply|purely|exclusively|least`)
+#: and each time a sibling — `not merely`, then `not alone`, then `not to mention`
+#: — left the ENTIRE pin green over a footnote stating §12.1b's inverse.
+#: `to\s+mention` is multi-word on purpose: a bare `to` would refuse the
+#: legitimate *"…is not to be read from"*.
+_AFFIRMATIVE_ADVERBS = (
+    "only", "just", "merely", "solely", "simply", "purely",
+    "exclusively", "least", "unlike", "mind", "alone", r"to\s+mention",
+)
+
 _NEGATION_CUE = (
     r"(?:\b(?:not|never|cannot|can\s?not|no longer|by no means|in no case)\b"
-    #: ⛔ NOT a cue inside an AFFIRMATIVE construction. `not only X but also Y`,
-    #: `not merely X`, `not least X`, `not unlike X` and `never mind X` all ASSERT
-    #: X (or assert more than X), so counting the `not` certified sentences that
-    #: state the inverse of the section they are pinned to: measured, `a session's
-    #: `summary` is §4.6 metadata and not only the narrative but also the summary
-    #: is §4.6 metadata` left the whole pin GREEN, and `it is not only
-    #: `:Source.summary` but also the narrative` passed `_negates_the_summary`.
-    #:
-    #: ⛔ **THE FAMILY, NOT THREE SPELLINGS.** Closing `only`/`unlike`/`mind` alone
-    #: left the siblings open and UNPINNED — `not merely`, `not just`, `not solely`,
-    #: `not simply`, `not least` were all still certified (measured: the footnote
-    #: re-worded to "…and the vector embeds not merely the narrative but also the
-    #: summary column" passed the ENTIRE pin, 75 passed; the same mutation spelled
-    #: `not only` red 3). An allow-list of adverbs is the wrong shape for a class,
-    #: so the exclusion names the class: every exclusivity adverb that turns
-    #: `not X` into `not ONLY X` (X asserted). Each surviving member is pinned in
-    #: the positive direction in `_*_INVERSIONS`.
-    r"(?!(?:\s+(?:only|just|merely|solely|simply|purely|exclusively|least"
-    r"|unlike|mind)\b))"
+    rf"(?!\s+(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b)"
     r"|\w+n['’]t\b)"
 )
 
@@ -2522,6 +2519,11 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "⛔ not just `:Source.summary` but the S1 narrative"),
     ("the `not least` affirmative",
      "⛔ not least `:Source.summary`"),
+    #: The two the enumeration missed one cut later — `not alone … but also` is
+    #: standard English for `not only … but also`, and the document itself writes
+    #: the family form at `docs/architecture/STORAGE-ARCHITECTURE.md:41`.
+    ("the `not alone` affirmative",
+     "⛔ not alone `:Source.summary` but the S1 narrative"),
 ]
 
 
@@ -2555,7 +2557,9 @@ def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str)
     "why,clause", _SUMMARY_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
          "negation-in-other-clause", "not-only-but-also", "not-merely",
-         "not-just", "not-least"])
+         "not-just", "not-least", "not-alone"])
+
+
 def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
@@ -2666,6 +2670,9 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     ("the `not just` affirmative", "not just the narrative"),
     ("the `not solely` affirmative", "not solely the narrative"),
     ("the `not least` affirmative", "not least the narrative"),
+    #: The two the enumeration missed one cut later.
+    ("the `not alone` affirmative", "not alone the narrative"),
+    ("the `not to mention` affirmative", "not to mention the narrative"),
 ]
 
 
@@ -2701,6 +2708,48 @@ def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
         f"accepted; refusing it reports a defect the document does not contain")
 
 
+#: The independent copy of the affirmative-adverb set that makes the DATA
+#: non-shaveable. `_AFFIRMATIVE_ADVERBS` is what the cue reads; THIS is what the
+#: suite requires it to contain — so deleting an adverb from the regex reds a
+#: test, instead of silently reopening the fail-open (the reviewer's measurement:
+#: dropping `simply`, `purely` or `exclusively` from the previous hand-written
+#: alternation left the whole pin at 82 passed, unchanged).
+_REQUIRED_AFFIRMATIVE_ADVERBS = (
+    "only", "just", "merely", "solely", "simply", "purely",
+    "exclusively", "least", "unlike", "mind", "alone", "to mention",
+)
+
+
+def test_every_affirmative_adverb_is_refused_on_BOTH_guards():
+    """*What value makes this test fail?* Shaving the exclusion set.
+
+    `not <exclusivity adverb> X` ASSERTS X, so the cue is not a negation there —
+    and every time this family was closed PARTIALLY, the surviving sibling left
+    the ENTIRE pin green over a section stating its own inverse. Measured in
+    sequence: `not merely` and `not just` (75 passed), then `not alone` and
+    `not to mention` (82 passed). So the requirement is asserted here, against a
+    copy that lives in the TEST rather than in the regex: removing a member from
+    `_AFFIRMATIVE_ADVERBS` now fails `missing` below, and a member that stops
+    excluding fails its own assertion, on BOTH guards.
+    """
+    missing = [adv for adv in _REQUIRED_AFFIRMATIVE_ADVERBS
+               if adv.replace(" ", r"\s+") not in _AFFIRMATIVE_ADVERBS]
+    assert not missing, (
+        f"`_AFFIRMATIVE_ADVERBS` no longer excludes {missing!r}. Every one of "
+        f"these turns `not X` into `not ONLY X`, which ASSERTS X — dropping it "
+        f"reopens the affirmative-cue fail-open this list exists to close")
+    for adv in _REQUIRED_AFFIRMATIVE_ADVERBS:
+        narrative = _NARRATIVE_CARRIER.format(f"not {adv} the narrative")
+        assert not _negates_the_narrative(narrative), (
+            f"`_negates_the_narrative` counted `not {adv}` as a negation of the "
+            f"narrative: {narrative!r} — it asserts the narrative")
+        trap = (f"⛔ and it does not {adv} read `{_SUMMARY_OBJECT}` but the S1 "
+                f"narrative")
+        assert not _negates_the_summary(trap), (
+            f"`_negates_the_summary` counted `not {adv}` as a negation of "
+            f"`{_SUMMARY_OBJECT}`: {trap!r} — it asserts the trap AND more")
+
+
 @pytest.mark.parametrize(
     "why,clause", _NARRATIVE_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
@@ -2709,7 +2758,8 @@ def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
          "not-only-affirmative", "not-unlike-affirmative",
          "never-mind-affirmative", "not-merely-affirmative",
          "not-just-affirmative", "not-solely-affirmative",
-         "not-least-affirmative"])
+         "not-least-affirmative", "not-alone-affirmative",
+         "not-to-mention-affirmative"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
@@ -2816,7 +2866,13 @@ def test_the_REAL_footnote_LOSES_the_negation_when_it_is_dropped():
         f"`_negates_the_narrative` still accepted it: {dropped!r} — the guard "
         f"is not bound to the narrative's own clause")
     for why, clause in _NARRATIVE_NEGATION_REWORDINGS:
-        if clause == "never the narrative":
+        # ⛔ Skip any re-wording the DOCUMENT may ALREADY carry: `head_clause` is
+        # derived from the tree, so a document re-worded into one of these very
+        # forms makes the replacement a no-op — and the old skip named one
+        # literal, so `and not the narrative` / `and cannot be the narrative`
+        # tripped the "changed nothing" assert on a document whose level
+        # assertion was GREEN (measured).
+        if "and " + clause == head_clause:
             continue
         mutated = footnote.replace(head_clause, "and " + clause)
         assert mutated != footnote, (
