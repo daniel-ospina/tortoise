@@ -270,6 +270,19 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
         "a client disconnect must not be logged at ERROR — the ERROR level is "
         "what feeds the Sentry logging integration"
     )
+    # Review round 6 (P3): the DEBUG line is asserted POSITIVELY, not only as an
+    # absence of ERROR. Absence-of-ERROR is equally true when nothing is logged
+    # at all, so deleting the `.debug("client disconnected: …")` call in
+    # `_unhandled_exception_handler` left all 15 tests green — while that line is
+    # the only per-abort signal we keep (uvicorn's own ERROR is not ours to
+    # silence). This assertion is the pin that makes its removal red.
+    assert any(
+        r.levelno == logging.DEBUG and "client disconnected" in r.getMessage()
+        for r in caplog.records
+    ), (
+        "a benign disconnect must still be logged at DEBUG — it is the only "
+        "per-abort signal we keep"
+    )
     # Review round 1 (P3): the response SHAPE is deliberately unchanged. A 204
     # for a request whose body never arrived would tell a slow-but-alive caller
     # "succeeded" for work that did not happen; the 500 tells it the truth, and
@@ -314,6 +327,16 @@ def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == [], (
         "and it must not be logged at ERROR — that is what feeds the Sentry "
         "logging integration"
+    )
+    # Positive half of the same pin (review round 6, P3): the inbound-reset
+    # branch keeps the same single DEBUG signal, so its removal must red HERE
+    # too — the two benign branches are reached by different exceptions.
+    assert any(
+        r.levelno == logging.DEBUG and "client disconnected" in r.getMessage()
+        for r in caplog.records
+    ), (
+        "an inbound reset is still a disconnect — it must log at DEBUG, which "
+        "is the only per-abort signal we keep"
     )
     assert response.status_code == 500
 
