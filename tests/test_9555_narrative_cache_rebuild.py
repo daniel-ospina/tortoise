@@ -37,8 +37,8 @@ three windows that can actually fail:
 ⛔ WHAT CHANGED AT #10394, and why the pin moved rather than being deleted.
 This leg used to assert the OPPOSITE of window 3 — that a rebuilt node CARRIED
 `story_arc` — which was true, and was the defect: the RECORD → CACHE restore is
-one of the routes that put §9.1's prose back into the graph, so #10017's purge
-was undone by the next restore. §9.1 says the narrative lives in Postgres and
+one of the routes that put §9.1's prose back into the graph, so #10000's write
+deletion was undone by the next restore. §9.1 says the narrative lives in Postgres and
 NOT in the graph, so *"the narrative survives the cache being deleted"* is now
 measured where it is true: through the RECORD READER (`record_text.
 serve_from_record`, window 1 and the post-wipe read at the end), while the
@@ -205,7 +205,7 @@ def test_the_public_capture_path_REBUILDS_THE_CACHE_FROM_THE_RECORD_and_the_narr
                            for _labels, props in after_nodes), (
                 "the rebuilt cache holds §9.1's narrative on a node — the "
                 "restore re-materialised what #10000 stopped writing, so "
-                "#10017's purge is undone by the next routine restore "
+                "the next routine restore undid #10000's write deletion "
                 "(#10394 door 2)")
         finally:
             proj.close()
@@ -514,7 +514,7 @@ def test_the_event_journal_replay_drops_the_prose():
 #
 # ⛔ The fix is at that seam — STOP THE WRITE — not a purge pass after it: a
 # post-restore sweep would still rent the RAM for the duration and would have to
-# be re-run on every restore, which is #10017's purge being undone in a loop.
+# be re-run on every restore, i.e. #10000's write deletion undone in a loop.
 
 _NARRATIVE_DOOR_ROW = {
     # The RECORD row, not a graph node: every column a `:Source` row carries
@@ -544,7 +544,9 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
         non-vacuous: it is one key dropped, not an empty row.
     (3) a REAL restore into a graph that already holds a legacy node carrying
         the prose leaves `sum(size(n.story_arc))` at 0 over every node — this is
-        #10017's "purge → restore → 0" acceptance, and it is the arm that would
+        the "restore → 0" acceptance (`#10017`'s own purge → restore → 0 is about
+        the legacy TURN population, which no purge-free restore touches —
+        #11325), and it is the arm that would
         red if the deny were implemented in the reader only.
     (scope) `public.session_narrative` is untouched by this change: the record
         READER is not on this path at all (`record_text.serve_from_record` reads
@@ -665,8 +667,8 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
     proj = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"],
                                     graph_name=graph)
     try:
-        # The UN-PURGED state: a node that still carries the prose, exactly what
-        # #10017's graph-side purge is meant to remove. The restore runs over it
+        # A LEGACY state: a node that still carries the prose. No purge removes
+        # it (`#10017`'s never matches a `:Source` — #11325); the restore runs over it
         # (it wipes first), so a restore that re-materialises the key puts it
         # back and this leg reads non-zero.
         proj.g.query(
