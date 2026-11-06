@@ -385,8 +385,8 @@ _INDEX_CENSUS_RE = re.compile(
 # CENSUS. The row ALSO declares the record's **live operational state**, and that
 # half carried the pre-arming census ("the record is NOT ARMED … because R1 has
 # still not armed the DSN") for eleven days after the arming was measured, while
-# `08-hosted-prerequisites.md` §A8 and `09-record-tenancy-decision.md` — the file
-# this row's own source column points at — were corrected to say the opposite
+# `08-hosted-prerequisites.md` §A8 — the file this row's own source column points
+# at — and `09-record-tenancy-decision.md` were corrected to say the opposite
 # (#11064 review, P2: the correction stopped one hop short, at the doc that
 # ROUTES every reader, so a lane arrives at the corrected page with the stale
 # premise already loaded). The arming is measured, not asserted: `#9548` comment
