@@ -3502,8 +3502,8 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # while the footnote itself was reverted.
     assert _RETIRED_VECTOR_FOOTNOTE not in text, (
         f"the document is back to *\"§9.4's summary vector "
-        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — now that `#10852` has landed an "
-        f"episodic "
+        f"{_RETIRED_VECTOR_FOOTNOTE}\"* — now that `#10852` has landed "
+        f"(`ba87797c4`) an episodic "
         f"`:Source.summary` is a topic lexicon, so that sentence would tell a "
         f"designer to embed the one field §9.4 says the vector must not read. "
         f"The field §9.4 indexes is the narrative in `{home}` (§9.1); the "
