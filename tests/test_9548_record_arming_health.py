@@ -660,12 +660,66 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     `tests/test_9078_record_written_by_production_path.py`; this is its other
     half. Asserted against the real `metrics()` dict, key-set form, so the test
     cannot pass vacuously on a substring of some other key.
+
+    ⛔ It also pins the docstring that makes the claim, AT the claim: the pair's own
+    bullet (``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE
+    channel) and the "under the SAME names ``metrics()`` publishes" sentence — a
+    bare mention test was measured GREEN with both broken (#9548 review P2). The
+    runbook's field row is pinned next, in `tests/test_deploy_workflow.py`, and for
+    a stated reason: it runs on a docs-only diff and this file does not.
     """
     published = monitoring.metrics()
 
     assert {"record_writes_applied", "record_last_write_at"} <= set(published), (
         "the /health block documents these as `metrics()`'s own names, and "
         f"metrics() publishes {sorted(published)}"
+    )
+    # …and the claim must be pinned WHERE IT IS MADE, not merely mentioned: the
+    # docstring says the record counters are published "under the SAME names
+    # ``metrics()`` publishes". A bare `name in docstring` was measured GREEN on
+    # both halves being broken — a renamed bullet head (`applied_writes` /
+    # `last_write_at`) still mentions the real names later in the same bullet, and
+    # "SAME names" inverted to "DIFFERENT names" matched nothing. So the pair's
+    # bullet and the SAME-names sentence are both pinned, on a whitespace-normalised
+    # copy so a reflow cannot red them (#9548 review P2).
+    # ⚠️ The SAME-names pin runs to the END of its sentence — the full stop after
+    # `is claimed about.` — and each earlier stop point was MEASURED open, not
+    # assumed: stopping at `publishes` stayed green on a narrowing appended there,
+    # and stopping at `(#9188/#9231/#9307)` stayed green on one appended after the
+    # citation. So a narrowing placed anywhere INSIDE this sentence reds the pin.
+    # ⛔ What it does NOT bind, stated so no reader over-trusts it: both halves below
+    # are substring memberships, so a narrowing introduced as a SEPARATE NEW SENTENCE
+    # after `is claimed about.` (e.g. "Separately, the positive pair is documented
+    # elsewhere") still passes. Closing that needs sentence-level parsing of the
+    # docstring — deliberately out of scope for a prose pin; treat this as
+    # "the claim's own sentence is intact", never as "the whole docstring agrees with
+    # it" (#11128 review P3 at 786baf3e7).
+    # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
+    # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
+    # here: a runbook-only diff selects no surface and runs `tier1` only, and this
+    # file is on `api`/`core` — so a row pin in THIS file is asleep on the one diff
+    # that can re-break it (measured via `tools/ci_selection.py`).
+    doc = " ".join((hosted_api._record_health.__doc__ or "").split())
+    assert (
+        "``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE channel"
+        in doc
+    ), (
+        "`_record_health`'s docstring no longer documents the positive pair as the "
+        "pair the payload publishes — the field is published but undocumented, "
+        "which is the paper-only claim inverted"
+    )
+    assert (
+        "the record counters, under the SAME names ``metrics()`` publishes "
+        "(#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so without "
+        "them indicator (b) of #9548 (``record_write_failures`` = 0) has no reader at "
+        "all on the deployment it is claimed about." in doc
+    ), (
+        "`_record_health`'s docstring no longer claims (INSIDE that sentence) that the "
+        "record counters are published under `metrics()`'s own names, or has narrowed "
+        "the claim there so it excludes the positive pair — that claim is what ties the "
+        "/health keys to the ones the rest of the process reads, so losing it makes a "
+        "rename silent. ⚠️ Scope: this is a substring pin on the sentence itself, so a "
+        "narrowing added as a separate later sentence is outside it by construction."
     )
 
 
