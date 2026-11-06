@@ -1056,6 +1056,17 @@ class PackManifest:
     # [{id, name?, description?, steps[], enforcement?, edges?}]
     chains: list[dict] = dataclasses.field(default_factory=list)
 
+    # The pack's DECLARED business hierarchy: [{path: 'Theme → Epic', type: hasPart}].
+    #
+    # ⛔ Carried, not just validated (#11001). `_validate` has shape-checked this
+    # list since R6, and until #11001 the parsed value was DROPPED here — the
+    # declaration reached no producer, so `hierarchies` was config that could not
+    # change the graph. The read is `tortoise.pack_hierarchy.declared_hierarchy`,
+    # which resolves each entry to a namespaced (from_kind, predicate, to_kind)
+    # and binds it to a write path from `relation_write_paths`. Nothing infers a
+    # hierarchy that is not written here.
+    hierarchies: list[dict] = dataclasses.field(default_factory=list)
+
     # Manifest v3 (R6 §3.4): extraction activation + enforcement config,
     # normalized — always present with defaults (backward compat: absent in
     # v2 manifests → active: true, sourceTypes: [], enforcement default warn).
@@ -1510,6 +1521,7 @@ class PackRegistry:
             relations=ont.get("relations", []),
             kind_defs=ont.get("kindDefs", {}),
             chains=ont.get("chains", []),
+            hierarchies=ont.get("hierarchies", []),
             extraction=self._normalize_extraction(raw.get("extraction")),
             kind_subclasses=ont.get("subclassOf", {}),
             kind_equivalences=ont.get("equivalentTo", {}),

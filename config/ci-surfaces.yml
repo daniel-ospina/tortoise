@@ -239,6 +239,18 @@ surfaces:
   # `__main__.py`-only diff (the #1349/#2938/#3154 silent-drop class). The file
   # is NOT in `carve_out:` — it rides in `test_files`.
   - test_9556_record_restore_verb.py
+  # #10663 review (P2): DUAL-REGISTERED with `core` for the #9556 reason exactly
+  # — two of its tests pin `tortoise/__main__.py` (the `PlacementTableUnavailable`
+  # branches in `_cmd_record_reconcile` and `_cmd_record_restore`), and
+  # `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERN whose match REPLACES
+  # the `core` fallback. Measured with only the `core` row in place:
+  # `select(['tortoise/__main__.py'])` → `surfaces=['api']`, this file ABSENT —
+  # so a follow-up that deletes the `except PlacementTableUnavailable: raise`
+  # re-wraps the packaging fault as "the record is unreadable" and merges green,
+  # unguarded on the only diff that can cause it (the #1349/#2938/#3154 class
+  # this PR fixed for the generator one row further down). The other tests pin
+  # `cache_projection.py`/the carrier, which select `core`.
+  - test_10663_placement_table_packaged.py
   # #9555 (R7): §9.1's narrative CARRIER and §9.4's verbatim fetch. DUAL-
   # REGISTERED with `core` for the #9556 reason exactly: `record_text.py` (the
   # fetch composition, its exit codes, its scope proof) and its reader
@@ -2706,6 +2718,19 @@ surfaces:
   # the script's own query building (which raised `KeyError: 'id'` before it
   # wrote anything) was never executed by a test.
   - test_backfill_references_5141.py
+  # #10663: the placement table's PACKAGE-DATA carrier. `cache_projection.py`
+  # is the subject (it reads the table at runtime), so this rides the same
+  # surface as the two cache-projection suites below.
+  # ⚠️ The drift it guards is introduced by a placement-DOC-only edit, and NO
+  # `tier1` row is needed for that: `tools/ci_selection.py::CORE_ALSO` already
+  # names `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md`,
+  # so such a diff measures `surfaces=['core']` instead of taking the docs-only
+  # early return — measured. (`tier1` is for a doc that selects NO surface;
+  # adding this file there would run it on every unrelated docs-only PR.)
+  # Pinned by tests/test_ci_selection.py::
+  # test_the_placement_table_drift_pin_runs_on_a_placement_doc_only_diff, which
+  # reds if that CORE_ALSO entry ever disappears.
+  - test_10663_placement_table_packaged.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #10853: the §9.1/D1 narrowing at the RECORD->CACHE door
@@ -5113,6 +5138,15 @@ surfaces:
   - test_pack_cli.py
   - test_pack_content_v3.py
   - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
+  # #11001 landed `tests/test_pack_hierarchy_11001.py` WITHOUT a registration, so
+  # from that merge `--integrity` reported `manifest drift: ['test_pack_hierarchy_11001.py']`
+  # on EVERY PR's merged tree — the #3153/#2876 main-side drift class, this time
+  # blocking #11210's merge. Registered here, beside the pack suites it belongs
+  # with: the module under test (`tortoise/pack_hierarchy.py`) matches no
+  # SOURCE_PATTERN and falls through to `core`, which is the surface that runs
+  # this file. Measured: `select(['tortoise/pack_hierarchy.py']) -> ['core']`,
+  # this file selected.
+  - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
   # #2818: the per-kind VALUE-FIELD declaration surface — `values` in
@@ -6330,6 +6364,21 @@ surfaces:
   # half is closed by the `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
   # #1349/#3332/#3616 silent-drop class.
   - test_gh_read_cache.py
+  # #11021: the referentiality test — a phrase whose referent is not in the phrase
+  # (a pronoun / deictic / generic head) is HELD as a mention on the claims that
+  # used it and never minted as an :Object. #11021 review P1 measured this file in
+  # NO surface at all: `tools/ci_selection.py --integrity` listed it as
+  # `manifest drift: ['test_referentiality_11021.py']` (redding the REQUIRED
+  # `manifest-integrity` leg) and no leg selected it, so the rows the PR rests on —
+  # the two-pass union rows, the mutation evidence and the corpus measurements —
+  # ran only where a human ran them by hand. `core` because the subject is the
+  # extraction write path (`tortoise/extractor_v2.py` + `commit_schema`); ALSO
+  # `tier1`, because two of its arms read committed `docs/`/`tests/`-resident
+  # artifacts (`docs/evidence/7949-capstone/corpus/e1e2_corpus.json`,
+  # `tests/eval/write_path/salience_labels.jsonl`) and a docs-only diff takes
+  # `select()`'s early return — the #9076 placement for `test_e1_e2_measurement.py`.
+  # Hermetic: a scripted model, no DB, no graph, no network.
+  - test_referentiality_11021.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
@@ -7990,6 +8039,12 @@ tier1:
 # matters for this artifact: the evidence log, the corpus JSON and the probe all
 # live under `docs/`.
 - test_e1_e2_measurement.py
+# #11021: the referentiality test's `core` row carries the reasons; this arm is
+# the one that matters for its `docs/`-resident artifacts (the capstone corpus and
+# the `not_an_entity` label set), which a docs-only diff can edit while the `core`
+# fallback never selects this file (#4309/#9076). Hermetic — a scripted model, no
+# DB, no network.
+- test_referentiality_11021.py
 # #9075: the capstone pre-registration gate (`core` above) — a markdown table scan, a YAML pins
 # parse, a JSON record cross-check and a `tests/eval/write_path` re-derivation. No DB, no network,
 # no graph fixture, so a docs-only PR runs it here — and a docs-only PR is exactly the change class
@@ -8787,6 +8842,8 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_pack_hierarchy_11001.py: 2.0  # added by #11021 to repair a `main` breakage (see the `core` row): the file landed at `e918f3d6dd` with no manifest row, so it had no reading AND `manifest-integrity` was red on `main`. The #3400/#4348 trap applies unchanged — a fast file added by a PR must carry a weight, and a default is not a reading. Hermetic: manifest YAML plus `pack_hierarchy`/`pack_registry`, no DB, no graph, no network, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_referentiality_11021.py: 2.0  # new in #11021 (review P1) — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input. The row must EXIST, not merely default: the `core` + `tier1` registrations put it in `fast_pool()`, and a fast file added by a PR must carry a weight at all ("a default is not a reading"). What the weight covers: hermetic — a scripted model and in-memory embed lists, no DB, no graph, no network, no `gh`; the only file reads are the committed capstone corpus under `docs/evidence/7949-capstone/corpus/` and `tests/eval/write_path/salience_labels.jsonl`, plus `extractor_v2`'s own predicates. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every row a later review round adds, and this file gained eleven of them inside its own PR. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_vocabulary_gap_run_reader_10626.py: 2.0  # new in #10626 — the same #3400/#4348 trap as the row below: a file a PR ADDS cannot carry a CI junit reading yet, so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default (a default is not a reading). 14 of its 18 arms are hermetic; the 4 `sdk`-fixture arms skip visibly without `TORTOISE_DB_URI` (re-derived at `#10790`: `grep -c '^def test_'` -> 18 — the 18th is that PR's review-note pin for the LAZY wiring itself, a source read that adds no `sdk` arm, so the hermetic/`sdk` split moves 13/4 -> 14/4). `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_cli_config_show.py: 2.0  # new in #10694 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet, so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default ("a default is not a reading"): the `api` registration above puts it in `fast_pool()`, and a fast file added by a PR must carry a weight at all. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_closes_landing.py: 2.0  # new in #10597 (PR #10634) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default — the `core` registration above puts it in `fast_pool()`, and a fast file added by a PR must carry a weight at all ("a default is not a reading"). MEASURED at this head in the state the row changes, so the counterfactual is not folklore: `fast_pool()` is 1068 files with 36 unweighted = 1032/1068 = 0.966292 (`duration_coverage_issues() == []`) WITHOUT this row — i.e. its absence reds nothing today, and the floor's headroom is 70 files, not one. Treat that as a SNAPSHOT OF A MOVING DENOMINATOR, not a constant: `tools/ci_selection.py --integrity` is the authority. What the weight covers: hermetic and cheap — it loads `tools/closes_landing.py` by path against in-memory PR records and, in `test_the_parser_agrees_with_a_real_commonmark_renderer`, renders each shape through `markdown_it`'s CommonMark preset in-process; it shells out only to its own module for the exit-code and offline-CLI cases. No DB, no graph, no network, no model, no `gh`. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
@@ -11007,6 +11064,7 @@ durations:
   test_record_projection.py: 3.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.9s) is a LOWER bound; kept 3.2
   test_record_reconcile_trigger.py: 2.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_record_schema_placement.py: 0.2
+  test_10663_placement_table_packaged.py: 2.0  # new in #10663 — PR-added file: the header's flat DEFAULT_FAST_WEIGHT, not a local reading (the note and the value must agree, #2818)
   test_11075_record_declared_type_contract.py: 2.0  # PR-added file: the header's flat DEFAULT_FAST_WEIGHT, NOT a local reading (this map forbids a local reading as a shard input, #2818/#3419)
   test_record_writer_seam.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4
   test_references_boundary_5213.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2

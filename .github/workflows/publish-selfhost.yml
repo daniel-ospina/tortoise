@@ -65,6 +65,13 @@ jobs:
   # rebuilds incrementally) and asserts the in-container registry loads the
   # full starter set + the sample transcript. Bound derived from the
   # INSTALLED constant (4 today, 5 once #1933 merges — never hardcoded).
+  #
+  # #10663: and the image must ship the RECORD property namespace. That defect
+  # was MEASURED in this image (`record-reconcile` exited 2 on a real record),
+  # and this workflow is the hard pre-publish gate (`build-and-publish: needs:
+  # packaging-smoke`), so without the assertion below the carrier could vanish
+  # from the published image with every gate green — the mirror of the
+  # deploy-hosted assertion, in the image the defect was measured in.
   packaging-smoke:
     runs-on: ubuntu-latest
     permissions:
@@ -99,6 +106,22 @@ jobs:
           assert set(reg.packs) >= set(DEFAULT_STARTER_PACKS), "wrong pack set in container"
           assert Path("/app/tests/sample_transcript.txt").exists(), "transcript missing"
           print(f"selfhost image pack smoke OK: {len(reg.packs)} >= {bound}")
+          from tortoise.cache_projection import (
+              PACKAGED_PLACEMENT_TABLE, placement_columns,
+          )
+          assert not Path("/app/docs").exists(), (
+              "this smoke only proves the packaged carrier when the docs tree is "
+              "absent — the image grew a docs/ COPY and the assertion is now "
+              "vacuous")
+          assert PACKAGED_PLACEMENT_TABLE.exists(), (
+              f"no packaged placement table at {PACKAGED_PLACEMENT_TABLE} — the "
+              "image cannot read the record property namespace (#10663)")
+          placement = placement_columns()
+          got = placement.get("point", {}).get("point_kind")
+          assert got == "pointKind", (
+              "placement table did not resolve in-container: got " + repr(got))
+          print("selfhost image placement-table smoke OK: record property "
+                "namespace resolves without docs/")
           '
 
   build-and-publish:

@@ -1578,6 +1578,41 @@ def test_the_injected_arbiter_is_the_fourth_off_path_term(monkeypatch):
         "ORs first), not only the three env switches")
 
 
+def test_the_seam_arms_the_pass_when_the_mechanical_half_is_killed(monkeypatch):
+    """`_vet_enabled`'s `or _s2_seam_armed()` is STILL load-bearing (#10996).
+
+    `_s2_seam_armed`'s docstring used to justify that term with "`TORTOISE_VET`
+    unset and no arbiter injected ⇒ `extract_session_v2` would skip the VET
+    passes entirely". Since `#10996` that is NOT the state that skips them: an
+    unset value gate now arms the pass as `vet_enabled`'s third disjunct, so the
+    sentence read as if the term were dead code — and a lane deleting
+    `or _s2_seam_armed()` on that reading restores the `#10072` inert-enforcer
+    regression (an armed seam that no gate consults).
+
+    It is not dead. With the mechanical half explicitly killed
+    (`TORTOISE_VALUE_GATE=0`, this PR's own kill switch), `TORTOISE_VET` unset
+    and no arbiter injected, the seam's term is the ONLY arming left. The three
+    assertions are deliberately separate: the first two are the PREMISE (the
+    other two contributors really are off), the third is the consequence, so the
+    pin cannot pass by leaning on a term it exists to exclude.
+    """
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
+    monkeypatch.delenv("TORTOISE_VET", raising=False)
+    monkeypatch.setenv("TORTOISE_S2_DECISION_SEAM", "1")
+    from tortoise import extractor_v2 as v2
+
+    assert v2._value_gate_enabled() is False, (
+        "the mechanical half must be KILLED here, or this pin proves nothing "
+        "about the seam's own term")
+    assert v2._s2_seam_armed() is True, (
+        "the seam flag must be armed, or the third assertion cannot be caused "
+        "by it")
+    assert v2._vet_enabled() is True, (
+        "`_vet_enabled` must OR the seam in: with `TORTOISE_VET` unset and the "
+        "value gate killed, deleting `or _s2_seam_armed()` skips every VET pass "
+        "while the seam reports itself as armed (`#10072`)")
+
+
 def test_flag_on_removes_discarded_candidate_before_the_tail(monkeypatch):
     monkeypatch.setenv("TORTOISE_VET", "1")
     from tortoise import extractor_v2 as v2
