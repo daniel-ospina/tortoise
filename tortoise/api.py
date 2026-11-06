@@ -382,15 +382,17 @@ class EventAPI:
         # (The SDK surface does NOT refuse a caller-supplied `embedding`: `create_point`
         # and `update_point` store one VERBATIM by a recorded decision (PR #3018 review
         # P2 — see `tortoise.sdk::_sanitize_props`, which rejects the embedding IDENTITY
-        # props but deliberately not `embedding` itself). ⛔ But a vector cannot arrive
-        # HERE from those surfaces: no `add_point` call site in the tree passes an
-        # `embedding` (`extractor.run`'s sites via `capture_session`, `ingest`'s
-        # resolution event, `docs_miner`), so this branch guards the fields of INTERNAL
-        # producers rather than a tenant vector. Two guards — not one — keep a foreign
-        # vector from minting a claim it has not earned: the carry-with-no-attestation
-        # below (it cannot carry OUR attestation) and the `_forged` refusal a few lines
-        # down (the identity/marker keys that would let it FORGE one are rejected
-        # outright).)
+        # props but deliberately not `embedding` itself). ⚠️ But a vector cannot arrive
+        # HERE from those tools: their journal half lives in `tortoise.sdk`
+        # (`_journal_snapshot_from_create_map` → `_emit_event`'s
+        # `clean.setdefault("embedding", None)` for `create_point`, and the
+        # `PointRevised` record's `emit_props` for `update_point`). This branch guards
+        # the vector a DIRECT `EventAPI` caller hands to `add_point(fields=…)` —
+        # `tests/test_write_path_unreachable_seam_5148.py` pins that it arrives and is
+        # carried. Two guards — not one — keep a foreign vector from minting a claim it
+        # has not earned: the carry-with-no-attestation below (it cannot carry OUR
+        # attestation) and the `_forged` refusal a few lines down (the identity/marker
+        # keys that would let it FORGE one are rejected outright).)
         if "embedding" in fields:
             # The key stays PRESENT in both branches: an explicit None is the
             # journal saying "this id has no vector", which the replay must

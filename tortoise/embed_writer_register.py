@@ -3,8 +3,8 @@
 **Why this module exists.** `#10541` classified the embedding-writer population (the class counts
 move as writers are declared, so read `WRITER_CENSUS` rather than a number restated here) but the
 only place that classification lived was
-`tools/dod_5090_probe.py::WRITER_CENSUS`, which is a **read-only instrument** and says so at its own
-`:1264` (*"the census CLASSIFIES the unresolved set; it does not license moving this verdict"*). An
+`tools/dod_5090_probe.py::WRITER_CENSUS`, which is a **read-only instrument** and says so in its own
+header (*"the census CLASSIFIES the unresolved set; it does not license moving this verdict"*). An
 audit instrument is not a product decision: the answer to *"is this writer allowed to store a vector
 outside the gate?"* has to be resolvable **at runtime, from `tortoise/`**, or arming the EMBED gate
 (`#11086`) would let an undeclared writer bypass silently while the gap was merely *labelled*.
@@ -72,10 +72,13 @@ unclassified, absent, which is why the guard in `tests/test_embed_writer_registe
 for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace
 (`SET n = $map`), a property name INTERPOLATED into the clause, and the container-HELPER /
 COMPUTED-KEY forms a regex and a literal-slice test both miss
-(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and those forms are not hypothetical:
-the interpolation in `tortoise.cache_projection::node_statement`, the helper in
-`tortoise.sdk::_emit_event`, the computed key in `tortoise.sdk::update_point`, and the WHOLE-NODE
-replace in `tortoise.hosted_backup::restore_graph` (a writer declared here). The full list is
+(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and those forms are not hypothetical.
+⚠️ The SHAPE is what is blind, not necessarily the WRITER carrying it: the interpolation is live in
+`tortoise.cache_projection::node_statement` (that writer is genuinely ABSENT), while the helper in
+`tortoise.sdk::_emit_event` and the computed key in `tortoise.sdk::update_point` are in the census
+through OTHER statements they hold (`update_point` as `gated`), and
+`tortoise.hosted_backup::restore_graph` is declared here off its `set_embedding_clause`, NOT off its
+whole-node replace. The full list is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which is the authority: a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
 count them.
@@ -374,14 +377,17 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "(`tortoise.sdk::_sanitize_props` rejects the embedding IDENTITY props, not "
             "`embedding` itself; `_create_map[\"embedding\"]` is assigned AFTER the props "
             "loop from `_embedding_expr`; PR `#3018` review P2), so a TENANT can supply one "
-            "on those paths. ⚠️ But this row is not their journal half: no `add_point` call "
-            "site in the tree passes an `embedding` (`extractor.run`'s sites, reached from "
-            "`capture_session`; `ingest`'s resolution event; `docs_miner`), so what this "
-            "branch guards is an INTERNAL producer's `fields`, not a tenant vector. The "
-            "tenant doors' journal half is `tortoise.sdk::_emit_event`'s "
-            "`clean.setdefault(\"embedding\", None)`; their gate-side half is a `gated` "
-            "classification and therefore OUTSIDE this register's population — see the "
-            "closure-claim caveat above",
+            "on those paths. ⚠️ But this row is not their journal half, and it is not dead: "
+            "it guards a vector handed straight to `add_point`'s `fields` — a DIRECT "
+            "`EventAPI` caller, which is exactly what "
+            "`tests/test_write_path_unreachable_seam_5148.py` pins "
+            "(`add_point(…, embedding=[0.25, 0.5])` reaches this branch and is carried). "
+            "The tenant doors journal in `tortoise.sdk`: `create_point` through "
+            "`_journal_snapshot_from_create_map` → `_emit_event`'s "
+            "`clean.setdefault(\"embedding\", None)`, `update_point` through the "
+            "`PointRevised` record's `emit_props` (`update_point`'s emit). Their "
+            "GATE-side half is a `gated` classification and therefore OUTSIDE this "
+            "register's population — see the closure-claim caveat above",
             "#5004",
         ),
     ),
