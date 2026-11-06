@@ -3595,7 +3595,7 @@ text, so do not grep the 9090 listener for a counter name.
    ```
 
 2. **The counters** — `monitoring.metrics()`, read INSIDE the process that writes
-   the rows: the authenticated MCP tool `tortoise_overview(section="health")` on
+   the rows: the authenticated MCP tool `tortoise_graph_overview(section="health")` on
    the app's `/mcp` mount, which serves `monitoring.metrics()` from the same
    process that writes the rows (the retired name `tortoise_health` still answers
    as an alias), so `record_write_failures` (a `{reason: count}` dict),
