@@ -91,7 +91,12 @@ def _is_setup_cli_step(uses: object) -> bool:
 
     `_setup_cli_step` (the comparison) and `_setup_cli_step_node` (the literal-line check) both
     resolve "which step is this?" through this function, so the two readers cannot disagree about
-    it. Measured before it was shared: a second step spelled `Supabase/setup-cli@v1` carrying
+    WHICH ACTION is the step. That is all the predicate decides — the COUNT is a separate question
+    and is re-checked: one anchored step aliased twice (`- &scli …` then `- *scli`) yields two
+    entries from `yaml.safe_load` but ONE node from the node walk, which de-dupes by node identity;
+    `_setup_cli_step`'s `len(steps) == 1` fires first, so that shape still fails closed. Do not read
+    "one predicate" as "the readers cannot disagree about anything". Measured before it was shared:
+    a second step spelled `Supabase/setup-cli@v1` carrying
     `version: 3.0.0` was invisible to the case-sensitive filter, so `len(steps) == 1` held, the
     reader resolved `2.122.1`, and `_violations()` returned `[]` over a deploy job that installs a
     major-3 CLI — the exact false PASS this file exists to prevent, reached through a capital
@@ -493,17 +498,25 @@ def _config_declares_inbucket(config_text: str) -> bool:
     `[ inbucket ]`, `["inbucket"]`, `['inbucket']`, or declared through the dotted form
     `inbucket.enabled = true` — every one of those is the SAME table to any TOML parser, the CLI's
     included, and the CLI rejects every one of them alike. A detector that accepts only the
-    canonical spelling green-lights a major-3 pin over a config that still dies at config load,
-    which is the false PASS this file exists to prevent. Measured: the line regex this replaces
-    read `[ inbucket ]` and `["inbucket"]` as "no [inbucket] table" while `tomllib` reads both as
-    `{'inbucket': …}`, so the guard went GREEN over a header its own docstring names as load-bearing.
+    canonical spelling therefore **mis-diagnoses the refusal**: it reports the consent gate instead
+    of `DbConfigLoadError`, sending the reader to the `--yes` half of #11104 rather than to the
+    section header that actually killed the apply. Measured: the line regex this replaces read
+    `[ inbucket ]` and `["inbucket"]` as "no [inbucket] table" while `tomllib` reads both as
+    `{'inbucket': …}`, so six arms failed on the WRONG message.
+
+    ⛔ Scope, so this is not over-claimed: on THIS tree the detector no longer decides whether a
+    major-3 pin is refused — the ceiling below refuses every `major >= 3` unconditionally — so a
+    miss here is a wrong reason, not a false PASS. It DID decide that on `main`'s version of this
+    file, where the major-3 refusal was gated on this predicate; that is what made the guard inert
+    when #11104 migrated the config.
 
     The trailing-comment arm survives for the same reason: TOML reads `[inbucket]   # local email`
     as the same table, and so does the CLI.
 
     ⛔ FAILS CLOSED: a config this reader cannot parse returns True (treated as still declaring the
-    table), so an unreadable `config.toml` refuses a major-3 pin instead of silently permitting one
-    — `db push` cannot load an unparseable config either, so the refusal is the correct verdict.
+    table), so an unreadable `config.toml` reports the config-load reason rather than silently
+    reading as "no [inbucket] table" — `db push` cannot load an unparseable config either, so the
+    config-load verdict is the correct one.
     """
     try:
         declared = tomllib.loads(config_text)
@@ -976,16 +989,33 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
     pin = _requested_version(workflow)
 
     # (a) an `env:` supplied by an alias, pin untouched → ACCEPTED.
-    env_block = (
+    # ⛔ The anchor MUST include the pin. `env_block` alone — the two lines `env:` + the token — is
+    # NOT unique in this workflow: `check-migration-drift` carries the identical pair, and
+    # `replace(..., 1)` rewrote THAT step. Measured: the alias landed at line 142, outside the
+    # setup-cli step, so `_construct_refusals() == []` passed for a reason with nothing to do with
+    # this claim — reverting the alias arm to the false block it documents left the suite GREEN.
+    # Anchoring on `version: <pin>` + `env:` makes the substitution land where the arm claims, and
+    # the `_setup_cli_block` assert below pins that down so it cannot silently drift again.
+    env_anchor = (
+        f"          version: {pin}\n"
         "        env:\n"
         "          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}\n"
     )
-    assert env_block in workflow, (
-        "the setup-cli step's `env:` no longer has the shape this mutation drives — update it "
+    assert workflow.count(env_anchor) == 1, (
+        "the setup-cli step's `with:`/`env:` is no longer a unique sequence — this mutation would "
+        "land on a DIFFERENT step and prove nothing; update the anchor"
     )
-    env_aliased = workflow.replace(env_block, "        env: *shared\n", 1)
+    env_aliased = workflow.replace(
+        env_anchor,
+        f"          version: {pin}\n        env: *shared\n",
+        1,
+    )
     env_aliased = "env: &shared\n  SUPABASE_ACCESS_TOKEN: token\n" + env_aliased
     assert "        env: *shared" in env_aliased, "mutation (a) did not apply — vacuous"
+    assert any("*shared" in line for line in _setup_cli_block(env_aliased)), (
+        "mutation (a) landed on another step — this arm would prove nothing about the setup-cli "
+        "step, which is the only step whose refusals it asserts"
+    )
     assert _construct_refusals(env_aliased) == [], _construct_refusals(env_aliased)
     assert _requested_version(env_aliased) == pin, "an unrelated alias refused the guard"
 
