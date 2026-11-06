@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -206,13 +207,105 @@ def test_an_unreadable_config_is_unreadable(tmp_path: Path) -> None:
 # ── the protected ref, not the tree being judged ───────────────────────────
 
 
+def _git_env() -> dict[str, str]:
+    """Host-independent env for the fixtures' own git calls.
+
+    ⛔ THE THROWAWAY REPOSITORIES ARE NOT HERMETIC BY DEFAULT. Every `git` call here
+    would otherwise inherit the caller's environment and global config, and BOTH
+    failure modes are real on this fleet:
+
+      1. a global `commit.gpgsign = true` (a routine developer setting) or a global
+         `core.hooksPath` (this harness sets one) makes `git commit` exit non-zero,
+         so `check=True` turns it into `CalledProcessError` and these tests read as
+         an ERROR rather than as a finding;
+      2. an inherited `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` retargets every
+         call at a REAL repository — `git init -b main` reinitializes it, `git add -A`
+         stages the fixture's files into ITS index and `git commit` writes them onto a
+         live branch, with `check=True` reporting nothing but success.
+
+    So: every inherited `GIT_*` is dropped and both config files are pointed at
+    `os.devnull` — the same shape as `tests/test_measure_ask_distilled.py::_git_env`,
+    `tests/test_who_is_on.py::_git_env` and `tests/test_lane_stash.py::_env`.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(
-        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+        [
+            "git",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
         cwd=str(cwd),
         check=True,
         capture_output=True,
+        env=_git_env(),
     )
+
+
+def _git_out(cwd: Path, *args: str) -> str:
+    """Read from a fixture repository under the same hermetic env as `_git`."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+
+def test_the_git_fixture_ignores_a_hostile_global_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ A CONFIGURED HOST MUST NOT TURN THIS SUITE RED.
+
+    `_git` builds a throwaway repository and commits into it. If it inherited the
+    caller's global config, a routine developer setting — `commit.gpgsign = true`, or
+    a `core.hooksPath` (this harness sets one) whose hook exits non-zero — makes
+    `git commit` fail, and `check=True` reports that as `CalledProcessError`: an
+    ERROR in this suite, which reads as a finding about `tools/required_set` when it
+    is an artefact of the host. Both are set here at once; the fixture must be
+    unaffected.
+
+    Revert `_git` to `subprocess.run(...)` without `env=`/`commit.gpgsign=false` and
+    this reds on any host that has either setting.
+    """
+    hooks = tmp_path / "hostile-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\necho 'host hook ran inside the fixture' >&2\nexit 1\n", encoding="utf-8"
+    )
+    hook.chmod(0o755)
+    hostile = tmp_path / "hostile.gitconfig"
+    hostile.write_text(
+        "[commit]\n\tgpgsign = true\n"
+        "[gpg]\n\tprogram = /bin/false\n"
+        f"[core]\n\thooksPath = {hooks}\n"
+        "[init]\n\tdefaultBranch = trunk\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+
+    fixture = tmp_path / "fixture"
+    _tree(fixture)
+    _git(fixture, "init", "-b", "main")
+    _git(fixture, "add", "-A")
+    _git(fixture, "commit", "-m", "config")
+
+    # The commit landed, with the hostile config never consulted and no host hook run.
+    assert _git_out(fixture, "log", "--format=%s").splitlines() == ["config"]
+    assert MERGIFY_REL in _git_out(fixture, "ls-files").split()
 
 
 def test_derive_from_ref_ignores_a_branch_that_shrinks_its_own_set(tmp_path: Path) -> None:
@@ -249,6 +342,45 @@ def test_derive_from_ref_refuses_an_unreadable_ref(tmp_path: Path) -> None:
     with pytest.raises(RequiredSetUnreadable) as excinfo:
         derive_from_ref(tmp_path, "origin/does-not-exist")
     assert "origin/does-not-exist" in str(excinfo.value)
+
+
+def test_the_git_fixture_cannot_write_into_an_inherited_git_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ THE DANGEROUS HALF: AN INHERITED `GIT_DIR` MUST NOT REDIRECT THE FIXTURE.
+
+    With `GIT_DIR` set in the caller's environment, a non-hermetic `_git` sends
+    `git init`/`add`/`commit` at a REAL repository: the fixture's `.mergify.yml` and
+    `docs/ci/required-contexts.json` get staged into that checkout's index and
+    committed onto its branch, and `check=True` reports success. This is the class of
+    accident `tests/test_lane_stash.py::_env` was hardened against.
+
+    Revert `_git` to inherit the environment and the decoy's HEAD moves.
+    """
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    _git(decoy, "init", "-b", "main")
+    (decoy / "real.txt").write_text("real work\n", encoding="utf-8")
+    _git(decoy, "add", "-A")
+    _git(decoy, "commit", "-m", "real work")
+    decoy_head = _git_out(decoy, "rev-parse", "HEAD")
+    decoy_files = _git_out(decoy, "ls-files").split()
+
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+
+    fixture = tmp_path / "fixture"
+    _tree(fixture)
+    _git(fixture, "init", "-b", "main")
+    _git(fixture, "add", "-A")
+    _git(fixture, "commit", "-m", "config")
+
+    # The fixture committed into ITSELF (its own git dir, its own files)…
+    assert Path(_git_out(fixture, "rev-parse", "--show-toplevel")).resolve() == fixture.resolve()
+    assert MERGIFY_REL in _git_out(fixture, "ls-files").split()
+    assert _git_out(fixture, "log", "--oneline")
+    # …and the real repository the environment pointed at is untouched.
+    assert _git_out(decoy, "rev-parse", "HEAD") == decoy_head
+    assert _git_out(decoy, "ls-files").split() == decoy_files
 
 
 # ── an empty set is never a pass ───────────────────────────────────────────
