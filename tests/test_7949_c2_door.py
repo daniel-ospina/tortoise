@@ -225,6 +225,21 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
         f"sdk._extract_session_v2 at {_cite(SDK, '_extract_session_v2')} no "
         "longer CALLS extractor_v2.extract_session_v2 (its docstring and its "
         "import both name the function, so only the call form proves the hop)")
+    # §1.6.1 also names the OTHER lane's module and class in prose, and the
+    # sentence above promises the suite resolves every citation. Resolve them:
+    # relocating tortoise/extractor.py (move + fix the import) left all 18 tests
+    # green while the record's path rotted — the #8506 class (#10983 review,
+    # cycle 4).
+    m2_module = REPO / "tortoise/extractor.py"
+    classes = {node.name for node in ast.walk(_tree(m2_module))
+               if isinstance(node, ast.ClassDef)}
+    assert "LLMExtractor" in classes, (
+        f"tortoise/extractor.py no longer defines LLMExtractor — §1.6.1 and "
+        f"door.not_the_door cite it as the m2 lane's extractor (#10983)")
+    assert "_build_session_llm_extractor(" in (_body(SDK, "_extract_session_llm")), (
+        "sdk._extract_session_llm no longer builds the m2 extractor — the "
+        "non-default lane has no reachable implementation (#10983)")
+
     assert "extract_session_v2" in _funcs(EXTRACTOR), (
         f"extractor_v2.extract_session_v2 is GONE from "
         f"{EXTRACTOR.relative_to(REPO)} — the door's last hop does not exist")
@@ -401,13 +416,45 @@ def test_the_mechanical_gate_arms_the_vet_pass_on_the_default_path():
 
 
 def test_the_seam_var_the_ledger_names_is_the_one_the_module_reads():
-    """A seam name is a contract: the ledger's spelling must be the read."""
+    """A seam name is a contract: the ledger's spelling must be the read.
+
+    ⛔ Resolved from each RESOLVER's own body, docstring stripped — not from the
+    module text. The earlier version asserted `flag in _source(EXTRACTOR)`, which
+    every flag satisfies through a comment or a docstring: rewiring `_vet_enabled`
+    to read `TORTOISE_VET_LEGACY` left all 18 tests green (#10983 review,
+    cycle 4), so the acceptance arm's `TORTOISE_VET=1` and the ledger's spelling
+    could control nothing while the log declared the pass armed.
+    """
     assert 'ENV_FLAG = "TORTOISE_S2_DECISION_SEAM"' in _source(SEAM), (
         "s2_decision_seam.ENV_FLAG is no longer TORTOISE_S2_DECISION_SEAM — "
         "every acceptance log that pins that spelling is pinning nothing")
-    for flag in ("TORTOISE_S4_DELTA", "TORTOISE_VET", "TORTOISE_CLASSIFY_LATER"):
-        assert flag in _source(EXTRACTOR), f"{flag} is not read by extractor_v2"
-    assert "TORTOISE_LABEL_ORDER" in _source(EXTRACTOR)
+
+    paths = {"extractor_v2": EXTRACTOR, "value_gate": VALUE_GATE,
+             "s2_decision_seam": SEAM}
+    probe = _load_probe()
+    for flag, where, _default, _seam in probe.SEAM_LEDGER:
+        module, _, resolver = where.partition(".")
+        path = paths[module]
+        body = _body(path, resolver)
+        reads_literal = f'"{flag}"' in body or f"'{flag}'" in body
+        # Two resolvers read their flag through a module constant
+        # (``os.environ.get(ENV_FLAG)``), so the literal is not in the body.
+        reads_constant = _module_env_flag(path) == flag
+        assert reads_literal or reads_constant, (
+            f"{module}.{resolver} does not read {flag} — the ledger names a "
+            f"variable the resolver never reads, so pinning that spelling arms "
+            f"nothing (#10983): {body[:220]!r}")
+
+
+def _module_env_flag(path: Path) -> str | None:
+    """The module-level ``ENV_FLAG`` constant, if it has one."""
+    for node in ast.walk(_tree(path)):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "ENV_FLAG" \
+                        and isinstance(node.value, ast.Constant):
+                    return node.value.value
+    return None
 
 
 # ── 3. the stage vocabulary (§2 R10) ──────────────────────────────────────
@@ -682,6 +729,18 @@ def test_the_PUBLISHED_ledgers_are_the_codes_not_a_second_transcription():
         f"registration states it as the record:\n  published: "
         f"{published_json}\n  code:      {expect}")
 
+    # The TAXONOMY column too, not only the defaults: `behaviour_seam` inverted
+    # freely until the #10983 review (cycle 4), and it is the column that says
+    # whether a seam changes behaviour at all.
+    published_behaviour = {row["env"]: row["behaviour_seam"]
+                           for row in record["door"]["seams"]}
+    expect_behaviour = {env: seam
+                        for env, _w, _d, seam in probe.SEAM_LEDGER}
+    assert published_behaviour == expect_behaviour, (
+        "preregistration.json door.seams disagrees with the probe about WHICH "
+        f"seams change behaviour:\n  published: {published_behaviour}\n  "
+        f"probe:     {expect_behaviour}")
+
     # …and the DOCUMENT is a THIRD copy, read by humans. It was unpinned until
     # the #10983 review (cycle 3): setting its VALUE_GATE row back to off left
     # the suite green, re-publishing in §1.6.2 exactly the false ledger this PR
@@ -721,6 +780,25 @@ def test_the_registration_records_the_door_and_the_corpus_attribution():
     assert {row["env"] for row in door["seams"]} == {
         "TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_S2_DECISION_SEAM",
         "TORTOISE_VALUE_GATE", "TORTOISE_S4_DELTA", "TORTOISE_LABEL_ORDER"}
+
+    # The ARM is a FOURTH published copy of the pin set, and it was bound to
+    # nothing until the #10983 review (cycle 4): dropping TORTOISE_EXTRACT_MODEL
+    # — or TORTOISE_VALUE_GATE, the arm's decisive OFF pin — from `pinned_off`
+    # left 18 tests green while §1.6.2 told the reader that every one of them is
+    # written in-process, read back, and refused on a mismatch. Bind all three
+    # sets to the probe that actually sets them.
+    probe = _load_probe()
+    arm = door["acceptance_arm"]
+    assert set(arm["set_on"]) == set(probe.ARM_ON), (
+        f"door.acceptance_arm.set_on is {sorted(arm['set_on'])} but the probe "
+        f"arms {sorted(probe.ARM_ON)} (#10983)")
+    assert set(arm["pinned_off"]) == set(probe.ARM_OFF) | set(probe.DOOR_PINNED_OFF), (
+        f"door.acceptance_arm.pinned_off is {sorted(arm['pinned_off'])} but the "
+        f"probe pins off {sorted(set(probe.ARM_OFF) | set(probe.DOOR_PINNED_OFF))} "
+        f"— a record can omit a switch the run actually pins (#10983)")
+    assert dict(arm["pinned_to"]) == dict(probe.DOOR_PINNED_ON), (
+        f"door.acceptance_arm.pinned_to is {arm['pinned_to']} but the probe "
+        f"pins {dict(probe.DOOR_PINNED_ON)} (#10983)")
 
     rows = record.get("corpus_rows")
     assert isinstance(rows, dict) and rows, (
@@ -784,10 +862,12 @@ def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE():
 
     The control works, and it is the point of #10983: **the two doors build
     different graphs**, so a number measured on the ``m2`` lane is not a number
-    about the v2 door (and vice versa). The differences are structural, not a
-    matter of degree: the ``m2`` lane mints **no `:Object` at all** on this
-    session and 5.5x the Points, because it is a different extractor, not a
-    different seam of the same one.
+    about the v2 door (and vice versa). The difference is structural IN KIND —
+    the ``m2`` lane mints **no `:Object` at all** on this session — and the
+    5.5x Point count is the SIZE of that same difference, not the reason it
+    matters. (This docstring said "structural, not a matter of degree" beside the
+    5.5x figure until the #10983 review: a ratio IS a degree, and the record's own
+    ``structural_in_kind_not_only_in_size`` says so.)
 
     ⚠️ The assertion polarity is deliberately BOTH ways: identical output would
     mean the control had stopped being a control (the mock seam would have
