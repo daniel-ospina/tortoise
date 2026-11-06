@@ -2501,11 +2501,26 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # witness this bar exists to add (#9548's `record_writes_applied`) was one it
     # omitted, leaving the delta it demands uncomputable from the reading it
     # prescribed (#9548 review P2).
-    assert re.search(r"read every record counter BEFORE\s+the capture and again after", flat), (
+    # ⛔ Anchored to the BOLD imperative and paired with a negation guard: a bare
+    # `re.search` on the fragment matches inside "… **never** read every record
+    # counter BEFORE the capture …", i.e. a runbook that FORBIDS the baseline
+    # passed a pin whose own message promises it demands one (#9548 review P3,
+    # measured). The sibling clauses in this test are mutation-proven against a
+    # meaning inversion; this one is too.
+    assert re.search(
+        r"\*\*read every record counter BEFORE\s+the capture and again after\*\*", flat
+    ), (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
         "process's life then reads as this capture's growth — or it names a "
         "subset of the counters the presence list then requires"
+    )
+    assert not re.search(
+        r"(never|do not|don't|need not)\s+(\*\*)?read every record counter", flat
+    ), (
+        "the bar NEGATES the baseline it requires elsewhere — an operator "
+        "following the negated sentence takes no pre-capture reading, and the "
+        "fragment assertion above still matches its tail"
     )
     assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "
