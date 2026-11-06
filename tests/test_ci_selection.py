@@ -8717,6 +8717,124 @@ def _load_python_ci() -> dict:
     return yaml.safe_load(wf_path.read_text())
 
 
+# The `test` job's dependency-caches block: the section header that opens it and the
+# step the `⛔ OVERRIDES:` marker is attached to. Both are unique lines in
+# `python-ci.yml`, which is what makes them usable anchors (#11065 round 5, ISSUE 1).
+_TEST_JOB_CACHE_SECTION_HDR = "Dependency caches: read the big half, bound the write"
+_TEST_JOB_CACHE_RESTORE_STEP = "Restore pip dependency cache (#7612, read-only — #11063)"
+
+
+def _test_job_cache_overrides_block(wf_lines: list[str], prune_name: str) -> str:
+    """Return the `⛔ OVERRIDES:` block that GOVERNS the `test` job's uv cache write.
+
+    ⛔ ANCHORED TO THE STEP IT DOCUMENTS, not to a marker's absolute position in the
+    file (#11065 round 5, ISSUE 1 — measured). This locator used to be
+    `next(ln for ln in <whole 4,900-line file> if "⛔ OVERRIDES:")`, i.e. the FIRST such
+    marker anywhere, so the two arms built on it judged whichever block happened to
+    come first. Measured at `60981107a8`, on the merge tree, nothing else altered:
+
+      * a degraded copy of the REAL block read **GREEN** once an unrelated
+        `⛔ OVERRIDES:` block was inserted above it in `changes` — a fail-open; and
+      * that unrelated block reddened a **correct** real block whose own text was
+        untouched — a false block.
+
+    Neither is hypothetical: `AGENTS.md` requires an `OVERRIDES:` line for every
+    departure from the common default, so this workflow keeps growing them (three
+    today, one already ⛔-prefixed at `:954`), and "first marker in the file" is a
+    locator that decays the moment one is added above this job.
+
+    The anchor is therefore the PARSE-VISIBLE step the comment block documents: the
+    marker must live in the contiguous comment run attached to that step, at or after
+    the dependency-caches section header and above the prune step. A marker that is
+    not attached to this block raises instead of being silently judged — the guard
+    fails closed on its own drift.
+
+    (Comment-aware YAML is the theory answer — `ruamel.yaml` round-trip can attach a
+    comment to a node (`yaml_add_eol_comment`) where PyYAML discards comments
+    entirely. It is not taken here: one new import and a second YAML parser for one
+    pin is machinery this blocker PR should not grow. Adjacency to the documented
+    step gets the same guarantee from text the pin already reads.)
+    """
+    sections = [i for i, ln in enumerate(wf_lines) if _TEST_JOB_CACHE_SECTION_HDR in ln]
+    anchors = [i for i, ln in enumerate(wf_lines)
+               if ln.strip() == f"- name: {_TEST_JOB_CACHE_RESTORE_STEP}"]
+    prunes = [i for i, ln in enumerate(wf_lines) if ln.strip() == f"- name: {prune_name}"]
+    assert len(sections) == 1, (
+        f"expected exactly one dependency-caches section header "
+        f"({_TEST_JOB_CACHE_SECTION_HDR!r}) in python-ci.yml, found {len(sections)} — "
+        "the `OVERRIDES:` arm anchors on it and cannot locate the block without it")
+    assert len(anchors) == 1, (
+        f"expected exactly one `- name: {_TEST_JOB_CACHE_RESTORE_STEP}` step in "
+        f"python-ci.yml, found {len(anchors)} — the `OVERRIDES:` marker must stay "
+        "attached to the step block that carries the cache write, so a rename or a "
+        "duplicate has to be re-anchored here rather than judged as another block")
+    assert len(prunes) == 1, (
+        f"expected exactly one `- name: {prune_name}` prune step in python-ci.yml, "
+        f"found {len(prunes)} — the marker's lower bound is the step it governs")
+    section_hdr, anchor, prune_line = sections[0], anchors[0], prunes[0]
+
+    markers = [i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln and i < anchor]
+    assert markers, (
+        "no `⛔ OVERRIDES:` marker at or above the `test` job's dependency-caches "
+        "step — the departure from the vendor's `uv cache prune --ci` recommendation "
+        "is unrecorded, which is what the marker exists to prevent")
+    start = markers[-1]
+
+    # ⛔ ADJACENCY (the actual anchor): every line between the marker and the step it
+    # documents must be blank or a comment. This is what makes the locator immune to a
+    # marker added anywhere else in the workflow — including one in another job.
+    stray = [i + 1 for i in range(start, anchor)
+             if wf_lines[i].strip() and not wf_lines[i].lstrip().startswith("#")]
+    assert not stray, (
+        f"the nearest `⛔ OVERRIDES:` at or above the dependency-caches step is at "
+        f"python-ci.yml:{start + 1}, but non-comment lines {stray} sit between it and "
+        f"the step it is supposed to document (line {anchor + 1}). That marker belongs "
+        "to a different block — a departure statement must stay attached to the "
+        "step it governs, not float above unrelated steps")
+    assert section_hdr < start < prune_line, (
+        f"the `⛔ OVERRIDES:` marker resolved to python-ci.yml:{start + 1}, which is "
+        f"outside the dependency-caches section (header {section_hdr + 1}, prune step "
+        f"{prune_line + 1}) — the arm would judge a block that does not govern this "
+        "cache write")
+
+    # ⛔ ONE MARKER PER CACHE WRITE, asserted (#11065 round 5). Two markers inside this
+    # section would leave "which block is the attributed one" to the locator's tie-break —
+    # the same class of ambiguity the absolute-position anchor had — so a second departure
+    # statement here has to be folded into the one marker that governs this write.
+    in_section = [m for m in markers if m > section_hdr]
+    assert len(in_section) == 1, (
+        f"the dependency-caches section of python-ci.yml (line {section_hdr + 1}) carries "
+        f"{len(in_section)} `⛔ OVERRIDES:` markers "
+        f"({', '.join(str(m + 1) for m in in_section)}); this write has exactly one "
+        "departure to record, and with two markers the arm would judge whichever it "
+        "picked — fold the additional departure into the marker that governs this cache "
+        "write, or move it to the block it belongs to")
+
+    block = []
+    for ln in wf_lines[start:]:
+        if re.match(r"\s*#\s*ARM \d", ln):
+            break
+        block.append(ln)
+    return "\n".join(block)
+
+
+def _overrides_payload_misattribution(overrides: str) -> str | None:
+    """Return the sentence that misattributes `#7612`'s payload, or None when clean.
+
+    The claim, not the phrase (#11065 cycle 3): a bare substring ban reddened a
+    CORRECT edit that named `~/.cache/pip` for the 3.2 GB torch wheel set. What is
+    forbidden is an assertion that the payload SITS in `~/.cache/uv`.
+    """
+    prose = " ".join(re.sub(r"^\s*#\s?", "", ln) for ln in overrides.splitlines())
+    for sentence in re.split(r"(?<=[.;])\s+", prose):
+        if "#7612" not in sentence or "~/.cache/uv" not in sentence:
+            continue
+        if "~/.cache/pip" in sentence:
+            continue
+        return sentence.strip()
+    return None
+
+
 def _cache_refs_of(step: dict) -> str:
     """EVERY cache key a step names: its primary `key:` AND its `restore-keys:`.
 
@@ -11191,13 +11309,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # payload-SHRINKING change with a fact that cannot be true.
     wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
     wf_lines = wf_path.read_text().splitlines()
-    start = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
-    block = []
-    for ln in wf_lines[start:]:
-        if re.match(r"\s*#\s*ARM \d", ln):
-            break
-        block.append(ln)
-    overrides = "\n".join(block)
+    # ⛔ `_test_job_cache_overrides_block` anchors the marker to the block it documents
+    # and asserts that anchoring; it must NOT be swapped for "the first marker in the
+    # file", which judges an unrelated departure the moment one is added above this
+    # job (#11065 round 5, ISSUE 1).
+    overrides = _test_job_cache_overrides_block(wf_lines, str(prune.get("name") or ""))
     assert "~/.cache/uv" in overrides and "uv sync --frozen" in overrides, (
         "the `OVERRIDES:` block does not name the cache directory it governs "
         "(`~/.cache/uv`) or its only writer (`uv sync --frozen`), so its reason "
@@ -11215,43 +11331,43 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # block, strip the leading `#`, split on sentence terminators, and judge the CLAIM: a
     # sentence that attributes #7612's torch payload must not place it in `~/.cache/uv`
     # without also naming `~/.cache/pip`.
-    _prose = " ".join(re.sub(r"^\s*#\s?", "", _ln) for _ln in overrides.splitlines())
     # ⛔ No `:` in the split (#11065 delta review, P3-2ii): a hard-wrapped claim written
     # `#7612's torch payload: in \`~/.cache/uv\`` split at the colon and both halves read
     # GREEN. And no `torch` conjunct (P3-2i): the exact banned sentence without that word —
     # `#7612's payload is in \`~/.cache/uv\`` — also read GREEN. The conjunct that matters is
-    # the ISSUE NUMBER, because that is what the attribution claim is about.
-    for _sentence in re.split(r"(?<=[.;])\s+", _prose):
-        if "#7612" not in _sentence or "~/.cache/uv" not in _sentence:
-            continue
-        # ⛔ THE NEGATION ESCAPE IS WITHDRAWN (#11065 round 4, NEW-1 — measured). Round 3
-        # reddened a PURE NEGATION — `#7612's payload … is NOT in `~/.cache/uv`` is true, so
-        # that was a false block — and the fix skipped any sentence carrying a negator. That
-        # escape is SENTENCE-WIDE, so it also excused three FALSE claims, each measured GREEN:
-        # `… is in `~/.cache/uv`, not `~/.cache/pip``, `… is in `~/.cache/uv` (this placement
-        # is not negotiable)`, `… is not pip's; it is in `~/.cache/uv``. A fail-open outranks a
-        # false block, so the escape goes and the false block is accepted: fail-closed plus a
-        # message naming the remedy beats a prose parser this blocker PR should not grow.
-        #
-        # THREE DISCLOSED RESIDUALS, stated rather than half-solved:
-        #  (i)   a pure negation reds — say where the payload IS (`~/.cache/pip`) and it
-        #        passes, which is what the message already prescribes.
-        #  (ii)  `… is in `~/.cache/uv`, not `~/.cache/pip`` reads GREEN, because the assertion
-        #        below is a PRESENCE test on `~/.cache/pip`, not a claim about which path the
-        #        payload is attributed to. This is a residual of the sentence-scoped form, and
-        #        it is GREEN with the escape and without it — verified both ways.
-        #  (iii) a false claim that never names `#7612` is out of contract: this arm pins that
-        #        ISSUE's attribution, not torch prose in general.
-        # None is reachable in the shipped text — the block contains no `#7612's payload`
-        # today (`grep -c` -> 0) — so this arm guards a future edit, and every shape it does
-        # decide, it fails CLOSED on.
-        assert "~/.cache/pip" in _sentence, (
-            "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB torch wheel "
-            "set) to `~/.cache/uv`. It is not there: `install-cpu-torch` installs torch "
-            "with `pip`, so it lives in `~/.cache/pip`, which this job only restores. "
-            "`--ci` would drop the DEV-GROUP registry wheels `uv sync --frozen` "
-            f"re-resolves — say that instead (#11065 cycle 7). Offending sentence: "
-            f"{_sentence.strip()!r}")
+    # the ISSUE NUMBER, because that is what the attribution claim is about. The judge
+    # itself lives at module scope (`_overrides_payload_misattribution`) so the
+    # mutation test below can drive it over a MUTATED copy of this block (#11065 round 5).
+    #
+    # ⛔ THE NEGATION ESCAPE IS WITHDRAWN (#11065 round 4, NEW-1 — measured). Round 3
+    # reddened a PURE NEGATION — `#7612's payload … is NOT in `~/.cache/uv`` is true, so
+    # that was a false block — and the fix skipped any sentence carrying a negator. That
+    # escape is SENTENCE-WIDE, so it also excused three FALSE claims, each measured GREEN:
+    # `… is in `~/.cache/uv`, not `~/.cache/pip``, `… is in `~/.cache/uv` (this placement
+    # is not negotiable)`, `… is not pip's; it is in `~/.cache/uv``. A fail-open outranks a
+    # false block, so the escape goes and the false block is accepted: fail-closed plus a
+    # message naming the remedy beats a prose parser this blocker PR should not grow.
+    #
+    # THREE DISCLOSED RESIDUALS, stated rather than half-solved:
+    #  (i)   a pure negation reds — say where the payload IS (`~/.cache/pip`) and it
+    #        passes, which is what the message already prescribes.
+    #  (ii)  `… is in `~/.cache/uv`, not `~/.cache/pip`` reads GREEN, because the assertion
+    #        below is a PRESENCE test on `~/.cache/pip`, not a claim about which path the
+    #        payload is attributed to. This is a residual of the sentence-scoped form, and
+    #        it is GREEN with the escape and without it — verified both ways.
+    #  (iii) a false claim that never names `#7612` is out of contract: this arm pins that
+    #        ISSUE's attribution, not torch prose in general.
+    # None is reachable in the shipped text — the block contains no `#7612's payload`
+    # today (`grep -c` -> 0) — so this arm guards a future edit, and every shape it does
+    # decide, it fails CLOSED on.
+    _offending = _overrides_payload_misattribution(overrides)
+    assert _offending is None, (
+        "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB torch wheel "
+        "set) to `~/.cache/uv`. It is not there: `install-cpu-torch` installs torch "
+        "with `pip`, so it lives in `~/.cache/pip`, which this job only restores. "
+        "`--ci` would drop the DEV-GROUP registry wheels `uv sync --frozen` "
+        f"re-resolves — say that instead (#11065 cycle 7). Offending sentence: "
+        f"{_offending!r}")
     assert prune.get("continue-on-error") is True, (
         "the uv prune must be `continue-on-error: true` — a prune that cannot run "
         "only leaves a bigger archive for a save that is bounded on its own")
@@ -11602,6 +11718,100 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
             f"`steps.{s['id']}.…` reference exists anywhere in the workflow, so the "
             "id is inert. Either add the consumer (`cache-hit` / `outcome`) or drop "
             "the `id:` — an unused id reads as a gate that is not there.")
+
+
+def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
+    """#11065 round 5 (ISSUE 1): the anchor must be the block, not "first in the file".
+
+    The arm that judges the `test` job's `⛔ OVERRIDES:` block located its subject with
+    `next(ln for ln in <whole workflow> if "⛔ OVERRIDES:")`, so it judged whichever
+    departure marker came FIRST in `python-ci.yml` — measured at `60981107a8` as a
+    fail-open (a degraded real block read GREEN once an unrelated marker was inserted
+    above it) AND a false block (that unrelated marker reddened a correct real block).
+
+    Both directions are replayed here on a MUTATED copy of the real workflow text, so
+    the proof is non-vacuous without editing the shipped file: the pre-fix locator is
+    re-implemented inline (`first marker in the file`) and must MISS in each direction
+    while `_test_job_cache_overrides_block` must SEE. Nothing else about the block is
+    altered — the decoy is comments only, and the banned sentence is the exact one the
+    arm exists to catch.
+    """
+    wf_lines = (Path(__file__).resolve().parents[1]
+                / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    prune_name = str(next(s for s in _load_python_ci()["jobs"]["test"]["steps"]
+                          if "uv cache prune" in str(s.get("run") or "")).get("name") or "")
+    real = _test_job_cache_overrides_block(wf_lines, prune_name)
+    # The shipped text is clean: the arm's subject is the uv block, nothing is misattributed.
+    assert _overrides_payload_misattribution(real) is None
+    assert "~/.cache/uv" in real and "uv sync --frozen" in real
+
+    def _pre_fix_locator(lines: list[str]) -> str:
+        """The locator this test replaces: the FIRST `⛔ OVERRIDES:` in the file."""
+        start = next(i for i, ln in enumerate(lines) if "⛔ OVERRIDES:" in ln)
+        block: list[str] = []
+        for ln in lines[start:]:
+            if re.match(r"\s*#\s*ARM \d", ln):
+                break
+            block.append(ln)
+        return "\n".join(block)
+
+    decoy = [
+        "      # ⛔ OVERRIDES: an unrelated departure declared by a job ABOVE this one —",
+        "      # the shape `AGENTS.md` guarantees will keep appearing in this workflow.",
+        "      # ARM 9",
+        "      #",
+    ]
+    hdr = next(i for i, ln in enumerate(wf_lines) if _TEST_JOB_CACHE_SECTION_HDR in ln)
+    decoyed = wf_lines[:hdr] + decoy + wf_lines[hdr:]
+
+    # ── A1′ — a decoy above, real block untouched and CORRECT ──────────────────────
+    # Pre-fix: judges the decoy, which names neither `~/.cache/uv` nor `uv sync --frozen`
+    # -> false block on a correct block. Now: still the real block -> clean.
+    assert "~/.cache/uv" not in _pre_fix_locator(decoyed), (
+        "the pre-fix locator no longer misses the real block — this mutation no longer "
+        "demonstrates the false-block direction, so the proof is stale")
+    anchored = _test_job_cache_overrides_block(decoyed, prune_name)
+    assert anchored == real, (
+        "an unrelated `⛔ OVERRIDES:` block inserted above this job's dependency-caches "
+        "section re-routed the arm away from the block it governs — the locator is "
+        "anchored by position again instead of by the step the block documents")
+    assert _overrides_payload_misattribution(anchored) is None
+
+    # ── A1 — the same decoy above, and a FALSE attribution inside the REAL block ───
+    banned = "      # #7612's payload is in `~/.cache/uv`."
+    arm_at = next(i for i, ln in enumerate(decoyed) if re.match(r"\s*#\s*ARM 2", ln))
+    degraded = decoyed[:arm_at] + [banned] + decoyed[arm_at:]
+    # Pre-fix: reads the decoy, sees no claim -> GREEN while the real block asserts the
+    # exact falsehood that reddens a payload-SHRINKING change. That is the fail-open.
+    assert _overrides_payload_misattribution(_pre_fix_locator(degraded)) is None, (
+        "the pre-fix locator caught the false attribution — this mutation no longer "
+        "demonstrates the fail-open the anchoring fix closes")
+    # Now: the real block, so the claim is judged and the arm reds.
+    seen = _test_job_cache_overrides_block(degraded, prune_name)
+    assert _overrides_payload_misattribution(seen) is not None, (
+        "a false `#7612` attribution inside the governed `OVERRIDES:` block read GREEN "
+        "once an unrelated marker existed above it — the arm is judging the wrong block")
+    assert "~/.cache/uv" in seen and "uv sync --frozen" in seen, (
+        "the arm must still judge the real block when a decoy sits above it")
+
+    # ── a marker that is NOT attached to this block fails closed ────────────────────
+    # The anchor is lost (the real marker is gone) and the only one left is in `changes`,
+    # a job above, separated from this block by CODE lines. The locator must RAISE rather
+    # than quietly judge the wrong departure — that is the whole difference between a pin
+    # on "this block" and a pin on "whatever marker came first".
+    real_marker = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
+    jobs_at = next(i for i, ln in enumerate(wf_lines) if ln.rstrip() == "jobs:")
+    dropped = (wf_lines[:real_marker]
+               + [wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)")]
+               + wf_lines[real_marker + 1:])
+    detached = dropped[:jobs_at] + decoy + dropped[jobs_at:]
+    with pytest.raises(AssertionError, match="different block"):
+        _test_job_cache_overrides_block(detached, prune_name)
+
+    # ── a SECOND marker inside the section is refused, not tie-broken ────────────────
+    inside = wf_lines[:hdr + 1] + decoy + wf_lines[hdr + 1:]
+    with pytest.raises(AssertionError, match="carries 2"):
+        _test_job_cache_overrides_block(inside, prune_name)
 
 
 def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
