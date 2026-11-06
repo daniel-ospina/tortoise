@@ -1901,7 +1901,7 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
     stop set that makes the binding mean something:
 
       • **LEADING** — cue, then `_neg_span(40)`, then (for `home`) a
-        read/embed verb and a further `_NEG_CLAUSE_SAFE{0,30}`, then the object.
+        read/embed verb and a further `_neg_span(30)`, then the object.
       • **TRAILING** — the object, then `_neg_span(30)`, then the cue,
         then `_NEG_TRAILING_SUBJECT` (so a cue introducing ANOTHER backticked
         name is that name's negation, not this object's).
@@ -2546,22 +2546,23 @@ def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
 #: phrasing, applies a cue from the shared `_NEGATION_CUE` to the word
 #: `narrative`, and must be ACCEPTED.
 #:
-#: ⚠️ ALL FOUR non-head entries RED against the literal this replaced
+#: ⚠️ NON-HEAD ENTRIES RED against the literal this replaced
 #: (``assert "never the narrative" in footnote``), each with the message
 #: *"§12.1b's `:Source` footnote no longer states the NEGATION"* — about a
 #: sentence that states it, which is the exact inverse report cycle 18 fixed for
 #: §9.4's half of this same claim. The first entry is the head document's own
-#: wording and is the CONTROL (it passed the literal too, so it is 4 reds of 5,
-#: not 5).
+#: wording and is the CONTROL (it passed the literal too).
 #:
-#: ⛔ **THAT "FOUR" WAS TWO RE-WORDINGS AND TWO INVERSIONS (cycle 19).** The two
-#: subject forms — *"the narrative is never what gets embedded"*, *"the narrative
-#: is not the vector's text"* — state the OPPOSITE of the footnote, which says
-#: one sentence earlier that the vector's TEXT **is** the S1 narrative. They were
-#: moved to `_NARRATIVE_NEGATION_INVERSIONS` and the binding was made
-#: leading-only; the historical 4-of-5 count above belongs to the literal, and the
-#: list below is now the subset that really is the same claim (plus the two cues
-#: `rather than` / `instead of`, measured RED before they were admitted).
+#: ⛔ **THE SET THAT "ALL FOUR" NAMED WAS TWO RE-WORDINGS AND TWO INVERSIONS
+#: (cycle 19), AND ONE LATER ADDITION WAS WITHDRAWN (cycle 20).** The two subject
+#: forms — *"the narrative is never what gets embedded"*, *"the narrative is not
+#: the vector's text"* — state the OPPOSITE of the footnote, which says one
+#: sentence earlier that the vector's TEXT **is** the S1 narrative. They moved to
+#: `_NARRATIVE_NEGATION_INVERSIONS`. A `rather than` / `instead of` pair was added
+#: and then withdrawn, because admitting those cues is a measured fail-open (see
+#: `_NEGATION_CUE`); its cost is the declared false red `_DECLARED_OVER_BLOCK_CUE`.
+#: So the list below is the CONTROL plus the entries that really are the same
+#: claim: under the old literal, **2 of the 3** RED.
 _NARRATIVE_CARRIER = (
     "a session's `summary` is §4.6 metadata and {}.")
 _NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str]] = [
@@ -2677,25 +2678,47 @@ def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         f"another name or in another clause does not reach it")
 
 
-#: The `and … narrative` clause of the REAL footnote, DERIVED rather than
-#: spelled. The two real-footnote controls below used to hard-assert the literal
-#: `"and never the narrative"`, so re-wording the document into ANOTHER form its
+#: The §12.1b negation CLAUSE of the REAL footnote, DERIVED rather than spelled.
+#: The two real-footnote controls below used to hard-assert the literal
+#: `"and never the narrative"`, so re-wording the document into another form its
 #: own accept list requires (`and not the narrative`) failed BOTH with *"the
 #: footnote no longer carries …"* while the document-level assertion passed — a
 #: pin reding a correct re-wording and reporting a drift the document does not
-#: contain. The em dash is excluded so the match cannot run from an earlier
-#: `and` across a clause boundary into this one.
-_FOOTNOTE_CLAUSE_RE = re.compile(r"\band\b[^.;:—]*?\bnarrative\b[^.;:—]*")
+#: contain.
+#:
+#: ⛔ Anchored on the SUBJECT, never on the conjunction. `and` was the first cut
+#: and it is the same false-drift bug one word over: `, never the narrative` and
+#: `; never the narrative` are legal renderings of the same claim, and both made
+#: the controls report *"no `and … narrative` clause at all"* on a document whose
+#: level assertion was GREEN (measured). The separators `; : —` are excluded so
+#: the match cannot run out of its clause, and the `narrative` requirement keeps
+#: it from matching the footnote's earlier, unrelated `` `summary` `` mention.
+#: ⛔ `;` and `:` are allowed: they are legal renderings of the same join, and
+#: excluding them made the controls report drift on *"…metadata; never the
+#: narrative"* (measured) — the same false-drift bug one separator over. `—` and
+#: the line end are what actually bound this clause.
+_FOOTNOTE_CLAUSE_RE = re.compile(r"`summary`[^\n—]*\bnarrative\b")
+
+#: The clause's fixed prefix, so every mutation below changes ONLY the negation.
+_FOOTNOTE_CLAUSE_HEAD = "`summary` is §4.6 metadata and {}"
 
 
 def _footnote_negation_clause(footnote: str) -> str:
-    """The footnote's own `and … narrative` clause; refuses an absent one."""
+    """The footnote's own `<summary> is … metadata and <negation> the narrative`.
+
+    Refuses an absent AND an ambiguous clause: taking the LAST match (the first
+    cut) let a later correct `and … narrative` sentence be selected, so both
+    controls mutated the wrong clause and blamed the guard (measured: appending
+    *"… and the narrative lives in the §9.1 record."* red both with *"the
+    negation was DROPPED … and `_negates_the_narrative` still accepted it"* on a
+    document the level assertion passed).
+    """
     matches = _FOOTNOTE_CLAUSE_RE.findall(footnote)
-    assert matches, (
-        f"§12.1b's footnote carries no `and … narrative` clause at all, so the "
-        f"controls that mutate it have nothing to mutate — that IS the drift "
-        f"they exist to catch: {footnote!r}")
-    return matches[-1]
+    assert len(matches) == 1, (
+        f"§12.1b's footnote carries {len(matches)} `summary` … `narrative` "
+        f"clause(s), so the controls cannot tell which one states the negation "
+        f"— that ambiguity IS the drift they exist to catch: {matches!r}")
+    return matches[0]
 
 
 def test_the_REAL_footnote_LOSES_the_negation_when_it_is_dropped():
@@ -2848,9 +2871,33 @@ def test_the_declared_leading_cue_residual_is_the_measured_one():
         f"the declared pre-existing residual is now CLOSED — `_negates_the_"
         f"narrative` refuses {line!r}. That is an improvement, not a regression: "
         f"delete this case, tighten the docstring, and record the scope change")
-    assert "summary" in line, (
-        f"the residual case must be a SENTENCE about the summary, so its "
-        f"inversion is visible against §12.1b's own claim: {line!r}")
+
+
+def test_the_declared_not_only_but_residual_is_the_measured_one():
+    """*What value makes this test fail?* A residual that is really closed.
+
+    `_NEG_ADVERSATIVE` stops a negation reaching ACROSS a conjunction, which
+    fixes the `not X but Y` fail-open. It cannot see `not only X but Y`: the cue
+    lands on the trap, the conjunctions come AFTER it, and the sentence asserts
+    that the vector DOES read the trap. Measured — §9.4 re-worded to "…and it
+    does not only read `:Source.summary` but also the narrative" leaves the
+    `:Source.summary` count at 1, `_negates_the_home` False,
+    `_negates_the_summary` True and the whole pin GREEN.
+
+    PRE-EXISTING (identical at `f604df20f`, `5d7caf481` and this head) and
+    undeclared until now, unlike the narrative residual beside it. Declared and
+    pinned rather than left implicit: closing it needs the claim's PREDICATE (or
+    `not only` excluded from the cue arm), and either is a visible change that
+    reds this case.
+    """
+    line = (f"the embedded text is not only read from `{_SUMMARY_OBJECT}` but "
+            f"also the S1 narrative read from `{_HOME}`")
+    assert _negates_the_summary(line) is True, (
+        f"the declared `not only … but` residual is now CLOSED — "
+        f"`_negates_the_summary` refuses {line!r}. That is an improvement: delete "
+        f"this case, declare the closure, and record the scope change")
+    assert _negates_the_home(line, _HOME) is False, (
+        f"the residual case no longer isolates the trap's guard: {line!r}")
 
 
 def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
@@ -3101,7 +3148,10 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "and §9.4 asserts the same negation on its own sentence; dropping it "
         "here leaves the *\"embed the summary already there\"* reading open in "
         "the section a designer lands on when placing a vector. The check is "
-        "bound to the OBJECT `narrative` (both word orders, clause-stopped), so "
+        "bound to the OBJECT `narrative` in the LEADING word order only — a "
+        "cue placed AFTER the narrative states its INVERSE (see "
+        "`_DECLARED_OVER_BLOCK_NARRATIVE`) — so a re-wording that keeps the "
+        "claim with the cue before `narrative` is the form this pin accepts, "
         "a re-wording that keeps the claim passes; `_NARRATIVE_NEGATION_"
         "REWORDINGS` / `_INVERSIONS` pin both directions")
     assert s121b.count(_SUMMARY_OBJECT) == 0, (
