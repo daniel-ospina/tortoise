@@ -242,7 +242,7 @@ PROCEED would have implied the epic's existing acceptance still describes its wo
 four DoD rows is MET, one is an owner decision, and **both PARTIAL rows hold on the 15 embedding writers
 with no recognised producer call** (§1.3) — row 1 additionally on the gate being `set ON in: none` on the
 shipped default and one write path embedding outside it. **The instrument says re-classing that population
-moves neither verdict** (`tools/dod_5090_probe.py:1264-1270`: *"the census CLASSIFIES the unresolved set;
+moves neither verdict** (`tools/dod_5090_probe.py:1267-1273`: *"the census CLASSIFIES the unresolved set;
 it does not license moving this verdict … flipping this is a decision, not a cleanup"*), so rows 1–2 are
 closed by the **re-score decision** S2 carries (`03-scope.md:64`; `#11085`) — not by arming the gate and
 not by the register. **REPOINT** is option **C** from `#7879`'s own
@@ -271,7 +271,7 @@ so the next lane does not repeat it.
 |---|---|---|---|
 | **D11 — stay on hosted FalkorDB; the optimisation is DEFERRED** | 2026-09-24 | **#4333** decision record | No engine migration. Self-hosting, if ever, is **priced first** — same engine, SSPLv1, no rewrite. ⚠️ **Owner, 2026-11-05: *"we're not self-hosting flakorDB [sic] now. we have a lot of work that needs doing first"*** (ruling relayed at [#5090 comment 6669523691](https://github.com/daniel-ospina/tortoise/issues/5090#issuecomment-6669523691), per the DECISION RELAY rule) ⇒ **self-hosting is OUT of the option set, not deferred-and-available.** |
 | **The billing model** | 2026-10-08 | graph `1a11c902dac` | Tiers are **capped, priced per feature**, not sized by volume; over cap = **overage**, not upgrade. Two metered units: **storage per byte**, **compute per extraction**. ⇒ *"fix the billing unit"* is no longer a candidate. **Corollary: because we charge per stored byte, retained bytes are REVENUE — so "store less" is NOT a strategy.** |
-| **The unit** | 2026-10-25 | **#4333** | Cost is reported in exactly three things, all bytes/usage: **graph RAM bytes** (rows + indices + **the vector index**), **Postgres bytes**, **extraction usage**. *"we're moving away form [sic] nodes instead of using the tokens to actually implement the design I already requested"* |
+| **The unit** | 2026-10-25 | **#4333** | Cost is reported in exactly three things, all bytes/usage: **graph RAM bytes** (rows + indices + **the vector index**), **Postgres bytes**, **extraction usage**. Owner, verbatim: *"i alreayd said no cost in nodes (we kepe the old design untilw e can replace it ... we're moving away form nodes instead of using the tokens to actually implement the design I already requested)"* — `alreayd`, `kepe`, `untilw` and `form` are the source's own spellings, kept because a silently repaired typo inside quotation marks is itself a defect. |
 | **The engine's ROLE** | 2026-10-08 | §14.2 | FalkorDB **stays and is DEMOTED** to a derived hot cache. **"Shall we migrate to Postgres?" is not an open question and a lane must not re-open it.** |
 | **V1's own framing** | amended 2026-10-08 | §14.3 | ⚠️ **"The hybrid makes V1 more urgent, not less"** — under the hybrid every cache byte is rent on something Postgres already stores. **V1 is a CACHE-TIER question, not a data-cost question.** |
 | **V1 has a named measurement** | — | §15 **M5** | *"Where should the vector index live? — our query latency with the index resident, against a real `GRAPH.MEMORY USAGE` read"*. The latency half was measured 2026-09-24 (§12.1d). |
