@@ -557,7 +557,11 @@ export STUB_LOG="$LOG"
 # ── fixture timestamps ──────────────────────────────────────────────────────
 TS_RECENT="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
 TS_STALE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=500)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
-export TS_RECENT TS_STALE
+# #10234 review P2 (round 14): an age strictly BETWEEN STALE_MIN (90) and
+# DRIVER_DOWN_MIN (240). Without one, the arm's central comparison could be
+# mutated to STALE_MIN — or to a hardcoded literal — and every case stayed green.
+TS_MID="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=150)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export TS_RECENT TS_STALE TS_MID
 
 # ── driver env ──────────────────────────────────────────────────────────────
 export INTERNAL_API_URL="https://api.example.test"
@@ -2194,6 +2198,16 @@ export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78f. a future-dated last_sweep_at fails CLOSED, not open"
 assert_contains "$OUT" "dated in the FUTURE" "78f. the future stamp is reported as corruption"
+# Round 14 note: the 300s grace was pinned only against a +6h stamp, so any grace
+# under 6h survived. A +400s stamp must still be corruption.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+NEAR_FUTURE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=400)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$NEAR_FUTURE")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78f-iii. a stamp 400s in the future is already corruption (the 300s grace is bounded)"
 # Round 10: the TITLE of this arm's own incident must name corruption, not a
 # timeout (the phrase occurs only in the title).
 assert_contains "$(cat "$LOG")" 'last_sweep_at is in the future' "78f. the TITLE names the corrupt stamp"
@@ -2256,6 +2270,34 @@ run_driver
 assert_eq "$RC" 1 "78l. an unmeasurable pool with no completion evidence reds"
 assert_not_contains "$OUT" "leaving silent" "78l. it does NOT call the pool measured-empty"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78l. it files SWEEP_NO_COVERAGE"
+
+# ── 78m. #10234 review P2 (round 14): the arm's bound is DRIVER_DOWN_MIN ────
+# The comparison that decides this arm was unpinned: mutating it to STALE_MIN
+# (90) left every case green, so a sweep that completed 150 min ago would have
+# red a healthy pipeline with a title ("no sweep has completed within the
+# driver-down window") its own body contradicts ("150m old (> 90m)").
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_MID")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78m. a completion 150m old is INSIDE the driver-down window (green)"
+assert_contains "$OUT" "the last COMPLETED sweep was 1" "78m. the green line carries the real age"
+
+# ── 78n. #10234 review P2 (round 14): the bound follows the KNOB ───────────
+# Same 150m age, but the declared window is 120m: now it IS outside, so the arm
+# must red. This pins the linkage — a hardcoded literal would pass 78m and fail here.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_MID")"
+export STUB_SWEEP_RC=28
+export BACKUP_DRIVER_DOWN_THRESHOLD_MIN=120
+run_driver
+assert_eq "$RC" 1 "78n. the same age reds when the declared window is narrower (the bound follows the knob)"
+assert_contains "$OUT" "> 120m" "78n. the red names the effective bound, not a literal"
+unset BACKUP_DRIVER_DOWN_THRESHOLD_MIN
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
