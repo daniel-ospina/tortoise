@@ -548,7 +548,8 @@ the `{error}`-only shape whose retry action is different.
   refusal is about the instance and not about anything you wrote). This is a
   **throttle, not a cap**: it never refuses your data, the window self-heals
   within 60 s, and the correct action is **backoff-and-retry** — the opposite
-  of the cumulative `ERR_QUOTA` advice above. A request refused by THIS throttle
+  of the cumulative `ERR_QUOTA` advice above. **On the commit lane** a request
+  refused by THIS throttle
   leaves no record of its own: the `:CommitRecord` it opened is removed when
   that request created it, so the retry cannot be judged against it. If that
   attempt was the first for this `client_commit_id`, the retry is therefore a
@@ -563,6 +564,14 @@ the `{error}`-only shape whose retry action is different.
   rate limiter and Layer-1 validation still run first, so a re-POST of a
   written id whose non-canonical fields changed can still be refused 429 or
   422).
+  **On the capture lane** the retry story is simpler and stated here because the
+  paragraph above is commit-lane machinery: a capture writes no `:CommitRecord`
+  and has no `client_commit_id` / `held[]` adjudication at all, and a request
+  this throttle refused touched no graph state (the admission slot is released
+  in the handler's `finally`), so the retry is a first attempt in every respect
+  — it is charged again in whatever window it lands in, which is why an
+  identical re-POST of a capture can be throttled even though it mints nothing
+  new.
   (The repo's bundled SDK does not
   yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
   should honour `Retry-After` itself.) It exists because the removal of the
