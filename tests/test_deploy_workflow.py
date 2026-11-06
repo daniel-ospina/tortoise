@@ -4579,7 +4579,21 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # predicate must keep catching).
         return (
             re.search(
-                re.escape(_FALSE_TREE) + r"\s*,?\s*(?:is|was|means|denotes)\b",
+                re.escape(_FALSE_TREE) + r"\s*,?\s*(?:is|was|means|denotes)\b"
+                # ⛔ …AND NOT WHEN THE FALSE TREE IS DENIED OR KIN TO THE TRUE ONE (#11191
+                # review r13, P1 — MEASURED FALSE RED, a REGRESSION against `origin/main`).
+                # This arm had no guard, so the two-tree truth the row exists to record was
+                # refused while `main` accepts it:
+                #   "The census immediately before #9548 returns 10 at `047c91f7a`, and
+                #    `ff6379eb2` is not the tree."
+                #   "… at `047c91f7a`; `ff6379eb2` is not it."
+                #   "… at `047c91f7a`; `ff6379eb2` is an ancestor of it."
+                # The denial guard is the one `_COREF_ASSERTS_FALSE` already carries, and
+                # the kinship exclusion is the truthful relation this pin names elsewhere as
+                # a class it must NOT red. Measured: the r8 injection control ("and
+                # `ff6379eb2` is what the note said") stays REFUSED.
+                r"(?!\s*(?:not|never)\b)"
+                r"(?!\s+(?:an?\s+)?(?:ancestor|descendant|predecessor|successor)\b)",
                 text,
                 re.I,
             )
@@ -4637,8 +4651,25 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # a blank cheque") without the reasoning reaching its three siblings; the clause
         # boundary is the same rule one level down, and it is the TERMINATION-TERM set
         # ConText/NegEx scope negation with (`but` ends scope; the subordinators do too).
-        r"[.;\u2014\u2013]|,?\s*\b(?:and|but|while|whereas|yet|since|because|though|"
-        r"although|which|who)\b",
+        # ⛔ AND THE SET IS COMPLETE, AND `--` IS A DASH (#11191 review r13, P1/P3 —
+        # MEASURED both ways). Two gaps in the set above:
+        #   FAIL-OPEN — `for`/`or`/`nor`/`so` are coordinating conjunctions and were
+        #     missing, so one conjunction over the same alibi still worked: ACCEPTED while
+        #     `origin/main` REFUSES it.
+        #       "The note never calls `ff6379eb2` the #9601 merge, SO `ff6379eb2` is the
+        #        tree before #9548."
+        #   FALSE RED — `which`/`who` were added by the round above with NO measured
+        #     coverage, and they cut a denial off its own phrase: with them in the set the
+        #     clause ends at `which`, so a natural correction `origin/main` accepts is
+        #     refused:
+        #       "`ff6379eb2` is not the tree WHICH is immediately before #9548."
+        #     Measured: removing them restores that shape and changes no false shape.
+        #   …and `--` is the third spelling of the dash — `_INCISE` was widened to
+        #     `\s-{1,2}\s` for exactly this reason — so the blessed "— that is wrong"
+        #     refutation was refused in that spelling. A verdict keyed on a spelling is the
+        #     pattern this predicate keeps closing.
+        r"[.;\u2014\u2013]|\s-{1,2}\s|,?\s*\b(?:and|but|while|whereas|yet|for|or|nor|"
+        r"so|since|because|though|although)\b",
         re.I,
     )
     #: ⛔ AN ANCESTRY RELATION IS NOT THE EQUIVALENCE (#11191 review r11, P1 — MEASURED
@@ -4791,8 +4822,18 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: The COMPLEMENT names the false sha as NOT the tree — "the tree before #9548 is
     #: `047c91f7a`, NOT `ff6379eb2`". This is the fixer's most natural correction, and the
     #: symmetric arm below would otherwise refuse it (#11191 review r4, P1).
+    #: ⛔ AND THE OBJECT MAY NOT BE A RELATION OF THE FALSE TREE (#11191 review r13, P1 —
+    #: MEASURED fail-open). Denying `ff6379eb2`'s PARENT is not denying the equivalence, so
+    #: a false claim paid for with a true aside was ACCEPTED while `origin/main` refuses it:
+    #:   "`ff6379eb2` is the tree immediately before #9548, not `ff6379eb2`'s parent."
+    #: The guard is the one `_COREF_ASSERTS_FALSE` already carries in the other direction,
+    #: and `_NEG` carries for its bare `not`: a genitive, kinship or appositive tail after
+    #: the false sha means the negation is about that tail, not about the predication.
     _NOT_FALSE_SHA = re.compile(
-r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
+r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
+        + r"(?!\s*['\u2019]s\b)(?!\s+(?:parent|child|son|ancestor|descendant|successor|"
+        r"predecessor|merge|commit|tree|sha)\b)",
+        re.I,
     )
     #: The denial tokens a correction can carry BETWEEN the sha and the phrase. `isn't`,
     #: `cannot be` and `rather than` were dropped at `d4ba94671e` along with their
@@ -5171,7 +5212,18 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     #: subject); this one was a blank cheque. The binding is the `that`-clause the arm was
     #: written for: the claimed equivalence must be the SUBJECT of the denied inference.
     _INFERENCE_DENIAL = re.compile(
-        r"\bthat\s+[^.;\u2014\u2013]{0,60}?"
+        # ⛔ IT IS SUBJECT-BOUND, AND THE SUBJECT IS THE SPAN'S OWN COMPLEMENT (#11191
+        # review r13, P1 — MEASURED fail-open). A free `that` anywhere in the window let an
+        # OBJECT clause buy the exemption: the `that` bound to `records` and the subject of
+        # `does not mean` was `it`, so a false claim with a true inference beside it was
+        # ACCEPTED while `origin/main` refuses it —
+        #   "The row records that `ff6379eb2` is the tree immediately before #9548, it does
+        #    not mean the count grew."
+        # The anchor is the span's START, which `_occurrence_span` already places at the
+        # claim's own clause, so the quoted-equivalence shape the arm exists for ("That
+        # `ff6379eb2` is … does not mean the census is 5") still matches.
+        r"\A\W*(?:that|the\s+(?:claim|reading|statement)\s+that)\s+"
+        r"[^.;\u2014\u2013]{0,60}?"
         + _PHRASE_RE
         + r"[^.;\u2014\u2013]{0,40}?\b(?:does|do|did)\s+not\s+"
         r"(?:mean|imply|establish|show|prove)\b",
@@ -5182,8 +5234,13 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     #: `047c91f7a`", "is disproven by `047c91f7a`". Requiring the true tree is what
     #: keeps the verb from buying a pass for a stale figure on its own.
     _CORRECTION_VERB = re.compile(
-        r"\b(?:corrected|replaced|superseded|refuted|disproven|disproved|retracted|"
-        r"falsified)\b",
+        # ⛔ THE DIRECTION OF THE CORRECTION IS THE WHOLE CLAIM (#11191 review r13, P2 —
+        # MEASURED fail-open). A bare verb plus the true tree somewhere in the span admitted
+        # the INVERSE spelling — "…is `ff6379eb2`, CORRECTED FROM `047c91f7a`" and
+        # "…replaced BY `047c91f7a`" — i.e. the defect paid for with a true-sha alibi. Only
+        # the direction that RETIRES the attribution is admitted.
+        r"\b(?:(?:corrected|replaced|superseded)\s+(?:to|with)"
+        r"|(?:disproven|disproved|refuted)\s+by|retracted|falsified)\b",
         re.I,
     )
     #: The INVERTED form: "the tree (immediately) before #9548 IS `ff6379eb2`", and its
