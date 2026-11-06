@@ -11,10 +11,12 @@ a statement about the STORE's graph list: the graph leg refuses a graph the
 store does not already hold, instead of creating it (#11112 — a typo'd
 `--graph-name` used to leave a stub graph behind). It is NOT a claim that
 opening the store is free of side effects. On the EMBEDDED leg the redislite
-open rewrites the RDB on EVERY open/close — measured at this head on a 1-node
-store: `live.db` 861 B → 854 B across two consecutive read-only CLI runs, with a
-different sha256 each time — so the #10017 byte census is taken AROUND a run,
-never from a copy the run itself touched. It also leaves a
+open rewrites the RDB on EVERY open/close — measured at this head: two
+consecutive read-only CLI runs of the same store left it with a DIFFERENT
+sha256 each time (and a different size; the exact bytes are version- and
+payload-dependent, so they are deliberately not quoted as a figure) — so the
+#10017 byte census is taken AROUND a run, never from a copy the run itself
+touched. It also leaves a
 `<db>.tortoise-construct.lock` beside the store (the suffix is a CONSTANT,
 not the graph's name — measured), and a `<db>.settings` that lives
 ONLY while the daemon does (measured: present mid-run, GONE after `close()`). A
