@@ -4311,8 +4311,8 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # This file is `tier1` (its `- test_deploy_workflow.py` entry under `tier1:` in
     # `config/ci-surfaces.yml`), so it runs in python-ci's `test`
     # job, and that job's ONLY checkout is a bare `actions/checkout@v4`
-    # (`.github/workflows/python-ci.yml:680` job header, `:898` the checkout) — the default
-    # `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`
+    # (`.github/workflows/python-ci.yml`'s `test:` job header at `:680`, its checkout step at
+    # `:968`) — the default `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`
     # belongs to the separate `changes` job (`:279`), which does not share a working tree.
     # `047c91f7a` is far behind `origin/main` — `git rev-list --count 047c91f7a..origin/main`
     # read 388 at 2026-11-06, and that figure only GROWS, so it is not the claim: the claim is
@@ -4473,9 +4473,9 @@ def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp
        `0` would be satisfied by a command that never ran: the `#4309` shape this block exists
        to close, reproduced inside its own pin.
     2. FALSE RED — that same empty stdout was compared against a real count, so on python-ci's
-       depth-1 `test` job (`.github/workflows/python-ci.yml:898`, a bare
-       `actions/checkout@v4`) this pin failed on a CORRECT tree on every PR. The depth-1 clone
-       below reproduces the shape: the old tree is absent, and `_census_deepen_to` reaches it
+       depth-1 `test` job (its bare `actions/checkout@v4` — `.github/workflows/python-ci.yml:968`,
+       inside the `test:` job header at `:680`) this pin failed on a CORRECT tree on every PR. The
+       depth-1 clone below reproduces the shape: the old tree is absent, and `_census_deepen_to` reaches it
        with a bounded fetch instead of reddening — while a FULL clone that lacks the rev is
        never shallow-ified, because `tests/test_9397_about_edge_properties.py::_ensure_commit`
        measured that `git fetch --depth=N` truncates a developer's history.
@@ -5144,4 +5144,90 @@ def test_any_ci_surfaces_line_citation_here_resolves_to_this_files_own_row():
         "Cite the entry by mechanism (`its `- test_deploy_workflow.py` entry under "
         "`tier1:` in `config/ci-surfaces.yml``) — a line number here has already rotted "
         "onto a sibling test's row (#11064 review P3)"
+    )
+
+
+def test_any_workflow_line_citation_here_resolves_to_a_real_line_and_the_test_job_is_bare():
+    """#11064 review (P2), executed: a `.github/workflows/*.yml:<line>` citation must RESOLVE.
+
+    The census guard's premise — *the `test` job's only checkout is a bare `actions/checkout@v4`,
+    so the job runs at the default `fetch-depth: 1`* — was cited as `.github/workflows/python-ci.yml`
+    line 898. ⚠️ Quoted WITHOUT the `:<n>` suffix on purpose: this pin reads this file's own source,
+    so a live-looking `python-ci.yml:898` in a docstring would be treated as a claim (the sibling
+    `ci-surfaces` pin documents the same convention). That number was CORRECT at the head the
+    sentence was
+    written on and rotted **during this PR's own merge of `origin/main`**: at `fc92a8e3c` the line
+    was `      - uses: actions/checkout@v4`, and at the merge commit `ce0bb3d44` it is a prose
+    comment (*"published to every later step through `$GITHUB_ENV` …"*) — a `main` edit higher in
+    the file moved every later line down. The claim stayed true and its evidence pointed at
+    unrelated text, which is the exact "a past state quoted as a current one" decay this PR exists
+    to close, reproduced inside the PR that closes it.
+
+    So this pin executes the class rather than trusting the numeral:
+
+    1. every `.github/workflows/<name>.yml:<line>` pointer in THIS file must land inside its
+       workflow at a line that is real CONTENT — not blank, and not a `#` comment. That is what
+       catches a rotted pointer without needing to know what the line is *supposed* to say; a
+       citation that lands on a comment has provably moved.
+    2. the SEMANTIC half, asserted where the sentence makes it: the `test` job's checkout carries
+       no `with:`/`fetch-depth`. If a later lane unshallows that job, the shallow-checkout bound
+       this file guards against stops existing and the guard would keep passing — the premise has
+       to red, not the silent-pass path.
+
+    Falsified on the pre-fix text: line 898 resolved to a comment. Falsified on an unshallowed
+    `test` job: the second assertion names the added `with:` key.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    workflows = _REPO_ROOT / ".github" / "workflows"
+    stale = []
+    for match in re.finditer(r"\.github/workflows/([a-z0-9_.-]+\.ya?ml):(\d+)", source):
+        name, number = match.group(1), int(match.group(2))
+        lines = (workflows / name).read_text(encoding="utf-8").splitlines()
+        line = lines[number - 1] if 0 < number <= len(lines) else None
+        if line is None:
+            stale.append(f"{match.group(0)} -> beyond the file ({len(lines)} lines)")
+        elif not line.strip() or line.lstrip().startswith("#"):
+            stale.append(f"{match.group(0)} -> {line.strip()!r} (blank or a comment)")
+    assert not stale, (
+        "a `.github/workflows/<name>.yml:<line>` citation in this file no longer lands on "
+        "anything:\n  " + "\n  ".join(stale) + "\n"
+        "A workflow edit shifts every later line, so re-derive the number or cite the step by "
+        "mechanism — a pointer that lands on a comment has provably rotted (#11064 review P2)"
+    )
+
+    # ── the SEMANTIC half: the `test` job's checkout must stay BARE ─────────────────────
+    workflow = (workflows / "python-ci.yml").read_text(encoding="utf-8").splitlines()
+    header = next(
+        (i for i, ln in enumerate(workflow) if re.fullmatch(r"  test:\s*", ln)),
+        None,
+    )
+    assert header is not None, (
+        "`python-ci.yml` no longer declares a top-level `test:` job — the census guard's "
+        "shallow-checkout bound is derived from it"
+    )
+    end = next(
+        (i for i in range(header + 1, len(workflow)) if re.fullmatch(r"  [A-Za-z0-9_-]+:\s*", workflow[i])),
+        len(workflow),
+    )
+    checkouts = [
+        i for i in range(header, end)
+        if workflow[i].strip().startswith("- uses: actions/checkout@")
+    ]
+    assert len(checkouts) == 1, (
+        "the `test:` job no longer has exactly ONE `actions/checkout@` step "
+        f"(found {len(checkouts)}) — the guard's premise is that a single bare checkout "
+        "gives the job the default `fetch-depth: 1` (#11064 review P2)"
+    )
+    # The step's own body is the checkout line plus any `with:`/`env:` continuation lines up to
+    # the next step. `fetch-depth` anywhere in it means the job is no longer shallow.
+    step = [workflow[checkouts[0]]]
+    for ln in workflow[checkouts[0] + 1:end]:
+        if ln.strip().startswith("- "):
+            break
+        step.append(ln)
+    assert not any("fetch-depth" in ln for ln in step), (
+        "the `test:` job's checkout now sets `fetch-depth`, so the job is no longer shallow — "
+        "the false-RED bound `test_the_census_git_guard_fails_closed_and_never_reds_a_shallow"
+        "_checkout` guards against no longer exists, while the guard would keep passing "
+        "(#11064 review P2):\n  " + "\n  ".join(ln for ln in step if "fetch-depth" in ln)
     )

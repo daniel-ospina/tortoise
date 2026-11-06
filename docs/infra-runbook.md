@@ -3523,10 +3523,12 @@ operator who read the line above as "CI defends this" would never run it.
 >   `supabase_migrations.schema_migrations` **has a row for both**. The gate is fail-closed by
 >   contract (its own exit-code table: a missing token, a non-201/200 Management-API answer, or a
 >   body that is not a JSON array each exit **2**, never 0), so this is a positive read, not a skip.
->   ⛔ **What it does NOT establish:** the gate's own remediation text says it *"sees versions, not
->   schema"* — a version row is present because the DDL ran **or** because it was recorded by
->   `supabase migration repair` after a bookkeeping drift (#9613). So: **both are RECORDED APPLIED;
->   the OBJECTS are unread.**
+>   ⛔ **What it does NOT establish:** the gate reads VERSION ROWS, and says so itself — *"`supabase
+>   migration list --linked` — version ROWS only, so it cannot tell you whether the objects exist"*,
+>   and *"'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks the objects"*
+>   (both `.github/scripts/check-migration-drift`). A version row is present because the DDL ran
+>   **or** because it was recorded by `supabase migration repair` after a bookkeeping drift (#9613).
+>   So: **both are RECORDED APPLIED; the OBJECTS are unread.**
 >
 >   ⚠️ **WHICH run first recorded them is NOT established — and that is a finding, not a
 >   reassurance.** The `supabase-deploy` history around that gate names no clean single apply:
@@ -3551,8 +3553,8 @@ operator who read the line above as "CI defends this" would never run it.
 >   after 23:07:38Z (the cancelled run 56 minutes after it), so they postdate the reading that first
 >   saw the rows. The recorder is therefore an act **this run history does not contain**: an
 >   out-of-band `supabase db push`, or a `supabase migration repair` recording a version whose
->   objects were already present (#9613) — which is exactly what the gate's own "sees versions, not
->   schema" bound permits. ⛔ **Do not read `supabase-deploy`'s red as "the apply never ran"**: that
+>   objects were already present (#9613) — which is exactly what the gate's own version-ROWS-only
+>   bound permits. ⛔ **Do not read `supabase-deploy`'s red as "the apply never ran"**: that
 >   is the same *a red signal means nothing happened* misread this section exists to correct, and on
 >   `42136459903` the apply step is **green inside a failed job**. The quoted `#9548` `6669720078`
 >   (*"the deployment cannot be refreshed until the migration apply runs"*) was written
