@@ -743,6 +743,73 @@ class RecordStatementError(RecordProjectionError):
     raised from the reporter itself — the "lost row nobody can attribute"
     failure this class exists to end. Both arms keep the fault clause, so no
     call shape is a trap.
+
+    ⛔ AND BOTH ARMS COMPOSE THE FAULT CLAUSE THE SAME WAY — ``_driver_fault``
+    (#11121). This one composed it as ``type(cause).__name__: {cause}``, i.e.
+    ``str(cause)``, which on a driver error is the protocol's fields
+    CONCATENATED: the ``DETAIL``/``CONTEXT`` clause quotes the refused row or a
+    prefix of its values, so the withhold documented above was true of the
+    message arm and false of the cause arm. The leak is entirely the DRIVER's
+    clause — the cause arm's own half (:meth:`Statement.attribution`) renders
+    ``value_types()`` and carries no bound value at all, and
+    :func:`_column_pair` is reached only from the message arm — so what came
+    back verbatim was *whatever the driver chose to quote*, not necessarily every
+    withheld value: pre-fix, on this PR's own fixture, the refused ``search_keys``
+    token reappeared. That fixture names nothing but ``search_keys`` in its
+    ``DETAIL``/``CONTEXT``, so it witnesses the leak rather than its extent — a
+    `CHECK` violation's ``DETAIL`` quotes the whole row, and none of the other
+    withheld columns has to appear for this arm to be the wrong place to compose
+    the clause. ``RecordStatementError``
+    carries neither ``diag`` nor ``pgcode``, and ``record_writer._bounded_cause``
+    narrows only on the OUTER exception's own ``diag``/``pgcode``, so it could
+    not repair this either — before this change it took its ``str(exc)`` branch
+    with the driver's ``DETAIL`` already embedded here. Those are two permanent
+    facts and one PRE-FIX consequence, and the tense is load-bearing (#11124
+    review cycle 4): the facts are unchanged, which is why this layer is the
+    only place the leak can be closed, but the consequence is not — the
+    narrowing still runs on every one of these errors and no longer has a driver
+    ``DETAIL`` to find.
+
+    ⚠️ AND THE NARROWING IS NOW SHAPE-BLIND, which is the one thing this fix
+    costs (#11124 review P3). :func:`_primary_message` falls back to the FIRST
+    LINE of ``str(exc)`` for every exception, not only a driver-shaped one, so a
+    multi-line NON-driver cause keeps its first line and drops the rest —
+    measured, on a `Statement` cause: ``ValueError("line one\\nline two")``
+    reported ``ValueError: line one`` where the pre-fix arm carried both. A cause
+    whose FIRST line is BLANK keeps nothing at all: ``splitlines()`` yields the
+    empty head, :func:`_primary_message` returns ``""``, and
+    :func:`_driver_fault` renders the type alone — ``ValueError("\\nline two")``
+    reports ``failed (ValueError)`` with no ``…``/``<withheld>`` marker, i.e.
+    indistinguishable from a cause that genuinely carried no message
+    (#11124 review cycle 3). It is
+    the same narrowing the message arm has applied SINCE #10648 (before it,
+    :func:`replay` composed ``f"{type(exc).__name__}: {exc!s}"`` — full
+    ``str(exc)`` — and only then took ``_driver_fault(exc)`` inside
+    ``_failure_line``), so the two arms are now consistent
+    rather than newly wrong. Stated because ``_bounded_cause`` escapes newlines
+    rather than dropping them (`record_writer._bounded_text`), i.e. pre-fix those
+    lines DID reach the log stream.
+    ⚠️ Cited by SYMBOL, not by line: two review cycles in a row found this
+    paragraph's line numbers dead, because every prose insertion above the call
+    site moves it (the second correction was measured against the pre-edit file).
+    A name survives an insertion; a number does not.
+
+    ⚠️ THE COST IS BOUNDED TO A MULTI-LINE **NON-DRIVER** CAUSE, and that
+    qualifier is load-bearing rather than decorative (#11124 review cycle 2):
+    the only in-tree multi-line cause is DRIVER-SHAPED — the
+    :class:`_DriverShapeError` double in
+    ``tests/test_9548_record_search_keys_shape.py`` (the other ``pgcode``/``diag``
+    double in-tree, :class:`_DriverError` in
+    ``tests/test_record_searchkeys_10620.py``, is never passed as a *cause*) —
+    and for that shape :func:`_primary_message` returns the protocol's
+    single-line ``M`` field, so nothing is lost. It is the plain
+    ``Exception("a\\nb")`` shape that loses its tail, and no in-tree caller
+    passes one.
+
+    No in-tree PRODUCTION caller builds this form today (only :func:`replay`
+    raises the class, via the message form; the cause form is built by this
+    module's own tests), which is exactly why it is pinned by a test rather than
+    left as a trap for the repair script or backfill the form is documented for.
     """
 
     def __init__(self, statement: Statement | str,
@@ -756,7 +823,7 @@ class RecordStatementError(RecordProjectionError):
         detail = (statement.attribution()
                   if isinstance(statement, Statement) else str(statement))
         super().__init__(
-            f"{where} failed ({type(cause).__name__}: {cause}) — {detail}"
+            f"{where} failed ({_driver_fault(cause)}) — {detail}"
         )
 
 

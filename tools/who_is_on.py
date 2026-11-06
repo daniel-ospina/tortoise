@@ -197,13 +197,28 @@ def pushed_branch_names(git_bin: str, repo: str,
     so a remote whose name contains a slash cannot mis-split the ref."""
     refs = [name for name, _sha in
             cp._git_refs(git_bin, repo, "refs/remotes", timeout)]
-    rc, out, _ = _git(git_bin, repo, "remote", timeout=timeout)
+    rc, out, err = _git(git_bin, repo, "remote", timeout=timeout)
+    # ⛔ A FAILED `git remote` IS NOT "NO REMOTES" (#8881). The old fallback read
+    # an unreadable remote list as an EMPTY one, and the no-prefix arm below then
+    # credited every branch as pushed by stripping one path component — i.e. a
+    # never-pushed branch could be reported PUSHED, the exact stranded-work
+    # fail-open this tool exists to close. It is also where #8881's undecodable
+    # byte used to surface as a crash; with `_run` classifying it, the honest
+    # answer is that the remote half of "local-only" is UNMEASURED — so refuse
+    # the read (the caller turns this into rc 2, never rc 1 and never "all
+    # clear").
+    if rc != 0:
+        raise cp.SurfaceError(
+            "`git remote` could not be read "
+            f"(exit {rc}{(': ' + _clean(err)) if err else ''}) — which branches "
+            "are pushed is UNKNOWN, so \"local-only\" cannot be decided"
+        )
     # LONGEST remote prefix first: with remotes `foo` and `foo/bar`,
     # `refs/remotes/foo/bar/qux` must strip `foo/bar` (-> `qux`), not `foo`
     # (-> `bar/qux`). A shortest-first match hid a never-pushed branch named
     # `bar/qux` from every surface — the exact stranded-work fail-open.
     remotes = sorted((ln.strip() for ln in out.splitlines() if ln.strip()),
-                     key=len, reverse=True) if rc == 0 else []
+                     key=len, reverse=True)
     names: set[str] = set()
     for ref in refs:
         rest = ref[len("refs/remotes/"):] if ref.startswith("refs/remotes/") else ref
@@ -483,6 +498,79 @@ def _local_detail_lines(surfaces: list, git_bin: str, repo: str,
     return lines, unknown_refs
 
 
+def _answer_for_pull_request(exc, issue: int, repo_arg: str | None,
+                             gh_bin: str, git_bin: str, timeout: float,
+                             depth: int) -> tuple[str, int]:
+    """"who is on #<PR>?" — resolve it, then answer for the WORK ITEM(S) (#9976).
+
+    Mirrors the gate's own resolution (`collision_preflight.resolve_pull_request_
+    work_items`) so the two verbs cannot disagree about what a PR number means.
+    Every resolved item is answered under its own heading; the aggregate exit is
+    `rc 2` if ANY item could not be answered, else `rc 0`. This verb still never
+    returns 1.
+
+    ⛔ AN UNRESOLVABLE PR IS STILL rc 2 AND STILL SAYS WHY. "I could not work out
+    which work item this PR serves" is an incomplete answer to the question that
+    was asked — never "nobody" — and the gate's own refusal sentence (which the
+    tests and callers already match on) is kept first so a reader recognises the
+    shape.
+    """
+    resolution = cp.resolve_pull_request_work_items(getattr(exc, "pr", None) or {},
+                                                   issue)
+    route = cp._resolution_route(resolution)
+    if not resolution.resolved:
+        return (
+            f"ANSWER INCOMPLETE: {_clean(str(exc))} This is NOT \"nobody\".\n"
+            f"{_clean(cp._resolution_failure(resolution))}\n",
+            EXIT_INCOMPLETE,
+        )
+    if depth >= 1:
+        # A PR whose resolved item is ITSELF a PR would recurse forever (the
+        # resolved number is re-refused, re-resolved, …). One hop is honoured;
+        # the second REFUSES the item as incomplete rather than looping.
+        return (
+            f"ANSWER INCOMPLETE: #{issue} resolves to {', '.join(f'#{n}' for n in resolution.issues)}, "
+            "which is itself a pull request number — refusing to recurse further "
+            "(ask again with the ISSUE the work serves). This is NOT \"nobody\".\n",
+            EXIT_INCOMPLETE,
+        )
+    items = ", ".join(f"#{n}" for n in resolution.issues)
+    chunks = [
+        f"#{issue} is an OPEN PULL REQUEST — resolved via {_clean(route)} to "
+        f"{items}. Answering for the WORK ITEM(S), the same resolution the "
+        "pre-flight uses (#9957/#9976).",
+        "",
+    ]
+    codes: list[int] = []
+    for item in resolution.issues:
+        text, code = who_holds(item, repo_arg, gh_bin, git_bin, timeout,
+                               depth + 1)
+        chunks.append(text.rstrip("\n"))
+        codes.append(code)
+    worst = EXIT_INCOMPLETE if any(c == EXIT_INCOMPLETE for c in codes) else EXIT_ANSWERED
+    if len(resolution.issues) > 1:
+        # One line a reader can take the answer from, mirroring the gate's own
+        # "the WORST decides" aggregate — and stating that a holder on any item
+        # is an answer, not a collision (this verb has no verdict).
+        chunks.append(
+            f"ANSWER: PR #{issue} resolves to {len(resolution.issues)} work "
+            f"item(s) ({items}); each is answered above under its own heading"
+            + (" — at least one answer is INCOMPLETE (see above)."
+               if worst == EXIT_INCOMPLETE else ".")
+        )
+    return "\n\n".join(chunks) + "\n", worst
+
+
+def _ps_bin() -> str:
+    """The `ps` binary, resolved the same way the gate resolves it (`--ps`).
+
+    This verb has no `--ps` flag of its own (it is not a flag users pass here),
+    so the environment seam is the whole surface — and it is READ PER CALL rather
+    than at import so a caller/test can point it somewhere else without a reload.
+    """
+    return os.environ.get(cp.PS_ENV, "ps")
+
+
 def _hit_lines(surface) -> list[str]:
     """Per-surface hit lines, capped exactly like the gate's report so a broad
     keyword match on a 550-branch hub cannot print hundreds of lines. Every field
@@ -498,10 +586,29 @@ def _hit_lines(surface) -> list[str]:
 
 
 def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
-              timeout: float) -> tuple[str, int]:
+              timeout: float, depth: int = 0) -> tuple[str, int]:
     """The answer to "who is on #N?", local surfaces included. rc 0 = complete
     answer (holders or none); rc 2 = a surface could not be queried / the target
-    repo could not be resolved. Never 1."""
+    repo could not be resolved. Never 1.
+
+    ⛔ A PR NUMBER IS ANSWERED, NOT ABSTAINED FROM (#9976). GitHub shares one
+    number space, so "who is on #2712?" is a likely human invocation against a
+    PULL REQUEST — and the gate itself resolved that shape years-of-issues ago
+    (#9957): a PR number is RESOLVED to the work item(s) it serves and the
+    gate's verdict is computed for THOSE. This verb used to abstain
+    (`ANSWER INCOMPLETE: … is an OPEN PULL REQUEST, not a work item`), so the two
+    verbs answered the same number differently — which AGENTS.md says they
+    cannot, because this verb reuses the pre-flight's own enumeration precisely
+    so the two cannot drift.
+
+    The resolution is the pre-flight's OWN (`cp.resolve_pull_request_work_items`),
+    not a second implementation, and this verb answers for EVERY item it resolves
+    to — under each item's own heading — rather than picking one. The exit
+    contract is unchanged: `rc 0` when every item answered, `rc 2` when any
+    surface could not be read, and NEVER 1. `depth` bounds a PR→PR chain (a PR
+    that only references a peer PR): the second hop REFUSES that item instead of
+    recursing without bound.
+    """
     ns = SimpleNamespace(repo=repo_arg, gh=gh_bin, git=git_bin, issue=issue)
     target, code = cp._resolve_target(ns, timeout)
     if target is None:
@@ -515,7 +622,31 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     local_repo = target.path or os.getcwd()
     try:
         surfaces, title, _rc = cp.run_preflight(
-            issue, target, gh_bin, git_bin, timeout, identity=cp.Identity(login=None),
+            issue, target, gh_bin, git_bin, timeout,
+            # ⛔ THE VERB MUST CARRY THE CALLER'S OWN IDENTITY (review cycle 1).
+            # With a bare `Identity(login=None)` the live-lane surface could not
+            # apply the self exemption, so a lane asking "is anyone on my issue?"
+            # was told "1 holder(s)" — itself — i.e. #10684 reintroduced one verb
+            # over, and on a PR number it disagreed with the gate about the same
+            # input. Same ancestry set the gate auto-declares.
+            identity=cp.Identity(
+                login=None,
+                # ⛔ THE ANCESTRY WALK NEEDS THE **PS** BINARY (review cycle 2,
+                # MEDIUM). This passed `git_bin`, which Linux masks: the walk
+                # answers from `/proc/<pid>/stat` there, so the bug was invisible.
+                # On a host WITHOUT procfs the macOS fallback runs
+                # `<binary> -o ppid= -p <pid>` — `git -o ppid= …` fails, the set
+                # collapses to `{getpid()}`, and the caller's own `pi` ancestor is
+                # no longer exempt, so the verb reports the caller as its own
+                # holder: the #10684 defect, one verb over, on macOS.
+                self_pids=frozenset(cp._ancestor_pids(_ps_bin(), timeout)),
+            ),
+            # ⛔ AND THE SAME BINARY GOES TO THE SURFACE (cycle-3 review, LOW).
+            # `run_preflight` defaults `ps_bin` to the literal `"ps"`, so without
+            # this `COLLISION_PREFLIGHT_PS` meant two different things inside one
+            # `who_holds` run. The gate resolves `ps` ONCE and passes it to both
+            # uses; this verb must too.
+            ps_bin=_ps_bin(),
         )
     except cp.NotAWorkItem as exc:
         # A DESIGNED refusal, not an unexpected failure: the gate refuses a
@@ -524,8 +655,14 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         # INSIDE `run_preflight`, so it must be caught HERE — a handler in
         # `main()` is unreachable, because the generic fail-closed clause below
         # swallows it first and reports a designed refusal as a crash.
-        return (f"ANSWER INCOMPLETE: {_clean(str(exc))} This is NOT \"nobody\".\n",
-                EXIT_INCOMPLETE)
+        #
+        # ⛔ #9976: THE REFUSAL IS THE RESOLUTION TRIGGER, exactly as it is in
+        # the gate (#9957). Answering for the work item(s) is the parity
+        # AGENTS.md demands; only a resolution that FAILS still ends here, and it
+        # then names what it could not resolve (rc 2 — "do not start on a guess").
+        return _answer_for_pull_request(
+            exc, issue, repo_arg, gh_bin, git_bin, timeout, depth,
+        )
     except cp.SurfaceError as exc:
         return f"who-is-on: {_clean(str(exc))}\n", EXIT_INCOMPLETE
     except Exception as exc:  # FAIL-CLOSED by contract
@@ -841,6 +978,23 @@ def _resolve_inventory_path(repo_arg: str | None, gh_bin: str, git_bin: str,
         print(f"who-is-on: no local checkout found for {target.slug or repo_arg!r}; the "
               "inventory reads local git state and needs one", file=sys.stderr)
         return None, EXIT_INCOMPLETE
+    # ⛔ AN UNRESOLVED SLUG IS ONLY FATAL WHEN A READ WAS REFUSED (#8881). The
+    # inventory itself is local git state, so a repo with NO remote (an ordinary
+    # local-only checkout: `git remote -v` exits 0 and prints nothing) is a
+    # complete answer — but a `git remote -v` that FAILED means the run could not
+    # read the topology it is about to report on, and that used to escape as a
+    # UnicodeDecodeError traceback (exit 1, the collision code). Distinguishing
+    # `exited 0 / found nothing` from `could not be read` is what keeps the pin
+    # (#8881) honest instead of turning every remote-less checkout into an
+    # INCOMPLETE.
+    if not target.slug:
+        rc, _out, err = _git(git_bin, target.path, "remote", "-v", timeout=timeout)
+        if rc != 0:
+            print("who-is-on: `git remote -v` could not be read "
+                  f"(exit {rc}{(': ' + _clean(err)) if err else ''}) — the remote "
+                  "topology this inventory reports on is UNKNOWN, so this is an "
+                  "INCOMPLETE answer, never an all-clear", file=sys.stderr)
+            return None, EXIT_INCOMPLETE
     return target.path, 0
 
 
