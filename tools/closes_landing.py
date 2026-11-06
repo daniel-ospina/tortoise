@@ -1525,6 +1525,25 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         else:
             _line_residual = _line_col = rest_indent
         _indent_base = container.rest_col if container is not None else 0
+        # ⛔ THE PARAGRAPH'S CONTAINER IS NOT ALWAYS THE ITEM (round 42 review — a lost close this
+        # module introduced AGAINST `origin/main`). When the open paragraph lives in a blockquote
+        # NESTED INSIDE the list item, the item is not what holds it, and `container.depth` (the
+        # item's) stops the marker consumption BEFORE that quote's `>`. The distance is then measured
+        # to the wrong column and a lazy paragraph continuation is blanked as code:
+        #     `- > q` + `  >     -     Closes #100`
+        #         renderer ONE `<p>` inside the inner quote (`q\n    -     Closes #100`)
+        #         origin/main `[100]`; head `[]` — 60 such bodies per marker family, all lost
+        # The paragraph's depth is `prev_quote_depth` (it already carries lazy continuation), so when
+        # it is DEEPER than the item and the line is written at exactly that depth, the line is
+        # inside that quote: consume the line's own markers and measure from the quote's content
+        # column, which in that space is 0. Swept over 22,176 + 9,072 bodies against
+        # `MarkdownIt("commonmark")`: lost closes 120 -> 0 and 45 -> 0, no fail-open moved, 0
+        # regressions.
+        if (container is not None
+                and prev_quote_depth > container.depth
+                and _quote_depth(prefix) == prev_quote_depth):
+            _line_residual = _fence_line_column(line, prev_quote_depth)[1]
+            _indent_base = 0
         _lazy_indent = (prev_prose
                         and _line_residual > _indent_base + _MAX_FENCE_INDENT
                         and container is prev_container

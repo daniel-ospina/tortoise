@@ -3781,3 +3781,53 @@ def test_a_line_that_DROPS_its_quote_is_lazy_only_when_the_ITEM_owns_the_markers
     ):
         assert token_type(body) in ("code_block", "inline"), (why, body)
         assert cl.parse_closing_refs(body) == [], (why, body)
+
+
+def test_the_PARAGRAPHS_container_is_not_always_the_ITEM():
+    """Round 42 review — a lost close this module introduced AGAINST `origin/main`.
+
+    When the open paragraph lives in a blockquote NESTED INSIDE the list item, the item is not the
+    container that holds it. `_lazy_indent` measured the line in the ITEM's space — consuming at most
+    `container.depth` markers, i.e. stopping BEFORE the inner quote's `>` — so §4.4's distance was
+    taken to the wrong column and a lazy paragraph continuation was blanked as code:
+
+        `- > q` + `  >     -     Closes #100`
+            renderer ONE `<p>` inside the inner quote (`q\\n    -     Closes #100`)
+            `origin/main` `[100]`; before this fix `[]` — a lost close, 60 per marker family
+
+    The paragraph's depth already exists (`prev_quote_depth`, which carries lazy continuation), so
+    when it is DEEPER than the item and the line is written at exactly that depth the line is inside
+    that quote: consume the line's own markers and measure from the quote's content column.
+
+    Swept against `MarkdownIt("commonmark")` in both directions — no body the renderer puts in
+    `<pre><code>` may be credited, and no prose body may be hidden — over 22,176 + 9,072 bodies at
+    the fix's head: lost closes 120 -> 0 and 45 -> 0, with no fail-open moved.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    body = "- > q\n  >     -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+
+    # Controls: the SAME item without the inner quote is CODE (no paragraph inside it holds the
+    # line), and a line at the item's own depth is the round-39 pin, not this one.
+    for control in ("- > q\n  2.     Closes #100\n",        # marker at the item's content column
+                    "> - item\n>      -     Closes #100\n"):  # §4.4 distance inside the item itself
+        assert token_type(control) == "code_block", control
+        assert cl.parse_closing_refs(control) == [], control
+    assert cl.parse_closing_refs("- > q\n  > 2.     Closes #100\n") == [100]
+
+    for prep, prefix in (("- > q\n", "  > "), ("- > q\n  > pre\n", "  > "), ("> - > q\n", "  > ")):
+        for marker in ("-", "*", "1.", "2.", "10."):
+            for gap in range(1, 10):
+                for indent in range(0, 7):
+                    candidate = (prep + prefix + " " * indent + marker + " " * gap
+                                 + "Closes #100\n")
+                    expected = [] if token_type(candidate) == "code_block" else [100]
+                    assert cl.parse_closing_refs(candidate) == expected, candidate
