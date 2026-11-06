@@ -123,6 +123,25 @@ def _rearm_stranded_probe(selfhost_mod) -> None:
 #: healthy still fails — it just fails after a budget a loaded box can meet.
 _HEALTH_VERDICT_WAIT_S = 90.0
 
+#: How long ``test_the_health_wait_releases_a_starved_probe_slot``'s holder keeps
+#: the ONE process-lifetime probe slot occupied. It MUST OUTLAST the wait's own
+#: budget, or that test stops proving what it is named for.
+#:
+#: The test's subject is the wait's RE-ARM of a stranded slot
+#: (``_rearm_stranded_probe``, #3396). A hold SHORTER than the budget un-starves
+#: itself: the holder times out, its worker drains, the next refresh MEASURES on
+#: the freed slot, and the assertion passes with the remedy never called. That is
+#: exactly what the 30 s hold against this 90 s default did, measured on PR #11023:
+#: GREEN as-is and GREEN with ``_rearm_stranded_probe`` monkeypatched to a no-op.
+#: With the hold above the budget the no-op run FAILS at the deadline, so the test
+#: discriminates again.
+#:
+#: ⚠️ The OBSTACLE is what grows here, never the deadline: shrinking
+#: ``_HEALTH_VERDICT_WAIT_S`` back below the documented harness tolerance is what
+#: red-ed a required check on a HEALTHY daemon (CI run 42186465222, job
+#: 127800485941, ``test (d)``), and is not an option.
+_STARVED_SLOT_HOLD_S = _HEALTH_VERDICT_WAIT_S + 5.0
+
 
 def _wait_for_ready(tc, timeout: float = _HEALTH_VERDICT_WAIT_S):
     """Block until ``/health/ready`` answers 200, or fail naming its own 503.
@@ -980,7 +999,9 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
 
     def _hold_the_one_shared_slot():
         held.set()
-        release.wait(30.0)  # abandoned, never joined: the wait must not block on it
+        # abandoned, never joined: the wait must not block on it. It outlasts
+        # the wait's own budget on purpose — see `_STARVED_SLOT_HOLD_S`.
+        release.wait(_STARVED_SLOT_HOLD_S)
 
     tc = _client_for_env(monkeypatch, tmp_path)
     from tortoise import selfhost
@@ -1001,14 +1022,55 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
             # acquisition budget) plus ONE cold embedded-FalkorDB start is
             # already ~26 s before the runner's own load is counted.
             #
-            # It weakens nothing: the assertion below is unchanged (a MEASURED
-            # `ok is True`), and the remedy's BOUNDEDNESS is pinned where that
-            # property belongs — `test_the_strand_remedy_is_bounded`, on its own
-            # 3.0 s bound.
+            # ⛔ The budget is NOT the only half of this test's discrimination: a
+            # slot held for LESS than the budget un-starves itself, so the wait
+            # never has to re-arm and this passes with the remedy deleted — it did,
+            # at the 30 s hold this test used to install (PR #11023 review). The
+            # hold (`_STARVED_SLOT_HOLD_S`) therefore exceeds this budget, and
+            # `test_the_starved_slot_hold_outlasts_the_wait_budget` pins that
+            # coupling so it cannot silently drift back.
+            #
+            # The remedy's BOUNDEDNESS is pinned where that property belongs —
+            # `test_the_strand_remedy_is_bounded`, on its own 3.0 s bound.
             _wait_for_probe(selfhost)
     finally:
         release.set()
     assert selfhost._HEALTH_PROBE.snapshot()["ok"] is True
+
+
+def test_the_starved_slot_hold_outlasts_the_wait_budget():
+    """Non-vacuity coupling for `test_the_health_wait_releases_a_starved_probe_slot`.
+
+    That test proves the wait RE-ARMS a stranded slot. It can only do that while
+    the slot it installs is STILL HELD at the moment the wait would otherwise
+    expire: with `hold < budget` the holder returns first, the next refresh
+    MEASURES on the freed slot, and the assertion passes with
+    `_rearm_stranded_probe` never called.
+
+    Measured on PR #11023 (fresh-context review): at the 30 s hold this test
+    used to install against the 90 s default, the assertion was GREEN as-is AND
+    GREEN with the remedy monkeypatched to a no-op — green without its subject.
+    This pin holds the coupling, so an edit that raises the budget (or shrinks
+    the hold) re-creates that vacuity and goes RED here instead of merging
+    silently green.
+    """
+    import inspect
+
+    assert _STARVED_SLOT_HOLD_S > _HEALTH_VERDICT_WAIT_S, (
+        f"the starved-slot hold ({_STARVED_SLOT_HOLD_S}s) must outlast the health "
+        f"wait budget ({_HEALTH_VERDICT_WAIT_S}s) — a shorter hold un-starves "
+        "itself, and test_the_health_wait_releases_a_starved_probe_slot then "
+        "passes with the re-arm remedy deleted (vacuous, not green)"
+    )
+    # The coupling only bites because that test takes `_wait_for_probe`'s DEFAULT
+    # budget rather than passing its own, so the default IS the bound to size
+    # against — not a copy of it.
+    default = inspect.signature(_wait_for_probe).parameters["timeout"].default
+    assert default == _HEALTH_VERDICT_WAIT_S, (
+        f"_wait_for_probe's default timeout is {default}, not the "
+        f"{_HEALTH_VERDICT_WAIT_S}s budget the hold is sized against — re-derive "
+        "_STARVED_SLOT_HOLD_S, or pass the budget explicitly in that test"
+    )
 
 
 class TestHealthTruthMCP:
