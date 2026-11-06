@@ -9513,11 +9513,14 @@ def _ingest_rate_limited(admission, *, resource: str) -> HTTPException:
 
     ``resource`` names THIS request's charge (``commit_ingest_bytes`` /
     ``capture_ingest_bytes``) — the lane that refused you, NOT the lane that
-    spent the window. The spender is NOT named: ``used`` is the org's whole spend
-    across BOTH lanes, so which lane spent it is only recoverable by subtraction
-    against what this lane charged (``test_the_window_is_shared_with_the_
-    commit_lane`` is the leg that shows a capture-spent window reporting
-    ``resource="commit_ingest_bytes"`` on the commit refusal). It must not be
+    spent the window. The spender is NOT named and is NOT recoverable: ``used``
+    is the org's whole spend across BOTH lanes, and no field in this body says
+    how much of it YOUR lane contributed, so subtracting this request's charge
+    from ``used`` yields the pre-request total, not an attribution. That is
+    exactly what makes ``resource`` unambiguous — it names the charge, never a
+    culprit (``test_the_window_is_shared_with_the_commit_lane`` is the leg that
+    shows a capture-spent window reporting ``resource="commit_ingest_bytes"``
+    on the commit refusal). It must not be
     read as "which allowance": there is ONE window per org, which is why
     alternating lanes cannot buy a second one.
 

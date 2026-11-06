@@ -3513,9 +3513,12 @@ class TestCaptureOrgIngestBound:
 
         3 fixed nodes (``:Session`` + ``sessionCaptured`` ``:Event`` +
         transcript ``:Source``), plus TWO nodes per conversation entry (the turn
-        ``:Point`` and its ``PointAdded`` ``:GraphEvent`` — the rate the shipped
-        journal-configured lane writes), at the pricing-tied 1024 B/node. The
-        body of a two-word turn is far smaller than that, which is why a
+        ``:Point`` and its ``PointAdded`` ``:GraphEvent`` — the rate the
+        JOURNAL-CONFIGURED / RECORD-UNARMED lane writes, which is the
+        ``docker-compose.yml`` shape; production runs the ARMED record at 0
+        graph nodes per turn, so this is an accepted OVER-charge there, see
+        ``hosted_api._CAPTURE_TURN_NODES``), at the pricing-tied 1024 B/node.
+        The body of a two-word turn is far smaller than that, which is why a
         byte-only charge would leave this loop nearly free (the `OVERRIDES:`
         recorded on #4051).
         """
@@ -3524,8 +3527,8 @@ class TestCaptureOrgIngestBound:
         assert self._charge(3) - self._charge(1) == 4 * 1024, (
             "the charge does not grow two nodes per turn (the turn Point and "
             "its `PointAdded` durability record) — a long transcript would be "
-            "charged half its node growth on the shipped journal-configured "
-            "lane, the fail-open direction for a throttle")
+            "charged half its node growth on the journal-configured / "
+            "record-unarmed lane, the fail-open direction for a throttle")
 
     def test_a_fat_transcript_is_charged_its_bytes_not_its_node_floor(self):
         """The payload term binds once the text outweighs the chain.
@@ -3534,14 +3537,29 @@ class TestCaptureOrgIngestBound:
         cap is the only per-request bound), so a handful of large captures must
         not fit inside a minute by accident.
         """
-        from tortoise.hosted_api import SessionRequest, capture_ingest_charge_bytes
+        from tortoise.commit_schema import COMMIT_INGEST_BYTES_PER_NODE
+        from tortoise.hosted_api import (
+            SessionRequest,
+            capture_ingest_charge_bytes,
+            declared_capture_write_count,
+        )
         fat = [{"role": "user", "content": "x" * 20_000}]
         body = SessionRequest(conversation=fat)
         charge = capture_ingest_charge_bytes(body)
-        assert charge == len(body.model_dump_json().encode("utf-8")), (
-            "a 20 KB turn was charged the node floor — the byte term is not "
-            "binding on stored text")
-        assert charge > 4 * 1024
+        # ORDER PROPERTIES, not the serializer's own expression. The property
+        # this case exists for is "the stored text is what binds", so it pins
+        # a LOWER bound (the raw content) and a comparison against the node
+        # floor — both of which a dropped payload term fails, and neither of
+        # which reds on a behaviour-preserving re-spelling of the byte term
+        # (``charge == len(model_dump_json().encode())`` did: it copied the
+        # implementation and coupled this case to the serializer choice).
+        raw_text = len(fat[0]["content"])
+        assert charge >= raw_text, (
+            f"a {raw_text} B turn was charged {charge} B — the payload term "
+            "does not cover the stored text it is binding on")
+        assert charge > declared_capture_write_count(body) * COMMIT_INGEST_BYTES_PER_NODE, (
+            "a 20 KB turn was charged no more than the node floor — the byte "
+            "term is not binding on stored text")
 
     def test_the_capture_charge_is_never_cheaper_than_the_write(
             self, client, monkeypatch, no_provider_keys):
@@ -3605,8 +3623,8 @@ class TestCaptureOrgIngestBound:
         from tortoise.hosted_api import _CAPTURE_TURN_NODES
         assert _CAPTURE_TURN_NODES >= 2, (
             "the charge declares fewer than 2 nodes per turn, so it under-"
-            "charges every capture on the shipped journal-configured lane "
-            "(Point + PointAdded :GraphEvent) — the fail-open direction")
+            "charges every capture on the journal-configured / record-unarmed "
+            "lane (Point + PointAdded :GraphEvent) — the fail-open direction")
         assert declared >= minted, (
             f"the charge declared {declared} nodes but the capture minted "
             f"{minted} (marginal {marginal:.2f} nodes/turn) — the throttle "
@@ -3798,18 +3816,24 @@ class TestPayloadEnvelopeBytes:
             "the fallback must over-count the escape, never under-count the "
             "write")
 
-    def test_the_shared_helper_is_the_one_both_lanes_use(self):
+    def test_the_shared_helper_is_the_one_both_lanes_use(self, monkeypatch):
         """One implementation, so the two lanes cannot drift on the fallback.
 
-        ⛔ THE COMPARISON IS ACROSS TWO BODIES, not ``helper(body) ==
-        helper(body)``. A same-call assertion holds for ANY implementation of
-        the helper — including ``return 0`` — so it reads as coverage of the
-        shared fallback and gives none (agent-infra#3442 rule 3). What the two
-        lanes actually depend on is that the surrogate body is charged MORE
-        than its clean twin: the fallback must over-count the escape, never
-        under-count the write.
+        ⛔ THE DELEGATION ITSELF IS PINNED, and a comparison across two bodies
+        does NOT pin it. That cheaper shape — ``capture_helper(hostile) >
+        helper(clean)`` — holds for the SHARED helper AND for a private COPY of
+        the fallback re-inlined in ``hosted_api.py`` (measured: an inline
+        duplicate passes it), so it reads as coverage of the one-implementation
+        property and gives none (agent-infra#3442 rule 3). The sentinel below
+        is what a copy cannot satisfy: ``_capture_payload_envelope_bytes``
+        re-reads ``tortoise.commit_schema.payload_envelope_bytes`` at CALL time,
+        so a patched-to-12345 delegate returns 12345 while a re-inlined copy
+        returns a real byte count and reds. The across-two-bodies leg is kept
+        beside it because it is the leg that pins the FALLBACK's direction
+        (over-count the escape, never under-count the write) — the property the
+        delegation exists to share, not the delegation.
         """
-        from tortoise.commit_schema import payload_envelope_bytes
+        from tortoise import commit_schema
         from tortoise.hosted_api import SessionRequest, _capture_payload_envelope_bytes
 
         clean = SessionRequest(
@@ -3817,7 +3841,19 @@ class TestPayloadEnvelopeBytes:
         hostile = SessionRequest(
             conversation=[{"role": "user", "content": "hi"}],
             metadata={"k": "\ud800"})
-        clean_bytes = payload_envelope_bytes(clean)
+
+        # leg 1 — the DELEGATION: a sentinel only a delegate can return.
+        monkeypatch.setattr(commit_schema, "payload_envelope_bytes",
+                            lambda _model: 12_345)
+        assert _capture_payload_envelope_bytes(hostile) == 12_345, (
+            "the capture charge did not call "
+            "`commit_schema.payload_envelope_bytes` — it holds its own copy of "
+            "the byte term, which is the drift a second implementation buys "
+            "(an under-count on either lane is a free write on both)")
+        monkeypatch.undo()
+
+        # leg 2 — the FALLBACK'S DIRECTION, shared through that delegation.
+        clean_bytes = commit_schema.payload_envelope_bytes(clean)
         assert _capture_payload_envelope_bytes(hostile) > clean_bytes, (
             "the capture charge's escape route is no larger than the clean "
             f"body it hides in ({clean_bytes} B) — the fallback collapsed")
