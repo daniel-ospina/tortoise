@@ -6165,9 +6165,10 @@ def test_ci_surfaces_declares_each_yaml_key_at_most_once():
     """Review round 5 on #11057 — a duplicate `durations` key is SILENT, and worse than a list one.
 
     `duplicate_entries` (#2913/#5373, the test above) gates a name repeated within one
-    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union`: a conflicting
-    hunk keeps BOTH sides' lines, so two lanes appending the same registration is the
-    natural conflict shape. The `durations` map has the same hazard and a strictly worse
+    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union` — which keeps
+    BOTH sides inside a conflicting hunk and never dedupes, while the same row appended at
+    a DIFFERENT anchor lands twice with no conflict at all (measured; see
+    `duplicate_entries`' docstring). The `durations` map has the same hazard and a strictly worse
     failure mode — it is a YAML MAPPING, so a second row for the same file is not a repeat
     any list check can see. The loader collapses it and the LAST row wins, silently.
 

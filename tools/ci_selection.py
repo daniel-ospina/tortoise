@@ -4166,10 +4166,10 @@ def duplicate_entries(manifest: dict) -> list[str]:
     2026-11-06 from three lanes appending this row at three different anchors
     (#3153), not from the driver.
 
-    ⚠️ `tools/registry_integrity.py`'s docstring still states the older
-    "byte-identical additions dedupe" framing; the measurements above falsify it
-    (the different-anchor case it says cannot duplicate does). Corrected there is
-    a separate change; do not cite that sentence as the authority for this rule.
+    ⚠️ The older "byte-identical additions dedupe" framing in
+    `tools/registry_integrity.py` has been corrected to match the measurements
+    above (it said the different-anchor case could not duplicate; it does), so
+    that module now states the same rule and may be cited alongside this one.
 
     Each offending name is reported ONCE however many times it repeats, so the
     count is a count of distinct problems.

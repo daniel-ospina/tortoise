@@ -170,9 +170,13 @@ surfaces:
   # ⛔ This is the `api` registration (the `__main__.py` subcommand shape). The file is ALSO
   # registered in `core`, once, with the #10655 `config.py` selection argument — cross-surface
   # (dual) registration is deliberate. A SECOND row in EITHER surface is what
-  # `tools/ci_selection.py --integrity` reds as `<surface>: test_cli_config_show.py`, because
-  # this file carries `merge=union` and two lanes appending the same registration keep BOTH
-  # lines: the shallow fold that merged `#10694` twice hit exactly that.
+  # `tools/ci_selection.py --integrity` reds as `<surface>: test_cli_config_show.py`.
+  # On this file's `merge=union` (`.gitattributes`): it never dedupes — the same row
+  # appended at two different anchors survives as TWO rows, with the attribute and
+  # without it (measured), while only the same change in the same place collapses, and
+  # that is git's ordinary identical-change resolution. So do not infer "a union merge
+  # ran" from a duplicate row. The shallow fold that merged `#10694` twice produced a
+  # duplicate row of this shape.
   - test_cli_config_show.py
   - test_9583_openapi_read_only_claim.py
   # #4282: the `api` arm of the #4860 key-limit failover guard. The file drives the
