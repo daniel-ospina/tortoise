@@ -288,6 +288,42 @@ def test_a_model_supplied_span_source_must_VERIFY():
     assert _mentions_of(payload_ok)[0]["span_source"] == "quote"
 
 
+def test_a_carried_record_is_constructed_not_copied():
+    """The `seeded` carry copied a channel entry VERBATIM, so an entry that guessed
+    the cue's own `rule_id` (the S4 prompt renders the whole embed list, so the shape
+    is visible) shipped a `span_source` naming a text that does not index it, and
+    skipped the `_MAX_QUOTE` clamp on the way (review cycle 5, P2)."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{
+        "surface": "the problem", "quote": "the quick brown fox",
+        "claim_ref": el["points"][0]["content"],
+        "span_start": 3, "span_end": 9, "span_source": "quote",
+        "rule_id": ref.RULE_GENERIC_HEAD}]
+    payload, _ = _mint(el)
+    rec = _mentions_of(payload)[0]
+    assert rec["span_source"] == "model", rec
+    assert rec["quote"][rec["span_start"]:rec["span_end"]] != "the problem"
+    # …and the cue's own rule id is still carried, which is what the branch exists for
+    assert rec["rule_id"] == ref.RULE_GENERIC_HEAD
+    # a long quote is clamped before the span is judged, so no address outlives its text
+    long_el = _embed_list("config/ci-surfaces.yml")
+    tail = "the problem is real"
+    long_quote = ("pad " * 60) + tail          # `the problem` sits past the 200 cap
+    long_el["mentions"] = [{
+        "surface": "the problem",
+        "quote": long_quote,
+        "claim_ref": long_el["points"][0]["content"],
+        "span_start": long_quote.index(tail), "span_end": len(long_quote),
+        "span_source": "quote",
+        "rule_id": ref.RULE_GENERIC_HEAD}]
+    payload_long, _ = _mint(long_el)
+    rec_long = _mentions_of(payload_long)[0]
+    # the quote is CLAMPED before the declaration is judged, so offsets that index
+    # past the stored text cannot keep claiming `quote`
+    assert len(rec_long["quote"]) <= 200
+    assert rec_long.get("span_source") == "model", rec_long
+
+
 # ── the flag ───────────────────────────────────────────────────────────────
 
 def test_the_predicate_is_off_at_the_default(monkeypatch):
