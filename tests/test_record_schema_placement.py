@@ -698,10 +698,13 @@ def test_the_routing_index_census_matches_the_record_migrations():
 # were **fail-open for the exact regression they document**. Both were written
 # as a first-occurrence pair — `at = text.find(retired)`, `labelled =
 # text.find(marker)`, `assert labelled < at` — and `find` returns the EARLIEST
-# match of each. The #7879 row is a single ~7,000-character line that already
-# carries one `SUPERSEDED` at offset ~1,631 (the A8 cell) and the retained R1
-# clause at ~6,421 with its own label at ~6,298, so the pair degraded to "the row
-# contains the word SUPERSEDED somewhere before this sentence". Replayed against
+# match of each. The #7879 row is a single multi-thousand-character line that
+# already carries an unrelated `SUPERSEDED` in the A8 cell, AHEAD of the retained
+# R1 clause and its own label, so the pair degraded to "the row contains the word
+# SUPERSEDED somewhere before this sentence". (No character offsets here on
+# purpose: they were pinned once and were stale by the next round — the same decay
+# this file's own doctrine removes. The span relation is the fact; the number is
+# a copy of it.) Replayed against
 # the head, that guard stayed GREEN for both mutations it exists to reject:
 #
 #   * append the retired sentence as a LIVE claim ("…and the record is NOT ARMED
@@ -1084,8 +1087,8 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
 
     The #11064 round-7 review measured that the two pins above were **fail-open**:
     both located the retired sentence and the `SUPERSEDED` marker with
-    first-occurrence `find`, so on the real #7879 row — one ~7,000-character
-    line carrying an unrelated `SUPERSEDED` ~4,800 characters earlier — the check
+    first-occurrence `find`, so on the real #7879 row — one very long line
+    carrying an unrelated `SUPERSEDED` well before this sentence — the check
     reduced to "the word appears somewhere before this sentence", and it stayed
     GREEN for both regressions below. A green run over a stale premise is a false
     PASS, and a false PASS is the one verdict this whole file exists to prevent.
