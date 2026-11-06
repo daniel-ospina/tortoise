@@ -128,7 +128,19 @@
 #  78c. #10234: a timeout with NO usable last_sweep_at and a pool holding team
 #      prefixes IS red — unknown is not healthy (#2790)
 #  78d. #10234: the sweep ceiling is an overridable knob (default derived from
-#      the job timeout); the 600s literal that killed healthy sweeps is gone
+#      the job timeout); the 600s literal that killed healthy sweeps is gone.
+#      d-ii refuses a non-numeric value; d-iii refuses 0, an over-budget value,
+#      and a value too WIDE for `[ -gt ]` to compare (which would otherwise skip
+#      the validator entirely)
+#  78e. #10234: `curl rc=56` is a TRANSPORT failure, not a budget timeout — it
+#      stays red even over a fresh completion, and names curl's own rc
+#  78f. #10234: a future-dated last_sweep_at is corruption — it reds regardless
+#      of the pool (f-ii pins the measured-empty-pool case, where round 1 had it
+#      silently green)
+#  78g. #10234: a fresh stamp does NOT prove the pool is servable — an
+#      unparseable archive timestamp reds AND files POOL_STALE (never a silent red)
+#  78h. #10234: an archive-LESS team (the custom-only shape this leg cannot see,
+#      #2375) does NOT red — round 3's broader guard would have red every run
 #  79. #5028: an empty sweep body names empty_response (not a held lock); it is
 #      judged on the same completion gate as a timeout
 #  80. #5028: the sweep OUTCOME is logged untruncated even when `per_team`
@@ -2002,21 +2014,47 @@ run_driver
 assert_eq "$RC" 1 "78d-iii. a value too wide to compare is refused, not passed to curl"
 unset SWEEP_TIMEOUT_S
 
-# ── 78g. #10234 review P1 (round 3): a fresh stamp does NOT make a broken pool green ──
+# ── 78g. #10234 review P1 (round 3) / P2 (round 4): a fresh stamp does not prove
+#         the pool is servable — but ONLY the unparseable-timestamp cause reds ──
 # `last_sweep_at` is written unconditionally at the end of the roll-up, BEFORE the
-# outcome is computed — so it proves the roll-up finished, not that the pool is
-# servable. The direct-R2 leg has three stale causes; only "a stale archive" files
-# anything, so "team prefix present but NO default archive" (or an unparseable
-# timestamp) sets POOL_STALE without filing — and pre-fix this run went GREEN.
+# outcome is computed, so it proves the roll-up finished, not that the pool is
+# servable. Of the three direct-R2 stale causes only "a stale archive" files
+# anything, so an UNPARSEABLE archive timestamp would otherwise leave the run
+# green. It reds — and FILES POOL_STALE, because a detectable, fileable condition
+# is never allowed to be silent.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
-export R2_DEFAULT_LIST=""                 # prefix present, NO default archive
+export R2_DEFAULT_LIST='not-a-timestamp'   # newest archive timestamp unparseable
 export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export STUB_SWEEP_RC=28
 run_driver
-assert_eq "$RC" 1 "78g. a fresh stamp over an archive-less pool is NOT green"
-assert_contains "$OUT" "the direct-R2 leg flagged the pool stale" "78g. the red names the pool evidence, not a coverage claim"
+assert_eq "$RC" 1 "78g. a fresh stamp over an UNMEASURABLE pool is NOT green"
+assert_contains "$OUT" "could not read an archive timestamp" "78g. the red names the pool evidence, not a coverage claim"
+# "Filed" can take two shapes: a create POST, or a dedup adoption of an already
+# open POOL_STALE. Both record the condition; silence records nothing. Accept
+# either, and fail only on silence.
+if grep -qE "GH POST .*/issues .*POOL_STALE" <<<"$(cat "$LOG")" \
+   || grep -qF "dedup: POOL_STALE" <<<"$OUT"; then
+  ok "78g. the condition is FILED or adopted, never a silent red"
+else
+  bad "78g. the condition is FILED or adopted, never a silent red (neither a POST nor a dedup adoption)"
+fi
 assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78g. it does NOT resurrect the false SWEEP_NO_COVERAGE claim"
+
+# ── 78h. #10234 review P2 (round 4): an archive-LESS team does NOT red ──────
+# "team prefix present but no default archive" is exactly what a team whose
+# DEFAULT graph is legitimately empty looks like while a CUSTOM graph archives —
+# this leg is DEFAULT-only by design (#2375), and the driver's own no_teams/no_work
+# arm RESOLVES SWEEP_NO_COVERAGE on that reading. Reding it (round 3's guard did)
+# would red every timeout run forever for a healthy custom-only team.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST=""                  # prefix present, NO default archive
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78h. an archive-less (custom-only) team does not red a budget timeout"
+assert_not_contains "$OUT" "could not read an archive timestamp" "78h. (control) the unparseable branch did not run"
 
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
 # rc=56 (connection reset) was measured in production at 201s and 480s of a

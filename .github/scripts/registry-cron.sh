@@ -974,6 +974,7 @@ R2_OK=1
 # by the kill-switch classifier (off-while-stale) and the no-coverage check
 # (enabled but 0 teams backed up) below.
 POOL_STALE=0        # a team's newest default archive is older than DRIVER_DOWN_MIN
+POOL_UNPARSEABLE=0  # a team's newest-archive timestamp could not be parsed (no healthy reading)
 R2_TEAM_COUNT=0     # team prefixes present under backups/
 # #4994: the direct-R2 leg's PER-TEAM staleness is accumulated here instead of
 # being filed as one `[DR] STALE` per tenant. One systemic pool fault therefore
@@ -1146,6 +1147,15 @@ if [ "$R2_OK" = "1" ]; then
           # report it fresh.
           log "team ${org_id}: unparseable archive timestamp '${newest}' — treating pool as stale"
           POOL_STALE=1
+          # #10234 review P2 (round 4): this is the ONLY pool-stale cause with no
+          # healthy reading. The other two are ambiguous — "team prefix present
+          # but no default archive" is exactly what a team whose DEFAULT graph is
+          # legitimately empty looks like while a CUSTOM graph archives (the
+          # driver's own `no_teams|no_work` arm resolves SWEEP_NO_COVERAGE on that
+          # reading, and #2375 keeps this leg DEFAULT-only). Gate on THIS flag, not
+          # on the pooled POOL_STALE, or a healthy custom-only team would red every
+          # timeout run forever.
+          POOL_UNPARSEABLE=1
         else
           age_min=$(( ($(date +%s) - newest_ts) / 60 ))
           if [ "$age_min" -gt "$STALE_MIN" ]; then
@@ -1231,7 +1241,17 @@ if [ "$R2_OK" = "1" ] && [ "$R2_LIST_OK" = "1" ] && [ "$STALE_TEAM_COUNT" = "0" 
   POOL_MEASURED_FRESH=1
 fi
 
-if [ "$STALE_TEAM_COUNT" != "0" ]; then
+# #10234 review P2 (round 4): the pooled incident must also cover an UNPARSEABLE
+# archive timestamp. That cause carries no stale-archive COUNT (STALE_TEAM_COUNT
+# stays 0), so before this it filed nothing at all while marking the pool stale —
+# and the sweep-timeout arm could then only turn LOUD, i.e. a red with no
+# incident, no body and nothing to close. Filing here keeps ONE file site for
+# this kind and reuses the dedup/streak machinery below.
+if [ "$STALE_TEAM_COUNT" != "0" ] || [ "${POOL_UNPARSEABLE:-0}" = "1" ]; then
+  if [ "${STALE_TEAM_COUNT:-0}" = "0" ]; then
+    STALE_TEAMS="${STALE_TEAMS}- (no stale archive counted: a team's newest-archive timestamp could not be parsed, so the pool age is UNMEASURABLE)
+"
+  fi
   POOL_LIST_NOTE=""
   if [ "$R2_LIST_OK" != "1" ]; then
     # The tenants below WERE measured; the pool as a whole was not. Say so in
@@ -1243,8 +1263,13 @@ if [ "$STALE_TEAM_COUNT" != "0" ]; then
 
 ${STALE_TEAMS}
 Per-tenant STALE incidents are watcher-owned (the watcher resolves them per org, in-process); this pooled incident is the driver-side record of the same systemic fault and self-heals once the pool is measured fresh on $(recovery_streak_for POOL_STALE) consecutive runs.${POOL_LIST_NOTE}"
+  if [ "${STALE_TEAM_COUNT:-0}" != "0" ]; then
+    POOL_STALE_SUMMARY="${STALE_TEAM_COUNT} team default archive(s) older than ${STALE_MIN}m"
+  else
+    POOL_STALE_SUMMARY="an archive timestamp could not be parsed (pool age UNMEASURABLE)"
+  fi
   file_alert POOL_STALE \
-    "[DR] POOL_STALE — ${STALE_TEAM_COUNT} team default archive(s) older than ${STALE_MIN}m" \
+    "[DR] POOL_STALE — ${POOL_STALE_SUMMARY}" \
     "$POOL_STALE_BODY" ""
   # The pool is NOT fresh this run, so any accumulated recovery count is
   # reset: a stale run between two fresh readings must restart the count, or a
@@ -1788,9 +1813,12 @@ case "$RUN_STATUS" in
         # green. Surface it through LOUD (the pool's own signal) rather than by
         # filing SWEEP_NO_COVERAGE, so the false claim #10234 is about is not
         # resurrected.
-        if [ "$POOL_STALE" = "1" ] && [ "${STALE_TEAM_COUNT:-0}" = "0" ]; then
-          LOUD=1
-          log "sweep ${RUN_STATUS_SAFE} with a fresh completion stamp, BUT the direct-R2 leg flagged the pool stale (${POOL_STALE}) while measuring NO stale archive — a team prefix has no restorable default, or an archive timestamp is unparseable. Red: the sweep reporting is not evidence the pool is servable."
+        if [ "${POOL_UNPARSEABLE:-0}" = "1" ]; then
+          # The incident itself was filed by the pooled POOL_STALE site above
+          # (which already set LOUD), so this run is RED regardless; this line
+          # says WHY the fresh stamp did not make it green. Filing from here as
+          # well would give one condition two file sites.
+          log "sweep ${RUN_STATUS_SAFE} with a fresh completion stamp, BUT the direct-R2 leg could not read an archive timestamp (pool age UNMEASURABLE) — a fresh stamp proves the ROLL-UP finished, not that the pool is servable; POOL_STALE is the filing."
         else
           # #10234 review P2 (round 2): the ride-alongs are SKIPPED on this shape
           # (a timeout may still hold the server-side per-org locks), and the run

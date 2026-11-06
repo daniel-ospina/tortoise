@@ -314,7 +314,7 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 > ⚠️ **Except the sweep's own timeout, which now skips both ride-alongs on a GREEN run**
 > (#10234): when the sweep POST gets no report, purge and reconcile are skipped because the
 > sweep may still hold the server-side per-org locks — and the run is no longer red (that red
-> was the defect this section documents). **So on a `driver_timeout`/`empty_response` run, an
+> was the defect this section documents). **So on a `driver_timeout`/`empty_response`/`transport_error` run, an
 > absent `PURGE_FAILED` is NOT evidence that erasure or revocation ran.** Look for "leaving SWEEP_NO_COVERAGE unchanged" / "ride-alongs are SKIPPED" in the run log to tell such a run
 > apart from one where the ride-alongs actually executed.
 >
@@ -973,7 +973,7 @@ and `RECONCILE_FAILED` clear on the ride-along leg's **own** success evidence
 means the leg queued behind a held lock and is **not** evidence of erasure), the
 reconcile leg only on a **completed** 2xx exchange (curl exit 0 with a body — a
 2xx whose transfer then hit the `-m` ceiling is still a transport failure). A
-**SKIPPED** ride-along (sweep `already_running`, or a timed-out/empty sweep)
+**SKIPPED** ride-along (sweep `already_running`, or a timed-out/empty/transport-failed sweep — `driver_timeout`, `empty_response`, `transport_error`)
 clears neither — no evidence was gathered, and the driver logs that it is leaving
 them unchanged. `POOL_STALE` (#4994) clears on a whole-pool measured-fresh
 reading held for `BACKUP_POOL_RESOLVE_STREAK` consecutive runs (default 2, now
