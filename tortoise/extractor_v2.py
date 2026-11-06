@@ -5403,28 +5403,19 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
     emitted = {str(e.get("name")).strip() for e in out.get("entities") or []
                if isinstance(e, dict) and e.get("name")}
     # Keyed by BOTH folds — `_endpoint_fold_keys`, the same enumeration S5's
-    # resolver probes — so the rename stage and the resolver cannot disagree
-    # about which spellings are the same entity (`_norm` collapses a whitespace
-    # RUN, `.casefold()` folds ß/İ; neither is a superset of the other).
-    folded_emitted: dict[str, list[str]] = {}
-    for _n in emitted:
-        for _key in _endpoint_fold_keys(_n):
-            _bucket = folded_emitted.setdefault(_key, [])
-            if _n not in _bucket:
-                _bucket.append(_n)
-
-    def _fold_hits(ref: str) -> list[str]:
-        found: list[str] = []
-        for _key in _endpoint_fold_keys(ref):
-            for _n in folded_emitted.get(_key) or []:
-                if _n not in found:
-                    found.append(_n)
-        return found
+    # resolver probes, through the same `_endpoint_fold_index`/`_fold_hits`
+    # pair — so the rename stage and the resolver cannot disagree about which
+    # spellings are the same entity (`_norm` collapses a whitespace RUN,
+    # `.casefold()` folds ß/İ; neither is a superset of the other). The rule
+    # lives in ONE place; this stage expresses only its own POLICY over it
+    # (ambiguous → leave the spelling alone so the resolver, not this stage,
+    # refuses it), which is why the two share the hits and not the verdict.
+    folded_emitted = _endpoint_fold_index(emitted)
 
     def _canonical_endpoint(ref: str) -> str:
         if ref in emitted:
             return ref
-        hits = _fold_hits(ref)
+        hits = _endpoint_fold_hits(ref, folded_emitted)
         if len(hits) == 1:
             return hits[0]
         if hits:
@@ -8740,6 +8731,42 @@ def _endpoint_fold_keys(name: str) -> tuple[str, ...]:
     return (_norm(name), name.casefold())
 
 
+def _endpoint_fold_index(names: set[str]) -> dict[str, list[str]]:
+    """Index ``names`` by BOTH folds, the input :func:`_endpoint_fold_hits` reads.
+
+    The ONLY builder of this index. Both stages that resolve an endpoint (D3's
+    rename and S5's assembler) read it through this pair of helpers, so the
+    identity rule has one home and the two stages cannot drift apart about
+    which spellings are the same entity — the wrong-node attribution that
+    survived two review cycles while each stage carried its own copy.
+    """
+    folded: dict[str, list[str]] = {}
+    for name in names:
+        for key in _endpoint_fold_keys(name):
+            bucket = folded.setdefault(key, [])
+            if name not in bucket:
+                bucket.append(name)
+    return folded
+
+
+def _endpoint_fold_hits(ref: str, folded: dict[str, list[str]]) -> list[str]:
+    """Every indexed name sharing EITHER fold with ``ref``, deduped, in order.
+
+    A ``list`` (not a set) because both callers decide on its LENGTH: one hit
+    is an unambiguous resolution, two or more is an ambiguity neither stage may
+    guess through. A set would answer the same question here, but the ordered
+    form makes the "first wins" arm of each caller's policy explicit, and it
+    keeps the hit for a spelling indexed on both folds from being counted
+    twice.
+    """
+    hits: list[str] = []
+    for key in _endpoint_fold_keys(ref):
+        for name in folded.get(key) or []:
+            if name not in hits:
+                hits.append(name)
+    return hits
+
+
 def _resolve_relation_endpoint(name: str, exact: set[str],
                                folded: dict[str, list[str]]) -> str | None:
     """The emitted entity an endpoint names, or ``None`` (never a new one).
@@ -8755,11 +8782,7 @@ def _resolve_relation_endpoint(name: str, exact: set[str],
     fix. ``folded`` must be keyed by BOTH ``_endpoint_fold_keys`` of each name."""
     if name in exact:
         return name
-    hits: list[str] = []
-    for key in _endpoint_fold_keys(name):
-        for hit in folded.get(key) or []:
-            if hit not in hits:
-                hits.append(hit)
+    hits = _endpoint_fold_hits(name, folded)
     return hits[0] if len(hits) == 1 else None
 
 
@@ -8791,12 +8814,7 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     exact = {str(e.get("name") or "").strip()
              for e in payload_entities if isinstance(e, dict)}
     exact.discard("")
-    folded: dict[str, list[str]] = {}
-    for n in exact:
-        for key in _endpoint_fold_keys(n):
-            bucket = folded.setdefault(key, [])
-            if n not in bucket:
-                bucket.append(n)
+    folded = _endpoint_fold_index(exact)
 
     declared = _declared_relation_predicates()
     # The closed Layer-2 vocabulary, imported lazily for the same reason as

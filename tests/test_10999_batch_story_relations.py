@@ -458,6 +458,47 @@ def test_a_whitespace_variant_endpoint_survives_a_firing_resolution():
     assert result["relations"][0]["src"] == "Retry Storm (2024)"
 
 
+def test_both_endpoint_stages_resolve_through_ONE_shared_rule(monkeypatch):
+    """#10999 review cycle 5 P2 (the stated residual, now closed): endpoint
+    identity had TWO homes — D3's nested `_fold_hits`/`_canonical_endpoint`
+    and S5's `_resolve_relation_endpoint` — so an edit to either ambiguity arm
+    could leave the other answering a different question, which is the
+    wrong-node attribution cycles 3 and 5 both found.
+
+    Discriminating by CONSTRUCTION rather than by comparing two copies:
+    disabling the shared `_endpoint_fold_hits` must disable fold resolution in
+    BOTH stages. A private copy re-introduced into either stage survives the
+    patch, and that half then still carries the edge — so
+    `relations_dropped == 1` reds the moment the rule grows a second home.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["entities"] = [
+        {"name": "Retry  Storm", "kind": "core:event"},
+        {"name": "Deadline Rule", "kind": "core:rule"},
+    ]
+    # The resolution renames the OTHER entity, so D3 runs (the rename stage is
+    # a no-op on an empty map) while the src endpoint is answerable ONLY by the
+    # fold over the emitted names — never by the rename map. Without that
+    # split, D3's rename-map arm would carry the src on its own and the patch
+    # below could not tell whether the STAGES read the shared rule.
+    resolution = {"Deadline Rule": {"name": "Deadline Rule (2024)"}}
+    emission["relations"] = [{"src": "retry storm", "dst": "Deadline Rule",
+                              "predicate": "IMPL"}]
+
+    resolved = v2._apply_entity_resolution(copy.deepcopy(emission), resolution)
+    assert resolved["relations"][0]["src"] == "Retry  Storm"
+    assert _run(resolved)["stats"]["relations_dropped"] == 0
+
+    monkeypatch.setattr(v2, "_endpoint_fold_hits", lambda ref, folded: [])
+    # D3 no longer folds, so it leaves the spelling alone...
+    crippled = v2._apply_entity_resolution(copy.deepcopy(emission), resolution)
+    assert crippled["relations"][0]["src"] == "retry storm"
+    # ...and S5, which must be reading the SAME rule, no longer resolves it.
+    result = _run(crippled)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+
+
 def test_a_case_variant_endpoint_survives_entity_resolution():
     """#10999 review cycle 2 P2: the rename mirrors the resolver — exact first,
     then a UNIQUE case-insensitive hit.
