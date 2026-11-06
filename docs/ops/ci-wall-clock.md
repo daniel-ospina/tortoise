@@ -228,13 +228,17 @@ names:
 Every other row was checked against that rule. The discriminating fact is **not** that the
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
-SUM. `test` clears it with room to spare: 10 m last-failed pre-phase + the emitted **26 m** per-shard
+SUM. `test` clears it with room to spare: 10 m last-failed pre-phase + the emitted **27 m** per-shard
 watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
-90, x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **58.6 m against
+90, x 1.5 = 87.9**. (The watchdog term read **26 m** until #10999 registered its own fast suite,
+`tests/test_10999_batch_story_relations.py` — one more file in `fast_pool()` re-packs the worst
+shard across a whole minute, and this paragraph restates that emission rather than owning it:
+`tools/ci_selection.py --emit-push-matrix` is the authority, and `tests/test_ci_selection.py`
+reds the moment the two disagree again.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
 is now read from the shared `pip-<os>-<hash uv.lock>` key that FOUR other jobs write, while
 `~/.cache/uv` keeps exactly one writer here, bounded in ACCUMULATION (`uv cache prune` — it drops entries no environment reaches, not a single environment's set) and in time
