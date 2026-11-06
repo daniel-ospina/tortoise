@@ -2929,8 +2929,8 @@ jobs:
         # POST cache SAVE is charged against this job's `timeout-minutes` and
         # has no timeout of its own, so at a 15m cap it can never be amortized —
         # and the `cancelled` it causes reds a REQUIRED check on a green leg
-        # (#5219). This job only ever READ the shared key; `test-slow` (gated on
-        # `slow_run == 'true'`) and `test-d14-hosted-api` write it on every run.
+        # (#5219). This job only ever READ the shared key; `test-d14-hosted-api`
+        # writes it on every run, `test-slow` only when `slow_run == 'true'`.
         uses: actions/cache/restore@v4
         continue-on-error: true
         with:

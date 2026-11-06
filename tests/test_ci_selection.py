@@ -13539,7 +13539,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert save_paths == ["~/.cache/uv"], (
         f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
-        "measured 3,616,385,308 B and is written by THREE other jobs.")
+        "measured 3,616,385,308 B and is written by TWO other jobs.")
     gate = str(uv_save.get("if") or "").strip()
     # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
     # finding 3). The literal let a rename or a deletion read GREEN — and a

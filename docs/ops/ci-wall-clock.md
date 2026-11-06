@@ -187,7 +187,7 @@ that job no longer writes the 3.6 GB archive at all — see its row below, which
 authority for it. Nor is `test-carve-out`, whose pip step has been
 `actions/cache/restore@v4` since #10182) are optimistic by ~7 m against the censored 15.9 m
 and by ~11 m against the completed ~20 m. Re-deriving them is owed and is deliberately NOT
-done here: nothing has measured either of the two saving rows being cancelled, and this
+done here: nothing has measured any row carrying that term being cancelled, and this
 document's rule is to move a cap from a measurement, not from a comparison of two samples.
 
 ⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
@@ -256,8 +256,8 @@ are still in that state — `test-slow`, `test-carve-out` and `test-concurrency-
 false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its cap rose: #11063
 took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its
 cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
-`test-carve-out` sits at 30 m against 30 on IN-STEP caps alone (10 m embedder + 19 m shard
-watchdog + ~1 m); its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
+`test-carve-out` sits at ~31.6 m against 30: 10 m embedder + 19 m shard watchdog + ~1 m, plus the 1 m 38 s
+`~/.cache/huggingface` POST (`python-ci.yml:3539`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision** — ≈ 21 m of IN-STEP caps (10 + 10 + ~1 m), and it installs
 `install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2941-2946`). The ~30 m this row used to
