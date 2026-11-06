@@ -38,6 +38,7 @@ from tools.ci_selection import (  # noqa: I001
     slow_shard_entries, slow_leg_files, slow_wall_projection,
     MAX_SLOW_SHARDS, DEFAULT_SLOW_SHARDS,
     SLOW_LEG_WALL_TARGET_MIN, SLOW_LEG_SETUP_ALLOWANCE_MIN,
+    SLOW_LEG_CAPPED_WALL_TARGET_MIN,
 )
 from tools import mergify_config_guard as mcg
 from tools import ci_selection as cs
@@ -10049,8 +10050,12 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
         `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
         within 0.1%, so 1.25 is deliberately loose enough for a coarse map);
       * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
-        guideline. A new slow file big enough to break it reds here, and the
-        remedy is a reviewed `slow_shards` bump, not a quieter number.
+        guideline, AND, once the matrix is capped (#6744), the job's real band
+        `ceil(legs/cap) x (max leg + allowance)` <= `SLOW_LEG_CAPPED_WALL_TARGET_MIN`.
+        A new slow file big enough to break either reds here, and the remedy is a
+        reviewed `slow_shards` bump, not a quieter number. The second bound is
+        not optional: a per-leg number alone certifies a wall the job cannot
+        hit as soon as one leg is not the whole job.
 
     The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
     over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
@@ -10090,6 +10095,30 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
         f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. Raise "
         f"`config/ci-surfaces.yml::slow_shards` (reviewed) instead of letting "
         f"this lane become the merge ceiling again")
+    # #6744: the per-leg number above is NOT the job's wall once the matrix is
+    # capped. `max-parallel: 3` over 5 legs is TWO waves (ceil(5/3)), so a guard
+    # that stops at the per-leg share stays GREEN while asserting a wall the job
+    # cannot hit — the same defect this docstring names for the per-leg fixed
+    # cost, one multiplication further out. The cap is read from the workflow so
+    # a re-tune moves this assertion with it, and its absence fails closed (a
+    # vacuous wave count would be a second way to pass on nothing).
+    cap = ((_load_python_ci()["jobs"]["test-slow"].get("strategy")
+            or {}).get("max-parallel"))
+    assert isinstance(cap, int), (
+        "python-ci.yml's `test-slow` matrix declares no integer `max-parallel` "
+        f"(got {cap!r}) — the wave band below would be vacuously one wave")
+    capped = slow_wall_projection(m, entries, max_parallel=cap)
+    assert capped["waves"] == -(-count // cap), (
+        f"the projection says {capped['waves']} waves for {count} legs at cap "
+        f"{cap}, which is not ceil({count}/{cap})")
+    assert capped["projected_job_wall_min"] <= SLOW_LEG_CAPPED_WALL_TARGET_MIN, (
+        f"the slow JOB's wall is now {capped['projected_job_wall_min']:.2f}m "
+        f"({capped['waves']} waves x ({capped['max_leg_min']:.2f}m leg + "
+        f"{capped['setup_allowance_min']:.2f}m setup)) at `max-parallel: {cap}`, "
+        f"over the {SLOW_LEG_CAPPED_WALL_TARGET_MIN:.0f}m ceiling that cap was "
+        f"accepted with (#6744). Re-tune `slow_shards` or the cap, or move the "
+        f"ceiling from a fresh measurement — do not drop this assertion, or the "
+        f"guard goes back to certifying a wall the job cannot hit")
     # the emitted matrix is what the job expands, and every leg is non-empty
     inc = slow_matrix_include(entries)["include"]
     assert [r["half"] for r in inc] == [e["name"] for e in entries]
@@ -10568,9 +10597,12 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
 
 #: The in-step watchdog each save-arm job must still clear, from the COLLECT+run
 #: measurement (run 42154769896, job 127701854811): a 11 m 10 s collection of the
-#: 46,906-item tree plus 3 m 20 s of tests = 14 m 30 s at the worst collect cost
+#: 47,070-item tree plus 3 m 20 s of tests = 14 m 30 s at the worst collect cost
 #: observed, so 20 m is 1.38x. `test-track-b`'s own run phase is unchanged (its
 #: tests pass in 44.96s and its in-step cap is the 5 m `timeout` in its step).
+#: (#6744 review: this said 46,906 — that is the tree run 42135045069 collected;
+#: job 127701854811's own log says `collected 47070 items`, so the two runs
+#: differed by 164 items because the tree grew between heads.)
 _SAVE_ARM_IN_STEP_FLOORS: dict[str, int] = {
     "test-d14-hosted-api": 20,
     "test-track-b": 5,
@@ -10582,7 +10614,14 @@ def _save_arm_cap(in_step: int, setup: int = 1, cold_save: int = 9) -> int:
     next 10 m. Kept as an executable derivation so a measured re-tune of either
     term moves the assertion with it instead of needing a new magic number."""
     total = in_step + setup + cold_save
-    return -(-(total * 3 // 2) // 10) * 10
+    # ceil(total x 1.5 / 10) x 10, in integers. ⛔ The earlier form
+    # `-(-(total * 3 // 2) // 10) * 10` FLOORED before it ceiled: `total * 3 //
+    # 2` drops the half-minute first, so total=27 gave 40 where the rule needs
+    # 40.5 -> 50 — the helper emitting a cap BELOW 1.5 x SUM, i.e. the exact
+    # under-sizing this arm exists to prevent, silently, on the first re-tune
+    # whose total is odd (#6744 review). Both shipped values are unaffected
+    # (15 -> 30, 30 -> 50), so this is a latent bug fixed while it is cheap.
+    return -(-(total * 3) // 20) * 10
 
 
 def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
@@ -10594,8 +10633,9 @@ def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
     the two terms `docs/ops/ci-wall-clock.md` §2 names.
 
     * `test-d14-hosted-api` (job 127701854811) — COLLECTION alone took 11 m 10 s
-      of the then-15 m in-step cap (04:23:22 -> 04:34:32; the same 46,906 items
-      collected in 4 m 59 s on run 42135045069). The run then finished CLEAN
+      of the then-15 m in-step cap (04:23:22 -> 04:34:32 over `collected 47070
+      items`, against 4 m 59 s for the 46,906-item tree on run 42135045069).
+      The run then finished CLEAN
       (`256 passed, 39 skipped, 46812 deselected ... in 855.20s`) and the
       watchdog SIGINT-killed the process at 900 s while it unwound — which
       `pytest-attribution` reads as `INCOMPLETE`, so the leg certified nothing
@@ -10662,6 +10702,27 @@ def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
             "and GitHub reports `cancelled` — which python-ci-gate reads as red "
             "BY DESIGN (#5219), reddening a REQUIRED check on a green leg "
             "(run 42154769896: 4 passed in 44.96s, cancelled at 10m15s).")
+
+
+def test_the_save_arm_rounds_the_sum_up_before_it_divides():
+    """#6744 review: `SUM x 1.5, rounded UP to the next 10 m` must be applied to
+    the SUM, not to a half-truncated one.
+
+    The helper used to compute `-(total * 3 // 2)`: the `// 2` drops the odd
+    half-minute BEFORE the ceiling, so an odd `total * 3` could come back BELOW
+    `1.5 x SUM` — the exact under-sizing the arm exists to prevent, silently.
+    Both shipped values happen to be even (`15 -> 30`, `30 -> 50`), so nothing
+    live was wrong; this pins the arithmetic so the first re-tune that lands on
+    an odd total cannot ship a cap under the rule.
+    """
+    assert _save_arm_cap(in_step=5) == 30      # total 15 -> 22.5 -> 30 (track-b)
+    assert _save_arm_cap(in_step=20) == 50     # total 30 -> 45.0 -> 50 (d14)
+    # total 27: 27 x 1.5 = 40.5 must round UP to 50; the old form returned 40,
+    # a cap below 1.5 x SUM.
+    assert _save_arm_cap(in_step=17) == 50, (
+        "_save_arm_cap floors before it ceils: 27 x 1.5 = 40.5 rounded up is "
+        "50, and a cap BELOW 1.5 x SUM is the under-sizing that reddened two "
+        "required checks in the first place (#10182/#10212)")
 
 
 def _carve_matrix() -> dict:

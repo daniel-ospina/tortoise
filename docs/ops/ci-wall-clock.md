@@ -180,7 +180,7 @@ paragraph above opens.** Run 42154769896 (PR #11032, head `8f32c5255`) reddened 
 checks with no failing test in either artifact, and both terms are the ones this section names:
 
 - `test-d14-hosted-api` (job 127701854811) — the in-step `15m` was eaten by **COLLECTION**: 11 m 10 s
-  (04:23:22 → 04:34:32) before a single test ran, against 4 m 59 s for the same 46,906-item
+  (04:23:22 → 04:34:32) over `collected 47070 items`, against 4 m 59 s for the 46,906-item
   collection on run 42135045069. The run then finished CLEAN — verbatim
   `256 passed, 39 skipped, 46812 deselected, 14 warnings in 855.20s (0:14:15)` — and the watchdog SIGINT-killed the process at 900 s while it unwound —
   which `pytest-attribution` reads as `INCOMPLETE`, so a green leg certified nothing (#5219).
@@ -461,7 +461,14 @@ invariant 2.
 **The accepted regression has two components, and only the run-level number judges it.** The slow
 matrix gains its second wave (`ceil(5/3)` = 2): one wave of the measured slow-leg wall is ~8.9 m
 (row above), so its band goes ~9 m → ~18 m (1 wave → 2), still narrower than
-the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. The fast
+the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
+guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
+`max-parallel` and reports `waves x (max leg + setup)` — `9.02 m` per leg → **`18.04 m`** from the
+committed `durations` map — and
+`test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
+`SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
+per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was
+double it, which is the false PASS this pin exists to prevent. The fast
 matrix's band is pinned at `ceil(9/3)` = 3 waves — inside the 2–4 wave band invariant 1 protects,
 but on the runs where the pool delivered those 9 shards in 2, the third wave is new wall. No saving
 is claimed on the runs where it took 4. The pair is what the simulation's **matrix-band end delta
