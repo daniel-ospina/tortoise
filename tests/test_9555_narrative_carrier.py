@@ -1898,6 +1898,40 @@ _NEG_ADVERSATIVE = r"(?:\bbut\b|\brather\b|\binstead\b)"
 #: `_negation_bound_to`). Asterisks only — underscores live inside identifiers.
 _EMPHASIS_RE = re.compile(r"\*{1,2}")
 
+#: ⛔ `not so much A as B` (`than` works too) is a MITIGATED DENIAL of A and an
+#: ASSERTION of B — and the guards bind POSITIONALLY (`cue + span + object`), so
+#: they cannot tell the two terms apart by shape. Both directions were measured:
+#: excluding the construction refused the CORRECT sentence (A denied), and simply
+#: dropping the exclusion certified the INVERSE (a §9.4 sentence reading the trap,
+#: and a §12.1b footnote saying `summary` IS the narrative, both left the whole
+#: file GREEN). Handled by POSITION, not vocabulary: the object is the denied term
+#: only when it PRECEDES the pivot.
+_NOT_SO_MUCH_RE = re.compile(r"\bnot\s+so\s+(?:much|many)\b", re.IGNORECASE)
+_PIVOT_RE = re.compile(r"\b(?:as|than)\b", re.IGNORECASE)
+
+
+def _object_is_the_ASSERTED_term(line: str, object_regex: str) -> bool:
+    """Is `object` the ASSERTED half of a `not so much A as B`?
+
+    True means the cue must NOT be read as negating this object. False for every
+    line without the construction, so the rule costs nothing elsewhere.
+    """
+    nsm = _NOT_SO_MUCH_RE.search(line)
+    if nsm is None:
+        return False
+    pivot = _PIVOT_RE.search(line, nsm.end())
+    if pivot is None:
+        return False
+    # \u26d4 NOT "the first occurrence in the line". The footnote names \"the S1
+    # narrative\" (the HOME) several clauses before this construction, so a
+    # first-match test read the wrong occurrence and left the inverted clause
+    # certified (measured). The question is which ROLE this object plays in THIS
+    # construction: if it sits in the DENIED span it is the negated term; if it
+    # only appears AFTER the pivot it is the ASSERTED one.
+    if re.search(object_regex, line[nsm.end():pivot.start()], re.IGNORECASE):
+        return False
+    return re.search(object_regex, line[pivot.end():], re.IGNORECASE) is not None
+
 #: What a negation may NOT cross on its way to the object it negates: another
 #: backticked name, or a clause boundary (`. , ; : ( — –`). The BACKTICK half
 #: keeps a negation of a DIFFERENT name from reaching this one — in *"never from
@@ -2000,6 +2034,8 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
     #: over a §12.1b footnote stating the inverse. Asterisks are stripped before
     #: matching; backticks are NOT, because the guards bind objects BY them.
     line = _EMPHASIS_RE.sub("", line)
+    if _object_is_the_ASSERTED_term(line, object_regex):
+        return False
     pattern = f"(?:{leading}{object_regex}{_AFFIRMATIVE_EXCLUSION_POST})"
     if trailing:
         pattern += (f"|(?:{object_regex}{_neg_span(30)}"
@@ -2551,6 +2587,12 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "⛔ not `public.session_narrative`; it is `:Source.summary`"),
     ("the negation in a neighbouring clause",
      "⛔ the narrative is not on the node; `:Source.summary`"),
+    #: ⛔ The MIRROR: the trap is the ASSERTED term — a sentence telling the vector
+    #: to read it. Refused by POSITION, not vocabulary (see
+    #: `_object_is_the_ASSERTED_term`): merely dropping the construction from the
+    #: exclusion list certified this, measured GREEN on the whole file.
+    ("the `not so much … as` with the trap ASSERTED",
+     "not so much from the S1 narrative as from `:Source.summary`"),
     #: ⛔ AN AFFIRMATIVE `not only`. The `not` is not a cue there — what follows
     #: is ASSERTED — so counting it certified a sentence telling the vector to
     #: read BOTH texts (measured: `_negates_the_summary` True, pin GREEN).
@@ -2607,7 +2649,7 @@ def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str)
     ids=["negation-dropped", "negates-another-name",
          "negation-in-other-clause", "not-only-but-also", "not-merely",
          "not-just", "not-least", "not-alone", "isnt-only",
-         "not-the-only"])
+         "not-the-only", "not-so-much-as-asserted"])
 
 
 def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
@@ -2710,6 +2752,12 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "the narrative is never what gets embedded"),
     ("a copula form, narrative as subject",
      "the narrative is not the vector's text"),
+    #: ⛔ And the MIRROR must stay refused: there the narrative is the ASSERTED
+    #: term, so the sentence says `summary` IS the narrative (§12.1b's inverse).
+    #: Handled by position (`_object_is_the_ASSERTED_term`); merely dropping the
+    #: construction from the exclusion list certified this.
+    ("the `not so much … as` with the narrative ASSERTED",
+     "not so much a lexicon as the narrative"),
     #: ⛔ THE AFFIRMATIVE CUES the shared vocabulary counted as negations. Each
     #: asserts the narrative (or asserts more than it) and was ACCEPTED, so the
     #: pin certified the inverse of §12.1b on a two-word prefix (measured:
@@ -2830,7 +2878,8 @@ def test_every_affirmative_adverb_is_refused_on_BOTH_guards():
          "not-least-affirmative", "not-alone-affirmative",
          "not-to-mention-affirmative", "isnt-only-contraction",
          "not-the-only-article",
-         "emphasised-not-only", "post-positional-not-alone"])
+         "emphasised-not-only", "post-positional-not-alone",
+         "not-so-much-as-asserted"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
