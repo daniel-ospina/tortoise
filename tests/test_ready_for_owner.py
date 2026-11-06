@@ -2517,6 +2517,63 @@ def test_the_required_set_verb_labels_a_config_error_as_one(
     assert "REQUIRED-SET-UNREADABLE" not in out
 
 
+def test_the_required_set_verb_labels_a_DIVERGED_live_read_as_a_config_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """⛔ THE REFUSAL HAS TO REACH THE VERB, not just the library.
+
+    `required_set._live_attestation` is pinned at the DERIVATION level (six tests in
+    `tests/test_required_set.py`), and the test above pins the verb's CONFIG-ERROR label
+    for the record↔config EQUALITY shapes only. Neither covers the shape this PR's fix
+    added: a record whose `required_contexts` still matches the config — so every equality
+    check passes — while its own `live_result` says the live read DIVERGED.
+
+    That gap matters because the two labels are different REMEDIES: `UNREADABLE` means
+    "could not be read, re-run it", while this state is not going to change on a re-run —
+    it needs `--live` re-attestation under a credential that can read branch protection.
+    A refusal that lands on the wrong label sends the reader to the wrong subsystem, which
+    is what this file's existing verb test exists to prevent.
+
+    The fixture is deliberately the FAIL-OPEN shape the fix removed: `live_observed_contexts`
+    EQUALS `required_contexts` and both equal the derived union, so the payload is a perfect
+    match. Only the verdict disagrees — and before the fix it certified the set.
+    """
+    from tools.mergify_config_guard import MERGIFY_REL, RECORD_REL
+
+    union = ["docs"]
+    (tmp_path / MERGIFY_REL).write_text(
+        "queue_rules:\n"
+        "  - name: main\n"
+        "    queue_conditions: ['base=main', 'check-success=docs']\n"
+        "    branch_protection_injection_mode: merge\n"
+        "    merge_conditions: []\n",
+        encoding="utf-8",
+    )
+    record = tmp_path / RECORD_REL
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps(
+            {
+                "required_contexts": union,
+                "emitters": {},
+                "live_result": "DIVERGED",
+                "live_observed_contexts": union,
+                "live_checked_at": "2026-11-01T00:00:00Z",
+                "live_verified_at": "2026-10-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    code = rfo.report_required_set(tmp_path, None)
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "REQUIRED-SET-CONFIG-ERROR" in out, out
+    assert "REQUIRED-SET-UNREADABLE" not in out, out
+    # The remedy that WORKS must be named: `--recut` rewrites only gate_digest/emitters/
+    # verified_at and cannot make a DIVERGED live read SATISFIED.
+    assert "--live" in out, out
+
+
 def test_the_required_set_verb_refuses_an_empty_ref(capsys: pytest.CaptureFixture[str]) -> None:
     """An empty `--ref` (an unset `$BRANCH` in `--ref "$BRANCH"`) must be REFUSED with a
     message that names the problem.
