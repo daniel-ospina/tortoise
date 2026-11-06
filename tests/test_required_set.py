@@ -781,7 +781,13 @@ def test_the_two_derivations_of_the_required_set_agree_on_this_repo() -> None:
     """
     guard = _load_required_set_guard()
     ours = derive_from_config(REPO_ROOT)
-    theirs = guard.load_mergify()
+    # ⛔ THE TRACKED FILE, NAMED EXPLICITLY. `load_mergify()` resolves its path from the
+    # `MERGIFY_CONFIG` env seam at CALL time, so an exported `MERGIFY_CONFIG` would decide
+    # what this pin compares — a false RED on a correct tree (measured: a copy of the file
+    # with one `check-success=` line removed reds this pin). `test_required_set_sync.py`
+    # clears that seam for the same reason; here the path is simply supplied, which is the
+    # stricter form.
+    theirs = guard.load_mergify(REPO_ROOT / ".mergify.yml")
     # `derive_from_config` FOLDS `merge` into `entry` under mode `queue`, so state the mode
     # the comparison is valid under rather than assuming one.
     assert ours.mode == "merge", (
