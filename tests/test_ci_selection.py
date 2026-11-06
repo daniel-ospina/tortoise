@@ -10697,7 +10697,11 @@ def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
         assert cap >= required, (
             f"{job_name}: `timeout-minutes: {cap}` cannot hold its own SUM — "
             f"{in_step}m in-step + ~1m setup + ~9m cold save = {in_step + 10}m, "
-            f"x 1.5 = {required}m (docs/ops/ci-wall-clock.md §2, save arm). "
+            # The round-up is not elided here: `x 1.5 = 30` for a 15m SUM is
+            # false arithmetic (15 x 1.5 = 22.5), and the fixer reading this red
+            # is reading it to learn what the rule IS (#6744 review P2).
+            f"x 1.5 = {1.5 * (in_step + 10):.1f}m, rounded UP to the next 10 m "
+            f"= {required}m (docs/ops/ci-wall-clock.md §2, save arm). "
             "Below that the ~3.6 GB pip-cache SAVE POST-step runs out of budget "
             "and GitHub reports `cancelled` — which python-ci-gate reads as red "
             "BY DESIGN (#5219), reddening a REQUIRED check on a green leg "
