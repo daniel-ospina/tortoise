@@ -179,7 +179,8 @@ one: **12 m in-step watchdog + ~1 m setup/provision + ~20 m completed save = ~33
 50**. The ~20 m is the completed SAVE STEP (tar + transfer) — the transfer alone is 977 s at the
 ~3.7 MB/s the log reports, and the step also tars — not the transfer alone. The censored 15.9 m is
 the floor under that figure, and it alone would give 43.4 → 50 as well, so the two brackets agree
-on 50. `× 1.5, round up to the next 10` on either reading is what §5's rule says; nothing here
+on 50. `× 1.5, round up to the next 10` on either reading is what §2's **Rule used** block
+says (arm 2, `that SUM × 1.5, rounded UP to the next 10 m`); nothing here
 overrides it. Arm 2 rather than arm 1 for the reason it always
 was: the save this row pays on a key change is the SHARED archive, not its own downloads — so
 `2 × 15.43 = 30` is not the number.
