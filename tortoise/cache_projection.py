@@ -73,10 +73,19 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    table for the rule, its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
-   set equals the record view's field set exactly (never a superset) — an
-   identity with **no** exceptions, because every property the declared classes
-   below add is materialised in :func:`node_from_row` and is therefore already
-   IN the view. ⚠️ The five declared classes are exceptions to a DIFFERENT
+   set never EXCEEDS the record view's (a superset would make the cache a second
+   authority) — that direction has no class-level exception, because every
+   property the declared classes below add is materialised in the VIEW-BUILDING
+   path and is therefore already IN the view: :func:`node_from_row` applies the
+   fold and derived classes, and :func:`apply_event_stream_folds` (reached from
+   :func:`read_record_view` and ``FalkorProjection.rebuild_from_record``) applies
+   the stream class. ⚠️ Two MECHANICAL adjustments in :func:`node_statement` are
+   not projection classes and can make the written set NARROWER than the view:
+   ``embedding`` is written in its own clause rather than in ``$props``, and a
+   FALSY :data:`VERBATIM_MARKER` is popped and not re-added (reachable only from
+   a row written outside the SDK's ``'true'``/``NULL`` writer, so it is named
+   rather than feared). ⚠️ The five declared classes are exceptions to a
+   DIFFERENT
    identity — *the view against the record's PRIMARY column set* — and they run
    in BOTH directions (the count and the classification are stated once here and
    mirrored by §17.2 of `STORAGE-ARCHITECTURE.md` and by

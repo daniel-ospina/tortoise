@@ -158,14 +158,24 @@ to have none.
     upsert is the one read, and it resolves a RECORD coordinate).
   * **rebuild == record**: re-projecting the plan writes exactly the record's
     key set and field set — **no extra field, no extra node** — asserted over
-    the plan's `Statement.params['props']`, not over the input model. ⚠️ **One
-    declared exception (#9634):** `cache_projection.FOLD_ON_CREATE_DEFAULTS`
-    applies the FOLD's `ON CREATE` constants (`subjectKind`/`objectKind` →
-    `'other'`, `Object.title` → `''`) where the record row is silent, so a
-    record-sourced node equals the node the live fold would build. Because the
-    assertion reads the VIEW, it cannot see this class — the drift pin in
-    `tests/test_cache_projection.py` is the bound, and the members the record
-    cannot decide are #9710.
+    the plan's `Statement.params['props']`, not over the input model. ⚠️ The
+    assertion reads the VIEW, so it cannot see any class that is materialised in
+    the VIEW-BUILDING path; the bound on those is a drift pin, not this
+    assertion. ⛔ **The census is ONE, stated in full at
+    `STORAGE-ARCHITECTURE.md` §17.2 and in `cache_projection`'s module docstring
+    point 3; this section only names what this assertion is blind to.** The five
+    declared classes, by DIRECTION: ONE **value-filling**
+    (`cache_projection.FOLD_ON_CREATE_DEFAULTS`, #9634 — `subjectKind`/`objectKind`
+    → `'other'`, `Object.title` → `''`) supplies a constant where the record row
+    is SILENT; those columns are `P` in the placement table, so it adds a VALUE
+    for a field the record HAS and does **not** widen the field set, and reading
+    it as a widening is the field-set/value conflation §17.2 exists to avoid;
+    TWO **widening** (`cache_projection.DERIVED_FROM_RECORD`, #9974, and
+    `cache_projection.EVENT_STREAM_FOLDS`, #10198 — both mint `status`, which has
+    no record column); TWO **narrowing**
+    (`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS`, #10853, per ROW, and
+    `cache_projection.CACHE_FORBIDDEN_COLUMNS`, #10394, per TABLE). The members
+    the record cannot decide are #9710.
   * **idempotent**: projecting the same view twice yields the same statement
     multiset.
   * **not-hot, never empty**: an unmaterialized record key is `not-hot` and an
@@ -197,11 +207,15 @@ to have none.
 ## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853), except the space-less-run residual named below
 
 **A declared narrowing** of the field set — one of TWO — in the opposite
-direction from the three widening exceptions the module names
-(`FOLD_ON_CREATE_DEFAULTS`, `DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`). The
-other narrowing is `cache_projection.CACHE_FORBIDDEN_COLUMNS` (`#10394`), which
-is **per TABLE rather than per row** and is stated at the end of this section
-(`:source`/`:event` `story_arc`):
+direction from the TWO widening exceptions the module declares
+(`DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`). ⛔ `FOLD_ON_CREATE_DEFAULTS` is
+NOT a third widening: its members are `P` columns the record HAS, so it supplies
+a VALUE where the row is silent rather than adding a field (§17.2 and
+`cache_projection`'s point 3 state the full census by direction — one
+value-filling, two widening, two narrowing; the fold class is the value-filling
+one). The other narrowing is `cache_projection.CACHE_FORBIDDEN_COLUMNS`
+(`#10394`), which is **per TABLE rather than per row** and is stated at the end
+of this section (`:source`/`:event` `story_arc`):
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
 when the Source is a captured session **and the row holds the pre-#10000
 derivation**, so `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to
