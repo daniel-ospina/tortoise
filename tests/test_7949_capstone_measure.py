@@ -9219,14 +9219,29 @@ def test_the_legacy_head_really_predates_the_flip():
     records; one that hardcoded the answer would be the inert trust token this
     whole change removes. If the campaign head ever turns out to carry the flip,
     this reds and the licence has to be narrowed instead of silently widening.
+
+    ⛔ READABLE-IN-THIS-CLONE IS NOT THE PREMISE. CI's `test` job checks this repo
+    out with a bare `actions/checkout@v4` (`python-ci.yml`, default
+    `fetch-depth: 1`), where an ANCESTOR commit does not exist by construction —
+    so a hard failure here would red every CI run for the checkout alone, reported
+    as a defect in the change. It SKIPS in that case, naming what is unchecked,
+    exactly as `test_no_legacy_token_path.py` does for the same `git show <sha>:…`
+    read. A skip is not a pass: the licence premise is UNCHECKED on a shallow
+    clone, and this says so rather than passing silently as if it had checked.
     """
     head = scores_probe._PRE_FLIP_HEAD
-    shown = subprocess.run(
-        ["git", "show", f"{head}:tortoise/value_gate.py"],
-        cwd=_REPO, capture_output=True, text=True)
-    assert shown.returncode == 0, (
-        f"the licensed head {head[:9]} is not readable from this checkout, so the "
-        f"licence cannot be checked: {shown.stderr.strip()}")
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{head}:tortoise/value_gate.py"],
+            cwd=_REPO, capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        pytest.skip(
+            f"{head[:9]} (the licensed pre-flip head) is not in this clone's "
+            f"history ({exc.__class__.__name__}) — a `fetch-depth: 1` checkout "
+            "cannot contain an ancestor, so the licence premise is UNCHECKED "
+            "here, not disproved. Re-derive it on a full clone: "
+            "`git fetch --unshallow origin` (or the worktree this branch was "
+            "written in).")
     source = shown.stdout
     assert 'os.environ.get(ENV_FLAG, "1")' not in source, (
         f"{head[:9]} already carries the post-`#10996` default — the legacy "

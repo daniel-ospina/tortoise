@@ -1541,10 +1541,27 @@ def test_the_injected_arbiter_is_the_fourth_off_path_term(monkeypatch):
     — every switch off + an arbiter ⇒ the pass RUNS and its verdict is applied;
     (b) the prose — the off-path sentence names the arbiter, so it cannot be
     re-worded back into an exhaustive-sounding three-term list without a red.
+
+    ⛔ THE "OFF" SPELLING (`#10996`). This arm used to DELETE
+    `TORTOISE_VALUE_GATE`, which spelt OFF before the flip and spells ON after it —
+    and `_value_gate_enabled()` is `vet_enabled`'s THIRD disjunct, so the pass was
+    armed by the value gate whether or not the arbiter term existed. Limb (a) was
+    therefore green on the very mutation it exists to catch (deleting
+    `vet_arbiter is not None`), which is the class this PR's R2 closes everywhere
+    else in this file. "Every switch off" now spells the kill switch explicitly.
     """
-    for env in ("TORTOISE_VET", "TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM"):
+    for env in ("TORTOISE_VET", "TORTOISE_S2_DECISION_SEAM"):
         monkeypatch.delenv(env, raising=False)
+    # `#10996`: an UNSET value gate is the ON arm, so OFF must be written.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
     from tortoise import extractor_v2 as v2
+
+    # The premise limb (a) rests on, asserted rather than assumed: if the third
+    # disjunct were armed here the arbiter term would be untested and this test
+    # would certify coverage it does not have.
+    assert v2._value_gate_enabled() is False, (
+        '"every switch off" must leave the value gate OFF — an unset value gate '
+        'is the ON arm since `#10996`, and it is this expression\'s third disjunct')
 
     out = v2.extract_session_v2(_Model(), _conv(), vet_arbiter=_discard)
     assert out["vet"]["enabled"] is True, (
