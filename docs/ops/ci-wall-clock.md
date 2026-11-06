@@ -424,8 +424,8 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 | --- | --- | --- |
 | 2 / 2 / 2 — ⛔ rejected by invariant 1 (`ceil(9/2) = 5` waves) | 8 / 9 | +31.8 m / +38.5 m |
 | **3 / 3 / 3 (shipped)** | **9 / 12** | **+17.9 m / +23.2 m** |
-| 4 / 4 / 3 | 10 / 13 | +10.1 m / +14.4 m |
-| 5 / 3 / 3 | 10 / 12 | +8.1 m / +9.6 m |
+| 4 / 4 / 3 — ⛔ rejected by invariant 2 (`sum = 11 > 12 - 3`) | 10 / 13 | +10.1 m / +14.4 m |
+| 5 / 3 / 3 — ⛔ rejected by invariant 2 (`sum = 11 > 12 - 3`) | 10 / 12 | +8.1 m / +9.6 m |
 | unset | 11 / 18 | 0 / 0 |
 
 ⛔ **The `2 / 2 / 2` row is the one candidate this section's own pin rejects.** `ceil(9 / 2)` = 5
@@ -488,8 +488,12 @@ dedicated capacity for all 8 still runs them **3 at a time**, and its own valida
 matrix-band delta above (+17.9 m p50 / +23.2 m max). This is recorded as a KNOWN COST of #6744, not
 as a decision that a fold run should be capped — the cap's justification ("no single PR may hold the
 pool") is a fairness bound between concurrent PRs, and a fold is not competing with them that way.
-Exempting one would need an expression-valued `max-parallel`; this repo has no evidence GitHub
-accepts one, so measure that before relying on it.
+Exempting one would need an expression-valued `max-parallel` — the key is JOB-level, not per-row
+data like `runs-on`, so a per-row exemption is impossible — and the platform settles it: GitHub's
+workflow syntax states that contexts and expressions **cannot** be used in
+`jobs.<job_id>.strategy.max-parallel`, so no expression-valued exemption is achievable at all. The
+exemption is not taken here, and this paragraph exists so a silent one cannot be introduced as a
+"tidy-up".
 
 ⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
 these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a
@@ -555,8 +559,10 @@ gh api "repos/daniel-ospina/tortoise/actions/runs/<capped_run_id>/jobs?per_page=
 ```
 
 **Taken 2026-11-05 on the first capped run** (`pull_request`, head `80d059348f68`, run
-`42034142918`, 26 jobs, jobs API `filter=all`) — the shape holds, measured rather than assumed; the
-batch is real, but it is created when the job becomes eligible, NOT at the run's start:
+`42034142918`, 29 job records — the 26 accounted for below plus the 3 dependents (`canary-streak`,
+`ci-introduced-failure`, `python-ci-gate`), jobs API `filter=all`) — the shape holds, measured rather
+than assumed; the batch is real, but it is created when the job becomes eligible, NOT at the run's
+start:
 
 | reading | value |
 | --- | --- |
