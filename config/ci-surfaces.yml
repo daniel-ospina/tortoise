@@ -7648,9 +7648,10 @@ tier1:
 #   * `test_session_extraction_modes.py` pins §4.6's `VENICE_API_KEY` row — the table
 #     an operator reads BEFORE setting the key on the hosted deployment. Delete the
 #     row and it merged green.
-# ⛔ The other runbook READERS are reachable already, each through its own tier1 arm
-# rather than through this block — `test_durability_posture.py` (`#2881` above) and
-# `test_retention_promise.py` (`#4179`) — which is exactly why a census that
+# ⛔ The other runbook READERS are reachable already, each through its own `tier1` arm
+# rather than through this block — `test_deploy_workflow.py`, `test_fly_secret_drift.py`,
+# `test_durability_posture.py` (`#2881` above) and `test_retention_promise.py` (`#4179`)
+# — which is exactly why a census that
 # enumerated only the *runbook-specific* owners could not see the whole set, and
 # why the set below is no longer asserted in prose at all:
 # tests/test_ci_selection.py::test_the_record_schema_placement_pins_run_on_a_doc_only_diff
