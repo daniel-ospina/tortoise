@@ -324,6 +324,58 @@ def test_an_object_the_scan_cannot_read_is_not_evidence_for_the_claim_before_it(
     assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[11000]], why
 
 
+def test_a_named_list_does_not_sweep_in_the_next_CLAUSE_s_claim():
+    """Measured at `2219dfe86` (review, P2): the object ZONE (a raw text scan to the clause end)
+    continued past `and` whenever a ref sat nearby, so a claim introduced by a LATER clause was
+    moved from `weak` to `declined` and disappeared — the silent-drop direction, introduced by the
+    fix that closed the previous round.
+
+    The object is captured by the GRAMMAR now (a list must continue with `#N` right after its
+    separator), so `#200 and Refs #300` stops at `#200`: the `and` there joins clauses, not refs.
+    """
+    # `#200` is the decline's OBJECT, not a claim (no claiming word precedes it), so it is not in
+    # `declined` — what matters is that `#300`, which IS claimed and resolved by nothing, was not
+    # swept into the decline and dropped.
+    a = "Closes #100 — deliberately not closing #200 and Refs #300 for the follow-up.\n"
+    assert L.claims(a, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(a, 1)] == [[300]]
+    b = "Refs #100 — deliberately not closing #200, and Refs #300 is separate.\n"
+    assert L.claims(b, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(b, 1)] == [[100, 300]]
+
+
+def test_a_context_reference_in_the_same_clause_does_not_steal_the_decline():
+    """Measured at `2219dfe86` (review, P2): the zone added every ref in the clause to `targets`,
+    so a context ref (`see #11078`) stole the decline from the ref the sentence was about and an
+    HONEST decline was flagged — rc 0 at `049548f2c`, rc 3 at the head that introduced the zone.
+
+    A noun object (`it`) names no reference, so the proximity rule applies and `#11000` clears.
+    """
+    assert L.classify_pr("Refs #11000 — deliberately not closing it, see #11078 for the review.\n",
+                         1) == []
+    assert L.classify_pr("Refs #11000 — deliberately not closing it; #11078 has the detail.\n",
+                         1) == []
+
+
+@pytest.mark.parametrize("tail,why", [
+    (", the review issue.", "an ordinary appositive"),
+    (", none of which is confirmed.", "`none` contains `one`"),
+    (", my other PR.", "`PR` matches `pr`"),
+    (", see the commit.", "`commit` contains `it`"),
+])
+def test_an_unreadable_object_stays_unreadable_when_the_sentence_continues(tail, why):
+    """Measured at `2219dfe86` (review, P2): the unreadable-object guard searched `_REF_NOUN` over
+    the WHOLE rest of the line, so one incidental reference noun — `none`, `PR`, `commit` — satisfied
+    it and the blanked object fell through to proximity again, clearing the ref before the sentence.
+
+    The test is now on the CAPTURED object, not on the rest of the line: a clause that continues
+    with an appositive cannot tell us what was blanked, so the claim stays flagged.
+    """
+    body = "Part of #11000 — deliberately not closing `#11078`" + tail + "\n"
+    assert L.claims(body, 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]], why
+
+
 def test_a_plural_decline_clears_the_whole_list_it_names():
     """`them` was added as an object in round 13 but resolved by proximity, so a PLURAL sentence
     cleared one ref and flagged the other (measured at `e7dd41058`, review P3).

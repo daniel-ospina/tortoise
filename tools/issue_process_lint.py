@@ -249,16 +249,21 @@ _CLOSING_STEM = (r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]?|ing)?"
 _REF_NOUN = (r"(?:one|ones|ref|refs|reference|references|issue|issues|keyword|keywords"
              r"|commit|commits|pr|prs|it|them|this|that)\b")
 _REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
+# A decline may name a LIST — `#100, #200`, `#100 and #200`. Captured as ONE group so every named
+# ref is visible to the target logic; the continuation requires a `#N` right after the separator, so
+# `#200 and Refs #300 for the follow-up` stops at `#200` (the `and` there joins CLAUSES, and
+# sweeping `#300` in silently dropped a claim the author had made — measured at `2219dfe86`).
+_REF_LIST = rf"(?:{_REF_OBJ})(?:{_DECLINE_TAIL}(?:and{_EMPH})?#\d{{1,7}})*"
 _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
 DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
-    rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})(?P<obj_a>{_EMPH}{_DET}{_REF_OBJ})?"
+    rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})(?P<obj_a>{_EMPH}{_DET}{_REF_LIST})?"
     rf"{_DECLINE_TAIL}(?:$|[,;]|{_EMPH}and{_EMPH}))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
-    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}$",
+    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?{_DECLINE_TAIL}$",
     re.IGNORECASE,
 )
 # ⛔ A DECLINE IS ABOUT *ITS OWN* REFERENCE — the two properties the grammar alone cannot express,
@@ -433,40 +438,31 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # flagged as un-declined, and `Part of #100 — deliberately not closing #200, #100.`
             # (rc 0 at `e7dd41058`) became rc 3 (review P2). The region stops at the clause end
             # (`.`/`;`), so a following sentence's refs are never swept in.
-            # The object ZONE: what follows the decline, up to the end of its clause. It stops at
-            # `.`/`;` and at a conjunction that does NOT continue an object list — `#100 and #200`
-            # continues one (the word before `and` is a ref), while `Closes and #200 is deliberately
-            # not Closes.` starts a SECOND sentence (the word before `and` is the closing verb), and
-            # sweeping its ref in dropped the first sentence's own reference.
-            after_stem = line[(m.end("stem_a") if m.group("stem_a") else m.end()):]
-            stop = len(after_stem)
-            for sep in (".", ";"):
-                j = after_stem.find(sep)
-                if j != -1:
-                    stop = min(stop, j)
-            zone = after_stem[:stop]
-            for conj in re.finditer(r"\b(?:and|or)\b", zone, re.IGNORECASE):
-                if not _REF_POS_RE.search(zone[:conj.start()][-12:]):
-                    zone = zone[:conj.start()]
-                    break
-            named = [int(x) for x in _REF_POS_RE.findall(obj)] + \
-                    [int(x) for x in _REF_POS_RE.findall(zone)]
+            named = [int(x) for x in _REF_POS_RE.findall(obj)]
             if named:
                 targets.update(named)
                 continue
             # ⛔ AN UNREADABLE OBJECT IS NOT EVIDENCE. `strip_code` blanks an inline-code span or an
             # HTML comment to WHITESPACE, so `deliberately not closing `#11078`.` reaches this
-            # function as `deliberately not closing         .` — the stem is there, the object is
-            # gone. Falling through to proximity then cleared the ref BEFORE the sentence, which is
-            # the same silent-drop the named-object rule exists to stop (measured at `049548f2c`,
-            # review P3). An object region that begins with whitespace and names neither a ref nor a
-            # reference noun is therefore no target at all — the flag direction. A region that
-            # starts immediately with punctuation (`deliberately not Closes.`, `not closing.`) is
-            # the clause-terminal convention and is unaffected.
-            if m.group("stem_a") is not None:
-                if (after_stem[:1].isspace()
-                        and not _REF_POS_RE.search(after_stem)
-                        and not re.search(_REF_NOUN, after_stem, re.IGNORECASE)):
+            # function with its object GONE (the stem survives, the ref does not). Falling through
+            # to proximity then cleared the ref BEFORE the sentence — the silent drop this rule
+            # exists to stop (measured at `049548f2c`). An object region that STARTS with whitespace
+            # and captured nothing readable is therefore no target at all. The clause-terminal
+            # convention (`deliberately not Closes.`, `deliberately not closing.`) has punctuation
+            # straight after the stem, so it keeps the proximity path and stays a decline.
+            #
+            # ⛔ THE TEST IS ON THE CAPTURED OBJECT, NOT ON THE REST OF THE LINE (measured at
+            # `2219dfe86`): searching `_REF_NOUN` over `after_stem` matched `one\b` inside `none`,
+            # `pr\b` inside `PR` and `it\b` inside `commit`, so appending any ordinary clause
+            # (`… `#11078`, the review issue.`) re-opened the drop.
+            if m.group("stem_a") is not None and not obj.strip():
+                after_stem = line[m.end("stem_a"):]
+                # …but a clause that CONTINUES (`Closes and #200 is deliberately not Closes.`) also
+                # begins with a space, and there the space is the conjunction's, not a blanked span's.
+                # Only `and`/`or` are admitted as that continuation: any other word after the gap is
+                # the appositive or the rest of the sentence, which cannot tell us what was blanked.
+                head = re.match(r"[ \t]+([A-Za-z]+)?", after_stem)
+                if head and (head.group(1) or "").lower() not in ("and", "or"):
                     continue
             before = [r for r in refs if r[1] <= m.start()]
             if not before:
