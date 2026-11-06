@@ -25,10 +25,10 @@ _service = "tortoise-hosted-api"
 # derives `ignore_errors` from. ⚠️ DELIVERED, not "built": `_is_ignored_error`
 # runs inside `Client.capture_event`, i.e. AFTER `event_from_exception` has
 # serialized every frame and only before `_prepare_event` — the event is still
-# constructed, which is exactly why `include_source_context=False` above is
-# required too. Reading this as "no event is built" is the misconception this
-# branch exists to correct. ⚠️ The request layer is a SEPARATE and broader set,
-# and a reset admitted there still delivers one event — see
+# constructed, which is exactly why `include_source_context=False` in `init()`
+# below is required too. Reading this as "no event is built" is the misconception
+# this branch exists to correct. ⚠️ The request layer is a SEPARATE and broader
+# set, and a reset admitted there still delivers one event — see
 # `REQUEST_LAYER_DISCONNECT_NAMES`.
 # #11092: a peer hanging up is routine (a health probe timing out, a browser tab
 # closed, a dropped fetch). Routing it through the unhandled-exception handler

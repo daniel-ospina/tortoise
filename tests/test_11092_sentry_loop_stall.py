@@ -653,11 +653,11 @@ def test_the_real_sdk_builds_an_event_with_no_source_context(real_sentry) -> Non
     ``test_init_turns_source_context_off`` pins a kwarg captured by the FAKE SDK,
     so a ``sentry-sdk`` bump that keeps the key accepted while no longer reading
     it would leave that pin green while the per-frame source read — the outage —
-    came back. That is not hypothetical: ``with_locals`` is the option #2863's fix
-    originally used, and the SDK retired it in favour of
-    ``include_local_variables`` (it is absent from the installed SDK's option
-    set). ``pyproject.toml`` declares
-    ``sentry-sdk>=2.0`` with no upper bound, so another rename is reachable. (As
+    came back. That is not hypothetical: the SDK has retired an option of exactly
+    this kind before (``with_locals``, gone in the 1.x->2.x migration in favour of
+    ``include_local_variables``; passing it today raises ``TypeError: Unknown
+    option``), and ``pyproject.toml`` declares ``sentry-sdk>=2.0`` with no upper
+    bound, so another rename is reachable. (As
     of 2.74.0 — the current release — ``include_source_context`` and
     ``include_local_variables`` are still accepted and carry no deprecation
     marker in the vendor tree; ``data_collection`` coexists with them. Do not
