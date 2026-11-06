@@ -3442,3 +3442,66 @@ if __name__ == "__main__":  # pragma: no cover
 
     os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     raise SystemExit(pytest.main([str(Path(__file__).resolve()), "-q"]))
+
+
+def test_a_whitespace_only_line_does_not_carry_the_previous_line_s_per_line_state():
+    """Round 38 review, P1 — a CRASH, and a regression against `origin/main`.
+
+    `pushed`, `container` and `own_gap` are per-LINE state, but they were assigned only inside
+    `if line.strip():`, so a whitespace-only line kept the PREVIOUS line's `pushed=True` while the
+    `indent_code` branch had already popped the items that flag referred to. Two shapes then raised
+    `IndexError`, and `main` answers both:
+
+        '- [ ] b' + 8 spaces + blank                     strict=True -> pop from empty list
+        '- [ ] criterion' + 5 spaces + 5 spaces + 'Closes #N'        -> list index out of range
+
+    ⛔ A crash is not a narrow blast radius here: `sweep()` has no per-PR guard, so ONE such PR body
+    aborts the whole sweep and the run exits 1 against a documented 0/3/2 contract — every other
+    PR's result is lost with it. The state is reset at the top of the iteration, where "this line's
+    own" begins, and these bodies are the pin because the shipped sweeps cannot see the shape (each
+    of their families supplies at most one whitespace-only line).
+    """
+    bodies = ["- [ ] b\n        \n\n", "- [ ] criterion one\n     \n     \nCloses #100\n",
+              "- item\n        \n        \n", "> - [ ] a\n        \n\n", "\t\n\t\n- [ ] b\n"]
+    for body in bodies:
+        for kw in ({}, {"strict": True}, {"indented_code": True}, {"strict": True, "indented_code": True}):
+            cl.strip_code(body, **kw)          # must not raise
+            cl.parse_closing_refs(body, None, strict=kw.get("strict", False))
+    # …and the answer is `main`'s, not a crash-shaped placeholder: the indented blank tail is
+    # dropped and the paragraph before it survives.
+    assert cl.strip_code("- [ ] b\n        \n\n", strict=True) == "- [ ] b\n\n"
+
+
+def test_a_paragraph_one_container_deeper_than_its_line_is_STILL_another_container():
+    """Round 38 review, P2 — `_lazy_marker`'s depth term could not see INTERIOR nesting.
+
+    The term was the line's own PREFIX depth, which misses two shapes where the open paragraph sits
+    a container deeper than that prefix shows — and in both the renderer opens a NEW list, so the
+    wide-gap content is CODE and crediting it is a `lands` GitHub never fires:
+
+        '- > q' + '  2.     Closes #100'   the `> ` sits AFTER the marker -> paragraph at depth 1
+        '> Notes' + 'lazy' + '2.     …'    a lazy line has no `>` prefix, so depth 0 was recorded
+                                           and the open quote was forgotten
+
+    The depth carried is now the PARAGRAPH's: a marker line adds the depth of its own content, and a
+    line shallower than the paragraph it continues keeps the paragraph's depth (that is what lazy
+    means). Control, which must stay prose: the same depth on both sides.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body, why in (("- > q\n  2.     Closes #100\n", "the `> ` is after the marker"),
+                      ("> Notes\nlazy\n2.     Closes #100\n", "the lazy line dropped its `>`"),
+                      ("- > q\n  10.     Closes #100\n", "same, a two-digit marker")):
+        assert token_type(body) == "code_block", (why, body)
+        assert cl.parse_closing_refs(body) == [], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [], (why, body)
+    # The control: SAME container depth on both sides is still a lazy continuation.
+    body = "> Notes\n> 2.     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body

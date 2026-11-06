@@ -1230,6 +1230,20 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # saw it — the block it opened under then had no edge and the keyword
         # inside the block the renderer calls CODE read as prose (#10634 review
         # P1, fail-open). `_item_dedented` is the matching pop, in the same space.
+        # ⛔ THE PER-LINE STATE MUST BE RESET ON A WHITESPACE-ONLY LINE (round 38 review, P1 — a
+        # CRASH, and a regression against `origin/main`). `pushed`, `container` and `own_gap` were
+        # assigned only inside `if line.strip():`, so a whitespace-only line carried the PREVIOUS
+        # line's `pushed=True` forward — and the `indent_code` branch had already popped the items
+        # the flag referred to. Two shapes then raise IndexError, both of which `main` answers:
+        #     `- [ ] b` + `        ` (8 spaces) + blank          strict=True  -> pop from empty list
+        #     `- [ ] criterion` + `     ` + `     ` + `Closes #N` strict=True -> list index out of range
+        # A crash is not a narrow blast radius in this tool: `sweep()` has no per-PR guard, so one
+        # such body aborts `--sweep` for EVERY PR and the run exits 1 against a documented 0/3/2
+        # contract. Reset at the top of the iteration, which is where "this line's own" begins.
+        if not line.strip():
+            pushed = False
+            container = None
+            own_gap = 0
         if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
@@ -1397,7 +1411,19 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # families of credited quotations came from reading only `raw.strip()` here.
         prev_prose = bool(raw.strip()) and not _leaves_no_paragraph(
             rest, rest_indent, container, prev_prose)
-        prev_quote_depth = _quote_depth(prefix)
+        # ⛔ THE PARAGRAPH'S CONTAINER DEPTH, WHICH IS NOT THE LINE'S OWN PREFIX DEPTH (round 38
+        # review, P2 — a false PASS). Two shapes put a paragraph at a depth its line's prefix does
+        # not show, and both made `_lazy_marker`'s depth term answer "same container" when the
+        # renderer opens a NEW list:
+        #     `- > q` + `  2.     Closes #100`   the `> ` sits AFTER the marker, so the paragraph is
+        #                                        at depth 1 while the prefix reads 0 -> CODE
+        #     `> Notes` + `lazy` + `2.     …`   the lazy line has NO `>` prefix, so recording depth 0
+        #                                        lost the open quote -> CODE
+        # So: a marker line contributes the depth of its own CONTENT, and a line shallower than the
+        # paragraph it continues keeps the paragraph's depth (that is what "lazy" means).
+        _inner = rest[_content_column(rest):] if _content_column(rest) is not None else ""
+        _own_depth = _quote_depth(prefix) + _quote_depth(_split_prefix(_inner)[0])
+        prev_quote_depth = max(_own_depth, prev_quote_depth) if prev_prose else _own_depth
         # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
         # text inside the `<li>`), not in the item it sat in before.
         prev_container = (list_items[-1] if pushed else container)
