@@ -166,6 +166,30 @@ def _structural_duplicate_keys(text: str) -> list[str]:
     return walk(yaml.compose(text))
 
 
+def _normalized_input_collisions(with_mapping: dict) -> list[str]:
+    """Keys of an action `with:` mapping that resolve to the SAME input once GitHub normalizes them.
+
+    `@actions/core` reads an input as `INPUT_${name.replace(/ /g, "_").toUpperCase()}`, so `version`
+    and `Version` are one input to the action while being two distinct keys to PyYAML — and the
+    tie-break between them is unmeasured. Measured by review on this very file: the live step plus a
+    `Version: 3.0.0` line resolved to `2.122.1`, reported NO structural duplicate key, and left
+    `_violations` empty — a major-3 pin, green behind a capital letter. That is class (2) of the
+    declared surface ("a pin this reader resolves differently from CI"), not a cosmetic nit.
+
+    Scoped to `with:` on purpose: the normalization belongs to action INPUTS. Applying it to every
+    mapping in the document would assert something GitHub does not do (step keys, matrix keys and
+    `env:` names are not case-folded this way) and would false-block on legitimate shapes.
+    """
+    by_input: dict[str, list[str]] = {}
+    for key in with_mapping:
+        by_input.setdefault(str(key).replace(" ", "_").upper(), []).append(str(key))
+    return [
+        f"`{'` and `'.join(keys)}` both resolve to `INPUT_{normalized}`"
+        for normalized, keys in by_input.items()
+        if len(keys) > 1
+    ]
+
+
 def _requested_version(workflow_text: str) -> str:
     """The CLI version the workflow pins, and proof that CI resolves the same value.
 
@@ -174,11 +198,20 @@ def _requested_version(workflow_text: str) -> str:
     step could carry no `version:` line at all, PyYAML would synthesize one, and the
     `version is None` arm below would never fire while the action fell back to `latest` (3.x). The
     same class covers a duplicate `version:` key, where PyYAML takes the last one and GitHub's
-    tie-break is not measured. So the step must carry EXACTLY ONE literal `version:` line, and it
-    must be the resolved value. Merge keys are refused outright.
+    tie-break is not measured, and a CASE-VARIANT key, where PyYAML sees two distinct keys but the
+    action sees one input (see `_normalized_input_collisions`). So the step must carry EXACTLY ONE
+    literal `version:` line, and it must be the resolved value. Merge keys are refused outright.
     """
     step = _setup_cli_step(workflow_text)
     with_ = step.get("with") or {}
+    collisions = _normalized_input_collisions(with_)
+    assert not collisions, (
+        "the setup-cli step's `with:` declares keys that GitHub resolves to the same input: "
+        + "; ".join(collisions)
+        + ". GitHub upper-cases an input name and turns spaces into underscores, so these are ONE "
+        "input to the action and two keys to this reader — the tie-break is unmeasured, so the pin "
+        "asserted here is not provably the one installed"
+    )
     assert "<<" not in with_, (
         "the setup-cli step's `with:` uses a YAML merge key (`<<`). GitHub Actions does not implement "
         "merge keys, so the `version` PyYAML reads here is not the version CI resolves — the action "
@@ -236,8 +269,9 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
 
     DECLARED THREAT SURFACE — in scope, each covered by an arm below:
       (1) a floating pin (`latest`, `v2`, `^2.122.1`, …) — any shape that is not an exact x.y.z;
-      (2) a pin this reader resolves differently from CI (merge key, duplicate key, alias), so the
-          value asserted is not the value installed;
+      (2) a pin this reader resolves differently from CI (merge key, duplicate key, alias, or an
+          input key that collides with `version` after GitHub's own normalization), so the value
+          asserted is not the value installed;
       (3) a major-3 pin — the config-load break while `[inbucket]` is declared, and the hosted-
           mutation consent gate once it is not.
 
@@ -445,6 +479,23 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         assert respelled in smuggled, f"mutation did not apply for {respelled!r} — vacuous"
         with pytest.raises(AssertionError, match="duplicate mapping key"):
             _requested_version(smuggled)
+
+    # (e) GitHub normalizes an input name to `INPUT_<NAME>` (upper-cased, spaces → underscores), so
+    #     two keys differing only in case are ONE input to the action and TWO keys to PyYAML. Measured
+    #     by review: this shape resolved to `2.122.1`, reported no duplicate key, and left
+    #     `_violations` empty — a major-3 pin, green behind a capital letter.
+    case_variant = workflow.replace(
+        "        with:\n          version: 2.122.1",
+        "        with:\n          version: 2.122.1\n          Version: 3.0.0",
+        1,
+    )
+    assert "Version: 3.0.0" in case_variant, "mutation did not apply — this test would be vacuous"
+    assert _structural_duplicate_keys(case_variant) == [], (
+        "the case variant parsed as an exact duplicate key — the arm would pass for the wrong "
+        "reason and never exercise the normalization"
+    )
+    with pytest.raises(AssertionError, match="INPUT_VERSION"):
+        _requested_version(case_variant)
 
 
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
