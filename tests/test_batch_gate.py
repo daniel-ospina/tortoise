@@ -783,6 +783,80 @@ def test_the_ARGV_fold_self_inclusion_is_dropped_before_it_can_close_the_fold(
     )
 
 
+def test_an_EMPTY_diff_is_never_a_containment_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The empty-diff arm is the code's OWN statement of the invariant, so it is pinned.
+
+    Removing it is fail-closed on git 2.43.0 today — `git apply --reverse --check`
+    fed empty stdin exits 128 (`error: No valid patches in input`), so the `rc > 1`
+    arm answers UNMEASURABLE. That safety margin is a GIT IMPLEMENTATION DETAIL, not
+    a property this module asserts: `--allow-empty`, or any change to that message's
+    status, would let an empty diff reach the apply with nothing to reverse and be
+    read as `CONTAINED-CONTENT` — `closable is True` on no evidence at all, which is
+    the one unrecoverable outcome the module docstring names (the PR gets closed).
+    Deleting the arm leaves this file green (measured, 55 passed), so the arm had no
+    regression detector at all.
+    """
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    monkeypatch.setattr(
+        bo,
+        "_run",
+        lambda argv, *, timeout, cwd=None, stdin=None: subprocess.CompletedProcess(
+            argv, 0, "", ""
+        ),
+    )
+    state, detail = bo.content_contained("a" * 40, "b" * 40, "c" * 40, Path("."))
+    assert state == "NOT-CONTAINED", (
+        f"an empty diff is not evidence of containment — got {state!r} ({detail})"
+    )
+    assert "empty" in detail, detail
+
+
+def test_an_EMPTY_constituent_set_is_COULD_NOT_MEASURE_not_a_clean_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A run that measured NOTHING must not exit 0 — 0 means "every one was contained".
+
+    `if not constituents:` prints the reason and returns 2. Nothing pinned it, so
+    deleting it left this file green (55 passed) while `main` fell through to the
+    verdict loop with an EMPTY list, built an empty plan and exited **0** — the code
+    its own docstring reserves for "every constituent was contained and (with
+    `--apply`) closed". With `--apply` it also issued
+    `pr edit <fold> --add-label <FOLD_LABEL>` on the strength of that empty set, so
+    the tool ACTS on a fold it never measured. Both halves are asserted: the exit
+    code and the absence of any `gh` write.
+
+    Two argv shapes reach the empty set, and the cycle-2 pin does not cover either:
+    (a) a body with no `fold-constituents:` line at all, (b) `--constituent <fold>`
+    alone, which the argv filter at :934 empties.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bo,
+        "fetch_fold",
+        lambda n, repo=None: (0, "f" * 40, "fold-br", "Closes #10963, no constituents line"),
+    )
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+
+    def _gh(argv, repo=None):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(bo, "_gh", _gh)
+
+    # (a) the body declares no constituents at all
+    rc = bo.main(["--fold", "900", "--apply"])
+    out = capsys.readouterr()
+    assert rc == 2, f"nothing was measured, so this is exit 2 — got {rc}: {out.out}{out.err}"
+    assert calls == [], f"a run that measured nothing issued a gh write: {calls}"
+
+    # (b) the only constituent named is the fold itself
+    calls.clear()
+    rc = bo.main(["--fold", "900", "--constituent", "900", "--apply"])
+    out = capsys.readouterr()
+    assert rc == 2, f"an empty set after the fold filter is still exit 2 — got {rc}: {out.out}{out.err}"
+    assert calls == [], f"a run whose only constituent was the fold issued a gh write: {calls}"
+
+
 def test_an_unmeasurable_constituent_is_NOT_reported_as_a_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
