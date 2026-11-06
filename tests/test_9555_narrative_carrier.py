@@ -1824,15 +1824,25 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
 #: `_VECTOR_INVERSIONS` and `_SUMMARY_NEGATION_INVERSIONS`.
 _NEGATION_CUE = (
     r"(?:\b(?:not|never|cannot|can\s?not|no longer|by no means|in no case)\b"
-    #: ⛔ NOT a cue inside an AFFIRMATIVE construction. `not only X but Y`,
-    #: `not unlike X` and `never mind X` all ASSERT X (or assert more than X),
-    #: so counting the `not` certified sentences that state the inverse of the
-    #: section they are pinned to: measured, `a session's `summary` is §4.6
-    #: metadata and not only the narrative but also the summary is §4.6 metadata`
-    #: left the whole pin GREEN, and `it is not only `:Source.summary` but also the
-    #: narrative` passed `_negates_the_summary`. Pinned in both objects'
-    #: `_*_INVERSIONS` lists.
-    r"(?!\s+(?:only|unlike|mind)\b)"
+    #: ⛔ NOT a cue inside an AFFIRMATIVE construction. `not only X but also Y`,
+    #: `not merely X`, `not least X`, `not unlike X` and `never mind X` all ASSERT
+    #: X (or assert more than X), so counting the `not` certified sentences that
+    #: state the inverse of the section they are pinned to: measured, `a session's
+    #: `summary` is §4.6 metadata and not only the narrative but also the summary
+    #: is §4.6 metadata` left the whole pin GREEN, and `it is not only
+    #: `:Source.summary` but also the narrative` passed `_negates_the_summary`.
+    #:
+    #: ⛔ **THE FAMILY, NOT THREE SPELLINGS.** Closing `only`/`unlike`/`mind` alone
+    #: left the siblings open and UNPINNED — `not merely`, `not just`, `not solely`,
+    #: `not simply`, `not least` were all still certified (measured: the footnote
+    #: re-worded to "…and the vector embeds not merely the narrative but also the
+    #: summary column" passed the ENTIRE pin, 75 passed; the same mutation spelled
+    #: `not only` red 3). An allow-list of adverbs is the wrong shape for a class,
+    #: so the exclusion names the class: every exclusivity adverb that turns
+    #: `not X` into `not ONLY X` (X asserted). Each surviving member is pinned in
+    #: the positive direction in `_*_INVERSIONS`.
+    r"(?!(?:\s+(?:only|just|merely|solely|simply|purely|exclusively|least"
+    r"|unlike|mind)\b))"
     r"|\w+n['’]t\b)"
 )
 
@@ -2504,6 +2514,14 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: read BOTH texts (measured: `_negates_the_summary` True, pin GREEN).
     ("the affirmative `not only … but also` construction",
      "⛔ not only `:Source.summary` but also the S1 narrative"),
+    #: The exclusivity-adverb family, after `only` alone was measured to leave
+    #: these open: each turns `not X` into `not ONLY X`, which ASSERTS X.
+    ("the `not merely` affirmative",
+     "⛔ not merely `:Source.summary` but the S1 narrative"),
+    ("the `not just` affirmative",
+     "⛔ not just `:Source.summary` but the S1 narrative"),
+    ("the `not least` affirmative",
+     "⛔ not least `:Source.summary`"),
 ]
 
 
@@ -2536,7 +2554,8 @@ def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str)
 @pytest.mark.parametrize(
     "why,clause", _SUMMARY_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
-         "negation-in-other-clause", "not-only-but-also"])
+         "negation-in-other-clause", "not-only-but-also", "not-merely",
+         "not-just", "not-least"])
 def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
@@ -2641,6 +2660,12 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     ("the `not only` affirmative", "not only the narrative"),
     ("the `not unlike` affirmative", "not unlike the narrative"),
     ("the `never mind` affirmative", "never mind the narrative"),
+    #: The rest of the exclusivity-adverb family — measured ACCEPTED while the
+    #: exclusion named `only`/`unlike`/`mind` alone.
+    ("the `not merely` affirmative", "not merely the narrative"),
+    ("the `not just` affirmative", "not just the narrative"),
+    ("the `not solely` affirmative", "not solely the narrative"),
+    ("the `not least` affirmative", "not least the narrative"),
 ]
 
 
@@ -2682,7 +2707,9 @@ def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
          "negation-in-other-clause", "cue-across-a-clause-boundary",
          "subject-form-trailing-cue", "subject-form-copula",
          "not-only-affirmative", "not-unlike-affirmative",
-         "never-mind-affirmative"])
+         "never-mind-affirmative", "not-merely-affirmative",
+         "not-just-affirmative", "not-solely-affirmative",
+         "not-least-affirmative"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
