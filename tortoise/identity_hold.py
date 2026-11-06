@@ -112,6 +112,10 @@ HOLD_PENDING = "pending"
 HOLD_CLAIMED = "claimed"
 HOLD_RESOLVED = "resolved"
 HOLD_STATES: tuple[str, ...] = (HOLD_PENDING, HOLD_CLAIMED, HOLD_RESOLVED)
+#: The bucket `summary()` uses for a record whose `state`/`kind` is missing — a
+#: torn or hand-edited line is COUNTED, never raised over (a census must not be
+#: able to sink the run that reports it).
+HOLD_UNKNOWN = "unknown"
 
 #: Collapse whitespace only — NOT case, and NOT punctuation. Two refs that differ
 #: in case are not provably the same identity, and a store that merged them would
@@ -324,12 +328,22 @@ class HoldStore:
                     if r.get("state") == HOLD_PENDING]
 
     def summary(self) -> dict[str, Any]:
-        """Counts by state and kind — the census the run reports, never silence."""
+        """Counts by state and kind — the census the run reports, never silence.
+
+        ⛔ Read through `.get()` (#10997 review round 2, P2): `_load` accepts any
+        JSON object carrying a `key`, so a hand-edited or half-written record can
+        lack `state`/`kind`. Indexing it raised `KeyError` out of a *reporting*
+        method — inside `execute_embed` that replaced the whole S5 payload with
+        the caller's error dict, i.e. a corrupt hold file could lose a session's
+        points and operators. A census must not be able to sink the run.
+        """
         with self._lock:
             by_state: dict[str, int] = {state: 0 for state in HOLD_STATES}
             by_kind: dict[str, int] = {}
             for rec in self._records.values():
-                by_state[rec["state"]] = by_state.get(rec["state"], 0) + 1
-                by_kind[rec["kind"]] = by_kind.get(rec["kind"], 0) + 1
+                state = str(rec.get("state") or HOLD_UNKNOWN)
+                kind = str(rec.get("kind") or HOLD_UNKNOWN)
+                by_state[state] = by_state.get(state, 0) + 1
+                by_kind[kind] = by_kind.get(kind, 0) + 1
             return {"path": str(self.path), "total": len(self._records),
                     "by_state": by_state, "by_kind": by_kind}

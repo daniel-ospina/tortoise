@@ -196,9 +196,62 @@ class TestTheHoldIsDrainable:
             "duplicate this whole mechanism exists to prevent")
         assert store.summary()["by_state"][hold.HOLD_RESOLVED] == 1
 
+    def test_a_drained_item_that_folds_onto_an_existing_point_still_commits(
+            self, tmp_path):
+        """Survival is "still WIRED", not "in `payload_points`" (review 2, P1).
+
+        A drain can legally mint nothing into the payload: the `#4716` NOOP fold
+        resolves a ref against a PRIOR point, so the id is already in the graph
+        and is never appended. Asking payload membership alone released the
+        claim and printed *"no surviving operator references it, so the Point was
+        pruned"* about an item whose edge is right there in the payload — so the
+        store re-drained it on every resolved run, forever, and the held count
+        could never return to zero. The mutation this pins: with the shipped
+        predicate the run below reports `committed=False` and the key stays
+        `pending`; with the fix it reports `committed=True`.
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        first = v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
+        key = first["held"][0]["key"]
+
+        # The fold: the lookup returns a PRIOR point with the held ref's own
+        # content, so the mint resolves to an id that is already in the graph and
+        # appends nothing to the payload (exactly what `prior_id` does).
+        folded = _search(True)
+        folded["points"] = [{"id": "pt_existing", "content": _REF,
+                             "pointKind": "statement", "session_ref": "s0"}]
+        second = v2.execute_embed(_EMBED, folded, session_id="s2",
+                                  hold_store=store)
+        assert [e["point_id"] for e in second["held_drained"]] == ["pt_existing"]
+        assert second["held_drained"][0]["committed"] is True, (
+            "a fold onto an existing point was reported as PRUNED and the item "
+            "was released back to pending — it can never resolve")
+        assert store.get(key)["state"] == hold.HOLD_RESOLVED
+        assert store.pending() == [], store.summary()
+        # …and its EDGE is in the payload, which is what makes it committed.
+        assert [o["src"] for o in second["payload"]["operators"]] == ["pt_existing"]
+
+    def test_the_held_count_is_identities_not_occurrences_without_a_store(self):
+        """`stats.held` is a CENSUS, and it must mean the same thing with and
+        without a store (review 2, P2).
+
+        `hold_store` is `None` on every production call, so a key derived only
+        when a store is supplied made the shipping path count OCCURRENCES: two
+        operators naming one ref reported `held == 2`, contradicting the run's
+        own comment and the epic's \"the held count returns to zero\" reading.
+        """
+        embed = {**_EMBED, "operators": [
+            {"src": _REF, "dst": "the budget is 40k", "op_type": "IMPL"},
+            {"src": _REF, "dst": "the budget is 40k", "op_type": "MITIGATES"},
+        ]}
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert len(result["held"]) == 2, "one record per held OCCURRENCE"
+        assert result["stats"]["held"] == 1, (
+            "two operators naming one ref are ONE held identity — an occurrence "
+            "count makes the census unreadable without a store")
+        assert len({h["key"] for h in result["held"]}) == 1
+
     def test_a_resolved_identity_is_never_re_held(self, tmp_path):
-        """The other half of idempotency: an ambiguous run AFTER a resolution must
-        not re-arm the key, or the next drain would mint a second copy."""
         store = hold.HoldStore(tmp_path / "hold.jsonl")
         v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
         key = store.pending()[0]["key"]
@@ -356,7 +409,15 @@ class TestTheStoreExactlyOnce:
         key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
         store.claim(key)
         store.confirm(key, "pt_1")
+        # ⛔ `HoldStore.__new__` hands back the REGISTRY instance for a path it
+        # has already seen (the two-in-memory-views guard), so without this the
+        # "reload" below is the SAME object and `_load` never runs — measured:
+        # `HoldStore(path) is store` was True and truncating the file left
+        # `pending()` at 1. The test then asserted nothing about durability and
+        # would not have redded if `_load` were deleted (#10997 review 2, P2).
+        hold._STORES.clear()
         reloaded = hold.HoldStore(path)
+        assert reloaded is not store
         assert reloaded.get(key)["state"] == hold.HOLD_RESOLVED
         assert reloaded.get(key)["minted_id"] == "pt_1"
         assert reloaded.summary()["by_state"][hold.HOLD_RESOLVED] == 1
@@ -367,7 +428,23 @@ class TestTheStoreExactlyOnce:
         store.hold(hold.HOLD_ENDPOINT, "a ref")
         with path.open("a", encoding="utf-8") as fh:
             fh.write('{"key": "torn", "kind"')  # a crash mid-append
+        hold._STORES.clear()  # force a real `_load` (see the reload test above)
         assert len(hold.HoldStore(path).pending()) == 1
+
+    def test_a_record_missing_its_state_cannot_sink_the_census(self, tmp_path):
+        """A torn/hand-edited line is COUNTED by `summary()`, never raised over.
+
+        `_load` accepts any JSON object carrying a `key`, so `rec["state"]` could
+        raise `KeyError` out of a reporting method — and inside `execute_embed`
+        that replaced the whole S5 payload with the caller's error dict, i.e. a
+        corrupt hold file could lose a session's points and operators (#10997
+        review 2, P2).
+        """
+        path = tmp_path / "hold.jsonl"
+        path.write_text('{"key": "k1", "content": "x"}\n', encoding="utf-8")
+        summary = hold.HoldStore(path).summary()
+        assert summary["total"] == 1
+        assert summary["by_state"][hold.HOLD_UNKNOWN] == 1
 
     def test_open_store_is_per_graph_and_env_overridable(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TORTOISE_IDENTITY_HOLD_DIR", str(tmp_path))

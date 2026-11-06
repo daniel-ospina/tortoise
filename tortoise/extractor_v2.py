@@ -3132,11 +3132,18 @@ def _hold_endpoint(hold_store: object | None, held: list[dict], *,
         "operator": dict(operator or {}),
         "persisted": False,
     }
+    # ⛔ The run's `held` list is an IDENTITY report, and `stats.held` is read off
+    # it — so every record carries the content-addressed key even when no store
+    # is supplied (#10997 review round 2, P2). Keyed on `where` instead, two
+    # operators naming ONE ref counted as two held identities in exactly the
+    # path that ships (`hold_store=None`), and the epic's "held count returns to
+    # zero" census would have read an occurrence count. The key is a pure
+    # function of the normalised text, so the census is the same either way.
+    rec["key"] = _identity_hold.hold_key(_identity_hold.HOLD_ENDPOINT, content)
     held.append(rec)
     if hold_store is None:
         return rec
     try:
-        rec["key"] = _identity_hold.hold_key(_identity_hold.HOLD_ENDPOINT, content)
         stored = hold_store.hold(
             _identity_hold.HOLD_ENDPOINT, content, where=where,
             session_ref=session_ref, operator=rec["operator"], ref=rec["ref"])
@@ -9861,9 +9868,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"reading the held set failed ({type(exc).__name__}: {exc}); "
                 "the run's own candidates are unaffected")
         for _rec in _drainable:
+            _claimed = False
             try:
                 if not hold_store.claim(_rec["key"]):
                     continue
+                _claimed = True
                 # ⛔ The ORIGINAL ref, not the truncated `content` (review P1):
                 # `_write_span` clamps the content to `_MAX_CONTENT`, while the
                 # restored operator still carries the untruncated ref — draining
@@ -9879,6 +9888,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     hold_store.release(_rec["key"])
                     continue
             except Exception as exc:  # a store write must not sink the run
+                # ⛔ A claim taken and then abandoned is INVISIBLE to every later
+                # drain: `pending()` lists only HOLD_PENDING, so a key left
+                # CLAIMED by a raise inside this block would never be drained
+                # again — the silent I2 loss the store exists to prevent
+                # (#10997 review round 2, P2). Give the claim back before
+                # reporting the failure.
+                if _claimed:
+                    with contextlib.suppress(Exception):
+                        hold_store.release(_rec["key"])
                 warnings.append(
                     "hold store WRITE FAILED (#10997): the drain could not take "
                     f"{_clip(_rec.get('content'), 60)!r} ({type(exc).__name__}: "
@@ -10035,10 +10053,30 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # marks an identity resolved that the payload threw away, and the item is
     # lost for good (the exact I2 loss this module exists to prevent).
     if _pending_confirm and hold_store is not None:
+        # ⛔ "did my Point survive?" is NOT the same question as "is it in
+        # `payload_points`" (#10997 review round 2, P1). A drain can legally
+        # return an id that never enters the payload: the #4716 NOOP fold
+        # resolves a ref against a PRIOR point (`_decision.prior_id`), and that
+        # point is already in the graph, so it is neither minted nor appended.
+        # Asking membership alone then reported "no surviving operator
+        # references it, so the Point was pruned" about an item whose edge is
+        # in the payload — and released the claim, so the store re-drained it on
+        # every resolved run forever and the held count could never return to
+        # zero (the epic's own acceptance). The question a fold answers is
+        # "is it still WIRED?", so survival is payload membership OR a
+        # reference from a surviving operator.
         _surviving = {str(p.get("id")) for p in payload_points}
+        _wired: set[str] = set()
+        for _po in payload_operators:
+            _wired.add(str(_po.get("src") or ""))
+            _wired.add(str(_po.get("dst") or ""))
+            _tgt = _po.get("target")
+            if isinstance(_tgt, dict):
+                _wired.add(str(_tgt.get("src") or ""))
+                _wired.add(str(_tgt.get("dst") or ""))
         for _key, _pid, _where in _pending_confirm:
             _entry = next((e for e in held_drained if e["key"] == _key), None)
-            if _pid in _surviving:
+            if _pid in _surviving or _pid in _wired:
                 try:
                     hold_store.confirm(_key, _pid)
                 except Exception as exc:
@@ -10193,7 +10231,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "held": held,                  # #10997: HELD — never minted (I1), never dropped (I2)
         "held_drained": held_drained,  # held items THIS run committed, exactly once
         "hold": {"store_supplied": hold_store is not None,
-                 "store": hold_store.summary() if hold_store is not None else None},
+                 "store": (hold_store.summary()
+                           if hold_store is not None else None)},
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
