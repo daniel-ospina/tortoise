@@ -161,6 +161,49 @@ _ARM_ON_VARS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 # definitions equal, so they cannot drift apart silently.
 _ARM_OFF_VARS = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
+#: The subset of :data:`_ARM_OFF_VARS` whose UNSET value is **ON** since `#10996`.
+#:
+#: ⛔ "PINNED OFF" AND "LEFT UNSET" STOPPED BEING THE SAME STATE (review cycle 2,
+#: P1). `tortoise/value_gate.value_gate_enabled` reads
+#: `is_truthy(os.environ.get(ENV_FLAG, "1"))`, so an ABSENT `TORTOISE_VALUE_GATE`
+#: is now the TREATMENT — while a blank or garbage value is still OFF, because
+#: those are PRESENT and `is_truthy` reads them falsy. Reading absence as an OFF
+#: spelling therefore certified the treatment under the control's label, and E1's
+#: pair (`after_share <= 0.50 x before_share`) can be built from TWO gate-armed
+#: arms and still be scored as decided — the exact case this file's own comment
+#: says must be refused ("scoring it as one compares a treatment against itself
+#: and still reports a decided E1").
+#:
+#: Both producers this driver reads now PIN the key explicitly
+#: (`capstone_measure.ARM_OFF` and `e1_paired_arm.DEFAULT_ON_KEYS` both write
+#: `"0"`), so a record that spells it as absent can only have been produced by
+#: the pre-`#10996` code. :func:`_absent_default_on_refusal` admits that ONE
+#: legacy reading, under the campaign-head licence, and refuses every other.
+#:
+#: `TORTOISE_S2_DECISION_SEAM` is deliberately NOT here: it still defaults OFF
+#: (it arms a paid network call), so absence remains a genuine OFF spelling for
+#: it before and after the flip. Only the key whose DEFAULT MOVED belongs here,
+#: and `test_the_default_on_key_set_is_the_one_whose_default_moved` pins this
+#: literal against the real resolver rather than against this comment.
+_DEFAULT_ON_VARS = ("TORTOISE_VALUE_GATE",)
+
+#: The head the whole committed campaign was measured at — the ONLY head at which
+#: an absent `TORTOISE_VALUE_GATE` is still a record of an OFF switch.
+#:
+#: ⛔ THIS IS THE LEGACY LICENCE, AND IT IS A HEAD, NOT A NAME. Every record this
+#: bundle scores declares this head (`docs/evidence/9889/on-arm.log`'s `# head:`
+#: line, and the two before arms' `capstone_off_54922a800_<stamp>` graph names),
+#: and it is a commit in which
+#: `tortoise/value_gate.py` still DEFAULTS THE PREDICATE OFF — so absence in a
+#: record taken there really was OFF. Pinning the head is what keeps the licence
+#: from becoming a spelling rule: a NEW run declares a NEW head, and so is refused
+#: the legacy reading. The premise is not trusted, it is TESTED at that commit
+#: (`test_the_legacy_head_really_predates_the_flip` reads
+#: `git show <this head>:tortoise/value_gate.py` and asserts the default is not
+#: ON) — if the campaign head ever contained the flip, that test reds and this
+#: licence has to be revisited instead of silently widening.
+_PRE_FLIP_HEAD = "54922a800f96858935b58ef250da569a4896df44"
+
 #: The shortest head prefix the PRODUCERS actually write into a graph name.
 #:
 #: `capstone_measure.py` builds its own default graph as
@@ -191,6 +234,50 @@ def _is_bare_definite(name: str) -> bool:
     """Whether ``name`` has the ``the <body>`` shape (repo predicate, copied)."""
     raw = str(name or "").strip()
     return bool(raw) and _BARE_ARTICLE.match(raw) is not None
+
+
+def _is_absent_pin(raw) -> bool:
+    """Whether a record spells a switch as NOT IN THE ENVIRONMENT.
+
+    `None` is the JSON producer's spelling (`os.environ.get(var)` on a key that
+    was never set) and `<unset>` is `capstone_measure.arm_header`'s. Neither is a
+    falsy VALUE: since `#10996` the default-ON key reads ON when it is absent, so
+    absence is that key's ON spelling and can no longer certify an OFF pin.
+    A BLANK value is not absence — `TORTOISE_VALUE_GATE=` is present, and
+    `is_truthy` reads it falsy, exactly as the pipeline does.
+    """
+    return raw is None or str(raw).strip() == "<unset>"
+
+
+def _names_pre_flip_head(head: str) -> bool:
+    """Whether ``head`` is a prefix of :data:`_PRE_FLIP_HEAD` (a 40-hex branch
+    records the full sha, the graph names carry eight or nine characters)."""
+    wanted = str(head or "").strip()
+    return bool(wanted) and _PRE_FLIP_HEAD.startswith(wanted)
+
+
+def _absent_default_on_refusal(where: str, var: str, licence: str | None) -> None:
+    """Refuse an `#10996`-moved switch that is recorded as ABSENT, not falsy.
+
+    The two producers write an explicit `"0"` (`capstone_measure.ARM_OFF`,
+    `e1_paired_arm.DEFAULT_ON_KEYS`), so absence is the ONE state they no longer
+    produce — it only survives in records taken at :data:`_PRE_FLIP_HEAD`, where
+    the default still made it OFF. `licence` is that legacy reading when the
+    record has earned it, and `None` otherwise; anything the shipped producers
+    can write must therefore be explicit, which is what stops the next corpus
+    from producing a silently-misconfigured pair.
+    """
+    if licence is not None:
+        return
+    raise _refuse(
+        f"{where} records {var} as ABSENT rather than set to a falsy value. "
+        "Since `#10996` the S2.2 mechanical half DEFAULTS ON, so an absent "
+        f"{var} is the TREATMENT arm: a record that expresses OFF by absence "
+        "does not show the passes were OFF, and scoring it as E1's control (or "
+        "as the ON half while its pinned-OFF switches are absent) compares a "
+        "treatment against itself and still reports a decided E1. Pin it "
+        f"explicitly ({var}=0) and re-record — the legacy reading is admitted "
+        f"only for the pre-`#10996` campaign head {_PRE_FLIP_HEAD[:9]}")
 
 
 def _names_head(graph: str, head: str) -> bool:
@@ -929,6 +1016,22 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     arms: list[dict] = []
     for name in OFF_ARMS:
         record = _read_json(repo / EVIDENCE / name)
+        # ⛔ THE LEGACY LICENCE, and both halves of it are needed. (`#10996`
+        # review cycle 2, P1.) An absent `TORTOISE_VALUE_GATE` is only a record
+        # of an OFF switch in a record TAKEN BEFORE THE FLIP, so a record earns
+        # the legacy reading only when (a) it carries NONE of the four pin fields
+        # — the shape the shipped probe stopped producing at `76c2e1f09`, i.e.
+        # long before the flip — and (b) its graph names the pre-`#10996`
+        # campaign head. Either half alone is too wide: (a) without (b) admits a
+        # hand-stripped record, (b) without (a) admits a record from a head
+        # someone merely named.
+        legacy_licence = (
+            f"legacy record @ {_PRE_FLIP_HEAD[:9]} (produced before the pin "
+            "fields existed, so before `#10996`; the shipped probe writes those "
+            f"four fields and pins {_DEFAULT_ON_VARS[0]} explicitly)"
+            if (not any(field in record for field in _BEFORE_PIN_FIELDS)
+                and _names_head(str(record.get("graph") or ""), _PRE_FLIP_HEAD))
+            else None)
         share = record.get("share")
         objects = record.get("objects")
         if share is None or not objects:
@@ -989,6 +1092,11 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                     f"{name} was measured with {var}={state!r}, so it is not a "
                     "before arm — scoring it as one compares a treatment against "
                     "itself and still reports a decided E1")
+            # …and the other half of the same rule: OFF is a falsy VALUE, never
+            # an ABSENCE, for the key whose default moved (`#10996`).
+            if var in _DEFAULT_ON_VARS and _is_absent_pin(state):
+                _absent_default_on_refusal(f"{name}'s `arm` block", var,
+                                           legacy_licence)
         graph = record.get("graph")
         if not isinstance(graph, str) or not graph.strip():
             raise _refuse(
@@ -1143,6 +1251,10 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
             "bare_definite": record.get("bare_definite"),
             "share": share,
             "arm": arm,
+            "value_gate_pin": (
+                "legacy-absent"
+                if any(_is_absent_pin(arm.get(var))
+                       for var in _DEFAULT_ON_VARS) else "explicit"),
             "corpus": _before_corpus_provenance(name, record, floors),
         })
     return arms
@@ -1336,6 +1448,21 @@ def read_on_arm(repo: Path) -> dict:
     # after-share to E1 scores a bar over a treatment this driver's arm never
     # declared. Presence is required here for the same reason as on the before
     # side: an absent key stringifies to "none" and would read as consent.
+    #
+    # ⛔ AND SINCE `#10996` THE `<unset>` SPELLING IS NOT THAT CONSENT
+    # (review cycle 2, P1). `capstone_measure.measured_arm` now writes an explicit
+    # `"0"` for both pinned-OFF keys (and reads it back), so this log is the ONE
+    # record in the tree that still spells `TORTOISE_VALUE_GATE=<unset>` — an
+    # artifact of the pre-flip producer, admissible only while BOTH the log's own
+    # `# head:` and its `# graph:` name the pre-`#10996` campaign head. A log from
+    # any other head must pin the key: otherwise the ON half of the pair is a run
+    # whose predicate was ARMED, and E1's bar (`after <= 0.50 x before`) gets the
+    # easier side of a treatment it never declared.
+    legacy_licence = (
+        f"legacy log @ {_PRE_FLIP_HEAD[:9]} (produced by the pre-`#10996` "
+        "`capstone_measure`, which popped the pin instead of setting it; the "
+        f"shipped producer writes {_DEFAULT_ON_VARS[0]}=0 and reads it back)"
+        if _names_pre_flip_head(head) else None)
     for var in _ARM_OFF_VARS:
         if var not in after_arm:
             raise _refuse(
@@ -1345,16 +1472,27 @@ def read_on_arm(repo: Path) -> dict:
                 "before/after pair while its OFF switches are declared")
         if _is_truthy(after_arm.get(var)):
             raise _refuse(
-                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
+                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}=" 
                 f"{after_arm.get(var)!r}, but the measured arm pins it OFF — "
                 "that is a different arm (the value-gate/seam pass), and "
                 "crediting its after share to E1 would score a treatment this "
                 "pair never declared")
+        if var in _DEFAULT_ON_VARS and _is_absent_pin(after_arm.get(var)):
+            _absent_default_on_refusal(f"{EVIDENCE / ON_ARM_LOG}'s arm readback",
+                                       var, legacy_licence)
     return {
         "artifact": f"{EVIDENCE / ON_ARM_LOG}",
         "head": head,
         "graph": graph,
         "arm": after_arm,
+        "value_gate_pin": (
+            "legacy-absent"
+            if any(_is_absent_pin(after_arm.get(var))
+                   for var in _DEFAULT_ON_VARS) else "explicit"),
+        "value_gate_pin_basis": (
+            legacy_licence if any(_is_absent_pin(after_arm.get(var))
+                                 for var in _DEFAULT_ON_VARS)
+            else "the log pins it to an explicit falsy value"),
         "corpus_sha256": corpus,
         "objects": objects,
         "bare_definite": bare,
@@ -1623,6 +1761,17 @@ def score(repo: Path = _ROOT) -> dict:
     bars = floors["bars"]
     before_arms = read_off_arms(repo, floors)
     after = read_on_arm(repo)
+    # …and the log's OWN `# graph:` line must name its OWN `# head:` line. The
+    # legacy-pin licence and the before-arm graph check both read the head, so a
+    # log whose graph names a different run would otherwise sail through every
+    # later check on a head it merely shares — the same class of hole
+    # `_names_head` was made a NAME test for (#10610 at `75bfd9c6`).
+    if not _names_head(str(after.get("graph") or ""), after["head"]):
+        raise _refuse(f"{ON_ARM_LOG}'s `# graph:` line is {after.get('graph')!r}, "
+                      "which does not name its own `# head:` line "
+                      f"({after['head'][:_HEAD_PREFIX]}) — one log, one run, so "
+                      "a graph naming another head cannot supply this head's "
+                      "after share")
     # One record, one run: the before, ON, E2a, falsifier and gate-drops records
     # must ALL name the same head (and the E2a / gate-drops pair the same graph),
     # or a number from one run is being reported under another run's corpus.
@@ -2052,6 +2201,30 @@ def score(repo: Path = _ROOT) -> dict:
         # the comparison is in the evidence rather than only in the driver that
         # checked it.
         "after_arm": after["arm"],
+        # ⛔ WHAT THE PAIR'S "OFF" ACTUALLY MEANS, because `#10996` changed it
+        # (review cycle 2, P1). Every artifact this record scores spells
+        # `TORTOISE_VALUE_GATE` as ABSENT, which is the OFF spelling only under the
+        # pre-flip code — since the flip, absence is the TREATMENT. They are read
+        # as OFF under the campaign-head licence (`_PRE_FLIP_HEAD`), and this block
+        # says so beside the numbers instead of leaving it in the driver. A record
+        # from any other head must pin the key explicitly or it is refused.
+        "value_gate_pin": {
+            "default_on_keys": list(_DEFAULT_ON_VARS),
+            "legacy_head": _PRE_FLIP_HEAD,
+            "after": {"pin": after["value_gate_pin"],
+                      "basis": after["value_gate_pin_basis"]},
+            "before": [{"artifact": arm["artifact"],
+                        "pin": arm["value_gate_pin"]} for arm in before_arms],
+            "limitation": (
+                "`TORTOISE_VALUE_GATE` is recorded as ABSENT in every arm here, "
+                "and since `#10996` an absent value gate is the ON arm. These "
+                "records predate the flip, so absence really was OFF when they "
+                "were taken, and they are admitted only on that licence (the "
+                "producer pins the key explicitly now, so a NEW record cannot "
+                "express OFF this way). Re-recording the pair at the shipped "
+                "probes — `TORTOISE_VALUE_GATE=0` written and read back — is "
+                "what closes the residual; that is a re-take of E1's arms and "
+                "belongs to #7949, not to this record.")},
         "bars_source": (
             f"{PREREG}#criteria + #denominator_floors, parsed by "
             "capstone_measure.parse_bars — the same reader the scoring probe "
