@@ -10137,6 +10137,149 @@ exec {real} "$@"
         self.assertIn("VERDICT: CLEAN", out)
         self.assertNotIn("repo-root-unresolved", out)
 
+    # ── fresh-context review at cbd184875: 3 findings ────────────────────────
+
+    def test_a_digit_like_queue_filename_cannot_crash_into_a_collision(self):
+        """Finding 1, HIGH: `isdigit()` is not a promise that `int()` succeeds.
+
+        `'²'.isdigit()` is True (Unicode `Numeric_Type=Digit`) while
+        `int('²')` raises ValueError (it needs `Decimal`). Nothing catches it:
+        `run_preflight` calls the scanner with no `try`, and `main` catches only
+        `NotAWorkItem`/`RuntimeError` — so pre-fix this run is a TRACEBACK, and
+        an uncaught exception's exit status is 1, which is this tool's
+        EXIT_COLLISION. A corrupt filename read as "another lane is on it" is
+        the crash-as-verdict class (#8881) the bundle closes.
+        """
+        queue = self.tmp / "lane-queue-digit-like"
+        queue.mkdir(exist_ok=True)
+        # A LIVE pid, so nothing but the filename shape decides the outcome.
+        (queue / "prd-test-owner-test-repo-\u00b2.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertNotEqual(rc, 1, out)       # exit 1 is COLLISION — never a crash
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("invalid literal for int()", out)
+        # The unparseable name is SKIPPED, not counted as an entry.
+        self.assertIn("0 entr(ies) for this repo", out)
+
+    def test_a_CLOSED_pr_attributed_to_the_issue_still_makes_its_lane_visible(self):
+        """Finding 2, MEDIUM (false CLEAN): a lane OUTLIVES the PR it serves.
+
+        Both PR-aware arms of the live-lane surface consume ONE set, and it was
+        fed only from the OPEN page. A `pr-doctor`/merge lane still running for a
+        PR that has since merged therefore matched neither the queue key nor an
+        ancestor's `--argv …/argv-<PR>`: the queue entry was live, and the verdict
+        was CLEAN.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654, "title": "fix(thing): the 3061 shape", "body": "",
+            "state": "closed", "url": "https://example.invalid/pulls/7654",
+            "headRefName": "fix/3061-shape", "mergedAt": None,
+            "headSha": "a" * 40,
+        }])
+        queue = self.tmp / "lane-queue-closed-pr"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("lane:prd-test-owner-test-repo-7654", out)
+        self.assertIn("PR #7654", out)
+
+    def test_the_callers_OWN_subagent_in_its_own_worktree_does_not_block(self):
+        """Finding 3, MEDIUM (false block): #10684 one layer out.
+
+        A lane's `pi` dispatches a sub-agent through the `task` tool —
+        `spawn(command, args, {detached: true})`, so the child leads its own
+        session but its `ppid` is still the lane's `pi` — and the child INHERITS
+        the lane's working directory, which for a `fix-<N>` / `land-<N>` lane
+        names the issue. The pre-flight the lane then runs (the `--repo .` form
+        AGENTS.md mandates) matched that row on the cwd arm and refused the
+        caller with its own sub-agent.
+
+        A REAL process stands here (its cwd comes from /proc, which is the
+        point); the seam declares its `ppid` as this test's pid, which IS an
+        ancestor of the tool. ⛔ The peer counter-test above keeps the other
+        polarity: an unrelated `pi` in a sibling worktree still blocks.
+        """
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        lane_wt = worktrees / "fix-3061"
+        subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                        "-b", "fix/3061-lane", str(lane_wt), "HEAD"],
+                       cwd=self.repo, check=True, capture_output=True, text=True)
+        fakebin = worktrees / "fakebin-subagent"
+        fakebin.mkdir(exist_ok=True)
+        binary = fakebin / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(lane_wt),
+            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            table = self.tmp / "table-own-subagent.txt"
+            table.write_text(
+                f"1 0 /sbin/init\n{proc.pid} {os.getpid()} pi\n")
+            rc, out = self.run_tool(
+                # `--repo .` FROM the lane's own worktree, exactly as AGENTS.md
+                # prescribes: the sub-agent's cwd and the caller's are the same.
+                repo_arg=lane_wt, cwd=lane_wt,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("own sub-agent(s) exempted", out)
+        self.assertNotIn("do NOT dispatch", out)
+
+    def test_a_DISPATCHED_lane_in_its_own_worktree_still_blocks(self):
+        """The polarity `_is_own_subagent` must keep: parentage ALONE is not it.
+
+        An orchestrator agent dispatches lanes along its own edges, so a lane can
+        genuinely be a child of a `pi` in the caller's ancestry (the `task` tool,
+        `nonblocking-dispatch.sh`). The exemption therefore also requires the
+        child to stand in the CALLER's directory; a dispatched lane is given its
+        own worktree, so it never matches — and exempting it would be a false
+        CLEAN on the verdict that exists to stop a duplicate dispatch.
+        """
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        caller_wt = worktrees / "fix-3061-caller"
+        lane_wt = worktrees / "fix-3061-dispatched"
+        for path, branch in ((caller_wt, "fix/3061-caller"),
+                             (lane_wt, "fix/3061-dispatched")):
+            subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                            "-b", branch, str(path), "HEAD"],
+                           cwd=self.repo, check=True, capture_output=True, text=True)
+        fakebin = worktrees / "fakebin-dispatched"
+        fakebin.mkdir(exist_ok=True)
+        binary = fakebin / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(lane_wt),
+            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            table = self.tmp / "table-dispatched-lane.txt"
+            table.write_text(
+                f"1 0 /sbin/init\n{proc.pid} {os.getpid()} pi\n")
+            rc, out = self.run_tool(
+                repo_arg=caller_wt, cwd=caller_wt,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("own sub-agent(s) exempted", out)
+
 
 #: The parent's tests must not be collected twice (this subclass adds FOUR
 #: DEFECT ARMS, not a second copy of the 300-test suite). `unittest` collects

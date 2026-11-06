@@ -7509,7 +7509,21 @@ def _lane_queue_entries(slug: str | None
         # exist. The remainder after the prefix must be EXACTLY the PR number.
         remainder = stem[len(prefix):]
         tail = stem.rsplit("-", 1)[-1]
-        if not remainder.isdigit() or not tail.isdigit():
+        # ⛔ `str.isdigit()` IS NOT A PROMISE THAT `int()` SUCCEEDS (review,
+        # HIGH). It accepts every character whose Unicode `Numeric_Type` is
+        # *Digit*, while `int()` requires *Decimal* — `'²'.isdigit()` is True
+        # and `int('²')` raises `ValueError`. Nothing above catches it
+        # (`run_preflight` calls this scanner with no `try`, and `main` catches
+        # only `NotAWorkItem`/`RuntimeError`), so a queue filename ending in a
+        # digit-like character escaped as a traceback with NO `VERDICT` line —
+        # and Python's exit status for an uncaught exception is 1, which is
+        # this tool's EXIT_COLLISION. A corrupt filename read as "another lane
+        # is on it" is verbatim the crash-as-verdict class (#8881) this bundle
+        # closes. `isascii()` narrows the predicate to exactly the character
+        # set `int()` accepts here, so the two can no longer disagree.
+        if not (remainder.isascii() and remainder.isdigit()):
+            continue
+        if not (tail.isascii() and tail.isdigit()):
             continue
         try:
             with open(os.path.join(root, name), encoding="utf-8",
@@ -7652,6 +7666,61 @@ def _parent_attribution(parents: dict[int, tuple[int, str]], pid: int,
     return ""
 
 
+def _is_own_subagent(pid: int, parents: dict[int, tuple[int, str]],
+                     self_pids: frozenset[int], workdir: str | None,
+                     caller_cwd: str) -> bool:
+    """Is `pid` a sub-agent THIS lane spawned, rather than a peer lane?
+
+    ⛔ ANCESTORS ALONE RE-CREATE #10684 ONE LAYER OUT (review, MEDIUM).
+    `Identity.self_pids` is the caller and its `ppid` chain, so the exemption
+    at the process arm covered everything ABOVE the caller and nothing BELOW
+    it. A lane's `pi` dispatches a sub-agent through the `task` tool —
+    `spawn(command, args, {detached: true})`, so the child leads its OWN session
+    but its `ppid` is still the lane's `pi` — and the child INHERITS the lane's
+    working directory, which for every `fix-<N>` / `land-<N>` / `p0-<N>` lane
+    names the issue. The tool the lane then runs (`collision_preflight.py N
+    --repo .`, the form AGENTS.md mandates) saw that row, matched the cwd arm
+    and answered `COLLISION — do NOT dispatch`: the caller blocked by its own
+    sub-agent. That is #10684, the defect this bundle exists to close, one
+    layer out.
+
+    ⛔ WHY THIS IS NARROWER THAN "EVERY DESCENDANT" OR "MY PROCESS GROUP",
+    the two mechanisms the review offered. Both over-exempt, because this fleet
+    dispatches lanes ALONG THE SAME EDGES: an orchestrator agent starts its
+    lanes from its own subtree, and `nonblocking-dispatch.sh` backgrounds them
+    inside the dispatching shell's group. Exempting either set would let an
+    orchestrator's own LIVE LANE read as "mine" — a false CLEAN on the verdict
+    that exists to stop a duplicate dispatch, i.e. the direction this gate may
+    never fail in. Two conditions, both necessary, keep that out:
+
+      * PARENTAGE — `ppid` is one of my own pids. Only a direct child of me (or
+        of an ancestor of mine) is my own spawn; a harness lane is reached
+        through `bash fix-one.sh` / a subshell, never as a direct child of a
+        `pi`.
+      * LOCATION — the child's cwd is EXACTLY mine. A `task` child inherits its
+        parent's cwd; a DISPATCHED LANE IS GIVEN ITS OWN WORKTREE, so its cwd
+        names the issue while mine does not. That is the discriminator the
+        parentage test alone cannot supply, and it is the one that keeps an
+        orchestrator's own dispatched lane BLOCKING.
+
+    The exemption can therefore only ever cover a process standing in MY
+    directory that MY OWN agent spawned — nothing a peer lane can be — and it
+    is a strict subset of both mechanisms the review proposed.
+
+    A shape it deliberately does NOT cover: a sub-agent nested two levels down
+    (`task` -> `pi` -> `task` -> `pi`), whose parent is my sub-agent and not one
+    of my own pids. That stays BLOCKING, and `--self-pid <pid>` — the declared,
+    #3504-shaped escape every other ambiguous attribution already uses — is the
+    documented way through.
+    """
+    if not self_pids or not workdir or not caller_cwd:
+        return False
+    row = parents.get(pid)
+    if row is None or row[0] not in self_pids:
+        return False
+    return os.path.realpath(workdir) == os.path.realpath(caller_cwd)
+
+
 def scan_process_surface(
     surface: Surface, issue: int, identity: Identity, *,
     slug: str | None, cwd: str, ps_bin: str, timeout: float,
@@ -7683,7 +7752,10 @@ def scan_process_surface(
     CLEAN, and never a crash. `_pid_is_alive` carries the tri-state.
 
     Self (`identity.self_pids`) is excluded from BOTH: a lane re-checking its own
-    issue is the case #10684 measured, and it must not collide with itself.
+    issue is the case #10684 measured, and it must not collide with itself. A
+    sub-agent the caller's OWN `pi` spawned, standing in the caller's own
+    directory, is excluded too — see `_is_own_subagent` for why that has to be
+    narrower than "my descendants" or "my process group".
     """
     notes: list[str] = []
     rows, why = _process_rows(ps_bin, cwd, timeout)
@@ -7703,10 +7775,16 @@ def scan_process_surface(
             pid: (ppid, cmd) for pid, ppid, cmd in rows
         }
         named = 0
+        own_subagents = 0
         for pid, _ppid, cmd in pi_rows:
             if pid in self_pids:
                 continue
             workdir, cwd_why = _process_cwd(pid, timeout)
+            if _is_own_subagent(pid, parents, self_pids, workdir, cwd):
+                # #10684 one layer out: MY OWN sub-agent, in MY OWN directory.
+                # Counted so the report says so instead of dropping it silently.
+                own_subagents += 1
+                continue
             how = ""
             if number_present(cmd, issue):
                 how = (f"its command line names #{issue} "
@@ -7741,7 +7819,10 @@ def scan_process_surface(
                     )
         note = (
             f"process scan: {len(pi_rows)} live `pi` process(es) enumerated, "
-            f"{len(self_pids)} self pid(s) exempted, {named} attributed to "
+            f"{len(self_pids)} self pid(s) exempted, "
+            + (f"{own_subagents} own sub-agent(s) exempted, "
+               if own_subagents else "")
+            + f"{named} attributed to "
             f"#{issue}"
         )
         if unattributable:
@@ -8197,6 +8278,22 @@ def run_preflight(
                 # has no `closingIssuesReferences`. Every hit here is advisory.
                 scan_pr_surface(surface, prs, issue, identity,
                                 use_closing_field=False)
+                # ⛔ A LANE OUTLIVES THE PR IT SERVES, SO THE CLOSED PRs COUNT
+                # TOO (review, MEDIUM). This feed used to run only on the OPEN
+                # page, and BOTH PR-aware arms of the live-lane surface consume
+                # this ONE set: the queue key (`prd-<owner>-<repo>-<PR>`) and
+                # the ancestor's `--argv …/argv-<PR>`. A `pr-doctor`/merge lane
+                # still running for a PR that has since MERGED (or a
+                # closed-unmerged PR whose issue stays open — the one case the
+                # verdict is not already decided by `exit 4 LANDED`) was
+                # therefore invisible to every arm, and the verdict could be
+                # CLEAN while a live lane held the work. The payload is already
+                # fetched (one REST page above), so the extra evidence costs no
+                # API call: the projection carries `number`, `title` and
+                # `headRefName`, which is what `_prs_serving_issue` reads; the
+                # GraphQL-only closing reference is absent here, and that helper
+                # answers "not by that arm" for a field it cannot read.
+                attributed_prs.update(_prs_serving_issue(prs, issue))
                 if partial:
                     shown = (
                         f"~{approx_total}" if approx_total is not None

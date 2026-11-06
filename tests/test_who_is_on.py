@@ -742,6 +742,37 @@ exec {real} "$@"
         self.assertEqual(rc, 0, out)
         self.assertNotIn("pushed/thing", out)
 
+    def test_a_failed_git_remote_refuses_the_inventory_instead_of_answering(self):
+        """The fail-closed guard in `pushed_branch_names` (#8881) had no test.
+
+        With `remotes=[]` — what a FAILED `git remote` used to be read as — the
+        no-prefix arm strips one path component, so a never-pushed branch could
+        be credited as pushed and hidden from `--inventory`: stranded work
+        reported as FREE. The read is therefore refused, and the refusal must
+        reach the caller as INCOMPLETE (exit 2), never as a decided "all clear"
+        (exit 0 — what the pre-fix run answered) and never as exit 1, which is
+        this repo's COLLISION code.
+
+        The shim fails `git remote` but NOT `git remote -v`, so the earlier
+        slug-resolution guard cannot answer for the branch under test.
+        """
+        self.local_branch(f"fix/{ISSUE}-strand")
+        real = shutil.which("git")
+        stub = self.tmp / "gitremote" / "git"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub = self._write_exec(stub, f'''#!/usr/bin/env bash
+if [ "${{1:-}}" = "remote" ] && [ "${{2:-}}" != "-v" ]; then
+  echo "git-shim: refusing the remote list" >&2; exit 128
+fi
+exec {real} "$@"
+''')
+        rc, out = self.run_tool("--inventory", git_bin=stub)
+        self.assertEqual(rc, 2, out)          # INCOMPLETE, never a decided answer
+        self.assertNotEqual(rc, 1, out)       # exit 1 is COLLISION — never a crash
+        self.assertNotIn("Traceback", out)
+        self.assertIn("could not be read", out)
+        self.assertIn("UNKNOWN", out)
+
     def test_inventory_dirty_only_excludes_clean_local_only_branch(self):
         self.local_branch("fix/clean-but-unpushed")
         rc_all, out_all = self.run_tool("--inventory")
