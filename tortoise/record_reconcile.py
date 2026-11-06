@@ -75,10 +75,12 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ACCEPTS — any string on an ``:Object``, but on a ``:Subject`` only
   ``_SUBJECT_STATUS_VALUES``, so a ``:Subject`` value outside that set has NO
   mint and keeps only the clear below (`#11296`). A NON-STRING status (which
-  the ``:Object`` door accepts, it validates nothing) has no USABLE mint either
-  — the state-op reader reads ``payload -> 'state' ->> 'status'``, so a minted ``5``
-  comes back as the TEXT ``'5'`` — the bucket empties, but the pair reds as a
-  ``field_mismatches`` entry instead of reading clean.
+  the ``:Object`` door accepts, it validates nothing) has no mint either: the
+  state-op leg selects ``payload -> 'state' -> 'status'`` ONLY under
+  ``jsonb_typeof(…) = 'string'``, and the event builder skips a non-string
+  ``restatus`` — so the record derives NOTHING, the name STAYS in
+  ``graph_only``, and no ``field_mismatches`` entry appears. The clear below is
+  the only route for it.
   ⛔ A CLEAR is the route only where the value is not trustworthy, and it is
   LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
   as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
