@@ -1000,6 +1000,46 @@ def test_content_contained_reports_an_uncomputable_diff_as_UNMEASURABLE(
     assert "could not compute the constituent diff" in detail, detail
 
 
+def test_a_fold_worktree_that_cannot_be_built_is_UNMEASURABLE(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b3c) The THIRD member of the tri-state's "cannot be COMPUTED" set.
+
+    `tools/batch_open.py:538-545` names three ways a diff cannot be computed: an absent
+    object, no merge base in a shallow clone, and **no scratch worktree**. The first two
+    are pinned by their own tests; this one had none. Measured (review cycle 2): reverting
+    `return "UNMEASURABLE", f"could not materialise the fold tree: ..."` to
+    `"NOT-CONTAINED"` left **all 57 cases green**.
+
+    It is reachable without a contrived fixture: `tempfile.mkdtemp` followed by
+    `git worktree add` fails on ENOSPC, on an unwritable TMPDIR, and on a stale entry under
+    `.git/worktrees`. Collapsing that into NOT-CONTAINED restores exactly the contract
+    breach this PR exists to fix — exit 1 and "closing would destroy work" about a
+    comparison that never ran.
+
+    Discrimination proof: with the arm reverted the state is the string `NOT-CONTAINED`,
+    never `UNMEASURABLE`, and this test reds.
+    """
+    left = _commit(scratch_repo, {"a.txt": "left\n"}, [], "root-left")
+    right = _commit(scratch_repo, {"b.txt": "right\n"}, [], "root-right")
+
+    real_git = bo._git
+
+    def _git_refuses_the_worktree(argv, cwd):
+        if list(argv[:2]) == ["worktree", "add"]:
+            return 1, "fatal: could not create work tree dir: No space left on device"
+        return real_git(argv, cwd)
+
+    monkeypatch.setattr(bo, "_git", _git_refuses_the_worktree)
+
+    state, detail = bo.content_contained(left, right, right, scratch_repo)
+    assert state == "UNMEASURABLE", (
+        f"a fold tree that could not be BUILT was reported as a containment verdict: "
+        f"{state!r} ({detail})"
+    )
+    assert "could not materialise the fold tree" in detail, detail
+
+
 def test_an_absent_BASE_does_not_block_the_ANCESTRY_route(scratch_repo: Path) -> None:
     """(b3c) The presence gate must not over-block: ancestry needs `head` and `fold_head` only.
 

@@ -593,6 +593,33 @@ def test_an_absent_total_count_is_fail_closed(fixture):
     assert fixture.cancelled() == []
 
 
+def test_a_non_list_jobs_payload_is_fail_closed(fixture):
+    """⛔ An object `jobs` payload is NOT an empty list, and reading it as one issues a cancel.
+
+    Measured (review cycle 2): replacing the `isinstance(jobs, list)` refusal with
+    `jobs = []` left **all 55 cases green**, and the mutant then served
+    `{"total_count": 0, "jobs": {}}` end-to-end as `verdict: SUPERSEDED — the head moved
+    on (0 of 0 job(s) started)` and issued a real `POST /cancel` at **rc 0**. That is the
+    one outcome this tool may never produce.
+
+    The sibling arms each have a case — `test_a_non_object_job_row_is_fail_closed` covers a
+    LIST carrying a bad row, `test_an_absent_total_count_is_fail_closed` covers a missing
+    `total_count` — but this shape (`jobs` a MAPPING, with a `total_count` that agrees with
+    nothing) had none. The message assertion is what keeps the case from being satisfied by
+    a neighbouring arm: an assertion the wrong branch can also pass is not a detector.
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": 0, "jobs": {}})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "could not be read" in (r.stdout + r.stderr), r.stdout + r.stderr
+    assert fixture.cancelled() == [], (
+        "an OBJECT jobs payload was read as an empty list, so 'no job started' was claimed "
+        "about a list that was never read"
+    )
+
+
 def test_a_case_variant_of_the_same_head_still_refuses(fixture):
     """Review cycle 1, R4: a raw compare let `A7BA…` pass a `a7ba…` head into PERMIT."""
     fixture.apply("run.json", _run_meta(sha=HEAD_CURRENT))
