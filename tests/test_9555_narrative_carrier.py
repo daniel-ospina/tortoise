@@ -1826,7 +1826,14 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
     verb + the backticked home, with no backtick between them), and a column is
     the `` `home`.`col` `` / `` `home`'s col `` SHAPE, never a bare period.
     """
-    assert f"the S1 narrative read from `{home}`" in line, (
+    #: ⛔ THE FRAGMENTS, not the literal: the object must be the S1 narrative and
+    #: the pointer must be `read … from <home>`, in that order, in one sentence,
+    #: with no inverting insert between them — while an INSERTION
+    #: (`the S1 narrative is read directly from …`) stays accepted. A full literal
+    #: refused that correct re-wording, the same spelling-lock class review cycle
+    #: 22 measured on the other four claim asserts (closed in `ebccde8f7` for those
+    #: four; this fifth one was left behind and is closed here).
+    assert _claim_present(line, "the S1 narrative", "read", f"from `{home}`"), (
         f"{where} no longer states that the source vector's text IS the S1 "
         f"narrative read from `{home}` — `{home}` appearing on the line is not "
         f"enough: rewriting the OBJECT (`the one-line `summary` read from "
@@ -2372,6 +2379,8 @@ _VECTOR_REWORDINGS: list[tuple[str, str, str]] = [
     ('ends-on-the-backticked-home', "a correct sentence that simply ENDS on the backticked home",
      "whose embedded text is the S1 narrative read from `{home}`. It is one "
      "vector attached to the `:Source` node"),
+    ('adverb-inserted-before-the-pointer', "an adverb inserted between the read and its pointer — the fifth claim's spelling lock (review cycle 22 class)",
+     "the S1 narrative is read directly from `{home}`"),
     ('head-document-wording', "the head document's own wording (control: green before AND after the fix)",
      "whose embedded text is the S1 narrative read from `{home}` — ⛔ never "
      "from `:Source.summary`"),
@@ -3214,6 +3223,39 @@ def test_a_claim_tolerates_inserted_words_but_never_an_inserted_inversion():
             f"`_claim_present` ACCEPTS an inverted claim: {inverted!r} — the "
             f"bounded gap must not admit the word that inverts the claim, "
             f"which is the fail-open the literal assert was closing")
+    #: ⛔ THE CONTRACTION SPELLING — the gap guard's own fail-OPEN, measured. The
+    #: first cut's local `not|never|no|none|nor|cannot|without` list does not match
+    #: `isn't`, so this sentence was ACCEPTED by the guard added to close exactly
+    #: this inversion. Reusing `_NEGATION_CUE` for the gap check (it carries the
+    #: `-n't` arm) is what refuses it, and that is why the check is the file's
+    #: shared set rather than a second hand-rolled one.
+    _section = _ontology_section_of("summary")
+    assert not _claim_present(
+        f"a session's `summary` isn't {_section} metadata",
+        "a session's `summary`", f"{_section} metadata"), (
+        f"`_claim_present` ACCEPTS `a session's `summary` isn't "
+        f"{_section} metadata` — a negated claim in the CONTRACTION spelling. "
+        f"`_CLAIM_GAP_FORBIDDEN` has to read the file's shared `_NEGATION_CUE`; "
+        f"a local cue list misses `-n't` and re-opens the fail-open this guard "
+        f"exists to close")
+    #: …and the FIFTH claim, whose literal was left behind by `ebccde8f7`: an
+    #: INSERTED adverb passes, its negated and re-specified forms do not.
+    assert _claim_present(
+        f"the S1 narrative is read directly from `{_HOME}`",
+        "the S1 narrative", "read", f"from `{_HOME}`"), (
+        "the vector-object claim is still a spelling lock: inserting an adverb "
+        "between the read and its pointer refused a CORRECT re-wording of §9.4 "
+        "and §12.1b, the same false red cycle 22 measured on the other four "
+        "claims")
+    for inverted in (
+        f"the S1 narrative is NOT read from `{_HOME}`",
+        f"the one-line `summary` read from `{_HOME}`.`summary`",
+    ):
+        assert not _claim_present(
+            inverted, "the S1 narrative", "read", f"from `{_HOME}`"), (
+            f"`_claim_present` ACCEPTS an inversion of the vector-object claim: "
+            f"{inverted!r} — the negated pointer and the column reading are the "
+            f"two holes `_assert_vector_reads_the_narrative` exists to close")
 
 
 #: The false red that NOT admitting `rather than` / `instead of` as cues costs, and
@@ -3381,9 +3423,21 @@ def test_the_not_only_but_fail_open_is_closed():
 #: The claim asserts below exist because an inserted NEGATION (or a restored
 #: future modal) INVERTED the sentence with the pin still GREEN (cycles 20–21),
 #: so the tolerance `_claim_present` grants is over ordinary words only.
+#:
+#: ⛔ THE NEGATION HALF IS `_NEGATION_CUE`, THE FILE'S OWN SHARED SET, not a
+#: second hand-rolled list. The first cut was a local `\b(?:not|never|no|none|nor|
+#: cannot|without)\b` and it missed the CONTRACTION arm: measured, *"a session's
+#: `summary` isn't §4.6 metadata"* was ACCEPTED by `_claim_present` — a fail-OPEN
+#: in the very guard added to close one, and exactly what `_NEGATION_CUE`'s own
+#: header warns about (*"a cue admitted by one and missed by the other is the same
+#: hole twice over"*). Reusing it makes the vocabulary complete by construction; a
+#: cue added there reaches every guard at once. The bare `no` / `none` / `nor` /
+#: `without` and the future modals are kept because `_NEGATION_CUE` does not carry
+#: them and a restored `will replace` in a gap is the cycle-21 defect.
 _CLAIM_GAP_FORBIDDEN = re.compile(
-    r"\b(?:not|never|no|none|nor|cannot|without|will|would|shall|should|may|"
-    r"might|must)\b",
+    rf"(?:{_NEGATION_CUE}"
+    r"|\b(?:no|none|nor|without)\b"
+    r"|\b(?:will|would|shall|should|may|might|must)\b)",
     re.IGNORECASE)
 
 
