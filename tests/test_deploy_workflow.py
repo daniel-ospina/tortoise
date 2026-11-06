@@ -4741,14 +4741,29 @@ def test_the_runbook_field_row_documents_the_positive_pair():
     substring test was measured GREEN on a rename of the pair in the head cell, because the row's
     own explanation still names both fields further along it.
 
-    ⛔ The NAMES themselves are DERIVED FROM `metrics()`, never duplicated here. That is the
-    finding this pin was rewritten for (#9548 review P3): the earlier form asserted two LITERALS,
-    so a *coherent* rename — payload keys, docstring, `test_9548`'s literals and this file's
-    literals all renamed together — left `docs/infra-runbook.md` documenting a field the payload no
-    longer publishes with **every test green**, while this docstring claimed it pinned "the two
-    fields the payload publishes". A pin that names its names by hand cannot check that sentence;
-    one that reads them from `metrics()` can, and it is the only form that reds the runbook-stale
-    half — which is also the reason this pin is in `tier1` rather than beside the docstring pin.
+    ⛔ **The set of names this pin DEMANDS is DERIVED FROM `metrics()`** — never a duplicate of it.
+    That is the finding this pin was rewritten for (#9548 review P3): the earlier form iterated two
+    LITERALS, so a *coherent* rename — payload keys, docstring, `test_9548`'s literals and this
+    file's literals all renamed together — left `docs/infra-runbook.md` documenting a field the
+    payload no longer published with **every test green**, while this docstring claimed it pinned
+    "the two fields the payload publishes". Reading the demanded set from `metrics()` is what reds
+    the runbook-stale half, and it is also the reason this pin is in `tier1` rather than beside the
+    docstring pin.
+
+    ⚠️ **What is still spelled out by hand, and why that is not a contradiction** (#11128 review P3):
+    the positive pair is hand-spelled at **four sites below, in three roles** —
+    (1) the `<= record_keys` **precondition**; (2) the non-vacuity **mutation**, both its `.replace(...)`
+    SEARCH strings and the `== {…}` EXPECTATION naming what the mutation must leave reported missing;
+    and (3) the **survivor** assertion that the unmutated cells satisfy the pair. Role (1) is the only
+    duplicate-in-the-harmful-sense, and it is deliberate: naming `record_writes_applied` /
+    `record_last_write_at` IS the #9548 claim (this pair exists, is published, and must be documented),
+    so the pin has to fail if either disappears rather than quietly demanding one fewer name.
+    Roles (2) and (3) are not second sources of truth: (2)'s search strings say which cells to mutate
+    and its expectation says which names must then be missing (they have to be the payload's names —
+    that is what makes the mutation mean "the runbook kept the OLD row"), and (3) asserts those same
+    names are satisfied before the mutation. So a coherent rename does require editing these
+    spellings too — and the pin still reds when the runbook keeps the old row; what it never does is
+    reduce the set it demands on its own.
     """
     from tortoise import monitoring  # local: this file keeps heavy imports inside tests
 
