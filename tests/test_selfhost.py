@@ -969,7 +969,21 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
     The slot is held here exactly as a wedged/overrunning probe holds it, and
     the ONE refresh period is shortened so the recovery is a couple of seconds
     rather than the shipped 15 s cadence.
+
+    ⛔ **The hold OUTLIVES the wait's budget, and the re-arm is COUNTED** — both
+    are load-bearing, and both were added because the leg had stopped pinning
+    the property it is named for (#11023 review, measured). At a 30 s hold
+    against the module's 90 s tolerance the holder gave up ~60 s BEFORE the
+    deadline: the slot un-starved itself, a later cycle MEASURED, and the final
+    `ok is True` passed with `_rearm_stranded_probe` never running — so a
+    deleted remedy left this leg green. Holding past the deadline removes that
+    escape, and the counter makes the requirement explicit rather than inferred
+    from timing: with the slot held the ONLY path to a measured `ok=True` is a
+    re-arm (`_stranded_slot_error` classifies every queued refresh as
+    discardable). The `finally: release.set()` ends the abandoned holder, which
+    is never joined.
     """
+    import sys
     import threading
 
     from tortoise import monitoring as mon
@@ -980,7 +994,21 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
 
     def _hold_the_one_shared_slot():
         held.set()
-        release.wait(30.0)  # abandoned, never joined: the wait must not block on it
+        #: ⛔ + 5 s, NOT the 30 s it used to be: the holder must still own the
+        #: slot at the moment the wait's deadline would fire, or the leg no
+        #: longer distinguishes "the re-arm recovered it" from "the holder gave
+        #: up". See the docstring.
+        release.wait(_HEALTH_VERDICT_WAIT_S + 5.0)
+
+    calls = {"rearms": 0}
+    real_rearm = _rearm_stranded_probe
+
+    def _counting_rearm(selfhost_mod):
+        calls["rearms"] += 1
+        real_rearm(selfhost_mod)
+
+    monkeypatch.setattr(sys.modules[__name__], "_rearm_stranded_probe",
+                        _counting_rearm)
 
     tc = _client_for_env(monkeypatch, tmp_path)
     from tortoise import selfhost
@@ -1001,13 +1029,19 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
             # acquisition budget) plus ONE cold embedded-FalkorDB start is
             # already ~26 s before the runner's own load is counted.
             #
-            # It weakens nothing: the assertion below is unchanged (a MEASURED
-            # `ok is True`), and the remedy's BOUNDEDNESS is pinned where that
-            # property belongs — `test_the_strand_remedy_is_bounded`, on its own
-            # 3.0 s bound.
+            # ⚠️ It does not weaken the RECOVERY pin either — that half is
+            # carried by the hold (above the budget) and the re-arm count
+            # (asserted below), not by the bound. The remedy's BOUNDEDNESS stays
+            # where that property belongs — `test_the_strand_remedy_is_bounded`,
+            # on its own 3.0 s bound.
             _wait_for_probe(selfhost)
     finally:
         release.set()
+    assert calls["rearms"] >= 1, (
+        "the wait recovered WITHOUT re-arming the stranded slot — with the slot "
+        "held past the deadline the only way to a measured `ok=True` is "
+        "`_rearm_stranded_probe`, so this leg would pass even if the remedy "
+        "were deleted, which is exactly the vacuity #11023's review found")
     assert selfhost._HEALTH_PROBE.snapshot()["ok"] is True
 
 
