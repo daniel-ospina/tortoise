@@ -1867,7 +1867,8 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   ⚠️ That pin was RENAMED by `#10394` to `test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so`
   — the name above is this entry's historical reference, and a grep for it now finds this line only.
   **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
-  restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
+  restore re-rents the RAM. ⚠️ **CORRECTED (`#11325`)**: `#10017`'s purge is the legacy TURN population and never
+  matched `:Source`/`:Event`; what the next restore re-rented was `#10000`'s write of the prose. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
   table, plus that test's premise), which is why it is filed rather than absorbed.
 - **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
   persists extras with `skip = _META_KEYS | _EVENT_HANDLED`, and `story_arc` was in neither while
@@ -2105,11 +2106,14 @@ occurrence (one property the projection declines to write), NOT as a `field_mism
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
 a DESTRUCTIVE CLEAR — a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too (and the targeted alternative, a graph-side `REMOVE n.story_arc`, is
+whole-graph and therefore clears a legacy copy too (⚠️ refused PRE-WIPE on a production SERVER graph name by `#2944`'s
+L2 guard — `record_restore._ask_the_wipe_guard`; an embedded `path=` DB is exempt from the name check), and the
+targeted alternative, a graph-side `REMOVE n.story_arc`, is
 in place in principle but shipped by no instrument — `#10017`'s purge is the precedent on a DIFFERENT population, legacy
-episodic turn `:Point`s, and names no `story_arc`). ⛔ Only the NOT-PROJECTABLE class lacks a repair that RESTORES the
-value and a non-destructive one (nothing writes the column, so no in-place route can put a value back — ⛔ though a
-targeted `REMOVE` IS in place, it is destructive); the declined pair has one, shipped —
+episodic turn `:Point`s (turn-shaped ones only: a non-turn episodic `:Point` refuses its sweep), and names no
+`story_arc`. ⛔ The NOT-PROJECTABLE class — and a `status` with no usable mint (§17.2, `#11296`/`#11300`) — lacks a repair
+that RESTORES the value and a non-destructive one (no RECORD→CACHE projection may write the column, so no in-place route
+can put a value back — ⛔ though a targeted `REMOVE` IS in place, it is destructive); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
 

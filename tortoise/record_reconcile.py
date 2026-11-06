@@ -142,8 +142,13 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE
   CLEAR — ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy, or the graph-side removal of the column itself (``REMOVE
-  n.story_arc``) — and it has NO repair that RESTORES the value. ⛔ That is the
+  legacy copy — ⚠️ on a SERVER graph that restore is refused PRE-WIPE unless the
+  graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
+  → the projection's ``_assert_test_graph``, #2944), which is EVERY production
+  name ``org_<org_id>``, so on a production cache the targeted ``REMOVE`` is the
+  only route that works (an embedded ``path=`` DB is exempt from the name
+  check, not from supervision) — or the graph-side removal of the column itself
+  (``REMOVE n.story_arc``) — and it has NO repair that RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
   forbids every projection from writing it into the graph and no in-tree route
@@ -625,7 +630,9 @@ def reconcile_record_and_cache(
     against a record that is correct. The repair for that occurrence is a
     DESTRUCTIVE CLEAR — a full ``record-restore`` (whose wipe is whole-graph, so
     it clears the copy too; measured by
-    `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3)), or a
+    `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3) — ⚠️ but
+    refused PRE-WIPE on a production server graph name, #2944's L2 guard; see
+    the module docstring's (5)), or a
     graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today.
     ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
     episodic turn ``:Point``s — a different population, though a legacy turn
@@ -795,7 +802,8 @@ def log_result(result: RecordReconcileResult,
         # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
         # re-projection, whose write is additive —) and the not-projectable
         # column (the record holds it and the graph must NOT — its repair is a
-        # destructive clear: a full restore's wipe, or a graph-side
+        # destructive clear: a full restore's wipe — refused pre-wipe on a
+        # production SERVER graph name, #2944 L2 — or a graph-side
         # REMOVE n.story_arc that no instrument ships today; #10017's purge is
         # a DIFFERENT population — legacy episodic turn :Points — and names no
         # story_arc). Calling them all "owned" sends the operator to the

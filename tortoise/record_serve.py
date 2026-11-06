@@ -1207,8 +1207,9 @@ def parity_difference(cache_props: Mapping[str, Any],
       holding the prose and a record row rightly holding it both render as
       ``explained_missing: [...]``, because the caller supplied the arguments and
       so knows which direction it asked. The two need different repairs
-      (a destructive clear — a full ``record-restore``'s whole-graph wipe, or a
-      graph-side ``REMOVE n.story_arc`` no instrument ships today; ``#10017``'s
+      (a destructive clear — a full ``record-restore``'s whole-graph wipe
+      (refused PRE-WIPE on a production server graph name, #2944's L2 guard), or
+      a graph-side ``REMOVE n.story_arc`` no instrument ships today; ``#10017``'s
       purge clears only TURN-SHAPED (``pointKind='event'``) legacy episodic
       ``:Point`` copies — a non-turn episodic ``:Point`` refuses its sweep
       rather than being cleared — vs nothing at
