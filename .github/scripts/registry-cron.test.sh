@@ -1985,7 +1985,7 @@ export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export SWEEP_TIMEOUT_S=0
 run_driver
 assert_eq "$RC" 1 "78d-iii. SWEEP_TIMEOUT_S=0 is refused (it means no ceiling to curl)"
-assert_contains "$OUT" "between 60 and 2100" "78d-iii. the refusal names the accepted range"
+assert_contains "$OUT" "between 60 and 1800" "78d-iii. the refusal names the accepted range"
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -1993,7 +1993,30 @@ export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export SWEEP_TIMEOUT_S=3000
 run_driver
 assert_eq "$RC" 1 "78d-iii. a ceiling above the job budget is refused"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=99999999999999999999
+run_driver
+assert_eq "$RC" 1 "78d-iii. a value too wide to compare is refused, not passed to curl"
 unset SWEEP_TIMEOUT_S
+
+# ── 78g. #10234 review P1 (round 3): a fresh stamp does NOT make a broken pool green ──
+# `last_sweep_at` is written unconditionally at the end of the roll-up, BEFORE the
+# outcome is computed — so it proves the roll-up finished, not that the pool is
+# servable. The direct-R2 leg has three stale causes; only "a stale archive" files
+# anything, so "team prefix present but NO default archive" (or an unparseable
+# timestamp) sets POOL_STALE without filing — and pre-fix this run went GREEN.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST=""                 # prefix present, NO default archive
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78g. a fresh stamp over an archive-less pool is NOT green"
+assert_contains "$OUT" "the direct-R2 leg flagged the pool stale" "78g. the red names the pool evidence, not a coverage claim"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78g. it does NOT resurrect the false SWEEP_NO_COVERAGE claim"
 
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
 # rc=56 (connection reset) was measured in production at 201s and 480s of a

@@ -1549,19 +1549,20 @@ CURL_RC=0
 # the elapsed seconds make budget exhaustion self-evident.
 SWEEP_START="$(date +%s)"
 SWEEP_TIMEOUT_S="${SWEEP_TIMEOUT_S:-1500}"
-# #10234 review P2 (round 2): bounds as well as type. `curl -m 0` means NO
-# ceiling (verified against a black-hole server), so 0 would reinstate exactly
-# the unbounded POST this change exists to remove; and a value above the job
-# ceiling means the runner kills the driver mid-leg, which the workflow's
-# `timeout-minutes` note says must not happen. The ceiling must fit UNDER the
-# job budget (45 min), so cap it at 35 min.
+# #10234 review P2 (round 3): bound the WIDTH as well as the range, and keep the
+# non-numeric test FIRST — `[ a -gt b ]` returns 2 on a non-numeric or overflowing
+# operand, which is false under `if`, so a range test alone silently passes a
+# 20-digit value (curl then rejects it with rc=2 and it is misreported as a
+# transport fault of the backup pipeline). Four digits cannot overflow and covers
+# the whole accepted range.
 case "$SWEEP_TIMEOUT_S" in
   ''|*[!0-9]*)
     fail "SWEEP_TIMEOUT_S must be whole seconds, got '${SWEEP_TIMEOUT_S}'"
     exit 1 ;;
 esac
-if [ "$SWEEP_TIMEOUT_S" -lt 60 ] || [ "$SWEEP_TIMEOUT_S" -gt 2100 ]; then
-  fail "SWEEP_TIMEOUT_S must be between 60 and 2100 seconds (the job ceiling is 45 min and the driver needs the rest), got '${SWEEP_TIMEOUT_S}'"
+if [ "${#SWEEP_TIMEOUT_S}" -gt 4 ] \
+   || [ "$SWEEP_TIMEOUT_S" -lt 60 ] || [ "$SWEEP_TIMEOUT_S" -gt 1800 ]; then
+  fail "SWEEP_TIMEOUT_S must be between 60 and 1800 seconds (the job ceiling is 45 min and the sweep's ride-alongs and listings need the rest), got '${SWEEP_TIMEOUT_S}'"
   exit 1
 fi
 RUN="$(curl -sS -m "$SWEEP_TIMEOUT_S" -X POST -H "Authorization: Bearer $KEY" \
@@ -1774,12 +1775,30 @@ case "$RUN_STATUS" in
           "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}), and the last COMPLETED sweep is ${timeout_age_min}m old (> ${DRIVER_DOWN_MIN}m). Unlike a bare budget timeout this IS coverage evidence: no sweep has landed inside the declared driver-down window, so sweeps have stopped completing. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
         NO_COVERAGE=1
       else
-        # #10234 review P2 (round 2): the ride-alongs are SKIPPED on this shape
-        # (a timeout may still hold the server-side per-org locks), and the run
-        # is green — so say it here rather than leaving it to the adjacent
-        # "sweep skipped" line. An absent PURGE_FAILED on this run is not
-        # evidence that erasure ran.
-        log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m), so the driver's patience ran out, not the pipeline — leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
+        # #10234 review P1 (round 3): a fresh completion stamp proves the ROLL-UP
+        # finished — `last_sweep_at` is written unconditionally before the outcome
+        # is computed (backup_sweep.py:1842 precedes the status assignment) — so
+        # it does not prove the POOL is servable. The direct-R2 leg, measured in
+        # THIS run, is the independent evidence, and it has three stale causes of
+        # which only one (a stale archive, STALE_TEAM_COUNT>0) files anything.
+        # A POOL_STALE with NO stale-archive count means "unparseable archive
+        # timestamp" (:1145) or "team prefix with no default archive at all"
+        # (:1171) — a pool problem that measured nothing stale. Backups are then
+        # not restorable, and calling this run healthy would be an unbounded
+        # green. Surface it through LOUD (the pool's own signal) rather than by
+        # filing SWEEP_NO_COVERAGE, so the false claim #10234 is about is not
+        # resurrected.
+        if [ "$POOL_STALE" = "1" ] && [ "${STALE_TEAM_COUNT:-0}" = "0" ]; then
+          LOUD=1
+          log "sweep ${RUN_STATUS_SAFE} with a fresh completion stamp, BUT the direct-R2 leg flagged the pool stale (${POOL_STALE}) while measuring NO stale archive — a team prefix has no restorable default, or an archive timestamp is unparseable. Red: the sweep reporting is not evidence the pool is servable."
+        else
+          # #10234 review P2 (round 2): the ride-alongs are SKIPPED on this shape
+          # (a timeout may still hold the server-side per-org locks), and the run
+          # is green — so say it here rather than leaving it to the adjacent
+          # "sweep skipped" line. An absent PURGE_FAILED on this run is not
+          # evidence that erasure ran.
+          log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m), so the driver's patience ran out, not the pipeline — leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
+        fi
       fi
     elif [ "$R2_LIST_OK" != "1" ] || [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
       # No completion evidence at all (absent or unparseable) and a pool that is

@@ -323,14 +323,22 @@ jurisdiction-restricted buckets require the `cf-r2-jurisdiction` header.)
 > sweep on every hourly run and then reported the abandonment as a coverage
 > outage — 127 recurrences while `/status` showed a completed sweep 9–39 min
 > old (`graph_totals attempted:84 backed_up:4 errors:0`). The ceiling is now
-> bound as the repo variable `SWEEP_TIMEOUT_S` (unset ⇒ 1500 s) and the job
+> bound as the repo variable `SWEEP_TIMEOUT_S` (unset ⇒ 1500 s; **accepted range
+> 60–1800 s**, refused outside it — `curl -m 0` means no ceiling at all, and a
+> value above the job budget gets the driver killed mid-leg) and the job
 > ceiling moved 30 → 45 min. **Raising it does NOT remove `driver_timeout`** —
 > 1500 s still sits below the sweep's upper bound, which is fine, because the
 > verdict no longer rests on the timeout: a timeout is judged against the age of
 > the last **completed** sweep, and reds only when that age exceeds
 > `BACKUP_DRIVER_DOWN_THRESHOLD_MIN` (240 m), when there is no completion stamp at
 > all and the pool is not measured empty, or when the stamp is future-dated
-> (corruption, which reds regardless of the pool). Note the practical detection delay for a genuine
+> by more than a 300 s clock-skew grace (corruption, which reds regardless of the
+> pool). **A fresh stamp is not on its own enough for green:** `last_sweep_at` is
+> written before the outcome is computed, so the arm also requires the direct-R2
+> leg to be clean — a pool flagged stale that measured NO stale archive (a team
+> prefix with no restorable default, or an unparseable timestamp) reds the run,
+> without resurrecting the `SWEEP_NO_COVERAGE` claim this section is about.
+> Note the practical detection delay for a genuine
 > sweep outage is ≈90 min, not 240 — the direct-R2 `POOL_STALE` leg fires first.
 > (Raising these bounds is a separate decision — moving the purge off the
 > synchronous request path to 202-and-poll is the better long-term shape and was
