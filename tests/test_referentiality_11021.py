@@ -1680,3 +1680,83 @@ def test_the_clamp_never_publishes_half_an_address():
         assert "span_start" not in half and "span_end" not in half, half
         assert "span_source" not in half, (
             f"a space label outlived the address it describes: {half!r}")
+
+
+# ── a surface needs a name, and the fail-open path counts one hold once ──────
+# `_clamped_mention` is the ONLY verifier on the fail-open path: `execute_embed`
+# catches any `route_mentions` exception and keeps the model's raw `mentions[]`,
+# and both publishing surfaces (the payload and `result["mentions"]["records"]`)
+# are built from it. Two shapes it still answered wrongly, plus the count.
+
+def test_a_whitespace_surface_is_not_a_surface():
+    """⛔ `Mention.surface` is `min_length=1`, so `"   "` passed validation and
+    became a record with no name to resolve, and `" it "` matched nothing.
+    `_dedupe_mentions` drops the whitespace-only shape on the normal path
+    (`_norm` strips), which is why only the fail-open path and the direct clamps
+    could see it. The strip must come BEFORE the 200-character cap, the order
+    `_mention_record` uses: capping first collapsed a padded 202-character
+    surface to the one-character `"i"` here while the sibling builder kept
+    `"itx"` (review at `d785f3da8`, P3)."""
+    from tortoise.extractor_v2 import _clamped_mention, _mention_record
+
+    assert _clamped_mention({"surface": "   ", "claim_ref": "c"}) is None, (
+        "a whitespace-only surface became a record")
+    padded = _clamped_mention({"surface": " it ", "claim_ref": "c",
+                               "quote": "x it y", "span_source": "quote",
+                               "span_start": 2, "span_end": 4})
+    assert padded["surface"] == "it", f"the surface was not stripped: {padded!r}"
+    assert padded["span_source"] == "quote", (
+        "stripping the surface must keep its verified address")
+
+    long_padded = " " * 199 + "itx"
+    assert _clamped_mention({"surface": long_padded, "claim_ref": "c"})["surface"] == "itx", (
+        "a padded surface past the cap was truncated before it was stripped")
+    assert _mention_record(surface=long_padded, claim={"content": "c"},
+                           kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                           reason="t", narrative="", quote="")["surface"] == "itx"
+
+    # …and a PADDED declared space is the same declaration (`_mention_record`
+    # strips it, so leaving it raw demoted a verifiable address on one builder
+    # only). It must be written back stripped, or the payload 422s.
+    from tortoise.commit_schema import Mention
+    padded_space = _clamped_mention({"surface": "it", "claim_ref": "c",
+                                     "quote": "x it y", "span_source": " quote ",
+                                     "span_start": 2, "span_end": 4})
+    assert padded_space["span_source"] == "quote", (
+        f"a padded declared space was demoted: {padded_space!r}")
+    assert Mention(**padded_space).span_source == "quote"
+
+
+def test_the_fail_open_path_dedupes_BOTH_publishing_surfaces(monkeypatch):
+    """⛔ `_dedupe_mentions` runs INSIDE `route_mentions` — the call that may have
+    raised. On the fail-open path nothing deduped, so one hold was counted twice
+    on BOTH published lists AND in the accounting. The accounting matters most:
+    `_records` is read straight from `embed_list`, so deduping only the published
+    lists left `stats["mentions_recorded"] == 2` for one hold — the number plan
+    R1's arming gate reads — while `records` said 1, i.e. the run disagreed with
+    itself, and the "did not emit" warning counted two records while naming one
+    surface (review at `d785f3da8`, P2)."""
+    from tortoise.extractor_v2 import _mentions_for_claim
+
+    entry = {"surface": "the admin-merge rail", "claim_ref": "the budget is 40k",
+             "quote": "the admin-merge rail", "rule_id": ref.RULE_CHANNEL}
+    direct = _mentions_for_claim({"mentions": [dict(entry), dict(entry)]},
+                                 "the budget is 40k", armed=True, narrative="")
+    assert [m["surface"] for m in direct] == ["the admin-merge rail"], (
+        f"the payload clamp forwarded one hold twice: {direct!r}")
+
+    out = _fail_open_session(monkeypatch, [dict(entry), dict(entry)])
+    evidence = [m["surface"] for m in out["mentions"]["records"]]
+    assert evidence == ["the admin-merge rail"], (
+        f"the evidence surface double-counted one hold: {evidence!r}")
+    payload = [m["surface"] for m in _mentions_of(out["payload"])]
+    assert payload == ["the admin-merge rail"], (
+        f"the fail-open payload double-counted one hold: {payload!r}")
+    stats = out["stats"]
+    assert stats["mentions_recorded"] == 1, (
+        f"one hold was counted {stats['mentions_recorded']} times by the arming "
+        f"number: {stats!r}")
+    assert stats["mentions_unresolved"] == 0, (
+        f"the emitted claim was reported unresolved: {stats!r}")
+    assert not [w for w in out.get("warnings") or [] if "did not emit" in w], (
+        f"the fail-open warning counted a hold twice: {out.get('warnings')!r}")
