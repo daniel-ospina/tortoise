@@ -49,7 +49,9 @@ drill, and the R5 edge producers. **All 13 native sub-issues are closed.**
 ⚠️ **No census count is asserted here.** Two populations are in play and they do not agree: the native
 sub-issue links (13, all closed, before this lane added 23 — 36 in total, **21 open / 15 closed**: #10683 closed
 when its answer was recorded, and **#9548 closed 2026-11-06T01:57Z** by `#11109`'s merge — landed on `main`,
-still **undelivered by `#10896`**) and the issues whose *body* carries an
+still **undelivered by `#10896`**; re-measured 2026-11-06T05:14Z with `gh api …/issues/7879/sub_issues
+--paginate | jq '.state'`, and the pair moves as issues close, so read it as a dated census) and the issues
+whose *body* carries an
 `Epic: #7879` field. The GitHub search API's tokenized `in:body` match returned **99 total / 26 open** by one
 query and **38 / 11** by a stricter re-match — **so no count of THAT population is quoted anywhere in this
 document; it is not reproducible.** ⚠️ **Two different populations must not be confused:** the 1691 figure in
@@ -335,7 +337,7 @@ has already paid for once, so the decomposition's product is **navigation and or
 | 23 | **#9558** pooling + column-map cache | G4 | OPEN (`FOLLOW`) | linked |
 | 24 | **#10600** the census docs still read "not armed yet" | G4 | OPEN, docs-only | linked |
 | 25 | **#10977** hosted-graph cost/structure | G5 | OPEN, cross-epic **tracking** | linked — **but it is not G5's deliverable** (below) |
-| 26 | **#11129** the "blocked deploy / 2 migrations unapplied" premise vs. the deploy that shipped `c3af2d018` | G1 | **NEW** | **filed** by PR #11128 — §1's *the two migrations* and *the deploy* rows defer to it, and the one-sentence verdict below now carries a dated pointer to it |
+| 26 | **#11129** the "blocked deploy / 2 migrations unapplied" premise vs. the deploy that shipped `c3af2d018` | G1 | **NEW** | **filed** by PR #11128 — §1's *the two migrations* and *the deploy* rows defer to it, and the one-sentence verdict above (§1) now carries a dated pointer to it |
 
 ### 5.1 G5 has no closable carrier yet — and the ruling names FIVE measurements, not three
 
@@ -495,7 +497,7 @@ it, and §7.1's and this section's text are authoritative until it lands.
 - [ ] `gh api repos/daniel-ospina/tortoise/issues/7879/sub_issues --paginate` contains the live carriers
       (#10896, #10593, #11075, #9567, #9548, #10977, …), not only closed ones — **measured at that pass: 36
       linked, 22 open / 14 closed**; ⚠️ **live at this head: 21 open / 15 closed**, #9548 having closed
-      2026-11-06 by `#11109`
+      2026-11-06 by `#11109` — **verified 2026-11-06T05:14Z**
 - [ ] **every P0 named in this plan actually carries the `P0-blocker` label** — #10896 arrived with **zero**
       labels; it and #10593/#10977 now carry `P0-blocker` + `team:epistemic-team`
 - [ ] the decomposition comment on #7879 carries a provenance line and names #10896 as the first gate
