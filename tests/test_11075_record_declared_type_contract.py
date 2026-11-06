@@ -68,6 +68,7 @@ column list is restated anywhere in this file.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -343,10 +344,25 @@ _INT_LITERAL_RE = re.compile(r"^-?\d+$")
 
 
 def _parse_date(value: str) -> object:
-    """`value` as a date, or raise `ValueError` — Postgres's own verdict."""
-    from datetime import datetime
+    """`value` as a date, or raise `ValueError`.
 
-    return datetime.strptime(value.strip(), "%Y-%m-%d")
+    Wider than one pattern because `date_in` is: the ISO basic form
+    (`20260228`), slash-separated input, and a full timestamp (which `date_in`
+    TRUNCATES) are all accepted by Postgres, so refusing them would be a false
+    red on the first `date` column.
+    """
+    from datetime import date, datetime
+
+    text = value.strip()
+    for pattern in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+    # The VALUE, not the shape: `2026-02-30` matches any pattern and is refused
+    # by Postgres (`22008`), so the day/month combination is validated too.
+    return date.fromisoformat(text)
 
 
 def _parse_iso(value: str) -> object:
@@ -387,6 +403,10 @@ def _accepts(declared: str, value: Any) -> bool:
         # certify a value Postgres refuses with `22P02`. The COMPACT and BRACED
         # spellings are accepted too — `uuid_in` takes them, so refusing them
         # would be a false red on a correct tree.
+        from uuid import UUID
+
+        if isinstance(value, UUID):
+            return True  # psycopg binds a `uuid.UUID` natively
         if not isinstance(value, str):
             return False
         return bool(_UUID_RE.match(value.strip().strip("{}").replace("-", "")))
@@ -425,7 +445,17 @@ def _accepts(declared: str, value: Any) -> bool:
         # exists to make unreachable. (A lossy value is the producer's problem,
         # not a refusal.)
         if isinstance(value, float):
-            return True
+            # Finite and in the target's range: `float8 → int4` is an assignment
+            # cast that ROUNDS, but NaN/±Inf/1e300 are `22003` — and `json.loads`
+            # accepts `NaN`/`Infinity` literals by default, so a producer really
+            # can hand one over (#11075 review round 4).
+            limits = {"integer": 2 ** 31 - 1, "serial": 2 ** 31 - 1,
+                      "smallint": 2 ** 15 - 1, "smallserial": 2 ** 15 - 1}
+            return math.isfinite(value) and abs(value) <= limits.get(
+                declared, 2 ** 63 - 1)
+        if isinstance(value, Decimal):
+            # `numeric → int4` is also an assignment cast.
+            return value.is_finite()
         # A string literal is coerced by the assigned column type (`'3'` into an
         # `integer` column IS accepted), so the arm matches that rather than
         # claiming a refusal that does not happen.
@@ -512,8 +542,14 @@ def test_the_pin_judges_a_real_population():
     """
     declared = rp.column_types()
     judged, _expressions = _enumeration()
-    assert len(judged) >= 80, f"only {len(judged)} bound values were judged"
-    assert len({table for table, _c, _v in judged}) >= 9
+    # ⚠️ The floor is set just under the MEASURED population (544 values, 10
+    # tables) rather than at a round number: a floor of 80 could not see
+    # `_bindings` dying, which silently removes the ~321 values that reach the
+    # pin through the TEXT path only (the rest arrive via the writer's own
+    # `param_columns`) — a 59 % shrink with every test still green (#11075
+    # review round 4, measured).
+    assert len(judged) >= 500, f"only {len(judged)} bound values were judged"
+    assert len({table for table, _c, _v in judged}) >= 10
     for table, column, _value in judged:
         assert column in declared.get(table, {}), (
             f"{table}.{column} is written by the projection and is in NO "
@@ -777,6 +813,12 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
     retyped = re.compile(
         r'ALTER\s+COLUMN\s+"?([a-z_][a-z0-9_]*)"?\s+TYPE\s+' + token, re.I)
     missed: list[str] = []
+    #: `(table, column) -> type of the LAST `ALTER COLUMN … TYPE` over the WHOLE
+    #: migration set. ⚠️ Hoisted out of the per-file loop on purpose: a landed
+    #: migration is never edited, so a genuine SECOND retype always arrives in a
+    #: NEW file — a per-file "last wins" reds on the earlier file's rewrite,
+    #: against a reader that is right (#11075 review round 4, measured).
+    rewrites: dict[tuple[str, str], str] = {}
     for name in rp.RECORD_MIGRATIONS:
         path = MIGRATIONS / name
         if not path.exists():
@@ -799,7 +841,6 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
         dumb_alter = re.compile(
             r'ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?'
             r'(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?(.*?);', re.S | re.I)
-        rewrites: dict[tuple[str, str], tuple[int, str]] = {}
         for found_alter in dumb_alter.finditer(sql):
             table = found_alter.group(1)
             if table not in rp.THE_RECORD_TABLES:
@@ -825,17 +866,16 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
                         f"{table}.{column} (forward REWRITE in {name} to "
                         f"{type_token!r} — the column is not captured at all)")
                     continue
-                # LAST rewrite wins (`_declared_types_for_dir`'s documented
-                # rule), so only the final one is asserted APPLIED: a column
-                # retyped twice would otherwise red on its first rewrite — a
-                # FALSE red on a correct tree.
-                rewrites[(table, column)] = (found.start(), type_token)
-        for (table, column), (_at, type_token) in rewrites.items():
-            if declared[table][column] != type_token:
-                missed.append(
-                    f"{table}.{column} (forward REWRITE to {type_token!r}, but "
-                    f"the reader reports {declared[table][column]!r} — the "
-                    "rewrite is not applied)")
+                # LAST rewrite (over the WHOLE set) wins, matching
+                # `_declared_types_for_dir`'s documented rule.
+                rewrites[(table, column)] = type_token
+    for (table, column), type_token in rewrites.items():
+        if table in declared and column in declared[table] and (
+                declared[table][column] != type_token):
+            missed.append(
+                f"{table}.{column} (forward REWRITE to {type_token!r}, but "
+                f"the reader reports {declared[table][column]!r} — the "
+                "rewrite is not applied)")
     assert missed == [], (
         "these columns are DECLARED in a migration and were not captured by "
         "`_DECLARED_TYPE_ALTERNATION`, so they are outside every pin -- widen "
