@@ -1326,15 +1326,17 @@ _RESIDUAL_ROW_START = "\n  - id: state_value_carve_out\n"
 _RESIDUAL_CLASS_ANCHOR = re.compile(
     r"adjacency|\btime[- ]unit\b|carve[- ]out|\bthe guarantee\b|\bretention\b|"
     r"\bvalue class\b|\bnumeric side\b|"
-    # ⛔ THE GAP NAMED WITHOUT THE WORD `adjacency`: the unanchored arm catches
-    # `the remaining gap is not closed` but was blind to `the remaining gap is
-    # open` — the same claim with the other verb — because `<verb> … open` needs
-    # an anchor and these subjects carry none (#11258 review round 4 `P2`,
-    # measured). They are SUBJECT PHRASES for THIS row's closed gap, and none of
-    # them occurs in the honest text (measured over the 37,914-char region).
-    r"\bthe remaining gap\b|\bthe gap (?:that|those)\b[^.;]{0,40}\bclosed\b|"
-    r"\bthe exception it (?:carved|carves)\b|"
     r"\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
+    # ⛔ ONE subject phrase, and only one: `the gap that/those … closed` names the
+    # gap BY ITS CLOSURE, so it can only be about this one. `the remaining gap` and
+    # `the exception it carved` were here for a revision and had to go — the row's
+    # `the remaining gap` names the SURVIVING OPEN residual (it says "What SURVIVES
+    # of the old (d) is the SPELLING case"), so anchoring it withheld the honest
+    # `spelling` waiver and red `the remaining gap is the SPELLING case, which is
+    # open by design` (#11258 review round 5 `P2`, measured). `the remaining gap is
+    # open` is therefore an undisclosed-arm shape and is named in
+    # `WHAT THIS CANNOT CATCH` instead of being claimed covered.
+    r"\bthe gap (?:that|those)\b[^.;]{0,40}\bclosed\b|"
     + _UNIT_TOKEN.pattern,
     re.I)
 
@@ -1354,6 +1356,20 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
 #: `… fails open`, and the two-clause spelling form) went GREEN because the
 #: anchored arm stopped applying to any carve-out clause at all (#11258 review
 #: round 3, measured). A note binds nothing; only the literal above does.
+
+#: The other negated CLOSED verdicts: `never … closed`, `<aux> yet to be closed`,
+#: `far from closed`, `anything but closed`. ⛔ ANCHORED, deliberately: `not …
+#: closed` can only be about this gap, but these read naturally about ANY residual —
+#: the row is a list of what is still not enforced, so `(b2) is far from closed` and
+#: `residual (a) is never closed by any rule` are HONEST, and putting them in the
+#: unanchored arm red eight such sentences (#11258 review round 5 `P1`, measured).
+#: The round-4 defect they close is real: `the ADJACENCY gap was never closed` was
+#: GREEN while `the ADJACENCY gap is not closed` RED.
+_RESIDUAL_CLOSED_VERDICT = (
+    r"\bnever\b[^.;]{0,30}\bclosed\b",
+    r"\b(?:has|have|had|is|are|was|were)\s+yet\s+to\s+be\s+closed\b",
+    r"\b(?:far\s+from|anything\s+but)\s+closed\b",
+)
 
 #: The affirmations that something IS open / STOPPED being closed. TWO ARMS,
 #: and the split is the whole design — each arm was measured into place.
@@ -1379,7 +1395,13 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
 #: DOES NOT KNOW (`_RESIDUAL_CLAUSE_SPLIT` is a CLOSED list: `and`/`but`/`while`/
 #: `whereas`/`although`/`though`/`yet`) puts two claims in one segment, and the
 #: honest `spelling` waiver then covers both — the measured fix for `while` and
-#: `although` is in that list, but a joiner it does not name still does this. ⛔ EVERY
+#: `although` is in that list, but a joiner it does not name still does this. ⛔ AND
+#: THE GAP NAMED WITHOUT AN ANCHOR: `the remaining gap is open` is GREEN, because
+#: `the remaining gap` names the SURVIVING OPEN residual and therefore cannot be a
+#: class anchor — anchoring it would refuse `the remaining gap is the SPELLING
+#: case, which is open by design`, which is true (#11258 review round 5 `P2`,
+#: measured). The closed subject IS read when it names its own closure
+#: (`the gap those tables closed is open`). ⛔ EVERY
 #: ENTRY HERE IS A CLAIM LIKE ANY OTHER and must be re-measured when the arms
 #: change: "`minute` is back in the open set" sat on this list for one revision
 #: and is RED again (it is mutation #28), because the anchored arm reads an object
@@ -1398,15 +1420,14 @@ _RESIDUAL_OPENNESS = (
     # (#11258 review `P2`, measured).
     r"\bnot\b[^.;]{0,30}\bclosed\b",
     r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
-    # ⛔ `never … closed` ASSERTS the gap is open for the same reason `not …
-    # closed` does, and it was one word away from being caught: `the ADJACENCY gap
-    # was never closed` was GREEN while `the ADJACENCY gap is not closed` RED — the
-    # most natural sentence a lane writes when it believes the closure did not
-    # land (#11258 review round 4 `P1`, measured). The `has yet to be` and
-    # `far from` / `anything but` forms are the same claim in other words.
-    r"\bnever\b[^.;]{0,30}\bclosed\b",
-    r"\b(?:has|have|had|is|are|was|were)\s+yet\s+to\s+be\s+closed\b",
-    r"\b(?:far\s+from|anything\s+but)\s+closed\b",
+    # ⛔ `never … closed`, `<aux> yet to be closed`, `far from closed` and
+    # `anything but closed` assert the gap is open for the same reason `not …
+    # closed` does — but they are in the ANCHORED arm and NOT here, because unlike
+    # `not closed` they are ordinary prose about ANY residual: this row's list is
+    # literally "WHAT IS STILL NOT ENFORCED", so `(b2) is far from closed` and
+    # `residual (a) is never closed by any rule` are honest and both RED when these
+    # forms are unanchored (#11258 review round 5 `P1`, measured). See
+    # `_RESIDUAL_CLOSED_VERDICT`.
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     # ⛔ THE PARTICIPLE, SUBJECT-GATED, and the gate is split by TENSE because the
     # honest shapes are historical. The `no longer` arm above carries only the 3sg
@@ -1534,6 +1555,7 @@ _RESIDUAL_ANCHORED_OPENNESS = (
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
     r"(?<![n']t\s)(?<![n']t\sbeen\s)\bre-?open",
+    *_RESIDUAL_CLOSED_VERDICT,
 )
 
 #: The floor for an EXEMPT sentence — one that discloses the still-open SPELLING
@@ -1680,6 +1702,22 @@ def _residual_reopening_claims(text: str) -> list[str]:
         # waiver (round 2 `P2`). So the honest clauses are REMOVED and what is
         # left is scanned.
         clauses = re.split(_RESIDUAL_CLAUSE_SPLIT, sentence)
+        # ⛔ THE NEGATED CLOSED VERDICTS ARE SCANNED ON THE WHOLE SENTENCE, before any
+        # clause surgery, because their own text CONTAINS splitter words:
+        # `has yet to be closed` splits at `yet`, `anything but closed` at `but`,
+        # and removing an honest `spelling` clause then rejoins the pieces — so the
+        # pattern's two halves land in different segments and it never matches
+        # (`the SPELLING gap is open, and the time-unit half has yet to be closed`
+        # was GREEN, #11258 review round 5 `P2`, measured). They are ANCHORED, so
+        # the honest `spelling` disclosure (`… the SPELLING gap is not closed`) is
+        # unaffected — it carries no closed-verdict phrase.
+        if _RESIDUAL_CLASS_ANCHOR.search(sentence):
+            for pattern in _RESIDUAL_CLOSED_VERDICT:
+                m = re.search(pattern, sentence)
+                if m is not None:
+                    claims.append(
+                        f"{m.group(0)!r} in sentence {sentence.strip()!r}")
+                    break
         honest = [c for c in clauses if _is_honest_spelling(c)]
         if honest:
             if len(honest) == len(clauses):
@@ -1690,7 +1728,8 @@ def _residual_reopening_claims(text: str) -> list[str]:
                             f"{m.group(0)!r} in sentence {sentence.strip()!r}")
                         break
                 continue
-            scan = ". ".join(c for c in clauses if not _is_honest_spelling(c))
+            # ⛔ REJOINED WITH `, `, NOT `. ` — see the round-5 note below.
+            scan = " , ".join(c for c in clauses if not _is_honest_spelling(c))
         else:
             scan = sentence
         patterns = list(_RESIDUAL_OPENNESS)
@@ -1929,8 +1968,13 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is far from closed.",
     "the ADJACENCY half is anything but closed.",
     "the time-unit half has yet to be closed",
-    "the remaining gap is open.",
     "the gap those tables closed is open.",
+    # round 9 (#11258 review round 5): the honest-`spelling` clause is REMOVED and
+    # the survivors rejoined, so a join that used to be `and`/`but` was severing the
+    # new patterns' own halves — `has` / `to be closed`, `anything` / `closed`. They
+    # are rejoined with ` , ` now; these two pin it.
+    "the SPELLING gap is open, and the time-unit half has yet to be closed.",
+    "the SPELLING gap is open, and the ADJACENCY half is anything but closed.",
     # round 8 (#11258 review round 4): the clause splitter did not know
     # `while`/`although`, so an honest `spelling` disclosure and a reopening joined
     # by one of them shared a segment and the waiver swallowed the second claim.
@@ -1995,6 +2039,17 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the ADJACENCY half is not entirely open.",
     "the ADJACENCY half is clearly not open.",
     "the ADJACENCY half has not yet been re-opened.",
+    # ⛔ HONEST PROSE ABOUT THE ROW'S OTHER RESIDUALS. The row is a list of what is
+    # still not enforced, so `(b2) is far from closed` is a disclosure, not a
+    # reopening — these red when the closed-verdict forms are UNANCHORED (#11258
+    # review round 5 `P1`, measured). The last two are the `spelling` waiver's cost
+    # for `the remaining gap` / `the exception it carved`, which name the OPEN
+    # residual and so must not anchor (#11258 review round 5 `P2`).
+    "(b2) is far from closed at 49.4%.",
+    "(e) has yet to be closed.",
+    "residual (a) is never closed by any rule in this module.",
+    "the remaining gap is the SPELLING case, which is open by design.",
+    "the exception it carved is the SPELLING class, still open.",
     # ⛔ ⚠️ AN HONEST CLAUSE THAT NAMES BOTH `spelling` AND THE CARVE-OUT IS NOT
     # HERE, because it is deliberately REFUSED: waiving it is what let one word
     # (`the SPELLING `) turn every reopening on the carve-out GREEN, so the two
