@@ -141,6 +141,8 @@
 #      unparseable archive timestamp reds AND files POOL_STALE (never a silent red)
 #  78h. #10234: an archive-LESS team (the custom-only shape this leg cannot see,
 #      #2375) does NOT red — round 3's broader guard would have red every run
+#  78c-ii. #10234: a rc=0 `empty_response` with no completion evidence reds with a
+#      title that says "no report body", never "timed out"
 #  78i. #10234: a MIXED pool (one stale team AND one unparseable timestamp) files
 #      a POOL_STALE whose body names the corrupt stamp and whose title covers both
 #      causes — the placeholder bullet must not be gated on the stale count
@@ -1962,6 +1964,22 @@ assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78c. unverifiable completion fil
 assert_contains "$OUT" "no usable last_sweep_at" "78c. the fail-closed branch is the one that ran (not the stale-age branch)"
 assert_not_contains "$OUT" "the last COMPLETED sweep was" "78c. (control) the stale-age branch did NOT run"
 assert_contains "$OUT" "no sweep report was read (status=driver_timeout)" "78c. the exit line names the missing report, not a coverage failure"
+
+# ── 78c-ii. #10234 review P2 (round 8): a rc=0 completion is NOT "timed out" ──
+# The fail-closed arm's incident TITLE said "sweep timed out" even for
+# `empty_response`, where curl exited 0 and the exchange completed. A title that
+# contradicts its own body is the #5114 class this PR closes, and no case reached
+# this branch (78c uses rc=28, 79 uses a fresh stamp).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_RC=0
+run_driver
+assert_eq "$RC" 1 "78c-ii. an empty body with no completion evidence stays RED"
+assert_contains "$OUT" "no usable last_sweep_at" "78c-ii. the fail-closed branch is the one that ran"
+assert_not_contains "$(cat "$LOG")" 'sweep timed out' "78c-ii. the incident TITLE does not claim a budget timeout for an rc=0 completion"
+assert_contains "$(cat "$LOG")" 'returned no report body' "78c-ii. the title names the real shape"
 
 # ── 78d. #10234: the ceiling knob exists and its default exceeds the 600s ──
 # The 600s literal WAS the defect: the sweep needs longer than its client was

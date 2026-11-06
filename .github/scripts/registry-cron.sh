@@ -756,7 +756,7 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
 # shape classifier below) rather than calling this helper. That duplication used
 # to be justified by a gap this driver has since closed: the sweep now expresses
 # `transport_error` too, so it produces THREE of these four tokens with a
-# near-verbatim copy of this body — #5114 is closed by that split, and #11119
+# near-verbatim copy of this body — #5114's gap is closed by that split (the issue itself is referenced in the PR), and #11119
 # tracks collapsing both onto ONE owner. Until then, change them together.
 leg_shape() { # <curl_rc> <body> -> shape label on stdout
   if [ "${1:-99}" -eq 28 ]; then
@@ -1851,7 +1851,15 @@ case "$RUN_STATUS" in
       # No completion evidence at all (absent or unparseable) and a pool that is
       # NOT measured-empty: unknown is not healthy (#2790).
       log "sweep ${RUN_STATUS_SAFE}, no usable last_sweep_at, and the pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} prefix(es)) — filing SWEEP_NO_COVERAGE (job red)"
-      file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — sweep timed out and completion cannot be verified" \
+      # #10234 review P2 (round 8): the TITLE must not name a budget timeout for
+      # `empty_response`, where curl exited 0 and the exchange completed. A title
+      # that contradicts its own body is the #5114 class this change closes.
+      if [ "$RUN_STATUS" = "empty_response" ]; then
+        NOCOV_TITLE="[DR] SWEEP_NO_COVERAGE — the sweep call returned no report body and completion cannot be verified"
+      else
+        NOCOV_TITLE="[DR] SWEEP_NO_COVERAGE — sweep timed out and completion cannot be verified"
+      fi
+      file_alert SWEEP_NO_COVERAGE "$NOCOV_TITLE" \
         "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}) and /status carries no usable last_sweep.last_sweep_at (absent or unparseable), so there is no evidence any sweep has completed. The R2 pool is NOT measured-empty (R2_LIST_OK=${R2_LIST_OK}, ${R2_TEAM_COUNT} team prefix(es)), so this cannot be read as the chronic pre-beta empty state. Check the app's sweep lock and its ops/state.json." ""
       NO_COVERAGE=1
     else
