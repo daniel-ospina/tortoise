@@ -729,6 +729,18 @@ def strip_code(body: str, *, strict: bool = False,
     silent drop that guard exists to stop. Equal-length spaces keep every offset AND leave a
     whitespace run of two or more wherever a comment stood, which is the discriminator that
     separates a blanked OBJECT from a sentence that simply names none.
+
+    ⛔ AND A BLANK LINE INSIDE A COMMENT IS STILL A PARAGRAPH BOUNDARY (round 37, P2). Blanking
+    every character with `.` under `DOTALL` also swallowed `\n`, so a comment that spanned a blank
+    line SPLICED the two paragraphs around it into one — and this module's own rule that a claim
+    list does not cross a blank line then stopped applying wherever the blank line sat in a
+    comment (measured at `23d7a77ab`):
+        `Closes #100 <!-- x` / blank / `y --> and #200 is separate.`   -> arm 1 flagged #200
+    while the renderer says that body is TWO paragraphs and flags nothing — the false-positive
+    direction this module ranks as worse than the defect it would catch. So a comment is blanked
+    per character EXCEPT its newlines, and then a SOFT break (a lone `\n`) collapses to one space
+    (the claim direction above needs `Refs <!-- an explanation` / `over two lines --> #1234` to
+    read as one line) while a blank line survives. Equal length, so every offset is kept.
     """
     stats: dict[str, int] = {}
     # ⛔ `strict` IS THE PASS DIRECTION AND ONLY ARM 1 ASKS FOR IT (round 28, P2 — the first attempt
@@ -769,8 +781,17 @@ def strip_code(body: str, *, strict: bool = False,
     # unreadable-object guard reads as an honest reason and clears the ref before it — the silent
     # drop it exists to stop. Equal-length spaces keep every offset AND leave the whitespace run of
     # two or more that separates a blanked OBJECT from a sentence that names none.
-    text = re.sub(r"<!--.*?-->", lambda m: re.sub(r".", " ", m.group(0), flags=re.DOTALL), text,
-                  flags=re.DOTALL)
+    # ⛔ NEWLINES ARE NOT BLANKED WITH THE REST (round 37, P2): `.` under `DOTALL` matched `\n`, so
+    # a comment spanning a blank line spliced the paragraphs around it and arm 1 claimed a ref the
+    # author had put in a SEPARATE paragraph (`Closes #100 <!-- x` / blank / `y --> and #200 is
+    # separate.` flagged #200 at `23d7a77ab`) — the false-positive direction. A lone newline is a
+    # SOFT break and becomes one space (so a wrapped comment still lets `Refs <!-- a` / `b --> #1234`
+    # claim); a blank line is a PARAGRAPH boundary and stays one. Both substitutions are 1-for-1.
+    def _blank_comment(m: re.Match[str]) -> str:
+        blanked = re.sub(r"[^\n]", " ", m.group(0))
+        return re.sub(r"(?<!\n)\n(?!\n)", " ", blanked)
+
+    text = re.sub(r"<!--.*?-->", _blank_comment, text, flags=re.DOTALL)
     # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim. Imported, not
     # re-derived — a single-backtick regex here read a ``Refs #1234`` span as prose (F1).
     # ⛔ AND THE SPAN SCANNER TAKES THE SAME FLAG — but only when the caller asked for it (round 28,

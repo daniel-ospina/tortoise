@@ -2358,15 +2358,81 @@ def test_a_multi_line_comment_between_a_claiming_word_and_its_ref_still_claims(b
         Refs <!-- an explanation
         over two lines --> #1234        -> no claim at all, NOTHING FLAGGED
 
-    A comment is now blanked character-for-character INCLUDING its newlines, so the claim survives.
-    RED against the newline-preserving blanking: `claims()` returns `{}` and there is no finding.
-    The closing-word spelling is included because it is the one that never broke (`cmid` is
-    ``\\s*:?\\s*`` — the separator ITSELF, never a character class (see the `cmid` note above), so it
-    crossed the blanked newline) — the pair keeps the two keyword classes honest.
+    A comment is now blanked character-for-character with each SOFT line break (a lone `\n`)
+    collapsed to ONE space, so the claim survives. RED against the newline-preserving blanking:
+    `claims()` returns `{}` and there is no finding. The closing-word spelling is included because
+    it is the one that never broke (`cmid` is ``\\s*:?\\s*`` — the separator ITSELF, never a
+    character class (see the `cmid` note above), so it crossed the blanked newline) — the pair keeps
+    the two keyword classes honest. The BLANK-line case is the next test: it must NOT collapse.
     """
     claimed = L.claims(body, 1)
     assert claimed["weak"] + claimed["closing"] == [1234], why
     assert claimed["declined"] == [], why
+
+
+@pytest.mark.parametrize("body, why", [
+    ("Closes #100 <!-- x\n\ny --> and #200 is separate.\n", "the comment carries the blank line"),
+    ("Closes #100<!--\n\n--> and #200 is separate.\n", "the comment IS the blank line"),
+    ("Closes #100 <!-- a\nb\n\nc --> and #200 is separate.\n", "a soft break then a blank line"),
+])
+def test_a_blank_line_inside_a_comment_is_still_a_paragraph_boundary(body, why):
+    """A claim list does not cross a BLANK LINE — that rule has to hold inside a comment too.
+
+    Blanking every character of a comment with `.` under `DOTALL` also matched `\n`, so a comment
+    that spanned a blank line spliced the paragraphs on either side into one, and arm 1 then claimed
+    a ref the author had deliberately put in a SEPARATE paragraph (measured at `23d7a77ab`):
+
+        `Closes #100 <!-- x` / blank / `y --> and #200 is separate.`
+            -> FLAGGED, claimed [100, 200], unresolved [200]
+
+    The renderer is the oracle and says that body is two paragraphs, with `#200` in the second — so
+    the flag is the false-positive direction this module ranks as worse than the defect it catches:
+    `MarkdownIt("commonmark")` renders `<p>Closes #100 &lt;!-- x</p>` + `<p>y --&gt; and #200 is
+    separate.</p>`. The CONTROL below is the same document shape written without the comment on the
+    blank line, and it was already CLEAN — the two must agree.
+
+    RED against the pre-fix module: every row is flagged with `unresolved == [200]`, and the control
+    is clean, so the test fails on the difference rather than on both sides being red.
+    """
+    assert L.classify_pr(body, 1) == [], f"{why}: {L.classify_pr(body, 1)}"
+    assert L.claims(body, 1)["closing"] == [100], why
+    assert 200 not in L.claims(body, 1)["closing"], why
+
+    # …and the renderer agrees these bodies are TWO paragraphs, so CLEAN is the right verdict and
+    # not merely a lenient one.
+    rendered = MarkdownIt("commonmark").render(body)
+    assert rendered.count("<p>") == 2, (why, rendered)
+
+
+def test_the_control_for_the_comment_blank_line_shape_is_still_clean():
+    """The shape the finding measured AGAINST — same two paragraphs, the comment off the blank line.
+
+    It was CLEAN at `23d7a77ab` and must stay CLEAN: if this row ever reds, the fix has gone too far
+    in the pass direction rather than the false-positive one being repaired.
+    """
+    body = "Closes #100\n\n<!-- x\ny -->\nand #200 is separate.\n"
+    assert L.classify_pr(body, 1) == []
+    assert L.claims(body, 1)["closing"] == [100]
+
+
+def test_blanking_a_comment_keeps_every_offset_and_every_blank_line():
+    """The docstring's claim, made executable: blanking is LENGTH-preserving and keeps every BLANK line.
+
+    Both were false before the round-37 fix, one direction each — deletion shortened the body
+    (round 21), and `.`-under-`DOTALL` collapsed two lines into one (round 37). A reader can rely on
+    neither unless it is pinned: offsets are what the guards around the blanked object measure, and
+    the BLANK lines are what the paragraph rule counts. (A lone newline is deliberately NOT kept —
+    it is a soft break and becomes one space; see the wrapped-comment test above.)
+    """
+    for body in ("Closes #100 <!-- x\n\ny --> and #200.\n",
+                 "Part of #11000 — does not close<!-- #11078 --> because it is a measurement PR.\n",
+                 "Refs <!-- an explanation\nover two lines --> #1234\n",
+                 "<!-- a\n\nb\n\n\nc -->\n"):
+        stripped, _ = L.strip_code(body)
+        # `strip_code` drops the body's trailing newline; nothing else may change the length.
+        trimmed = body.rstrip("\n")
+        assert len(stripped) == len(trimmed), body
+        assert stripped.count("\n\n") == trimmed.count("\n\n"), body
 
 
 def test_a_gloss_ending_on_an_auxiliary_cannot_carry_a_clause_subject_past_the_bridge():
