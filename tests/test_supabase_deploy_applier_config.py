@@ -3,7 +3,7 @@
 MEASURED FAILURE this test exists to prevent
 --------------------------------------------
 `supabase-deploy.yml` → job `deploy` → step `Apply migrations` (the sole automated
-`supabase db push` against production) exited **1 after 0.5 s** on run `42091073635`
+`supabase db push` against production) exited **1 within ~1 s** on run `42091073635`
 (2026-11-05T19:45:57Z), having applied nothing:
 
     Target: project premise-labs (ybetwichurajbfswfeqa) · production
@@ -103,29 +103,86 @@ def test_local_smtp_keeps_the_mail_catcher_settings() -> None:
     )
 
 
-def _applier_steps() -> list[dict]:
-    """Every workflow step that installs or invokes the Supabase CLI (parsed, not grepped)."""
+def _workflow_doc() -> dict:
     doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    steps: list[dict] = []
-    for job in (doc.get("jobs") or {}).values():
-        steps.extend(job.get("steps") or [])
-    return steps
+    assert isinstance(doc, dict), "workflow did not parse as a mapping"
+    return doc
 
 
-def _mutating_steps() -> list[dict]:
-    """The steps that actually RUN a hosted-mutating CLI command (by command position)."""
-    mutating = ("supabase db push", "supabase functions deploy", "supabase migration repair")
+def _all_steps() -> list[dict]:
+    """Every step in every job (parsed, not grepped)."""
     return [
         step
-        for step in _applier_steps()
-        if any(c.startswith(mutating) for c in _commands_in(step))
+        for job in (_workflow_doc().get("jobs") or {}).values()
+        for step in (job.get("steps") or [])
     ]
+
+
+def _applier_jobs() -> list[tuple[str, dict]]:
+    """The job(s) that INSTALL the CLI — the only door that applies production DDL."""
+    return [
+        (name, job)
+        for name, job in (_workflow_doc().get("jobs") or {}).items()
+        if any(
+            "supabase/setup-cli" in str(step.get("uses", ""))
+            for step in (job.get("steps") or [])
+        )
+    ]
+
+
+def _applier_steps() -> list[dict]:
+    """The steps of the APPLIER JOB (the one that installs `supabase/setup-cli`).
+
+    Scoped to that job deliberately. Walking EVERY job made an ordinary local-stack smoke step
+    (`supabase db push --local --yes` added to a new job) a false RED against the remote-target
+    assertion below — but that assertion is about the PRODUCTION apply, and a second job doing local
+    work is not it. Reddening a correct file is a defect in a guard: measured, review cycle 6.
+    """
+    jobs = _applier_jobs()
+    assert len(jobs) == 1, (
+        f"expected exactly one job installing supabase/setup-cli, found {[n for n, _ in jobs]} — "
+        f"the applier's guards would otherwise silently apply to the wrong job(s)"
+    )
+    return list(jobs[0][1].get("steps") or [])
+
+
+#: The command roots that mutate the HOSTED project.
+_MUTATING_ROOTS = ("supabase db push", "supabase functions deploy", "supabase migration repair")
+
+#: Ways a shell `run:` body can turn a failing apply into a green one. `continue-on-error` is the
+#: YAML form; these are the shell forms, and a guard asserting only the YAML form is defeatable by
+#: two tokens — measured GREEN before this was added (review cycle 6).
+_FAILURE_SWALLOWERS = (
+    re.compile(r"\|\|\s*(?:true|:)\b"),
+    re.compile(r"(?m)^\s*set\s+\+e\b"),
+    re.compile(r"(?m)^\s*set\s+\+o\s+errexit\b"),
+    re.compile(r"(?m);\s*true\s*$"),
+)
+
+
+def _run_body(step: dict) -> str:
+    """A step's `run:` body, shell line-continuations joined so a wrapped flag is still one command."""
+    return str(step.get("run") or "").replace("\\\n", " ")
+
+
+def _mutating_steps_with_job() -> list[tuple[str, dict, dict]]:
+    """`(job name, job, step)` for each step that RUNS a hosted-mutating CLI command."""
+    return [
+        (name, job, step)
+        for name, job in _applier_jobs()
+        for step in (job.get("steps") or [])
+        if any(c.startswith(_MUTATING_ROOTS) for c in _commands_in(step))
+    ]
+
 
 
 def _commands_in(step: dict) -> list[str]:
     """The CLI invocations one step runs (shell line-continuations joined, prose skipped)."""
-    body = str(step.get("run") or "").replace("\\\n", " ")
-    return [line.strip() for line in body.splitlines() if line.strip().startswith("supabase ")]
+    return [
+        line.strip()
+        for line in _run_body(step).splitlines()
+        if line.strip().startswith("supabase ")
+    ]
 
 
 def _applier_commands() -> list[str]:
@@ -235,12 +292,35 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
     # job's implicit `success()`, so `Dispatch deploy-hosted` (the last step, #3627) fires over an
     # unapplied schema — a broken deploy that reads as a successful one, with every flag above
     # intact. `test_comove_dispatch_3627` pins this on the DISPATCH step only, never on the applies.
-    for step in _mutating_steps():
+    # …and the silencing must be closed at ALL THREE levels it can be set, not just the step. Each
+    # of the four mutations below was measured GREEN against the step-attribute-only form:
+    # `|| true` appended to the push, `set +e` prepended, a JOB-level `continue-on-error: true`, and
+    # an `if:`-wrapped push. The first three are asserted here; assert-don't-swallow is the contract.
+    mutating = _mutating_steps_with_job()
+    assert mutating, (
+        "the applier job must still RUN a hosted mutation — finding none means the selection broke, "
+        "and every assertion below would pass vacuously (#10896)"
+    )
+    for job_name, job, step in mutating:
+        where = f"step {step.get('name')!r} in job {job_name!r}"
         assert not step.get("continue-on-error"), (
-            f"step {step.get('name')!r} runs a hosted mutation and must not set `continue-on-error`: "
-            f"a failed apply would stop blocking, and the app flip at the end of the same job would "
-            f"fire over an unapplied schema (#10896, #3627)"
+            f"{where} runs a hosted mutation and must not set `continue-on-error`: a failed apply "
+            f"would stop blocking, and the app flip at the end of the same job would fire over an "
+            f"unapplied schema (#10896, #3627)"
         )
+        assert not job.get("continue-on-error"), (
+            f"job {job_name!r} sets `continue-on-error` and runs a hosted mutation: a FAILED apply "
+            f"then produces a GREEN RUN, and `Dispatch deploy-hosted` (#3627) fires over an "
+            f"unapplied schema — the inversion this test exists to catch, with every flag above "
+            f"still intact (#10896)"
+        )
+        body = _run_body(step)
+        for swallow in _FAILURE_SWALLOWERS:
+            assert not swallow.search(body), (
+                f"{where} silences its own failure (matched {swallow.pattern!r}): the apply becomes "
+                f"a no-op that reads as success, and the co-move dispatch fires over an unapplied "
+                f"schema. Assert the exit status — never swallow it (#10896, #3627)"
+            )
 
 
 def test_printed_remediations_pass_yes_too() -> None:
@@ -281,8 +361,22 @@ def test_printed_remediations_pass_yes_too() -> None:
         )
     # The printed manual fallback for the apply itself (drift gate, remediation (a)).
     drift = governed[".github/scripts/check-migration-drift"].read_text(encoding="utf-8")
-    assert "supabase db push --linked --include-all --yes" in drift, (
-        "the drift gate's printed manual apply must carry `--yes` (#10896)"
+    # PER OCCURRENCE on the RUNNABLE form (`--linked`), not as a whole-file substring. The old
+    # substring form was measured GREEN when a SECOND printed `--linked` remedy without `--yes` was
+    # added beside the fixed one. The anchor is `--linked` because the file ALSO says
+    # `supabase db push --include-all` in PROSE describing what the deploy runs — documentation, not
+    # a remedy to copy — and asserting on that would false-RED a correct gate.
+    pushes = re.findall(r"supabase db push --linked[^\"\n]*", drift)
+    assert pushes, (
+        "the drift gate must still print a runnable `supabase db push --linked` apply remedy: an "
+        "operator resolving drift needs a command to run (#1095), and its disappearance must not "
+        "pass vacuously"
+    )
+    lacking = [cmd for cmd in pushes if "--yes" not in cmd]
+    assert not lacking, (
+        f"{len(lacking)} of {len(pushes)} printed `supabase db push --linked` remedies lack `--yes` "
+        f"({lacking}): CLI v3 consent-gates `db push` and cannot prompt, so the copy-paste apply an "
+        f"operator takes from the gate applies nothing and says nothing (#10896)"
     )
 
 
@@ -308,7 +402,7 @@ def test_the_drift_banner_remedy_passes_yes_too() -> None:
     # keeps one YAML traversal to maintain.
     banners = [
         "::warning::" + part
-        for step in _applier_steps()
+        for step in _all_steps()
         for part in str(step.get("run") or "").replace("\\\n", " ").split("::warning::")[1:]
     ]
     remedies = [

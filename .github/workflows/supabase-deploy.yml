@@ -208,18 +208,18 @@ jobs:
       - uses: supabase/setup-cli@v1
         # ⛔ PINNED, NOT `latest` (#10593). The CLI is not an ordinary dependency here: its
         # MAJOR versions change the `supabase/config.toml` schema, and this workflow is the ONLY
-        # door that applies migrations to production. 3.0.0 was published 2026-11-02T12:18Z; the
-        # first and only apply attempted after that — run 42091073635, 2026-11-05T19:45:57Z —
+        # door that applies migrations to production. 3.0.0 was published 2026-11-02T12:18Z, and
+        # TWO applies were dispatched after it — run 42091073635 (`Apply migrations` 19:45:56Z) and
+        # run 42107006180 (same step 21:40:38Z, head `af36e9240`) — and BOTH died the same way: they
         # refused to load this repo's config, which THEN still declared `[inbucket]`
         # (`DbConfigLoadError` => exit 1 at CONFIG LOAD, before `db push` contacts the database):
         #
         #   [inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.
         #   ##[error]Process completed with exit code 1.          -- run 42091073635, 19:45:57Z
         #
-        # Every apply between 2026-11-03T02:53:49Z and this pin died there — that window held no
-        # other apply (no migration was pending until 20261102000001/2 landed on 11-03), which is
-        # why `deploy-hosted`'s drift gate stayed red naming those versions while its own
-        # prescribed remedy (`gh workflow run supabase-deploy.yml --ref main`) could never succeed.
+        # Every apply between 2026-11-03T02:53:49Z and this pin died there, which is why
+        # `deploy-hosted`'s drift gate stayed red naming those versions while its own prescribed
+        # remedy (`gh workflow run supabase-deploy.yml --ref main`) could never succeed.
         # 2.122.1 is `v2.stable`; measured at the same moment, it LOADS this config and fails only
         # for want of the access token CI supplies.
         #

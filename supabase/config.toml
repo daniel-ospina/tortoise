@@ -100,7 +100,7 @@ openai_api_key = "env(OPENAI_API_KEY)"
 # ⛔ `[inbucket]` → `[local_smtp]` (#10896): the Supabase CLI **v3.0.0** removed the `[inbucket]`
 # section and REJECTS a config that carries it — not a warning, an `exit 1` with
 # `[inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.` Because
-# `supabase db push` parses the config BEFORE it looks at any migration, that exit 1 happened 0.5 s
+# `supabase db push` parses the config BEFORE it looks at any migration, that exit 1 happened ~1 s
 # into `Apply migrations` and **no migration was ever applied** — the config section name is the
 # whole reason the only automated DDL path was dead while `deploy-hosted` refused on drift. The
 # section is LOCAL-DEV only (the local mail catcher); it has no production effect.

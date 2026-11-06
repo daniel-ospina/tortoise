@@ -160,7 +160,7 @@ its last step, so step 2 and step 3 of the flip sequence share one run and
 there is no second dispatch to remember. `deploy-hosted` re-runs this same
 drift gate before it ships. If the gate reports `OUT OF ORDER` (a blocking
 version older than prod's newest applied version), resolve those FIRST — a
-forward migration, or `migration repair --linked --status applied <version>`
+forward migration, or `migration repair --linked --status applied <version> --yes`
 when the migration is provably already in prod — because the apply pushes the
 whole pending set in filename order.
 
