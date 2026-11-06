@@ -686,8 +686,14 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     # `is claimed about.` — and each earlier stop point was MEASURED open, not
     # assumed: stopping at `publishes` stayed green on a narrowing appended there,
     # and stopping at `(#9188/#9231/#9307)` stayed green on one appended after the
-    # citation. Anything short of the sentence lets the docstring narrow the claim
-    # to exclude the pair while the pin reports the claim intact (#9548 review P3).
+    # citation. So a narrowing placed anywhere INSIDE this sentence reds the pin.
+    # ⛔ What it does NOT bind, stated so no reader over-trusts it: both halves below
+    # are substring memberships, so a narrowing introduced as a SEPARATE NEW SENTENCE
+    # after `is claimed about.` (e.g. "Separately, the positive pair is documented
+    # elsewhere") still passes. Closing that needs sentence-level parsing of the
+    # docstring — deliberately out of scope for a prose pin; treat this as
+    # "the claim's own sentence is intact", never as "the whole docstring agrees with
+    # it" (#11128 review P3 at 786baf3e7).
     # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
     # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
     # here: a runbook-only diff selects no surface and runs `tier1` only, and this
@@ -708,10 +714,12 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         "them indicator (b) of #9548 (``record_write_failures`` = 0) has no reader at "
         "all on the deployment it is claimed about." in doc
     ), (
-        "`_record_health`'s docstring no longer claims the record counters are "
-        "published under `metrics()`'s own names (or has narrowed that claim so it "
-        "excludes the positive pair) — that claim is what ties the /health keys to "
-        "the ones the rest of the process reads, so losing it makes a rename silent"
+        "`_record_health`'s docstring no longer claims (INSIDE that sentence) that the "
+        "record counters are published under `metrics()`'s own names, or has narrowed "
+        "the claim there so it excludes the positive pair — that claim is what ties the "
+        "/health keys to the ones the rest of the process reads, so losing it makes a "
+        "rename silent. ⚠️ Scope: this is a substring pin on the sentence itself, so a "
+        "narrowing added as a separate later sentence is outside it by construction."
     )
 
 
