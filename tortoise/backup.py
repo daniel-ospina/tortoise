@@ -828,6 +828,15 @@ def restore(backup_dir: str, db_path: str,
                     # (post-restore: #2943).
                     from tortoise.session_source_migration import reconcile_after_replay
                     reconcile_after_replay(proj, engine="backup.restore")
+                    # #11070: rebuild-DETECTED, not repaired (see
+                    # `projection.rebuild`): plan-only, writes nothing. The
+                    # pre-#10852 `SourceCreated` record carries the utterance,
+                    # so this replay re-mints the prose pair. PLAN-ONLY here (no
+                    # record handle) — the clear arm is destructive and not
+                    # self-correcting. Never raises (post-restore: #2943).
+                    from tortoise import session_source_prose_migration as sspm
+
+                    sspm.reconcile_after_replay(proj, engine="backup.restore")
                 assert_no_non_folded(_nf_entries, engine="restore")
             finally:
                 proj.close()
