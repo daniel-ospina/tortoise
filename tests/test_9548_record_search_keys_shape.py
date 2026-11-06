@@ -125,11 +125,13 @@ class _DriverShapeError(Exception):
     """psycopg2's ``str()``: the protocol's fields CONCATENATED (#11121).
 
     Not a stand-in for a driver's behaviour we are guessing at — it is the
-    documented shape. The protocol carries three human-readable fields: ``M``
-    ("accurate but terse (typically one line)"), and the OPTIONAL ``D``/``W``,
-    which quote the DATA (for `22P02` the refused token; for a `CHECK`
-    violation the whole row). psycopg2 formats them as lines, and in total make
-    up ``str(exc)``; ``diag.message_primary`` carries ``M`` alone.
+    documented shape. The fields that quote TEXT FROM THE ERROR are the primary
+    ``M`` ("accurate but terse (typically one line)") and the OPTIONAL
+    ``D``/``W``, which quote the DATA (for `22P02` the refused token; for a
+    `CHECK` violation the whole row). libpq builds ``str(exc)`` from those AND
+    from whatever else the server sent — a ``HINT``, an internal query, the
+    ``LINE n:`` position — and psycopg2 concatenates all of it, while
+    ``diag.message_primary`` carries ``M`` alone.
 
     `_primary_message`/`_driver_fault` exist to keep only the latter, and
     `record_writer._bounded_cause` can only apply the same narrowing to an

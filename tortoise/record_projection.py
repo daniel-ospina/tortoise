@@ -753,10 +753,13 @@ class RecordStatementError(RecordProjectionError):
     clause — the cause arm's own half (:meth:`Statement.attribution`) renders
     ``value_types()`` and carries no bound value at all, and
     :func:`_column_pair` is reached only from the message arm — so what came
-    back verbatim is *whatever the driver chose to quote*, not every withheld
-    value: measured on this PR's own fixture, the refused ``search_keys`` token
-    reappears while the ``content`` value, withheld by the same
-    :func:`_column_pair` on the message arm, does not. ``RecordStatementError``
+    back verbatim was *whatever the driver chose to quote*, not necessarily every
+    withheld value: pre-fix, on this PR's own fixture, the refused ``search_keys``
+    token reappeared. That fixture names nothing but ``search_keys`` in its
+    ``DETAIL``/``CONTEXT``, so it witnesses the leak rather than its extent — a
+    `CHECK` violation's ``DETAIL`` quotes the whole row, and none of the other
+    withheld columns has to appear for this arm to be the wrong place to compose
+    the clause. ``RecordStatementError``
     carries neither ``diag`` nor ``pgcode``, and ``record_writer._bounded_cause``
     narrows only on the OUTER exception's own ``diag``/``pgcode``, so it could
     not repair this either — before this change it took its ``str(exc)`` branch
