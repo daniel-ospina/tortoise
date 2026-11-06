@@ -9442,3 +9442,146 @@ def test_a_before_arm_switch_value_of_another_type_is_refused(value, tmp_path, c
     # …and the shipped `null` still scores.
     path.write_text(text)
     assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+# ── the drop census, and a bar that binds nothing (#10610 review at `6e28a20e1f`) ─────────────
+
+def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
+    """P2: `drops_total` was BOUNDED by the Object population, never reconciled.
+
+    `_count(..., ceiling=gate_objects)` refuses a total above the 61-Object
+    population, which is necessary and not sufficient: the SAME record carries the
+    drop census itself (`e1_gate_drops.py:83` writes `value_gate_drops` as a
+    name-keyed dict, `:84` writes `len(drops)` beside it) and nothing read it — so
+    the field was a trusted integer anywhere inside `[0, objects]`.
+
+    Measured at the pre-fix head, on a copied bundle whose shipped pair is
+    `value_gate_drops: {} / drops_total: 0`: setting `drops_total: 61` (equal to the
+    ceiling, while `62` is refused) exited 0 and emitted `drops_total: 61`. That is
+    the harm the bound exists to prevent, because `capstone_measure.py` renders the
+    number into the scored E1 note as `reports value_gate drops 61 of 61 Objects
+    with its positive controls alive` — a mechanism claim the artifact contradicts.
+
+    Non-vacuity: measured, exit 0 pre-fix and exit 2 here; the shipped `{}`/`0` pair
+    still scores. TWO arms, because the fix has two directions and the ceiling alone
+    covers only one of them:
+
+    * a total ABOVE the census (`61` against the shipped empty census) is refused by
+      the ceiling, which is now `len(census)` rather than the 61-Object population;
+    * a total BELOW the census (`0` against a one-name census) passes every bound
+      and is refused only by the equality check — the direction a ceiling can never
+      see, and the one that keeps a real drop from vanishing out of the note.
+    """
+    repo = _bundle(tmp_path / "census")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+    assert record["value_gate_drops"] == {} and record["drops_total"] == 0, (
+        "the SHIPPED gate record's drop census is not `{}`/0 — re-derive this pin")
+
+    # ARM 1 — the reviewer's measurement: a total inside the OBJECT population but
+    # outside the drop census. It was `61` of 61 Objects, emitted and exit 0.
+    record["drops_total"] = record["objects"]
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    assert "drops_total" in capsys.readouterr().err
+
+    # ARM 2 — the opposite direction, which only the equality check can refuse: one
+    # name in the census, zero claimed in the total.
+    record["value_gate_drops"] = {"the one dropped object": None}
+    record["drops_total"] = 0
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused2:
+        scores_probe.score(repo)
+    assert refused2.value.code == 2, refused2.value
+    err = capsys.readouterr().err
+    assert "census holds 1" in err, err
+
+    # …and the shipped pair still scores, so the guard refuses an edited count
+    # rather than the field.
+    path.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+def test_a_drop_census_that_is_not_an_object_is_refused(tmp_path, capsys):
+    """The census is now READ, so its shape matters: a non-object is a refusal.
+
+    `_object_block` is the helper `with_anchor`/`as_written` already go through —
+    `(value or {})` is not a guard, because a non-empty string is truthy and hands
+    the value on to a `.get` that raises `AttributeError` (exit 1). Reading this
+    field for the first time is what makes that relevant at this site.
+    """
+    repo = _bundle(tmp_path / "census-shape")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+    record["value_gate_drops"] = "none"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value            # NOT exit 1/AttributeError
+    err = capsys.readouterr().err
+    assert "value_gate_drops" in err, err
+
+    path.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+def _prereg_with_threshold(tmp_path: Path, bar: str, new: str) -> Path:
+    """A bundle whose frozen pre-registration states `bar`'s threshold as `new`."""
+    repo = _bundle(tmp_path / f"bar-{bar}")
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    hits = [c for c in prereg["criteria"] if c["id"] == bar]
+    assert len(hits) == 1, f"preregistration no longer carries exactly one {bar} row"
+    hits[0]["threshold"] = new
+    path.write_text(json.dumps(prereg))
+    return repo
+
+
+@pytest.mark.parametrize("bar,new", [
+    # a COUNT bar: `n == 0` never fails, `n > m` never passes — neither binds
+    ("E2a", "`>= 0 of 14`"),
+    ("E2a", "`>= 20 of 14`"),
+    ("E1b", "`>= 0 of 90`"),
+    # E2b is a SHARE over surviving units, so `t >= 1.0` accepts every reading
+    ("E2b", "`<= 1.0`"),
+    # E1 is a REDUCTION: at `m >= 1` the null result satisfies it
+    ("E1", "`after_share <= 1.0 × before_share`"),
+    ("E1", "`after_share <= 100 × before_share`"),
+])
+def test_a_frozen_bar_that_binds_nothing_is_refused(bar, new, tmp_path, capsys):
+    """P2: the `criteria` bars were parse-checked, never BINDING-checked.
+
+    Three statements above them, `denominator_floors` got a positivity arm for
+    exactly this reason — *"a floor of zero or less binds nothing: … every reading
+    would clear it and the guard it feeds would pass everything"*. The four bars are
+    read from the SAME frozen record one statement later and only E2a's `of` was
+    reconciled, so each of these edits moved a VERDICT:
+
+        E1  `<= 0.50 ×` -> `<= 100 ×`   exit 0, E1=PASS, decided=True (was REFUSED)
+        E2a `>= 13 of 14` -> `>= 0 of 14` exit 0, E2=PASS (its own detail: 8/14)
+        E2b `<= 0.05` -> `<= 1.0`       exit 0, accepted
+
+    The rules are provable from each bar's population rather than a policy about
+    how strict a pre-registration should be: a `>= n of m` count binds iff
+    `0 < n <= m`; E2b's share is in `[0, 1]`, so it binds iff `0 <= t < 1`; E1's
+    multiplier is relative and binds iff `0 < m < 1`.
+
+    Non-vacuity: measured, all six exit 0 at the pre-fix head and exit 2 here. The
+    SHIPPED bars (0.50, 90/90, 13/14, 0.05) are all inside those windows, which the
+    byte-pin above proves independently — that is the over-block check.
+    """
+    repo = _prereg_with_threshold(tmp_path, bar, new)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert f"criteria[{bar}]" in err, err
+
+    # …and the SHIPPED bar for that same row still scores, so the rule refuses the
+    # inert value rather than the row.
+    shipped = _bundle(tmp_path / f"shipped-{bar}")
+    assert scores_probe.score(shipped)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")

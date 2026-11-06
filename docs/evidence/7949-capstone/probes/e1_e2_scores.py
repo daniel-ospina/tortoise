@@ -786,6 +786,61 @@ def frozen_denominators(repo: Path) -> dict:
                       f"{bars['E2a']['of']}' but corpus.value_bearing_units is "
                       f"{value_bearing} — two frozen statements about E2a's "
                       "denominator disagree, so no bar can be printed over it")
+    # ⛔ A BAR THAT BINDS NOTHING IS NOT A BAR (#10610 review at `6e28a20e1f`,
+    # P2). The `denominator_floors` map three statements above got a positivity arm
+    # for exactly this reason ("a floor of zero or less binds nothing: … every
+    # reading would clear it and the guard it feeds would pass everything"), and the
+    # four `criteria` bars are read from the SAME frozen record one statement later
+    # with only E2a's `of` reconciled. Measured at the pre-fix head, each of these
+    # exited 0 and moved a verdict:
+    #
+    #   E1  `after_share <= 0.50 × before_share` -> `<= 100 ×`  E1=PASS, decided=True
+    #   E2a `>= 13 of 14`                        -> `>= 0 of 14` E2=PASS (8/14 survived)
+    #   E2b `<= 0.05`                            -> `<= 1.0`     accepted
+    #
+    # The three rules below are PROVABLE from the population each bar is stated
+    # over, not a policy about how strict a pre-registration should be:
+    #
+    #  * a `>= n of m` COUNT bar is inert at `n == 0` (nothing ever fails it) and
+    #    unsatisfiable at `n > m` (nothing ever passes it), so it binds iff
+    #    `0 < n <= m`;
+    #  * E2b is a SHARE over surviving units, which is in `[0, 1]` by construction,
+    #    so `t >= 1.0` accepts the worst possible reading (every unit fused) and
+    #    `t < 0` accepts nothing — it binds iff `0 <= t < 1`;
+    #  * E1 is a REDUCTION (`after <= m × before`). At `m >= 1` the criterion is
+    #    satisfied by the null result — an after arm that improved nothing, or got
+    #    worse-but-not-more-than-m-times-worse — so it is not the reduction E1 is
+    #    defined to measure. It binds iff `0 < m < 1`.
+    #
+    # ⛔ SCOPE: the four bars this driver SCORES. `parse_bars` also returns E4's and
+    # E5's, and this record grades neither; refusing a pre-registration over a bar
+    # nothing here reads would be over-block, so they are deliberately not checked.
+    # `parse_bars`' regexes only admit digit literals, so there is no `NaN`/`Infinity`
+    # /`bool` avenue to close here — every hole left was MAGNITUDE, which is why the
+    # rules above are about magnitude.
+    for bar_id in ("E1b", "E2a"):
+        required, of = bars[bar_id]["required"], bars[bar_id]["of"]
+        if not 0 < required <= of:
+            raise _refuse(
+                f"{PREREG}'s criteria[{bar_id}] bar is '>= {required} of {of}' — "
+                "a count bar binds nothing outside `0 < n <= m`: at n=0 no "
+                "reading can fail it, and above m no reading can pass it, so "
+                f"either way row {bar_id} would be decided by nothing")
+    max_fused = bars["E2b"]["max_fused_share"]
+    if not 0 <= max_fused < 1:
+        raise _refuse(
+            f"{PREREG}'s criteria[E2b] bar is '<= {max_fused}" + "' — a fused "
+            "share is a fraction of the surviving units, so a bound of 1.0 or "
+            "more accepts the worst possible reading (every unit fused) and a "
+            "negative one accepts none; it binds iff `0 <= t < 1`")
+    multiplier = bars["E1"]["multiplier"]
+    if not 0 < multiplier < 1:
+        raise _refuse(
+            f"{PREREG}'s criteria[E1] bar is 'after_share <= {multiplier} x "
+            "before_share' — E1 registers a REDUCTION, and at a multiplier of "
+            "1.0 or more the criterion is satisfied by the null result (an after "
+            "arm that improved nothing), so it is not the reduction the row "
+            "claims to measure; it binds iff `0 < m < 1`")
     return {
         "e1_objects": floors["e1_objects"],
         "e1_min_before_share": floors["e1_min_before_share"],
@@ -1826,6 +1881,35 @@ def score(repo: Path = _ROOT) -> dict:
     gate_record = _read_json(repo / EVIDENCE / GATE_DROPS)
     gate_objects = _count(f"{EVIDENCE / GATE_DROPS}", "objects",
                           gate_record.get("objects"))
+    # ⛔ THE CEILING WAS A BOUND, NOT A RECONCILIATION (#10610 review at
+    # `6e28a20e1f`, P2). `_count(..., ceiling=gate_objects)` refuses a value
+    # above the Object population, which is necessary and not sufficient: the
+    # SAME record carries the drop census itself (`e1_gate_drops.py:83` writes
+    # `value_gate_drops` as a name-keyed dict, `:84` writes `len(drops)` beside
+    # it), and nothing in this file had ever read it. So any value in
+    # `[0, objects]` scored — measured at the pre-fix head, `drops_total: 61`
+    # (equal to the 61-Object ceiling) beside a shipped `value_gate_drops: {}`
+    # exited 0 and the record emitted `drops_total: 61`, where 62 was refused.
+    # That is exactly the harm the bound was added to prevent: the number reaches
+    # `capstone_measure.py`'s E1 note as `reports value_gate drops 61 of 61
+    # Objects with its positive controls alive` — a mechanism claim the artifact
+    # it was read from contradicts.
+    #
+    # The census is REQUIRED and the count must EQUAL it. A present-but-empty
+    # `{}` is legitimate here (zero drops is the shipped reading) — unlike
+    # `with_anchor`, where an empty block means the run never wrote its counter —
+    # so the check is `len()`, not emptiness.
+    gate_census = _object_block(str(EVIDENCE / GATE_DROPS), "value_gate_drops",
+                               gate_record.get("value_gate_drops"))
+    gate_drops_total = _count(f"{EVIDENCE / GATE_DROPS}", "drops_total",
+                             gate_record.get("drops_total"),
+                             ceiling=len(gate_census))
+    if gate_drops_total != len(gate_census):
+        raise _refuse(
+            f"{EVIDENCE / GATE_DROPS} states drops_total={gate_drops_total} but "
+            f"its own `value_gate_drops` census holds {len(gate_census)} — "
+            "the count IS the names it dropped, so a total that disagrees with "
+            "its own census is a number edited away from the run")
     return {
         "schema": "e1-e2-scores/1",
         "corpus_sha256": floors["fixtures_hash"],
@@ -1905,9 +1989,7 @@ def score(repo: Path = _ROOT) -> dict:
         "gate_drops": {
             "artifact": f"{EVIDENCE / GATE_DROPS}",
             "objects": gate_objects,
-            "drops_total": _count(f"{EVIDENCE / GATE_DROPS}", "drops_total",
-                                  gate_record.get("drops_total"),
-                                  ceiling=gate_objects),
+            "drops_total": gate_drops_total,
             "predicate_alive": gate_record.get("predicate_alive"),
         },
     }
