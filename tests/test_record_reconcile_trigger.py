@@ -467,16 +467,27 @@ def test_the_UNDECLARED_second_writer_population_is_reported_but_never_divergenc
     assert held.report.field_mismatches == 1, held.report.render()
     assert held.verdict() == rr.VERDICT_DIVERGENT
 
-    # THIRD ARM — the PLACEMENT half of the two-term rule. `title` is INSIDE the
-    # record's placement (so the schema says the record can carry it) and ABSENT
-    # from this record row, while the cache has it: a projection gap, which must
+    # THIRD ARM — the PLACEMENT half of the two-term rule. `content` is INSIDE
+    # the record's placement for a `Point` — this arm reads the placement table
+    # ITSELF (`projected_properties` + the contract key, the same pair
+    # `scan_cache_view` fills) rather than a hand-picked name, so the scenario is
+    # one the production read can actually produce. (The earlier draft named
+    # `title`, which is a `source` column and NOT in `point`'s placement: with
+    # the shipped map that name is bucketed and reads `clean`, so the arm passed
+    # on a synthetic map only — measured, #11253's review.) `content` is ABSENT
+    # from this record row while the cache has it: a projection gap, which must
     # stay COMPARED. Partition it out and the pair reads `clean` — measured
     # against a mutant `keep = set(record_props)`, where THIS arm reds and the
     # two above stay green.
+    point_placement = (cp.projected_properties(cp.NODE_TABLES["Point"])
+                       | {cp.KEY_PROPERTY["Point"]})
+    assert "content" in point_placement, (
+        "the arm's gap name must be one the placement table PLACES, or the "
+        "scenario is unreachable through `scan_cache_view`")
     in_placement = rr.reconcile_record_and_cache(
         {"Point:p1": {"id": "p1"}},
-        {"Point:p1": {"id": "p1", "title": "X"}},
-        placed={"Point:p1": frozenset({"id", "title"})})
+        {"Point:p1": {"id": "p1", "content": "projected, record row silent"}},
+        placed={"Point:p1": point_placement})
     assert in_placement.graph_only == (), (
         "a cache property INSIDE the record's placement was partitioned out as "
         "cache-held, so a projection that wrote a field the record PLACES and "

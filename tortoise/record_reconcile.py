@@ -49,10 +49,17 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   record side does not carry it — so FOUR populations reach it: (a) the EP and
   derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
   ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
-  REFUSES by name and so can never hold — the one §17.5 owns; (b) any property a
-  SECOND WRITER put on a placed node, OR on a cache-only node the record does
-  not own at all (``scan_cache_view`` fills ``placed`` for every cache node it
-  reads, so such a node's out-of-placement names are bucketed too), which the
+  REFUSES by name and so can never hold — the one §17.5 owns. ⚠️ ONE refused
+  name the record's own derivation DOES supply: ``status`` (``Object``/
+  ``Subject``) is refused as a record ``props`` KEY, but ``DERIVED_FROM_RECORD``
+  and the ``EVENT_STREAM_FOLDS`` synthesise it on the record side, so wherever
+  the record carries a carrier the name is COMPARED and a mismatch reds; only a
+  ``status`` the record cannot corroborate (no carrier on the record side)
+  reaches this bucket, and that is a lifecycle value, not "nothing to repair";
+  (b) any property a
+  SECOND WRITER put on a placed node, OR on a node the record does not own at
+  all (``scan_cache_view`` fills ``placed`` for every cache node it reads, so
+  such a node's out-of-placement names are bucketed too), which the
   record does not carry — §17.1's
   chokepoint signature, DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
@@ -69,16 +76,23 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
   count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
-  here — (b) is declared by nothing — and every one of them is BUCKETED rather
-  than compared (⛔ not "every one reads clean": a property on a cache-only node
-  is bucketed while the node itself is an ``extra_in_cache`` divergence, so that
-  pair reads DIVERGENT), while the
+  here — (b) is declared by nothing — and the partition BUCKETS every name it
+  cannot judge rather than comparing it (⛔ not "every one reads clean": a
+  property on a node the record does not own is bucketed while the NODE itself
+  is an ``extra_in_cache`` divergence, so that pair reads DIVERGENT), while the
   three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
-  nothing to repair); the projection-DECLINED pair an EPISODIC Source's
+  nothing to repair — bar ``status``, which the record's own derivation makes
+  COMPARABLE wherever the record carries the carrier, see (a) above); the
+  projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record's
-  TABLE holds, and which a record-sourced re-projection removes; and the
+  TABLE holds and the record SIDE of this comparison omits, and which
+  ``session_source_prose_migration.reconcile_session_source_prose`` (#11070)
+  releases IN PLACE, ⛔ NOT a record-sourced re-projection: that write is
+  ADDITIVE (``MERGE … SET n += $props``, no REMOVE pass), so a node that already
+  carries the pair keeps it across an incremental projection
+  (``cache_projection``'s own stated bound, #10852 review); and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
   — which the record's TABLE ALSO holds and which no projection may ever write,
   because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
@@ -424,10 +438,11 @@ class RecordReconcileResult:
     #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
     #: and the cache must not materialise, ``#10394``), PLUS one population no
     #: declaration names — a property a SECOND WRITER put on a placed node the
-    #: record does not carry, or on a cache-only node the record does not own at
+    #: record does not carry, or on a node the record does not own at
     #: all (``#11221``; the bucket is partitioned OUT of ``field_mismatches``, so
-    #: the placed-node case reads `clean` while a cache-only node is an
-    #: ``extra_in_cache`` divergence and reads DIVERGENT; either way the repair is
+    #: the placed-node case reads `clean` while a node the record does not own is
+    #: an ``extra_in_cache`` divergence and reads DIVERGENT; either way the
+    #: repair is
     #: *find the writer*) — as
     #: ``(name, node count)``. Kept OUT of ``field_mismatches``
     #: (counting them
@@ -518,10 +533,19 @@ def reconcile_record_and_cache(
     refuses by name) is NOT a field mismatch and is reported as its own named
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
-    a ``graph_only`` name has one repair per population: none (schema-refused),
-    a record-sourced re-projection (declined), the graph-side purge for a
-    not-projectable column (below), or *find the writer* for the undeclared
-    second-writer population the partition also counts.
+    a ``graph_only`` name has one repair per population: none (schema-refused —
+    bar ``status``: where the record carries a carrier the name is COMPARED, and
+    its uncorroborated form — a value the record cannot place — is cleared by an
+    explicit caller clear (``update_entity(…, status=None)``,
+    ``SET n += {status: null}``, a REMOVAL) or the destructive wipe, ⛔ NOT by a
+    record-sourced re-projection, which is ADDITIVE and leaves the value in
+    place — measured, see the module docstring's (5)),
+    a record-sourced clear IN PLACE for the declined pair —
+    ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
+    ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
+    node, the graph-side purge for a not-projectable column (below), or *find
+    the writer* for the undeclared second-writer population the partition also
+    counts.
 
     ⛔ AND A THIRD OMISSION, from `#10394`: `cache_projection.
     CACHE_FORBIDDEN_COLUMNS` subtracts the NOT-PROJECTABLE class from
@@ -686,13 +710,15 @@ def log_result(result: RecordReconcileResult,
         # ⚠️ "cache-HELD", not "cache-OWNED" (#10394 review, P3). Each of the
         # THREE DECLARED omission classes is a property the CACHE holds — and
         # `graph_only` ALSO counts one population NO DECLARATION NAMES (a SECOND
-        # WRITER's property on a placed node the record does not carry; its
-        # repair is *find the writer*), so the bucket is not the three-name set
+        # WRITER's property on a placed node the record does not carry, or on a
+        # node the record does not own at all; its repair is *find the writer*),
+        # so the bucket is not the three-name set
         # this comment's earlier wording implied. "owned" is the §17.5
         # partition's term for ONE of the three (the EP/derived scalars the
         # record schema refuses, which only the cache has). The other two are
         # record-owned: the §9.1/D1 pair the narrowing DECLINES (the record
-        # holds it, its repair is a re-projection) and the not-projectable
+        # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
+        # re-projection, whose write is additive —) and the not-projectable
         # column (the record holds it and the graph must NOT — its repair is
         # #10017's purge). Calling them all "owned" sends the operator to the
         # wrong repair.
