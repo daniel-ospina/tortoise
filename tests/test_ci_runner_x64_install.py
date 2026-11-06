@@ -3743,6 +3743,36 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
     )
 
 
+#: Files OUTSIDE the two runbooks that cite `python-ci.yml:<line>` for the `test-slow` header's
+#: refusal paragraph. Both were exactly right on `main` (`:1891`) and #6744's +70-line insert in the
+#: `test` job's `strategy` block moved the paragraph to `:1961` — and NOTHING read either file, so the
+#: drift shipped green: a reader (or a fixer) sent to `:1891` lands one job earlier on the `test`
+#: job's FalkorDB-teardown comment and never finds the refusal it was sent to read.
+_REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
+
+#: The sentence such a citation must land on — the opener of the `test-slow` header's cost paragraph
+#: (`# the fallback label is attached. During a real GitHub-hosted outage these two …`), which is
+#: where the refusal is stated. Pinned by SENTENCE, like the refs in the runbook pin below, so a
+#: number that keeps passing `1 <= n <= EOF` while landing elsewhere reds instead.
+_REFUSAL_ANCHOR = "the fallback label is attached"
+
+
+def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
+    """Every `python-ci.yml:<n>` in `text` that does not land on the refusal paragraph."""
+    problems: list[str] = []
+    for m in re.finditer(r"python-ci\.yml:(\d+)", text):
+        n = int(m.group(1))
+        if not 1 <= n <= len(workflow):
+            problems.append(f"cites python-ci.yml:{n}, past EOF ({len(workflow)} lines)")
+            continue
+        if _REFUSAL_ANCHOR not in workflow[n - 1]:
+            problems.append(
+                f"cites python-ci.yml:{n}, which is {workflow[n - 1].strip()!r} — not the "
+                f"`test-slow` refusal paragraph"
+            )
+    return problems
+
+
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
 def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     """Refs OUTSIDE the installer map were only range-checked, so they drifted silently.
@@ -3883,6 +3913,35 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         f"batch-integration.md cites python-ci.yml:{n} for the canary killed at 32m12s, but that "
         f"line is {at('.github/workflows/python-ci.yml', n)!r}"
     )
+
+    # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
+    # `.github/workflows/ci.yml:1506` and `.github/actionlint.yaml:32` both cite the same refusal
+    # paragraph, and both were exactly right on `main` (`python-ci.yml:1891`). The +70-line insert
+    # into the `test` job's `strategy` block moved it to `:1961`, and neither file is read by any
+    # gate — the identical "no gate reads it, so it drifts green" hole that put
+    # `batch-integration.md` in this pin one round earlier. Both sentences are load-bearing:
+    # `ci.yml:1506` is why the #10237 canary exists at all (the required legs CANNOT be routed to
+    # the pool), and `actionlint.yaml:32` is the only record of why declaring a label is not a way
+    # to make a required leg schedulable.
+    #
+    # Mutation: revert either number to its pre-#6744 value (`:1891`) -> RED naming the line it
+    # actually hit, which at this head is the `test` job's FalkorDB-teardown comment.
+    workflow_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    for rel in _REFUSAL_CITATION_SITES:
+        text = (REPO_ROOT / rel).read_text()
+        assert re.search(r"python-ci\.yml:\d+", text), (
+            f"{rel} no longer cites `python-ci.yml:<line>` for the `test-slow` refusal — re-anchor "
+            "this pin rather than deleting it"
+        )
+        problems = _refusal_citation_problems(text, workflow_lines)
+        assert not problems, f"{rel} sends the reader past the sentence it means: " + "; ".join(problems)
+
+    # Non-vacuity, executable: the SAME checker must reject the pre-fix citation, so a pass on the
+    # real files cannot be it matching nothing. `:1891` is the number both files carried on `main`
+    # (and the number this round corrected) — measured, not invented.
+    assert _refusal_citation_problems(
+        "The required legs CANNOT be routed here: `python-ci.yml:1891` — refused.", workflow_lines
+    ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
 
 
 # ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────

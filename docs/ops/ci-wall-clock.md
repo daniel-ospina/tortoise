@@ -535,7 +535,7 @@ batch is real, but it is created when the job becomes eligible, NOT at the run's
 | reading | value |
 | --- | --- |
 | the 4 `needs:`-less jobs (`changes`, `manifest-integrity`, `surface-guard`, `workflow-lint`) | one `created_at`: `14:57:11Z` |
-| every cell of all 3 matrices + the 6 jobs that need only `changes` (22 jobs) | one `created_at`: `15:38:51Z` |
+| every cell of all 3 matrices + the 5 jobs that need only `changes` (22 jobs) | one `created_at`: `15:38:51Z` |
 | the run's own creation | `13:15:19Z` — so its first job was created 1 h 42 m later |
 | fast legs' `started_at` (4 of 9) | `16:40:46`, `16:45:34`, `16:46:13`, `17:36:36` |
 | their wait, `created_at` → `started_at` | 62, 67, 67, **118** minutes |
