@@ -21,20 +21,31 @@ A SECOND review round (`#10852` @ `3466bc1ce`, P3) found the correction itself
 carried the same defect in miniature: the list it published named THREE routes,
 and for the population under discussion — the node that already carries the
 pair — two of them clear nothing. A capture under a NEW `session_id` MERGEs a
-DIFFERENT node (`url = session:<id>`), so the old node keeps its pair; a
-record-sourced re-projection is a PREVENTION route (its write is additive,
-`MERGE … SET n += $props`, and `summary` is declined on that door), so it only
-ever produces a prose-free node where none existed. The guard below now pins
-the SINGLE clearing route and keeps the three-route claim out of both docs,
-because a repair list that is wrong for two of its three members is the same
-"this population sorts itself out" misdirection the retraction exists to remove.
+DIFFERENT node (`url = session:<id>`), so the old node keeps its pair; an
+INCREMENTAL record-sourced re-projection is a PREVENTION route (its write is
+additive, `MERGE … SET n += $props`, and `summary` is declined on that door), so
+it only ever produces a prose-free node where none existed. The guard below
+pins every route that really does clear the pair and keeps the wrong two out of
+both docs, because a repair list that is wrong for two of its three members is
+the same "this population sorts itself out" misdirection the retraction exists
+to remove.
+
+⚠️ THE CENSUS IS THREE, not one (#11184 review, cycle 10 — measured): `#11070`'s
+repair SHIPPED in `98df3bd4cf` (`tortoise/session_source_prose_migration.py`,
+operator path `graph-scripts/11070_repair_session_source_prose.py`), and it
+repairs or clears the pair IN PLACE from the record without a wipe; and a full
+`record-restore` wipes unconditionally (`_wipe_all_nodes`), clearing the pair
+along with everything else. The two PREVENTION routes above are still not
+clearing routes — that half of the `#10852` correction stands.
 
 WHY ITS OWN FILE, REGISTERED IN `tier1`. The guarded artifact is under `docs/`,
 and a docs-only diff selects no surface and runs `tier1` only, so a pin placed in
 `tests/test_10000_source_prose.py` (the `core` surface, graph-touching, one
 throwaway FalkorDB per case) would SLEEP on exactly the diff that re-arms the
 claim. Same shape and the same reason as `tests/test_10191_record_move_doc_pin.py`.
-DB-free, fixture-free, network-free: it reads two files and asserts on text.
+DB-free, fixture-free, network-free: it reads two files and asserts on text — plus,
+through `cache_projection.projected_columns`, the record migration files it parses
+(`record_projection._read_migrations`), which is still no DB, fixture or network.
 
 WHAT IT ASSERTS is the CORRECTION in both directions, in the doc AND in the module
 docstring the doc is supposed to mirror, so the two cannot drift apart silently:
@@ -97,11 +108,23 @@ RETRACTED_SHAPES = (
 #: statement passes, a correct-looking one that loses the mechanism does not.
 CORRECTION_KEYWORDS = ("does not repair", "no-op replay", "1727")
 
-#: The ONE route that clears an EXISTING legacy node's pair: a retry of a prior
-#: FAILED capture re-runs the mint for the same `url`, so the capture's `SET`s
-#: overwrite the pair (`retry_failed_capture`, `#2335`). It is the only entry
-#: because `#10852`'s review measured the other two as prevention, not repair.
-CLEARING_ROUTES = ("retry of a prior FAILED capture",)
+#: Every route that clears an EXISTING legacy node's pair, and each is pinned
+#: because a repair list short by one sends the operator to the wrong lane:
+#:   * a retry of a prior FAILED capture re-runs the mint for the same `url`, so
+#:     the capture's `SET`s overwrite the pair (`retry_failed_capture`, `#2335`);
+#:   * `#11070`'s reconciler repairs or CLEARS the pair IN PLACE from the record
+#:     without a wipe (shipped `98df3bd4cf`, `#11152`) — the only non-destructive
+#:     route;
+#:   * a full `record-restore` wipes unconditionally (`_wipe_all_nodes`), so it
+#:     clears the pair along with the rest of the graph.
+#: ⚠️ The `#10852` review's "SINGLE clearing route" was true when it was measured
+#: and stopped being true when `#11070` shipped; the PREVENTION half of it — a NEW
+#: `session_id` and an incremental re-projection clear nothing — still stands.
+CLEARING_ROUTES = (
+    "retry of a prior FAILED capture",
+    "reconcile_session_source_prose",
+    "record-restore",
+)
 
 #: The two routes the earlier cut published as clearing ones. They must still be
 #: NAMED — an operator who was told about them needs to learn they do not clear
@@ -121,6 +144,89 @@ REQUIRED_PINNED_LEGS = (
     "test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row",
 )
 
+#: The `#10394` review's last open P3: the value-filling class was proved by
+#: naming the fold's KEYS as record COLUMNS. `FOLD_ON_CREATE_DEFAULTS` is keyed by
+#: PROPERTY name (`subjectKind` — what the node and the placement table carry);
+#: `projected_columns` speaks COLUMN space (`subject_kind` — what the record row
+#: carries). Two of the three members named were not columns in ANY table, so the
+#: proof was false for them — in the one sentence whose entire job is to prove the
+#: class. The first shape is the pre-fix text VERBATIM, so this arm was RED at
+#: `ce056ec857` (measured); the second is the paraphrase a lane reaches for when it
+#: re-types the claim from the fold's dict keys.
+PROPERTY_AS_COLUMN_SHAPES = (
+    "`subjectKind`/`objectKind`/`Object.title` are all in `projected_columns`",
+    "`subjectKind`/`objectKind`/`title` are all in `projected_columns`",
+)
+
+def _snake(prop: str) -> str:
+    """`subjectKind` → `subject_kind`: the record's spelling of a property name.
+
+    The two namespaces the `#10394` review P3 conflated: `FOLD_ON_CREATE_DEFAULTS`
+    is keyed in PROPERTY space (what the node carries) and `projected_columns`
+    answers in COLUMN space (what the row carries). A single-word key spells the
+    same in both, which is why one of the three members was true as written and
+    the two camel-case ones were not.
+    """
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", prop).lower()
+
+
+#: The fold's OWN table, derived from the label it is keyed by — never a hand
+#: restated list. The first cut hardcoded the three members, which is the same
+#: restated-enumeration cost the commit message claims to avoid one level up: a new
+#: fold default would have left both the doc's "all three" and this pin's member
+#: list silently short.
+FOLD_LABEL_TABLES = (("Subject", "subject"), ("Object", "object"))
+
+
+def _fold_columns() -> tuple[tuple[str, str], ...]:
+    """`(table, column)` for every declared fold default, DERIVED not restated."""
+    owned = dict(FOLD_LABEL_TABLES)
+    return tuple(
+        sorted((owned[label], _snake(prop))
+               for label, defaults in cache_projection.FOLD_ON_CREATE_DEFAULTS.items()
+               if label in owned
+               for prop in defaults))
+
+
+#: The same fields in the space the claim has to live in — derived from the fold and
+#: MEASURED against the projector, so a column that stops projecting (or a new fold
+#: default) reds the sentence that cites the class instead of rotting quietly.
+FOLD_COLUMNS = _fold_columns()
+
+#: The section that makes the non-widening claim. The presence arm is SCOPED to it:
+#: an unscoped `column in whole` check is vacuous at this very head — `### 0.6
+#: Verification` names the same three columns in another bullet (measured, and the
+#: reason a review found the first cut GREEN on the deletion it exists to catch).
+FOLD_PROOF_HEADING_PREFIX = "## §9.1/D1 at the projection door"
+FOLD_PROOF_PREFIX_LABEL = "§9.1/D1 at the projection door"
+
+#: The column space the proof must be stated IN, within that section.
+PROOF_CITATION = "projected_columns"
+
+#: How much text around a `projected_columns` mention counts as "cited beside it".
+#: A mixed-space paraphrase (`subject_kind`/`objectKind` "are all in
+#: `projected_columns`") is the likeliest re-entry of the defect, and it is not any
+#: single string — so the guard checks the WINDOW around every mention instead of
+#: blacklisting shapes. 400 chars covers the parenthetical a lane rewrites without
+#: reaching into the next paragraph.
+COLUMN_CITATION_WINDOW = 400
+
+#: A camel-case key inside that window is FINE when the text is drawing the
+#: contrast — naming the namespace is the correct thing to do, and the corrected
+#: sentence does exactly that. So the qualifier is what separates the contrast from
+#: the claim: a namespace marker shortly before the key. Without one, the key reads
+#: as a member of the set it is cited beside, which is the defect.
+NAMESPACE_MARKERS = ("PROPERTY", "property name", "property names")
+NAMESPACE_LOOKBACK = 160
+
+#: The tables whose column lists are the universe for the property-space check —
+#: the four an entity/node row is built from, NOT all ten `table_columns()` answers
+#: (`record_projection.table_columns()` also keys `journal_event`, `node_identity`,
+#: `point`, `relation`, `session`, `session_narrative`). Measured: no column in ANY
+#: of the ten carries an uppercase character, so the camel-case arm is equivalent
+#: over the full set; the own-table arm below is what keeps the check exact.
+COLUMN_SPACE_TABLES = ("subject", "object", "event", "source")
+
 #: The modules a cited `test_*` name may resolve in — the two files the pin
 #: section points at, and nothing else.
 PIN_MODULES = (
@@ -129,6 +235,26 @@ PIN_MODULES = (
     # This file is itself a leg the pin section cites.
     ROOT / "tests" / "test_10000_cache_projection_doc_pin.py",
 )
+
+
+def _section_by_prefix(prefix: str) -> str:
+    """The body of the ONE heading starting with ``prefix``, verbatim.
+
+    Prefix-anchored rather than exact (unlike :func:`_section`) because this heading
+    carries a long tail that lanes legitimately extend; the EXACTLY-ONCE assertion is
+    kept, because a prefix that matches twice would inspect the wrong prose and read
+    as coverage.
+    """
+    lines = DOC.read_text(encoding="utf-8").splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith(prefix)]
+    assert len(starts) == 1, (
+        f"`{DOC.name}` must carry exactly ONE heading starting `{prefix}`; found "
+        f"{len(starts)} at lines {starts}. Re-point this guard at the section rather "
+        "than deleting it — it is what ties the doc's claim to the code's")
+    start = starts[0] + 1
+    end = next((i for i in range(start, len(lines))
+                if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[start:end])
 
 
 def _doc_text() -> str:
@@ -259,6 +385,129 @@ def test_the_pin_section_names_the_per_row_legs_and_they_resolve():
             f"`{DOC.name}`'s `{PIN_HEADING}` cites `{cited}`, which is not "
             f"defined in {' or '.join(p.name for p in PIN_MODULES)} — a doc that "
             "names a leg that does not exist pins nothing")
+
+
+def test_the_value_filling_class_is_proved_in_COLUMN_space_and_the_proof_is_measured():
+    """`FOLD_ON_CREATE_DEFAULTS` does not widen the field set — proved in columns.
+
+    RED against the pre-fix document at `ce056ec857`: its parenthetical said the
+    fold's keys "are all in `projected_columns`", and `projected_columns` is
+    COLUMN space. Measured there: `subject_kind` is a `Subject` column and
+    `object_kind`/`title` are `Object` columns, while `subjectKind`/`objectKind`
+    are property names present in NO table's column list — the claim was false for
+    two of its three members, in the sentence whose whole job is to prove the
+    value-filling class.
+
+    WHY A FALSE PROOF IS NOT COSMETIC. The sentence exists to settle a conflation
+    (field-set vs value) that `#17.2`/point 3 rely on; a reader who checks it
+    against `projected_columns` finds `subjectKind` absent and concludes the fold
+    DOES widen the set — the exact misreading the paragraph forbids. The measured
+    arm below keeps the corrected sentence honest in both namespaces.
+    """
+    whole = _doc_text()
+    for shape in PROPERTY_AS_COLUMN_SHAPES:
+        assert shape not in whole, (
+            f"`{DOC.name}` proves the value-filling class in PROPERTY space "
+            f"({shape!r}) while citing COLUMN space. `FOLD_ON_CREATE_DEFAULTS` is "
+            "keyed by property name; `projected_columns` returns the record's "
+            "snake_case columns. Name the three fields as columns (measured), or "
+            "drop the citation — a proof whose members are not members of the set "
+            "it cites is the field-set/value conflation the paragraph exists to "
+            "prevent.")
+
+    # ⛔ THE CLASS, not the shape: exact strings only catch the wording that has
+    # already happened. A camel-case fold key within a citation window of
+    # `projected_columns` is the defect however the sentence is arranged —
+    # measured, that table holds `subject_kind`, never `subjectKind`, so any such
+    # citation is false about its own members.
+    camel_keys = sorted({key for defaults
+                         in cache_projection.FOLD_ON_CREATE_DEFAULTS.values()
+                         for key in defaults if _snake(key) != key})
+    assert camel_keys, (
+        "`FOLD_ON_CREATE_DEFAULTS` no longer carries a camel-case key — the "
+        "property/column namespace split this pin measures does not exist. "
+        "Re-derive the census (module-docstring point 3) before trusting the arm.")
+    lowered = whole.lower()
+    start = lowered.find("projected_columns")
+    while start != -1:
+        window = whole[max(0, start - COLUMN_CITATION_WINDOW):
+                       start + len("projected_columns") + COLUMN_CITATION_WINDOW]
+        for prop in camel_keys:
+            at = window.find(prop)
+            while at != -1:
+                context = window[max(0, at - NAMESPACE_LOOKBACK):at]
+                assert any(marker in context for marker in NAMESPACE_MARKERS), (
+                    f"`{DOC.name}` cites `{prop}` (a PROPERTY name) within "
+                    f"{COLUMN_CITATION_WINDOW} chars of `projected_columns` (COLUMN "
+                    "space) without saying what namespace it belongs to — "
+                    f"measured, no table's column list contains `{prop}`; the row "
+                    f"spells it `{_snake(prop)}`. A mixed-space paraphrase is the "
+                    "likeliest re-entry of the P3 this pin closes: either state the "
+                    "proof in column space, or name the namespace so the contrast "
+                    "is unambiguous (a bare key beside the citation reads as a "
+                    "member of it).")
+                at = window.find(prop, at + 1)
+        start = lowered.find("projected_columns", start + 1)
+
+    # The corrected sentence must be PRESENT, not merely un-replaced: the file's
+    # own convention is that "fixing" a false claim by deleting it does not pass
+    # (`test_the_doc_states_the_mechanism_and_the_routes_that_do_clear_the_pair`
+    # exists for the same reason).
+    # ⛔ SCOPED TO THE SECTION, and that scoping is the whole arm: an unscoped
+    # `column in whole` check was GREEN on the deletion it names, because
+    # `### 0.6 Verification` names the same three columns in a different bullet
+    # (found by review at `f9adf39da5`, P2 — a guard reporting OK on the exact
+    # mutation it exists to catch is the false-PASS class, not a wording nit).
+    proof = _section_by_prefix(FOLD_PROOF_HEADING_PREFIX)
+    assert PROOF_CITATION in proof, (
+        f"`{DOC.name}`'s `{FOLD_PROOF_PREFIX_LABEL}` section no longer mentions "
+        f"`{PROOF_CITATION}`. The value-filling class is settled there by citing "
+        "the COLUMNS the fold fills; without that citation the paragraph's claim "
+        "is unbacked and a reader concludes the fold widens the field set.")
+    for _table, column in FOLD_COLUMNS:
+        assert column in proof, (
+            f"`{DOC.name}`'s `{FOLD_PROOF_PREFIX_LABEL}` section no longer names "
+            f"`{column}`. Deleting the proof is not a repair — the class has to be "
+            "proved in the row's own spelling, in that section (naming it in "
+            "`### 0.6 Verification` instead leaves the §9.1/D1 paragraph — the one "
+            "a reader consults for this door — without its proof).")
+
+    for table, column in FOLD_COLUMNS:
+        assert column in cache_projection.projected_columns(table), (
+            f"`projected_columns({table!r})` no longer projects `{column}`, so "
+            f"`{DOC.name}`'s proof of the value-filling class is no longer true "
+            "for it. Re-check the class BEFORE repairing the sentence: the claim "
+            "is that the fold supplies a VALUE for a field the record HAS, so "
+            "every member must still be one (a field-set widening is a different "
+            "class and needs its own entry in the census).")
+
+    # The distinction the sentence must preserve, measured instead of asserted.
+    # ⛔ NOT every fold key is absent from column space: `title` is a single word
+    # and spells identically in both namespaces, so it IS a column (measured —
+    # which is exactly why the pre-fix claim was false for two members and true
+    # for the third). The defect class is the CAMEL-CASE key, which no table
+    # spells: those must never appear in a column list, and their snake spelling
+    # must. That asymmetry is the whole point, so it is measured, not assumed.
+    column_space = {table: set(cache_projection.projected_columns(table))
+                    for table in COLUMN_SPACE_TABLES}
+    for label, table in FOLD_LABEL_TABLES:
+        defaults = cache_projection.FOLD_ON_CREATE_DEFAULTS[label]
+        assert defaults, f"`FOLD_ON_CREATE_DEFAULTS[{label!r}]` lost its defaults"
+        for prop in defaults:
+            if _snake(prop) == prop:
+                continue
+            assert not any(prop in cols for cols in column_space.values()), (
+                f"`{label}.{prop}` is BOTH a `FOLD_ON_CREATE_DEFAULTS` key (PROPERTY "
+                "space) and a record COLUMN — the distinction this pin exists to "
+                "keep separate has collapsed, so `projected_columns` is no longer "
+                "the wrong space for the fold's keys. Re-derive the census "
+                "(module-docstring point 3) before touching the doc.")
+            assert _snake(prop) in column_space[table], (
+                f"`{label}.{prop}`'s snake spelling `{_snake(prop)}` is not in "
+                f"`projected_columns({table!r})` — the fold's OWN table. Either the "
+                "fold now supplies a VALUE for a field the record does not HAVE "
+                "(a field-set WIDENING, a different class) or it is landing on "
+                "another table. Re-derive the census before repairing the sentence.")
 
 
 def test_the_module_docstring_the_doc_paraphrases_says_the_same_thing():
