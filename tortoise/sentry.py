@@ -32,9 +32,10 @@ _service = "tortoise-hosted-api"
 # is one silent drift away from re-opening the storm — shrink this and the SDK
 # delivers an event the helper already called benign; grow only the SDK list and
 # the helper captures one the SDK drops. `test_init_turns_source_context_off`
-# pins them equal, and pins this set as a SUBSET of
-# `REQUEST_LAYER_DISCONNECT_NAMES` so the request-layer set can never fall
-# behind it.
+# pins the DK/list equality; `test_direction_ambiguous_names_are_benign_only_on_
+# the_inbound_layer` pins this set as a SUBSET of `REQUEST_LAYER_DISCONNECT_NAMES`
+# so the request-layer set can never fall behind it (round 5, P3: the comment
+# credited the subset pin to the wrong test).
 BENIGN_EXCEPTION_NAMES = frozenset({"ClientDisconnect", "BrokenResourceError"})
 
 #: ⛔ REQUEST-LAYER ONLY — names whose MEANING depends on which end hung up.
@@ -114,9 +115,30 @@ def init() -> bool:
             # (measured `_capture_exception`: 3-7 ms -> 0.15-0.18 ms). The
             # integration builds the event before `capture_event`, so this saves
             # the tail and not the build — which is why
-            # `include_source_context=False` above is still required.
-            # Broken pipe / reset / anyio's broken-resource all mean the same
-            # thing at this layer (the peer is gone) and none is an app fault.
+            # `include_source_context=False` above is still required. (Measured on
+            # origin/main with a real server, a real client and a capturing
+            # transport: 1 DELIVERED event per abort with ~58 source reads; at
+            # this head, 0 events and 0 source reads. Read the earlier "2 events
+            # per abort" figure as two CAPTURE attempts — `DedupeIntegration`
+            # collapses them to one delivered envelope.)
+            # reviewed round 3/4): `ignore_errors` carries ONLY the
+            # direction-unambiguous names — `ClientDisconnect` (only a caller can
+            # produce it) and `BrokenResourceError`. The reset/pipe names are
+            # handled at the request layer instead (see
+            # `REQUEST_LAYER_DISCONNECT_NAMES`), because this list is
+            # CLIENT-GLOBAL: `Client._should_capture` applies it to every event
+            # from every path, so a direction-ambiguous entry here would silence
+            # a real upstream reset process-wide.
+            #
+            # ⚠️ `BrokenResourceError` is the one entry whose direction is not
+            # self-evident: anyio raises it from `SocketStream.send/receive`
+            # wherever `transport.is_closing()`, outbound as well as inbound, and
+            # `mcp_server.py` records it from a broken INTERNAL stream. It stays
+            # global deliberately: nothing in `tortoise/` does raw anyio I/O, and
+            # every outbound HTTP path is httpx→httpcore, which maps
+            # `anyio.BrokenResourceError` to `ConnectError`/`WriteError`/`ReadError`
+            # — so an upstream break is still captured, while an inbound abort
+            # costs zero events. It is checked, not assumed (round 5, P3).
             #
             # ⚠️ The SDK matches these by EXACT type name (`Client._is_ignored_error`),
             # not by MRO, so a SUBCLASS of ClientDisconnect is benign here and not

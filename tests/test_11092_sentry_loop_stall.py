@@ -123,6 +123,25 @@ def test_capture_exception_still_reports_a_real_error(
     assert enabled_sentry["exc"] == [error]
 
 
+def test_capture_exception_uses_the_NARROW_set_not_the_request_layer_one(
+    enabled_sentry: dict[str, list],
+) -> None:
+    """Round 5 (P3): the belt's direction scope was unpinned.
+
+    `capture_exception` is the GLOBAL belt — it is what `oauth._capture`'s
+    "single capture" for the token boundary goes through. If it were changed to
+    pass `inbound_request=True`, an OUTBOUND reset would be swallowed there and
+    the oauth boundary would log at WARNING and capture nothing. Pinned at the
+    composite, not at the predicate.
+    """
+    error = ConnectionResetError("reset by peer (upstream)")
+    tsentry.capture_exception(error)
+    assert enabled_sentry["exc"] == [error], (
+        "capture_exception must NOT treat a direction-ambiguous class as benign — "
+        "this call is the belt behind every capture, including the oauth boundary"
+    )
+
+
 def test_benign_matching_survives_a_rewrapped_subclass() -> None:
     """A re-wrapped SUBclass of starlette's own ClientDisconnect must stay benign.
 
@@ -167,6 +186,25 @@ def test_benign_matching_is_exact_by_name_not_by_mro() -> None:
     # REQUEST-LAYER set only, pinned by the direction test below.)
     BrokenResourceError = type("BrokenResourceError", (Exception,), {})
     assert tsentry.is_benign_exception(BrokenResourceError()) is True
+
+    # ⛔ ROUND 5 (P3): the fixture above is HARMLESS under an MRO walk, because
+    # `ConnectionResetError` is no longer in the GLOBAL set. These two are the
+    # ones that actually discriminate, and both were False-but-should-be-True
+    # under a walk: `RemoteDisconnected`'s MRO contains `ConnectionResetError` and
+    # a subclass of a globally-named class inherits that name in its MRO.
+    import http.client
+
+    assert tsentry.is_benign_exception(
+        http.client.RemoteDisconnected(), inbound_request=True
+    ) is False, (
+        "the UPSTREAM-reset class must not be benign even at the request layer — "
+        "an MRO walk would classify it benign and silence a dependency outage"
+    )
+    _SubOfGlobalName = type("_SubOfGlobalName", (BrokenResourceError,), {})
+    assert tsentry.is_benign_exception(_SubOfGlobalName()) is False, (
+        "a SUBCLASS of a globally-named class is not itself benign — the name arm "
+        "is exact, and only the isinstance arm covers subclasses"
+    )
 
 
 def test_direction_ambiguous_names_are_benign_only_on_the_inbound_layer() -> None:
@@ -278,6 +316,42 @@ def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
         "logging integration"
     )
     assert response.status_code == 500
+
+
+def test_a_broken_classifier_cannot_suppress_the_500(
+    enabled_sentry: dict[str, list],
+) -> None:
+    """Round 5 (P3): the round-3 (d) 500-guarantee was unpinned.
+
+    The classifier import/call sits inside a `try` that fails closed to
+    `_benign = False`. Deleting that guard (making the call unguarded in an
+    exception HANDLER) would produce NO response at all instead of the promised
+    500 — and the suite stayed green without this test.
+    """
+    import tortoise.hosted_api as hapi
+    import tortoise.sentry as sentry_mod
+
+    real = sentry_mod.is_benign_exception
+    sentry_mod.is_benign_exception = lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("classifier exploded")
+    )
+    try:
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/v1/state"), method="GET", headers={}
+        )
+        response = asyncio.run(
+            hapi._unhandled_exception_handler(request, _OtherError("boom"))
+        )
+    finally:
+        sentry_mod.is_benign_exception = real
+
+    assert response.status_code == 500, (
+        "the handler MUST still answer 500 when classification fails — an "
+        "exception escaping a handler produces no response at all"
+    )
+    assert response.headers.get("access-control-allow-origin") is not None, (
+        "#1591 CORS headers must survive a classification failure too"
+    )
 
 
 def test_unhandled_handler_still_reports_a_real_error_at_error_level(
