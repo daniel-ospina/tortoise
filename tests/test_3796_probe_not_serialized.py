@@ -184,8 +184,12 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
     call (the pre-#3796 order) — the line never appears inside a 5 s window
     while a 30 s digest is in flight, and this REDs on the timeout.  A hook
     that EXITS between the dispatch and the digest (an early ``exit 0``, the
-    shape of a ``set -u``/``set -e`` abort) must RED in ~5 s, never hang: the
-    wait's latch is one-shot, so a dead hook cannot push the deadline forward.
+    shape of a ``set -u``/``set -e`` abort) must RED and never hang: the wait's
+    latch is one-shot, so a dead hook cannot push the deadline forward.  The
+    bound is TWO 5 s budgets, measured: 5.14 s when the beacon line lands
+    immediately, 10.08 s when it lands at 4.9 s and the one-shot re-arm then
+    arms the digest's own budget — and never past the absolute ``hard_stop`` of
+    12 s, which holds even if that latch were ever reset.
 
     ⛔ The poll waits for BOTH lines, and it must (#11149, found as #11134's CI
     red).  The beacon is forked FIRST and the digest SECOND, so the probe's line
@@ -282,8 +286,11 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
         # is addressed directly. `os.getpgid(proc.pid)` raises ProcessLookupError
         # once `proc.poll()` has reaped the child — and the dead-hook paths poll
         # before this runs — so the suppress below would swallow it and leave the
-        # backgrounded probe/sleep grandchild alive (review P3).
-        with contextlib.suppress(ProcessLookupError):
+        # backgrounded probe/sleep grandchild alive (review P3). PermissionError
+        # is absorbed too: on macOS `killpg` is documented to raise EPERM when
+        # only zombies remain in the group, and this repo supports macOS dev
+        # boxes — a cleanup error must never replace the assertion that fails.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
         proc.wait(timeout=30)
 
@@ -366,8 +373,9 @@ def test_the_digest_is_not_serialized_behind_a_slow_probe(tmp_path):
             f"order — the acceptance test owns ordering): {calls!r}")
     finally:
         # Group id == `proc.pid` under `start_new_session=True`; see the
-        # acceptance test's `finally` for why `os.getpgid` is not used (review P3).
-        with contextlib.suppress(ProcessLookupError):
+        # acceptance test's `finally` for why `os.getpgid` is not used (review
+        # P3), and for the macOS EPERM half of the suppression.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
         proc.wait(timeout=30)
 
