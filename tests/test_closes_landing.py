@@ -5201,3 +5201,51 @@ def test_a_SELF_CLOSING_type1_tag_opens_NO_type1_block():
         body = f"<{tag}>\n-     Closes #100\n</{tag}>\n"
         assert keyword_types(body) == {"html_block"}, (tag, keyword_types(body))
         assert cl.parse_closing_refs(body) == [100], tag
+
+
+def test_a_PHANTOM_item_needs_FOUR_columns_and_the_SETEXT_exclusion_is_PINNED():
+    """Round-51 review — the guard's own threshold and its own reproduction.
+
+    **1. A phantom item needs FOUR columns, not three** (P2, FAIL-OPEN in both arms). `_MAX_FENCE_INDENT`
+    is 3 and §4.4's "an indented code block cannot interrupt a paragraph" needs four columns past the
+    content column, so a marker at exactly three still opens a real `<li>`. `real`/`_continuation`
+    spelled its threshold `>=` — the file's only non-strict form (`_leaves_no_paragraph` and
+    `indent_code` both spell it `>`) — which marked that column PHANTOM, suppressed the
+    `dropped_paragraph_item` record, and credited the wide-gap claim below it:
+
+        `Notes` + `   - x` + `Summary.` + `2.     Closes #100`
+            renderer: `<p>Notes</p><ul><li>x Summary.</li></ul>` then an `<ol>` whose wide-gap
+            content is `<pre><code>` -> CODE; the pre-fix head credited it in BOTH arms, so also in
+            `strict=True` — the `issue_process_lint` PASS arm
+
+    The 4-column controls keep their round-49 answer (the marker really IS the paragraph's
+    continuation text there, so the claim under it is prose).
+
+    **2. Mechanism 8's setext exclusion is LIVE and had no test that reds when removed.** Replacing
+    that term with `and True` left the suite green — 352 passed, byte-identical — while it changes
+    six bodies in `indented_code=True`, the only arm where it decides. Mechanism 8's own repro is one
+    of them and is pinned here.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(b: str) -> set[str]:
+        return {t.type for t in md.parse(b) if "Closes #100" in getattr(t, "content", "")}
+
+    # 1. THREE columns is a REAL item, so the claim under it is code.
+    for body in ("Notes\n   - x\nSummary.\n2.     Closes #100\n",
+                 "- a bullet\n     - x\nSummary.\n2.     Closes #100\n"):   # 5 = rest_col 2 + 3
+        assert "code_block" in keyword_types(body), body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # …and the FOUR-column control keeps its round-49 answer.
+    for keep in ("Notes\n    - x\n?>\n2.     Closes #100\n",
+                 "Notes\n    - x\n</script>\n2.     Closes #100\n"):
+        assert keyword_types(keep) == {"inline"}, keep
+        assert cl.parse_closing_refs(keep) == [100], keep
+
+    # 2. Mechanism 8's repro, in the arm where the setext exclusion decides.
+    setext = "**bold**\n-\n    Closes #100\n"
+    assert keyword_types(setext) == {"code_block"}, setext
+    assert next(t.type for t in md.parse(setext)) == "heading_open", setext   # §4.3: a heading
+    assert cl.parse_closing_refs(setext, None, strict=True) == [], setext
+    assert "#100" not in cl.strip_code(setext, indented_code=True), setext

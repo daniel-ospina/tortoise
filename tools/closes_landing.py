@@ -770,7 +770,14 @@ def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
     return consumed, i - start, i
 
 
-@dataclass
+#: ⛔ `eq=False` — IDENTITY, NOT VALUE (round-51 review, P3, and the docstring below has always
+#: claimed it): every container test in this module is `is` (`container is prev_container`,
+#: `prev_container is _popped`), and the one membership test (`_blanked_opens_paragraph in
+#: list_items`) used to go through the generated `__eq__`, so a POPPED item whose
+#: `(depth, rest_col, raw_col, has_content)` happened to match a live one read as "still open".
+#: Measured: 0 of 18,276 (body, arm) answers change, so this closes a hazard, not a defect — and it
+#: is what makes "nothing hashes or compares these by value" TRUE.
+@dataclass(eq=False)
 class _ListItem:
     """One OPEN list item, in BOTH spaces a dedent can be measured in.
 
@@ -1884,10 +1891,23 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # …and whether that item is REAL: a marker line that is a paragraph continuation
                 # (4+ columns past the paragraph's own base) opens no `<li>` (§4.4), so the item is
                 # a phantom the state machine needs for its columns and nothing else. See `real`.
+                # ⛔ 4+, NOT 3+ (round-51 review, P2 — a FAIL-OPEN in BOTH arms at the boundary
+                # column). `_MAX_FENCE_INDENT` is 3 and §4.4's "cannot interrupt a paragraph" needs
+                # an INDENTED CODE BLOCK, i.e. FOUR columns past the content column; at exactly 3 the
+                # renderer still opens a real `<li>`. Marking it phantom suppressed the
+                # `dropped_paragraph_item` record mechanism 11 relies on, and `_is_lazy_marker` then
+                # fell back to `container is None -> True`, crediting the wide-gap claim below it:
+                #     `Notes` + `   - x` + `Summary.` + `2.     Closes #100`
+                #         renderer: `<p>Notes</p><ul><li>x Summary.</li></ul>` then an `<ol>` whose
+                #         wide-gap content is `<pre><code>` -> CODE; credited in both arms, so also
+                #         in `strict` — the `issue_process_lint` PASS arm.
+                # Every other reader of this threshold spells it `>` (`_leaves_no_paragraph`,
+                # `indent_code`) — this was the only `>=`, and `real`'s own docstring already said
+                # "at 0-3 columns the marker DOES open a `<ul>`".
                 _continuation = bool(
-                    prev_prose and rest_indent >= _MAX_FENCE_INDENT
+                    prev_prose and rest_indent > _MAX_FENCE_INDENT
                     and (container is None
-                         or rest_indent >= container.rest_col + _MAX_FENCE_INDENT))
+                         or rest_indent > container.rest_col + _MAX_FENCE_INDENT))
                 list_items.append(
                     _ListItem(_quote_depth(prefix), rest_col,
                               len(prefix) + rest_col,
