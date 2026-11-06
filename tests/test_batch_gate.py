@@ -744,8 +744,12 @@ def test_the_ARGV_fold_self_inclusion_is_dropped_before_it_can_close_the_fold(
 
         constituents = [n for n in dict.fromkeys(requested) if n != args.fold]
 
-    and nothing pinned that comprehension. Deleting it leaves this file 54/54 green
-    (measured) while `main` closes the FOLD itself: `is_ancestor(fold_head,
+    and nothing pinned that comprehension. Deleting it left this file green when
+    this pin was written. ⛔ The whole-file count is deliberately NOT restated here:
+    it is a property of the FILE, not of the arm, and it drifts with every test
+    added — a stale figure reads as "the pin is vacuous" when the arm is in fact
+    pinned. Re-derive it by deleting the arm. Without the drop, `main` closes the
+    FOLD itself: `is_ancestor(fold_head,
     fold_head)` is vacuously true, so the fold is classified CONTAINED-ANCESTOR and
     `apply` posts `closure_comment(fold, fold_head, fold)` ON the fold — a
     self-referential record asserting the fold's work is contained in the fold —

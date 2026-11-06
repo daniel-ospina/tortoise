@@ -1664,8 +1664,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # guard would then cancel the open PR's current head. MEASURED before this
              # entry: `--changed-files tools/ci_cancel_guard.py --event pull_request` ->
              # surfaces=[], full=False, test_ci_cancel_guard.py ABSENT; after ->
-             # surfaces=['core'], present. ⚠️ n is a SNAPSHOT taken at the head that
-             # measured it — re-measure, do not trust the count. Same
+             # surfaces=['core'], present. Same
              # #1349/#3332/#3616 class as the entries above. Pinned by
              # tests/test_ci_selection.py::test_ci_cancel_guard_tool_change_selects_core_not_tier1.
              "tools/ci_cancel_guard.py",
