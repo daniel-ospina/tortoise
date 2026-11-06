@@ -1124,8 +1124,15 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
     unbounded `MATCH (n)` scan. (Derived from `_path` rather than from
     `_find_local_jsonl_dir`, which answers None when the directory holds no
     `.jsonl` at all — exactly the pending-sidecar case below, #11113 review
-    cycle 7.) Answering "I could not ask" is NOT this arm's job: a failed count
-    is left to the read arm, which already refuses with its own message.
+    cycle 7.) ⛔ "I COULD NOT ASK" IS NOT "NOT LOST" (#11113 review cycle 11,
+    P1). This arm's whole claim is that it applies `recover_from_log`'s three
+    conditions, and recovery's FIRST one is an explicit refusal of an
+    unanswerable count (`if db_count is None: … "graph unresponsive —
+    recovery requires a live DB"`). Leaving the count to the read arm instead
+    does not work: that arm runs a DIFFERENT query over a DIFFERENT population
+    (`MATCH (t:Point) WHERE t.is_episodic = true`), so it can succeed where the
+    all-label aggregate failed, and a 0-node store then certified CLEAN under
+    `--expect-empty` — the same false PASS this arm exists to prevent.
     """
     path = getattr(proj, "_path", None)
     if not path or str(path) == ":memory:":
@@ -1148,10 +1155,25 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
     # not even read, and the message invited the operator to delete a rescue
     # file. Only a 0-node graph asks what recovery would act on.
     try:
-        if _graph_total_node_count(proj.g):
-            return                # non-empty graph: drained, not lost
-    except Exception:
-        return                    # the read arm owns an unreadable graph
+        total = _graph_total_node_count(proj.g)
+    except Exception as exc:
+        # ⛔ AN UNANSWERABLE COUNT REFUSES (#11113 review cycle 11, P1).
+        # `recover_from_log` returns `{"recovered": False, … "reason": "graph
+        # unresponsive — recovery requires a live DB"}` on exactly this state,
+        # so mirroring its conditions means refusing here too. Returning
+        # instead delegated the diagnosis to the read arm — a different query
+        # over a different population that can succeed while this one fails —
+        # and the store then certified CLEAN. Measured red-first: patching only
+        # the count query to raise returned `nodes={}` and exit 0.
+        raise CensusError(
+            "the graph's own total-node count could not be read "
+            f"({type(exc).__name__}: {exc}) — so whether this store is DRAINED "
+            "or LOST is UNKNOWN, not answered, and --expect-empty must not "
+            "certify it. tortoise's own recovery refuses on this same state "
+            "('graph unresponsive — recovery requires a live DB'). Check that "
+            "the store is reachable and retry (#11113 review cycle 11).") from exc
+    if total:
+        return                    # non-empty graph: drained, not lost
     # 0 nodes: ask what recovery would act on, in ITS order — the pending
     # sidecar first (the loader can REFUSE it as untrustworthy, which recovery
     # propagates), then the log.
@@ -1379,8 +1401,21 @@ def _pending_prewipe_snapshot(events_dir: str) -> str | None:
     try:
         from tortoise.consistency import _load_prewipe_snapshot
         from tortoise.projection import prewipe_snapshot_path
-    except Exception:             # pragma: no cover - import env problem
-        return None
+    except Exception as exc:      # pragma: no cover - import env problem
+        # ⛔ AN UNIMPORTABLE HELPER IS A REFUSAL, NOT AN ABSENCE (#11113 review
+        # cycle 11, P2). `None` here means "no record sits beside this store" —
+        # the answer that lets a 0-node graph certify as drained. If the loader
+        # cannot even be imported we have measured NOTHING, not "nothing is
+        # there". The module's own policy agrees: `read_graph_turns`' guarded
+        # import raises `CensusError("tortoise import failed …")`, and the
+        # neighbouring classifier arm above still REFUSES when its classifier
+        # is unimportable.
+        raise CensusError(
+            "the pre-wipe snapshot check could not be loaded "
+            f"({type(exc).__name__}: {exc}) — whether a surviving record sits "
+            "beside this store is UNKNOWN, not answered, so an emptiness "
+            "verdict here would certify a store whose record set was never "
+            "read (#11113 review cycle 11).") from exc
     try:
         path = prewipe_snapshot_path(events_dir)
     except Exception:             # pragma: no cover - path derivation

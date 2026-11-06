@@ -1536,6 +1536,43 @@ def test_a_LOST_graph_with_a_replayable_log_is_REFUSED_not_certified(
     assert "ACTS on that log" in message, message
 
 
+def test_an_UNANSWERABLE_total_node_count_REFUSES_not_certifies(
+        tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 11, P1: "I could not ask" is not "not lost".
+
+    This arm's first condition is the graph's TOTAL node count, and
+    `recover_from_log` REFUSES when that count cannot be answered
+    ("graph unresponsive — recovery requires a live DB"). Returning instead
+    delegated the diagnosis to the read arm — but that arm runs a DIFFERENT
+    query over a DIFFERENT population (`MATCH (t:Point) WHERE t.is_episodic =
+    true`), so it can succeed while the all-label aggregate fails, and the
+    store then certified CLEAN under `--expect-empty`.
+
+    The patch targets the ONE call site in the LOST arm; the aggregate that a
+    healthy store is read through (`_GRAPH_EPISODIC_COUNT_CYPHER`) is a
+    different query, so this cannot mask the population the census reads.
+
+    Measured red-first: on the pre-fix module this call RETURNS `nodes={}`
+    (and the CLI exits 0 with `verdict: CLEAN`).
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)
+
+    def _unanswerable(_g):
+        raise RuntimeError("count query failed mid-flight")
+
+    monkeypatch.setattr(tpc, "_graph_total_node_count", _unanswerable)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "total-node count could not be read" in message, message
+    assert "RuntimeError" in message, message      # the cause is named
+    assert "UNKNOWN, not answered" in message, message
+    # the state that must never be blessed: this is NOT a "nothing there" pass
+    assert "LOST-STORE shape" not in message, message
+
+
 def test_a_DRAINED_graph_is_never_mistaken_for_a_LOST_one(
         tmp_path, monkeypatch):
     """The other half, and the one #10017's terminal run depends on.
@@ -1985,7 +2022,12 @@ def test_a_permission_refusal_is_diagnosed_as_the_CREDENTIAL(monkeypatch):
     census on the `--uri` leg with a tenant credential is a REFUSAL the operator
     can only act on if the message says whose problem it is. Measured on the
     pinned client (redis 7.4.1): the vendor parser maps `NOPERM` to
-    `NoPermissionError`, which is the type arm below.
+    `NoPermissionError`, whose MESSAGE the ACL predicate matches — the
+    classification is a text test (`tortoise/acl_graph_users.py`
+    `_is_permission_refusal`: `"noperm" in msg or "no permissions" in msg`),
+    NOT a type test, and there is no type arm anywhere in this pair. This case
+    therefore pins the wording an operator actually sees, not a behaviour the
+    class alone would buy (#11113 review cycle 11, P2).
     """
     from redis.exceptions import NoPermissionError
 
