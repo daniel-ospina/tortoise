@@ -141,6 +141,9 @@
 #      unparseable archive timestamp reds AND files POOL_STALE (never a silent red)
 #  78h. #10234: an archive-LESS team (the custom-only shape this leg cannot see,
 #      #2375) does NOT red — round 3's broader guard would have red every run
+#  78i. #10234: a MIXED pool (one stale team AND one unparseable timestamp) files
+#      a POOL_STALE whose body names the corrupt stamp and whose title covers both
+#      causes — the placeholder bullet must not be gated on the stale count
 #  79. #5028: an empty sweep body names empty_response (not a held lock); it is
 #      judged on the same completion gate as a timeout
 #  80. #5028: the sweep OUTCOME is logged untruncated even when `per_team`
@@ -1913,7 +1916,7 @@ assert_eq "$RC" 0 "78. a timeout with a fresh last COMPLETED sweep is NOT red"
 assert_contains "$OUT" "sweep skipped (status=driver_timeout)" "78. a timeout names driver_timeout"
 assert_not_contains "$OUT" "lock held" "78. a timeout is NOT reported as a held lock"
 assert_match "$OUT" "curl rc=28, took [0-9]+s" "78. the timeout reports rc 28 and the elapsed seconds"
-assert_contains "$OUT" "the driver's patience ran out, not the pipeline" "78. the verdict names the driver's patience, not a coverage outage"
+assert_contains "$OUT" "the driver's own ceiling was hit" "78. the verdict names the driver's patience, not a coverage outage"
 assert_contains "$OUT" "the last COMPLETED sweep was" "78. the verdict carries the completion age it gated on"
 assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78. no SWEEP_NO_COVERAGE incident is filed"
 assert_not_contains "$OUT" "ride-along OK" "78. a timeout still skips the purge/reconcile ride-along"
@@ -1958,6 +1961,7 @@ assert_eq "$RC" 1 "78c. a timeout with no usable last_sweep_at stays RED"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78c. unverifiable completion files SWEEP_NO_COVERAGE"
 assert_contains "$OUT" "no usable last_sweep_at" "78c. the fail-closed branch is the one that ran (not the stale-age branch)"
 assert_not_contains "$OUT" "the last COMPLETED sweep was" "78c. (control) the stale-age branch did NOT run"
+assert_contains "$OUT" "no sweep report was read (status=driver_timeout)" "78c. the exit line names the missing report, not a coverage failure"
 
 # ── 78d. #10234: the ceiling knob exists and its default exceeds the 600s ──
 # The 600s literal WAS the defect: the sweep needs longer than its client was
@@ -2075,7 +2079,11 @@ export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78i. a mixed pool stays red"
 assert_contains "$OUT" "could not read an archive timestamp" "78i. the unparseable cause is not masked by the stale count"
-assert_file_match "$LOG" 'could not be parsed' "78i. the FILED body names the corrupt timestamp, not only the stale tenant"
+# Round 7: the create POST logs {title, body}, and round 6 added the phrase to
+# BOTH — so a single needle matched either half and the case proved nothing.
+# Assert one phrase unique to each.
+assert_file_match "$LOG" 'its pool AGE is UNMEASURABLE; fix the corrupt LastModified' "78i. the FILED body bullet names the corrupt stamp"
+assert_file_match "$LOG" 'and an archive timestamp could not be parsed' "78i. the TITLE covers both causes, not just the stale count"
 
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
 # rc=56 (connection reset) was measured in production at 201s and 480s of a
@@ -2093,6 +2101,13 @@ assert_contains "$OUT" "sweep transport_error" "78e. the shape is named transpor
 assert_not_contains "$OUT" "budget timeout" "78e. a transport fault is NOT called a budget timeout"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78e. a transport fault files SWEEP_NO_COVERAGE"
 assert_match "$(cat "$LOG")" 'curl exit 56' "78e. the filed body names curl's own rc"
+# Round 7: deleting the `transport_error` clause from the ride-along guard survived
+# the whole suite. A reset connection says NOTHING about whether the server stopped
+# the sweep and released its per-org locks, so the skip is load-bearing.
+assert_contains "$OUT" "sweep skipped (status=transport_error)" "78e. a transport fault skips the purge/reconcile ride-alongs"
+assert_not_contains "$OUT" "ride-along OK" "78e. (control) neither ride-along ran"
+# and the terminal line must not make a coverage claim it cannot measure
+assert_contains "$OUT" "no sweep report was read (status=transport_error)" "78e. the exit line names the missing report, not a coverage failure"
 
 # ── 78f. #10234 review P2: a FUTURE-dated last_sweep_at is unusable, not fresh ──
 # A skewed/corrupt ops/state.json makes the age negative, and a negative age is
@@ -2131,7 +2146,10 @@ run_driver
 assert_eq "$RC" 0 "79. an empty response with a fresh completion is NOT red"
 assert_contains "$OUT" "sweep skipped (status=empty_response)" "79. an empty response names empty_response"
 assert_not_contains "$OUT" "lock held" "79. an empty response is NOT reported as a held lock"
-assert_contains "$OUT" "the driver's patience ran out, not the pipeline" "79. an empty body is judged on the same completion gate"
+# Round 7: on `empty_response` curl COMPLETED (rc=0) — "patience ran out" is a
+# cause the leg never observed, and on a green run this line is the only record.
+assert_contains "$OUT" "the exchange COMPLETED (curl rc=0) but carried no report body" "79. an empty body names the REAL cause (no report), not a budget expiry"
+assert_not_contains "$OUT" "ceiling was hit" "79. (control) no budget claim on a completed exchange"
 
 # ── 80. #5028: the sweep OUTCOME is never truncated away ───────────────────
 # `per_team` (the org census) is serialized BEFORE `last_sweep`, so the old

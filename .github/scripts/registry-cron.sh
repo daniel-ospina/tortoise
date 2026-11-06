@@ -752,11 +752,12 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
 #   transport_error  any other non-zero rc — the exchange did not complete
 #   empty_response   rc 0 with no body
 #   http             rc 0 with a body (the HTTP code is then meaningful)
-# The SWEEP leg (#5028) deliberately keeps its own `rc -eq 28` test: its STATUS
-# vocabulary (`driver_timeout`/`empty_response`) is that shipped contract, and
-# the `transport_error` case it now expresses itself (see the sweep shape classifier below) is the sweep's own
-# incident-body truthfulness gap, which the sweep now closes ITSELF (#5114). Routing it through this
-# helper would unify nothing — it consumes one token of the four.
+# The SWEEP leg (#5028) still keeps its own three-branch test (see the sweep
+# shape classifier below) rather than calling this helper. That duplication used
+# to be justified by a gap this driver has since closed: the sweep now expresses
+# `transport_error` too, so it produces THREE of these four tokens with a
+# near-verbatim copy of this body — #5114 is closed by that split, and #11119
+# tracks collapsing both onto ONE owner. Until then, change them together.
 leg_shape() { # <curl_rc> <body> -> shape label on stdout
   if [ "${1:-99}" -eq 28 ]; then
     printf 'driver_timeout'
@@ -1832,7 +1833,18 @@ case "$RUN_STATUS" in
           # is green — so say it here rather than leaving it to the adjacent
           # "sweep skipped" line. An absent PURGE_FAILED on this run is not
           # evidence that erasure ran.
-          log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m), so the driver's patience ran out, not the pipeline — leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
+          # #10234 review P2 (round 7): name the CAUSE for the shape, not one
+          # cause for both. `driver_timeout` means the caller's own ceiling was
+          # hit; `empty_response` means curl COMPLETED (rc=0) and the exchange
+          # carried no body — a server/proxy fault, never a budget artifact. On a
+          # green run this line is the ONLY record, so a wrong cause here IS the
+          # whole evidence.
+          if [ "$RUN_STATUS" = "empty_response" ]; then
+            SWEEP_CAUSE="the exchange COMPLETED (curl rc=0) but carried no report body — a server/proxy fault, not a budget artifact"
+          else
+            SWEEP_CAUSE="the driver's own ceiling was hit (rc=${CURL_RC}), so it stopped waiting — not the pipeline"
+          fi
+          log "sweep ${RUN_STATUS_SAFE} (curl rc=${CURL_RC}, took ${SWEEP_ELAPSED}s) — the last COMPLETED sweep was ${timeout_age_min}m ago (<= ${DRIVER_DOWN_MIN}m): ${SWEEP_CAUSE}; leaving SWEEP_NO_COVERAGE unchanged. NOTE: the purge/reconcile ride-alongs are SKIPPED for this run (the sweep may still hold the server-side locks), so this run is NOT evidence that erasure or revocation ran."
         fi
       fi
     elif [ "$R2_LIST_OK" != "1" ] || [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
