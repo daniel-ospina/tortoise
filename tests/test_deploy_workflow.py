@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -4057,6 +4058,96 @@ def test_the_health_build_block_is_documented_for_operators():
     )
 
 
+#: Depths at which the census's historical tree is sought in a SHALLOW clone, mirroring
+#: `tests/test_9397_about_edge_properties.py::_SHALLOW_DEPTHS`. Bounded on purpose: the cost is
+#: one shallow branch fetch and the bound is the point at which the tree is genuinely too old to
+#: reach — reported as a SKIP that says so, never as a measurement of zero.
+_CENSUS_SHALLOW_DEPTHS = (120, 400, 1500)
+
+
+def _census_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """A read-only git command in `repo`; a git that cannot run reports a NON-ZERO exit.
+
+    Never raises: every caller decides what a failure means, and none of them may read it as
+    "the command returned nothing" (#4309's fail-open shape).
+    """
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - no git at all
+        return subprocess.CompletedProcess([*args], 127, stdout="", stderr=str(exc))
+
+
+def _census_commit_available(repo: Path, rev: str) -> bool:
+    """True when `rev` resolves to a commit in THIS checkout's history."""
+    return _census_git(repo, "cat-file", "-e", f"{rev}^{{commit}}").returncode == 0
+
+
+def _census_is_shallow(repo: Path) -> bool:
+    """True when this checkout is a SHALLOW clone (`--is-shallow-repository`)."""
+    done = _census_git(repo, "rev-parse", "--is-shallow-repository")
+    return done.returncode == 0 and done.stdout.strip() == "true"
+
+
+def _census_deepen_to(
+    repo: Path, rev: str, depths: tuple[int, ...] = _CENSUS_SHALLOW_DEPTHS
+) -> bool:
+    """Make `rev` reachable IF the checkout is shallow — bounded, best effort.
+
+    ⛔ Gated exactly like `tests/test_9397_about_edge_properties.py::_ensure_commit`, whose
+    docstring records the measurement: `git fetch --depth=N` on a NON-shallow clone turns
+    `--is-shallow-repository` from `false` to `true` and cuts `git rev-list --count
+    origin/main` from 6106 to 120 — it TRUNCATES a developer's full history. So a full clone
+    that lacks the rev is never shallow-ified: this returns False and the caller SKIPS with a
+    message, rather than failing on a tree that structurally cannot carry the object.
+
+    The refspec is explicit so the fetch does not depend on `remote.origin.fetch` being
+    configured — a `actions/checkout@v4` clone of a PR does not set it up the way a developer
+    clone does, and `git fetch origin main` alone would then leave no `refs/remotes` entry.
+    """
+    if _census_commit_available(repo, rev):
+        return True
+    if not _census_is_shallow(repo):
+        return False
+    for depth in depths:
+        _census_git(
+            repo,
+            "fetch",
+            "--quiet",
+            f"--depth={depth}",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main",
+        )
+        if _census_commit_available(repo, rev):
+            return True
+    return False
+
+
+def _census_count_at(repo: Path, rev: str, paths: list[str]) -> int:
+    """The census's line count at `rev` — FAIL-CLOSED on a git failure.
+
+    `git grep` exits **1** when it selects nothing (the legitimate "0 lines" reading) and
+    **128** when the object is missing. Summing stdout without looking at the exit code reads
+    the second as the first: a command that never ran would then satisfy a note that states 0,
+    which is the #4309 shape this whole block exists to close, reproduced inside its own pin.
+    """
+    done = _census_git(repo, "grep", "-c", _RECORD_DSN_ENV, rev, "--", *paths)
+    assert done.returncode in (0, 1), (
+        f"`git grep` at {rev} failed (exit {done.returncode}) instead of selecting nothing "
+        f"(exit 1), so its stdout is NOT a census of zero lines:\n{done.stderr.strip()}"
+    )
+    measured = 0
+    for line in done.stdout.splitlines():
+        tail = line.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            measured += int(tail)
+    return measured
+
+
 def _superseded_census_note() -> str:
     """The epic's #9548 supersession note for the first census command, verbatim.
 
@@ -4186,12 +4277,86 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # documentation hits arrived on top of #9556/R8's invocation). The stated
     # number and the enumerated hits must be ONE measurement, or a later lane
     # re-runs the census and gets a different answer than the record of record.
-    stated = re.search(r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\*", note)
-    assert stated, (
-        "the note no longer states how many lines the pre-#9548 census returned, "
-        "so `NOT empty` is all it claims and the count can drift to any number"
+    # ⛔ The tree matters at least as much as the number, and this pin had the WRONG
+    # TREE (#11064 review r11, P2): it forced the pre-#9548 reading to be the
+    # `ff6379eb2` one. `ff6379eb2` is the #9601 merge — an ancestor of the base, 12
+    # commits and three runbook-touching commits BEFORE the #9548 arming (`785bb2b59`)
+    # — so the reading "immediately before #9548" is that commit's parent,
+    # `047c91f7a`, where the same path set returns 10. The pin therefore asserted a
+    # number that was true of a different tree than the sentence claimed, which is
+    # the stale-flag class this whole note exists to close. It now REQUIRES the tree
+    # to be named, MEASURES the count at that tree with git rather than trusting a
+    # numeral, and keeps the `ff6379eb2` enumeration pinned separately.
+    stated = re.search(
+        r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\* at `([0-9a-f]{7,40})`",
+        note,
+        re.I,
     )
-    count = int(stated.group(1))
+    assert stated, (
+        "the note no longer states how many lines the pre-#9548 census returned AT A "
+        "NAMED TREE, so `NOT empty` is all it claims and both the count and the tree "
+        "can drift"
+    )
+    pre_count, pre_sha = int(stated.group(1)), stated.group(2)
+    assert pre_sha != "ff6379eb2", (
+        "the note is back to calling `ff6379eb2` the tree immediately before #9548 — "
+        "that is the #9601 merge, three runbook-touching commits before the arming "
+        "commit `785bb2b59`"
+    )
+    # ... and the number is EXECUTED at the tree it names, not asserted: the same
+    # census the doc publishes, over the same path set (`paths`, read out of the doc
+    # above rather than retyped here), against the named sha.
+    #
+    # ⛔ AND IT MUST NOT RED ON A TREE THAT CANNOT SEE THE OBJECT (#11064 review, HIGH).
+    # This file is `tier1` (its `- test_deploy_workflow.py` entry under `tier1:` in
+    # `config/ci-surfaces.yml`), so it runs in python-ci's `test`
+    # job, and that job's ONLY checkout is a bare `actions/checkout@v4`
+    # (`.github/workflows/python-ci.yml`'s `test:` job header at `:680`, its checkout step at
+    # `:968`) — the default `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`
+    # belongs to the separate `changes` job (`:279`), which does not share a working tree.
+    # `047c91f7a` is far behind `origin/main` — `git rev-list --count 047c91f7a..origin/main`
+    # read 388 at 2026-11-06, and that figure only GROWS, so it is not the claim: the claim is
+    # that a depth-1 checkout does not carry it. `git grep` there exits 128 with EMPTY stdout,
+    # and the un-guarded form summed that to `measured == 0` and failed
+    # `measured == pre_count` on a CORRECT tree on every PR — a
+    # false RED produced by a guard whose purpose is to stop false GREENs. The repo already
+    # records this environment fact (`tests/test_capstone_preregistration_9075.py:550-566`:
+    # "CI test jobs check out at `fetch-depth: 1`") and carries five `--is-shallow-repository`
+    # guards for it; this is the sixth, in `_ensure_commit`'s shape (bounded deepen when
+    # SHALLOW only, else an explicit skip — never a silent pass, never a false red).
+    # ... and the MECHANISM above is executed, not merely named: this file's `tier1`
+    # membership is the premise for the whole shallow-checkout guard below. If this
+    # file ever leaves `tier1` it can be scheduled onto a lane with a full clone, and
+    # the bound it is guarding against stops existing while the guard keeps passing —
+    # the premise has to red, not the silent-pass path (#11064 review r15, P3).
+    from tools.ci_selection import load_manifest
+    assert "test_deploy_workflow.py" in set(load_manifest()["tier1"]), (
+        "this file is no longer a `tier1` entry, so the `fetch-depth: 1` premise the "
+        "census guard below rests on has changed — re-derive which job runs this file "
+        "instead of trusting the comment above (#11064 review r15, P3)"
+    )
+    if not _census_deepen_to(_REPO_ROOT, pre_sha):
+        pytest.skip(
+            f"`{pre_sha}` is not an object in this checkout (shallow: "
+            f"{_census_is_shallow(_REPO_ROOT)}) and a bounded fetch to depth "
+            f"{_CENSUS_SHALLOW_DEPTHS[-1]} did not reach it, so the census cannot be "
+            "MEASURED here. The textual pins above still ran; this SKIP is not a pass, and "
+            "the executed half of this pin needs a checkout carrying its history"
+        )
+    measured = _census_count_at(_REPO_ROOT, pre_sha, paths)
+    assert measured == pre_count, (
+        f"the note states {pre_count} line(s) at {pre_sha}, but running the census "
+        f"there returns {measured} — the number and the tree are then two different "
+        "measurements of the same claim"
+    )
+    # The `ff6379eb2` reading the note ENUMERATES is pinned to the enumeration below,
+    # so the two numbers cannot be quietly swapped back.
+    ff = re.search(r"that tree reads\s+\*\*(\d+) lines\*\*", note)
+    assert ff, (
+        "the note no longer states the `ff6379eb2` reading it enumerates, so the "
+        "enumeration below has no number to agree with"
+    )
+    count = int(ff.group(1))
     # \d{3,5}, not \d{4,5}: the runbook's early sections cite THREE-digit lines
     # (`docs/infra-runbook.md:382` is R9's `record-backup` section, and :528 its
     # drill commentary), and the narrower pattern silently dropped them while the
@@ -4261,6 +4426,133 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     assert "3 lines immediately before #9548" not in row, (
         "§A8's evidence cell still carries the retired 3-line reading — the "
         "figure the census note's own last paragraph calls stale"
+    )
+    # ⛔ AND THE ROW MUST NOT CALL `ff6379eb2` THE TREE BEFORE #9548 (#11064 review
+    # r16, P1). The §G note was corrected — `ff6379eb2` is the #9601 merge, an
+    # ANCESTOR of this branch's base, and the commit immediately before the #9548
+    # arming (`785bb2b59`) is its parent `047c91f7a`, where the same path set
+    # returns 10 lines, not 5 — but the identical sentence survived HERE, 893 lines
+    # away, where this pin read only the count and the tree NAME. Measured:
+    # `git rev-list --count ff6379eb2..047c91f7a` → 12, and the row's own parenthetical
+    # already said "an ancestor of this branch's base", so the clause contradicted
+    # the sentence it was attached to.
+    assert not re.search(r'what\s+"?immediately before #9548"?\s+means', row, re.I), (
+        "§A8's evidence cell calls ff6379eb2 what \"immediately before #9548\" "
+        "means — that is the #9601 merge, 12 commits and three runbook-touching "
+        "commits BEFORE the arming commit `785bb2b59`; the tree immediately "
+        "before it is `047c91f7a`, where the same path set returns 10, not the "
+        "5 this cell states at ff6379eb2"
+    )
+    # ... and a cell that still NAMES the phrase must DENY the equivalence. Deleting
+    # the clause is equally correct, so both shapes pass — what may not pass is the
+    # bare equivalence, which is what the cell carried before this pin existed. The
+    # denial must sit ADJACENT to the phrase (a `not` anywhere in a 900-word cell
+    # sentence is not the correction — measured: the pre-fix sentence contains
+    # "not empty and not one" AFTER the false clause and satisfied a whole-sentence
+    # test, so this arm is windowed like the manifest denial above).
+    for sentence in re.split(r"(?<=\.)\s+", row):
+        if not re.search(r"immediately\s+before\s+#9548", sentence, re.I):
+            continue
+        assert re.search(
+            r"\b(?:not|never|isn't|is not)\b[^.]{0,40}?immediately\s+before\s+#9548",
+            sentence,
+            re.I,
+        ), (
+            "§A8's evidence cell names \"immediately before #9548\" without "
+            "denying it applies to ff6379eb2:\n  " + sentence
+        )
+
+
+def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp_path):
+    """#11064 review (HIGH): the executed census must not read a git failure as zero lines.
+
+    Two defects, both MEASURED here on a throwaway repo — no network, no DB, no docker:
+
+    1. FAIL-OPEN — `git grep` at an object this checkout does not carry exits **128** with
+       EMPTY stdout. The pre-fix block summed stdout and got `0`, so a note that ever states
+       `0` would be satisfied by a command that never ran: the `#4309` shape this block exists
+       to close, reproduced inside its own pin.
+    2. FALSE RED — that same empty stdout was compared against a real count, so on python-ci's
+       depth-1 `test` job (its bare `actions/checkout@v4` — `.github/workflows/python-ci.yml:968`,
+       inside the `test:` job header at `:680`) this pin failed on a CORRECT tree on every PR. The
+       depth-1 clone below reproduces the shape: the old tree is absent, and `_census_deepen_to` reaches it
+       with a bounded fetch instead of reddening — while a FULL clone that lacks the rev is
+       never shallow-ified, because `tests/test_9397_about_edge_properties.py::_ensure_commit`
+       measured that `git fetch --depth=N` truncates a developer's history.
+
+    Non-vacuity: on the pre-fix tree none of these helpers exists (the logic was inline and
+    unguarded), so this test reds at its first call — the defect, not the fixture. The two
+    `pytest.raises` arms are the ones the pre-fix code could not produce at all.
+    """
+    repo = tmp_path / "census-repo"
+    runbook = repo / "docs" / "infra-runbook.md"
+    runbook.parent.mkdir(parents=True)
+    # A path in the census set that selects NOTHING (the legitimate exit-1 reading), committed
+    # so the "git grep exits 1 when it selects nothing" arm is measured on a real path.
+    (repo / "fly.toml").write_text('[app]\nname = "fixture"\n', encoding="utf-8")
+    assert _census_git(repo, "init", "-q", "-b", "main").returncode == 0
+
+    def commit(n_lines: int, message: str) -> str:
+        runbook.write_text(
+            "".join(f"export TORTOISE_RECORD_DSN=line{i}\n" for i in range(n_lines)),
+            encoding="utf-8",
+        )
+        for args in (
+            ("add", "-A"),
+            (
+                "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "-m", message,
+            ),
+        ):
+            done = _census_git(repo, *args)
+            assert done.returncode == 0, f"fixture git {args} failed: {done.stderr}"
+        head = _census_git(repo, "rev-parse", "HEAD")
+        assert head.returncode == 0, head.stderr
+        return head.stdout.strip()
+
+    census_paths = ["docs/infra-runbook.md"]
+    old_sha = commit(2, "two census lines")
+    commit(5, "five census lines")
+
+    # The reachability predicate the old block never asked.
+    assert _census_commit_available(repo, old_sha)
+    assert not _census_commit_available(repo, "0" * 40)
+    # A legitimate "selects nothing" (exit 1) is a measurement of ZERO, not a failure...
+    assert _census_count_at(repo, old_sha, ["fly.toml"]) == 0
+    # ...while an object the checkout does not have is a FAILURE, never a zero.
+    with pytest.raises(AssertionError) as excinfo:
+        _census_count_at(repo, "0" * 40, census_paths)
+    assert "failed" in str(excinfo.value) and "NOT a census of zero" in str(excinfo.value)
+    # The real counts, at the tree each was measured at.
+    assert _census_count_at(repo, old_sha, census_paths) == 2
+    assert _census_count_at(repo, "HEAD", census_paths) == 5
+
+    # ── the CI shape: a depth-1 checkout ────────────────────────────────────
+    shallow = tmp_path / "shallow"
+    clone = _census_git(
+        tmp_path, "clone", "-q", "--depth", "1", f"file://{repo.resolve()}", str(shallow)
+    )
+    assert clone.returncode == 0, clone.stderr
+    assert _census_is_shallow(shallow)
+    assert not _census_commit_available(shallow, old_sha), (
+        "the depth-1 fixture must not carry the old tree — otherwise it does not reproduce "
+        "the environment the HIGH finding was measured in"
+    )
+    # The PRE-FIX reading of that state: `git grep` fails, stdout is empty, and the sum is 0.
+    with pytest.raises(AssertionError):
+        _census_count_at(shallow, old_sha, census_paths)
+    # The guard's answer is to DEEPEN (bounded), not to red: measured, not asserted.
+    assert _census_deepen_to(shallow, old_sha, depths=(2, 4, 8))
+    assert _census_count_at(shallow, old_sha, census_paths) == 2
+
+    # ── and the deepen arm must never touch a FULL clone ────────────────────
+    # A bogus rev on a full clone returns False WITHOUT fetching: if the shallow gate were
+    # dropped, `git fetch --depth=1` would truncate this repo's history and
+    # `--is-shallow-repository` would flip to true — the destructive side effect
+    # `_ensure_commit` documents.
+    assert not _census_deepen_to(repo, "0" * 40, depths=(1,))
+    assert not _census_is_shallow(repo), (
+        "the deepen arm shallow-ified a FULL clone — that truncates a developer's history"
     )
 
 
@@ -4816,3 +5108,126 @@ def test_the_runbook_field_row_documents_the_positive_pair():
     # with the REAL head cells, neither name is missing.
     assert not _record_keys_missing_a_row(heads, {"record_writes_applied",
                                                 "record_last_write_at"})
+
+
+def test_any_ci_surfaces_line_citation_here_resolves_to_this_files_own_row():
+    """#11064 review (P3), executed: a line citation into the manifest must RESOLVE.
+
+    The sentence establishing WHERE this file's `tier1` registration lives cited
+    `config/ci-surfaces.yml` by LINE NUMBER, and the number had rotted onto another
+    test's row — on `main` it was `- test_cli_serve.py`; on this branch it was
+    `- test_s2_decision_record_5087.py`. It is now cited by mechanism, which the manifest
+    itself requires ("Named by mechanism, not by line number"). A mechanism citation
+    cannot decay; a line citation decays on the next edit to a 7,600-line file, which is
+    precisely how the wrong one got there.
+
+    So this pin does not ban a line citation, it CHECKS one: every
+    `config/ci-surfaces.yml:<line>` pointer in THIS file must resolve to a row naming
+    this file. ⚠️ If a later lane needs to QUOTE a rotten pointer as history, quote it
+    without the `:<n>` suffix (the surviving row's own name), or this pin will treat the
+    quotation as a live claim — the distinction the rest of this file draws between a
+    live instruction and a `SUPERSEDED` record.
+
+    Falsified on the pre-fix text: the pointer resolved to another test's row.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    manifest = (_REPO_ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8").splitlines()
+    stale = []
+    for match in re.finditer(r"config/ci-surfaces\.yml:(\d+)", source):
+        number = int(match.group(1))
+        row = manifest[number - 1].strip() if 0 < number <= len(manifest) else "<beyond the file>"
+        if "test_deploy_workflow.py" not in row:
+            stale.append(f"{match.group(0)} -> {row!r}")
+    assert not stale, (
+        "a `config/ci-surfaces.yml:<line>` citation in this file resolves to a row that is "
+        "not this file's registration:\n  " + "\n  ".join(stale) + "\n"
+        "Cite the entry by mechanism (`its `- test_deploy_workflow.py` entry under "
+        "`tier1:` in `config/ci-surfaces.yml``) — a line number here has already rotted "
+        "onto a sibling test's row (#11064 review P3)"
+    )
+
+
+def test_any_workflow_line_citation_here_resolves_to_a_real_line_and_the_test_job_is_bare():
+    """#11064 review (P2), executed: a `.github/workflows/*.yml:<line>` citation must RESOLVE.
+
+    The census guard's premise — *the `test` job's only checkout is a bare `actions/checkout@v4`,
+    so the job runs at the default `fetch-depth: 1`* — was cited as `.github/workflows/python-ci.yml`
+    line 898. ⚠️ Quoted WITHOUT the `:<n>` suffix on purpose: this pin reads this file's own source,
+    so a live-looking `python-ci.yml:898` in a docstring would be treated as a claim (the sibling
+    `ci-surfaces` pin documents the same convention). That number was CORRECT at the head the
+    sentence was
+    written on and rotted **during this PR's own merge of `origin/main`**: at `fc92a8e3c` the line
+    was `      - uses: actions/checkout@v4`, and at the merge commit `ce0bb3d44` it is a prose
+    comment (*"published to every later step through `$GITHUB_ENV` …"*) — a `main` edit higher in
+    the file moved every later line down. The claim stayed true and its evidence pointed at
+    unrelated text, which is the exact "a past state quoted as a current one" decay this PR exists
+    to close, reproduced inside the PR that closes it.
+
+    So this pin executes the class rather than trusting the numeral:
+
+    1. every `.github/workflows/<name>.yml:<line>` pointer in THIS file must land inside its
+       workflow at a line that is real CONTENT — not blank, and not a `#` comment. That is what
+       catches a rotted pointer without needing to know what the line is *supposed* to say; a
+       citation that lands on a comment has provably moved.
+    2. the SEMANTIC half, asserted where the sentence makes it: the `test` job's checkout carries
+       no `with:`/`fetch-depth`. If a later lane unshallows that job, the shallow-checkout bound
+       this file guards against stops existing and the guard would keep passing — the premise has
+       to red, not the silent-pass path.
+
+    Falsified on the pre-fix text: line 898 resolved to a comment. Falsified on an unshallowed
+    `test` job: the second assertion names the added `with:` key.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    workflows = _REPO_ROOT / ".github" / "workflows"
+    stale = []
+    for match in re.finditer(r"\.github/workflows/([a-z0-9_.-]+\.ya?ml):(\d+)", source):
+        name, number = match.group(1), int(match.group(2))
+        lines = (workflows / name).read_text(encoding="utf-8").splitlines()
+        line = lines[number - 1] if 0 < number <= len(lines) else None
+        if line is None:
+            stale.append(f"{match.group(0)} -> beyond the file ({len(lines)} lines)")
+        elif not line.strip() or line.lstrip().startswith("#"):
+            stale.append(f"{match.group(0)} -> {line.strip()!r} (blank or a comment)")
+    assert not stale, (
+        "a `.github/workflows/<name>.yml:<line>` citation in this file no longer lands on "
+        "anything:\n  " + "\n  ".join(stale) + "\n"
+        "A workflow edit shifts every later line, so re-derive the number or cite the step by "
+        "mechanism — a pointer that lands on a comment has provably rotted (#11064 review P2)"
+    )
+
+    # ── the SEMANTIC half: the `test` job's checkout must stay BARE ─────────────────────
+    workflow = (workflows / "python-ci.yml").read_text(encoding="utf-8").splitlines()
+    header = next(
+        (i for i, ln in enumerate(workflow) if re.fullmatch(r"  test:\s*", ln)),
+        None,
+    )
+    assert header is not None, (
+        "`python-ci.yml` no longer declares a top-level `test:` job — the census guard's "
+        "shallow-checkout bound is derived from it"
+    )
+    end = next(
+        (i for i in range(header + 1, len(workflow)) if re.fullmatch(r"  [A-Za-z0-9_-]+:\s*", workflow[i])),
+        len(workflow),
+    )
+    checkouts = [
+        i for i in range(header, end)
+        if workflow[i].strip().startswith("- uses: actions/checkout@")
+    ]
+    assert len(checkouts) == 1, (
+        "the `test:` job no longer has exactly ONE `actions/checkout@` step "
+        f"(found {len(checkouts)}) — the guard's premise is that a single bare checkout "
+        "gives the job the default `fetch-depth: 1` (#11064 review P2)"
+    )
+    # The step's own body is the checkout line plus any `with:`/`env:` continuation lines up to
+    # the next step. `fetch-depth` anywhere in it means the job is no longer shallow.
+    step = [workflow[checkouts[0]]]
+    for ln in workflow[checkouts[0] + 1:end]:
+        if ln.strip().startswith("- "):
+            break
+        step.append(ln)
+    assert not any("fetch-depth" in ln for ln in step), (
+        "the `test:` job's checkout now sets `fetch-depth`, so the job is no longer shallow — "
+        "the false-RED bound `test_the_census_git_guard_fails_closed_and_never_reds_a_shallow"
+        "_checkout` guards against no longer exists, while the guard would keep passing "
+        "(#11064 review P2):\n  " + "\n  ".join(ln for ln in step if "fetch-depth" in ln)
+    )
