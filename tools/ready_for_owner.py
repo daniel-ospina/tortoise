@@ -1379,6 +1379,15 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
             f"{context}=UNATTRIBUTABLE(the head's workflow runs could not be read, so "
             "absence cannot be told apart from a pending aggregate)"
         )
+    # A listing with an unreadable ENTRY is not a reading of the listing — the same rule
+    # the fixture door enforces (`_fixture_head_runs`). "No run matched" is a MEASUREMENT
+    # only when every entry was readable, so a hand-built `Probe` carrying a malformed
+    # entry must land on the same FAIL, never on the DEFERRED (PASS) arm.
+    if not all(isinstance(run, Mapping) for run in probe.head_runs):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's run listing carries an entry that is not "
+            "a run, so 'no run of the emitter' is not a measurement)"
+        )
     matched = [_run_file(run) for run in probe.head_runs if _run_emits(run, files)]
     if matched:
         return "missing", (
@@ -3063,6 +3072,46 @@ def _fixture_head_runs(data: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]
     return tuple(raw)
 
 
+def _fixture_merge_emit_files(data: Mapping[str, Any]) -> Mapping[str, tuple[str, ...]]:
+    """A fixture's ``emitters`` projection, shape-validated like the run listing.
+
+    The emitter map is what makes an absent merge-time context ATTRIBUTABLE, so a value
+    that is not a list of workflow FILE NAMES is not a reading of it. Two plausible JSON
+    slips are type-confused rather than merely empty:
+
+    * ``{"python-ci-gate": "python-ci.yml"}`` (a bare string) becomes a tuple of
+      CHARACTERS, so ``_run_file`` can never match it;
+    * ``{"python-ci-gate": {"workflow": "python-ci.yml"}}`` (a bare mapping) becomes its
+      KEYS.
+
+    Neither matches an emitter, so each graded the absence ``DEFERRED`` — a PASS over an
+    emitter that IS recorded and that DID run on the head (measured at ``caa4d7e6f``: the
+    correct list yields ``missing:python-ci-gate``/FAIL, both slips yield PASS). The live
+    path cannot produce either shape (``RequiredSet.emit_workflows`` yields tuples), so
+    this is the fixture door — and the door must not turn a type-confused value into the
+    pass arm.
+
+    A malformed value collapses to ``()``, which `_merge_time_absence` reads as
+    **UNATTRIBUTABLE** (FAIL), never as "read it, no emitter". An OMITTED or null
+    projection stays ``{}`` — also UNATTRIBUTABLE for any required merge-time name — so
+    every unreadable shape fails closed.
+    """
+    raw = data.get("merge_emit_files")
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for name, files in raw.items():
+        if (
+            isinstance(files, (list, tuple))
+            and files
+            and all(isinstance(f, str) and f for f in files)
+        ):
+            out[str(name)] = tuple(files)
+        else:
+            out[str(name)] = ()
+    return out
+
+
 def probe_from_dict(data: Mapping[str, Any]) -> Probe:
     """Build a Probe from a fixture dict (used by tests and ``--fixture``)."""
     groups = data.get("groups")
@@ -3115,10 +3164,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         groups=parsed_groups,
         groups_raw=str(data.get("groups_raw", "")),
         head_runs=_fixture_head_runs(data),
-        merge_emit_files={
-            str(name): tuple(files or ())
-            for name, files in (data.get("merge_emit_files") or {}).items()
-        },
+        merge_emit_files=_fixture_merge_emit_files(data),
         required=None if data.get("required") is None else tuple(data["required"]),
         # Same absent-vs-null idiom as `labels` above: a fixture that OMITS the key is a
         # pre-split fixture whose flat set was all entry checks (so `()` is faithful),

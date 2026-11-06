@@ -34,9 +34,13 @@ THE CONTRACT THIS IMPLEMENTS — `.mergify.yml`'s own header, clause 1
         `queue_conditions` gates ENTRY   (evaluated against the PR head)
         `merge_conditions` gates the MERGE (evaluated against the queue branch)
 
-    A `merge_conditions` name is therefore **DEFERRED** at a PR head, not missing:
-    Mergify evaluates it on `mergify/merge-queue/<sha>`, so a consumer that treats
-    absence as `FAIL(missing)` reports NOT-READY for every PR forever.
+    A `merge_conditions` name is therefore **DEFERRED** at a PR head, not missing —
+    *but only for a consumer that can ATTRIBUTE the absence*: one that knows which
+    workflow emits the context (``emit_files``) AND has read that head's run listing.
+    Mergify evaluates the context on `mergify/merge-queue/<sha>`, so a consumer that
+    treats absence as `FAIL(missing)` reports NOT-READY for every PR forever, while one
+    that defers on bare absence grades a PENDING aggregate PASS (see the paragraph below).
+    With no attribution the answer is `FAIL(unattributable)`, never `DEFERRED`.
 
     ⛔ BUT "DEFERRED" IS NOT "ABSENT", AND THE FIRST MEASUREMENT SAID THE WRONG THING.
     This docstring used to conclude, from "all six sampled open PR heads carried ZERO

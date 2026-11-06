@@ -35,6 +35,7 @@ The modes, one test each:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -3498,12 +3499,15 @@ def test_a_truncated_run_listing_fails_closed_before_attribution(
     assert "TRUNCATED" in gates.raw
 
 
-def test_a_malformed_run_entry_reaching_attribution_is_skipped_not_a_traceback() -> None:
-    """★ The `--fixture` door: a non-mapping run entry must not RAISE — and not DEFER.
+def test_a_malformed_run_entry_is_refused_by_the_fixture_door_not_a_traceback() -> None:
+    """★ The `--fixture` door validates the run listing's SHAPE, so nothing malformed
+    reaches attribution — and the verdict it produces is still FAIL(unattributable).
 
-    Every condition is a pure function of the Probe, and `probe_from_dict` is a documented
-    way to build one, so a malformed entry can reach attribution without passing
-    `collect_items`. Two things must hold, and they pull in opposite directions:
+    ⛔ This test used to claim a malformed entry "can reach attribution without passing
+    `collect_items`". It cannot: `probe_from_dict` refuses a listing whose entries are not
+    mappings (`_fixture_head_runs`), so the entry arrives as "not read". What is pinned
+    here is therefore the DOOR, and the two things it must not do are the ones that
+    matter:
 
     * an AttributeError escaping `check_gates` exits **1** through the CLI, which a caller
       reads as "a required check is red" rather than "I could not read the runs" — the
@@ -3512,7 +3516,9 @@ def test_a_malformed_run_entry_reaching_attribution_is_skipped_not_a_traceback()
       is not "evidence it did not run", so it may not reach the DEFERRED (PASS) arm —
       that is the same conflation `958b235db` retracts for the omitted key, one shape over.
 
-    So the verdict is FAIL(unattributable): a verdict, not a traceback, and not a pass.
+    `_run_emits`' own `Mapping` guard covers the remaining construction (a hand-built
+    `Probe`, which both collect doors cannot produce) and is pinned directly by
+    `test_the_malformed_entry_guard_holds_on_a_hand_built_probe`.
     """
     probe = rfo.probe_from_dict(
         {
@@ -3538,6 +3544,30 @@ def test_a_malformed_run_entry_reaching_attribution_is_skipped_not_a_traceback()
     assert probe.head_runs is None, probe.head_runs
     gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
     # A partially-readable listing is UNATTRIBUTABLE — a verdict, not a crash, not a deferral.
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+
+def test_the_malformed_entry_guard_holds_on_a_hand_built_probe() -> None:
+    """★ `_run_emits`' `Mapping` guard is live, and its arm is UNATTRIBUTABLE — not a deferral.
+
+    Both collect doors refuse a non-mapping run entry, so this input is reachable only by
+    building the `Probe` directly — which the module's own "every condition is a pure
+    function of the Probe" contract documents as supported. Two outcomes are forbidden and
+    this pins both: an `AttributeError` escaping `check_gates` (the CLI reports exit 1,
+    "a required check is red") and the DEFERRED PASS arm ("no run of the emitter exists"
+    is not a measurement when an entry could not be read).
+    """
+    probe = dataclasses.replace(
+        rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+        # `_run_emits` takes a Mapping; this IS the type-confused input the guard exists
+        # for, and `Probe` is a documented pure-function-of-the-Probe construction.
+        head_runs=("not-a-run",),  # type: ignore[arg-type]
+    )
+    assert rfo._run_emits("not-a-run", ("python-ci.yml",)) is False  # type: ignore[arg-type]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    # A verdict, not a traceback — and not a deferral: a listing with an unreadable entry
+    # is not a reading, so it takes the same UNATTRIBUTABLE arm as the fixture door.
     assert gates.passed is False, gates.raw
     assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
 
@@ -3601,6 +3631,59 @@ def test_a_type_confused_head_runs_is_unattributable_not_a_deferral() -> None:
         gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
         assert gates.passed is False, (shape, gates.raw)
         assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+def test_a_type_confused_emitter_projection_is_unattributable_not_a_deferral() -> None:
+    """★ `merge_emit_files` VALUES are shape-validated, one field over from the run listing.
+
+    An emitter spelled as a bare string becomes a tuple of CHARACTERS, and one spelled as a
+    bare mapping becomes its KEYS; neither can ever match a run, so each graded the
+    context `DEFERRED`/PASS — **at a head where the emitting workflow really ran**. That is
+    the same fail-open the `head_runs` shape pin above closes, one field over. Measured at
+    `caa4d7e6f`: the correct list yields `missing:<ctx>`/FAIL, both slips yield PASS.
+
+    A malformed value collapses to `()`, which the absence arm reads as UNATTRIBUTABLE
+    (FAIL) — never as "read it, no emitter".
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    for shape in (
+        "python-ci.yml",
+        {"workflow": "python-ci.yml"},
+        ["python-ci.yml", 17],
+        [],
+    ):
+        probe = rfo.probe_from_dict(
+            _fixture_with_head_runs(
+                {"merge_emit_files": {MERGE_TIME_REQUIRED[0]: shape}, "head_runs": ran}
+            )
+        )
+        assert probe.merge_emit_files.get(MERGE_TIME_REQUIRED[0]) == (), (
+            shape,
+            probe.merge_emit_files,
+        )
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+def test_a_well_formed_emitter_projection_still_attributes_the_absence() -> None:
+    """The counterpart: a correctly-shaped projection keeps deciding MISSING and DEFERRED.
+
+    Without this, the pin above could be satisfied by collapsing every projection to `()`,
+    which would trade the fail-open for a permanent FAIL on every merge-time context.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": ran}))
+    assert probe.merge_emit_files == {MERGE_TIME_REQUIRED[0]: ("python-ci.yml",)}
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+    deferred = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []}))
+    assert deferred.merge_emit_files == {MERGE_TIME_REQUIRED[0]: ("python-ci.yml",)}
+    gates = next(c for c in rfo.evaluate(deferred).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)(no python-ci.yml run" in gates.raw, gates.raw
 
 
 def test_an_explicit_empty_head_runs_still_defers() -> None:
