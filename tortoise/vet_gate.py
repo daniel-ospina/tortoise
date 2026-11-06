@@ -681,13 +681,21 @@ def _referenced_entity_names(embed_list: object,
     # whose sole tie to the emission is a relation's endpoint looked
     # unreferenced and could be DISCARDed — and S5 would then drop the
     # relation as unresolvable, one stage after this guard authorised it.
-    for rel in embed_list.get("relations") or []:
-        if not isinstance(rel, Mapping):
-            continue
-        for side in ("src", "dst"):
-            ref = rel.get(side)
-            if isinstance(ref, str) and ref.strip():
-                names.add(_norm(ref))
+    #
+    # Read through `_as_items` (the same tolerance the section scan above
+    # uses): `relations` is MODEL-emitted, so a mistyped value is reachable —
+    # `relations: 5` must contribute nothing, never raise. An exception here
+    # escapes `apply_vet` and abandons the ENTIRE S2.2 pass (every candidate
+    # kept, no discards), which is not the "contributes nothing" this guard
+    # documents.
+    if isinstance(embed_list, Mapping):
+        for rel in _as_items(embed_list.get("relations")):
+            if not isinstance(rel, Mapping):
+                continue
+            for side in ("src", "dst"):
+                ref = rel.get(side)
+                if isinstance(ref, str) and ref.strip():
+                    names.add(_norm(ref))
     return names
 
 

@@ -5424,7 +5424,14 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
         renamed &= emitted
         return renamed.pop() if len(renamed) == 1 else ref
 
-    for rel in out.get("relations") or []:
+    # `relations` is MODEL-emitted, so a mistyped value is reachable (the same
+    # reason `_assemble_relations` treats it as a drop, not a no-op). It
+    # contributes nothing here — it must never raise, because an exception
+    # escapes into `extract_session_v2`'s per-stage guard and silently loses
+    # the WHOLE D3 rename, i.e. exactly the canonicalisation this block exists
+    # to perform.
+    raw_relations = out.get("relations")
+    for rel in raw_relations if isinstance(raw_relations, list) else ():
         if not isinstance(rel, dict):
             continue
         for side in ("src", "dst"):

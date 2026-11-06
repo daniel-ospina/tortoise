@@ -496,3 +496,61 @@ def test_core_predicates_are_accepted(predicate):
                               "predicate": predicate}]
     result = _run(emission)
     assert [r["predicate"] for r in result["relations"]] == [predicate]
+
+
+# ── 9. a MISTYPED relations section contributes nothing, never an exception ─
+#
+# `relations` is MODEL-emitted, so a malformed value is reachable — the same
+# reason `_assemble_relations` treats it as a drop rather than a no-op. Every
+# stage that touches it before S5 must therefore be total on a bad shape: an
+# exception does not stay local, it escapes into a per-stage `except` and
+# abandons that ENTIRE stage (the whole S2.2 vet pass, or the whole D3 rename)
+# while reporting only one warning.
+
+def test_a_mistyped_relations_section_never_aborts_the_vet_pass():
+    """`apply_vet` is documented as total on a malformed section shape, and
+    `_referenced_entity_names` on "a shape we do not recognise contributes
+    nothing" — both false while the referent scan iterated the raw value.
+
+    Measured pre-fix: `apply_vet(…, {"relations": 5}, <one DISCARD>)` raised
+    `TypeError: 'int' object is not iterable`, so a direct caller saw an
+    exception and `_run_vet_pass` silently abandoned EVERY verdict in the
+    batch (all candidates kept, no discards, one `vet failed` warning).
+    """
+    from tortoise import vet_gate
+
+    emission = {"entities": [{"name": "Retry Storm", "kind": "core:event"},
+                            {"name": "Deadline Rule", "kind": "core:rule"}],
+                "events": [], "points": [], "operators": [],
+                "relations": 5}
+    item_id = vet_gate._item_id("entities", 1, emission["entities"][1])
+    kept, _warnings = vet_gate.apply_vet(
+        emission, {item_id: {"outcome": "DISCARD"}})
+
+    # The verdict is APPLIED — not merely "no exception raised": a silently
+    # abandoned pass would keep both entities and still return normally.
+    assert [e.get("name") for e in kept["entities"]] == ["Retry Storm"]
+    # …and the malformed section contributes no name to the referent set.
+    assert vet_gate._referenced_entity_names(emission, set()) == set()
+    # …and a non-Mapping embed list stays total (it returns an empty set, as
+    # the pre-#10999 code did, instead of raising AttributeError).
+    for bad in (None, 5, [], "x"):
+        assert vet_gate._referenced_entity_names(bad, set()) == set(), bad
+
+
+def test_a_mistyped_relations_section_never_aborts_the_rename_stage():
+    """The D3 rename reads `relations` too, and an exception there costs the
+    WHOLE rename for the session — i.e. precisely the canonicalisation that
+    makes a relation resolvable at S5.
+
+    Measured pre-fix with a non-empty resolution map: `TypeError: 'int' object
+    is not iterable`, raised out of `_apply_entity_resolution`.
+    """
+    resolved = v2._apply_entity_resolution(
+        {"entities": [{"name": "Ghost", "kind": "core:rule"},
+                      {"name": "Keep", "kind": "core:rule"}],
+         "relations": 5},
+        {"Ghost": {"name": "Renamed"}})
+
+    assert [e["name"] for e in resolved["entities"]] == ["Renamed", "Keep"]
+    assert resolved["relations"] == 5       # untouched, not "fixed up"
