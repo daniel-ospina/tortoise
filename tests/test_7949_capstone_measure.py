@@ -1502,7 +1502,16 @@ def test_an_overflowing_SHARE_FLOOR_refuses_instead_of_tracebacking(
 
     Non-vacuity: measured at the pre-fix head (`.venv/bin/python
     docs/evidence/7949-capstone/probes/e1_e2_scores.py --repo <mutated>`) the run
-    exited **1** with that traceback; post-fix it exits 2 naming the criteria.
+    exited **1** with that traceback; post-fix it exits 2.
+
+    ⛔ WHICH GUARD ANSWERS IT MOVED (#10610 review at `ec7b5e7e`, then `380a2b7a2`).
+    After the non-finite-floor guard landed, an unbounded-magnitude share floor is
+    refused in `frozen_denominators` BEFORE `_parse_bars` is reached — so this pin
+    now exercises the FLOOR guard and asserts ITS message, because a pin that keeps
+    asserting the older wording would be asserting a path this input no longer
+    takes. `_parse_bars`'s `OverflowError` arm is kept as defence in depth for a
+    bar path or a floor that is added to the parse without the floor validation,
+    and its comment says so rather than claiming coverage this pin does not give it.
     """
     repo = _copied_bundle(tmp_path)
     path = repo / "docs/evidence/7949-capstone/preregistration.json"
@@ -1511,13 +1520,12 @@ def test_an_overflowing_SHARE_FLOOR_refuses_instead_of_tracebacking(
         "E1's share floor moved — this pin's subject is gone, move the pin with it")
     prereg["denominator_floors"]["e1_min_before_share"] = 10 ** 400
     path.write_text(json.dumps(prereg))
-    # …and the INT floor of the same magnitude is already refused, which is the
-    # asymmetry this pin closes. Arm it ALONE so the share floor cannot answer for it.
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
     err = capsys.readouterr().err
-    assert "criteria cannot be parsed" in err, err
+    assert "e1_min_before_share" in err, err
+    assert "no float can hold" in err, err
     assert "too large to convert to float" in err, err
 
 
@@ -8261,6 +8269,168 @@ def test_a_RE_ORDERED_copy_of_one_before_arm_is_still_one_realization(
     err = capsys.readouterr().err
     assert "SAME `object_names`" in err, err
     assert "re-ordering the list" in err, err
+
+
+def test_a_before_arm_census_with_a_DUPLICATED_name_is_refused(tmp_path, capsys):
+    """#10610 review at `380a2b7a2` (P1): a census has no duplicates.
+
+    The identity guard added above reasons about multiplicity ACROSS arms; nothing
+    read it WITHIN one. `e1_paired_arm.py` writes one row per `:Object` node, so a
+    name can appear once — and a duplicated population is self-consistent for EVERY
+    guard on the block: `objects == len(names)` (a duplicate is still a member),
+    `bare_in_names`, `_consistent_share` and `label_counts["Object"]` all reconcile.
+    Measured at the pre-fix head, replacing arm 1's 78 names with 78 copies of one
+    name and reconciling `bare_definite: 78, share: 1.0, label_counts: 78`:
+
+        E1 PASS decidable=True (before spread 43.5 pp)
+           before 1.0000 -> bound 0.5000 vs after 0.2131 = PASS
+           before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS
+        EXIT=0
+
+    — a DECIDED row computed over a census no producer can write. The E2a census
+    beside this one has refused the same shape since `f12471075`
+    (`len(set(ids)) != len(ids)`); this is that rule on the population E1's share
+    is computed over. Non-vacuity: measured, pre-fix exit 0 and this same bundle
+    post-fix exit 2.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(first.read_text())
+    names = record["object_names"]
+    assert len(set(names)) == len(names), (
+        "the SHIPPED before arm already carries a duplicate — re-derive this pin")
+    record["object_names"] = ["the same object"] * len(names)
+    record["bare_definite"] = len(names)
+    record["share"] = 1.0
+    record.setdefault("label_counts", {})["Object"] = len(names)
+    first.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "lists the same `object_names` member twice" in err, err
+    assert "CENSUS" in err, err
+
+
+def test_a_before_arm_census_member_of_another_type_is_refused(tmp_path, capsys):
+    """#10610 review at `380a2b7a2` (P3): the refusal must NAME the field, not a session.
+
+    The member type-check was borrowed from `_unit_id_members`, whose message says
+    "session" — but a BEFORE ARM HAS NO SESSIONS, so it reported the graph name as a
+    session id and (with `{field}={member!r}`) the offending member as if it were the
+    whole population. A message that misnames the field is a defect in the one string
+    an operator uses to find the bad record, so it is pinned here.
+
+    The check itself matters as much as the wording: without it the member reaches
+    `sorted(...)`, which raises `TypeError` — exit 1 with a traceback, beside a guard
+    whose failure mode must be the exit-2 refusal.
+    """
+    repo = _bundle(tmp_path)
+    first = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(first.read_text())
+    record["object_names"] = [{"not": "a name"}, *record["object_names"][1:]]
+    first.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "`object_names` member" in err, err
+    assert "not an object name" in err, err
+    assert "session" not in err, (
+        "a before arm has no sessions — the refusal must not report the graph name "
+        f"as one: {err}")
+
+
+@pytest.mark.parametrize("value,label", [
+    (float("nan"), "nan"),
+    (float("inf"), "inf"),
+    (0, "zero"),
+    ("0.2", "string"),
+    (True, "bool"),
+])
+def test_a_frozen_share_floor_that_is_not_a_floor_is_refused(
+        value, label, tmp_path, capsys):
+    """#10610 review at `380a2b7a2` (P2): a floor that binds nothing is not a floor.
+
+    `frozen_denominators` read the three floors RAW and used them as comparison
+    thresholds. JSON carries the `NaN`/`Infinity` literals, so
+    `e1_min_before_share = NaN` made E1's floor describe nothing — every `share < nan`
+    is False — and a control arm too flat to measure E1 was accepted. Composed with a
+    zero-share before arm (legal under `_consistent_share` when `bare_definite: 0`)
+    the inert floor let the pairing through and the ratio at
+    `after["share"] / arm["share"]` raised `ZeroDivisionError: float division by
+    zero` — exit **1** with a traceback, the contract violation the two
+    `OverflowError` arms in this file close, one function over. `inf` was refused only
+    incidentally (`share < inf` happens to be True), which is luck and not a rule.
+
+    `0` is the third arm: `share < 0` is unreachable for a share, so a zero floor
+    refuses nothing and re-opens the division from the other side. A string and a
+    bool are the type arms — `bool` is an `int` in Python, and `float("0.2")` would
+    accept the string and hand the raw value to the comparison.
+
+    Non-vacuity, MEASURED and stated per arm rather than as one blanket claim (the
+    first cut of this docstring said "all of these exited 0", which the measurement
+    refutes): `nan` and `0` both exited **0** and wrote a record at the pre-fix head,
+    so those two are NEW coverage. `inf`, the string and the bool were ALREADY
+    refused there — `inf` incidentally (`share < inf` happens to be True), the other
+    two by `_parse_bars`' own type checks — so those three arms are regression
+    protection for a refusal that exists for the wrong reason, which is why they are
+    kept rather than dropped.
+    """
+    repo = _copied_bundle(tmp_path)
+    path = repo / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(path.read_text())
+    prereg["denominator_floors"]["e1_min_before_share"] = value
+    path.write_text(json.dumps(prereg))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, (label, refused.value)
+    err = capsys.readouterr().err
+    assert "e1_min_before_share" in err, err
+
+
+def test_an_ABSENT_value_lost_is_refused_and_is_not_an_empty_list(tmp_path, capsys):
+    """#10610 review at `380a2b7a2` (P2): the field a forger DELETES switched the rule off.
+
+    `_census_reconcile`'s partition rule was gated on `lost is not None`, so the one
+    field a forger removes was the one that disabled the check. Measured on the
+    shipped bundle — delete `value_lost` from every `per_session` row, set
+    `value_survived = value_ids` and mirror the falsifier's `as_written` block —
+    the run wrote **`E2 PASS — E2a 14/14`, exit 0**, which is the identical forgery
+    that block's own docstring records having measured and closed for the
+    row-present case ("the census `kept = ids` with `value_lost` untouched wrote
+    `E2 PASS`").
+
+    An absent field is a REFUSAL, not an empty list: `e2a_value_units.py` writes
+    `value_lost` on every row and all 21 rows across the three shipped records carry
+    it, so absence is an edit. This is the rule the rest of the file already applies
+    ("an absent provenance is not a default one").
+    """
+    repo = _copied_bundle(tmp_path)
+    for name in ("e2a-value-units.json", "e2a-value-units-falsifier.json"):
+        path = repo / "docs/evidence/9889" / name
+        record = json.loads(path.read_text())
+
+        def _strip(block):
+            for row in block["per_session"].values():
+                assert "value_lost" in row, (
+                    "the SHIPPED record already omits value_lost — re-derive this pin")
+                row.pop("value_lost")
+                row["value_survived"] = list(row["value_ids"])
+            block["value_survived"] = block["value_units"]
+
+        if "per_session" in record:
+            _strip(record)
+        for key in ("with_anchor", "as_written"):
+            if isinstance(record.get(key), dict) and "per_session" in record[key]:
+                _strip(record[key])
+        path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "carries no value_lost" in err, err
+    assert "PARTITION" in err, err
 
 
 def test_the_before_arms_counts_are_the_population_they_count(tmp_path, capsys):

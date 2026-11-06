@@ -516,22 +516,38 @@ def _census_reconcile(where: str, block: dict, *, declared=None) -> None:
             raise _refuse(f"{where}'s session {session_id!r} reports surviving units "
                           "that are not among its own value_ids — a unit cannot "
                           "survive a population it was never in")
+        # ⛔ ABSENCE IS NOT A DEFAULT ONE (#10610 review at `380a2b7a2`, P2). The
+        # partition rule below was gated on `lost is not None`, so the ONE field a
+        # forger deletes was the one that switched the rule off: measured on the
+        # shipped bundle, deleting `value_lost` from every `per_session` row,
+        # setting `value_survived = value_ids` and mirroring the falsifier's
+        # `as_written` block wrote `E2 PASS — E2a 14/14`, exit 0 — the identical
+        # forgery this block's own docstring records having measured and closed for
+        # the row-present case. `e2a_value_units.py` writes `value_lost` on every
+        # row (`[v for v in value_ids if v not in set(survived)]`) and all 21 rows
+        # across the three shipped records carry it, so a row without it was edited,
+        # not produced — which is the rule the rest of this file already applies
+        # ("an absent provenance is not a default one").
         lost = row.get("value_lost")
-        if lost is not None:
-            if not isinstance(lost, list):
-                raise _refuse(f"{where}'s session {session_id!r} carries a "
-                              "value_lost that is not a list")
-            _unit_id_members(where, session_id, "value_lost", lost)
-            both = set(lost) & set(kept)
-            if both:
-                raise _refuse(f"{where}'s session {session_id!r} lists "
-                              f"{sorted(both)!r} as BOTH survived and lost — the row "
-                              "contradicts itself, so its totals describe no run")
-            if set(lost) | set(kept) != set(ids) or len(set(lost)) != len(lost):
-                raise _refuse(f"{where}'s session {session_id!r} does not partition "
-                              "its value_ids into survived + lost — the census is a "
-                              "partition of the population, not two independent "
-                              "lists")
+        if lost is None:
+            raise _refuse(f"{where}'s session {session_id!r} carries no "
+                          "value_lost — the census is a PARTITION of its "
+                          "value_ids, every producer writes the losing half, so "
+                          "an absent one is a deleted field and not an empty list")
+        if not isinstance(lost, list):
+            raise _refuse(f"{where}'s session {session_id!r} carries a "
+                          "value_lost that is not a list")
+        _unit_id_members(where, session_id, "value_lost", lost)
+        both = set(lost) & set(kept)
+        if both:
+            raise _refuse(f"{where}'s session {session_id!r} lists "
+                          f"{sorted(both)!r} as BOTH survived and lost — the row "
+                          "contradicts itself, so its totals describe no run")
+        if set(lost) | set(kept) != set(ids) or len(set(lost)) != len(lost):
+            raise _refuse(f"{where}'s session {session_id!r} does not partition "
+                          "its value_ids into survived + lost — the census is a "
+                          "partition of the population, not two independent "
+                          "lists")
         units += len(ids)
         survived += len(kept)
     stated = declared if declared is not None else (
@@ -621,6 +637,14 @@ def _parse_bars(prereg: dict) -> dict:
     # SIBLING OF `Infinity`"). Measured at the pre-fix head: exit 1; an
     # `e1_objects` of the same magnitude beside it refused cleanly, so the asymmetry
     # sat inside one record's floor map.
+    #
+    # ⚠️ DEFENCE IN DEPTH, NOT THE LOAD-BEARING GUARD (#10610 review at `380a2b7a2`).
+    # `frozen_denominators` now validates all three floors (finite, numeric, share
+    # floor > 0) BEFORE this call, so the `10**400` case is answered there with a
+    # message that names the field — and no test exercises this arm through the
+    # floors any more. It is kept because `parse_bars` is the bundle's shared reader
+    # and a bar path or a newly added floor could reach `float()` without passing
+    # that validation; a reader should not mistake it for the guard that fires today.
     try:
         return _BARS_READER["module"].parse_bars(prereg)
     except (ValueError, OverflowError) as exc:
@@ -651,6 +675,46 @@ def frozen_denominators(repo: Path) -> dict:
     for key in ("e1_objects", "e1_min_before_share", "e2b_surviving_units"):
         if key not in floors:
             raise _refuse(f"{PREREG} carries no denominator_floors.{key}")
+    # ⛔ A FLOOR THAT IS NOT A FINITE NUMBER IS NOT A FLOOR (#10610 review at
+    # `380a2b7a2`, P2). These three are read RAW and then used as COMPARISON
+    # thresholds, and JSON carries the `NaN`/`Infinity` literals — so
+    # `denominator_floors.e1_min_before_share = NaN` made E1's floor describe
+    # nothing: every `share < nan` is False, so the floor silently stopped binding
+    # and a control arm too flat to measure E1 was accepted. Composed with a
+    # zero-share before arm (legal under `_consistent_share` when `bare_definite:
+    # 0`) the inert floor let the pairing through and the ratio at
+    # `after["share"] / arm["share"]` raised `ZeroDivisionError: float division by
+    # zero` — exit **1** with a traceback, the exact contract violation the two
+    # `OverflowError` arms above close, one function over. `inf` was refused only
+    # incidentally (`share < inf` happens to be True), which is luck and not a
+    # rule — the same reasoning `e079c8dd`'s NaN-share pin states for the log.
+    #
+    # The share floor is additionally required to be POSITIVE: `0` is not a floor
+    # (`share < 0` is unreachable for a share) and it re-opens the zero division
+    # from the other side.
+    for key in ("e1_objects", "e1_min_before_share", "e2b_surviving_units"):
+        value = floors[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _refuse(f"{PREREG}'s denominator_floors.{key} is a "
+                          f"{type(value).__name__} ({value!r}), not a number — a "
+                          "floor is compared against a measurement, so a value of "
+                          "another type cannot be one")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError as exc:
+            raise _refuse(f"{PREREG}'s denominator_floors.{key} is at a magnitude "
+                          f"no float can hold — a floor that no reading can be "
+                          f"compared against: {exc}") from exc
+        if not finite:
+            raise _refuse(f"{PREREG}'s denominator_floors.{key} is {value!r} — a "
+                          "floor that is not finite binds nothing (every "
+                          "comparison against NaN is False), so it is not a "
+                          "floor")
+    if floors["e1_min_before_share"] <= 0:
+        raise _refuse(f"{PREREG}'s denominator_floors.e1_min_before_share is "
+                      f"{floors['e1_min_before_share']!r} — a share floor of zero "
+                      "or less refuses nothing (every share clears it), so a "
+                      "control arm too flat to measure E1 would score")
     corpus = prereg.get("corpus")
     corpus = {} if corpus is None else _object_block(
         str(PREREG), "corpus", corpus)
@@ -717,6 +781,21 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     returns `None`, which stringifies to `"none"` — a token of the OFF
     vocabulary — so a block that wrote nothing would certify the arm it is
     supposed to prove.
+
+    ⚠️ WHAT THIS FUNCTION STILL CANNOT REFUSE, stated so the row is not read as
+    more than it is (#10610 review at `380a2b7a2`, P1 second arm). Every guard here
+    reads ONE record. A before arm has no SECOND artifact about its own run —
+    `e1-gate-drops.json` exists precisely to witness the ON arm's census, and
+    nothing plays that part for the OFF arms — so a coherent MULTI-FIELD edit to a
+    single before record is undetectable in principle: measured, prefixing six
+    non-bare names with `the ` and reconciling `bare_definite` (28 -> 34) and
+    `share` (0.3590 -> 0.4359) exits 0 and moves E1's bound from 0.1795 to 0.2179,
+    above the after arm's 0.2131. Every field still agrees with every other field,
+    which is all a single artifact can be held to. What IS refused is every edit
+    that leaves the record internally incoherent (a count that disagrees with its
+    census, a duplicated name, a share its own counts refute) — which is why the
+    rows cite the RECORD's corpus pin and the reasoning travels to the README
+    rather than being implied here.
 
     ⛔ And the FOURTH refusal is the one every other guard in this file cannot
     reach, because it is the only place the mirror rule has to be INVERTED. The
@@ -835,7 +914,42 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
         # guard whose failure mode must be the exit-**2** refusal (the class
         # `_unit_id_members` already converts for the E2a census, which is the same
         # shape: a list of string ids compared as a population).
-        _unit_id_members(str(EVIDENCE / name), graph, "object_names", names)
+        # The members are checked as object names FIRST: `sorted` over a list
+        # holding a dict or a list raises `TypeError` — exit **1** with a traceback,
+        # beside a guard whose failure mode must be the exit-**2** refusal (the class
+        # `_unit_id_members` already converts for the E2a census, which is the same
+        # shape: a list of string ids compared as a population). Written out rather
+        # than borrowed from `_unit_id_members` because that helper's message says
+        # "session" and a BEFORE ARM HAS NO SESSIONS — it would report the graph
+        # name as a session id and the offending member as the whole list, which is
+        # the one string an operator uses to find the bad field (#10610 review at
+        # `380a2b7a2`, P3).
+        for member in names:
+            if not isinstance(member, str):
+                raise _refuse(
+                    f"{name} carries an `object_names` member {member!r}, which is "
+                    "not an object name — the population is the run's own list of "
+                    "`:Object` names, so a member of another type is an edited "
+                    "record")
+        # ⛔ A CENSUS HAS NO DUPLICATES (#10610 review at `380a2b7a2`, P1). The
+        # identity guard below reasons about multiplicity ACROSS arms; nothing read
+        # it WITHIN one. `e1_paired_arm.py` writes one row per `:Object` node, so a
+        # name can appear once — and a duplicated population is self-consistent for
+        # every guard on the block: `objects == len(names)` (a duplicate is still a
+        # member), `bare_in_names`, `_consistent_share`, `label_counts`. Measured:
+        # replacing arm 1's 78 names with 78 copies of one name and reconciling
+        # `bare_definite: 78, share: 1.0, label_counts: 78` scored
+        # `E1 PASS decidable=True` at a 43.5 pp spread, exit 0 — a DECIDED row from a
+        # census no producer can write. The E2a census beside this one has refused
+        # the same shape since `f12471075` (`len(set(ids)) != len(ids)`); this is
+        # that rule, on the population E1's share is computed over.
+        if len(set(names)) != len(names):
+            raise _refuse(
+                f"{name} lists the same `object_names` member twice ({len(names)} "
+                f"members, {len(set(names))} distinct) — the population is a CENSUS "
+                "of `:Object` names, one row per node, so a duplicate cannot come "
+                "from a producer and would inflate the count the share is "
+                "computed over")
         same = next((prior for prior in arms
                      if sorted(prior["object_names"]) == sorted(names)), None)
         if same is not None:
