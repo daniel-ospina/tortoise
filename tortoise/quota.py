@@ -1670,6 +1670,15 @@ def _commit_ingest_reclaim(store, now_ts: float) -> None:
 def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmission:
     """Charge ``charge_bytes`` against the org's rolling-60s ingest allowance.
 
+    ⚠️ ONE WINDOW FOR BOTH SESSION WRITE LANES (#4051 §3.1). The name follows
+    the documented operator knob (``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN``,
+    ``docs/capacity.md`` §3) and predates the second caller: since the capture
+    lane was wired, ``POST /v1/sessions`` charges the SAME per-org window as
+    ``POST /v1/sessions/commit`` (``hosted_api.capture_ingest_charge_bytes``).
+    Alternating endpoints therefore cannot buy a second allowance — the
+    allowance is per ORG and per WINDOW, not per route. A caller that adds a
+    third write lane must charge this same window rather than add a constant.
+
     Exemptions:
 
     * ``not org_id`` (stdio/operator) is unbounded — it mirrors

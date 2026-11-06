@@ -510,19 +510,27 @@ the `{error}`-only shape whose retry action is different.
 - **The cap is CUMULATIVE, not rate-based.** It is the team's total node
   count against the tier limit (`max_points` ← `graph_size_cap`). Backoff
   cannot clear it — only raising the limit (or pruning) does.
-- **One bound IS rate-based — and backoff DOES clear it (429).** `POST
-  /v1/sessions/commit` also carries a **per-team ingest budget**: a rolling
-  60-second allowance of `10 MiB` of writes per team, per instance (the window
-  is process state; today the service runs one worker, so per-instance and
-  per-team are the same figure). A request is charged the larger of (a) the
-  bytes of the re-serialized §6.1 **request body** — the whole validated
-  payload, including `sources`, `provenance_refs` and `telemetry`, so it is
-  never less than the canonical form used for `client_commit_id` — and (b) the
-  nodes it will write × 1024, where (b) is a declared **upper bound** on the
-  nodes the request leaves behind (a node plus its `:GraphEvent` record for
-  every point/operator/supersession — three for a superseding point, three for
-  a `MITIGATES` bridge-attack — plus the fixed record/session/source/event
-  chain), never an under-count. Exceeding the allowance answers **429** with a
+- **One bound IS rate-based — and backoff DOES clear it (429).** BOTH session
+  write lanes — `POST /v1/sessions/commit` and `POST /v1/sessions` — carry ONE
+  **per-team ingest budget**: a rolling 60-second allowance of `10 MiB` of
+  writes per team, per instance (the window is process state; today the
+  service runs one worker, so per-instance and per-team are the same figure).
+  It is ONE window, not one per endpoint: alternating the two endpoints does
+  not buy a second allowance, and `detail.resource` (`commit_ingest_bytes` /
+  `capture_ingest_bytes`) names the charge that spent it. A request is charged
+  the larger of (a) the bytes of the re-serialized **request body** — on the
+  commit lane the whole validated §6.1 payload, including `sources`,
+  `provenance_refs` and `telemetry`, so it is never less than the canonical
+  form used for `client_commit_id`; on the capture lane the whole posted
+  capture request (`conversation` turns plus metadata) — and (b) the nodes it will
+  leave behind × 1024, where (b) is a declared **upper bound**, never an
+  under-count: on the commit lane a node plus its `:GraphEvent` record for
+  every point/operator/supersession (three for a superseding point, three for
+  a `MITIGATES` bridge-attack) plus the fixed record/session/source/event
+  chain; on the capture lane the `:Session`, the `sessionCaptured` `:Event`,
+  the transcript `:Source`, and one turn `:Point` per conversation entry
+  (`:GraphEvent` records are a COMMIT-lane cost — a capture turn goes through
+  the record carrier and leaves no per-turn event node, so its rate is 1). Exceeding the allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
   is always **your** spend in the window, and `detail.scope` says which
   allowance refused you — `"org"` (your team's own budget) or `"process"` (the
@@ -555,8 +563,12 @@ the `{error}`-only shape whose retry action is different.
   points count, so the points gate cannot see it. Graph **bytes**, not nodes,
   are the unit because that is the ruled storage unit (#4495/#5331). Operators
   can retune the allowance with `TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`. **The
-  capture lane (`POST /v1/sessions`) is not covered by this budget** — its
-  `count + estimate` points gate and its per-session turn cap are unchanged.
+  capture lane (`POST /v1/sessions`) is covered by the SAME budget** — it
+  charges the same per-team window (`detail.resource = "capture_ingest_bytes"`),
+  so alternating the two endpoints does not buy a second allowance, and its
+  `count + estimate` points gate and per-session turn cap are unchanged on top
+  of it. An `ingest_rate_limited` 429 on either lane means the same thing and
+  takes the same action: honour `Retry-After` and retry.
 - **How to check usage:** `tortoise team info` → `GET /v1/team` returns
   `point_count` plus user/graph limits. **Known mismatch:** `GET /v1/team`
   exposes only `point_count` — there is **no points-limit field**, and the

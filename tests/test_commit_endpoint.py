@@ -3398,6 +3398,223 @@ class TestCommitOrgIngestBound:
             "bridge-attack, the fail-open direction (#4051)")
 
 
+class TestCaptureOrgIngestBound:
+    """#4051 §3.1 on the CAPTURE lane — the half of the bound that never shipped.
+
+    §3.1 asks for a per-org, per-window ingest rate on BOTH session write lanes
+    ("``/v1/sessions/commit`` and ``/v1/sessions``"). Only the commit half
+    landed (#9798); the capture lane kept the per-KEY bucket (300/min × up to
+    20 keys) plus the instance-wide in-flight cap, and
+    ``_count_resource("points")`` matches none of what it writes —
+    ``:Session``, the ``sessionCaptured`` ``:Event``, the transcript
+    ``:Source`` and one episodic ``:Point`` per turn — so the #5637 points gate
+    cannot trip there either. MEASURED pre-fix: the third capture below was
+    admitted (200) with an empty window that should have refused it.
+
+    These live beside ``TestCommitOrgIngestBound`` on purpose: the two lanes
+    charge ONE window (``quota.commit_ingest_admit``), so the charge, the
+    refusal contract and cross-lane exhaustion are properties of a single
+    object — a second allowance per route is exactly what §3.1 rules out.
+    """
+
+    _CONV = [  # noqa: RUF012 — read-only fixture data, copied nowhere
+        {"role": "user", "content": "we decided to ship the capture slice"},
+        {"role": "assistant", "content": "agreed — the consent gate is the P0"},
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _no_embedder(self, force_sparse_tfidf):
+        """Pin the embedder OFF for these captures (the shared `#2573` fixture).
+
+        The ingest charge is a pure function of the REQUEST, so turn vectors are
+        irrelevant to it — and a cold local embedder load (blocked egress plus
+        retries) costs longer than both the product's own transport wait bound
+        and the 60 s window under test, which would turn an assertion about the
+        bound into an assertion about machine load.
+        """
+        return force_sparse_tfidf
+
+    @staticmethod
+    def _allow(monkeypatch, charge_bytes: int) -> None:
+        """Set the per-minute BYTE allowance and start from an empty window.
+
+        ONE knob for both lanes (`MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG`) and
+        one reset — the window is PROCESS state keyed by org_id, and every test
+        in this file authenticates as `team-001` (see
+        `tests/conftest.py::_fresh_commit_ingest_budget`).
+        """
+        import tortoise.quota as quota_mod
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG", charge_bytes)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+
+    @staticmethod
+    def _charge(turns: int = 2) -> int:
+        """The bytes a capture of ``turns`` one-character turns is charged.
+
+        Read from the SAME function the endpoint calls, so a test cannot pin a
+        charge the product does not compute.
+        """
+        from tortoise.hosted_api import SessionRequest, capture_ingest_charge_bytes
+        conv = [{"role": "user", "content": "x"} for _ in range(turns)]
+        return capture_ingest_charge_bytes(SessionRequest(conversation=conv))
+
+    def _capture(self, client, session_id: str, conversation=None):
+        return client.post("/v1/sessions", json={
+            "session_id": session_id,
+            "harness": "claude",
+            "conversation": conversation or self._CONV,
+        })
+
+    def test_the_charge_is_the_node_floor_for_a_small_capture(self):
+        """A tiny capture is charged the chain it leaves behind, not its body.
+
+        3 fixed nodes (``:Session`` + ``sessionCaptured`` ``:Event`` +
+        transcript ``:Source``), plus one turn ``:Point`` per conversation entry,
+        at the pricing-tied 1024 B/node. The body of a two-word turn is far
+        smaller than that, which is why a byte-only charge would leave this
+        loop nearly free (the `OVERRIDES:` recorded on #4051).
+        """
+        assert self._charge(1) == 4 * 1024
+        assert self._charge(3) == 6 * 1024
+        assert self._charge(3) - self._charge(1) == 2 * 1024, (
+            "the charge does not grow one node per turn — a long transcript "
+            "would be charged like a short one")
+
+    def test_a_fat_transcript_is_charged_its_bytes_not_its_node_floor(self):
+        """The payload term binds once the text outweighs the chain.
+
+        Capture content is schema-unbounded per turn (the route's 16 MiB body
+        cap is the only per-request bound), so a handful of large captures must
+        not fit inside a minute by accident.
+        """
+        from tortoise.hosted_api import SessionRequest, capture_ingest_charge_bytes
+        fat = [{"role": "user", "content": "x" * 20_000}]
+        body = SessionRequest(conversation=fat)
+        charge = capture_ingest_charge_bytes(body)
+        assert charge == len(body.model_dump_json().encode("utf-8")), (
+            "a 20 KB turn was charged the node floor — the byte term is not "
+            "binding on stored text")
+        assert charge > 4 * 1024
+
+    def test_the_capture_charge_is_never_cheaper_than_the_write(
+            self, client, monkeypatch, no_provider_keys):
+        """The declared node count is an UPPER bound on what the capture
+        ACTUALLY mints — measured against the graph, not asserted from the
+        formula that produced it.
+
+        A bound stated as a formula is only a bound if the GRAPH agrees, and an
+        arithmetic test reading the same constant cannot tell. This leg measures
+        the marginal growth per turn (it is 1 on this lane: a capture turn goes
+        through the record carrier and writes no per-turn ``:GraphEvent``, which
+        a reviewer argued it did) and asserts the declared count covers the
+        whole request — so a lane that starts minting per-turn durability
+        records reds here instead of silently under-charging (the fail-OPEN
+        direction, #4051).
+        """
+        from tortoise.hosted_api import SessionRequest, declared_capture_write_count
+
+        self._allow(monkeypatch, 64 * 1024 * 1024)
+
+        def node_total() -> int:
+            return int(_team_sdk()._get_proj().g.query(
+                "MATCH (n) RETURN count(n)").result_set[0][0])
+
+        def conversation(turns: int):
+            return [{"role": "user", "content": f"turn {i}"} for i in range(turns)]
+
+        def measured(session_id: str, turns: int) -> tuple[int, int]:
+            conv = conversation(turns)
+            declared = declared_capture_write_count(
+                SessionRequest(conversation=conv))
+            before = node_total()
+            r = self._capture(client, session_id, conv)
+            assert r.status_code == 200, r.text
+            return declared, node_total() - before
+
+        # STEADY STATE first: the very first write to a graph also creates the
+        # event store's one-time singletons (:GraphEventMeta, :EpMeta, :Meta),
+        # which are per-GRAPH constants rather than per-request growth — the
+        # loop #4051 describes repeats this shape, not that one.
+        assert self._capture(client, "sCapBoundWarm",
+                             conversation(2)).status_code == 200
+
+        d2, m2 = measured("sCapBoundShort", 2)
+        d10, m10 = measured("sCapBoundLong", 10)
+        marginal = (m10 - m2) / 8
+        declared, minted = d10, m10
+        assert marginal == 1, (
+            f"the capture's marginal growth is {marginal:.2f} nodes/turn "
+            f"(short=({d2},{m2}), long=({d10},{m10})) but the charge declares "
+            f"{declared} nodes for {minted} minted — a turn that now mints a "
+            "durability record changes the constant this charge is built on, "
+            "and one node per turn under-charges it (#4051, fail-open)")
+        assert declared >= minted, (
+            f"the charge declared {declared} nodes but the capture minted "
+            f"{minted} (marginal {marginal:.2f} nodes/turn) — the throttle "
+            "would be cheaper than the write, which is the fail-open "
+            "direction (#4051)")
+
+    def test_the_capture_loop_is_refused_once_the_minute_is_spent(
+            self, client, monkeypatch, no_provider_keys):
+        """THE HOLE, pinned: two captures fit, the third 429s and writes nothing.
+
+        Pre-fix this loop has no ORG-level bound at all — every iteration
+        returns 200 while the points count stays 0, which is the capture-lane
+        half of #4051's bypass (the first comment on the issue records it).
+        """
+        unit = self._charge(2)
+        self._allow(monkeypatch, 2 * unit)
+        for i in (0, 1):
+            r = self._capture(client, f"sCapIngest{i}")
+            assert r.status_code == 200, r.text
+            assert TestCommitPointsGate._chain_counts(f"sCapIngest{i}")[0] == 1
+
+        r = self._capture(client, "sCapIngest2")
+        assert r.status_code == 429, (
+            f"the third capture was admitted ({r.status_code}) — the per-org "
+            "ingest window does not bind the capture lane")
+        assert int(r.headers["Retry-After"]) >= 1
+        detail = r.json()["detail"]
+        assert detail["code"] == "ingest_rate_limited"
+        assert detail["scope"] == "org"
+        assert detail["resource"] == "capture_ingest_bytes"
+        assert detail["limit"] == 2 * unit
+        assert detail["used"] == 2 * unit
+        assert detail["unit"] == "bytes/60s"
+        # A throttle refuses the REQUEST, never the customer's data: the
+        # refused capture left no Session, Event or transcript Source behind,
+        # so the retry after `Retry-After` is a clean first attempt.
+        assert TestCommitPointsGate._chain_counts("sCapIngest2") == (0, 0, 0)
+
+    def test_the_window_is_shared_with_the_commit_lane(
+            self, client, monkeypatch, no_provider_keys):
+        """ONE window per org, not one per route (§3.1).
+
+        A client cannot buy a second allowance by alternating endpoints: a
+        capture's charge is visible to the very next commit on the same org.
+        """
+        cap = self._charge(2)
+        com = TestCommitOrgIngestBound._charge(
+            points=[], entities=[], provenance_refs=[])
+        self._allow(monkeypatch, cap + com - 1)
+
+        assert self._capture(client, "sCapSharedCap").status_code == 200
+
+        r = _commit(client, _raw_payload(
+            0, session_id="sCapSharedCommit", points=[], entities=[],
+            provenance_refs=[]))
+        assert r.status_code == 429, (
+            "a commit was admitted on an org whose window the capture lane had "
+            "already spent — the two lanes are charging different windows")
+        detail = r.json()["detail"]
+        assert detail["resource"] == "commit_ingest_bytes", (
+            "the refusal does not name which charge spent the window")
+        assert detail["used"] == cap, (
+            "the commit lane's `used` does not include the capture's charge — "
+            "the window is not shared")
+
+
 class TestDeclaredCommitWriteCount:
     """The budget's unit — every node `_execute_commit_writes` mints."""
 
