@@ -1063,16 +1063,24 @@ class ParityDiff:
     ``changed``              fields both stores answer, with different values.
                              Non-empty = RED.
     ``explained_missing``    a DECLARED asymmetry at work. Every member comes
-                             from one of three declarations, and the member's
-                             NAME (not this dict) says which by resolving
-                             against it: the schema's carve-out (`confidence`,
-                             `content_hash`, `ep_*`, …), §9.1/D1's declined
-                             turn prose for an episodic Source (`summary`,
-                             `_searchText`), or a **not-projectable** column
+                             from one of the FOUR declarations
+                             :func:`parity_difference` enumerates, and the
+                             member's NAME (not this dict) says which by
+                             resolving against it: the schema's carve-out
+                             (`confidence`, `content_hash`, `ep_*`, …), a fold
+                             `ON CREATE` default (#9634 — `objectKind`, `title`),
+                             §9.1/D1's declined turn prose for an episodic
+                             Source (`summary`, `_searchText`), or a
+                             **not-projectable** column
                              (`cache_projection.CACHE_FORBIDDEN_COLUMNS` —
                              §9.1/D1's narrative on `source`/`event`, #10394).
-                             Enumerated in :func:`parity_difference`, never
-                             silently tolerated.
+                             Enumerated, never silently tolerated.
+                             ⚠️ FOUR and not three: a fold default reaches this
+                             dict too (`parity_difference({'name': 'acme',
+                             'objectKind': 'other', 'title': ''}, {'name':
+                             'acme'}, label='Object')` explains both), so
+                             resolving a member against only the other three
+                             finds a legitimate one unmatched.
     """
 
     label: str
@@ -1156,9 +1164,9 @@ def parity_difference(cache_props: Mapping[str, Any],
       explanation, is a projection gap — and it reddens. A field the record
       answers and the cache does not is an invention — and it reddens too, UNLESS
       it is a not-projectable column, a DECLINED name (the §9.1/D1 pair above),
-      or a fold default. The carve-out, the decline above and the
-      not-projectable set are the ONLY sanctioned asymmetries, and because all
-      three are enumerated they cannot be used to hide a gap. ⚠️ TWO of the three
+      or a fold default. The four explanations above are the ONLY sanctioned
+      asymmetries, and because all four are enumerated they cannot be used to
+      hide a gap. ⚠️ TWO of the three
       are mirrored into the ``invented`` direction (the decline and the
       not-projectable set); the CARVE-OUT is not, so a raw record row still
       reports its own ``content_hash`` as invented — a pre-existing gap of that
