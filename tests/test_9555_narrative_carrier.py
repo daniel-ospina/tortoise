@@ -1824,6 +1824,15 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
 #: `_VECTOR_INVERSIONS` and `_SUMMARY_NEGATION_INVERSIONS`.
 _NEGATION_CUE = (
     r"(?:\b(?:not|never|cannot|can\s?not|no longer|by no means|in no case)\b"
+    #: ⛔ NOT a cue inside an AFFIRMATIVE construction. `not only X but Y`,
+    #: `not unlike X` and `never mind X` all ASSERT X (or assert more than X),
+    #: so counting the `not` certified sentences that state the inverse of the
+    #: section they are pinned to: measured, `a session's `summary` is §4.6
+    #: metadata and not only the narrative but also the summary is §4.6 metadata`
+    #: left the whole pin GREEN, and `it is not only `:Source.summary` but also the
+    #: narrative` passed `_negates_the_summary`. Pinned in both objects'
+    #: `_*_INVERSIONS` lists.
+    r"(?!\s+(?:only|unlike|mind)\b)"
     r"|\w+n['’]t\b)"
 )
 
@@ -2490,6 +2499,11 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "⛔ not `public.session_narrative`; it is `:Source.summary`"),
     ("the negation in a neighbouring clause",
      "⛔ the narrative is not on the node; `:Source.summary`"),
+    #: ⛔ AN AFFIRMATIVE `not only`. The `not` is not a cue there — what follows
+    #: is ASSERTED — so counting it certified a sentence telling the vector to
+    #: read BOTH texts (measured: `_negates_the_summary` True, pin GREEN).
+    ("the affirmative `not only … but also` construction",
+     "⛔ not only `:Source.summary` but also the S1 narrative"),
 ]
 
 
@@ -2522,7 +2536,7 @@ def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str)
 @pytest.mark.parametrize(
     "why,clause", _SUMMARY_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
-         "negation-in-other-clause"])
+         "negation-in-other-clause", "not-only-but-also"])
 def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
@@ -2619,6 +2633,14 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
      "the narrative is never what gets embedded"),
     ("a copula form, narrative as subject",
      "the narrative is not the vector's text"),
+    #: ⛔ THE AFFIRMATIVE CUES the shared vocabulary counted as negations. Each
+    #: asserts the narrative (or asserts more than it) and was ACCEPTED, so the
+    #: pin certified the inverse of §12.1b on a two-word prefix (measured:
+    #: `_NARRATIVE_CARRIER.format("not only the narrative")` was True while the
+    #: documented inversion it extends — plain "the narrative" — is refused).
+    ("the `not only` affirmative", "not only the narrative"),
+    ("the `not unlike` affirmative", "not unlike the narrative"),
+    ("the `never mind` affirmative", "never mind the narrative"),
 ]
 
 
@@ -2658,7 +2680,9 @@ def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
     "why,clause", _NARRATIVE_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
          "negation-in-other-clause", "cue-across-a-clause-boundary",
-         "subject-form-trailing-cue", "subject-form-copula"])
+         "subject-form-trailing-cue", "subject-form-copula",
+         "not-only-affirmative", "not-unlike-affirmative",
+         "never-mind-affirmative"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
@@ -2700,11 +2724,18 @@ def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
 #:   across the clause boundary, so a second `summary`/`narrative` mention turned
 #:   into an "ambiguous" refusal on a document the pin certified — the same false
 #:   drift with a different operand (measured).
-#: • **the span is BOUNDED** (`;`, `—`, the line end) and non-greedy, so it stops
-#:   at the negation's own object instead of swallowing the next clause.
+#: • **the span is the GUARD's own class.** `[^;—\n]` was too permissive — it
+#:   crossed a period, a comma, a parenthesis and a backticked name, so a
+#:   correct footnote whose EARLIER sentence uses a negation produced a second
+#:   bogus "clause" and an "ambiguous" refusal (measured). It is `
+#:   _NEG_CLAUSE_SAFE`, the same class `_negation_bound_to` binds with, so the
+#:   control mutates exactly what the guard reads.
+#: • **the cue need not touch the join.** `and it is never the narrative` is the
+#:   same claim, and a join-adjacent-only pattern derived ZERO clauses on it and
+#:   red both controls on a document the pin certified (measured).
 _FOOTNOTE_CLAUSE_RE = re.compile(
-    rf"(?:\band\b|[,;—]|\bbut\b)\s*{_NEGATION_CUE}"
-    rf"[^;—\n]*?\bnarrative\b",
+    rf"(?:\band\b|[,;—]|\bbut\b){_NEG_CLAUSE_SAFE}{{0,40}}?{_NEGATION_CUE}"
+    rf"{_NEG_CLAUSE_SAFE}{{0,40}}?\bnarrative\b",
     re.IGNORECASE)
 
 
@@ -2878,31 +2909,33 @@ def test_the_declared_leading_cue_residual_is_the_measured_one():
         f"delete this case, tighten the docstring, and record the scope change")
 
 
-def test_the_declared_not_only_but_residual_is_the_measured_one():
-    """*What value makes this test fail?* A residual that is really closed.
+def test_the_not_only_but_fail_open_is_closed():
+    """*What value makes this test fail?* Re-admitting the affirmative `not only`.
 
     `_NEG_ADVERSATIVE` stops a negation reaching ACROSS a conjunction, which
-    fixes the `not X but Y` fail-open. It cannot see `not only X but Y`: the cue
-    lands on the trap, the conjunctions come AFTER it, and the sentence asserts
-    that the vector DOES read the trap. Measured — §9.4 re-worded to "…and it
-    does not only read `:Source.summary` but also the narrative" leaves the
-    `:Source.summary` count at 1, `_negates_the_home` False,
-    `_negates_the_summary` True and the whole pin GREEN.
+    fixes the `not X but Y` fail-open. It could not see `not only X but Y`: the
+    cue landed on the trap, the conjunctions came AFTER it, and the sentence
+    asserts that the vector DOES read the trap. Measured before the fix — §9.4
+    re-worded to "…and it does not only read `:Source.summary` but also the
+    narrative" left the `:Source.summary` count at 1, `_negates_the_home` False,
+    `_negates_the_summary` True and the whole pin GREEN (identical at
+    `f604df20f`, `5d7caf481` and the head that declared it).
 
-    PRE-EXISTING (identical at `f604df20f`, `5d7caf481` and this head) and
-    undeclared until now, unlike the narrative residual beside it. Declared and
-    pinned rather than left implicit: closing it needs the claim's PREDICATE (or
-    `not only` excluded from the cue arm), and either is a visible change that
-    reds this case.
+    It is CLOSED in `_NEGATION_CUE` by the `not only` / `not unlike` / `never
+    mind` exclusion, and pinned here in the positive direction so that a future
+    widening of the cue vocabulary cannot silently reopen it. The three
+    narrative forms are cases in `_NARRATIVE_NEGATION_INVERSIONS` and the trap
+    form in `_SUMMARY_NEGATION_INVERSIONS`.
     """
     line = (f"the embedded text is not only read from `{_SUMMARY_OBJECT}` but "
             f"also the S1 narrative read from `{_HOME}`")
-    assert _negates_the_summary(line) is True, (
-        f"the declared `not only … but` residual is now CLOSED — "
-        f"`_negates_the_summary` refuses {line!r}. That is an improvement: delete "
-        f"this case, declare the closure, and record the scope change")
+    assert _negates_the_summary(line) is False, (
+        f"the `not only … but also` construction is counted as a NEGATION again: "
+        f"{line!r} is a sentence telling the vector to read BOTH texts, and "
+        f"`_negates_the_summary` accepts it — `_NEGATION_CUE`'s `not only` "
+        f"exclusion was widened away")
     assert _negates_the_home(line, _HOME) is False, (
-        f"the residual case no longer isolates the trap's guard: {line!r}")
+        f"the case no longer isolates the trap's guard: {line!r}")
 
 
 def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
