@@ -250,8 +250,8 @@ grep -rn "_graph_write_with_retry" tortoise/ ; sed -n '14p' tortoise/retry.py
 
 **Added by the residual decomposition lane (`11-residual-plan-and-decomposition.md`), measured at
 `origin/main@3ac6b1636` on 2026-11-05.** The map above is **not stale**: every group in the residual plan maps
-onto a surface it already carries (G1 → S1+S2, G2 → S9+S1+S3, G3 → S1+S4+S5, G4 → S2). One **failure mode** is
-missing, and it is not a surface — it is a row on S1.
+onto a surface it already carries (G1 → S1+S2, G2 → S9+S1+S3, G3 → S1+S4+S5, plus **S6** for G3's W1b row,
+G4 → S2). One **failure mode** is missing, and it is not a surface — it is a row on S1.
 
 **S1's failure-mode list currently names** *totality* (`an unknown event type skipped ⇒ totality lost in
 silence`), *idempotency* (`a second replay double-applies`), and *a carried field not projected* (`the record is
@@ -292,21 +292,47 @@ cannot accept. A pin here is what would have caught #9264 before #10593 repeated
 earned: the failure produced a two-day silent row loss, and deleting the check makes the *product* worse, not the
 process.
 
-⚠️ **The reader this pin needs does NOT exist — this delta's first draft said it did.** `grep -rn jsonb_columns`
-returns **zero code hits**: #10671 proposed that mechanism and was **closed unmerged**. What exists points the
-other way — `tortoise/record_projection.py` states that a forward migration narrowing a column's TYPE is a form
-*"the readers do not parse this form, and deliberately"*, and its `_COLUMN_RE` matches the type and then keeps only the
-column **name**. So #11075 must **capture** the declared type from that existing match, **build** the
-`ALTER COLUMN … TYPE` form, **widen** the type vocabulary past its hardcoded seven terms, and add the
-**value→declared-type predicate** — closed over the migration set, or it reads the superseded `jsonb` declaration
-and reds on the current, correct tree.
+⚠️ **The reader this pin needs did NOT exist where this delta measured — and DOES exist at the head this plan
+now ships.** `grep -rn jsonb_columns` returned **zero code hits** at `3ac6b1636`, and at this head
+`git grep -c jsonb_columns -- '*.py'` returns **29 hits across 2 files**: `jsonb_columns()` is defined at
+`tortoise/record_projection.py:1607`, landed by `e74361912` (#10726's fold batch) and in this branch through
+`f1aa7362b`. So #11075 must **not** rebuild it: `_COLUMN_TYPE_RE` (`:1502`), `_ADDED_COLUMN_TYPED_RE` (`:1513`)
+and `_ALTER_COLUMN_TYPE_RE` (`:1529`) already exist, and `jsonb_columns()` already applies the narrowing —
+measured at this head it returns 11 names and **`search_keys` is not one of them**. What remains new is the
+**type vocabulary** (still a hardcoded seven-term allow-list) and the **value→declared-type predicate** for
+types outside it. `_COLUMN_RE` itself still matches the type in a **non-capturing** group, so a consumer of
+`_COLUMN_RE` must lift it — the fact §7.1 of the plan states, and the only part of the old paragraph that still
+holds.
 
 ⚠️ **And a detector of this class was deliberately removed once.**
-`tests/test_9078_record_written_by_production_path.py` records that `_SCHEMA_DISAGREEMENTS` was emptied and then
-made *"gone rather than parked"* when #9264 closed — the project's "a pin that outlives its defect" rule. The
+`tests/test_9078_record_written_by_production_path.py` records a TWO-step removal, not one: #9264 closed with only
+the `capture_redactions` entry gone (`:2366` — "#9264 closed `capture_redactions`"), the vocabulary was still
+holding `search_keys` at the commit before its deletion, and it became **empty** and *"gone rather than parked"*
+only when that **last** entry closed — `a6e20f05b` (#10717), the same fold that narrowed the column, recorded in
+history under the misnumbered `#10620` (`:132`, "now EMPTY (#10620 closed its last entry)"). That is the
+project's "a pin that outlives its defect" rule, applied at the LAST entry rather than the first. The
 difference that earns this one: a **derived** check cannot go empty, because it is closed over the migration set
-rather than over a hand-kept vocabulary.
+rather than over a hand-kept vocabulary. ⚠️ **`#11075`'s body states the ONE-STEP version** of that provenance
+today — *"records that `_SCHEMA_DISAGREEMENTS` was emptied and then made 'gone rather than parked' **when #9264
+closed**"* — **one of that body's four contradicted statements**, the other three being its `carve_out:` order,
+its `_COLUMN_RE` "**does** capture" claim and its `grep -rn jsonb_columns` "**zero code hits**" claim; this
+section and §7.1 of the plan are authoritative until the body is corrected. ⚠️ **The total is four, and it is
+the same four in §7.2 of the plan** — two documents that state different totals for one list are the defect this
+paragraph exists to remove, so both sites enumerate all four.
 
-**Layer:** `unit` + `contract` (DB-free; the declared types are read from the migration files, so the pin runs in
-the carve-out lane as well — which requires registering the new test file in `config/ci-surfaces.yml`'s
-`carve_out:` list: a `config: standard` registration, not "none").
+**Layer:** `unit` + `contract` (DB-free; the declared types are read from the migration files). Registration is
+a **surface** entry plus a `durations:` row, exactly like the DB-free migration-reading precedent
+`tests/test_record_schema_placement.py` (surface `core`, `config/ci-surfaces.yml`). ⛔ **Not `carve_out:`.**
+That set is not a classification: `classify_test_file()` resolves a file only against `surfaces:`, and
+`integrity()` reports every `tests/**/test_*.py` it cannot classify as drift, which reds the required
+`manifest-integrity` leg — a carve-out-only entry therefore leaves the new file reading as drift. It is also
+**exclusive, not additive**: `select()` does `files -= carve` and carve-out files are excluded from every
+docker leg, so an entry there would *remove* the pin from those legs rather than add the carve-out lane "as
+well". Every one of the manifest's 57 carve-out files is also in a surface (**0** carve-out-only files), which is
+why the precedent above is a surface registration and `tests/test_record_searchkeys_10620.py` is registered as
+`api` + `core` with a `durations:` row — not as a carve-out.
+⚠️ **`#11075`'s body still orders the opposite** ("must be registered in `config/ci-surfaces.yml`'s
+`carve_out:` list or it never rides the URI-unset leg (#10648 needed the same registration)") — on a
+precedent this section measures as false, since #10648's file rides as `api` + `core`. **This section is
+authoritative**; a lane must not act on the issue body alone. **The correction was posted on `#11075`** (comment
+`6668307013`) — the body itself still carries the text, so it stays a live trap for anyone who reads only it.
