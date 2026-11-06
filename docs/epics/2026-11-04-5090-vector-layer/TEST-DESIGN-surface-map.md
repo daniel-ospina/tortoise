@@ -244,8 +244,13 @@ selects no test surface. So a lane that deletes a row here gets a red `docs` che
 one and a smaller checklist. `.github/workflows/*` is a surface worth naming explicitly: the change that
 added this line touches a workflow file, which a lane's own preflight cannot prove it may write —
 so the PR body says so. ⚠️ **A residual worth stating, measured rather than estimated.** The
-population pin lives inside the tool an editor edits, and `--self-test` mutates only the **document**,
-so it cannot see a pin edit at all. The two therefore cover different surfaces, and the honest limit is:
+population pin lives inside the tool an editor edits, so no self-test case mutates it — but a pin edit
+**on its own is not silent**: dropping a surface from `SURFACES` while its row is still there reds the
+check arm every time (`VIOLATION R1 SF<n>: surface is not in the pinned population SF1..SF15`, exit 1,
+measured for SF1/SF2/SF5/SF10/SF12/SF15), and dropping SF13 also reds the self-test
+(`1/12 mutation(s) NOT caught`, exit 1) because a case targets its row. The pin is silent only when the
+shrink edits it **consistently with the row** — the three-place edit the last bullet measures. The two
+arms therefore cover different surfaces, and the honest limit is:
 
 - **Two places beyond the row itself, for a surface no self-test case targets and no child names
   alone** — delete a surface row, **every mention of it** (R1/R4/R5 all referentially check what they
@@ -253,8 +258,8 @@ so it cannot see a pin edit at all. The two therefore cover different surfaces, 
   (measured on SF5 and on SF12: `14 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 9/9 plan seam(s)
   crosswalked · layers=…` then `CLEAN — every rule holds`, exit 0, *and* `12/12 mutation(s) refused`,
   exit 0). **Eleven** of the fifteen surfaces are in this class, and it is the case the paragraph above
-  measures: deleting the row *without* its mentions is already a violation, so the **pin is the one
-  edit the arm cannot see**.
+  measures: deleting the row *without* its mentions is already a violation, so once the row and its
+  mentions are gone the **pin is the edit neither arm sees**.
 - **For SF2, SF10 or SF13 — the three surfaces a mutation targets — the arm reds one step EARLIER**, on
   the self-test arm. Delete the row those cases target and the cases become `UNTESTABLE` rather than
   "not caught" (measured: SF13 `2/12 case(s) UNTESTABLE`, SF2 `4/12`, SF10 `1/12` — each exit 1, and
