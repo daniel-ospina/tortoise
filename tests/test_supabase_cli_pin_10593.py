@@ -292,7 +292,15 @@ def _construct_refusals(workflow_text: str) -> list[str]:
     """
     found: list[str] = []
     step_node = _setup_cli_step_node(workflow_text)
-    first_line, last_line = step_node.start_mark.line, step_node.end_mark.line
+    # ⛔ BOUND BY INDEX, NOT BY LINE (found in review, P3). `end_mark.line` is the line of the first
+    # token AFTER the step — i.e. the NEXT step's first line — so a line range counts that whole
+    # neighbouring line as ours. Measured: with the step after this one written as `- with: *base`
+    # (its first key, the `with:`-before-`uses:` shape this reader accepts elsewhere) and the pin
+    # left as a plain literal, the alias was reported at that line, and the guard REFUSED a
+    # legitimate workflow while naming the wrong step. The node ends at index 14932 and the alias
+    # token starts at 14940 — outside by index, "inside" by line. `_setup_cli_block` already slices
+    # byte-precisely; this is the same rule for the token scan.
+    step_first, step_last = step_node.start_mark.index, step_node.end_mark.index
 
     def walk(node: object) -> None:
         if isinstance(node, yaml.MappingNode):
@@ -328,7 +336,7 @@ def _construct_refusals(workflow_text: str) -> list[str]:
             continue
         if not isinstance(value_token, yaml.tokens.AliasToken):
             continue
-        if not (first_line <= key_token.start_mark.line <= last_line):
+        if not (step_first <= key_token.start_mark.index < step_last):
             continue
         found.append(
             f"an alias (`*{value_token.value}`) as the value of `{key_token.value}:` "
