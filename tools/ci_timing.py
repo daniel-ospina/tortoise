@@ -3169,6 +3169,33 @@ def _manifest_of(manifest_text: str) -> dict:
     # callers must therefore MAP this to exit 2, which they do at the CLI
     # boundary — see `refresh_durations` and `paid_vs_selected_cli`.
     try:
+        # ⛔ LENIENT ON PURPOSE — do NOT "harden" this to
+        # `cs.parse_manifest_text` (#10790 merge conflict, resolved toward the
+        # design that SURVIVED on main).
+        #
+        # A duplicate mapping key IS refused on the write path, but by the
+        # COMPOSED walk in `integrity_problems`
+        # (`cs.duplicate_mapping_key_issues(text=manifest_text, …)`), which
+        # names the key in the returned problem list — a RED, not a
+        # could-not-evaluate. Raising here instead was tried on this branch and
+        # is wrong twice over:
+        #
+        #   1. it breaks `validate_refreshed_manifest`'s documented contract:
+        #      that helper reports the DURATION checks and deliberately does
+        #      NOT report the duplicate class — `test_integrity_problems_
+        #      catches_a_duplicate_durations_key`'s second arm ASSERTS that
+        #      leniency is the premise making the composed walk load-bearing
+        #      ("if this ever starts catching the shape, this arm's premise
+        #      changed");
+        #   2. it pre-empts that walk, so `integrity_problems` would raise
+        #      instead of returning its full list — the contract its own
+        #      docstring states ("The FULL problem list `--integrity` composes")
+        #      and that this module's callers map to exit 2 rather than to a
+        #      named red.
+        #
+        # The parse here is therefore the plain loader, and `safe_load` keeps
+        # the LAST of two duplicate rows — which is exactly the silent-collapse
+        # the composed walk above exists to make loud.
         parsed = yaml.safe_load(manifest_text)
     except yaml.YAMLError as exc:
         raise DurationsBridgeError(
@@ -3820,11 +3847,18 @@ def paid_vs_selected_cli(args) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection  # lazy by design
 
-    # `_manifest_of` is this module's existing seam for exactly this — it wraps
-    # `ci_selection._normalize_surfaces(yaml.safe_load(text))`, which is what
-    # `load_manifest()` does for every other consumer. Feeding the raw YAML
-    # straight to `fast_pool` would iterate a scalar surface
-    # character-by-character and raise on a None one.
+    # `_manifest_of` is this module's existing seam for exactly this — and it is
+    # the LENIENT one, BY DESIGN (see its ⛔ note above): it parses with the
+    # plain `yaml.safe_load`, which keeps the LAST of two duplicate keys, and
+    # normalizes with `ci_selection._normalize_surfaces`. It does NOT go through
+    # `ci_selection.parse_manifest_text`, so it does not refuse a duplicate
+    # mapping key — and `--paid-vs-selected` composes no duplicate walk of its
+    # own either, so on this path a union-merged manifest is read SILENTLY
+    # COLLAPSED. That residual is known, not implied: hardening `_manifest_of`
+    # was tried in #10790 and reverted, because raising there pre-empts the NAMED
+    # red `integrity_problems` returns on the WRITE path (#5373). What the seam
+    # is for is the SHAPE: feeding raw YAML straight to `fast_pool` would
+    # iterate a scalar surface character-by-character and raise on a None one.
     try:
         manifest = _manifest_of(Path(args.manifest).read_text())
     except (DurationsBridgeError, OSError) as exc:

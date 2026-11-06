@@ -155,13 +155,15 @@ check blocked on a job whose legs all passed (#5219 reads `cancelled` as red by 
 
 **The remedy is the one `test-carve-out` already took (`a204c2cb3`), not the cap bump this note
 used to prescribe.** The distinguishing fact is what the save IS: this job's own
-`.[test,postgres]` downloads (`python-ci.yml:4586`; `[embeddings]`/torch deliberately absent)
+`.[test,postgres]` downloads (`python-ci.yml:4598`; `[embeddings]`/torch deliberately absent)
 are a rounding error beside the shared 3.6 GB torch/embeddings
 archive, so on a `uv.lock` bump it restores that archive and re-tars all of it
 (`restoreImpl.ts:45` extracts a `restore-keys` partial hit into `~/.cache/pip`; `saveImpl.ts:50`
 skips the save **only** on an exact primary-key match). Nothing is lost by not saving: the key is
 SHARED (`pip-<os>-<hash uv.lock>`) and is written by `test-d14-hosted-api` whenever it MISSES
-(unconditional, PR + push — on a warm exact hit `actions/cache@v4` POSTs no save), by `test-slow` when its legs run and by `test-concurrency-falkor`, so this job only ever READ it. **Paying 20 more
+(unconditional, PR + push — on a warm exact hit `actions/cache@v4` POSTs no save) and by `test-slow`
+when its legs run (`test-concurrency-falkor` no longer writes it — #11063 made that job restore-only
+too), so this job only ever READ it. **Paying 20 more
 minutes of held slot under an UNBOUNDED term (the save has no timeout of its own) is exactly what
 the `test-carve-out` note rejects**, and #3239 is about the cap being the stale-head exposure.
 
@@ -200,7 +202,7 @@ names:
   job at 10 m 15 s against a 10 m cap. **This row was missed by the audit above for a structural
   reason worth keeping: its save surface is created by a third-party action**, not by an
   `actions/cache` step of its own (`actions/setup-python` with `cache: pip`,
-  `python-ci.yml:3213`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
+  `python-ci.yml:3222`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
   like a comfortable 10 m. It is the only `cache: pip` site left in the workflow. Save arm:
   5 m in-step + ~1 + ~9 = 15 m × 1.5 = 22.5 → **30**.
 
@@ -241,7 +243,7 @@ PIN's upper bound, `_CAP_CEILING_FACTOR` × the measured 16.02 m pytest step = 4
 ~1 m + ~9 m = 60 m against 60 — no headroom at all). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
-because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2932-2937`) and so
+because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2941-2946`) and so
 writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
 move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
 
@@ -289,7 +291,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   still saves on a shared key is not the archive) — but its own cap PREDATES this arm and stays 30
   (#6135/#6142: do NOT re-derive it as 2 × 19.85 = 40 — see the row) — and `test-record-postgres` followed on 2026-11-05 — it WAS excluded here for exactly this reason, because it re-tarred the 3.6 GB pip
   archive on a key bump, and it no longer qualifies now that its pip cache step
-  (`python-ci.yml:4578-4580`) is restore-only (see the note under the table). Arm 1 applies to a job
+  (`python-ci.yml:4590-4592`) is restore-only (see the note under the table). Arm 1 applies to a job
   whose save is small because nothing it
   writes re-tars an archive already present in its cache path, not because its `pip install` line
   omits torch.

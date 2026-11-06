@@ -13129,6 +13129,13 @@ def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
       (`_pair_read_bucket`), so its appearance means the guard did not fire on
       THIS pair, not that a marker was lost;
     * OVERSIZE tokens — counted, never retained, so no vocabulary can name them.
+    * the SAMPLE cap — an ADDITIVE fourth clause, not a fourth predicate shape:
+      once `_VOCABULARY_GAP_CAP` is reached `distinct_tokens` stops being the
+      count of distinct tokens, so the alarm says the list is incomplete rather
+      than shipping "512 unlisted token(s)" with no sign the rest were dropped.
+      It cannot appear alone — `_truncated` only increments once the sample is
+      FULL — which is why the predicate (`_vocabulary_gap_recorded_a_loss`)
+      still fires on the three shapes above.
 
     A single trailing sentence describing all three as "reached NO identity
     dimension" is FALSE for the residual, and an enumeration that covered only
@@ -13159,6 +13166,17 @@ def _vocabulary_gap_run_warning(reading: dict[str, Any]) -> str:
             f"{reading['oversize_observations']} oversize token(s) counted but "
             f"never retained (over the {_VOCABULARY_GAP_MAX_TOKEN}-char cap, so "
             "never sampled)")
+    # The SAMPLE cap, not the token-size cap (review P2): `distinct_tokens` stops
+    # being the count of distinct tokens once `_VOCABULARY_GAP_CAP` is hit, and the
+    # reading carries `truncated_observations` for exactly that. Silent, a run that
+    # absorbed 5,000 distinct tokens shipped "512 unlisted token(s)" with no sign
+    # the rest were dropped — and this is a customer-visible receipt field.
+    if reading["truncated_observations"]:
+        parts.append(
+            f"{reading['truncated_observations']} further observation(s) were "
+            f"counted but not retained (the {_VOCABULARY_GAP_CAP}-distinct-token "
+            "sample cap), so this list is not complete")
+
     if not parts:  # unreachable through `_attach`, kept so no caller ships a hole
         parts.append("no readable loss (the reading recorded none of the three "
                      "shapes)")
