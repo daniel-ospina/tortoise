@@ -650,15 +650,18 @@ def _journal_calls(code: str) -> int:
     paren (`_journal_append (name)`), a site the AST half resolves to a correct
     OWNED prefix. Measured: such a block read RED off `_journal_calls` alone.
 
-    Kept as a documented TEXT helper because the shapes it was added for are worth
-    asserting in isolation; it must not be OR-ed back into the failure condition,
-    where it can only add a false BLOCK to what the AST half already decides.
+    Kept as a TEXT helper, and its exclusions AND its known spaced-call limitation
+    are pinned in isolation by `test_journal_calls_helper_excludes_non_calls` so
+    they cannot silently go stale. It must NOT be OR-ed back into the failure
+    condition, where it can only add a false BLOCK to what the AST half already
+    decides. It excludes a shadow `def` and a bare import; a COMMENT is removed by
+    MASKING (`_mask_strings_and_comments`) before it ever sees the text, not by
+    this helper.
 
     A `def _journal_append(...)` is a local SHADOW, not the record: it defines
     the symbol and journals nothing, so counting it as a call lets a block go
     clean while the graph stays UNOWNED (measured: a block whose only occurrence
-    was `def _journal_append(n): pass` read CLEAN). Named `_journal_calls` rather
-    than inlined so the exclusion is testable on its own.
+    was `def _journal_append(n): pass` read CLEAN).
     """
     calls = 0
     for m in re.finditer(r"_journal_append\(", code):
@@ -1517,6 +1520,28 @@ def _journal_prefixes(source: str) -> list[tuple[int, str]]:
     return [(line, prefix) for line, _col, prefix in _journal_sites(source)]
 
 
+def test_journal_calls_helper_excludes_non_calls():
+    """The three exclusions `_journal_calls` documents, asserted IN ISOLATION.
+
+    #11217 round-9 review, ISSUE 2: the helper was removed from the census's
+    presence decision (an AST scan subsumes it) and kept, but its docstring
+    claimed the shapes it was added for "are worth asserting in isolation" while
+    NOTHING asserted it — dead code carrying a justification the artifact did not
+    have. These assertions make that claim true.
+    """
+    assert _journal_calls("    _journal_append(name)") == 1
+    # ⛔ The KNOWN limitation, pinned: the regex misses a legal space before the
+    # paren, which is why this helper can add a false BLOCK and must stay out of
+    # the failure condition.
+    assert _journal_calls("    _journal_append (name)") == 0
+    assert _journal_calls("    def _journal_append(n): pass") == 0
+    assert _journal_calls("    async def _journal_append(n): pass") == 0
+    assert _journal_calls("    import _journal_append") == 0
+    # NOTE it does NOT exclude a COMMENT on unmasked input — the census always
+    # passes MASKED code, so masking (not this helper) is what removes one.
+    assert _journal_calls("    # _journal_append(name)") == 1
+
+
 def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
     """Cycle-6 P1-3: every raw `from falkordb import FalkorDB` bulk-DETACH
     site in a migrated test file must (a) resolve its graph handle to a
@@ -2201,8 +2226,8 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
 
     # A legal SPACE before the call's paren is the same call (#11217 round-9
     # review, ISSUE 4). The presence half used to AND the AST scan with a REGEX
-    # requiring the literal `_journal_append(`, so this compliant site redred
-    # while `_journal_prefixes` had already resolved its owned prefix.
+    # requiring the literal `_journal_append(`, so this compliant site red while
+    # `_journal_prefixes` had already resolved its owned prefix.
     site.write_text(_raw_client_site(
         '    name = f"test_ok_{os.urandom(4).hex()}"',
         "    _journal_append (name)",
