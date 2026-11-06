@@ -1280,6 +1280,18 @@ def parity_difference(cache_props: Mapping[str, Any],
         # `invented`'s only sanctioned repair is a re-projection, i.e. re-opening
         # the door. Measured red-first in
         # `tests/test_record_serve.py::test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention`.
+        # ⚠️ SCOPED, so the arm is not read as covering more than it does: with
+        # the record side supplied THE WAY THIS MODULE SAYS TO SUPPLY IT
+        # (`read_node`, i.e. `node_from_row`'s map — the contract stated at the
+        # top of this function), NEITHER name can reach this loop, because the
+        # decline and the deny are absent from that map BY CONSTRUCTION. The arm
+        # is therefore DEFENSIVE for the sanctioned shape and OPERATIVE for a
+        # caller that hands RAW record rows (an audit that opened the record with
+        # its own SQL) — and a raw row brings the record's COLUMN spellings, so
+        # the same caller also reds on `sessionId`-vs-`session_id`-style pairs
+        # (measured). Which is why `read_node`'s map remains the shape to use,
+        # and why this is a guard against a false RED rather than a rule about
+        # the sanctioned path.
         # ⚠️ The same mirror for the §9.1/D1 DECLINE (`declined`, #10853) is
         # applied here for the same reason and by the same rule: the record keeps
         # `summary`/`_searchText` and the projection declines to materialise

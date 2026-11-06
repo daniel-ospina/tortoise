@@ -42,13 +42,22 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   record PLACES, not a whole-graph census, and this trigger deliberately does
   not count or refuse unknown labels: refusing would make every cache
   unreadable (``:Meta`` is always there) and counting would report the
-  declaration as a second writer; (5) **cache-OWNED properties** — the EP and
-  derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
-  ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
-  REFUSES by name and so can never hold. They are neither a mismatch nor
-  invisible: :func:`reconcile_record_and_cache` partitions them into a named
-  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ THREE classes
-  arrive here, and they differ in what repairs them: §17.5's cache-owned scalars,
+  declaration as a second writer; (5) **cache-HELD properties** — every
+  property the cache holds that the partition did not judge, which is a
+  DIFFERENT (larger) set than the one this bullet's earlier title named. Two
+  facts make a name cache-held — it is outside its label's placement, AND the
+  record side does not carry it — so two populations reach it that are not the
+  one §17.5 owns: (a) the EP and derived scalars §17.5 places on the cache
+  (``ep_alpha``/``ep_beta``/``ep_dirty``/``content_hash``/``confidence``/…),
+  which the record schema REFUSES by name and so can never hold, and (b) any
+  property a SECOND WRITER put on a placed node, which the record does not
+  carry — §17.1's chokepoint signature, reported rather than detected here (its
+  repair is *find the writer*, and ``verdict()`` stays ``clean``; measured at
+  `#10394`'s review). They are neither a mismatch nor invisible:
+  :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
+  count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
+  here — (b) is declared by nothing, which is why it reads ``clean`` — and the
+  three differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair); the projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
@@ -408,11 +417,13 @@ class RecordReconcileResult:
     def graph_only_total(self) -> int:
         """Properties the CACHE holds that the comparison did not judge.
 
-        ⛔ NOT "cache-owned": `graph_only` carries THREE omission classes (see
-        the field's own declaration comment above, and :meth:`verdict` for how a
-        clean verdict is reached), and `owned` is §17.5's term for only ONE of
-        them — naming the total `owned` sends the operator to the wrong repair
-        for the other two, which is why the label :func:`log_result` renders says
+        ⛔ NOT "cache-owned": `graph_only` carries THREE DECLARED omission
+        classes plus one undeclared population (a second writer's property, which
+        no declaration names — see the field's own declaration comment above,
+        and :meth:`verdict` for how a clean verdict is reached), and `owned` is
+        §17.5's term for only ONE of them — naming the total `owned` sends the
+        operator to the wrong repair
+        for the others, which is why the label :func:`log_result` renders says
         `cache-held`. This docstring must not keep the term the label retracted.
         ⚠️ Cited by SYMBOL, not by line: a line number in this module rots the
         same way a line in a Markdown table does, and the citation that used to
@@ -472,7 +483,9 @@ def reconcile_record_and_cache(
 
     ``placed`` is :attr:`CacheScan.placed` — per key, the property names the
     record PLACES for its label. It enables the **cache-HELD partition** (⛔ not
-    "cache-owned": the partition carries THREE omission classes, only the first of
+    "cache-owned": the partition carries THREE DECLARED omission classes plus one
+    undeclared population (a second writer's property, which no declaration
+    names), only the first of
     which is §17.5-owned — ``_partition_cache_owned`` keeps its function name
     for history, but the term in prose is `cache-held`, matching the label
     :func:`log_result` renders): a
