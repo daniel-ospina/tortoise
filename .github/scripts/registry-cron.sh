@@ -755,7 +755,7 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
 # The SWEEP leg (#5028) deliberately keeps its own `rc -eq 28` test: its STATUS
 # vocabulary (`driver_timeout`/`empty_response`) is that shipped contract, and
 # the `transport_error` case it now expresses itself (see the sweep shape classifier below) is the sweep's own
-# incident-body truthfulness gap, tracked by #5114. Routing it through this
+# incident-body truthfulness gap, which the sweep now closes ITSELF (#5114). Routing it through this
 # helper would unify nothing — it consumes one token of the four.
 leg_shape() { # <curl_rc> <body> -> shape label on stdout
   if [ "${1:-99}" -eq 28 ]; then
@@ -1248,8 +1248,12 @@ fi
 # incident, no body and nothing to close. Filing here keeps ONE file site for
 # this kind and reuses the dedup/streak machinery below.
 if [ "$STALE_TEAM_COUNT" != "0" ] || [ "${POOL_UNPARSEABLE:-0}" = "1" ]; then
-  if [ "${STALE_TEAM_COUNT:-0}" = "0" ]; then
-    STALE_TEAMS="${STALE_TEAMS}- (no stale archive counted: a team's newest-archive timestamp could not be parsed, so the pool age is UNMEASURABLE)
+  if [ "${POOL_UNPARSEABLE:-0}" = "1" ]; then
+    # #10234 review P2 (round 6): emit this for a MIXED pool too. Gating it on
+    # STALE_TEAM_COUNT=0 hid the corrupt stamp whenever another team was stale, so
+    # an operator fixed the named tenants and the incident stayed open with
+    # nothing in its body saying why.
+    STALE_TEAMS="${STALE_TEAMS}- (a team's newest-archive timestamp could not be parsed — its pool AGE is UNMEASURABLE; fix the corrupt LastModified)
 "
   fi
   POOL_LIST_NOTE=""
@@ -1265,6 +1269,7 @@ ${STALE_TEAMS}
 Per-tenant STALE incidents are watcher-owned (the watcher resolves them per org, in-process); this pooled incident is the driver-side record of the same systemic fault and self-heals once the pool is measured fresh on $(recovery_streak_for POOL_STALE) consecutive runs.${POOL_LIST_NOTE}"
   if [ "${STALE_TEAM_COUNT:-0}" != "0" ]; then
     POOL_STALE_SUMMARY="${STALE_TEAM_COUNT} team default archive(s) older than ${STALE_MIN}m"
+    [ "${POOL_UNPARSEABLE:-0}" = "1" ] && POOL_STALE_SUMMARY="${POOL_STALE_SUMMARY}, and an archive timestamp could not be parsed (one team's age UNMEASURABLE)"
   else
     POOL_STALE_SUMMARY="an archive timestamp could not be parsed (pool age UNMEASURABLE)"
   fi
@@ -2073,7 +2078,15 @@ if [ "$RECONCILE_FAILED" = "1" ]; then
 fi
 
 if [ "$NO_COVERAGE" = "1" ]; then
-  fail "sweep backed up nothing (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE incident"
+  # #10234 review P2 (round 6): the shapes that carry NO REPORT must not be
+  # summarised as "backed up nothing" — that is the claim this whole change
+  # exists to stop making one layer up, and it is equally unmeasured here.
+  case "$RUN_STATUS" in
+    driver_timeout|empty_response|transport_error)
+      fail "no sweep report was read (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE / POOL_STALE incidents" ;;
+    *)
+      fail "sweep backed up nothing (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE incident" ;;
+  esac
   exit 1
 fi
 log "done"

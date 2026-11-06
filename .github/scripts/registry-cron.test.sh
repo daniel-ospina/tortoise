@@ -2062,6 +2062,21 @@ run_driver
 assert_eq "$RC" 0 "78h. an archive-less (custom-only) team does not red a budget timeout"
 assert_not_contains "$OUT" "could not read an archive timestamp" "78h. (control) the unparseable branch did not run"
 
+# ── 78i. #10234 review P2 (round 6): a MIXED pool still names the corrupt stamp ──
+# Gating the placeholder bullet on STALE_TEAM_COUNT=0 hid the unparseable cause
+# whenever another team was also stale, so an operator fixed the named tenants
+# and the incident stayed open with nothing in its body saying why.
+reset_case
+export R2_TEAMS=$'backups/teamA/	backups/teamZ/'
+export R2_DEFAULT_LIST_A="$TS_STALE"       # teamA: stale by age
+export R2_DEFAULT_LIST_Z="not-a-timestamp" # teamZ: unparseable
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78i. a mixed pool stays red"
+assert_contains "$OUT" "could not read an archive timestamp" "78i. the unparseable cause is not masked by the stale count"
+assert_file_match "$LOG" 'could not be parsed' "78i. the FILED body names the corrupt timestamp, not only the stale tenant"
+
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
 # rc=56 (connection reset) was measured in production at 201s and 480s of a
 # 600s budget — the driver still had patience left, so folding it into the
