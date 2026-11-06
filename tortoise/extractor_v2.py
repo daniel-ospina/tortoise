@@ -10834,8 +10834,9 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # (pass 1 kept a surface the model also mentioned, pass 2 removed it and
     # stripped it from every claim — a 70-reference must-keep referent deleted on
     # a model-supplied entry; #11021 review cycle 2, P1).
-    #: Surfaces the CHANNEL proved (the cue was re-run and agreed with the
-    #: model's rule on THAT surface). ⛔ Collected here and folded into
+    #: Surfaces the CHANNEL proved — the cue re-run on THAT surface and returns a
+    #: verdict (the model's `rule_id` string is NOT consulted; see the arm).
+    #: ⛔ Collected here and folded into
     #: `held_surfaces` below, because writing `hold` alone is a decision nothing
     #: enacts: `_strip_reference_sets`, the operator prune, `by_rule`,
     #: `mention_held` and the record loop ALL key on `held_surfaces`. A
@@ -10844,10 +10845,32 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     #: `about_entities reference unknown entities` — carried no `mention_held`
     #: into the union pass, and reported `held_surfaces: 0` while writing a
     #: record that named the cue rule (review at `5da3575b7a`, P1).
+    def _claims_naming(surface: str) -> list[dict]:
+        """Every carrier of this surface — claims AND events, in BOTH reference
+        sets Layer-1 resolves against the emitted entities.
+
+        ``about_entities`` is the first set; the typed ``subject``/``object``
+        SLOTS are the second (``_resolve_slot_refs`` refuses a slot that does
+        not resolve to an emitted entity). ⛔ Reading only the first set made a
+        slot-only reference invisible: the hold was abandoned, the phantom was
+        MINTED (fail-open) and the slot then dropped with a warning that reads
+        as an extraction error (#11021 review cycle 5, P1).
+
+        Defined ABOVE the channel loop because the hold asks it a question —
+        "can a claim carry this surface?" is a fact about the PAYLOAD, not a
+        verdict on the model's `claim_ref` string.
+        """
+        carriers: list[dict] = []
+        for carrier in [*points, *events]:
+            names = carrier.get("about_entities")
+            if ((isinstance(names, list)
+                 and any(str(a).strip() == surface for a in names))
+                    or surface in _slot_ref_names(carrier)):
+                carriers.append(carrier)
+        return carriers
+
     #: The claims a mention can attach to, keyed by the identity the WRITE keeps
-    #: (`_mention_ref`). Built HERE, before the channel is read, because the hold
-    #: itself is gated on it: "a mention no claim can carry is refused" is the
-    #: contract row, and "refused" must mean not-held, not held-but-unrecorded.
+    #: (`_mention_ref`) — one home for the carry loop and the channel record loop.
     claims_by_ref = {_norm(_mention_ref(p)): p for p in points
                      if str(p.get("content") or "").strip()}
     channel_held: set[str] = set()
@@ -10871,33 +10894,24 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # re-run, and a `None` verdict (a REFERENT) still never holds — that is
         # the cycle-3 P1 protection (a model-supplied pronoun tag cannot delete a
         # 70-reference must-keep), not the model's string.
-        if _norm(str(m.get("claim_ref") or "")) not in claims_by_ref:
+        # ⛔ And NOTHING ELSE in the entry decides it. A first cut also required
+        # the model's `claim_ref` to resolve, on the theory that "refused" must
+        # mean not-held rather than held-but-unrecorded — but the record loop is
+        # CARRIER-driven (`_claims_naming` above), so with a carrier the record
+        # is written whatever the model typed, and the gate only removed the
+        # HOLD: a contract-permitted `claim_ref: null` (the prompt allows
+        # `str|null`), or a paraphrase of the claim's text, left the surface in
+        # `about_entities` and 422'd the session (review at `40a0a81e6`, P1).
+        # The refusal is a fact about the PAYLOAD — "no claim can carry it" — so
+        # that is what is asked below, and the model's string is not.
+        if (_norm(str(m.get("claim_ref") or "")) not in claims_by_ref
+                and not _claims_naming(surface)):
             continue                       # no claim to carry it — refused below
         verdict = _referentiality.judge(surface)
         if verdict is not None:
             hold.setdefault(surface, (verdict[0],
                                       "recorded on the mention channel"))
             channel_held.add(surface)
-
-    def _claims_naming(surface: str) -> list[dict]:
-        """Every carrier of this surface — claims AND events, in BOTH reference
-        sets Layer-1 resolves against the emitted entities.
-
-        ``about_entities`` is the first set; the typed ``subject``/``object``
-        SLOTS are the second (``_resolve_slot_refs`` refuses a slot that does
-        not resolve to an emitted entity). ⛔ Reading only the first set made a
-        slot-only reference invisible: the hold was abandoned, the phantom was
-        MINTED (fail-open) and the slot then dropped with a warning that reads
-        as an extraction error (#11021 review cycle 5, P1).
-        """
-        carriers: list[dict] = []
-        for carrier in [*points, *events]:
-            names = carrier.get("about_entities")
-            if ((isinstance(names, list)
-                 and any(str(a).strip() == surface for a in names))
-                    or surface in _slot_ref_names(carrier)):
-                carriers.append(carrier)
-        return carriers
 
     stats: dict = {"held_surfaces": 0, "hold_abandoned_no_claim": 0,
                    "channel_refused_no_claim": 0, "channel_entry_is_entity": 0,

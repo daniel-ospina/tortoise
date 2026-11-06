@@ -1632,9 +1632,7 @@ def test_the_contract_shape_still_cannot_hold_a_REFERENT():
     """The negative control for the row above: the relaxation is the CUE's, not
     the model's. An entry with NO `rule_id` naming a must-keep referent is still
     not held, so a model cannot delete a 70-reference surface by omitting a
-    field (`the admin-merge rail` is this repo's measured must-keep), and an
-    entry whose `claim_ref` resolves to no claim is not a hold either — a
-    mention no claim can carry is refused, not enacted."""
+    field (`the admin-merge rail` is this repo's measured must-keep)."""
     el = _embed_list("the admin-merge rail")
     el["mentions"] = [{"surface": "the admin-merge rail",
                        "claim_ref": el["points"][0]["content"],
@@ -1644,13 +1642,33 @@ def test_the_contract_shape_still_cannot_hold_a_REFERENT():
     assert held["mention_stats"]["held_surfaces"] == 0, held["mention_stats"]
     assert held["points"][0]["about_entities"] == ["the admin-merge rail"]
 
-    # …and a resolvable CLAIM is part of the decision, not just the cue's verdict
-    orphan = _embed_list("it")
-    orphan["mentions"] = [{"surface": "it", "claim_ref": "a claim this run never emits"}]
-    del orphan["entities"]
-    routed = route_mentions(copy.deepcopy(orphan), "")
-    assert routed["mention_stats"]["held_surfaces"] == 0, routed["mention_stats"]
-    assert routed["mention_stats"]["channel_refused_no_claim"] == 1
+
+def test_a_mention_the_model_cannot_TIE_to_a_claim_is_still_held():
+    """⛔ The hold is a fact about the PAYLOAD, not about the model's
+    `claim_ref` string — which the prompt allows to be `null`
+    (`_MENTION_CONTRACT_LINE`: `str|null`) and which a model routinely
+    paraphrases. A first cut also required that string to resolve
+    `claims_by_ref`, so a surface a claim DID carry was not held, stayed in
+    `about_entities`, and Layer-1 rejected the session — the 422 this whole fix
+    exists to close, on an input the contract explicitly permits (review at
+    `40a0a81e6`, P1). The record loop is CARRIER-driven, so the record is written
+    against the carrier either way; only the HOLD was at stake."""
+    for claim_ref in (None, "a paraphrase of the claim",
+                      "a claim this run never emits"):
+        el = _embed_list("it")
+        el["mentions"] = [{"surface": "it", "claim_ref": claim_ref}]
+        del el["entities"]
+        held = route_mentions(copy.deepcopy(el), "")
+        assert held["mention_stats"]["held_surfaces"] == 1, (
+            claim_ref, held["mention_stats"])
+        assert held["points"][0]["about_entities"] == [], claim_ref
+        # the model's own entry is still refused as a RECORD (it names no claim);
+        # the hold writes its record against the carrier that does name it.
+        assert held["mention_stats"]["channel_refused_no_claim"] == 1, claim_ref
+        assert [m["surface"] for m in held["mentions"]] == ["it"], claim_ref
+        payload, _ = _mint(el)
+        verdict, _parsed = validate_payload_dict(payload)
+        assert verdict.ok is True, (claim_ref, verdict.errors)
 
 
 # ── the clamp may not publish HALF an address ─────────────────────────────
