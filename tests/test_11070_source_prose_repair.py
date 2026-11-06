@@ -1925,7 +1925,12 @@ def test_a_HEALTHY_SIBLING_at_the_same_url_is_never_written():
     # (which reds on main — #11182 — while this half is missing).
     from tests._embedded import _journal_append
 
-    _journal_append(endpoint.graph_name)
+    # Journal the LOCAL, not `endpoint.graph_name`: they are the same string
+    # (`resolve_db_endpoint` passes `graph_name` through verbatim), and the local
+    # is the one whose literal (`test_11070_dupurl_…`) the ownership census can
+    # PROVE owned. Reaching through the endpoint leaves the census with nothing
+    # decidable, which it now fails closed on (#11217 review round 5).
+    _journal_append(graph_name)
     g = client.select_graph(endpoint.graph_name)
     url = "session:dup-11152"
 
