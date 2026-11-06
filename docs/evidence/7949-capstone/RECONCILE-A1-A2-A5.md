@@ -14,45 +14,59 @@ aboutObjects: "#7949, #10984, #10985, #10987, #11001, #11021, #10997, #10996, #1
 **This document is a de-duplication record, not an implementation.** Its whole job is to stop two lanes
 building the same thing: three of epic `#7949`'s children — **`#10984` (A1 declared part-whole relations)**,
 **`#10985` (A2 S3 attaches instead of minting)**, **`#10987` (A5 Subjects are populated)** — were
-plausibly answered by three merges landed the same evening (`#11213`, `#11212`, `#11211`). Each verdict
-below is `ALREADY-DONE` or `STILL-MISSING`, with the evidence that decides it.
+plausibly answered by three PRs landed the same evening (`#11213`, `#11212`, `#11211`). Each verdict below
+is `ALREADY-DONE` or `STILL-MISSING`, with the evidence that decides it.
 
-**Measured at:** `origin/main` = `af864a42a626038c5f4c75d76ab145200570310e` (2026-11-06). Every number
-below is reproduced by a command in §5; none is copied from a PR body.
+**Measured at:** `origin/main` = `80c912244f8fd5bf2fa36ec89aa341356d4113d9` (2026-11-06T21:33:54Z — the
+`#11212` landing). The lane began at `af864a42a`; **`#11212` merged while it was being written**, and §0
+records what that changed and what it did not. `git cat-file -e`/`git show origin/main:…` are the reads
+below, never a bare `ls` of the checkout.
 
-**Verdict summary: 0 of 3 discharged. One of the three merges the premise names is not merged at all.**
+**Provenance:** every number read out of the tree, the scored artifacts, or the tracker is reproduced by a
+command in §5. The two figures that are **quoted from research records rather than re-derived** — the
+62.3 % definite-description share and `#4889`'s 13-type hosted census — are cited to their own sources
+and are marked as such in §5.
+
+**Verdict summary: 0 of 3 discharged — and one of the three blockages cleared during the lane without
+moving a single number.**
 
 | Child | Assertion | Verdict | Decisive evidence |
 |---|---|---|---|
 | `#10984` | A1 — declared part-whole relations become graph edges, **answering a rollup** | **STILL-MISSING** (its *blocker* is closed) | the declaration now reads and a writer exists, but nothing production calls it and no rollup query exists anywhere (§1) |
-| `#10985` | A2 — S3 attaches instead of minting; E1 `after_share <= 0.50 × before_share` | **STILL-MISSING** | the shipped arm moves the share `0.600000 → 0.600000`; the HOLD seam it names is **unmerged** (§2) |
+| `#10985` | A2 — S3 attaches instead of minting; E1 `after_share <= 0.50 × before_share` | **STILL-MISSING** | the HOLD seam it names **landed** (`#11212`, 21:33:54Z) and the share still moves `0.600000 → 0.600000` (§2) |
 | `#10987` | A5 — `Subject` count above 26, four edge families non-zero | **STILL-MISSING** | the census reads `Subject: 19` and three of the four families are absent from a **complete** edge-type enumeration (§3) |
 
-## 0. The premise correction — one of the three "merges" is an open PR
+## 0. The world moved during this lane — and the verdicts did not
 
-The lane brief describes `#11213`, `#11212` and `#11211` as "44 PRs merged tonight". Two are merged and
-one is not, and the difference decides a verdict:
+The lane's brief described `#11213`, `#11212` and `#11211` as merged. At the base the lane measured
+(`af864a42a`), **two were merged and one was not** — `#11212` was an OPEN PR whose commits were reachable
+only through its branch. It merged **2 m 49 s after** this record's previous head commit. Both facts are
+recorded, because each one on its own is a trap:
 
 | PR | closes | state | merge commit | on `origin/main`? |
 |---|---|---|---|---|
 | `#11213` | `#11001` | **MERGED** 2026-11-06T19:13:23Z | `e918f3d6d` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11211` | (part of `#11021` — **not** a PR close) | **MERGED** 2026-11-06T20:27:05Z | `aa414b4d5` | ✅ `merge-base --is-ancestor` → 0 |
-| `#11212` | `#10997` | ⛔ **OPEN** — `mergeCommit: null`, `mergedAt: null` | — | ❌ none of its commits are ancestors of `origin/main` |
+| `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` IS the `origin/main` tip** — but ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
 
-The `#11212` branch does carry the work (`78e8abae6 fix(10997): an unresolved identity is HELD, never
-minted`), and `git log --all --grep='#10997'` finds it — which is exactly the trap: `--all` walks every
-ref, so a branch-only commit reads like a landing. `git merge-base --is-ancestor 78e8abae6 origin/main`
-exits **1**, and `tortoise/identity_hold.py` — the module the PR adds — **does not exist** on
-`origin/main`. A lane that measured with `--all` would have reported A2's blocker as closed.
+⛔ **`git merge-base --is-ancestor` is not a landing test, in EITHER direction.** At `af864a42a` the
+branch commit `78e8abae6` was genuinely not an ancestor (the PR was open) and the check answered
+correctly by accident. After the squash merge it answers **1 for a PR that HAS landed** — the branch
+commit is not in the squashed merge commit's history at all. So the same command reads "not landed" both
+before and after, and a lane trusting it would park `#10985` on a seam that is already in the tree. **The
+load-bearing read is the tree**: `git cat-file -e origin/main:tortoise/identity_hold.py` → **PRESENT**
+(it was absent at `af864a42a`, hence the earlier text), and `gh issue view 10997 --json state` →
+`CLOSED 2026-11-06T21:33:55Z`. `git log --all --grep='#10997'` finds the commits either way — `--all`
+walks every ref, so it cannot distinguish a landing from a branch. **Neither grep of history nor an
+ancestry check answers "is it in the tree"; only a read of the tree does.**
 
 ⚠️ **`#11211` did not close `#11021`** — `gh pr view 11211 --json closingIssuesReferences` is empty
 and its own body says `Part of #11021 — not Closes`, routing the remaining row to `#11239` (OPEN).
-⛔ **And `#11021` does not read OPEN today either**: `gh issue view 11021 --json state,closedAt` →
-`CLOSED`, `closedAt 2026-11-06T20:27:06Z` — **one second after** the merge, i.e. a **manual close by the
-owner**, not a PR close. The merge did not discharge the issue; the owner closed it. So the rule stands
-and the fact is narrower than it looks: **neither** an OPEN issue with a merged PR **nor** a CLOSED one
-is evidence the behaviour shipped — you have to read the behaviour. That is why the verdicts below cite
-the tree, never an issue's state.
+⛔ **And `#11021` does not read OPEN either**: `gh issue view 11021 --json state,closedAt` → `CLOSED`,
+`closedAt 2026-11-06T20:27:06Z` — **one second after** the merge, i.e. a **manual close by the owner**,
+not a PR close. So the rule stands and the fact is narrower than it looks: **neither** an OPEN issue with
+a merged PR **nor** a CLOSED one is evidence the behaviour shipped — you have to read the behaviour. That
+is why every verdict below cites the tree, never an issue's state.
 
 ## 1. A1 / `#10984` — STILL-MISSING, but **unblocked**
 
@@ -68,7 +82,7 @@ real, substantial half — do not understate it:
   `(from_kind, predicate, to_kind)`; `relation_write_paths()` binds it to a writer.
 - `plan_hierarchy_edges()` filters candidate pairs to declared ones; `apply_hierarchy_edges()`
   (`pack_hierarchy.py:419`) writes them through `sdk.link_entities` → `create_edge`.
-- `tortoise pack validate` reports both lists. **Reproduced here**, `packs/dev` at `af864a42a`, exit 0:
+- `tortoise pack validate` reports both lists. **Reproduced here** at `80c912244`, `packs/dev`, exit 0:
 
 ```text
   declared hierarchies (ontology.hierarchies, #11001):
@@ -88,7 +102,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
 1. **Nothing in production calls the writer.** `git grep -n apply_hierarchy_edges` → **9 hits, all in
    `tests/test_pack_hierarchy_11001.py`**, plus its own `__all__` entry and definition in
    `tortoise/pack_hierarchy.py` (re-running it after this record lands also matches this file and its
-   index row — the count below is the pre-diff one, which is the one that decides the claim).
+   index row — the count here is the pre-diff one, which is the one that decides the claim).
    `plan_hierarchy_edges` → **9 hits, all in the same test file**, plus four references in
    `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:353` the definition,
    `:447` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
@@ -104,10 +118,10 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
    the capture path at `tortoise/sdk.py:17472`). ⚠️ **`probes/capstone_measure.py:279`'s docstring says
    `sdk.py:17465`, which is stale** — line 17465 is `summary=stored_summary,`; the call is 17472, at the
-   measured head too. Corrected here rather than propagated; the probe's docstring is a follow-up, not
-   this record's to edit. What is missing is the *declared part-whole* edge, not
-   every structural edge — and saying otherwise would send a lane off to build a writer the graph already
-   has (the "second producer" the epic forbids).
+   measured head too. Corrected here rather than propagated; the probe's own docstring is a follow-up,
+   not this record's to edit. What is missing is the *declared part-whole* edge, not every structural
+   edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
+   producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2238-2243`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
@@ -131,7 +145,7 @@ and re-scope to measurement-only; (b) add the declared-edge leg to the census so
 all; (c) define the rollup query, hand-label its ground truth, pre-state the scoring; (d) re-run on the
 pre-registered corpus. **`#10984` is now dispatchable** — its named blocker closed.
 
-## 2. A2 / `#10985` — STILL-MISSING, and its named blocker is **not merged**
+## 2. A2 / `#10985` — STILL-MISSING, and its blocker **landed without moving the number**
 
 **The child's acceptance, quoted (`#10985` → Indicators/Targets):**
 
@@ -156,21 +170,22 @@ deictics, generic heads**. Its scope is explicitly *not* A2's population:
   (**4,900 / 7,859**, enumerated **2026-09-24** —
   `docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md:192,314`). ⛔ **`#4894` is the
   *mechanism* audit (50 real instances), NOT the ratio** — the epic's own research brief says so
-  explicitly (`docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md:45`) and records
-  attributing the ratio to `#4894` as a DEFECT it fixed in review round 1. `#11211` does not touch one
-  of those Objects. ⚠️ The ratio is carried from a 7,859-Object population; today's is ~5,314 and has not
-  been re-enumerated (`#10995`).
+  explicitly (`docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md:45`) and records attributing
+  the ratio to `#4894` as a DEFECT it fixed in review round 1. `#11211` does not touch one of those
+  Objects. ⚠️ The ratio is carried from a 7,859-Object population; today's is ~5,314 and has not been
+  re-enumerated (`#10995`).
 - `#11211` also ships **flag OFF** (`TORTOISE_REFERENTIALITY`), because plan R1 says measure before
   arming.
 
-**What the shipped selection path does, measured.** `docs/evidence/7949-capstone/probes/e1_e2_probe.py`
-on the committed 25-candidate corpus, at `af864a42a` (exit 3 = `UNPREREGISTERED`, by design — a verdict
-needs a frozen threshold):
+**What the shipped selection path does, measured — re-run AFTER `#11212` landed.** `probes/e1_e2_probe.py`
+on the committed 25-candidate corpus, on a tree that contains `tortoise/identity_hold.py` (exit 3 =
+`UNPREREGISTERED`, by design — a verdict needs a frozen threshold):
 
 ```text
 e1 before_share=0.600000 after_share=0.600000 reduction=-0.000000 threshold=n/a observed=NO_REDUCTION verdict=UNPREREGISTERED
 arm=before metric=objects total=25 numerator=15 denominator=25 share=0.600000
 arm=after-vet-shipped metric=objects total=25 numerator=15 denominator=25 share=0.600000
+arm=after-vet-arbiter metric=objects total=25 numerator=15 denominator=25 share=0.600000
 arm=after-vet-shipped metric=vet-downgrades count=6
 arm=before metric=real_facts count=90
 arm=after-vet-shipped metric=real_facts count=90
@@ -180,7 +195,7 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
 `>= 90 of 90`):
 
 - **E1: `0.600000 <= 0.300000` → FALSE.** The share does not move at all (`reduction=-0.000000` is
-  `-0.0`, i.e. exactly zero).
+  `-0.0`, i.e. exactly zero). The semantic-arbiter arm moves it just as little.
 - **E1b: `90 of 90` holds — vacuously.** Nothing is removed, so nothing is lost. A2's own issue says the
   two must move together; a control that holds only because the mechanism is absent is not a win.
 - Why: `apply_vet` Rule 2 downgrades **all 3** mechanical discards back to `KEEP` (`vet-downgrades
@@ -189,20 +204,24 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
 - And the mechanism that *would* move it is foreclosed: `#5333` (OPEN) records that a pass may not
   remove a committed row, and E1's share is moved by **no non-destructive mechanism**.
 
-**The blocker `#10985` names by id is unmerged.** Its body: *"⛔ The id is `#10997` (S3 — an unresolved
-identity is HELD, never minted)"* and *"this child consumes `#5087`'s seam or declares itself blocked by
-id"*. `#10997`'s only implementation is PR **`#11212` — OPEN** (§0); `tortoise/identity_hold.py` is
-**absent** from `origin/main`. Its other premise blocker, `#10996`, is CLOSED and S2.2's mechanical half
-now defaults ON — the composition is `extractor_v2.py:11350-11352`
+⛔ **The blocker `#10985` names by id has LANDED — and it did not move the number.** Its body: *"⛔ The id
+is `#10997` (S3 — an unresolved identity is HELD, never minted)"*. `#10997` is **CLOSED
+2026-11-06T21:33:55Z**; `tortoise/identity_hold.py` is **PRESENT** on `origin/main`; the share above was
+re-measured on a tree containing it (`tests/test_10997_identity_hold.py`, 35 tests, green). So the seam
+`#10985` declared itself blocked by is **no longer the gap** — what remains is the measurement, which is
+the half `#10985` actually owns. Its other premise blocker, `#10996`, is CLOSED too, and S2.2's
+mechanical half now defaults ON — the composition is `extractor_v2.py:11350-11352`
 (`vet_enabled = (vet_arbiter is not None or _vet_enabled() or _value_gate_enabled())`), and the
 default-ON itself lives at `tortoise/value_gate.py:81` (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
 `extractor_v2.py:1153` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
 nothing else. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
 
-**Exact remaining gap for `#10985`:** (a) `#10997`'s HOLD seam must land (it is a PR, not a decision);
-(b) the attach rate must be a reported census number, per candidate, with HOLD as a third bucket;
-(c) E1/E1b must be scored against the registered arithmetic rather than reported as `NO_REDUCTION`;
-(d) it must state which non-destructive path moves the share, given `#5333`.
+**Exact remaining gap for `#10985`:** (a) the attach rate must be a reported census number, per candidate,
+with HOLD as a third bucket; (b) E1/E1b must be scored against the registered arithmetic rather than
+reported as `NO_REDUCTION`; (c) it must state which non-destructive path moves the share, given `#5333`.
+The seam it said it needed is in the tree, so **(a)–(c) are the whole remaining scope** — and (c) is the
+hard one, because the only arm that moves the share on this corpus is `counterfactual-mint-skip`
+(`0.600000 → 0.375000`), a mechanism that does not exist.
 
 ## 3. A5 / `#10987` — STILL-MISSING, and already measured *below* its target
 
@@ -210,10 +229,9 @@ nothing else. Which is why the 0.0 pp above is the **armed** result, not an unar
 
 > `Subject` count above 26 on a corpus the fleet actually captured, with the four edge families non-zero.
 
-None of `#11213`, `#11212`, `#11211` touches the Subject path. Nothing at all in **the three
-changesets** names `subject_binding`, `aboutSubject`, `memberOf`, `ownedBy` or `managedBy` ("changesets",
-not "merges" — `#11212` is a branch, §0). And the measurement the child
-asks for **already exists**, and reads below the bar — on the C1 pre-registered corpus
+None of `#11213`, `#11212`, `#11211` touches the Subject path. Nothing at all in **the three changesets**
+names `subject_binding`, `aboutSubject`, `memberOf`, `ownedBy` or `managedBy`. And the measurement the
+child asks for **already exists**, and reads below the bar — on the C1 pre-registered corpus
 (`capstone-measured-9152448d.log:265-311`, `9152448d7`):
 
 ```text
@@ -236,14 +254,14 @@ no `aboutSubject`/`memberOf`/`ownedBy`/`managedBy`; `:Subject` = **1**) and clos
 accurate **then**: the capture spine wrote **every** emitted entity through one label, so the extractor
 named a Subject and the spine relabelled it an Object.
 
-⛔ **That mechanism has since been FIXED, and it must not be relayed in the present tense** — the
-four ids `#4889` routed it to are all **CLOSED**, and `#4934` (CLOSED 2026-09-29T23:50:40Z, *"the capture
-entity spine mints SUBJECT-kind entities as Objects"*) **is** the fix. At the head this record is
-measured on, the write seam routes by kind (`tortoise/sdk.py:16414-16428`):
-`_ekind = _payload_entity_kind(e)` → `_is_subject = is_subject_kind(_ekind or "")` →
-`create_entity("subject", …)` **or** `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z),
-`#1370` (CLOSED 2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the
-relabelling is **historical**, and a reader must not file it as a live defect.
+⛔ **That mechanism has since been FIXED, and it must not be relayed in the present tense** — the four ids
+`#4889` routed it to are all **CLOSED**, and `#4934` (CLOSED 2026-09-29T23:50:40Z, *"the capture entity
+spine mints SUBJECT-kind entities as Objects"*) **is** the fix. At the head this record is measured on,
+the write seam routes by kind (`tortoise/sdk.py:16414-16428`): `_ekind = _payload_entity_kind(e)` →
+`_is_subject = is_subject_kind(_ekind or "")` → `create_entity("subject", …)` **or**
+`create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z), `#1370` (CLOSED
+2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the relabelling is
+**historical**, and a reader must not file it as a live defect.
 
 The capstone's **19** is a *different graph* — a fresh, disposable, pre-registered corpus — so 1-vs-19 is
 not a contradiction. Two explanations are live and this record does **not** choose between them:
@@ -263,63 +281,78 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 
 ## 4. What this changes for the epic
 
-- **`#10984` is dispatchable now.** Its `blocked-by #11001` is CLOSED; nothing else blocks it. It has no
+- **`#10984` is dispatchable.** Its `blocked-by #11001` is CLOSED; nothing else blocks it. It has no
   implementation lane and no PR, so the sequence is: census leg (§1(b)) → rollup query + ground truth
-  (§1(c)) → re-run (d). Its `config/v4-mechanisms.yml` row stays `#11001`'s: **`#11001` ships the
-  `implemented` row** (it owns `code:`/`symbols:`); `#10984` ships at most `tracking_issue:` + `pins:` —
-  one line, so the row cannot end up orphaned between two owners.
-- **`#10985` cannot start its measurement premise until `#11212` merges.** Dispatching it now would have
-  it "consume a seam" that is a branch. Review/land `#11212` first — it is a PR, not a decision.
+  (§1(c)) → re-run (d). ⛔ **Its `config/v4-mechanisms.yml` row does not exist today** — the file carries
+  **13** mechanism ids (`vet`, `source_dedup`, `exact_dedup`, `near_dup_detect`, `near_dup_merge`,
+  `against_priors_consolidation`, `span_link`, `embed_gate`, `sufficiency_router`, `fanout_cap`,
+  `state_value_carve_out`, `atomic_point_write`, `failure_policy`) and **none for the declared-hierarchy
+  mechanism**, despite `#10984`'s body asserting that `#11001` ships the `implemented` row. `#11001` is
+  CLOSED and shipped no such row, so A1 is a mechanism that is now **implemented but undeclared** — the
+  inverse of the `#5064` failure (*"a declared mechanism read exactly like a shipped one"*). Either
+  `#11001` owes the row or `#10984` ships it; it must be **one** owner, and neither has it today.
+- **`#10985` no longer has a seam blocker.** `#10997` landed (21:33:55Z) and `#10996` is closed, so (a)–(c)
+  of §2 are the whole remaining scope. Dispatching it does not need `#11212` re-reviewed or re-landed —
+  that PR is `main`.
 - **`#10987` needs no producer work to be adjudicated; it needs a measurement and a decision.** Its
   census leg partly exists already; what is missing is the per-point attach rate and the `#4889` call.
 - **None of the three is closed by tonight's merges.** Closing any of them on the strength of
   `#11213`/`#11212`/`#11211` would be the "a child closing is a claim" failure the epic's own rule exists
-  to prevent.
+  to prevent — and `#11212` is the proof: it landed, `#10997` closed, and **not one number moved**.
 
 ## 5. Re-derive every number above
 
 ```bash
-# the merge-state correction (§0) — a branch-only commit is not a landing
+# §0 — the merge state, and the ancestry trap. The TREE is the load-bearing read, not history.
 gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
-gh pr view 11212 --json state,mergeCommit,mergedAt          # OPEN, mergeCommit: null
-gh issue view 11021 --json state,closedAt                   # CLOSED, one second after the merge
-gh issue view 4889 --json state,closedAt,title
-git merge-base --is-ancestor 78e8abae6 origin/main; echo $?  # 1
-ls tortoise/identity_hold.py                                 # absent
+gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
+git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
+git merge-base --is-ancestor 78e8abae6 origin/main; echo $?   # 1 EVEN THOUGH IT LANDED (squashed)
+git cat-file -e origin/main:tortoise/identity_hold.py && echo PRESENT   # not `ls` — that reads the checkout
+gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
+gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # A1 (§1) — the declaration reads, and nothing production writes it
-.venv/bin/python3 -m tortoise pack validate packs/dev         # 6 declared hierarchies, exit 0
-git grep -n apply_hierarchy_edges                            # tests + definition only
+.venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
+git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
+git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
 grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # 0
+grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
+grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '17472p' tortoise/sdk.py                              # the call itself (the probe's `:17465` is stale)
-git grep -in 'rollup' -- '*.py' '*.md'                       # no graph rollup query anywhere
+sed -n '17472p' tortoise/sdk.py                             # the call (the probe's `:17465` is stale)
+git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
     ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # exit 1 = no output
 
-# A2 (§2) — the shipped arm moves the share by exactly zero
+# A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997
 .venv/bin/python3 docs/evidence/7949-capstone/probes/e1_e2_probe.py --json-out /tmp/e1e2.json \
-    > /tmp/e1e2.log 2>&1                                  # exits 3 = UNPREREGISTERED, by design
+    > /tmp/e1e2.log 2>&1                                   # exits 3 = UNPREREGISTERED, by design
 grep -E '^e1 |metric=objects|vet-downgrades|metric=real_facts' /tmp/e1e2.log
 grep -n -E 'after_share <= 0.50|>= 90 of 90' docs/evidence/7949-capstone/PRE-REGISTRATION.md
 sed -n '11350,11352p' tortoise/extractor_v2.py; sed -n '81p' tortoise/value_gate.py   # the default-ON composition
+# the 62.3 % share is QUOTED from a research record, re-read (not re-derived):
+sed -n '192p;314p' docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md
+sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#4894 is the mechanism audit"
 
 # A5 (§3) — Subject 19, three of four families at zero
-sed -n '16414,16428p' tortoise/sdk.py        # the kind→label routing at the write seam (#4934's fix)
-for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
+sed -n '16414,16428p' tortoise/sdk.py        # the kind→label routing at the write seam (#4934's fix)
+for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
+# #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
+gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'
 ```
 
-Suites run at `af864a42a`, through `tools/test_lane.py run` (private lane container), all green:
+Suites run at `80c912244`, through `tools/test_lane.py run` (private lane container), all green:
 
 | suite | command | result |
 |---|---|---|
-| three suites together | `tests/test_pack_hierarchy_11001.py tests/test_referentiality_11021.py tests/test_e1_e2_measurement.py -q` | **219 passed**, 34.75 s, exit 0 |
-| the three measurement pins | the two `test_referentiality_11021` corpus rows + `test_e1_share_is_the_pinned_number_with_both_counts` + `test_the_shipped_arm_moves_the_share_by_exactly_zero`, `-q -s` | **4 passed**, 6.25 s, exit 0 |
+| four suites together | `tests/test_pack_hierarchy_11001.py tests/test_referentiality_11021.py tests/test_e1_e2_measurement.py tests/test_10997_identity_hold.py -q` | **254 passed**, 36.23 s, exit 0 |
+| the four measurement pins | the two `test_referentiality_11021` corpus rows + `test_e1_share_is_the_pinned_number_with_both_counts` + `test_the_shipped_arm_moves_the_share_by_exactly_zero`, `-q -s` | **4 passed**, 6.25 s, exit 0 |
 
 ## 6. What this document does NOT do, and why it adds no gate
 
@@ -337,11 +370,28 @@ Suites run at `af864a42a`, through `tools/test_lane.py run` (private lane contai
      **re-running the probe**, never by editing a document. Nothing asserts them; a re-run supersedes
      them. A5's verdict rests on that kind of number, and saying so is more useful than implying a gate
      guards it.
-  A new test asserting "`tortoise/identity_hold.py` is absent" would **red `main` the day `#11212` — a PR
-  this record says SHOULD land — merges**. That is a false block on correct work, and building machinery
-  to police a document is the category-B drift the fleet's own rules exist to stop. The record is
-  reproducible instead: §5 re-derives every line.
+  **And the hypothetical in the previous revision of this bullet has now HAPPENED, which is why it stays
+  a rule:** it read *"a new test asserting `tortoise/identity_hold.py` is absent would red `main` the day
+  `#11212` merges"* — and `#11212` merged **2 m 49 s** after that revision's head commit. A pin on the
+  *absence* of another lane's work reds the moment the work lands, which is the opposite of a guard. The
+  record is reproducible instead: §5 re-derives every line.
 - **It does not adjudicate `#4889`.** §3 offers the reading that reconciles the two measurements and says
   plainly it is a reading; `#10987` owns the adjudication.
 - **It does not re-open `#5333`.** `#5333`'s ruling (a pass may not remove a committed row) is recorded
   and quoted, not challenged — which is why A2's remaining path must be non-destructive.
+
+## 7. The transferable lesson (why §0 exists)
+
+This record was **one merge away from shipping the wrong premise**, and nothing in it was wrong when
+measured. Three reads disagreed and each was individually defensible:
+
+| read | answered at `af864a42a` | answers now | why it is not the test |
+|---|---|---|---|
+| `git log --all --grep='#10997'` | "found" | "found" | walks every ref; cannot tell a branch from a landing |
+| `git merge-base --is-ancestor 78e8abae6 origin/main` | 1 | **1** | a **squash** merge leaves the branch commit out of the merged history — it says "not landed" for a landed PR |
+| `git cat-file -e origin/main:<the file the PR adds>` | absent | **present** | — this is the one that answers the question |
+
+**So: for "did it land", read the tree at `origin/main`, not the history.** And a measurement is a
+*point-in-time* fact: this lane's own record had to be re-measured mid-flight, and the correction is in
+§0–§2 rather than in a footnote. The verdicts survived the correction unchanged — which is the test that
+they were about the **behaviour** and not about the merge.
