@@ -3137,7 +3137,13 @@ def test_the_check_reds_a_cut_commit_that_resolves_to_nothing(checker, tmp_path,
     Measured at `3a95ee6b9`: `9542024cb…` was absent from the object database AND from the
     remote (`upload-pack: not our ref`), while the value it replaced resolved — `cut` writes
     `git rev-parse HEAD` in whatever worktree it runs in, and that head was rebased away.
-    The probe is INJECTED so the verdict does not depend on this checkout's clone shape.
+    The probe is INJECTED so the verdict does not depend on this checkout's clone shape —
+    and ⛔ it must be the symbol the code READS (`cut_commit_verdict` / `cut_commit_resolves`),
+    not `commit_present`: #11057's merge moved `provenance_report`'s default resolution probe
+    and left this control stubbing the old one, so its verdict became a function of the
+    ambient checkout's DEPTH — green in a full clone, RED in `test-slow`'s `fetch-depth: 1`
+    clone (CI run 42180602757, `test-slow (b)`). `..._stub_are_the_ones_the_check_reads`
+    pins the seam so the next refactor reds there instead of going quiet.
     """
     doc = _manifest()
     doc["cut_at_commit"] = "0123456789abcdef0123456789abcdef01234567"
@@ -3146,12 +3152,51 @@ def test_the_check_reds_a_cut_commit_that_resolves_to_nothing(checker, tmp_path,
     # never reaches `provenance_report`'s own "does not resolve" arm — that arm is pinned by
     # the direct call below, which is the one `check_provenance=False` callers and any future
     # reader would hit.
+    monkeypatch.setattr(
+        checker, "cut_commit_verdict",
+        lambda sha: (checker.CUT_FABRICATED, "no such object in this repository"),
+    )
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 1, "a `cut_at_commit` that resolves to nothing did not red the check"
     assert "NOT a commit" in out and doc["cut_at_commit"] in out, out
+    # The LINT's own arm, reached the way a `check_provenance=False` reader reaches it: the
+    # record passes the read-time shape/fabrication gate and the resolution probe reds it.
+    monkeypatch.setattr(
+        checker, "cut_commit_verdict", lambda sha: (checker.CUT_RESOLVED, ""))
+    monkeypatch.setattr(checker, "cut_commit_resolves", lambda sha: False)
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "the lint accepted a `cut_at_commit` that does not resolve"
+    assert "does not resolve" in out and doc["cut_at_commit"] in out, out
     problems, _unprovable = checker.provenance_report(
         doc, resolve=lambda sha: False)
     assert any("does not resolve" in problem for problem in problems), problems
+
+
+def test_the_probes_these_provenance_tests_stub_are_the_ones_the_check_reads(
+    checker, monkeypatch,
+):
+    """The controls around this one are clone-shape independent ONLY while they stub the
+    probe `provenance_report` actually reads — so the seam is pinned BEHAVIOURALLY here.
+
+    #11057's merge gave the defaults a new implementation (`cut_commit_resolves`, bridging
+    #10914's `cut_commit_verdict`) while three controls went on stubbing `commit_present`.
+    Their verdicts then depended on how much history the checkout had: green in a full
+    clone, RED in `test-slow`'s `fetch-depth: 1` clone — CI run 42180602757, `test-slow (b)`,
+    3 failed / 892 passed — for a record that is correct. A source grep would not have
+    caught it either; stubbing the symbol and reading the verdict does: if the default probe
+    moves again, the stubs above go inert and THIS reds instead of three controls silently
+    becoming environment-dependent.
+    """
+    doc = _manifest()
+    monkeypatch.setattr(checker, "cut_commit_verdict", lambda sha: (checker.CUT_RESOLVED, ""))
+    monkeypatch.setattr(checker, "cut_commit_resolves", lambda sha: False)
+    problems, unprovable = checker.provenance_report(doc)
+    assert unprovable is None, problems
+    assert any("does not resolve" in p for p in problems), problems
+    monkeypatch.setattr(checker, "cut_commit_resolves", lambda sha: True)
+    monkeypatch.setattr(checker, "on_default_branch", lambda sha, root=None: False)
+    problems, _ = checker.provenance_report(doc)
+    assert any("NOT in" in p for p in problems), problems
 
 
 def test_the_check_does_not_red_when_the_checkout_cannot_answer(checker, tmp_path, monkeypatch):
@@ -3223,7 +3268,14 @@ def test_the_check_reds_a_cut_commit_that_resolves_but_is_not_in_the_default_bra
     """
     doc = _manifest()
     doc["cut_at_commit"] = "9cd6cf28e6d45abd7790fbaf74d33c17b6c18044"  # a lane-only commit
-    monkeypatch.setattr(checker, "commit_present", lambda sha, root=None: True)
+    # ⛔ Stub the READER (`cut_commit_verdict`) and the LINT's own resolution probe
+    # (`cut_commit_resolves`) — never `commit_present`, which is not the symbol
+    # `provenance_report` reads (see `..._stub_are_the_ones_the_check_reads`). Without the
+    # reader stub the case is also object-database dependent: the lane commit is present in
+    # a worktree that fetched this branch and absent (→ fabricated, `NOT a commit`) in any
+    # fresh clone, so a full clone would red for the wrong reason.
+    monkeypatch.setattr(checker, "cut_commit_verdict", lambda sha: (checker.CUT_RESOLVED, ""))
+    monkeypatch.setattr(checker, "cut_commit_resolves", lambda sha: True)
     monkeypatch.setattr(checker, "on_default_branch", lambda sha, root=None: False)
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 1, "a `cut_at_commit` outside the default branch did not red the check"
@@ -3241,7 +3293,8 @@ def test_the_check_does_not_red_an_ancestry_question_it_cannot_answer(
     and the strict arm is what turns that refusal into the CI red (the case above).
     """
     doc = _manifest()
-    monkeypatch.setattr(checker, "commit_present", lambda sha, root=None: True)
+    monkeypatch.setattr(checker, "cut_commit_verdict", lambda sha: (checker.CUT_RESOLVED, ""))
+    monkeypatch.setattr(checker, "cut_commit_resolves", lambda sha: True)
     monkeypatch.setattr(checker, "on_default_branch", lambda sha, root=None: None)
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 0, out
