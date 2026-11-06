@@ -786,7 +786,8 @@ def _open_coming_soon(page: Page, key: str | None = None, index: int = 0):
        deliberate deferral `test_coming_soon_modal_dialog_contract_and_skip_reaches_done`
        already waits for, and pins). A `focus()` issued before that frame is
        therefore UNDONE by it, and the Enter below activates the PREVIOUS tile.
-       Settle the frame first, and assert focus is still ours before pressing.
+       Settle that frame, then PROVE the focus state with a retrying assertion
+       before sending the key.
     2. `tile_key` used to be `key or <the locator's own data attribute>`, i.e. the
        request echoed back to itself, so `assert opened_key == key` in the
        callers could NEVER red. With (1) live, the loop in
@@ -806,8 +807,19 @@ def _open_coming_soon(page: Page, key: str | None = None, index: int = 0):
     page.evaluate(
         "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
     tile.focus()
-    assert tile.evaluate("el => document.activeElement === el"), \
-        f"focus must be on tile {wanted!r} before Enter — a deferred restore stole it"
+    # A RETRYING, web-first assertion — not a one-shot read. `focus()` and
+    # `press()` are not actionability-checked, so a stale restore can land a
+    # frame later under load; the convergent practice is to prove the focus
+    # state with an assertion that re-polls before the key is sent, never a
+    # fixed sleep (Playwright's own writing-tests guidance, and every flake
+    # playbook: `focus()` + `press()` race rendering). The two frames above
+    # settle the app's KNOWN one-frame deferral; this proves the outcome.
+    try:
+        expect(tile).to_be_focused(timeout=5_000)
+    except AssertionError as error:
+        raise AssertionError(
+            f"focus is not on tile {wanted!r} before Enter — a deferred restore stole it"
+        ) from error
     page.keyboard.press("Enter")
     dialog = page.locator("[role='dialog']")
     expect(dialog).to_be_visible(timeout=5_000)
