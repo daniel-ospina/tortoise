@@ -159,7 +159,7 @@ exact primary-key match, so anything else falls through to `cache.saveCache(…)
 everything the restore just put there. On a `uv.lock` bump every pip site gets a new primary key
 at once, and this job — p50 1.62 m, the fastest of them — is the likely payer: it restores the
 shared 3.6 GB archive and re-saves it, its own `.[test,postgres]` downloads
-(`python-ci.yml:3635`; `[embeddings]`/torch deliberately absent) being a rounding error beside it.
+(`python-ci.yml:4435`; `[embeddings]`/torch deliberately absent) being a rounding error beside it.
 Its exposure is therefore 12 m in-step + ~1 m setup + ~9 m save ≈ 22 m against 20 → `cancelled` →
 red (#5219), on an event rather than on every run. Moved only from a measurement — nothing has
 measured it cancelled — but the number to move it TO follows the arm-2 rule, not arm 1: 22 × 1.5 →
@@ -178,8 +178,24 @@ read the cap against the SUM of the job's caps, not against its median.
 Every other row was checked against that rule. The discriminating fact is **not** that the
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
-SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 27 m per-shard
-watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
+SUM. `test` clears it with room to spare: 10 m last-failed pre-phase + the emitted **26 m** per-shard
+watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
+(`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
+suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
+whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
+90, x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
+(3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
+is now read from the shared `pip-<os>-<hash uv.lock>` key that FOUR other jobs write, while
+`~/.cache/uv` keeps exactly one writer here, bounded in ACCUMULATION (`uv cache prune` — it drops entries no environment reaches, not a single environment's set) and in time
+(`timeout-minutes: 7`, `continue-on-error`, fail-open to a MISS). A SINGLE 3.88 GB write still does
+not fit — but on the measured rates, not on an assumption: this run's degraded uplink was 0.9 MB/s
+sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner
+class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11036, job 127280762096,
+`Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
+~57 m+ degraded against the ~10.4 m of room the SUM leaves. Splitting the payload is what brings it
+inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
+that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
@@ -191,7 +207,7 @@ cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at
 30). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
-because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so
+because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2847-2852`) and so
 writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
 move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
 
@@ -233,7 +249,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:3624-3631`) and is therefore NOT an arm-1 row — on a key bump
+  writable shared key (`python-ci.yml:4421-4430`) and is therefore NOT an arm-1 row — on a key bump
   its save IS the archive (see the note under the table). Arm 1 applies to a job whose save is
   small because nothing restores an archive into its cache path, not because its `pip install`
   line omits torch.
