@@ -1966,6 +1966,38 @@ _NEG_READ_VERB = (
 #: that negation belongs to the other name and this object is not negated.
 _NEG_TRAILING_SUBJECT = r"(?:\s+(?:be|is|was|were|the|what|it|this|that)\b)"
 
+#: Copulas and prepositions — the two closed word classes a negation may cross on
+#: its way to a NOUN object. A negation whose complement is `be` / `from` / `the
+#: field` is a negation OF THE OBJECT; one whose complement is a content verb
+#: (`does not avoid …`, `no longer ignore …`) is a negation of THAT VERB, and
+#: reading it as a negation of the object certified the object's inverse
+#: (measured: the `negates-a-content-verb` rows of `_SUMMARY_NEGATION_INVERSIONS`).
+_NEG_COPULA = r"(?:be|is|are|was|were|being|been|am)"
+_NEG_PREP = (r"(?:from|of|in|to|on|at|by|with|into|onto|as|than|for|about"
+             r"|over|per|via)")
+#: ⛔ WORD-BOUNDED, both ends. `(?!{_NEG_COPULA}\b)` alone blocks inside `this`
+#: and `thesis` (the `is` sits mid-word), which made the whole clause-crossing
+#: arm UNREACHABLE — measured: *"is not (in this design) the S1 narrative"* was
+#: still certified green with that arm installed.
+_NEG_COPULA_W = rf"(?<!\w){_NEG_COPULA}\b"
+_NEG_READ_VERB_W = rf"(?<!\w){_NEG_READ_VERB}\b"
+#: ⛔ THE GOVERNOR — what a cue may cross on its way to a PLAIN NOUN object.
+#: Either nothing but whitespace (`never from`), or ONE of: a read/embed/index
+#: verb optionally followed by a preposition (`never read from`), a preposition
+#: (`never from`), a copula (`must not be`), or a determiner plus ONE word
+#: (`never the field`). Anything else — `avoid`, `ignore`, `need to avoid`, `the
+#: case that … ignores` — means the negation's complement is that VERB, not the
+#: object, and the guard refuses rather than guess. See `_negation_bound_to`'s
+#: `governed` note and `_DECLARED_OVER_BLOCK_GOVERNOR`.
+_NEG_GOVERNOR = (
+    rf"(?:\s+|\s*(?:"
+    rf"{_NEG_READ_VERB_W}\s+(?:{_NEG_PREP}\s+)?"
+    rf"|{_NEG_PREP}\s+"
+    rf"|{_NEG_COPULA_W}\s+"
+    rf"|the\s+\w+\s+"
+    rf"))"
+)
+
 #: Markdown emphasis, stripped before the guards read a line (see
 #: `_negation_bound_to`). Asterisks only — underscores live inside identifiers.
 _EMPHASIS_RE = re.compile(r"\*{1,2}")
@@ -1982,8 +2014,53 @@ def _neg_span(n: int) -> str:
     return rf"(?:(?!{_NEG_ADVERSATIVE}){_NEG_CLAUSE_SAFE}){{0,{n}}}"
 
 
+def _negation_governs_the_np(line: str, np_regex: str, post: str = "") -> bool:
+    r"""A cue whose OWN COMPLEMENT is the object's noun phrase — FAIL-CLOSED.
+
+    ⛔ THE HOLE THIS CLOSES, MEASURED. `_neg_span` stops at `, ; : . ( — –` so
+    that a negation in a NEIGHBOURING clause cannot bind to this one. That is
+    right in one direction and fail-OPEN in the other: when the cue and the
+    object sit in the SAME clause with a parenthetical, an appositive or a
+    fronted adverbial between them, the span consumes the empty string, the
+    required read verb then fails at the punctuation, and the guard reports NO
+    negation. Measured on §9.4's own deciding sentence — every one of these left
+    the pin GREEN while stating that the vector's text **is not** the narrative:
+
+      • `is not, however, the S1 narrative read from `home``
+      • `is not, in the current design, the S1 narrative read from `home``
+      • `is not — however — the S1 narrative read from `home``
+      • `is not: the S1 narrative read from `home``
+      • `is not (in this design) the S1 narrative read from `home``
+      • `is not; the S1 narrative read from `home``
+
+    So this arm crosses those boundaries on purpose, and pays for it with the
+    stop that actually distinguishes the two readings: **the crossed material
+    may carry no read/embed/index verb and no copula.** A cue followed by either
+    has already completed its negation on that predicate and the object belongs
+    to a later clause — which is exactly the correct prose the clause stop was
+    added for (*"the text is not stored on the node; it is the S1 narrative read
+    from `home`"*, *"the text is not read, the S1 narrative read from `home` …"*,
+    both still accepted, both pinned in `_VECTOR_REWORDINGS`).
+
+    ⛔ IT IS ADDITIVE, never a replacement: it can only turn a `False` into a
+    `True`, so it cannot accept anything the bound arms refuse. Fail-closed is
+    the only direction this file may move without opening a fail-open.
+
+    ⚠️ DECLARED, fail-CLOSED cost: a negation of ANOTHER predicate that names no
+    read verb or copula before the object — *"…is not stored in
+    `:Source.summary`"* — is REFUSED. That is the price of not enumerating
+    verbs, and enumerating them is what opened four fail-opens on this seam
+    already. Pinned by `_DECLARED_OVER_BLOCK_GOVERNOR`.
+    """
+    line = _EMPHASIS_RE.sub("", line)
+    gap = (rf"(?:(?!{_NEG_ADVERSATIVE})(?!{_NEG_READ_VERB_W})(?!{_NEG_COPULA_W})"
+           rf"[^`\n]){{0,40}}?")
+    return (re.search(rf"{_NEGATION_CUE}{gap}{np_regex}{post}", line,
+                      re.IGNORECASE) is not None)
+
+
 def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
-                       trailing: bool = True) -> bool:
+                       trailing: bool = True, governed: bool = False) -> bool:
     r"""Is a negation cue bound to `object_regex` — in EITHER direction?
 
     (`trailing=False` restricts it to the LEADING direction; §12.1b's object
@@ -2005,6 +2082,12 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
       • **TRAILING** — the object, then `_neg_span(30)`, then the cue,
         then `_NEG_TRAILING_SUBJECT` (so a cue introducing ANOTHER backticked
         name is that name's negation, not this object's).
+
+    ⛔ `governed=True` REPLACES the free leading span with a GOVERNOR
+    (`_NEG_GOVERNOR`) — see `_negates_the_summary`, which is the only caller and
+    the only object where a free 40-character span was measured to certify the
+    object's INVERSE (`does not ignore` / `no longer avoid` / `does not need to
+    avoid` / `is not the case that … ignores`).
 
     ⚠️ The SECOND span is clause-stopped too. It used to be `[^`;]{0,30}`, which
     admitted `. , : —`, so a cue in one clause reached an object in the NEXT one
@@ -2041,9 +2124,17 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
     is supposed to pin (measured — the pin stayed GREEN with that sentence
     transplanted into the REAL footnote).
     """
-    leading = _NEGATION_CUE + _neg_span(40)
-    if read_verb:
-        leading += rf"{_NEG_READ_VERB}\b{_neg_span(30)}"
+    if governed:
+        #: ⛔ THE GOVERNOR, not a free span. `cue + ≤40 characters + object`
+        #: accepted a negation of ANY predicate sitting between the two, so a
+        #: sentence telling the vector to STOP AVOIDING the trap was certified
+        #: as the sentence forbidding it (measured, all four shapes; each is now
+        #: a case in `_SUMMARY_NEGATION_INVERSIONS`).
+        leading = _NEGATION_CUE + _NEG_GOVERNOR
+    else:
+        leading = _NEGATION_CUE + _neg_span(40)
+        if read_verb:
+            leading += rf"{_NEG_READ_VERB}\b{_neg_span(30)}"
     #: ⛔ MARKDOWN EMPHASIS is not prose: the document bolds its claims
     #: (`not **only** X`, `not the **only** X`), and `**` inside the peek gap made
     #: the exclusion miss and the cue count again — measured, the whole pin GREEN
@@ -2077,7 +2168,23 @@ def _negates_the_home(line: str, home: str) -> bool:
     `_VECTOR_INVERSIONS`. The span is bounded, and its stop set is what keeps it
     from reaching across a clause boundary or another backticked name.
     """
-    return _negation_bound_to(line, rf"`{re.escape(home)}`", read_verb=True)
+    if _negation_bound_to(line, rf"`{re.escape(home)}`", read_verb=True):
+        return True
+    #: ⛔ THE CLAUSE-CROSSING ARM, and it is additive (so fail-closed): a cue whose
+    #: OWN COMPLEMENT is the claim's noun phrase — `never|not|… the S1 narrative
+    #: read … from `home`` — even when a comma, a colon, a semicolon, a
+    #: parenthesis or an em-dash separates the two. Without it, every one of the
+    #: six `_VECTOR_CLAUSE_SEVERED_INVERSIONS` shapes certified the sentence that
+    #: states the exact inverse of §9.4 (measured at `10fc020353`).
+    #:
+    #: ⚠️ The noun phrase is bounded to the one that NAMES the home, so a
+    #: negation of the narrative in a DIFFERENT claim — §9.4's own *"`summary` is
+    #: a §4.6 `:Source` property and never the S1 narrative (§9.1)"* — is not
+    #: read as a negation of this home (measured: an unbounded NP arm refused the
+    #: real deciding sentence).
+    return _negation_governs_the_np(
+        line,
+        rf"the\s+S1\s+narrative\b[^`\n]{{0,40}}?`{re.escape(home)}`")
 
 
 def _negates_the_summary(line: str) -> bool:
@@ -2115,9 +2222,24 @@ def _negates_the_summary(line: str) -> bool:
     the regression this assert exists for, and it is a control case in
     `_SUMMARY_NEGATION_INVERSIONS`, so a future loosening reds a test rather than
     a docs-only PR.
+
+    ⛔ **IT DOES NOT TAKE A FREE SPAN, and that was measured fail-OPEN.** The
+    first cut bound `cue + ≤40 characters + object`, which reads a negation of
+    ANY predicate between the two as a negation of the trap: *"and the vector
+    should no longer avoid `:Source.summary`"*, *"…does not need to avoid …"*,
+    *"…does not ignore …"* and *"it is not the case that the vector ignores …"*
+    were ALL certified as the required negation while telling the vector to read
+    it (measured at `10fc020353`; each is now a `negates-a-content-verb` row in
+    `_SUMMARY_NEGATION_INVERSIONS`). The span is a GOVERNOR now (`_NEG_GOVERNOR`):
+    a read/embed/index verb, a preposition, a copula, or a determiner plus one
+    word — the closed classes that make the OBJECT the negation's complement.
+    ⚠️ Declared fail-CLOSED cost: a negation of a verb outside those classes
+    (*"…is not stored in `:Source.summary`"*) is refused; see
+    `_DECLARED_OVER_BLOCK_GOVERNOR`.
     """
     return _negation_bound_to(
-        line, rf"`{re.escape(_SUMMARY_OBJECT)}`", read_verb=False)
+        line, rf"`{re.escape(_SUMMARY_OBJECT)}`", read_verb=False,
+        governed=True)
 
 
 def _negates_the_narrative(line: str) -> bool:
@@ -2190,8 +2312,17 @@ def _negates_the_narrative(line: str) -> bool:
     the *"embed the summary already there"* reading open), it is measured on the
     REAL footnote, and it is a control case in `_NARRATIVE_NEGATION_INVERSIONS`.
     """
-    return _negation_bound_to(line, r"\bnarrative\b", read_verb=False,
-                              trailing=False)
+    if _negation_bound_to(line, r"\bnarrative\b", read_verb=False,
+                          trailing=False):
+        return True
+    #: The same additive clause-crossing arm as `_negates_the_home`'s: a cue whose
+    #: own complement IS the narrative, across a comma/colon/em-dash/parenthesis.
+    #: Measured on the REAL footnote — *"for a session Source it is not, however,
+    #: the S1 narrative …"* stayed GREEN without it. `_AFFIRMATIVE_EXCLUSION_POST`
+    #: rides along so `not the narrative alone` — the affirmative family, which
+    #: ASSERTS the narrative — stays refused.
+    return _negation_governs_the_np(
+        line, r"\bnarrative\b", _AFFIRMATIVE_EXCLUSION_POST)
 
 
 def _namespaces_a_column(line: str, home: str) -> bool:
@@ -2411,6 +2542,86 @@ _VECTOR_REWORDINGS: list[tuple[str, str, str]] = [
     ('cue-after-home-other-name', "a cue after the home that introduces ANOTHER backticked name",
      "the S1 narrative read from `{home}` is never `:Source.summary`"),
 ]
+
+#: ⛔ THE CLAUSE-SEVERED CLASS — an inversion whose cue and object sit in the SAME
+#: clause, separated only by a parenthetical, an appositive or a fronted
+#: adverbial. `_NEG_CLAUSE_SAFE`'s clause stop (`. , ; : ( — –`) is what keeps a
+#: NEIGHBOURING clause's negation from binding, and it made every one of these
+#: invisible: the cue→verb span took the empty string, the required read verb then
+#: failed at the punctuation, and the guard reported NO negation. Measured at
+#: `10fc020353` on §9.4's own deciding sentence — all seven left the pin GREEN
+#: while stating that the vector's text **is not** the narrative, i.e. the exact
+#: inverse this pin exists to certify.
+#:
+#: Closed by `_negation_governs_the_np`, which crosses those boundaries and pays
+#: for it with the stop that actually discriminates: **no read/embed/index verb
+#: and no copula may sit between the cue and the object.** A cue followed by
+#: either has already completed its negation on that predicate and the object
+#: belongs to a later clause — which is exactly the correct prose the clause stop
+#: was added for, and it stays accepted (`other-clause-semicolon`,
+#: `other-clause-em-dash`, `clause-end-after-read-verb-comma`,
+#: `clause-end-after-read-verb-em-dash` in `_VECTOR_REWORDINGS`).
+_VECTOR_CLAUSE_SEVERED_INVERSIONS: list[tuple[str, str, str]] = [
+    ('severed-by-comma-adverb',
+     "a comma + conjunctive adverb between the cue and its object",
+     "whose embedded text is not, however, the S1 narrative read from `{home}`"),
+    ('severed-by-fronted-adverbial',
+     "a fronted adverbial between the cue and its object",
+     "whose embedded text is not, in the current design, the S1 narrative "
+     "read from `{home}`"),
+    ('severed-by-em-dash',
+     "an em-dash parenthetical between the cue and its object",
+     "whose embedded text is not — however — the S1 narrative read from "
+     "`{home}`"),
+    ('severed-by-colon',
+     "a colon between the cue and its object",
+     "whose embedded text is not: the S1 narrative read from `{home}`"),
+    ('severed-by-parenthesis',
+     "a parenthetical between the cue and its object",
+     "whose embedded text is not (in this design) the S1 narrative read from "
+     "`{home}`"),
+    ('severed-by-semicolon',
+     "a semicolon between the cue and its object",
+     "whose embedded text is not; the S1 narrative read from `{home}`"),
+    #: The SECOND gap (read → object), not the first: the read verb is qualified
+    #: and the pointer follows it. Prose that qualifies the read is CORRECT on its
+    #: own (*"…the S1 narrative read, however, from `home`"*), so the 40-character
+    #: second span stays clause-stopped and this case carries a cue for that
+    #: reason — the negation is what must not be lost behind the qualification.
+    ('severed-inside-the-pointer',
+     "a parenthetical inside the read→pointer span, under a cue",
+     "whose embedded text is not the S1 narrative read, however, from "
+     "`{home}`"),
+]
+
+
+@pytest.mark.parametrize("why,line", _params(_VECTOR_CLAUSE_SEVERED_INVERSIONS))
+def test_the_vector_helper_REFUSES_a_CLAUSE_SEVERED_inversion(why: str, line: str):
+    """*What value makes this test fail?* The pre-fix guard — replayed, all 7.
+
+    Every line carries the correct claim phrase, so `_claim_present` is not what
+    refuses it; each is refused by the negation guard alone. Replayed against the
+    helper extracted from `10fc020353` (`_negates_the_home` without
+    `_negation_governs_the_np`): **7 of 7 ACCEPTED there, 7 of 7 REFUSED here** —
+    so this list is non-vacuous in the direction that matters (it reds on the
+    pre-fix code) and green only because the clause-crossing arm exists.
+
+    ⚠️ The guard it pins is ADDITIVE (`_negation_governs_the_np` can only turn a
+    `False` into a `True`), so it cannot have widened any accept case — the four
+    correct-prose clause-boundary controls in `_VECTOR_REWORDINGS` are the proof
+    that the discriminator is the intervening verb/copula and not the punctuation.
+    """
+    formatted = line.format(home=_HOME)
+    try:
+        _assert_vector_reads_the_narrative(
+            formatted, "the clause-severed case", _HOME)
+    except AssertionError:
+        return
+    raise AssertionError(
+        f"the pin ACCEPTED a clause-severed inversion ({why}): {formatted!r} — "
+        f"a cue and its object separated by a parenthetical still bind, and the "
+        f"stop that separates them from a NEIGHBOURING clause's negation is an "
+        f"intervening read verb or copula, not the punctuation itself")
 
 #: Lines that carry the correct PHRASE and still invert or re-specify the claim
 #: about `{home}`. These are what the two object-bound guards are FOR, so they
@@ -2640,6 +2851,23 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str, str]] = [
      "⛔ isn't only `:Source.summary` but the S1 narrative"),
     ('not-the-only', "the `not the only` article form",
      "⛔ not the only `:Source.summary` but the S1 narrative"),
+    #: ⛔ THE CONTENT-VERB CLASS — four shapes that name the TRAP and tell the
+    #: vector to read it, certified as the required negation by the free
+    #: 40-character span this guard used to take. Each was MEASURED accepted at
+    #: `10fc020353` (the review's F2). The first two are ordinary design prose:
+    #: they say the vector USED TO keep away from `:Source.summary` and now does
+    #: not — the *"embed the summary already there"* reading the assert's own
+    #: message says it closes.
+    ('negates-a-content-verb', "the negation's complement is a content verb",
+     "⛔ and the vector does not ignore `:Source.summary`."),
+    ('negates-a-content-verb-modal', "a modal + content verb after the cue",
+     "⛔ and the vector should no longer avoid `:Source.summary`."),
+    ('negates-a-content-verb-infinitive',
+     "a `need to` + content verb after the cue",
+     "⛔ and the vector does not need to avoid `:Source.summary`."),
+    ('negates-a-content-verb-behind-a-noun',
+     "the content verb behind a determiner-led noun",
+     "⛔ it is not the case that the vector ignores `:Source.summary`."),
 ]
 
 
@@ -2798,6 +3026,41 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str, str]] = [
     ('post-positional-not-alone', "the post-positional `not the narrative alone`",
      "not the narrative alone"),
 ]
+
+
+def test_the_REAL_footnote_severed_by_a_PARENTHETICAL_is_REFUSED():
+    """*What value makes this test fail?* The pre-fix guard, on the REAL artefact.
+
+    §12.1b's half of the clause-severed class. The review's mutation (the §12.1b
+    footnote — *"for a session Source it is **not, however,** the S1 narrative
+    read from `public.session_narrative`"*) left the whole pin GREEN at
+    `10fc020353`: the footnote still carries its own `never the narrative` later,
+    so `_negates_the_narrative` was satisfied while the sentence above it stated
+    the INVERSE of what the footnote means. What must catch it is the HOME guard
+    on the same line — the same `_negation_governs_the_np` arm §9.4's shapes are
+    pinned by — so that is what is asserted here, on the document a reader
+    actually lands on rather than on a constructed line.
+    """
+    footnote = _source_vector_footnote(_storage_doc_text())
+    positive = f"it is the S1 narrative read from `{_HOME}`"
+    assert positive in footnote, (
+        f"the real §12.1b footnote no longer carries {positive!r} — re-derive "
+        f"where it states that the vector's text IS the narrative before "
+        f"trusting this control: {footnote!r}")
+    mutated = footnote.replace(
+        positive, f"it is not, however, the S1 narrative read from `{_HOME}`")
+    assert mutated != footnote, (
+        "the mutation did not change the footnote, so this control cannot fire")
+    try:
+        _assert_vector_reads_the_narrative(
+            mutated, "§12.1b's footnote, severed by a parenthetical", _HOME)
+    except AssertionError:
+        return
+    raise AssertionError(
+        f"§12.1b's REAL footnote accepts *\"it is not, however, the S1 narrative "
+        f"read from `{_HOME}`\"* — a cue severed from its own object by a comma "
+        f"still binds, and a note saying the vector's text is NOT the narrative "
+        f"is the inverse of the sentence one line above it")
 
 #: ⛔ `not so much X as Y` is in the EXCLUSIONS (see `_AFFIRMATIVE_EXCLUSION`) and
 #: its cost is declared in `_DECLARED_OVER_BLOCK_SO_MUCH`. It is a mitigated
@@ -3293,6 +3556,46 @@ def test_the_declared_rather_than_over_block_is_the_documented_one():
         f"is being revisited, the two measured fail-opens must be replayed first")
 
 
+#: ⛔ THE DECLARED, FAIL-CLOSED COST OF THE GOVERNOR. `_negates_the_summary`
+#: crosses only a read/embed/index verb, a preposition, a copula or a determiner
+#: plus one word on its way to the trap. A negation of a DIFFERENT predicate that
+#: names none of those — *"…is not stored in `:Source.summary`"* is the shape
+#: below — is therefore REFUSED, even though it states §9.4's claim correctly.
+#:
+#: That is the cheaper error and it is chosen deliberately: the free span this
+#: replaced certified FOUR inversions (the `negates-a-content-verb` rows of
+#: `_SUMMARY_NEGATION_INVERSIONS`), each of which told the vector to read the trap.
+#: An over-block costs a re-wording; a fail-open ships the wrong instruction.
+#: Closing it means enumerating the verbs that may govern the trap, which is the
+#: move that has opened this seam nine times — so it is DECLARED and PINNED
+#: instead, and a future cycle that widens the governor must do so with every
+#: `_SUMMARY_NEGATION_INVERSIONS` row replayed.
+_DECLARED_OVER_BLOCK_GOVERNOR = (
+    "whose embedded text is not stored in `{trap}` — ⛔ never from the summary")
+
+
+def test_the_declared_governor_over_block_is_the_documented_one():
+    """*What value makes this test fail?* A governor that has quietly gone free.
+
+    Three sides, all needed: the line states a negation of a predicate (`stored`)
+    that is NOT a governor, `_negates_the_summary` refuses it, and the pin refuses
+    the sentence for that reason. If a future cycle widens the governor — the
+    widening this seam's history says opens a fail-open — this reds, and the four
+    `negates-a-content-verb` inversions have to be replayed before it can land.
+    """
+    line = _DECLARED_OVER_BLOCK_GOVERNOR.format(trap=_SUMMARY_OBJECT)
+    assert f"`{_SUMMARY_OBJECT}`" in line, (
+        f"the declared governor over-block no longer names the trap, so it would "
+        f"be refused for the WRONG reason: {line!r}")
+    assert _negates_the_summary(line) is False, (
+        f"the governor now crosses a content verb: `_negates_the_summary` "
+        f"ACCEPTS {line!r}. That is the fail-open direction — replay every "
+        f"`negates-a-content-verb` row of `_SUMMARY_NEGATION_INVERSIONS` before "
+        f"landing it")
+    assert _negates_the_home(line, _HOME) is False, (
+        f"the case no longer isolates the trap's guard: {line!r}")
+
+
 #: The false red `_AFFIRMATIVE_EXCLUSION`'s `so much|many` arm declares. The
 #: construction DENIES its first term, so these guards SHOULD accept it — but they
 #: bind positionally, and every role-based attempt opened a measured fail-open.
@@ -3312,15 +3615,66 @@ _DECLARED_OVER_BLOCK_SO_MUCH = (
 #: the guard is total, (b) a future cycle that closes one reds a test and must do
 #: so deliberately, with the fail-open replays in `_*_INVERSIONS` re-run. The
 #: structural fix is filed against this seam, not against this PR.
+#:
+#: ⛔ **TWO ENTRIES WERE CLOSED (review at `10fc020353`), and closing them is the
+#: record that the seam moved.** `_negates_the_summary` no longer takes a free
+#: 40-character span between the cue and the trap; it takes a GOVERNOR
+#: (`_NEG_GOVERNOR`). That is a NARROWING, which cannot open a fail-open, and it
+#: refused both former entries because each ASSERTS the trap:
+#:   • `not from the S1 narrative so much as from `:Source.summary`` — `not A so
+#:     much as B` DENIES A and ASSERTS B, so it orders the trap;
+#:   • `we do not embed anything other than `:Source.summary`` — `other than`
+#:     excludes everything BUT the trap, i.e. it orders the trap too.
+#: Both previously read as "the required negation" and left the document-level
+#: pin GREEN over a sentence stating its inverse. The third entry (the narrative's
+#: `so much as`) is still open: `_negates_the_narrative` keeps its free span, so
+#: the narrowing is scoped to the object where it was measured.
 _DECLARED_RESIDUALS = (
-    # split word order: the construction the contiguous arm cannot see
-    ("the split `not A so much as B` order",
-     "not from the S1 narrative so much as from `{trap}`", "summary"),
-    ("the exception phrase `other than`",
-     "we do not embed anything other than `{trap}`", "summary"),
     ("the split `so much as` on the narrative object",
      "not a separate field so much as the narrative", "narrative"),
 )
+
+#: ⛔ DECLARED, FAIL-CLOSED: NEGATIONS THAT CARRY NO CUE IN THE VOCABULARY. These
+#: are NOT caught (`far from`, `hardly`, `anything but` are not in
+#: `_NEGATION_CUE`), so §9.4 rewritten as *"whose embedded text is far from the S1
+#: narrative read from `home`"* leaves the pin GREEN — measured at `10fc020353`.
+#:
+#: They are DECLARED rather than closed, and the reason is this file's own measured
+#: argument: closing a cue-vocabulary hole by ENUMERATING words has opened a
+#: different one on every attempt (nine cycles), because the question is which
+#: term the polarity reaches and a word list answers only which words are nearby.
+#: So each is ASSERTED ABSENT from the vocabulary, in the same shape as
+#: `_DECLARED_RESIDUALS`: a future widening reds this test and must be deliberate,
+#: with the `_*_INVERSIONS` replays re-run before it lands.
+_DECLARED_UNCUED_NEGATIONS = (
+    ("`far from` — a negation outside the cue vocabulary",
+     "whose embedded text is far from the S1 narrative read from `{home}`"),
+    ("`hardly` — a negation outside the cue vocabulary",
+     "whose embedded text is hardly the S1 narrative read from `{home}`"),
+    ("`anything but` — a negation outside the cue vocabulary",
+     "whose embedded text is anything but the S1 narrative read from `{home}`"),
+)
+
+
+def test_the_declared_uncued_negations_are_the_measured_ones():
+    """*What value makes this test fail?* A widening this file did not measure.
+
+    Each line is an INVERSION of §9.4 that the pin does not catch, because none of
+    the three shapes carries a word in `_NEGATION_CUE`. Asserting them ABSENT is
+    the honest form: it stops this file claiming a totality it does not have, and
+    it reds the moment one is closed so the closure — and the re-run of every
+    `_*_INVERSIONS` replay it requires — is visible in review rather than silent.
+    """
+    for why, templ in _DECLARED_UNCUED_NEGATIONS:
+        line = templ.format(home=_HOME)
+        assert f"the S1 narrative read from `{_HOME}`" in line, (
+            f"the declared uncued case no longer carries the claim's own phrase, "
+            f"so it would be missed for the WRONG reason: {line!r}")
+        assert not _negates_the_home(line, _HOME), (
+            f"the declared uncued negation {why!r} is now CLOSED — "
+            f"`_negates_the_home` sees {line!r}. That is the direction this seam "
+            f"wants: delete this case and re-run every `_*_INVERSIONS` replay "
+            f"before landing the closure")
 
 
 def test_the_declared_cue_vocabulary_residuals_are_the_measured_ones():
