@@ -9693,8 +9693,15 @@ exec {real} "$@"
         self.assertIn("lane queue: NOT PRESENT —", out)
         self.assertIn("no-such-queue", out)
 
-    def test_an_unlistable_lane_queue_is_incomplete_never_clean(self):
-        """The root EXISTS but cannot be listed — that is cannot-look."""
+    def test_a_lane_queue_that_is_a_FILE_is_incomplete_never_clean(self):
+        """The root EXISTS but is not a directory — that is cannot-look.
+
+        ⛔ RENAMED (review cycle 3, P2): this used to be called
+        `test_an_unlistable_lane_queue_…`, which claimed a branch it never
+        reaches — a regular FILE takes the `not_dirs` arm (`os.stat` succeeds,
+        `S_ISDIR` is False). The genuinely unlistable root — stat succeeds and
+        `os.listdir` refuses — is pinned by the two tests below.
+        """
         not_a_dir = self.tmp / "queue-is-a-file"
         not_a_dir.write_text("x")
         rc, out = self.run_tool(env_extra={
@@ -10338,6 +10345,68 @@ exec {real} "$@"
         self.assertIn("VERDICT: INCOMPLETE", out)
         self.assertIn("lane-queue-unreadable", out)
         self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_a_lane_queue_root_whose_ENTRIES_cannot_be_listed_is_incomplete(self):
+        """Class 2's LIST half: `stat` succeeds, the enumeration is REFUSED.
+
+        Review cycle 3 (P2): the stat arm above was pinned twice while its
+        sibling — the root is statable but `os.listdir` raises (a `chmod 000`
+        on the root itself, `hidepid`, an NFS refusal) — had NO test at all, so
+        `except OSError: names = []` survived the entire two-file suite while
+        turning a live holder into a measured empty queue. This asserts the
+        refusal is INCOMPLETE even though the `.pid` cannot be named: the
+        whole surface is undecidable, never CLEAN.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root ignores mode bits, so EACCES cannot be simulated; "
+                          "the mocked sibling below pins this branch there")
+        queue = self.tmp / "bg-unlistable"
+        queue.mkdir()
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        os.chmod(queue, 0o000)
+
+        def _restore() -> None:
+            with suppress(OSError):
+                os.chmod(queue, 0o700)
+
+        self.addCleanup(_restore)
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # ⛔ NOT the absent arm: this root was FOUND, it just could not be read.
+        self.assertNotIn("lane queue: NOT PRESENT", out)
+
+    def test_an_unlistable_root_is_incomplete_even_where_MODE_BITS_are_ignored(self):
+        """The same branch, uid-INDEPENDENT — CI runs as root.
+
+        `chmod 000` is cosmetic for uid 0, so the test above skips there and the
+        LIST refusal would go unpinned in CI. Patching `os.listdir` for the
+        single refused root pins the same fail-closed polarity without relying
+        on mode bits at all.
+        """
+        cp = _tool_module()
+        queue = self.tmp / "bg-unlistable-mocked"
+        queue.mkdir()
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        real_listdir = os.listdir
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(str(queue)):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_listdir(path, *a, **k)
+
+        with mock.patch.dict(
+                os.environ, {"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)}), \
+                mock.patch.object(cp.os, "listdir", side_effect=_refuse):
+            entries, absent, why = cp._lane_queue_entries("test-owner/test-repo")
+        self.assertIsNone(entries, why)
+        self.assertFalse(absent, why)
+        self.assertIn("could not be listed", why)
 
     def test_a_unicode_digit_ppid_from_ps_cannot_crash_into_a_collision(self):
         """`isdigit()` is not a promise that `int()` succeeds — the `ps` leg too.
