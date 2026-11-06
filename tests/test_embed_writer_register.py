@@ -18,7 +18,8 @@ is the product home; this file is its proof.
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
 | `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer whose vector the gate does not see and the product has no declaration for it — the *silent bypass* this issue exists to prevent |
-| `test_the_live_guard_has_teeth_on_an_INJECTED_writer` | the same guard, driven rather than read | the guard goes vacuous when the tree's population is all-declared (the `#10541` guard's own lesson), or the register's enumeration stops naming an undeclared writer |
+| `test_the_live_guard_has_teeth_on_an_INJECTED_writer` | the same guard, driven through **DISCOVERY** (`probe._embedding_writers` on an injected tree) rather than through set arithmetic | the guard goes vacuous when the tree's population is all-declared (the `#10541` guard's own lesson), or the discovery filter regresses and stops seeing a writer — in EITHER the clause shape or the container-key shape (`#11274`) |
+| `test_the_register_names_the_shapes_its_discovery_cannot_see` | `#11274` — the guard is exactly as wide as discovery, so discovery's blind spots are NAMED rather than implied | the instrument stops naming a shape it cannot decide, claims to decide one it cannot (or the reverse), or the register's docstring stops scoping its claim to the mechanism |
 | `test_the_instrument_and_the_product_declare_the_same_writers` | `04-plan.md` §6.2 — *"the instrument and the product cannot disagree about which writer a row is about"* | a class changes in one place, the census keeps an entry the register dropped, or the register invents one the instrument does not find |
 | `test_the_three_writers_that_carried_no_declaration_now_carry_one` | **this issue's own objective** (`03-scope.md` S2) | one of the three named writers loses its declaration, or the declaration stops naming `#11085` as the issue that accepted it |
 | `test_every_declaration_cites_a_seam_and_an_owning_issue` | the issue's `{class, reason, owning issue}` shape | an entry carries a claim with no symbol behind it, or an owner that is not an issue |
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -239,20 +241,85 @@ def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
     )
 
 
-def test_the_live_guard_has_teeth_on_an_INJECTED_writer():
-    """The same guard, DRIVEN — it must not depend on the tree currently holding a hole.
+def test_the_live_guard_has_teeth_on_an_INJECTED_writer(tmp_path):
+    """The same guard, DRIVEN **through discovery** — not through the register's own arithmetic.
 
-    `#10541`'s own guard learned this the expensive way: a live exact-set match goes vacuous the
-    moment the population is all-classified, and its repair is to keep an injected direction. Here
-    the injection is the *undeclared* direction: one key the register does not know, named by the
-    shared enumeration and refused by the lookup.
+    `#10541`'s guard learned this the expensive way: a live exact-set match goes vacuous the moment
+    the population is all-classified, and its repair is to keep an injected direction.
+
+    ⛔ The injection belongs in :func:`probe._embedding_writers` — the DISCOVERY half — and not in
+    the population handed to :func:`register.undeclared` (`#11085`'s review, P2 / `#11274`):
+    injecting into the derived set exercises set arithmetic that
+    `test_an_undeclared_writer_is_a_refusal_not_a_default` already covers, and it stays GREEN
+    through a regressed discovery filter — which is the failure that actually matters, because an
+    undiscovered writer never reaches the refusal at all.
+
+    Both shapes are injected, because a discovery filter can see one and miss the other:
+
+    * the CLAUSE shape (`name.embedding = …` / `set_embedding_clause(…)`) — always seen;
+    * the CONTAINER-KEY shape (`record["embedding"] = …`) — INVISIBLE until `#11274`, in two live
+      functions (`sdk._journal_event_raw_write`, `sdk._write_capture_turns`). This half of the test
+      is RED on the pre-`#11274` filter.
     """
-    injected = "tortoise.z::_a_new_writer"
-    population = _writers_outside_the_gate() | {injected}
-    assert register.undeclared(population) == (injected,)
-    assert not register.is_declared(injected)
-    with pytest.raises(UnclassifiedWriterKey):
-        register.classify(injected)
+    pkg = tmp_path / "tortoise"
+    pkg.mkdir()
+    (pkg / "z.py").write_text(
+        'def _clause_writer():\n'
+        '    return set_embedding_clause("n")\n'
+        '\n'
+        'def _container_key_writer(rec, vec):\n'
+        '    rec["embedding"] = vec\n'
+        '\n'
+        'def _no_write_at_all(rec):\n'
+        '    return rec.get("embedding")\n',
+        encoding="utf-8",
+    )
+    found = probe._embedding_writers(tmp_path)
+    written = {k for k, d in found.items() if d["kind"] == "unresolved_write"}
+    assert written == {
+        "tortoise.z::_clause_writer",
+        "tortoise.z::_container_key_writer",
+    }, f"discovery missed an injected writer: {sorted(found)}"
+    assert "tortoise.z::_no_write_at_all" not in found, (
+        "discovery reported a function that only READS the key — a filter that fires on a read "
+        "would fill the register with declarations that assert nothing"
+    )
+    assert register.undeclared(written) == tuple(sorted(written)), (
+        "the register declared an injected writer, or stopped refusing one"
+    )
+    for key in written:
+        with pytest.raises(UnclassifiedWriterKey):
+            register.classify(key)
+
+
+def test_the_register_names_the_shapes_its_discovery_cannot_see():
+    """`#11274`: the guard is exactly as wide as discovery — so its blind spots are NAMED.
+
+    A register whose claim is "an undeclared writer cannot bypass silently" is only as true as the
+    filter that populates it. Two shapes matter and only one is decidable:
+
+    * CONTAINER KEYS are decided on the AST (`probe._writes_an_embedding`), so they must NOT be in
+      the blind list any more;
+    * MAP-MERGES (`SET n += $p`) are data flow, not syntax, so they stay blind — and the live
+      instance (`sdk._update_entity`) is DECLARED under a named exemption instead of being read
+      as "no write". That is the difference between a scoped claim and a slogan.
+    """
+    blind = probe.UNDECIDABLE_WRITE_SHAPES
+    assert blind, "discovery's blind spot must be NAMED in the instrument, never implied"
+    assert any("map-merge" in shape for shape in blind), (
+        f"the map-merge shape is no longer named as undecidable: {sorted(blind)}"
+    )
+    assert not any("container" in shape.lower() for shape in blind), (
+        "the container-key shape is DECIDED now (#11274) — leaving it in the blind list would "
+        "claim a hole the instrument no longer has"
+    )
+    live = register.classify("tortoise.sdk::_update_entity")
+    assert (live.cls, live.owner_issue) == (EXEMPT, "#4094"), live
+    assert "UNDECIDABLE_WRITE_SHAPES" in (register.__doc__ or ""), (
+        "the register's own docstring must scope its claim to what discovery can decide — a "
+        "measured limitation nobody reading the register can see is the claim being wider than "
+        "the mechanism"
+    )
 
 
 def test_the_instrument_and_the_product_declare_the_same_writers():
@@ -290,19 +357,83 @@ def test_the_three_writers_that_carried_no_declaration_now_carry_one():
     for key in THE_THREE:
         assert register.is_declared(key), f"{key} carries no declaration — this issue's objective"
         entry = register.classify(key)
-        assert entry.cls == RECOGNISED_PRODUCER, (key, entry)
+        # ⛔ NOT pinned to `RECOGNISED_PRODUCER` (`#11085`'s review, P2 / `#11274`): this test's
+        # claim is "carries a declaration", and a class asserted here would red a CORRECT later
+        # reclassification for a reason this test does not state. What the classes must be is
+        # pinned where the claim lives — the instrument/product AGREEMENT test above, and
+        # `test_a_bypass_declaration_is_refused`, which pins the live classes to `CLASSES`.
+        assert entry.cls in CLASSES, (key, entry)
         assert entry.owner_issue == "#11085", (key, entry)
 
 
+#: A `module::symbol` citation in a `reason` — the ONLY form this register accepts, because a
+#: `path:LINE` citation rots silently (the census's own `sdk.py` +43-lines lesson). Both spellings
+#: are admitted so the register does not have to be edited to change one to the other:
+#: `tortoise.projection::_apply_one` (dotted) and `tortoise/projection/__init__.py::_apply_one`
+#: (a path ending in `.py`).
+_SEAM_CITATION = re.compile(
+    r"(?P<module>[A-Za-z_][\w./]*?\.py|[A-Za-z_][\w.]*)::(?P<symbol>\w+)"
+)
+
+
+def _cited_seams(reason: str) -> list[tuple[str, str]]:
+    return [(m.group("module"), m.group("symbol"))
+            for m in _SEAM_CITATION.finditer(reason)]
+
+
+def _resolve_module(module: str) -> Path | None:
+    """The file a dotted module (or a repo-relative `.py` path) names, or None."""
+    if module.endswith(".py"):
+        for candidate in (REPO_ROOT / module, REPO_ROOT / "tortoise" / module):
+            if candidate.is_file():
+                return candidate
+        return None
+    base = REPO_ROOT.joinpath(*module.split("."))
+    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def test_every_declaration_cites_a_seam_and_an_owning_issue():
-    """No entry is a claim with nothing behind it."""
+    """No entry is a claim with nothing behind it — and the citation is RE-DERIVED.
+
+    `"::" in reason` was the pin here until `#11274` (found by `#11085`'s review, P2): a substring
+    test passes on a reason that merely MENTIONS a `::` anywhere — including a citation of a symbol
+    the tree has since deleted — so it checked the format of a claim rather than the claim. Each
+    cited `module::symbol` must now RESOLVE at this head, which is also what makes the module
+    docstring's "re-derived at HEAD" true for the one entry the census has no row for
+    (`tortoise.session_indexer::main`).
+    """
     for key, entry in EMBED_WRITER_CLASSES.items():
         assert entry.owner_issue.startswith("#"), (key, entry)
         assert entry.cls in CLASSES, (key, entry)
-        assert "::" in entry.reason, (
-            f"{key} carries no symbol citation (`module::symbol`) — a reason without a seam is "
-            "exactly the `path:LINE` citation that rotted in the instrument's first census"
+        cited = _cited_seams(entry.reason)
+        assert cited, (
+            f"{key} carries no `module::symbol` citation — a reason without a seam is exactly the "
+            "`path:LINE` citation that rotted in the instrument's first census"
         )
+        for module, symbol in cited:
+            path = _resolve_module(module)
+            assert path is not None, (
+                f"{key} cites `{module}::{symbol}`, but `{module}` is not a module in this tree"
+            )
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            defined = {
+                node.name for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            }
+            # A module-level CONSTANT is a citation target too (`UNDECIDABLE_WRITE_SHAPES`), and
+            # it rots the same way a symbol does.
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    defined |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    defined.add(node.target.id)
+            assert symbol in defined, (
+                f"{key} cites `{module}::{symbol}`, but {path.relative_to(REPO_ROOT)} does not "
+                "define it — the seam moved and the declaration's evidence went with it"
+            )
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():

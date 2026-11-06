@@ -214,6 +214,65 @@ _EMBED_WRITE = re.compile(
     r"(?:\w+\.embedding|(?<![\w.])embedding)\s*=|set_embedding_clause\("
 )
 
+#: The SECOND write shape: a CONTAINER KEY, `record["embedding"] = …` /
+#: `p['embedding'] = …`. It puts a vector into a props/journal dict rather than
+#: onto a graph property, so every alternate in `_EMBED_WRITE` misses it.
+#: ⛔ It was INVISIBLE until `#11274` (found by `#11085`'s review, P2): a new
+#: writer using this shape added NOTHING to the population, so the register's
+#: "an undeclared writer cannot bypass silently" guard stayed green — the exact
+#: hole `#11085` exists to close, in a shape two live functions already use
+#: (`sdk._journal_event_raw_write`, `sdk._write_capture_turns`).
+#: Decided on the AST (`_writes_an_embedding`), NOT as an `_EMBED_WRITE`
+#: alternate: a regex reads raw SOURCE, so `["embedding"] =` as a pattern also
+#: matches PROSE quoting the shape, and this shape is exact enough to decide.
+#: The MAP-MERGE shape (`SET n += $p`) stays deliberately OUT: whether the merged
+#: map carries a vector is DATA FLOW, not syntax — 60 functions merge props and
+#: almost none can carry one, so a syntactic rule here would force dozens of
+#: declarations that assert nothing. That residual is named instead of guessed
+#: (`UNDECIDABLE_WRITE_SHAPES`) and is why `sdk._update_entity` carries the NAMED
+#: `#4094` exemption rather than being read as "no write".
+_EMBED_CONTAINER_KEY = "embedding"
+
+#: Write shapes discovery CANNOT decide, with the reason — named so the
+#: register's claim can be scoped to the mechanism rather than wider than it
+#: (`tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`).
+UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
+    "map-merge (`SET n += $p`)": (
+        "whether the merged map carries an `embedding` is DATA FLOW, not syntax: "
+        "60 functions in `tortoise/` merge a props map and almost none can carry a "
+        "vector, so a syntactic rule would force dozens of declarations that assert "
+        "nothing. The live instance is `sdk._update_entity`, which is DECLARED as an "
+        "exempt writer under the NAMED `#4094` exemption instead"
+    ),
+}
+
+
+def _writes_an_embedding(node, source: str) -> bool:
+    """Whether ``node`` writes a vector — by clause, by clause helper, or into a
+    CONTAINER KEY (:data:`_EMBED_CONTAINER_KEY`).
+
+    ``source`` is the function's own text (by line range); the AST pass is what
+    sees the container-key shape `_EMBED_WRITE` cannot.
+    """
+    if _EMBED_WRITE.search(source):
+        return True
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Assign):
+            targets = sub.targets
+        elif isinstance(sub, (ast.AugAssign, ast.AnnAssign)):
+            targets = [sub.target]
+        else:
+            continue
+        for target in targets:
+            for part in ast.walk(target):
+                if (
+                    isinstance(part, ast.Subscript)
+                    and isinstance(part.slice, ast.Constant)
+                    and part.slice.value == _EMBED_CONTAINER_KEY
+                ):
+                    return True
+    return False
+
 #: ── The RESOLVED census (#10541) ────────────────────────────────────────────
 #: A three-name callee vocabulary cannot tell a legitimate exemption from a
 #: bypass, so bullet 2 used to be held at `PARTIAL` over every function the
@@ -239,11 +298,15 @@ _EMBED_WRITE = re.compile(
 #: six calls it, so under #10541's literal class-1 wording ("route it through
 #: `encode_for_row`") none of them is a CONVERSION.
 #: Why each of the six is nonetheless legitimate is stated PER ENTRY, not as a
-#: blanket: the ONLY declaration here is #5008, which covers the session chain
+#: blanket: the declaration #5008 owns covers the session chain
 #: (`_session_event_write`, `ingest_corpus`, `_embedding_repair_attempt`) and
 #: nothing else. The other three (`restore_graph`, `_event_plain_merge`,
-#: `_rebuild_all_replay`) carry NO declared exemption — they store a vector
-#: computed or backed up UPSTREAM, through the canonical builder.
+#: `_rebuild_all_replay`) carried NO declared exemption in the PRODUCT until
+#: `#11085` — they store a vector computed or backed up UPSTREAM, through the
+#: canonical builder, and that reading now has a runtime home in
+#: `tortoise/embed_writer_register.py` (`#11085` owns those three declarations).
+#: ⛔ This census is a READ-ONLY INSTRUMENT and licenses nothing: the product
+#: declaration, not this table, is what an exemption is ALLOWED to point at.
 #: The name also inverts this file's own `kind == "producer"`, which means
 #: "computes a vector another function writes"; that is a wart, kept because
 #: #10541 names the class.
@@ -258,6 +321,18 @@ CENSUS_BYPASS = "bypass"
 CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
 
 WRITER_CENSUS: dict[str, tuple[str, str]] = {
+    "tortoise.api::add_point": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::add_point` — discovered by the CONTAINER-KEY shape "
+        "(`p[\"embedding\"] = fields[\"embedding\"]`, `_EMBED_WRITE` cannot see it; "
+        "`#11274`). It writes a CALLER-supplied vector OVER the server one into the "
+        "journal payload, and that is the `#5004` contract rather than a producer: "
+        "the key stays PRESENT so an explicit `None` means \"this id has no "
+        "vector\", and a foreign vector is CARRIED (restored verbatim on replay) "
+        "with NO attestation, because its origin is not ours to vouch for. The "
+        "server vector is stamped by `_point` (a different function, under its own "
+        "seam), and the SDK surface refuses a caller-supplied `embedding` outright, "
+        "so this is reachable only from a direct `EventAPI` caller"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
@@ -265,6 +340,14 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "cannot produce (`n.embedding=vecf32($embedding)`). The function reads "
         "`\"embedding\"` off both sides and APPENDS it to a divergence field "
         "list — reads and appends, never a write clause"),
+    "tortoise.consistency::_graph_fingerprint": (
+        CENSUS_EXEMPT,
+        "`tortoise/consistency.py::_graph_fingerprint` — discovered by the "
+        "CONTAINER-KEY shape (`view[\"embedding\"] = props[\"embedding\"]`, "
+        "`#11274`). It copies a vector READ OFF THE GRAPH (`props` comes from "
+        "`graph_view`) into a comparison view dict, so the write target is an "
+        "in-memory view and not a stored vector — a READ, the same direction as "
+        "`turn_prior_vectors`"),
     "tortoise.hosted_backup::restore_graph": (
         CENSUS_RECOGNISED,
         "`tortoise/hosted_backup.py::restore_graph` writes through the canonical "
@@ -323,6 +406,13 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "an already-computed `embedding` into `query_params` and executes the "
         "statement inside `_live_write_scope` (the §17.1 sanctioned live-write "
         "lane); it never computes one"),
+    "tortoise.sdk::_index_gate_read": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_index_gate_read` — discovered by the CONTAINER-KEY "
+        "shape (`g[\"embedding\"] = rows[0][0]`, `#11274`). It is the fast-path "
+        "ROUTER READ: every statement it issues is a `MATCH … RETURN`, and the "
+        "container it fills is its own `g` dict — the vector is read off a "
+        "returned row and never written, the `turn_prior_vectors` direction"),
     "tortoise.sdk::_index_process_unit": (
         CENSUS_EXEMPT,
         "`tortoise/sdk.py::_index_process_unit` — the instrument's match is the "
@@ -356,6 +446,16 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`point_props = dict(props)` keeps a caller-supplied `embedding` through "
         "the map-merge (`SET n += $p`). `_EMBED_WRITE` cannot see a map-merge. "
         "Exempt on the NAMED #4094 exemption, not on absence of a write"),
+    "tortoise.sdk::_write_capture_turns": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_write_capture_turns` — discovered by the "
+        "CONTAINER-KEY shape (`_turn_snapshot[\"embedding\"] = turn_embs[i] …`, "
+        "`#11274`). The vector is `turn_embs[i]` (or the already-stored one) and is "
+        "never computed here: no `encode_for_row`, no `set_embedding_clause` in the "
+        "body. Exempt as the SANCTIONED TURN-RECORD carrier of the `#5008` session "
+        "chain — the same direction, and for the same reason, as "
+        "`_journal_event_raw_write`: its record IS what the rebuild reads the "
+        "vector back from (`#8488`), not a store reached around the gate"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -379,9 +479,15 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
 #: union of `WRITER_CENSUS` and `WRITER_LABEL_OVERRIDES`, so a new entry cannot
 #: be added without evidence and evidence cannot outlive its entry.
 CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "tortoise.api::add_point": (
+        ("tortoise/api.py", "add_point",
+         'p["embedding"] = fields["embedding"]'),),
     "tortoise.consistency::_compare_views": (
         ("tortoise/consistency.py", "_compare_views",
          "n.embedding=vecf32($embedding)"),),
+    "tortoise.consistency::_graph_fingerprint": (
+        ("tortoise/consistency.py", "_graph_fingerprint",
+         'view["embedding"] = props["embedding"]'),),
     "tortoise.hosted_backup::restore_graph": (
         ("tortoise/hosted_backup.py", "restore_graph",
          "set_embedding_clause("),),
@@ -409,6 +515,8 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
          "set_embedding_clause("),),
     "tortoise.sdk::_event_raw_write_door": (
         ("tortoise/sdk.py", "_event_raw_write_door", "_live_write_scope"),),
+    "tortoise.sdk::_index_gate_read": (
+        ("tortoise/sdk.py", "_index_gate_read", 'g["embedding"] = rows[0][0]'),),
     "tortoise.sdk::_index_process_unit": (
         ("tortoise/sdk.py", "_index_process_unit",
          "indexed with embedding=None"),),
@@ -423,6 +531,9 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.sdk::_update_entity": (
         ("tortoise/sdk.py", "_update_entity", "point_props = dict(props)"),
         ("tortoise/sdk.py", "_update_entity", "SET n +="),),
+    "tortoise.sdk::_write_capture_turns": (
+        ("tortoise/sdk.py", "_write_capture_turns",
+         '_turn_snapshot["embedding"] ='),),
     "tortoise.sdk::ingest_corpus": (
         ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
         ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
@@ -663,12 +774,13 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             elif set(UNGATED_CALLS) & called:
                 callee = sorted(set(UNGATED_CALLS) & called)[0]
                 kind = "ungated"
-                # The write clause is a CALL (`set_embedding_clause("n")`), so
-                # this reads the function's SOURCE, not its string literals —
+                # The write clause is a CALL (`set_embedding_clause("n")`) or a
+                # CONTAINER KEY (`record["embedding"] = …`), so this reads the
+                # function's SOURCE *and* its AST, not its string literals —
                 # measured: reading only literals classed
                 # `session_indexer.main` (which does write) as a producer and
                 # hid a real ungated write path.
-                if not _EMBED_WRITE.search(source):
+                if not _writes_an_embedding(node, source):
                     kind = "producer"  # computes it; another function writes it
             else:
                 # No recognised producer call: if it still WRITES an embedding,
@@ -676,7 +788,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # otherwise report `OUTSIDE the gate: 1` for a tree with three
                 # (review round 5, P2 — measured: 17 functions carry an
                 # embedding-write clause, 9 of them were absent from this map).
-                if kind is None and _EMBED_WRITE.search(source):
+                if kind is None and _writes_an_embedding(node, source):
                     _put(f"{module}::{node.name}", {
                         "callee": "unrecognised",
                         "at": f"{rel}:{node.lineno}",

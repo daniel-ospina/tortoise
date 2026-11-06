@@ -22,9 +22,35 @@ rule exists to close.
   "leaf" below.
 * **Not a licence to change a writer.** It declares what each writer already does. Nothing consults
   it to decide a write yet; that is `#11086`'s seam.
-* **Not an audit log.** The evidence for each entry is the seam, cited in `reason` and re-derivable
-  by `tools/dod_5090_probe.py::CENSUS_EVIDENCE` — which is why the two are pinned to agree by
-  `tests/test_embed_writer_register.py::test_the_instrument_and_the_product_declare_the_same_writers`.
+* **Not an audit log.** The evidence for each entry is the seam, cited in `reason` — never a line
+  number, for the reason `tools/dod_5090_probe.py` learned the expensive way. Every citation is
+  **re-derived at HEAD**, in the direction that can actually rot: each `reason` must name a
+  `module::symbol` the tree still DEFINES, and — where the census has a row — the row's own
+  `CENSUS_EVIDENCE` needles must still be inside that symbol
+  (`tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`,
+  `::test_the_instrument_and_the_product_declare_the_same_writers`).
+  ⚠️ Census evidence and this register are **not** one population:
+  `tortoise.session_indexer::main` is the one entry with no census row (it is the instrument's ONE
+  `ungated` write path, carried in the census's row-1 prose), so its citation is re-derived by the
+  symbol test alone. A reader who wants "re-derivable by `CENSUS_EVIDENCE`" to cover 100% of this
+  file should read it as "by the two tests that re-derive it", which is what they do.
+
+**Discovery, and the edge of the guard.** The guard's population comes from
+`tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
+no wider. Two write shapes are worth naming, because the difference is the difference between a
+claim and a slogan:
+
+* **Container keys are SEEN** (`record["embedding"] = …`). This shape was invisible to the
+  instrument's clause regex until `#11274`, so a writer using it added nothing to the population and
+  this register's guard stayed green over it; discovery now decides it on the AST, and the four
+  live instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
+  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here.
+* **Map-merges are NOT** (`SET n += $p`, `probe.UNDECIDABLE_WRITE_SHAPES`). Whether the merged map
+  carries a vector is data flow, not syntax, and ~60 functions merge a props map. So the honest
+  statement is not "no writer can bypass silently" but: **every writer discovery finds outside the
+  gate is declared, and the shapes discovery cannot decide are named rather than assumed absent** —
+  which is why `sdk::_update_entity`, the live map-merge instance, carries the NAMED `#4094`
+  exemption instead of being read as "no write at all".
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a
@@ -102,8 +128,9 @@ class WriterClass:
     ``reason`` cites the **seam** (the symbol and the shape that decides the class), never a line
     number: `tools/dod_5090_probe.py`'s own census learned that the expensive way — a `path:LINE`
     citation rotted silently when `sdk.py` grew ~43 lines, while a symbol is stable under an
-    unrelated edit. That module's ``CENSUS_EVIDENCE`` carries the executable form; this one carries
-    the prose, and a test pins the two to agree.
+    unrelated edit. That module's ``CENSUS_EVIDENCE`` carries the executable form for the rows it
+    has (not all of them: `tortoise.session_indexer::main` has no census row), and this module's
+    own test re-derives the symbol every entry cites.
     """
 
     cls: str
@@ -235,6 +262,20 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "#5008",
         ),
     ),
+    (
+        "tortoise.sdk::_write_capture_turns",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/sdk.py::_write_capture_turns` assigns `_turn_snapshot[\"embedding\"] = "
+            "turn_embs[i] …` — the vector the `#5008` chain computed, or the already-stored "
+            "one; the body computes none (no `encode_for_row`, no `set_embedding_clause`). "
+            "Exempt as the SANCTIONED TURN-RECORD CARRIER, the same shape as "
+            "`tortoise.sdk::_journal_event_raw_write`: its record is what the rebuild reads the "
+            "vector back from (`#8488`'s enriched text rides the same snapshot), not a store "
+            "reached around the gate",
+            "#5008",
+        ),
+    ),
     # ── The one writer that was exempt only in the instrument's PROSE ─────────────────────────
     (
         "tortoise.session_indexer::main",
@@ -251,6 +292,48 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "#5008",
         ),
     ),
+    # ── Writers discovered when the filter widened to CONTAINER KEYS (#11274) ────────────────
+    #: `_EMBED_WRITE` reads `name.embedding =` clauses; `record["embedding"] = …` puts a vector
+    #: into a dict instead, so these were invisible to the instrument — and an invisible writer
+    #: is one this register's guard could stay green over. Discovery decides the shape on the AST
+    #: now (`tools/dod_5090_probe.py::_writes_an_embedding`), and each entry names what the write
+    #: actually is.
+    (
+        "tortoise.api::add_point",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::add_point` writes `p[\"embedding\"] = fields[\"embedding\"]` — a "
+            "CALLER-supplied vector OVER the server one, in the journal payload. That is the "
+            "`#5004` carrier contract, not a producer: the key stays PRESENT so an explicit "
+            "`None` means 'this id has no vector', and a foreign vector is restored verbatim "
+            "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its "
+            "own entry); the SDK surface refuses a caller-supplied `embedding` outright, so "
+            "this is reachable only from a direct `EventAPI` caller",
+            "#5004",
+        ),
+    ),
+    (
+        "tortoise.consistency::_graph_fingerprint",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/consistency.py::_graph_fingerprint` writes "
+            "`view[\"embedding\"] = props[\"embedding\"]` — a vector READ OFF THE GRAPH into a "
+            "comparison view dict. The target is an in-memory view, never a stored vector: a "
+            "READ, the same direction as `tortoise.record_read::turn_prior_vectors`",
+            "#11085",
+        ),
+    ),
+    (
+        "tortoise.sdk::_index_gate_read",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/sdk.py::_index_gate_read` writes `g[\"embedding\"] = rows[0][0]` off "
+            "`RETURN e.embedding` — the fast-path ROUTER READ. Every statement the body issues "
+            "is a `MATCH … RETURN` and the container it fills is its own `g` dict, so it reads "
+            "a vector rather than writing one",
+            "#11085",
+        ),
+    ),
     # ── Named exemptions that DO store (a map-merge the instrument cannot see) ────────────────
     (
         "tortoise.sdk::_update_entity",
@@ -258,8 +341,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             EXEMPT,
             "`tortoise/sdk.py::_update_entity` — the instrument's match is a COMMENT, but the "
             "function DOES store: `point_props = dict(props)` keeps a caller-supplied `embedding` "
-            "through the map-merge (`SET n += $p`), a shape `_EMBED_WRITE` cannot see. Exempt on "
-            "the NAMED `#4094` exemption, NOT on absence of a write",
+            "through the map-merge (`SET n += $p`), a shape that is DATA FLOW rather than syntax "
+            "(`tools/dod_5090_probe.py::UNDECIDABLE_WRITE_SHAPES`), so discovery cannot decide "
+            "it. Exempt on the NAMED `#4094` exemption, NOT on absence of a write",
             "#4094",
         ),
     ),
@@ -332,9 +416,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         "tortoise.sdk::_journal_event_raw_write",
         WriterClass(
             EXEMPT,
-            "`tortoise/sdk.py::_journal_event_raw_write` — the match is the SIGNATURE DEFAULT "
-            "(`embedding=None`), not a write clause (`_EMBED_WRITE` cannot see the dict-key form "
-            "`record[\"embedding\"] = embedding`). It stores no LIVE graph vector, but its journal "
+            "`tortoise/sdk.py::_journal_event_raw_write` — the CLAUSE match is the SIGNATURE "
+            "DEFAULT (`embedding=None`); the store that actually matters is the dict-key form "
+            "`record[\"embedding\"] = embedding`, which discovery reads on the AST since `#11274` "
+            "rather than through `_EMBED_WRITE`. It stores no LIVE graph vector, but its journal "
             "IS the sanctioned replay carrier `_upsert_event` consumes — exempt as a carrier, NOT "
             "because no store is reachable through it",
             "#10541",
