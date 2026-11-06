@@ -5395,6 +5395,10 @@ surfaces:
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
   - test_suggest_entry_points.py
   - test_supabase_control.py
+  # #10593: the pin on the CLI that applies migrations — a workflow-only edit to
+  # `supabase-deploy.yml` selects no python surface, so this file must be in
+  # `core` or the coupling it guards is never graded on the PR that breaks it.
+  - test_supabase_cli_pin_10593.py
   # #4606: the pin that stops a PR neutering its own surface gate. It guards
   # `.github/workflows/python-ci.yml`, a non-python prefix, so a workflow-only
   # edit would otherwise select NO surface — the same rationale as the
@@ -9158,6 +9162,7 @@ durations:
   test_gmm_proofs.py: 2.3  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.1
   test_suggest_entry_points.py: 2.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.2
   test_supabase_control.py: 4.0  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.9
+  test_supabase_cli_pin_10593.py: 2.0  # #10593: PR-added file, flat DEFAULT_FAST_WEIGHT; two file reads + a YAML parse, no DB
   test_welcome_url_consolidation.py: 0.1
   test_battery_retrieval_preflight.py: 2.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.7
   test_claim_endpoints.py: 3.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (3.6s) is a LOWER bound; kept 3.8
