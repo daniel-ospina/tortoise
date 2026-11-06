@@ -3147,11 +3147,11 @@ def test_the_check_reds_a_cut_commit_that_resolves_to_nothing(checker, tmp_path,
     """
     doc = _manifest()
     doc["cut_at_commit"] = "0123456789abcdef0123456789abcdef01234567"
-    # TWO layers refuse this, and the merge kept both: `_read_manifest` (via
-    # `cut_commit_verdict`) refuses at READ time with the fabricated wording, so `cmd_check`
-    # never reaches `provenance_report`'s own "does not resolve" arm — that arm is pinned by
-    # the direct call below, which is the one `check_provenance=False` callers and any future
-    # reader would hit.
+    # TWO layers refuse this, and the merge kept both. This call pins the READ-TIME one:
+    # `_read_manifest` (via `cut_commit_verdict`) refuses with the fabricated wording, so
+    # `cmd_check` never reaches `provenance_report`'s own "does not resolve" arm — which is
+    # pinned by the call below, the one `check_provenance=False` callers and any future
+    # reader hit.
     monkeypatch.setattr(
         checker, "cut_commit_verdict",
         lambda sha: (checker.CUT_FABRICATED, "no such object in this repository"),
