@@ -529,26 +529,36 @@ def test_a_long_unservable_head_is_reached_and_the_budget_state_is_named():
 
 
 def test_a_head_SHORTER_than_one_calls_reach_still_promises_the_re_run():
-    """The other half: when the head is inside one call's reach, re-running DOES help."""
-    offered = _candidates(60)
+    """The other half: when the head is inside one call's reach, re-running DOES help.
+
+    ⛔ THE PASS BUDGET MUST ACTUALLY BIND, or this asserts nothing. An earlier version
+    used a configuration whose holder-free 60-node graph finished inside its budget
+    (`pass_budget_exhausted` False), so both assertions sat behind an `if` that never
+    ran — and it was the ONLY assertion on the "re-run to continue" arm, leaving an
+    inverted arm green. Measured here: 200 nodes, `max_nodes=40, batch_size=5,
+    max_passes=2` -> reach 10, budget binds, and a re-run can make progress.
+    """
+    offered = _candidates(200)
 
     def probe(candidate) -> bool:
         return candidate.node_id >= 2          # the 2-node head can never be served
 
     report = evict(
         _assessment(evictable=[
-            {"population": POPULATION, "nodes": 60, "instrument": "i"}
+            {"population": POPULATION, "nodes": 200, "instrument": "i"}
         ]),
-        _FakeClient(), _FakeGraph(nodes=60),
+        _FakeClient(), _FakeGraph(nodes=200),
         population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
         record_probe=probe, dry_run=False,
-        # reach = 5 x 2^4 = 80 > the 2-node head, so a re-run can make progress.
-        policy=EvictionPolicy(max_nodes=40, batch_size=5, max_passes=5),
+        # reach = 5 x 2^1 = 10, far INSIDE the 2-node head's successor set, and the pass
+        # budget binds before the budget does.
+        policy=EvictionPolicy(max_nodes=40, batch_size=5, max_passes=2),
     )
 
-    if report.metric()["pass_budget_exhausted"]:
-        assert "re-run to continue" in report.reason, report.reason
-        assert "will not converge" not in report.reason, report.reason
+    assert report.metric()["pass_budget_exhausted"] is True, (
+        f"the pass budget did not bind, so this asserts nothing: {report.reason}")
+    assert "re-run to continue" in report.reason, report.reason
+    assert "will not converge" not in report.reason, report.reason
 
 
 def test_a_population_proven_dry_is_not_blamed_on_the_pass_budget():
