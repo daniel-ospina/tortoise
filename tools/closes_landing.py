@@ -947,6 +947,28 @@ def _html_block_open(rest: str) -> str | None:
     return None
 
 
+_HTML_TYPE7_RE = re.compile(r" {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>[ \t]*$")
+
+
+def _html_block_leaf(rest: str, prev_prose: bool) -> str | None:
+    """Type 7 — a COMPLETE tag alone on a line — as a block whose text is prose (`""` closer).
+
+    ⛔ TYPE 7 IS NOT AN ENDER, BUT IT IS STILL A BLOCK (round 45 review, P2 — 1,680 lost closes
+    against `origin/main`). §4.6 type 7 cannot INTERRUPT a paragraph, which is why the ender
+    predicate must not test it; that says nothing about whether its own text is read, and the state
+    machine's question is the second one. A bullet after `<br />`/`<span>`/`</div>` is the block's
+    raw text (renderer `html_block`), so blanking it lost closes that `origin/main` credits:
+
+        `<br />` + `-     Closes #100`      renderer `html_block`, head `[]`, `origin/main` `[100]`
+
+    The `prev_prose` guard is the spec's own condition: after an open paragraph the line continues
+    that paragraph (`<span>x</span>` is not a lone tag at all, and neither is a line following one).
+    """
+    if prev_prose or not _HTML_TYPE7_RE.match(rest):
+        return None
+    return ""
+
+
 def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
                     prev_quote_depth: int, container: _ListItem | None,
                     prev_container: _ListItem | None,
@@ -1308,9 +1330,15 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # `<!-- c -->` + `-     Closes #100` (renderer `code_block`) was CREDITED. `_html_block_open`
     # owns both the start set (types 1-6, type 1 included) and the closer.
     html_closer: str | None = None
-    # The block lives in a CONTAINER: a line dedented out of it is not the block's content any more
-    # (`- item` + `<div>` + a column-0 line belongs to a new block, which `own_code` must measure).
-    html_min_indent = 0
+    # ⛔ THE BLOCK LIVES IN A CONTAINER, NOT IN A COLUMN (round 45 review, P2 — a lost close this
+    # state machine introduced one commit earlier by binding the block to the OPENER'S INDENT). §4.6
+    # gives an html block no indentation end-condition at all, and a top-level block may legally open
+    # at 0-3 spaces, so "the next line is at a smaller column" is not "dedented out of a container":
+    # `"   <div>"` + a column-0 marker line lost the close against both the parent head and
+    # `origin/main` (1,440 such bodies). The block is bound to the ITEM it opened in (None at top
+    # level, and then it can never be dedented out of one) plus the quote depth it opened at.
+    html_item: "_ListItem | None" = None
+    html_depth = 0
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.
     hidden_lines = 0
@@ -1416,28 +1444,6 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             container = None
             own_gap = 0
             _lazy_push = False
-        # ── §4.6 html-block state: the state FOR THIS LINE, advanced once per line ────────────────
-        # Computed here, before every `continue` below, so the fence branch and the code branches all
-        # read the same answer (a state advanced inside a branch is a bug waiting for the next shape).
-        if html_closer is not None:
-            if rest_indent < html_min_indent:
-                _html_here = False            # dedented out of the container that held the block
-                html_closer = None
-            else:
-                _html_here = True
-                if html_closer:
-                    if html_closer.lower() in rest.lower():
-                        html_closer = None    # types 1-5: this line carries the block's own closer
-                elif not line.strip():
-                    _html_here = False        # type 6: the next blank line ends the block
-                    html_closer = None
-        else:
-            _html_here = False
-            _opened = _html_block_open(rest) if line.strip() else None
-            if _opened is not None:
-                html_min_indent = rest_indent
-                _html_here = True
-                html_closer = None if (_opened and _opened.lower() in rest.lower()) else _opened
         if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
@@ -1470,6 +1476,32 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 list_items.append(
                     _ListItem(_quote_depth(prefix), rest_col,
                               len(prefix) + rest_col))
+        # ── §4.6 html-block state: the state FOR THIS LINE, advanced once per line ────────────────
+        # Computed here, before every `continue` below, so the fence branch and the code branches all
+        # read the same answer (a state advanced inside a branch is a bug waiting for the next shape).
+        if html_closer is not None:
+            if (_quote_depth(prefix) < html_depth
+                    or (html_item is not None and _item_dedented(line, html_item))):
+                _html_here = False            # left the container that held the block
+                html_closer = None
+            else:
+                _html_here = True
+                if html_closer:
+                    if html_closer.lower() in rest.lower():
+                        html_closer = None    # types 1-5: this line carries the block's own closer
+                elif not line.strip():
+                    _html_here = False        # type 6: the next blank line ends the block
+                    html_closer = None
+        else:
+            _html_here = False
+            _opened = (_html_block_open(rest) if line.strip() else None)
+            if _opened is None and line.strip():
+                _opened = _html_block_leaf(rest, prev_prose)
+            if _opened is not None:
+                html_item = container
+                html_depth = _quote_depth(prefix)
+                _html_here = True
+                html_closer = None if (_opened and _opened.lower() in rest.lower()) else _opened
         fence = _fence_candidate(prefix, rest, list_items)
         if fence:
             hidden_lines = 0

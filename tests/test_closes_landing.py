@@ -3979,6 +3979,24 @@ def test_an_HTML_blocks_own_text_is_READ_not_hidden():
     # …and a TYPE-1 block survives a blank line (a `<!-- -->` close is what ends it, not a blank).
     assert token_type("<pre>\n\n-     Closes #100\n") == "html_block"
     assert cl.parse_closing_refs("<pre>\n\n-     Closes #100\n") == [100]
+    # INDENTED OPENER IS STILL A TOP-LEVEL BLOCK (round 45 review, P2). §4.6 allows a block to open
+    # at 0-3 spaces and gives it no indentation end-condition, so binding the block to the opener's
+    # COLUMN lost the close on the very next line.
+    for lead in (1, 2, 3):
+        indented = " " * lead + "<div>\n-     Closes #100\n"
+        assert token_type(indented) == "html_block", indented
+        assert cl.parse_closing_refs(indented) == [100], indented
+    # TYPE 7 IS A BLOCK TOO, though it can never END a paragraph (round 45 review, P2): a complete
+    # tag alone on a line swallows the next lines as its raw text — but ONLY when no paragraph is
+    # open, so `<span>x</span>` and a line after prose stay CODE.
+    for leaf in ("<br />", "<span>", "</span>", "</div>", "<em>", "<custom-tag>"):
+        body7 = leaf + "\n-     Closes #100\n"
+        assert token_type(body7) == "html_block", body7
+        assert cl.parse_closing_refs(body7) == [100], body7
+    for not_leaf in ("<span>x</span>", "Notes\n<span>"):
+        body_c = not_leaf + "\n-     Closes #100\n"
+        assert token_type(body_c) == "code_block", body_c
+        assert cl.parse_closing_refs(body_c) == [], body_c
     # …and a block does not follow a line dedented out of the container that held it.
     dedented = "- item\n  <div>\n-     Closes #100\n"
     assert token_type(dedented) == "code_block", dedented
@@ -3987,31 +4005,49 @@ def test_an_HTML_blocks_own_text_is_READ_not_hidden():
     for opener in ("<div>\n", "<p>\n", "<table>\n", "<details>\n<summary>x</summary>\n", "<li>\n",
                    "<pre>\n", "<script>\n", "<style>\n", "<textarea>\n"):
         for marker in ("-", "*", "+", "1.", "2.", "10."):
-            for gap in range(1, 10):
+            for gap in (1, 5, 9):
                 for indent in range(0, 5):
-                    candidate = opener + " " * indent + marker + " " * gap + "Closes #100\n"
-                    expected = [] if token_type(candidate) == "code_block" else [100]
-                    assert cl.parse_closing_refs(candidate) == expected, candidate
+                    for lead in (0, 1, 3):   # the OPENER's own indent (§4.6 allows 0-3)
+                        candidate = (" " * lead + opener + " " * indent + marker + " " * gap
+                                     + "Closes #100\n")
+                        expected = [] if token_type(candidate) == "code_block" else [100]
+                        assert cl.parse_closing_refs(candidate) == expected, candidate
 
 
 def test_the_shallower_reopened_quote_lazy_case_is_a_DECLARED_residual():
     """Round 44 review (P2) — measured here so the next round does not rediscover it as news.
 
         `- > > q` + `> y` + `> 2.     Closes #100`
-            renderer ONE `<p>` (`q\\ny\\n2.     Closes #100`)   `origin/main` `[100]`, head `[]`
+            renderer: TWO paragraphs — `q` (the item's nested quotes), then `y\n2.     Closes #100`
+            in a NEW outer blockquote — and the close lands in an `inline` token.
+            `origin/main` `[100]`; every head from round 39 to this one `[]`
 
     When a shallower line RE-OPENS the outer quote (`> y`), the item closes (`container` -> `None`)
     while round 39's carry leaves `prev_quote_depth` at 2, so the round-43 re-base is skipped (it
     needs a container) and `_is_lazy_marker`'s depth term reads the marker line against a container
-    that no longer exists. NOT a regression: every head from round 39 to this one answers `[]` — it
-    is parity with the reviewed tree, and it is the LOST-CLOSE direction, so it is pinned rather
-    than left implicit. Measured over a 25,920-body grid of the family: 48 lost closes, 0 fail-opens,
-    so whoever fixes it has a bounded target and a known blast radius.
+    that no longer exists.
+
+    ⛔ THE BASELINE IS `origin/main`, AND IT CREDITS THESE BODIES (round 45 review, P3 — the first
+    version of this docstring said "NOT a regression" while quoting `origin/main [100]` in the same
+    breath). It is parity with THIS BRANCH'S heads from round 39 on, NOT with `origin/main`: the
+    divergence is real and is the LOST-CLOSE direction, which is why it is pinned rather than waved
+    through. One root also loses a SECOND shape — a quote line that opens a block whose closer sits
+    at column 0:
+
+        `> <!--` + `end -->` + `2.     Closes #100`     renderer `inline`, head `[]`, `origin/main` `[100]`
+
+    Both shapes are pinned below, so whoever fixes the carried-`prev_quote_depth` root has the
+    radius in front of them.
     """
     body = "- > > q\n> y\n> 2.     Closes #100\n"
     md = MarkdownIt("commonmark")
     assert [t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
-    assert cl.parse_closing_refs(body) == [], "DECLARED residual — not a regression"
+    assert cl.parse_closing_refs(body) == [], "DECLARED residual — not a regression against the branch"
+    # The SECOND shape out of the same root (round 45 review, P3): a quote line opens a block whose
+    # closer sits at column 0, and the marker after it is read against a container that has closed.
+    second = "> <!--\nend -->\n2.     Closes #100\n"
+    assert [t.type for t in md.parse(second) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
+    assert cl.parse_closing_refs(second) == [], "same DECLARED root, second shape"
     # The control that must stay: with the item still open, the same lazy line IS credited.
     control = "- > > q\n  > y\n  >     -     Closes #100\n"
     assert [t.type for t in md.parse(control) if "Closes #100" in getattr(t, "content", "")] == ["inline"]

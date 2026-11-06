@@ -1244,13 +1244,13 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
     # offsets this comment used to carry (":1063"/":1130") rotted on the next commit.
     text, hidden = strip_code(body, strict=True)
     if hidden and notes is not None:
-        notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in #{number}")
+        notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in {_subject('', number).strip()}")
     own = number if isinstance(number, int) and number > 0 else None
     skipped: list[int] = []
     c = _claims_in(text, own, repo, skipped)
     if skipped and notes is not None:
         why = repo_unknown or "the repo is unknown; pass --repo to count them"
-        notes.append(f"{len(skipped)} owner/repo#N claim(s) in #{number} were NOT read — {why}")
+        notes.append(f"{len(skipped)} owner/repo#N claim(s) in {_subject('', number).strip()} were NOT read — {why}")
     claimed = sorted((set(c["closing"]) | set(c["satisfies"]) | set(c["weak"]))
                      - set(c["declined"]))
     if not claimed:
@@ -1296,7 +1296,7 @@ def classify_issue(comment_bodies: list[str], number: int | str,
     """
     hidden = sum(strip_code(body)[1] for body in comment_bodies)
     if hidden and notes is not None:
-        notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in #{number}")
+        notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in {_subject('', number).strip()}")
     markers = in_flight_markers(comment_bodies)
     if wip is None:
         is_wip = bool(markers)
