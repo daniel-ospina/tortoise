@@ -142,18 +142,23 @@ uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
     --prereg "$(git rev-parse HEAD)"
 # G0 pre-registration e0fc940b5… READ (schema capstone-preregistration/v1)
 # G1 corpus sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc MATCHES the frozen pin
-# arm TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> TORTOISE_S2_DECISION_SEAM=<unset> (read back from os.environ)
+# arm TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=0 TORTOISE_S2_DECISION_SEAM=0 (read back from os.environ)
 # → docs/evidence/7949-capstone/capstone-measured-e0fc940b.log
 ```
 
 ⛔ **The arm needs no exported flags, and that is a required property, not a convenience.**
 `probes/capstone_measure.py` FORCES `TORTOISE_VET=1` and `TORTOISE_CLASSIFY_LATER=1` in-process
 (restoring the previous values in a `finally`, exactly as `e1_e2_probe.run_arm` does), pins
-`TORTOISE_VALUE_GATE` **and** `TORTOISE_S2_DECISION_SEAM` unset — both also switch S2.2 on (the
-latter is #5087's arbiter, so `_vet_enabled()` is True and a billable call would run inside an arm
-declared OFF) — so an ambient value would silently change
+`TORTOISE_VALUE_GATE` **and** `TORTOISE_S2_DECISION_SEAM` to an EXPLICIT `"0"` — both also switch
+S2.2 on (the latter is #5087's arbiter, so `_vet_enabled()` is True and a billable call would run
+inside an arm declared OFF) — so an ambient value would silently change
 the arm — and then **reads the values back out of `os.environ`**. The log's `arm:` line is that
-read-back, never a typed literal, and a flag that does not read back as set REFUSES the run. The
+read-back, never a typed literal, and a flag that does not read back as set REFUSES the run.
+⛔ **`"0"`, not `<unset>`** (`#10996`): the value gate DEFAULTS ON, so an absent value pins nothing —
+absence IS the ON arm. The committed log in this bundle was taken at a PRE-flip head, where absence
+genuinely was OFF; its `<unset>` spelling is admitted by `e1_e2_scores.py` only under that
+campaign-head licence (disclosed as `value_gate_pin` in `docs/evidence/9889/e1-e2-scores.json`) and
+does not license a re-take. The
 earlier stamp of this bundle printed `arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1` while setting
 neither: a re-run following a recipe that exported only `TORTOISE_DB_URI` measured the **OFF**
 population under a log declaring both ON. Pinned by
@@ -951,7 +956,8 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # ⛔ AND THE FILE IT SUPERSEDES IS DELETED: exactly ONE scored log may exist, and
 # both the test and the pre-registration gate refuse a second one.
 # NO ARM EXPORTS: the probe forces TORTOISE_VET/TORTOISE_CLASSIFY_LATER itself,
-# pins TORTOISE_VALUE_GATE and TORTOISE_S2_DECISION_SEAM unset, and prints the
+# pins TORTOISE_VALUE_GATE and TORTOISE_S2_DECISION_SEAM to an explicit "0" (not
+# unset — since #10996 an absent value gate is the ON arm), and prints the
 # os.environ READ-BACK as its `arm:` line — check that line in the log it writes,
 # not your shell.
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"

@@ -702,6 +702,53 @@ def test_measure_restores_the_gate_flags(monkeypatch):
     assert os.environ["TORTOISE_VALUE_GATE"] == "1"
 
 
+def test_measure_pins_the_gate_flags_to_an_explicit_off(monkeypatch):
+    """Step 0 of the instrument — pinned by the state the ROWS are scored in.
+
+    `#10996` made `TORTOISE_VALUE_GATE` default ON, so a `measure()` that merely
+    POPPED the switches produced rows measured against a gate that was ARMED
+    while the instrument declared it idle. `measure()` now writes `"0"`
+    explicitly, and until this pin existed **nothing observed it**: the mutation
+    the review ran (delete the explicit write, keep the pop) left the suite
+    green, because `test_measure_restores_the_gate_flags` above only reads the
+    environment AFTER the run, which the `finally` block restores either way.
+
+    The assertion is on the RESOLVED predicate, not on the spelling: the
+    instrument's claim is "the gates were off while these rows were measured",
+    and only the resolver can say whether that was true. A future default flip
+    reds this test instead of silently re-arming the instrument.
+    """
+    from tortoise import embed_gate, value_gate
+
+    flags = ("TORTOISE_EMBED_GATE", "TORTOISE_VALUE_GATE")
+    seen: dict = {}
+
+    def _spy():
+        # The state the rows are actually scored in — sampled INSIDE the run.
+        seen["env"] = {var: os.environ.get(var) for var in flags}
+        seen["value_gate"] = value_gate.value_gate_enabled()
+        seen["embed_gate"] = embed_gate.embed_gate_enabled()
+        return []
+
+    # An ambient ON value must not survive into the measurement: a lane's own
+    # shell is exactly what Step 0 exists to neutralise.
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+    monkeypatch.setattr(probe, "_measure_rows", _spy)
+    probe.measure()
+
+    assert seen["env"] == {var: "0" for var in flags}, (
+        "measure() did not PIN the gate flags to an explicit OFF — a pop-only "
+        "Step 0 reads as OFF only while the flag defaults OFF, and "
+        "TORTOISE_VALUE_GATE now defaults ON (#10996)")
+    assert seen["value_gate"] is False, (
+        "the rows were measured with the S2.2 mechanical predicate ARMED while "
+        "the report declares it idle")
+    assert seen["embed_gate"] is False, (
+        "the rows were measured with the embed gate ARMED while the report "
+        "declares it idle")
+
+
 # ── The census, on its POSITIVE path (all three tests above were negative) ──
 
 

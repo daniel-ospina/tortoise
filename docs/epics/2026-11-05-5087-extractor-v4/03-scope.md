@@ -18,7 +18,7 @@ aboutObjects: "#5087, #7949, #10994-#11002, #11021, #11083"
 ### In Scope
 
 1. **A mention is not an entity** — the referentiality test at S2.2, and the mention channel S2.1 never had (`#11021`). **This item owns the arbiter probe** (the 25 owner-labelled rows plus the 12 most-referenced rows a name-pattern rule would have deleted); item 2 *consumes* that reading rather than re-measuring it, so an outcome cannot be credited to both.
-2. **The selection arm runs on the fleet door** — mechanical predicate default ON, the reference question available to an armed arbiter, and no candidate classified that consolidation will delete (`#10996`).
+2. **The selection arm runs on the fleet door** — mechanical predicate default ON, the reference question available to an armed arbiter, and the classify prune **withdrawn** (`#10996`): no candidate is classified that `classify_consolidation` will delete, because no `DELETE` verdict is producible (ADD/NOOP/UPDATE/MERGE only, D5) — the prune is not deferred, there is nothing to prune on; whoever introduces a producer owes it. The reference question remains `#11021`'s.
 3. **Identity is a gate** — an unresolved lookup HOLDs, never mints; one transaction across S3/S5/S6 (`#10997`).
 4. **The against-graph check fails closed** — an unchecked item is held, not committed (`#10998`).
 5. **The batch's own story is wired** — an entity↔entity channel in the output contract, and E4 read off a real-extraction receipt (`#10999`).
