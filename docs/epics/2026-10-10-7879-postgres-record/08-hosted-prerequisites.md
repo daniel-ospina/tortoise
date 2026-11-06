@@ -223,10 +223,13 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 > was written** — see the runbook's own rule, *"`record_write_failures: {}` is NOT evidence that a row
 > was written"*, and its capture-verification step. ⚠️ **The live blocker is a missing CREDENTIAL, not a
 > ruling:** the 2026-11-03 decision's non-negotiable **first** step is a verified backup, and
-> `TORTOISE_RECORD_BACKUP_DSN` / `TORTOISE_RECORD_SCRATCH_DSN` are absent, and **both** credentials we hold
-> fail the dump's FIRST gate: `create_record_backup` calls `require_direct_dsn` (`record_backup.py:1295`)
-> before `require_bypassing_role` (`:1316`), and both held values are **pooler** strings, so both are refused
-> as poolers and gate 2 is never reached. ⚠️ **Do not go hunting for a brand-new ROLE** — a bypassing role
+> `TORTOISE_RECORD_BACKUP_DSN` / `TORTOISE_RECORD_SCRATCH_DSN` are absent, and **the DSNs this deployment
+> does provision fail the dump's FIRST gate**: `create_record_backup` runs `require_direct_dsn` **before**
+> `require_bypassing_role`, and both of those DSNs carry the **pooler shape their own documentation
+> prescribes** (`.env.example`'s HOSTED block for `TORTOISE_AUDIT_DSN`; the app's pooler DSN for
+> `TORTOISE_RECORD_DSN`), so gate 1 refuses them and gate 2 is never reached. ⚠️ **Shapes, not read
+> values** — no lane in this fleet has read either value (`#9548` comment `6613140019` records that its
+> box held none at all), which is what the runbook's own credential table now says. ⚠️ **Do not go hunting for a brand-new ROLE** — a bypassing role
 > already exists; what is missing is a DIRECT connection string for one. The runbook's Secrets-Matrix section
 > carries the same correction as a table (row-by-row, gate-by-gate). The accurate state is **`AUTHORISED-BUT-BLOCKED-CRED`, not postponed**; a lane
 > reading this item must report the missing backup credential on `#9548`, never re-derive "postponed".

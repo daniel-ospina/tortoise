@@ -3338,9 +3338,11 @@ operator who read the line above as "CI defends this" would never run it.
 > measurement was taken. Re-read the issue before quoting either state: this sub-section describes a
 > sequence whose step (3) has not run.
 > ⚠️ **Step (1) is the live blocker, and it is a missing CREDENTIAL, not a ruling:**
-> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and **both** credentials
-> we DO hold fail the backup's checks — on two independent gates, which
-> `create_record_backup` applies in this order (`tortoise/record_backup.py:1295` then `:1316`):
+> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and the DSNs this
+> deployment DOES provision fail the backup's checks — on two independent gates, which
+> `create_record_backup` applies in this order — `require_direct_dsn` **before** `require_bypassing_role`
+> (⚠️ **shapes, not read values**: the table below states what the documented shapes are, never what a
+> held value was measured to be):
 >
 > | held value | gate 1 — `require_direct_dsn` | gate 2 — `require_bypassing_role` |
 > |---|---|---|
@@ -3358,7 +3360,7 @@ operator who read the line above as "CI defends this" would never run it.
 > is superseded here.
 > ⚠️ **So do not go hunting for a brand-new ROLE** — a bypassing role already exists. What is missing is a
 > **DIRECT** connection string (`db.<ref>.supabase.co:5432`, never the pooler) for one, which is exactly
-> what `TORTOISE_RECORD_BACKUP_DSN` resolves (`record_backup.py:205`). That value has never been held
+> what `TORTOISE_RECORD_BACKUP_DSN` resolves (`record_backup.py`'s `RECORD_BACKUP_DSN_ENV`). That value has never been held
 > in this environment — the blocker is a **credential**, not a ruling.
 >
 > ⚠️ **A BACKUP IS STILL IMPOSSIBLE FROM THIS ENVIRONMENT — and the wording that made the migrations
@@ -3373,7 +3375,7 @@ operator who read the line above as "CI defends this" would never run it.
 > - **The deployed IMAGE carries both migrations** — `migrations_head:
 >   20261102000002_record_point_search_keys_text`, i.e. `20261102000001_graphs_promote_default` and
 >   `20261102000002_…_search_keys_text` are in the image too. ⛔ **That is NOT "applied to the
->   database"** — this file's own `migrations_head` row (`:1025`) says so in as many words: the value
+>   database"** — this file's own `migrations_head` row says so in as many words: the value
 >   is *"the highest numeric-prefixed `supabase/migrations/*.sql` file this IMAGE CARRIES"*, and
 >   *"It is NOT 'which migration has been APPLIED to the database'"*. The applied set is a database
 >   fact, read from `supabase_migrations.schema_migrations` — and it was **not** read here, so it is
@@ -3383,7 +3385,7 @@ operator who read the line above as "CI defends this" would never run it.
 >   defect one layer down.** The repo's own fail-closed drift gate, run **2026-11-03T18:56:04Z**
 >   (run `41694722380`, quoted in `#9548` comment
 >   [`6613140019`](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6613140019)),
->   read `supabase_migrations.schema_migrations` — the artefact `:1025` names — and reported:
+>   read `supabase_migrations.schema_migrations` — the artefact that row names — and reported:
 >
 >   ```text
 >   BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):
@@ -3393,7 +3395,7 @@ operator who read the line above as "CI defends this" would never run it.
 >   ```
 >
 >   A **complete-set** verdict **at that reading** — so **as of 2026-11-03T18:56:04Z** both were
->   PENDING, independently corroborated then (`11-residual-plan-and-decomposition.md:64`: *"present
+>   PENDING, independently corroborated then (the residual plan's own row: *"present
 >   in the repo, unapplied in production"*). ⛔ **That is no longer the last measurement.** The
 >   repo's own fail-closed drift gate ran again **2026-11-05T23:07:38Z** — run `42117073101`,
 >   `deploy-api` job `127578919481`, the deploy that shipped `46ea687dc` — against prod project
@@ -3414,15 +3416,24 @@ operator who read the line above as "CI defends this" would never run it.
 >   `supabase migration repair` after a bookkeeping drift (#9613). So: **both are RECORDED APPLIED;
 >   the OBJECTS are unread.**
 >
->   ⚠️ **And the change's PROVENANCE is unrecorded, which is a finding, not a reassurance:** no
->   successful `supabase-deploy` run accounts for it. That workflow's 2026-11-03T18:32:04Z run
->   (`41694722380`) was a **`push`**, so its `deploy` job is `skipped` — only `check-drift` ran — and
->   **every `deploy` job since has failed** (`42091073635`, `42107006180`, `42136459903`). So the
->   quoted `#9548` `6669720078` (*"the deployment cannot be refreshed until the migration apply
->   runs"*) was written **2026-11-05T21:14:09Z — before that gate ran** and before the successful
->   deploy of 2026-11-05T23:14:03Z — and `6672017685` records a `supabase-deploy` **failure**, which
->   says nothing about the ledger. `supabase-deploy` failing is still true; it is **not** evidence of
->   a pending migration.
+>   ⚠️ **WHICH run first recorded them is NOT established — and that is a finding, not a
+>   reassurance.** The `supabase-deploy` history around that gate names no clean single apply:
+>
+>   | run | when | its `deploy` job |
+>   |---|---|---|
+>   | `41694722380` | 2026-11-03T18:32Z | **`skipped`** — a `push`, not a `workflow_dispatch`; only `check-drift` ran, and that is the 18:56 BLOCKING reading above |
+>   | `42091073635` | 2026-11-05T19:45Z | failed in ~14 s — its apply never landed |
+>   | `42107006180` | 2026-11-05T21:40Z | failed the same way |
+>   | `42134064961` | 2026-11-06T00:04Z→00:17Z | ⚠️ **CANCELLED after ~13 min** — the one window nobody has examined, and a half-run `supabase db push` is exactly the shape that can leave a partial apply |
+>   | `42136459903` | 2026-11-06T00:55Z | the *job* is marked **failed**, but its *`Apply migrations` step SUCCEEDED* — `supabase db push --linked --include-all` → **«Remote database is up to date.»** The failure is the follow-on `deploy-hosted` dispatch. So this is a **second, later green ledger read**, not evidence of a pending apply |
+>
+>   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z), and **no
+>   run is identified as the one that first recorded them** — the cancelled run is the only
+>   unexplained candidate. ⛔ **Do not read `supabase-deploy`'s red as "the apply never ran"**: that
+>   is the same *a red signal means nothing happened* misread this section exists to correct, and on
+>   `42136459903` the apply step is **green inside a failed job**. The quoted `#9548` `6669720078`
+>   (*"the deployment cannot be refreshed until the migration apply runs"*) was written
+>   **2026-11-05T21:14:09Z — before that gate ran** and before the deploy of 2026-11-05T23:14:03Z.
 >
 > So: the reason this section gave for believing the `point.search_keys` narrowing was absent —
 > *"the serving build predates `#10648`"* — **is gone**; and the reason the first cut of *this*

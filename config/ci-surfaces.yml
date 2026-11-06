@@ -7572,40 +7572,28 @@ tier1:
 # test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff.
 - test_deploy_workflow.py
 # #11064 review (P1): the SAME shape AGAIN, and the third member of this family.
-# `test_record_schema_placement.py` now reads TWO doc paths that select NO
-# surface at all — `docs/infra-runbook.md` (§"Secrets Matrix" / the §9 drill row)
-# and `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
-# (the `_ARMED_SOURCE_OF_TRUTH` anchors) — while its only registration is the
-# `core` surface's own entry, which no docs-only diff can reach. `docs/` is in
-# NON_PYTHON_PREFIXES and neither path matches a SOURCE_PATTERNS row, so a
-# runbook-only OR 09-only diff filters to `changed == []` and takes the docs-only
-# early return: tier1 ONLY. Measured on the authoring tree BEFORE this entry
-# (`tools.ci_selection.select`): `[docs/infra-runbook.md]` → `surfaces=[]`, pin
-# NOT selected; same for the 09 path. (The tier-1 COUNT is not load-bearing and
-# grows whenever `main` adds a tier1 file — re-measure it rather than trusting a
-# number here. What matters is that the pin becomes SELECTED once the entry below
-# is in.) So its runbook pin
-# (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which
 # `test_record_schema_placement.py` reads THREE doc paths that select NO surface
 # at all — `docs/infra-runbook.md` (§"Secrets Matrix" / the §9 drill row),
 # `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
 # (the `_ARMED_SOURCE_OF_TRUTH` anchors) and
 # `docs/epics/2026-10-10-7879-postgres-record/04-projection.md` (its
-# resolved-totals sentence) — while it is registered only on `core` (the entry
-# four thousand lines above this one). `docs/` is in NON_PYTHON_PREFIXES and
-# none of the three matches a SOURCE_PATTERNS row, so a diff touching only one of
-# them filters to `changed == []` and takes the docs-only early return: tier1
-# ONLY. Measured on this tree BEFORE this entry (`tools.ci_selection.select`):
-# each of the three paths → `surfaces=[]`, pin NOT selected — and pin SELECTED
-# with the entry below in. (Those counts are deliberately not restated: a figure
-# copied into this comment is what went stale here before — `tools/ci_selection.py`
-# already carries the rule. Re-measure; do not read a number.) So its
-# runbook pin (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which
-# requires the §9 drill row to still name a `captured` session and a `direct`
-# DSN) and its 09 anchor were ASLEEP on the only diffs that can break them —
+# resolved-totals sentence) — while its only registration is the `core`
+# surface's own entry, which no docs-only diff can reach. `docs/` is in
+# NON_PYTHON_PREFIXES and none of the three matches a SOURCE_PATTERNS row, so a
+# diff touching only one of them filters to `changed == []` and takes the
+# docs-only early return: tier1 ONLY. So its runbook pin
+# (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which requires the
+# §9 drill row to still name a `captured` session and a `direct` DSN), its 09
+# anchor and its 04 sentence were ASLEEP on the only diffs that can break them —
 # delete `captured`/`direct` from that row, or drop the 09 arming anchor, and the
 # PR merges green while 08 §R8 silently stops agreeing with the runbook it is
 # derived from (#4309 silent-drop class; the #8614 / #9548 shape one file over).
+# Measured (`tools.ci_selection.select`, on the authoring tree BEFORE this entry):
+# each of the three paths → `surfaces=[]`, pin NOT selected; pin SELECTED once
+# the entry below is in. (The count is not restated: it grows whenever `main`
+# adds a tier1 file, and a copied figure is what went stale here before —
+# `tools/ci_selection.py` carries that rule itself. Re-measure; do not read a
+# number.)
 # A `core` registration cannot help: `select()` emits a surface's test files
 # only for a surface it MATCHED, and a docs-only diff matches none — it takes the
 # `if not changed:` early return, whose `test_files` is the tier-1 set and
