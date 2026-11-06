@@ -4417,6 +4417,23 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 #     credit a DISCARDED response to the org's egress.
 _WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
 
+#: #10602 (exactly-once COUNT): a SEPARATE bit on the same shared
+#: ``scope["state"]`` dict, kept off ``_WAIT_BOUND_REFUSED_STATE`` on purpose.
+#: That flag is ONE-DIRECTIONAL — it lets ``mcp_server``'s dispatch seam suppress
+#: ITSELF when this middleware already refused, and says nothing about the
+#: reverse order. On a transport that does not start its response before
+#: dispatching (fastmcp's ``json_response`` mode — the case ``mcp_server``
+#: documents at its ``transport_refused`` read), the seam can see an unarisen
+#: deadline, count, and refuse FIRST; this middleware's own bound then expires
+#: later in the same request and counts a SECOND time for one refusal, because
+#: nothing above suppresses it. The count drives a capacity decision, so it must
+#: not depend on a transport option being set the helpful way.
+#:
+#: Whichever detector fires first WINS: it claims the bit, and the other's count
+#: becomes a no-op. Same literal as ``mcp_server._WAIT_BOUND_COUNTED_KEY`` — one
+#: string, two modules, kept in step by name (as the refused key is).
+_WAIT_BOUND_COUNTED_STATE = "_wait_bound_counted"
+
 #: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
 #: request under one is admitted on the ROUTE axis (see ``monitoring``'s
 #: two-axis note) rather than the request-derived one. That matters because a
@@ -5333,6 +5350,57 @@ class WaitBoundMiddleware:
         # be forged. The helper lives in ``mcp_auth`` (#3834 F-3) so the MCP
         # arm shares it without importing this module.
         safe_route_path = _mcp_auth._sanitize_for_log(route_path)
+        # #10602: count the breach HERE, synchronously and before the emit is
+        # scheduled. The emit is best-effort (telemetry pool, bounded backlog,
+        # `logger.debug` on failure); a counter that rode inside it would go
+        # silent under exactly the overload that causes breaches.
+        #
+        # ⛔ Classified by SURFACE, not by arm. THIS middleware also owns the
+        # `/mcp` refusal for a request that stalls BEFORE its SSE response
+        # begins (see the class docstring), and that refusal is served with the
+        # JSON-RPC `-32009` body — the exact shape #10602 recorded. Labelling it
+        # "rest" would report the P0's own refusal class under the surface an
+        # operator is told is NOT the read path, sending them to the REST routes
+        # while MCP tool calls are the ones being refused. `_is_jsonrpc_surface`
+        # is the same predicate `_send_wait_bound_refusal` uses three lines below
+        # to CHOOSE that body, so the label and the body cannot disagree.
+        #
+        # ⛔ WRAPPED, for the rule every other monitoring write on a request
+        # path in this module already carries (`record_egress`/`record_compute`
+        # below): measurement must never be a NEW failure mode for the request
+        # it measures. That rule is load-bearing HERE rather than merely
+        # tidy — this call sits AFTER `refused = True` and BEFORE the send, so
+        # an exception escaping it would skip `_track_wait_bound_request` and
+        # `_send_wait_bound_refusal` and hand the client an opaque 500 with no
+        # `Retry-After` and no `-32009` body: the illegible refusal #3834/#10602
+        # exist to remove, produced by the observation meant to expose it.
+        # ⛔ AT MOST ONCE PER REQUEST, whichever detector fired first. The
+        # dispatch seam (`mcp_server`) reaches the same refusal and counts on
+        # ITS thread; ``_WAIT_BOUND_REFUSED_STATE`` only suppresses the seam
+        # when THIS middleware went first, so without this bit the reverse order
+        # counts twice (see `_WAIT_BOUND_COUNTED_STATE`). Claim-and-check is
+        # one operation on the single-threaded loop, so two meters cannot both
+        # win; a request with no shared state dict (off-HTTP) counts, as before.
+        counted_now = True
+        if isinstance(state, dict):
+            counted_now = not state.get(_WAIT_BOUND_COUNTED_STATE)
+            state[_WAIT_BOUND_COUNTED_STATE] = True
+        if counted_now:
+            try:
+                _monitoring.record_wait_bound_breach(
+                    _monitoring.WAIT_BOUND_SURFACE_MCP
+                    if _is_jsonrpc_surface(route_path)
+                    else _monitoring.WAIT_BOUND_SURFACE_REST)
+            except Exception:
+                _logger.debug("wait-bound count failed", exc_info=True)
+        # ⛔ THE COUNT IS EXACTLY-ONCE; THIS EMIT IS NOT, IN THE REVERSE ORDER.
+        # When the seam refused FIRST it already scheduled its own event on the
+        # telemetry pool, and `_emit_wait_bound_breach` has no dedupe — so this
+        # emit can be the second analytics row for one request while the
+        # counter reports one. Stated rather than "fixed": gating the emit on
+        # `counted_now` would keep the SEAM's event and drop THIS one, inverting
+        # the #3834 F-2 rule that the detector which ANSWERED the caller owns the
+        # truthful event. Tracked on #10602.
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))
@@ -6721,6 +6789,16 @@ async def health():
             else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
             "backup_watcher": watcher, "change_feed": _change_feed_health(),
+            # #10602: the transport wait bound's own breach count. This is the
+            # surface an operator curls FIRST, and on 2026-11-02T15:44Z it read
+            # `status: "ok"` while 6/6 searches were refused with `-32009`.
+            # Same rule as `change_feed` / `build` above: it is REPORTED, never
+            # folded into `status`. A cumulative counter must never pin the
+            # deployment degraded for the life of the process; `status` stays
+            # tied to a failure that is observable NOW — which on THIS body
+            # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
+            # terms in the `status` expression above), not the counter.
+            "wait_bound_breaches": _monitoring.wait_bound_breach_counts(),
             "record": record, "build": _build_identity()}
 
 
