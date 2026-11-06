@@ -780,6 +780,13 @@ export STUB_SWEEP_BODY='{"status":"already_running"}'
 run_driver
 assert_eq "$RC" 1 "14. stuck lock exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "14. stuck lock files SWEEP_NO_COVERAGE"
+# Round 21 (fresh-context re-review): the terminal line is BEHAVIOUR and was
+# unpinned — reverting `already_running` out of the no-report case arm left the
+# suite fully green (610/0), so a revert would re-make "sweep backed up nothing"
+# for a held lock, the exact claim this change exists to stop. Every sibling
+# shape in that arm is pinned (78c, 78c-ii, 78e); pin this one the same way.
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14. the exit line names the missing report, not a coverage failure"
+assert_not_contains "$OUT" "sweep backed up nothing" "14. (control) a held lock never claims the sweep backed up nothing"
 
 # ── 15. 202 lock held + fresh last_sweep → healthy ──────────────────────────
 reset_case
@@ -812,6 +819,7 @@ assert_contains "$OUT" "dated in the FUTURE" "14b. the future stamp is reported 
 assert_not_contains "$OUT" "— healthy" "14b. a corrupt stamp is NEVER called healthy"
 assert_contains "$(cat "$LOG")" 'last_sweep_at is in the future' "14b. the TITLE names the corrupt stamp"
 assert_not_contains "$(cat "$LOG")" 'sweep timed out' "14b. (control) no budget claim on corruption"
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14b. the exit line names the missing report, not a coverage failure"
 
 # ── 14c. the 300s skew grace is the SAME on this arm, and clamps the age ────
 # A stamp 120s AHEAD is ordinary app<->runner skew: it must stay healthy (or
@@ -843,6 +851,7 @@ export STUB_SWEEP_BODY='{"status":"already_running"}'
 run_driver
 assert_eq "$RC" 1 "14d. a stamp 400s in the future is already corruption on the held-lock arm"
 assert_not_contains "$OUT" "— healthy" "14d. a bounded grace: 400s ahead is not healthy"
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14d. the exit line names the missing report, not a coverage failure"
 
 # ── 14e. the corruption red does NOT depend on the pool ────────────────────
 # 78f-ii pins this for the timeout arm: round 1 routed a future stamp into the
@@ -860,6 +869,7 @@ run_driver
 assert_eq "$RC" 1 "14e. a future-dated stamp reds on a held lock even when the pool is measured empty"
 assert_contains "$OUT" "dated in the FUTURE" "14e. the corruption is named, not swallowed as pre-beta"
 assert_not_contains "$OUT" "— healthy" "14e. a measured-empty pool never makes corruption healthy"
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14e. the exit line names the missing report, not a coverage failure"
 
 # ── 16. no_work + empty R2 pool → silent (pre-beta) ─────────────────────────
 reset_case
