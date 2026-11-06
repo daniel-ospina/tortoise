@@ -1,5 +1,5 @@
 ---
-title: "S3 — the vector census: which stored vectors no index and no query path can serve"
+title: "S3 — the vector census: which stored vectors no index and no efficient query path can serve"
 type: plan
 domain: planning
 doc_status: draft
@@ -13,7 +13,11 @@ aboutObjects: "epic #5090, child #11088, decision V1 (§12.1c), #4333, #10976, #
 # S3 — the vector census
 
 **Scope item:** `03-scope.md` **S3** · **Child:** `#11088` · **Epic:** `#5090` ·
-**Head this was written at:** `af864a42a6` (`origin/main`).
+**Base:** `af864a42a6` (`origin/main` at branch point) · **Measured at:** this branch's head at review
+round 8 (`2026-11-06`) — the tree §4's transcript and §6's commands were taken on. ⚠️ The two are
+different trees and must not be conflated: the census fields this document describes do not exist at
+the base, so a reader who re-runs §6 against `af864a42a6` reads a tree that never held the instrument
+(see `tools/finding_provenance.py`).
 
 **What this document is:** the evidence for the surface-approval request `#11088` carries. It records
 the census instrument's contract, the population it was measured on, the numbers, and the exact
@@ -60,7 +64,8 @@ not the union that formed the row set:
 | `stored` | nodes whose `embedding` is not null |
 | `indexed` | `CALL db.indexes()` holds a **VECTOR** index on that label's `embedding` (an index on another field does not count) |
 | `unindexed` | the stored remainder — `UNMEASURED(...)` when the coverage cannot be proved (`#4280` dimension disagreement, unreadable width) |
-| `payload.derived_payload_B` | `stored × width × 4 B`. The width is **probed from a stored vector**; when a covering index exists its `dimension` must agree, and a disagreement refuses. **No covering index at all** → the figure is derived from the probed width alone and `how` says the width was not cross-checked; a **covering index whose `dimension` is unreadable** → `UNMEASURED`, because the row reports `indexed: true` and must not also claim coverage; an **unreadable catalogue row** → `UNMEASURED` as well, because `not covering` cannot tell "no index" from "an index we could not see" |
+| `payload.derived_payload_B` | `stored × width × 4 B`. The width is **probed from the stored vectors** — up to **five**, because one row's width is not the label's: a graph that went through an `EMBEDDING_DIM` rotation holds vectors of two widths, and `stored × width` would then multiply one sampled row across every row. Sampled widths that **disagree** → `UNMEASURED(stored widths disagree (…))`, never a product. When a covering index exists its `dimension` must agree, and a disagreement refuses. **No covering index at all** → the figure is derived from the probed width alone and `how` says the width was not cross-checked; a **covering index whose `dimension` is unreadable** → `UNMEASURED`, because the row reports `indexed: true` and must not also claim coverage; an **unreadable catalogue row** → `UNMEASURED` as well, because `not covering` cannot tell "no index" from "an index we could not see" |
+| `indexes_on_label` | **every** index kind the catalogue reports for the label, not only VECTOR — `{"FULLTEXT": ["_searchText"]}` or `{"VECTOR": ["embedding"]}` or `none`. Read from the same `CALL db.indexes()` rows at no extra query cost, because §3.1's deciding datum (does this label carry a FULLTEXT index?) is a **non-vector** kind — and the census used to promise the run settled it while parsing VECTOR rows only |
 | `affected_entity_types` | the `entity_type` values the product translates onto this label |
 | `removal_changes_query_results` | `true` iff the label stores unindexed vectors **and** some `entity_type` reaches it; `false` when it does not; **`UNMEASURED(...)`** when either input is unmeasured (a consequence is never claimed from a hole) |
 
@@ -96,25 +101,44 @@ cannot read a census as an authorisation:
 "runner": "tortoise.search_engine.run_vector_query"
 ```
 
-The callers are **derived**, not listed: `tool_registry.TOOL_REGISTRY` (the ONE declaration of the
-MCP/REST surface) for tools bound to `sdk_method == "tortoise_fts_query"`, **unioned** with an AST scan
-of `tortoise/mcp_server.py` for handlers that pass `entity_type` into that method.
+The callers are **derived**, not listed, from **three** sources unioned — because each one alone
+under-reports in a different direction:
 
-| tool | route | named by |
-|---|---|---|
-| `tortoise_search` | `GET /v1/search` | registry binding **and** handler forwards `entity_type` |
-| `tortoise_query` | MCP only | handler forwards `entity_type` into the hybrid engine (its registry binding is `paginated_query`, so a binding-only derivation **misses it**) |
+1. `tool_registry.TOOL_REGISTRY` (the ONE declaration of the MCP/REST surface) for tools bound to
+   `sdk_method == "tortoise_fts_query"`;
+2. an AST scan of `tortoise/mcp_server.py` for **handlers** that pass `entity_type` into that method;
+3. an AST scan of `tortoise/sdk.py` for **SDK methods** that call the leg with a *fixed*
+   `entity_type` — a class neither of the other two can see, because the handler never forwards the
+   argument. A call that omits the kwarg runs the SDK's own default (`entity_type="point"`), which is
+   as much of an entrant as an explicit one; a non-literal argument is reported as
+   `UNKNOWN(<expr>)`, never guessed into a type.
+
+| tool | route | asks the leg for | named by | results change |
+|---|---|---|---|---|
+| `tortoise_search` | `GET /v1/search` | the caller's `entity_type` | registry binding **and** handler forwards `entity_type` | **yes** — the caller may choose any affected type |
+| `tortoise_query` | MCP only | the caller's `entity_type` | handler forwards `entity_type` into the hybrid engine (its registry binding is `paginated_query`) | **yes** — same reason |
+| `tortoise_recall` | MCP only | `object` **and** `point` | its SDK method (`recall_state`) calls the leg with a fixed `entity_type` | **yes** — its **default** `mode="state"` read queries `:Object` (`object_centric` defaults `True`) |
+| `tortoise_search_sessions` | MCP only | `event` | its SDK method (`search_sessions`) calls the leg with a fixed `entity_type` | **yes** — `:Event` |
+| `tortoise_issue_insight` | `GET /v1/issue-insight` | `point` | its SDK method calls the leg with a fixed `entity_type` | no — `:Point` is the one indexed label |
+| `tortoise_suggest_entry_points` | MCP only | `point` (the SDK default, no kwarg) | its SDK method calls the leg without `entity_type` | no — same reason |
+
+The census computes that last column per tool (`surface_consequence.surface[].reaches_affected_labels`)
+from the measured set, so "which tools change" is an answer rather than a reading — and a tool that is
+an entrant **without** a consequence is named with `[]` rather than dropped: dropping it would hide a
+future consequence behind a name that was never printed.
 
 ⚠️ **The binding-only derivation under-reports, and under-reporting is the dangerous direction here:**
 it states a smaller consequence for a surface change than the change actually has. `tortoise_query`
 binds `paginated_query` (its structural arm) and still forwards a `text=` argument to
-`tortoise_fts_query(entity_type=…)`. The AST union is what makes the second tool appear — pinned by
-`tests/test_dod_5090_probe.py::test_the_surface_named_is_the_one_that_can_pass_entity_type`.
+`tortoise_fts_query(entity_type=…)`; and `tortoise_recall` forwards nothing at all while reaching
+`:Object` on its default path. Each source is what makes the next tool appear — pinned by
+`test_the_surface_named_is_the_one_that_can_pass_entity_type` and
+`test_a_tool_whose_SDK_method_fixes_entity_type_is_named`.
 
 **The path, in full:**
 
 ```text
-MCP tortoise_search / tortoise_query,  REST GET /v1/search
+MCP tortoise_search / tortoise_query / tortoise_recall / tortoise_search_sessions,  REST GET /v1/search
   → TortoiseSDK.tortoise_fts_query(entity_type=…)
     → search_engine.classify_query()  (a text query turns the vector leg ON, independent of entity_type)
       → search_engine.degradation_chain(entity_type=…)        # forwards into every leg
@@ -157,7 +181,11 @@ So for `:Object` / `:Event` / `:Subject` the lexical leg is corroborated by both
 exercised `:Object`, and **for `:Source` / `document` the two disagree** — on a graph where §12.1b's
 inventory still holds, those two types DO lose everything and the "zero rows" framing would be right for
 them. That is a measurement to take on the graph a removal is actually proposed for, not an assumption;
-the census reports per-label counts and the graph's own catalogue, so the same run settles it.
+and the census answers it **in the same run**: `indexes_on_label` reports every index kind the
+catalogue holds for the label (`{"FULLTEXT": ["_searchText"]}`, `{"VECTOR": ["embedding"]}`, or
+`none`), so a `:Source` carrying a fulltext index — or not — is printed beside the count it qualifies.
+Read `FULLTEXT` on the label **and** on the field the FTS leg searches; §4's transcript shows the line
+for `:Object`.
 
 So after removal:
 
@@ -177,7 +205,7 @@ weaker claim is the true one, and because the owner is being asked to rule on th
 
 **Population: a lane container.** It is a real FalkorDB (`v4.20.6`, the repo-pinned image), seeded with
 **nine embeddings in total** at counts `2/2/3/1/1` over `Event`/`Object`/`Point`/`Source`/`Subject`,
-written through the engine's own `vecf32`, with the `Point` vector index created through the product's own DDL form. **The counts
+written through the engine's own `vecf32`, with the `Point` vector index created through the product's own DDL form, plus the `:Object` `name` **fulltext** index §3.1's measurement uses (so the same transcript answers the FTS question too). **The counts
 below are that population's, not production's** — they demonstrate the instrument and they establish the
 *label/index* facts, which are properties of the engine and the product's index DDL rather than of a row
 count. The production counts are §5's open item, and are **not** substituted with these.
@@ -186,12 +214,13 @@ The transcript below is the tool's **text mode**, pasted unedited:
 
 ```text
 $ uv run python tools/dod_5090_probe.py --census --uri <lane-uri> --graph census11088_demo
-Census — graph `census11088_demo` at 2026-11-06T21:46:04+00:00 (CALL db.indexes()):
+Census — graph `census11088_demo` at 2026-11-06T23:06:46+00:00 (CALL db.indexes()):
   command: uv run python tools/dod_5090_probe.py --census --uri docker://:pw@host:6379/<graph> --graph <graph>
   Event      stored=2            indexed=False  unindexed=2            payload=3072
              entity_type(s) served by this label: ['event'] — removing the UNINDEXED remainder changes query results: True
   Object     stored=2            indexed=False  unindexed=2            payload=3072
              entity_type(s) served by this label: ['object'] — removing the UNINDEXED remainder changes query results: True
+             other indexes on this label: FULLTEXT(name)
   Point      stored=3            indexed=True   unindexed=0            payload=4608
              entity_type(s) served by this label: ['operator', 'point'] — removing the UNINDEXED remainder changes query results: False
   Source     stored=1            indexed=False  unindexed=1            payload=1536
@@ -200,12 +229,20 @@ Census — graph `census11088_demo` at 2026-11-06T21:46:04+00:00 (CALL db.indexe
              entity_type(s) served by this label: ['subject'] — removing the UNINDEXED remainder changes query results: True
   surface consequence — removal is REQUESTED, not performed; it needs the owner's approval (MCP/SDK surface):
     affected entity_type values: ['document', 'event', 'object', 'source', 'subject']
-    path: tortoise_query (MCP only (no REST route)) / tortoise_search (GET /v1/search) → tortoise_fts_query(entity_type=…) → tortoise.search_engine.run_vector_query
+    path: tortoise_issue_insight (GET /v1/issue-insight, entity_type=point) / tortoise_query (MCP only (no REST route)) / tortoise_recall (MCP only (no REST route), entity_type=object|point) / tortoise_search (GET /v1/search) / tortoise_search_sessions (MCP only (no REST route), entity_type=event) / tortoise_suggest_entry_points (MCP only (no REST route), entity_type=point) → tortoise_fts_query(entity_type=…) → tortoise.search_engine.run_vector_query
+    tools whose results change: tortoise_query (any (the caller chooses)) / tortoise_recall (['object']) / tortoise_search (any (the caller chooses)) / tortoise_search_sessions (['event'])
   population: CALL db.labels()
 ```
 
+The two tools whose results change that a caller would **not** guess from the argument they pass are
+`tortoise_recall` (default `mode="state"` reads `:Object`) and `tortoise_search_sessions` (`:Event`);
+they appear because §3's third source reads the SDK's own call sites. `tortoise_issue_insight` and
+`tortoise_suggest_entry_points` are entrants with `reaches_affected_labels: []` — they ask the leg for
+`point` only, and `:Point` is indexed.
+
 (`--json` emits the same numbers as the report's `census` object, with `labels`, `payload`,
-`affected_entity_types`, `removal_changes_query_results` and `surface_consequence` — it prints no table.)
+`affected_entity_types`, `removal_changes_query_results`, `indexes_on_label` and `surface_consequence`
+— it prints no table.)
 
 ### 4.1 The answer to the question `#11088` left to measurement
 
@@ -275,8 +312,10 @@ assertion measures.
 
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
-114 passed, 1 skipped in 21.98s
+117 passed, 1 skipped in 42.07s
 ```
+
+(115 collected before this change's round 7, 118 after; the skip is the `<3.12` re-derive.)
 
 **Row 2 — an unreadable catalogue exits non-zero and does not report an empty population.**
 Three routes, all `2`, none reporting a population. ⚠️ These are **excerpts**, not full transcripts:
@@ -304,8 +343,10 @@ the row fields.
 **Row 3 — every affected `entity_type` is enumerated, with the SDK/MCP callers named.**
 `test_every_affected_entity_type_is_derived_from_the_ONE_mapping` (the one-to-many mapping, both
 directions), `test_the_census_states_the_consequence_of_removing_each_label` (per-row sets +
-`surface_consequence`), `test_the_surface_named_is_the_one_that_can_pass_entity_type` (both tools, the
-AST union), and the live test's assertions on a real engine — output in §4.
+`surface_consequence`, and each tool's `reaches_affected_labels`),
+`test_the_surface_named_is_the_one_that_can_pass_entity_type` (both forwarded-argument tools, the AST
+union), `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` (the fixed-type entrants and the
+default they run), and the live test's assertions on a real engine — output in §4.
 
 **Row 4 — `#10976` and `#7879` carry the "pending V1" qualification.** By comment on each issue, so a
 lane holding either issue's body is not collided with:
@@ -328,14 +369,19 @@ The contradiction they are qualified against, verbatim from `STORAGE-ARCHITECTUR
 ## 7. The request this evidence supports — and everything it does not do
 
 **Requested:** the owner's decision on whether to **remove** the `embedding` property from the
-unindexed labels (`:Event`, `:Object`, `:Source`, `:Subject`). The affected surface is
-`tortoise_search` / `tortoise_query` / `GET /v1/search` for `entity_type ∈ {event, object, document,
-source, subject}`, and what they lose is **semantic recall**: a query that matched only by meaning
+unindexed labels (`:Event`, `:Object`, `:Source`, `:Subject`). The affected surface is the **four tools
+whose results the census measures as changing** — `tortoise_search` and `tortoise_query` (for
+`entity_type ∈ {event, object, document, source, subject}`), `tortoise_recall` (its default
+`mode="state"` read, `:Object`) and `tortoise_search_sessions` (`:Event`), plus `GET /v1/search` —
+and what they lose is **semantic recall**: a query that matched only by meaning
 returns zero rows afterwards, while a lexically-matching query keeps answering from the FTS leg (§3.1
-is the measurement, and the reason it is stated this way rather than as "zero rows"). ⚠️ §3.1 also
+is the measurement, and the reason it is stated this way rather than as "zero rows"). `tortoise_recall`
+and `tortoise_search_sessions` are in this list because §3's third source reads the **SDK's** call
+sites; a caller would not guess them from any argument it passes. ⚠️ §3.1 also
 records where the record DISAGREES: on a graph whose `:Source` fulltext index matches §12.1b's dated
 inventory rather than the DDL declaration, `document`/`source` would lose everything — so the decision
-should be taken on a census of the graph it applies to. That is an MCP/SDK surface change, and no lane
+should be taken on a census of the graph it applies to (the same run answers it:
+`indexes_on_label`). That is an MCP/SDK surface change, and no lane
 may take it.
 
 **⚠️ The cost argument is GONE, in both directions — do not resurrect it.** The 2026-10-08 billing

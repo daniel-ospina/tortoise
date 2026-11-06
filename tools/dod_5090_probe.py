@@ -1953,6 +1953,12 @@ VECTOR_LEG_SDK_METHOD = "tortoise_fts_query"
 #: path, so a reader can walk it without searching.
 VECTOR_LEG_RUNNER = "tortoise.search_engine.run_vector_query"
 
+#: How many stored vectors the width probe samples. A label can hold vectors of
+#: MORE THAN ONE width (an `EMBEDDING_DIM` rotation), and `stored × width` is a
+#: figure only while every sampled row agrees — so the probe samples a handful
+#: and REFUSES on disagreement instead of extrapolating one row across the label.
+WIDTH_PROBE_SAMPLES = 5
+
 
 def affected_entity_types(label: str) -> list[str]:
     """The ``entity_type`` values a vector-leg query for ``label`` answers.
@@ -2032,17 +2038,26 @@ def vector_leg_surface() -> list[dict]:
     by_binding = {t.name for t in TOOL_REGISTRY
                   if getattr(t, "sdk_method", None) == VECTOR_LEG_SDK_METHOD}
     by_handler, handler_error = _handlers_forwarding_entity_type()
+    fixed_by_method, fixed_error = _sdk_methods_on_vector_leg()
+    #: Tool name → the `entity_type` values its SDK method asks the leg for
+    #: WITHOUT the caller choosing one (third source — see
+    #: `_sdk_methods_on_vector_leg`).
+    by_fixed = {t.name: sorted(fixed_by_method[t.sdk_method])
+                for t in TOOL_REGISTRY
+                if getattr(t, "sdk_method", None) in fixed_by_method}
     registered = {t.name for t in TOOL_REGISTRY}
     spec = {t.name: getattr(t, "rest_spec", None) for t in TOOL_REGISTRY}
 
     out: list[dict] = []
-    for name in sorted(by_binding | by_handler):
-        if name in by_binding and name in by_handler:
-            how = "registry sdk_method AND handler forwards entity_type"
-        elif name in by_binding:
-            how = "registry sdk_method"
-        else:
-            how = "handler forwards entity_type into the hybrid engine"
+    for name in sorted(by_binding | by_handler | set(by_fixed)):
+        sources: list[str] = []
+        if name in by_binding:
+            sources.append("registry sdk_method")
+        if name in by_handler:
+            sources.append("handler forwards entity_type into the hybrid engine")
+        if name in by_fixed:
+            sources.append("its SDK method calls the leg with a fixed entity_type")
+        how = " AND ".join(sources)
         route = spec.get(name)
         if route is not None:
             rest = f"{route.method} {route.path}"
@@ -2058,9 +2073,17 @@ def vector_leg_surface() -> list[dict]:
             "rest": rest,
             "named_by": how,
             "takes_entity_type": takes,
+            # ⛔ Two different facts about the same tool, and collapsing them
+            # would overstate one class: a PASS-THROUGH tool can ask the leg
+            # for ANY type the caller supplies (`"caller-supplied"`), while a
+            # fixed-type tool asks for one the caller never names. The fixed
+            # list is what makes the approval request complete — see
+            # `_sdk_methods_on_vector_leg` (#11088 review round 7, P1).
+            "entity_types": by_fixed.get(name, "caller-supplied"),
         })
-    if handler_error:
-        out.append({"tools": handler_error})
+    for error in (handler_error, fixed_error):
+        if error:
+            out.append({"tools": error})
     # ⛔ An UNRESOLVABLE `VECTOR_LEG_SDK_METHOD` empties BOTH sets, so `out` was
     # `[]` — and `takes`, which is computed to be `UNMEASURED(...)` in exactly
     # that case, had no entry to ride on. The surface then read as a MEASURED
@@ -2072,6 +2095,103 @@ def vector_leg_surface() -> list[dict]:
         out.append({"tools": f"UNMEASURED(the surface could not be derived: "
                              f"{takes if isinstance(takes, str) else 'no tool resolves'})"})
     return out
+
+
+def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
+    """SDK methods that call the vector leg, and the `entity_type` they ask for.
+
+    ⛔ THE THIRD SOURCE, and the one neither of the other two can see (#11088
+    review round 7, P1). A handler that never forwards `entity_type` can still
+    reach the leg, because the SDK method it calls names the type itself:
+    `recall_state` calls `tortoise_fts_query(…, entity_type="object")` while its
+    `object_centric` default is on, and `search_sessions` calls it with
+    `entity_type="event"` — so `tortoise_recall`'s DEFAULT `mode="state"` and
+    `tortoise_search_sessions` both change when those labels' vectors are
+    removed, and a derivation built only on forwarded arguments named neither.
+    Under-reporting the surface of a surface change is the dangerous direction:
+    an owner approves a change that is larger than the request describes.
+
+    A call with **no** `entity_type=` runs the SDK's own default (`"point"`),
+    which is as much of an entrant as an explicit one — the label it lands on is
+    affected the same way. A non-literal argument is reported as
+    `UNKNOWN(<expression>)`, never guessed into a type.
+
+    Returns `(method name → entity types, error)`; `error` is the reason the
+    scan could not be taken, so a missing source is REPORTED rather than read as
+    "no SDK method reaches the leg".
+    """
+    path = REPO_ROOT / "tortoise" / "sdk.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {}, f"UNMEASURED(SDK scan failed: {type(e).__name__}: {e})"
+
+    #: The SDK's declared default for the argument, read from the source rather
+    #: than restated here: `entity_type: str = "point"` in
+    #: `TortoiseSDK.tortoise_fts_query`. A call that omits the kwarg runs it.
+    default_entity_type = "UNKNOWN(no declared default found)"
+    out: dict[str, set[str]] = {}
+
+    def _is_target(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == VECTOR_LEG_SDK_METHOD
+        return isinstance(node, ast.Name) and node.id == VECTOR_LEG_SDK_METHOD
+
+    def _types_for(call: ast.Call) -> list[str]:
+        found: list[str] = []
+        for kw in call.keywords:
+            if kw.arg is None:  # `**{…}` — the keywords are not in the tree
+                found.append("UNKNOWN(**kwargs unpacking)")
+            elif kw.arg == "entity_type":
+                found.append(kw.value.value if isinstance(kw.value, ast.Constant)
+                             and isinstance(kw.value.value, str)
+                             else f"UNKNOWN({ast.unparse(kw.value)[:40]})")
+        return found or [default_entity_type]
+
+    def _scan(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        found: set[str] = set()
+        # Only THIS function's own body: a nested `def` is its own method, and
+        # attributing its call to the enclosing scope would name the wrong one.
+        stack: list[ast.AST] = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                continue
+            if isinstance(node, ast.Call) and _is_target(node.func):
+                found.update(_types_for(node))
+            stack.extend(ast.iter_child_nodes(node))
+        return found
+
+    # ⛔ TWO PASSES, because the default must be resolved BEFORE any call site
+    # is read: a single `ast.walk` reaches `suggest_entry_points` (which omits
+    # the kwarg, i.e. runs the default) before it reaches the leg's own
+    # signature, so a one-pass version reported
+    # `UNKNOWN(no declared default found)` for a call whose type is `point`.
+    # An order-dependent derivation is not a measurement.
+    functions = [n for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    leg = next((fn for fn in functions if fn.name == VECTOR_LEG_SDK_METHOD), None)
+    if leg is not None:
+        # The leg's own signature declares the default. The leg itself is never
+        # counted as an ENTRANT — that would name it as its own caller.
+        for default, a in zip(
+                [None] * (len(leg.args.args) - len(leg.args.defaults))
+                + list(leg.args.defaults), leg.args.args, strict=True):
+            if a.arg == "entity_type" and isinstance(default, ast.Constant):
+                default_entity_type = default.value
+        for a, default in zip(leg.args.kwonlyargs, leg.args.kw_defaults,
+                              strict=True):
+            if a.arg == "entity_type" and isinstance(default, ast.Constant):
+                default_entity_type = default.value
+
+    for fn in functions:
+        if fn is leg:
+            continue
+        types = _scan(fn)
+        if types:
+            out[fn.name] = types
+    return {name: out[name] for name in sorted(out)}, None
 
 
 def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
@@ -2088,10 +2208,14 @@ def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
     HELPER's name is, and since it is not a registry tool it lands in the
     `UNMEASURED(handler not in TOOL_REGISTRY …)` entry beside the real tools
     rather than vanishing. `**{…}` keyword unpacking is likewise unmatched. At
-    this head neither shape exists — the two module-level handlers are the whole
-    population — and a new one is REPORTED, not silently dropped, because the
-    unmatched name lands in that `UNMEASURED` entry. Stated rather than claimed
-    complete: this scan's promise is over what a walk of the tree can see.
+    this head neither shape exists — the two module-level handlers in
+    `mcp_server.py` that forward `entity_type` are the whole population of THIS
+    SCAN, and a new one is REPORTED, not silently dropped, because the unmatched
+    name lands in that `UNMEASURED` entry. Stated rather than claimed complete:
+    this scan's promise is over what a walk of the tree can see, and it is one of
+    THREE sources — a tool whose SDK method reaches the leg for a FIXED
+    `entity_type` is named by :func:`_sdk_methods_on_vector_leg`, because it
+    appears in no handler that forwards the argument (review round 7, P1).
 
     Returns `(names, error)`; `error` is the reason when the scan could not be
     taken, so the caller reports it instead of reading an empty set as "no tool
@@ -2183,6 +2307,13 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     # by construction (this tool's own review, P1 — a `:Chunk` with 2 stored
     # embeddings never appeared). The graph's own labels are the population.
     indexed: dict[str, list[dict]] = {}
+    #: label → {KIND: [fields]} — EVERY index kind the catalogue reports for the
+    #: label, not only VECTOR. `#11088` §3.1 asks whether a label carries a
+    #: FULLTEXT index (it decides whether a lexically-matching query survives a
+    #: vector removal), and the census said "a run settles it" while parsing
+    #: VECTOR rows only — so the deciding datum was not in the answer (review
+    #: round 7, P2). Recorded from the same rows, at no extra query cost.
+    index_kinds: dict[str, dict[str, list[str]]] = {}
     #: (label-or-None, reason) — matched by LABEL, so a short row (`['Point']`)
     #: is still attached to its label instead of being lost in a repr.
     unreadable: list[tuple[str | None, str]] = []
@@ -2197,6 +2328,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             unreadable.append((label, f"types cell is {type(types).__name__}"))
             continue
         for fld, kinds in types.items():
+            if isinstance(kinds, (list, tuple, set)):
+                for kind in sorted({str(k).upper() for k in kinds}):
+                    index_kinds.setdefault(label, {}).setdefault(
+                        kind, []).append(fld)
             if isinstance(kinds, (list, tuple, set)) and any(
                 str(k).upper() == "VECTOR" for k in kinds
             ):
@@ -2291,18 +2426,36 @@ def vector_census(graph, graph_name: str, at: str | None = None,
         # number is unreadable (review round 7, P2), and the payload is derived
         # from the same number.
         width = None
+        width_reason: str | None = None
         if isinstance(stored, int) and stored > 0:
             try:
                 # `size(n.embedding)` is REJECTED on a vecf32 column, so the
                 # vector is fetched and measured here (measured: every payload
                 # read UNMEASURED before this).
+                #
+                # ⛔ MORE THAN ONE ROW, because one row's width is not the
+                # label's: a graph that went through an `EMBEDDING_DIM`
+                # rotation holds vectors of two widths, and `stored x width`
+                # then reports one row's size multiplied across every row —
+                # wrong in an unbounded direction, in the figure #11088 exists
+                # to produce, with nothing marking it as estimated (review
+                # round 7, P2; measured 5x1024 + 1x384 → 24,576 B reported for
+                # a true 22,016 B). An indexed label cannot hold mixed widths,
+                # so the disagreement is the no-index case's own hazard.
                 probe = _read(
                     graph,
                     f"MATCH (n:{_cypher_label(label)}) "
-                    f"WHERE n.embedding IS NOT NULL RETURN n.embedding LIMIT 1",
+                    f"WHERE n.embedding IS NOT NULL RETURN n.embedding "
+                    f"LIMIT {WIDTH_PROBE_SAMPLES}",
                 ).result_set
-                if probe and probe[0] and probe[0][0] is not None:
-                    width = len(probe[0][0])
+                widths = {len(r[0]) for r in (probe or [])
+                          if r and r[0] is not None}
+                if len(widths) == 1:
+                    width = widths.pop()
+                elif len(widths) > 1:
+                    width_reason = ("stored widths disagree ("
+                                    + ", ".join(str(w) for w in sorted(widths))
+                                    + "), so stored x width is not a figure")
             except Exception:
                 width = None
         if isinstance(stored, str):
@@ -2347,9 +2500,14 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                        "how": f"catalogue row unreadable: {unreadable_here[0]}"}
         elif width is None:
             # ⛔ The refusal, BEFORE the index is consulted: without a measured
-            # width there is no byte figure, indexed or not.
-            payload = {"derived_payload_B": "UNMEASURED(stored width not probeable)",
-                       "how": "needs a width probe"}
+            # width there is no byte figure, indexed or not — and when the probe
+            # saw more than one width, the reason is that, not "unprobeable".
+            payload = {"derived_payload_B": "UNMEASURED("
+                                            + (width_reason or
+                                               "stored width not probeable") + ")",
+                       "how": ("a single width cannot stand for this label's "
+                               "stored vectors" if width_reason
+                               else "needs a width probe")}
         elif not covering:
             # ⛔ #11088: THE UNINDEXED LABELS ARE THE POPULATION THIS CENSUS IS
             # FOR, and they had no byte figure at all. The payload used to be
@@ -2437,6 +2595,12 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                           if unreadable_here else unindexed),
             "vector_indexes_on_label": found or "none",
             "index": idx or "none",
+            # ⛔ EVERY index kind, not only VECTOR: §3.1's deciding datum for
+            # `:Source`/`document` is whether a FULLTEXT index exists, and the
+            # doc promised the run settles it (review round 7, P2).
+            "indexes_on_label": (
+                "UNMEASURED(catalogue row unreadable)" if unreadable_here
+                else (index_kinds.get(label) or "none")),
             "payload": payload,
             "affected_entity_types": ets,
             "removal_changes_query_results": changes,
@@ -2493,7 +2657,7 @@ def surface_consequence(labels: dict) -> dict:
         "requested_not_performed": True,
         "sdk_method": VECTOR_LEG_SDK_METHOD,
         "runner": VECTOR_LEG_RUNNER,
-        "surface": vector_leg_surface(),
+        "surface": _annotated_surface(affected, unmeasured),
         "entity_types_whose_query_results_change": sorted(
             {et for a in affected for et in a["entity_types"]}),
         "labels": affected,
@@ -2502,6 +2666,62 @@ def surface_consequence(labels: dict) -> dict:
         # while this is non-empty.
         "unmeasured_labels": unmeasured,
     }
+
+
+def _annotated_surface(affected: list[dict], unmeasured: list[dict]) -> list[dict]:
+    """`vector_leg_surface()` with each tool's ACTUAL consequence attached.
+
+    ⛔ The entrant list and the affected list are different questions, and the
+    approval request needs the second: `tortoise_issue_insight` and
+    `tortoise_suggest_entry_points` reach the leg for `point` only, and `:Point`
+    is the one INDEXED label — naming them as entrants without saying so would
+    read as six affected tools. Each entry therefore carries
+    `reaches_affected_labels`: the intersection of what it asks the leg for with
+    the `entity_type` values whose results this census measured as changing, or
+    `"any (the caller chooses)"` for a pass-through tool (review round 7, P1:
+    the surface was under-reported; this keeps the over-report from replacing
+    it).
+
+    An UNMEASURED consequence makes the affected set a LOWER BOUND, so the field
+    says that instead of understating a tool's reach: a partial set may not be
+    used to clear a tool.
+    """
+    surface = vector_leg_surface()
+    possible = {et for a in affected for et in a["entity_types"]}
+    for entry in surface:
+        if "tool" not in entry:
+            continue
+        asked = entry.get("entity_types")
+        if unmeasured:
+            entry["reaches_affected_labels"] = (
+                "UNMEASURED(the affected set is partial — see unmeasured_labels)")
+        elif not isinstance(asked, list):
+            entry["reaches_affected_labels"] = "any (the caller chooses)"
+        else:
+            entry["reaches_affected_labels"] = sorted(set(asked) & possible)
+    return surface
+
+
+def _non_vector_indexes_line(kinds: object) -> str:
+    """The text-mode line for a label's indexes, or `""` when VECTOR is all it has.
+
+    ⛔ Extracted so the FORMAT is testable: the first version built the string
+    inline and put the closing paren on the whole join instead of on each
+    entry, so a label carrying two non-VECTOR kinds printed
+    `FULLTEXT(a, RANGE(b)` — a malformed line in the one output a reader quotes
+    into an approval request, and invisible because the single-kind case (all
+    the §4 transcript had) is correct (verification gate, P2).
+    """
+    if isinstance(kinds, str) and kinds.startswith("UNMEASURED"):
+        return f"⛔ indexes: {kinds}"
+    if not isinstance(kinds, dict):
+        return ""
+    extra = {kind: fields for kind, fields in kinds.items() if kind != "VECTOR"}
+    if not extra:
+        return ""
+    return ("other indexes on this label: "
+            + ", ".join(f"{kind}({','.join(fields)})"
+                        for kind, fields in sorted(extra.items())))
 
 
 def _connect(uri: str):
@@ -2739,6 +2959,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"{d.get('affected_entity_types') or 'none (no query path)'}"
                   f" — removing the UNINDEXED remainder changes query results: "
                   f"{d.get('removal_changes_query_results')}")
+            # ⛔ §3.1 leans on a FULLTEXT index to say a lexically-matching
+            # query survives a vector removal, and said "the same run settles
+            # it" while the run reported VECTOR rows only. The kinds are now
+            # read, so they are PRINTED — a datum a reader must open the JSON
+            # for is a datum the text mode's claim cannot stand on (review
+            # round 7, P2).
+            indexes = _non_vector_indexes_line(d.get("indexes_on_label"))
+            if indexes:
+                print(f"  {'':10s} {indexes}")
         sc = c.get("surface_consequence")
         if sc:
             print("  surface consequence — removal is REQUESTED, not "
@@ -2751,8 +2980,29 @@ def main(argv: list[str] | None = None) -> int:
             for entry in sc.get("surface") or []:
                 if "tool" not in entry:
                     print(f"    ⛔ surface: {entry.get('tools')}")
-            print(f"    path: {' / '.join(t['tool'] + ' (' + t['rest'] + ')' for t in sc.get('surface') or [] if 'tool' in t)}"
+
+            def _surface_entry(entry: dict) -> str:
+                # ⛔ A tool whose SDK method names the type itself carries the
+                # TYPE, not a pass-through arrow: printing both classes the same
+                # way would hide the one the caller never chooses (review round
+                # 7, P1).
+                fixed = entry.get("entity_types")
+                chosen = ("" if not isinstance(fixed, list)
+                          else ", entity_type=" + "|".join(fixed))
+                return f"{entry['tool']} ({entry['rest']}{chosen})"
+
+            path = " / ".join(_surface_entry(t) for t in sc.get("surface") or []
+                              if "tool" in t)
+            print(f"    path: {path}"
                   f" → {sc.get('sdk_method')}(entity_type=…) → {sc.get('runner')}")
+            # The question the approval request actually asks: WHICH tools'
+            # results change. Derived, per tool, from the measured set.
+            changed = [t for t in sc.get("surface") or []
+                       if "tool" in t and t.get("reaches_affected_labels")]
+            if changed:
+                print("    tools whose results change: " + " / ".join(
+                    f"{t['tool']} ({t['reaches_affected_labels']})"
+                    for t in changed))
             for entry in sc.get("unmeasured_labels") or []:
                 print(f"    ⛔ UNMEASURED — {entry['label']} "
                       f"({entry['entity_types'] or 'no entity_type'}): {entry['why']}")
