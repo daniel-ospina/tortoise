@@ -282,25 +282,21 @@ _MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
 def _construct_refusals(workflow_text: str) -> list[str]:
-    """Every YAML CONSTRUCT inside the setup-cli step that PyYAML resolves and GitHub Actions does not.
+    """Every YAML construct in the setup-cli step whose meaning for CI this reader cannot establish.
 
-    Scoped to the step and walked over composed nodes, because a check over the parsed dict cannot
-    see these at any level (see `_setup_cli_step_node`). Two constructs, both found live in review:
+    ONE construct is refused — a **merge key** (plain `<<`, tagged `tag:yaml.org,2002:merge`), at
+    EVERY depth, because `with: {version: …}` supplied by a step-level `<<:` is the same fail-open as
+    one written inside `with:`: PyYAML synthesizes the mapping, so `_requested_version` reads a pin
+    out of a construct the runner may never see (the action would then fall back to `latest`, 3.x).
+    Measured before this walk existed: the step-level spelling returned `[]` from `_violations` —
+    green — while this module declared merge keys refused outright.
 
-    * a **merge key** — plain `<<`, tagged `tag:yaml.org,2002:merge`. Refused at EVERY depth, because
-      `with: {version: …}` supplied by a step-level `<<:` is the same fail-open as one inside `with:`:
-      PyYAML synthesizes the `with` mapping, so `_requested_version` reads a pin out of a construct
-      CI does not implement (the action then falls back to `latest`, 3.x). Measured before this walk
-      existed: the step-level spelling returned `[]` from `_violations` — green — while the module
-      docstring declared merge keys refused outright.
-    * an **alias** — `with: *pin`. PyYAML follows it; the value asserted here would be read from
-      another node, not from the step's own literal pin (which the literals arm below also refuses).
-      ⚠️ This one CANNOT be found in the composed tree: PyYAML 6 has no `AliasNode` — it substitutes
-      the anchored node object in place, so an alias and its anchor are indistinguishable afterwards.
-      It is therefore found in the TOKEN stream, and ONLY where it SUPPLIES the pin — a `KeyToken`
-      for `with:`/`version:` immediately followed by an `AliasToken`. An alias anywhere else in the
-      step (`env: *shared`) is read identically by both parsers, so refusing it would be a false
-      block, not a guard (measured in review, P2).
+    An **alias is NOT refused** — `with: *pin` is ACCEPTED, because GitHub's Actions reference
+    documents anchors and aliases as supported workflow YAML, so PyYAML and the runner resolve the
+    same mapping. Only the VALUE an alias carries is checked, by every arm in `_requested_version`.
+    (An earlier version of this function also refused aliases; see `_alias_supplies_the_pin` for the
+    correction and its citation.) Scoped to the step and walked over composed nodes, because a check
+    over the parsed dict cannot see a merge key at any level (see `_setup_cli_step_node`).
 
     A QUOTED `"<<"` is deliberately NOT refused: it is an ordinary string key in both parsers, so it
     is not a divergence and refusing it would be a false block.
@@ -387,6 +383,13 @@ def _alias_supplies_the_pin(workflow_text: str) -> bool:
     checked by every other arm (exact x.y.z, the major ceiling, duplicate keys, input collisions),
     which is why accepting the spelling costs no coverage.
 
+    ⛔ THE TEST IS NARROW ON PURPOSE (found in review, P3): it asks whether the pin ITSELF arrives
+    through an alias — `with:` or `version:` whose value is an `AliasToken`, inside this step — NOT
+    whether *any* `with:`/`version:` key in the step has an aliased value. Measured with the wide
+    version: a step whose pin IS a literal `version:` line, plus an unrelated `version: *x` in its
+    `env:`, flipped the flag to True — which switched OFF the literal-line arm for a workflow whose
+    only reason to be refused was that arm. The skip must be exactly as wide as its justification.
+
     Detected in the TOKEN stream, because PyYAML 6 has no `AliasNode` — it substitutes the anchored
     node object, so an alias is invisible in the composed tree. `KeyToken` carries no `.value`, so
     the key's text arrives as the following `ScalarToken`.
@@ -405,7 +408,15 @@ def _alias_supplies_the_pin(workflow_text: str) -> bool:
             continue
         if not isinstance(value_token, yaml.tokens.AliasToken):
             continue
-        if step_first <= key_token.start_mark.index < step_last:
+        if not (step_first <= key_token.start_mark.index < step_last):
+            continue
+        # `with:` directly — the alias supplies the whole input mapping, pin included.
+        if key_token.value == "with":
+            return True
+        # `version:` — only when it IS the pin, i.e. it lives inside a `with:` mapping this step
+        # owns. A `version:` under `env:`/`secrets:` is a different key that happens to share a name.
+        window = workflow_text[step_first:key_token.start_mark.index]
+        if re.search(r"(?m)(^|\n)[ \t]*with[ \t]*:[ \t]*$|\{[^{}]*\bwith\s*:", window):
             return True
     return False
 
@@ -469,20 +480,16 @@ def _requested_version(workflow_text: str) -> str:
     if alias_supplied:
         return resolved
     assert literals, (
-        f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step. Three shapes "
-        "land here and this message must not send a reader hunting for the wrong one: a MERGE KEY "
-        "(`<<:`) building the `with:` mapping or the pin, which `_construct_refusals` refuses "
-        "before this arm; a step written as a FLOW MAPPING (`- {uses: …, with: {version: …}}`), "
-        "which has no `version:` line for any reader to check; or a pin supplied by an alias, which "
-        "is ACCEPTED — anchors and aliases are documented Actions YAML — so reaching this message "
-        "through one means the alias is somewhere this reader could not follow. In every case the "
-        "value asserted here is not provably the value installed; write `version:` on its own line "
-        "inside the step."
-    )
-    assert len(literals) == 1, (
-        f"the setup-cli step carries {len(literals)} literal `version:` lines ({', '.join(literals)}) "
-        "— a duplicate key's tie-break is not measured against GitHub's parser, so the value read "
-        "here is not provably the one installed. Pin exactly once."
+        f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step. This arm is a "
+        "BLOCK-STYLE requirement, and the three shapes that reach it are refusals for different "
+        "reasons — do not read one sentence as covering all of them. A MERGE KEY (`<<:`) building "
+        "the `with:` mapping or the pin is refused before this arm by `_construct_refusals`, because "
+        "PyYAML builds a mapping the runner may not see. A step written as a FLOW MAPPING "
+        "(`- {uses: …, with: {version: …}}`) is refused here ONLY because this reader requires the "
+        "pin on its own line — its value IS what CI reads; rewrite the step in block style if you "
+        "want it accepted. A pin supplied by an ALIAS is ACCEPTED outright (see "
+        "`_alias_supplies_the_pin`); reaching this message through one means the alias sits "
+        "somewhere this reader could not follow."
     )
     assert literals[0] == resolved, (
         f"the setup-cli step's literal pin is `{literals[0]}` but this reader resolved `{resolved}` "
@@ -532,10 +539,11 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
       (1) a floating pin (`latest`, `v2`, `^2.122.1`, …) — any shape that is not an exact x.y.z;
       (2) a pin this reader resolves differently from CI (merge key, duplicate key, alias, or an
           input key that collides with `version` after GitHub's own normalization), so the value
-          asserted is not the value installed. Merge keys and aliases are enforced STRUCTURALLY
-          over the composed step node and its tokens (`_construct_refusals`), at every depth — a
-          merge key that supplies the step's whole `with:` is the same fail-open as one written
-          inside it, and a probe over the parsed dict sees neither;
+          asserted is not the value installed. MERGE KEYS are refused structurally over the
+          composed step node (`_construct_refusals`), at every depth — one that supplies the step's
+          whole `with:` is the same fail-open as one written inside it, and a probe over the parsed
+          dict sees neither. ALIASES are not a divergence (GitHub documents them), so an aliased pin
+          is accepted and only its resolved VALUE is checked;
       (3) a major-3 pin — the config-load break while `[inbucket]` is declared, and the hosted-
           mutation consent gate once it is not.
 
@@ -669,7 +677,7 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
     |---|---|---|
     | `<<:` INSIDE `with:` | `with` = `{'version': …}` | the merge tag, at depth ≥ 1 |
     | `<<:` supplying `with:` on the STEP | the step = `{'with': {'version': …}}` | the merge tag, at depth 0 |
-    | `with: *pin` | the anchored mapping, followed | the `AliasToken` arm |
+    | `with: *pin` | the anchored mapping, followed | NOTHING — aliases are accepted (GitHub documents them); the VALUE the anchor carries is refused by the ceiling |
 
     The step-level row is the expensive one: it reads as green everywhere a `with`-shaped probe looks,
     because by then `with` is a perfectly ordinary mapping.
@@ -1018,6 +1026,14 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
     )
     assert _construct_refusals(env_aliased) == [], _construct_refusals(env_aliased)
     assert _requested_version(env_aliased) == pin, "an unrelated alias refused the guard"
+    # ⛔ Assert the DETECTOR too (#11134 review, P3): since nothing refuses an alias any more,
+    # "accepted" holds for every shape and cannot fail. `is False` is what a coarse detector — one
+    # that reported any `AliasToken` in the step — would break, and that detector would silently
+    # switch OFF the literal-line arm for a step whose pin is a plain literal.
+    assert _alias_supplies_the_pin(env_aliased) is False, (
+        "an alias on `env:` was read as supplying the pin — the detector is wider than its "
+        "justification, and it would disable the literal-line arm for an unrelated alias"
+    )
 
     # (b) the pin ITSELF supplied by an alias → ACCEPTED, and the RESOLVED value is what is checked.
     #     ⛔ This arm asserted a REFUSAL before the premise was corrected: GitHub's Actions reference
@@ -1035,6 +1051,10 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
         1,
     ).replace(canonical, "        with: *pinned", 1)
     assert "        with: *pinned" in aliased_pin, "mutation (b) did not apply — vacuous"
+    assert _alias_supplies_the_pin(aliased_pin) is True, (
+        "the detector missed an alias that supplies the step's whole `with:` — the literal-line arm "
+        "would then fire on a legitimate spelling"
+    )
     assert _requested_version(aliased_pin) == pin, "an alias-supplied pin was not read"
     assert _violations(aliased_pin, CONFIG.read_text(encoding="utf-8")) == [], (
         "a correctly pinned step written with an alias was refused — GitHub resolves aliases, so "
@@ -1068,6 +1088,10 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
         f"block: {_construct_refusals(after)!r}"
     )
     assert _requested_version(after) == pin, "a construct on the following step refused the guard"
+    assert _alias_supplies_the_pin(after) is False, (
+        "an alias on the NEXT step's first key was read as supplying THIS step's pin — the bound "
+        "regressed to a line range, so the two readers disagree about where the step stops"
+    )
     assert _violations(after, CONFIG.read_text(encoding="utf-8")) == [], (
         "a legitimate workflow with a literal pin was refused at the GUARD level too, because the "
         "NEXT step's first key is an alias — the whole point is that this step carries no construct"
