@@ -265,11 +265,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"--parity-graph {args.parity_graph!r} does not name --graph "
                 f"{args.graph!r} — a CLEAN census of one graph does not license "
                 f"evicting another")
-        try:
-            text = Path(path).read_text(encoding="utf-8")
-        except OSError as exc:
-            return _usage_error(f"cannot read --parity-report {path}: {exc}")
-        del text  # read only to reject an unreadable file before the loader does
+        # ⛔ NO PRE-READ HERE. The loader is the one place that classifies an unreadable
+        # report, and it does it correctly: `load_parity_report` maps a *missing* file to
+        # `OSError` (the caller's flag) and a NON-UTF8 or malformed body to
+        # `CacheReadError` — a REFUSAL about the STORE (3), not about the flags. A
+        # `Path.read_text()` guard here caught only `OSError`, so a non-UTF8 report
+        # raised `UnicodeDecodeError` (a `ValueError`) straight out of `main`: a
+        # traceback and exit 1, this file's USAGE code, telling the operator to retry
+        # FLAGS against corrupt evidence — the exact case the census pins and this file's
+        # own comment twenty lines below promises.
         try:
             report = load_parity_report(str(path), graph_name=args.graph)
         except CacheReadError as exc:

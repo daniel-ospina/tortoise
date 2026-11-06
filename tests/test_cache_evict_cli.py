@@ -443,3 +443,24 @@ def test_a_cache_already_inside_its_budget_reports_0(wired, tmp_path, capsys):
     assert body["metric"]["nodes_evicted"] == 0
     assert code == 0, ("a cache already inside its budget must report 0, not 2 — a "
                        "scheduler acts on this without reading the body")
+
+
+def test_a_report_that_is_not_utf8_is_a_REFUSAL_not_a_traceback(wired, tmp_path):
+    """⛔ Corrupt EVIDENCE is a refusal about the store (3), not a mistyped flag (1).
+
+    A `Path.read_text()` guard caught only `OSError`, so the non-UTF8 case raised
+    `UnicodeDecodeError` (a `ValueError`) straight out of `main` — a traceback and exit 1,
+    the USAGE code, telling the operator to retry FLAGS. The census pins the same case for
+    the same reason, and this file's own comment promises it.
+    """
+    _client, graph = wired
+    path = tmp_path / "not-utf8.json"
+    path.write_bytes(b'{"instrument": "tools/turn_parity_census.py", "graph": "\xff"}')
+
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "10", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(path), "--parity-graph", "tortoise"))
+
+    assert code == 3, "unreadable evidence is a refusal about the STORE, not a typo"
+    assert graph.mutations == []

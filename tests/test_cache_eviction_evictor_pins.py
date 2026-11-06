@@ -730,3 +730,66 @@ def test_a_failed_DELETE_statement_is_reported_as_unverified_not_as_clean():
     assert report.deleted == (), "the pass's own rows were claimed as removed"
     assert "UNVERIFIED" in report.reason, report.reason
     assert graph.mutating, "the fake never saw the DELETE it was meant to fail on"
+
+
+# --------------------------------------------------------------------------------------
+# THE IDENTIFIER GATE — the property name that reaches the DELETE statement
+#
+# ⛔ WHY THIS EXISTS. `_key_property` validates a CALLER-SUPPLIED `key_prop` before it is
+# interpolated into `AND n.{quote} = r.key` in the DETACH DELETE. It had NO test that
+# could fail: replacing its whole body with `return key_prop` left 78 tests green, and
+# `grep -n 'key_prop' tests/*.py` found no hit at all. The consequence is silent — an
+# empty or unquoted name emits a MALFORMED statement mid-sweep, which raises in
+# `_delete_nodes` and lands on the abort path (`delete_unverified=True`) → exit 2 ("may
+# have evicted") on a run that removed nothing. That is a false alarm on the destructive
+# exit code, which is exactly the shape this PR has already graded P1 twice.
+# --------------------------------------------------------------------------------------
+def test_an_EMPTY_key_property_is_refused():
+    """Interpolating nothing into a DELETE is never an identifier."""
+    from tortoise.cache_evictor import EvictionConfigError, _key_property
+
+    for empty in ("", "   ", "``", None, 5):
+        with pytest.raises(EvictionConfigError):
+            _key_property(empty)          # type: ignore[arg-type]
+
+
+def test_an_ALREADY_QUOTED_key_property_is_stripped_not_double_quoted():
+    """A caller quoting defensively is doing the right thing.
+
+    `_quote_identifier` quotes a non-bare name, so handing it ``` `id` ``` would produce
+    ``` ```id``` ```, which the engine rejects mid-sweep.
+    """
+    from tortoise.cache_evictor import _key_property
+
+    assert _key_property("`id`") == "id"
+    assert _key_property("id") == "id"
+
+
+def test_a_key_property_that_is_not_a_bare_identifier_is_QUOTED():
+    from tortoise.cache_evictor import _key_property
+
+    assert _key_property("my key") == "`my key`"
+
+
+def test_a_key_property_carrying_a_TRAILING_NEWLINE_is_still_safe():
+    """`str.isidentifier()` accepts a trailing newline; the engine reads it as the name."""
+    from tortoise.cache_evictor import _key_property
+
+    got = _key_property("id\n")
+    assert got == "id", got
+
+
+def test_a_pathological_key_property_refuses_the_WHOLE_pass_before_any_statement():
+    """The gate is on the PASS, not only the helper: nothing is read, nothing is issued."""
+    graph = _FakeGraph()
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record, key_prop="",
+        dry_run=False, policy=EvictionPolicy(max_nodes=1),
+    )
+
+    assert report.verdict == "REFUSED"
+    assert "config refused" in report.reason, report.reason
+    assert graph.mutating == [], f"a refused config mutated: {graph.mutating}"
