@@ -4,7 +4,7 @@ type: plan
 domain: planning
 doc_status: draft
 created: 2026-11-05
-updated: 2026-11-05
+updated: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #5090, child issues, MECE decomposition, test-design, capstone"
@@ -117,7 +117,7 @@ claim and not an assertion:
   consequence of removing them in front of the owner — because removal is a **surface change**.
 - **I:** a **read-only** dry-run census naming every label whose stored vectors have no vector index, with
   vector count and bytes, and **exactly which `entity_type` values would change** afterwards. ⚠️ **Corrected
-  2026-11-05 (`#11088`, measured):** this read "would return zero rows". That holds only for a query that
+  2026-11-06 (`#11088`, measured):** this read "would return zero rows". That holds only for a query that
   matched *only* by meaning — a lexically-matching query keeps answering from the FTS leg — so the
   delivered census names the affected `entity_type` SET and the loss as **semantic recall**. Evidence and
   the `:Source` caveat: `S3-VECTOR-CENSUS.md` §3.1/§7.

@@ -4,7 +4,7 @@ type: plan
 domain: planning
 doc_status: draft
 created: 2026-11-05
-updated: 2026-11-05
+updated: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #5090, embed gate, exemption register, vector index inventory, test-design, capstone"
@@ -171,7 +171,7 @@ unreadable catalogue rather than reporting an empty population.
 **S3 is the one place that could**: removing the embeddings held by the labels that have no vector index
 empties the **dense leg** for those labels, so a query that matched only by meaning returns **zero rows**.
 
-⚠️ **CORRECTED 2026-11-05 (`#11088`, measured)** — two things this paragraph used to get wrong:
+⚠️ **CORRECTED 2026-11-06 (`#11088`, measured)** — two things this paragraph used to get wrong:
 
 1. **The population.** It named `entity_type='object'` / `'event'` — two values. The census measures
    **FOUR labels / FIVE `entity_type` values**: `:Event`, `:Object`, `:Source`, `:Subject` →

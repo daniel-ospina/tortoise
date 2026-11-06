@@ -3,8 +3,8 @@ title: "S3 — the vector census: which stored vectors no index and no query pat
 type: plan
 domain: planning
 doc_status: draft
-created: 2026-11-05
-updated: 2026-11-05
+created: 2026-11-06
+updated: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: "the vector layer of the Tortoise memory graph"
 aboutObjects: "epic #5090, child #11088, decision V1 (§12.1c), #4333, #10976, #7879"
