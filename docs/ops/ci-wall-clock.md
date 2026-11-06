@@ -161,7 +161,7 @@ archive, so on a `uv.lock` bump it restores that archive and re-tars all of it
 (`restoreImpl.ts:45` extracts a `restore-keys` partial hit into `~/.cache/pip`; `saveImpl.ts:50`
 skips the save **only** on an exact primary-key match). Nothing is lost by not saving: the key is
 SHARED (`pip-<os>-<hash uv.lock>`) and is written by `test-d14-hosted-api` whenever it MISSES
-(unconditional, PR + push — on a warm exact hit `actions/cache@v4` POSTs no save), by `test-slow` when its legs run and by `test-concurrency-falkor`, so this job only ever READ it. **Paying 20 more
+(unconditional, PR + push — on a warm exact hit `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run, so this job only ever READ it. **Paying 20 more
 minutes of held slot under an UNBOUNDED term (the save has no timeout of its own) is exactly what
 the `test-carve-out` note rejects**, and #3239 is about the cap being the stale-head exposure.
 
@@ -215,7 +215,7 @@ whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions
 plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
 90, x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
-is now read from the shared `pip-<os>-<hash uv.lock>` key that THREE other jobs write, while
+is now read from the shared `pip-<os>-<hash uv.lock>` key that TWO other jobs write, while
 `~/.cache/uv` keeps exactly one writer here, bounded in ACCUMULATION (`uv cache prune` — it drops entries no environment reaches, not a single environment's set) and in time
 (`timeout-minutes: 7`, `continue-on-error`, fail-open to a MISS). A SINGLE 3.88 GB write still does
 not fit — but on the measured rates, not on an assumption: this run's degraded uplink was 0.9 MB/s

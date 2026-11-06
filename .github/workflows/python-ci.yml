@@ -1002,8 +1002,8 @@ jobs:
       # so the pip half is #7612's own payload — the torch wheel set, installed in
       # this job by `.github/actions/install-cpu-torch` with `pip` — and pip alone
       # accounts for 93% of the 3,882,423,064 B payload that was uploaded (that
-      # row is 3,616,385,308 B on its own). THREE other jobs write
-      # `pip-<os>-<hash uv.lock>` — `test-slow`, `test-concurrency-falkor`,
+      # row is 3,616,385,308 B on its own). TWO other jobs write
+      # `pip-<os>-<hash uv.lock>` — `test-slow` and
       # `test-d14-hosted-api` — so THIS job only ever
       # needed to READ that key: restore-only costs it nothing. The uv half has no
       # other writer, so it keeps one, explicitly and bounded.
@@ -2071,7 +2071,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           # ⛔ `~/.cache/uv` ALONE. Adding `~/.cache/pip` here is what made the
-          # payload 3.88 GB; that half is written by THREE other jobs and is read
+          # payload 3.88 GB; that half is written by TWO other jobs and is read
           # above, so a second writer would only re-upload 3.6 GB per miss shard.
           path: ~/.cache/uv
           key: uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -3476,10 +3476,10 @@ jobs:
         # This job cannot amortize that save, and no cap can make it able to.
         # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
         # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
-        # work_without_dwarfing_it`), and the SHIPPED 30m does not clear it:
-        # 10m embedder cap + 19m shard watchdog (floor-clamped, `carve_shards: 3`)
-        # + ~1m setup/provision + ~1.6m for the ~90 MB HF embedding cache this
-        # job still saves ≈ 31.6m against 30.
+        # work_without_dwarfing_it`), and the SHIPPED 30m does not clear the
+        # row's SUM — but the TERMS are the row's to state, not this comment's,
+        # so they are not repeated here: `docs/ops/ci-wall-clock.md` §2 is the
+        # single source, and the paragraph below records why a copy was wrong twice.
         #
         # ⛔ Do NOT restate that sum HERE. `docs/ops/ci-wall-clock.md` §2 is its
         # single source (graded by

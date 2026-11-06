@@ -12089,7 +12089,7 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     (`pip-<os>-<hash uv.lock>`) and is still written by `test-d14-hosted-api`
     whenever it MISSES (unconditional, PR + push — on a warm exact hit
     `actions/cache@v4` POSTs no save), by `test-slow` when its legs run and by
-    `test-concurrency-falkor`, so this job only ever READ it. The ~90 MB HF embedding cache in the same job is
+    so this job only ever READ it (`test-concurrency-falkor` is restore-only on it too). The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
     the pip cache is the ~3.6 GB term that does not fit.
@@ -12350,8 +12350,10 @@ def test_the_record_postgres_job_restores_the_pip_cache_without_saving_it():
     torch/embeddings archive it would re-tar.
 
     Non-vacuous in both directions: the pre-fix step is a bare `actions/cache@v4`
-    on this path, which reds the first assertion; and the presence + shape of the
-    restore is asserted too, so DELETING the cache step cannot pass.
+    on this path, which reds the SAVE assertion (the second one — the first, that
+    a pip-cache step exists, is satisfied by that same step); and the presence +
+    shape of the restore is asserted too, so DELETING the cache step reds the
+    presence assertion instead.
     """
     job = _load_python_ci()["jobs"]["test-record-postgres"]
     pip_caches = _pip_cache_steps(job)
@@ -12366,8 +12368,7 @@ def test_the_record_postgres_job_restores_the_pip_cache_without_saving_it():
         "UNBOUNDED: measured 2026-11-05 it held a green job from 1 m 49 s to "
         "20 m 25 s and GitHub reported `cancelled`, which reds the REQUIRED "
         "`python-ci-gate` (#5219). Use `actions/cache/restore@v4` here — the key "
-        "is shared and still written by `test-d14-hosted-api`, `test-slow` and "
-        "`test-concurrency-falkor`.")
+        "is shared and still written by `test-d14-hosted-api` and `test-slow`.")
     restores = [s for s in pip_caches
                 if s.get("uses") == "actions/cache/restore@v4"]
     assert len(restores) == 1, (
@@ -12426,7 +12427,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     3,616,385,308 B in a PR scope and 397,897,273 B in `refs/heads/main`, while
     `uv-pip-Linux-8755d72f…` is 662,393,744 B in `refs/heads/main` — so pip (the
     torch wheel set, #7612's own payload, installed by `install-cpu-torch` with
-    `pip`) is 93% of the uploaded payload on its own, and THREE other jobs write
+    `pip`) is 93% of the uploaded payload on its own, and TWO other jobs write
     `pip-<os>-<hash uv.lock>`, so this job reads it and writes nothing. The uv
     half has no other writer (`refs/heads/main` puts it at 252 MiB, an order of
     magnitude rather than a bound — scope variance is large), so this job keeps
@@ -12748,10 +12749,10 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "Use `actions/cache/restore@` plus an explicit, BOUNDED "
         "`actions/cache/save@` — for a NEW key. The two keys this job already "
         "carries are pinned separately and a save is REJECTED for both: `pip-` "
-        "because three other jobs write it, and `uv-cache-` because it must keep "
+        "because two other jobs write it, and `uv-cache-` because it must keep "
         "exactly one bounded writer (the next two arms).")
 
-    # ── The pip half: READ ONLY, because THREE other jobs write it ──────────────
+    # ── The pip half: READ ONLY, because TWO other jobs write it ───────────────
     pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
     assert pip_steps, (
         "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
@@ -12772,7 +12773,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert _path_of(pip_restore).strip() == "~/.cache/pip", (
         f"the pip restore reads {_path_of(pip_restore).strip()!r}, not "
         "`~/.cache/pip`. `path` is part of the cache's VERSION, so the entry the "
-        "three writer jobs produce can never match it — a permanent MISS with the "
+        "two writer jobs produce can never match it — a permanent MISS with the "
         "step green, which is a cold 3.6 GB torch download on every shard "
         "(#7612 reverted, #11063 cycle 5 finding 2).")
     assert pip_restore.get("continue-on-error") is True, (
@@ -12784,14 +12785,14 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert pip_key_root == "pip-", (
         f"the pip cache key is {pip_key!r}; the SHARED key other jobs write is "
         "`pip-<os>-<hash uv.lock>` — any other spelling silently unships it from "
-        "the three writers that populate it")
+        "the two writers that populate it")
     pip_writers_here = [s.get("name") for s in steps
                         if _is_writer(s) and pip_key_root in _key_of(s)]
     assert not pip_writers_here, (
         f"the `test` job WRITES the shared pip cache again {pip_writers_here}. "
         "That archive measured 3,616,385,308 B in a PR scope — restoring it and "
         "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
-        "and it buys nothing: THREE other jobs already write the key (#10327's "
+        "and it buys nothing: TWO other jobs already write the key (#10327's "
         "argument, applied to the bigger half).")
     pip_writer_rows = [(jid, s.get("name"), _key_of(s))
                        for jid, jd in wf["jobs"].items() if jid != "test"
@@ -12849,9 +12850,8 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"own run: {[(jid, _gate_of(jid)) for jid in pip_writers_elsewhere]} vs "
         f"this job's `{test_gate}`. A writer that needs `slow_run`/`carve_out_run` "
         "to be true does not populate the key on a run that still executes `test`, "
-        "so this job reads an entry nothing wrote. The unconditional writers are "
-        "`test-d14-hosted-api` (`always() && needs.changes.result == 'success'`) "
-        "and `test-concurrency-falkor`, which shares this job's own gate; "
+        "so this job reads an entry nothing wrote. The unconditional WRITER is "
+        "`test-d14-hosted-api` (`always() && needs.changes.result == 'success'`); "
         "`test-slow` (`slow_run`) is the only diff-gated pip writer. NOT writers at "
         "all: `test-carve-out` and `test-record-postgres` — both pip steps are "
         "restore-only by their own pins (the latter since this branch).")
@@ -12922,7 +12922,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert save_paths == ["~/.cache/uv"], (
         f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
-        "measured 3,616,385,308 B and is written by THREE other jobs.")
+        "measured 3,616,385,308 B and is written by TWO other jobs.")
     gate = str(uv_save.get("if") or "").strip()
     # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
     # finding 3). The literal let a rename or a deletion read GREEN — and a
