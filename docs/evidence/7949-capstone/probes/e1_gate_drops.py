@@ -72,6 +72,13 @@ legacy census keys are published on every run and `0 of 0 Objects` is that same
 zero-denominator reading; 2 when `--sections` names a section (or nothing) this
 instrument does not census.
 
+⛔ **A refusal writes NO artifact** (#11242 review round 2). The `--out` file is
+written only after the measurement is taken and every guard has passed, so an
+exit-2 run leaves the path untouched — which also means an `--out` file that
+EXISTS after a refused run is the PREVIOUS run's, not this one's. Check the exit
+status first, then `coverage_complete`; the sibling `e1_paired_arm.py` states the
+same contract ("a refusal writes no record").
+
 ⚠️ A section that yielded ZERO candidates is reported `measured: false` (and
 named in `unmeasured_sections`), never as "0 drops": an empty section is a zero
 denominator for that half of the pass condition, and `coverage_complete` says so
@@ -130,9 +137,11 @@ CONTROLS = ("#4118", "a/b/c.py", "the admin-merge rail")
 #: store, created with ``seq``/``ts``/``type``/``event_id``/``payload`` and NO
 #: ``name``/``content`` (`tortoise/event_store.py`'s ``CREATE (e:GraphEvent
 #: {...})``), so it can contribute no candidate text — querying it would
-#: full-scan the journal and always yield nothing. The census still COUNTS it
-#: (``census()["graph_events"]``) as a population fact; it is not a candidate
-#: class the predicate judges.
+#: full-scan the journal and always yield nothing. `capstone_measure.census`
+#: still counts it (``census()["graph_events"]``) as a population fact, but THIS
+#: instrument no longer calls `census` at all: it is not a candidate class the
+#: predicate judges (#11242 review round 1 — the citation named a call this file
+#: does not make).
 SECTION_LABELS: dict[str, tuple[str, ...]] = {
     "objects": ("Object",),
     "events": ("Event",),
@@ -361,7 +370,6 @@ def main(argv: list[str] | None = None) -> int:
     sections = tuple(part.strip() for part in args.sections.split(",")
                      if part.strip())
     record = measure(args.graph, sections)
-    Path(args.out).write_text(json.dumps(record, indent=1))
     print(f"objects={record['objects']} bare_definite={record['bare_definite']} "
           f"share={record['bare_definite_share']}")
     print(_sections_line(record))
@@ -398,6 +406,14 @@ def main(argv: list[str] | None = None) -> int:
         print("REFUSED: the positive controls no longer drop — the predicate is "
               "dead, so the drop count measures nothing")
         return 2
+    # ⛔ WRITTEN LAST, after every refusal (#11242 review round 1, measured). An
+    # artifact on disk is what a later reader SCORES — `--out` used to be written
+    # before these guards, so a REFUSED run (exit 2, "not a result") left
+    # `step4_points_events_drops` on disk beside its `REFUSED` line. Measured at
+    # `0e523239a5`: objects=0 + points/events populated → exit 2 AND an artifact
+    # reading `step4_points_events_drops: 0` with `coverage_complete: false` — the
+    # pass condition's own number, pickable, from a run that measured nothing.
+    Path(args.out).write_text(json.dumps(record, indent=1))
     return 0
 
 

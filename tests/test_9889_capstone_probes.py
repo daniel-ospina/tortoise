@@ -327,9 +327,10 @@ def test_e1_gate_drops_still_refuses_a_graph_with_no_objects(monkeypatch, tmp_pa
 
     The legacy census keys are published on EVERY run and `e1_e2_scores.py` reads
     them as a census, so a candidate-bearing graph with no `:Object` name would
-    publish "0 of 0 Objects" — the reading this probe has always refused. The
-    record is still written before the refusal, and it carries NO drop number for
-    the half it could not measure.
+    publish "0 of 0 Objects" — the reading this probe has always refused. A
+    refusal writes NO artifact: an `--out` file beside a `REFUSED` line is what a
+    later reader scores, and this record's `step4_points_events_drops` would be a
+    measured-looking `0` for the pass condition (#11242 review round 1).
     """
     exit_code = _run_gate_drops(monkeypatch, tmp_path, population={
         "objects": [], "points": ["the lease fix"], "events": ["the retro"]})
@@ -338,21 +339,47 @@ def test_e1_gate_drops_still_refuses_a_graph_with_no_objects(monkeypatch, tmp_pa
     out = capsys.readouterr().out
     assert "no Object names" in out
     assert "value_gate drops: UNMEASURED" in out
-    record = json.loads((tmp_path / "o.json").read_text())
-    assert record["drops_total"] is None
+    assert not (tmp_path / "o.json").exists(), (
+        "a refused run measured nothing — leaving `--out` on disk publishes "
+        "`step4_points_events_drops: 0` for a run that refused")
+
+
+def test_e1_gate_drops_measure_keeps_the_legacy_keys_null_on_an_empty_objects_census(
+        monkeypatch):
+    """The None-not-0 rule, pinned at `measure()` — where no refusal hides it.
+
+    `main()` now refuses a graph with no `:Object` name, so the legacy keys'
+    `None` state is unreachable THROUGH it. It is still reachable through
+    `measure()` (a caller, or a future main), and that is where the rule that an
+    empty census publishes NO drop number has to hold: `drops if names else None`
+    becoming `len(drops) if names else 0` reds this and nothing else.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
+    monkeypatch.setattr(
+        e1_gate_drops, "section_population",
+        _fake_population(objects=[], points=["the lease fix"],
+                         events=["the retro landed"]))
+    record = e1_gate_drops.measure("g", ("objects", "points", "events"))
+
     assert record["value_gate_drops"] is None
+    assert record["drops_total"] is None
     assert record["drops_among_bare_definite"] is None
     assert record["unmeasured_sections"] == ["objects"]
+    assert record["coverage_complete"] is False
 
 
 def test_e1_gate_drops_point_drops_come_from_the_predicate_not_a_constant(
         monkeypatch, tmp_path):
-    """MUTATION PROOF: invert the predicate and the point count must move.
+    """MUTATION PROOF, taken at `measure()` — where no refusal can mask it.
 
     A per-section counter that does not read `mechanical_verdict` would report
     the same numbers whatever the predicate does — the shape this whole issue is
-    about. With the predicate forced to "never fire" the SAME population yields
-    zero drops, so the counter is provably the predicate's.
+    about. Through `main()` a dead predicate now REFUSES (exit 2) and writes no
+    record, so the count can only be pinned one layer down: `measure()` has no
+    refusal, and there the same population yields **0** drops under a dead
+    predicate and **2** under the live one. Measured at #11242 review round 2: a
+    counter hard-coded to `2` reds the `== 0` assertion, and a counter that
+    counts candidates instead of drops reds it too (2 candidates vs 0 drops).
     """
     population = {"objects": ["the deploy rail"], "points": ["#4118", "a/b/c.py"],
                   "events": ["the retro"]}
@@ -360,10 +387,23 @@ def test_e1_gate_drops_point_drops_come_from_the_predicate_not_a_constant(
     _, live = _measure(monkeypatch, tmp_path, population=population)
     assert live["sections"]["points"]["drops_total"] == 2
 
-    _, dead = _measure(monkeypatch, tmp_path, population=population,
-                       verdict=lambda text: None)
+    monkeypatch.setattr(e1_gate_drops, "section_population",
+                        _fake_population(**population))
+    import tortoise.value_gate as value_gate
+    monkeypatch.setattr(value_gate, "mechanical_verdict", lambda text: None)
+    dead = e1_gate_drops.measure("g", ("objects", "points", "events"))
     assert dead["sections"]["points"]["drops_total"] == 0, (
-        "the point counter did not follow the predicate — it is a constant")
+        "the point counter did not follow the predicate — it is a constant or a "
+        "candidate count, not a drop count")
+
+    # …and the refusal `main()` performs on that same dead predicate is a pin of
+    # its own: a dead predicate must exit 2, never report 0 through a counter
+    # that never read it.
+    dead_exit = _run_gate_drops(monkeypatch, tmp_path, population=population,
+                                verdict=lambda text: None)
+    assert dead_exit == 2, (
+        "a dead predicate must refuse, not report 0 through a counter that "
+        "never read it")
 
 
 def _vet_and_apply(embed: dict) -> tuple[dict, dict, dict, list[str]]:

@@ -25,7 +25,7 @@ both gaps, plus the numbers they measured. No `tortoise/` file changed.
 | probe | the question it answers | falsifier |
 |---|---|---|
 | `probes/e1_paired_arm.py` | what is E1's **before** share on the pre-registered corpus, with the selection passes OFF? | refuses (measures nothing) if any pass switch is already set, if the backend cannot extract (no key → a measurement of a key's ABSENCE), or if the checkout's corpus is not the pre-registration's frozen one (`G1`); exit 2, writing no record, if the run's population is one E1's record refuses — a zero denominator, fewer `:Object` nodes than E1's frozen floor, or a before-share under the frozen `e1_min_before_share` |
-| `probes/e1_gate_drops.py` | does the v4 value-gate predicate drop any candidate, over **every section the S2.2 pass judges** (`objects`/`events`/`points` — the Objects half is the `^the <X>` class)? (deterministic, zero model calls) | exit 2 if the positive controls stop dropping, if no selected section yields candidate text, if the graph yields no Object names, or if `--sections` names a section the instrument does not census |
+| `probes/e1_gate_drops.py` | does the v4 value-gate predicate drop any candidate, over **every section the S2.2 pass judges** (`objects`/`events`/`points` — the Objects half is the `^the <X>` class)? (deterministic, zero model calls) | exit 2 if the positive controls stop dropping, if no selected section yields candidate text, if the graph yields no Object names, or if `--sections` names a section the instrument does not census — and a refusal writes **no** `--out` artifact, so a file left at that path after a refused run is the PREVIOUS run's |
 | `probes/e2a_value_units.py` | how many of the frozen **14** value-bearing planted units STRICTLY survive? | refuses (exit 2, no record) when no searchable `TORTOISE_DB_URI` is set (the embedded fallback would read an empty graph as `0 of 14`) or when the graph holds no memory-level Points at all (an ABSENT population, not a losing pipeline); `--inject-anchor` refuses if injecting every lost unit's anchor moves the counter by nothing |
 
 ## The tree these numbers belong to
@@ -231,12 +231,22 @@ two nodes while an Objects-only census shows one
 test_the_mechanical_predicate_drops_a_claim_and_its_entity_together`).
 
 Measured on the ON arm's graph (matches that run's own census exactly — 61
-Objects, 13 bare-definite, 0.2131):
+Objects, 13 bare-definite, 0.2131) — ⛔ **and taken at head `54922a800`, which
+PREDATES the `#10996` flip**: `on-arm.log:8` reads
+`TORTOISE_VALUE_GATE=<unset>`, and before the flip absence really was OFF, so
+that population is a gate-OFF population and the zero below is a measurement
+rather than the vacuous kind:
 
 ```text
 objects=61 bare_definite=13 share=0.21311475409836064
 value_gate drops: 0 (among bare_definite: 0) controls alive=True
 ```
+
+(That two-line block is the PRE-PR instrument's output, kept as the record of
+what was measured. The shipped probe also prints the per-section line —
+`objects=61(drops=0) events=… points=…`, with `UNMEASURED` for a section that
+yielded no candidates — and a `STEP-4 (points+events) drops: …` line; it does not
+re-print this artifact's numbers because the artifact predates those sections.)
 
 **0 of 61 Objects** and **0 of 13 `^the <X>`** are dropped by the mechanical
 predicate. The positive controls stayed alive: `#4118` and `a/b/c.py` DO drop,
