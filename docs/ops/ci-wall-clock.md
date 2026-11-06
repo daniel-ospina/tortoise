@@ -174,8 +174,8 @@ cap would pin a per-PR concurrency slot at 50 m (#3239) against a SUM that can n
 That also retires the arm-2 ranking this row used to carry. Arm 2 exists for a job that pays the
 shared archive's save on a key change; this job no longer writes a cache at all, so the ~20 m term
 the 50 was derived from is not in its SUM, and the "it warms the shared key for the long legs"
-argument no longer holds for it. The `test` / `test-slow` / `test-carve-out` / `test-d14-hosted-api`
-rows still save, so the save-term caveat below still applies to THEM and is untouched here.
+argument no longer holds for it. Which rows still pay a save is the caveat below's own list —
+stated there once, not restated here, which is how this pair drifted apart in the first place.
 
 ⚠ **The `~9 m` save term the saving rows use is not re-measured here.** That figure comes from the
 `test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063

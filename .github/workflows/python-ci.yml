@@ -4580,8 +4580,8 @@ jobs:
         # `actions/cache` saves in a POST step, and (#10182) that step is
         # charged against the job's `timeout-minutes` like any other step. The
         # save has no timeout of its own, so it is UNBOUNDED, not merely large,
-        # and this job's 20m cap is documented above as "a runaway bound" for a
-        # ~349 s pytest leg — it cannot absorb an unbounded term.
+        # and this job's 20m cap is documented above as bounding a runaway, not a
+        # measurement-thin step, for a ~349 s leg — it cannot absorb an unbounded one.
         #
         # MEASURED (run 42090497973, job `test-record-postgres` 127519984967,
         # PR #10790): every WORK step was green — `192 passed, 1 xfailed in
