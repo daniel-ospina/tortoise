@@ -642,6 +642,18 @@ def test_env_uri_assignment_uses_live_uri_helper(fname):
 def _journal_calls(code: str) -> int:
     """How many CALLS to `_journal_append(` the masked block contains.
 
+    ⛔ NO LONGER part of the census's PRESENCE decision (#11217 review round 9,
+    ISSUE 4). It is a REGEX and `own` (an AST scope/`Call` scan) subsumes it — a
+    shadow `def _journal_append`, a bare import and a comment produce no call
+    NODE, and a call outside the block is filtered out — while the regex falsely
+    BLOCKS a functionally compliant site that writes a legal space before the
+    paren (`_journal_append (name)`), a site the AST half resolves to a correct
+    OWNED prefix. Measured: such a block read RED off `_journal_calls` alone.
+
+    Kept as a documented TEXT helper because the shapes it was added for are worth
+    asserting in isolation; it must not be OR-ed back into the failure condition,
+    where it can only add a false BLOCK to what the AST half already decides.
+
     A `def _journal_append(...)` is a local SHADOW, not the record: it defines
     the symbol and journals nothing, so counting it as a call lets a block go
     clean while the graph stays UNOWNED (measured: a block whose only occurrence
@@ -742,7 +754,14 @@ def _raw_detach_violations(root=None):
             # No claim is made here about unparseable files: `own` is empty for
             # one, so its sites are reported — fail CLOSED, matching a helper that
             # cannot read the journal list at all.
-            if "os.urandom" not in block or not _journal_calls(code) or not own:
+            #
+            # ⛔ `own` is the SINGLE presence test (#11217 review round 9,
+            # ISSUE 4). The old condition also required the `_journal_calls`
+            # REGEX, which falsely BLOCKED a legal `_journal_append (name)` — a
+            # space before the paren — on a site whose owned prefix the AST half
+            # had already resolved. The regex adds no coverage: a shadow `def`, a
+            # bare import and a comment produce no `ast.Call`, so they still red.
+            if "os.urandom" not in block or not own:
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
                     f"L{lineno} without a "
@@ -2135,6 +2154,29 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
     assert not _raw_detach_violations(root=tmp_path), (
         "a COMMENT's apostrophe inside the call's arguments fabricated a prefix: "
         f"{_raw_detach_violations(root=tmp_path)}")
+
+    # A legal SPACE before the call's paren is the same call (#11217 round-9
+    # review, ISSUE 4). The presence half used to AND the AST scan with a REGEX
+    # requiring the literal `_journal_append(`, so this compliant site redred
+    # while `_journal_prefixes` had already resolved its owned prefix.
+    site.write_text(_raw_client_site(
+        '    name = f"test_ok_{os.urandom(4).hex()}"',
+        "    _journal_append (name)",
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a legal space before the paren red a compliant site: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # …and the shapes the regex WAS added for must still red without it: a local
+    # `def _journal_append` produces no `ast.Call`, so the AST half already
+    # covers them and `_journal_calls` is not needed in the decision at all.
+    site.write_text(_raw_client_site(
+        '    name = f"test_ok_{os.urandom(4).hex()}"',
+        "    def _journal_append(n): pass",
+    ), encoding="utf-8")
+    assert _raw_detach_violations(root=tmp_path), (
+        "a local `def _journal_append` shadow stopped reding once the regex left "
+        f"the decision: {_raw_detach_violations(root=tmp_path)}")
 
     # Only the binding LIVE at the call is journaled, so a DEAD earlier binding
     # must not be reported over a live UNDECIDABLE one — but the verdict on an
