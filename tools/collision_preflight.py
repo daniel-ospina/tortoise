@@ -1673,8 +1673,9 @@ def closing_reference(text: str, issue: int) -> bool:
       anything" would be FALSE, and it was written here until the #11105 review
       measured the contradiction: the same matched PR number is returned by
       `_prs_serving_issue` into `attributed_prs`, and the live-lane
-      harness-queue arm renders that attribution at `strong` (:8044), which
-      DECIDES the verdict. So this regex CAN block through the queue arm, and it
+      harness-queue arm renders that attribution at `strong` — the row
+      `scan_process_surface` adds in its lane-queue loop — which DECIDES the
+      verdict. So this regex CAN block through the queue arm, and it
       does so even when the body NEGATES the phrase ("This does NOT close #N") —
       a keyword regex cannot read negation. That over-attribution is the
       ACCEPTED direction (a missed duplicate is worse than a false alarm); the
@@ -5365,13 +5366,15 @@ def _prs_serving_issue(prs: list[dict], issue: int) -> set[int]:
     as STRONG evidence are read here — title, head ref, the computed closing
     reference, and the body's closing keyword — and nothing lexical is invented.
 
-    ⛔ A missing/unreadable `closingIssuesReferences` answers "not by that arm"
-    here, because the PR surface ALREADY reports that surface INCOMPLETE (an
-    unmeasured test is not evidence either way) — it then falls through to the
-    BODY keyword below. So the precise statement of this helper's reach is: a
-    MISS can only ever NARROW the queue arm, while a HIT (from any of the four
-    fields) can DECIDE the verdict, because the queue arm renders an attribution
-    at `strong` (:8044).
+    ⛔ A missing/unreadable `closingIssuesReferences` is NOT a pass and NOT an
+    answer of "not by that arm": the PR surface ALREADY reports that surface
+    INCOMPLETE (an unmeasured test is not evidence either way), and this helper
+    then falls through to the BODY keyword below. So the precise statement of
+    this helper's reach is: a MISS can only ever NARROW the queue arm, while a
+    HIT (from any of the four fields) can DECIDE the verdict, because
+    `SURFACE_PROCESSES` renders an attribution at `strong` on TWO arms — the
+    lane-queue row `scan_process_surface` adds, and `_parent_attribution`'s
+    ancestor-argv row, which reads the same `attributed_prs` set.
 
     ⛔ BUT THE BODY IS STILL CLOSING EVIDENCE (review of #11105, P2 — fail-open).
     The closed-PR page is REST `/pulls`, which carries NO
@@ -8420,9 +8423,11 @@ def run_preflight(
                 # therefore invisible to every arm, and the verdict could be
                 # CLEAN while a live lane held the work. The payload is already
                 # fetched (one REST page above), so the extra evidence costs no
-                # API call: the projection carries `number`, `title` and
-                # `headRefName`, which is what `_prs_serving_issue` reads; the
-                # GraphQL-only closing reference is absent here — which does NOT
+                # API call: the projection carries `number`, `title`,
+                # `headRefName` AND `body` (the jq projection in
+                # `_closed_pr_sample`), which are the four fields
+                # `_prs_serving_issue` reads; the GraphQL-only closing
+                # reference is absent here — which does NOT
                 # make that helper blind: it falls through to the SAME body
                 # predicate this page's own PR surface attributes with
                 # (`closing_reference(body, issue)`), so a body-only closing

@@ -9637,9 +9637,9 @@ exec {real} "$@"
         `closing_reference` is a keyword regex and cannot read negation, so a
         merged PR whose body says "This does NOT close #3061; a follow-up is
         needed." matches it. Routed through `_prs_serving_issue` that hit reaches
-        the live-lane harness-queue arm, whose row is `strong` (:8044) and
-        therefore DECIDES the verdict — the same hit the closed-PR surface
-        renders as `(weak) (advisory — cannot block)`.
+        the live-lane harness-queue arm, whose row is `strong` and therefore
+        DECIDES the verdict — the same hit the closed-PR surface renders as
+        `(weak) (advisory — cannot block)`.
 
         That asymmetry is deliberate and must stay in this direction: the surface
         already accepts it for itself ("a missed duplicate is worse than a false
@@ -9681,11 +9681,17 @@ exec {real} "$@"
         keyword anywhere — so nothing attributes and the verdict stays CLEAN.
         Without this, the test above would pass even if the fall-through had been
         replaced by "attribute every closed PR".
+
+        The body DOES name the issue number (`context in #3061`), which is what
+        makes this the control for the predicate rather than for the regex as a
+        whole: `number_present` matches it and `closing_reference` does not, so a
+        future widening from the closing keyword to any number mention reds here
+        (review of #11105, delta review — the sharper control).
         """
         self.gh_fixtures(closed_prs=[{
             "number": 7654,
             "title": "fix(tools): the bundled shape",
-            "body": "Follow-up tracked separately in the tracker.",
+            "body": "Follow-up tracked separately; context in #3061.",
             "headRefName": "fix/bundled-shape",
             "state": "closed",
             "mergedAt": "2026-11-05T12:00:00Z",
