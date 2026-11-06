@@ -3555,32 +3555,65 @@ def test_the_shared_log_is_refused_even_without_the_artifact(tmp_path):
         kill_group(ln.pid)
 
 
-def test_a_record_that_ALREADY_EXITED_is_not_live_whatever_its_pid_answers(tmp_path):
+def test_a_record_that_ALREADY_EXITED_is_not_live_whatever_its_pid_answers(
+        tmp_path, monkeypatch):
     """`_record_is_live` must honour `EXIT=` before it consults `PID=`/`CHILD_PID=`.
 
     ⛔ Deleting `if _attempt_exits(text): return False` left this whole suite green
-    (measured, 96 passed), so the arm had no regression detector. The consequence is
-    the ordering it exists for: during the window where a finished attempt's carrier
-    is still exiting, its pid (possibly recycled) still answers alive, so a FINISHED
-    attempt would outrank the genuinely-live record at `_artifact_for_any_spelling`'s
-    liveness pass — and `collect` would publish that attempt's `refused`/`lost`.
-    `lost` is exactly the state `launch`'s duplicate-rail guard ACCEPTS, i.e. the
-    #3061 direction (a second rail on one PR).
+    (measured: arm present → 98 passed, arm DELETED → 98 passed), so the arm had no
+    regression detector. The consequence is the ordering it exists for: during the
+    window where a finished attempt's carrier is still exiting, its pid (possibly
+    recycled) still answers alive, so a FINISHED attempt would outrank the
+    genuinely-live record at `_artifact_for_any_spelling`'s liveness pass — and
+    `collect` would publish that attempt's `refused`/`lost`. `lost` is exactly the
+    state `launch`'s duplicate-rail guard ACCEPTS, i.e. the #3061 direction (a second
+    rail on one PR).
+
+    ⛔ AND THE PIN ITSELF WAS VACUOUS UNTIL THE PROBE WAS FORCED ALIVE. Its first
+    form wrote `PID=<pytest's own pid>`, whose argv does not carry the artifact path,
+    so `_rail_alive` answered "not ours" at `_pid_alive`'s marker test and the
+    assertion held for a reason with nothing to do with `EXIT=`: arm present → this
+    test passed, arm DELETED → this test passed (measured at `34e57cb58`). An
+    assertion satisfied by an unrelated branch is not a detector, however green it
+    is. `_rail_alive` is therefore monkeypatched to answer ALIVE, which is the one
+    condition under which `EXIT=`'s precedence is observable at all: arm present →
+    passed, arm deleted → FAILED (measured, same fixture).
+
+    The same-record-differing-only-in-`EXIT=` assertion is the vacuity guard for the
+    patch itself: if the monkeypatch were not in effect (wrong symbol, silently
+    unapplied), the unterminated record would read NOT live and fail here instead of
+    letting the pin pass for the old wrong reason.
 
     The control half matters as much as the pinned half: the same record WITHOUT the
-    `EXIT=` line must still read LIVE, so this cannot be satisfied by a blanket
-    `False` (which would make every rail look dead and re-open the duplicate launch
-    from the other side).
+    `EXIT=` line must still read LIVE under the REAL probe, so this cannot be
+    satisfied by a blanket `False` (which would make every rail look dead and re-open
+    the duplicate launch from the other side).
     """
+    head = f"PR=77\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nPID={os.getpid()}\n"
     exited = tmp_path / "rail-o-r-77.md"
-    exited.write_text(
-        f"PR=77\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nPID={os.getpid()}\nEXIT=0\n",
-        encoding="utf-8",
-    )
-    assert not rd._record_is_live(exited), (
-        "a record whose writer already wrote EXIT= is FINISHED — a recycled pid must "
-        "not resurrect it"
-    )
+    exited.write_text(head + "EXIT=0\n", encoding="utf-8")
+    # Byte-identical to `exited` minus the `EXIT=` line: under ONE probe, the two
+    # answers can only be produced by `EXIT=`.
+    unterminated = tmp_path / "rail-o-r-77-live.md"
+    unterminated.write_text(head, encoding="utf-8")
+
+    probes: list[str] = []
+
+    def forced_alive(*_a, **_k):
+        probes.append("probe")
+        return True
+
+    with monkeypatch.context() as m:
+        m.setattr(rd, "_rail_alive", forced_alive)
+        assert rd._record_is_live(unterminated), (
+            "the forced-alive probe must be IN EFFECT — with no EXIT= this record "
+            "reads live, or the pin below is measuring an unrelated branch again"
+        )
+        assert not rd._record_is_live(exited), (
+            "a record whose writer already wrote EXIT= is FINISHED — a recycled pid "
+            "must not resurrect it, even when the liveness probe answers alive"
+        )
+    assert probes, "the pinned half never consulted the liveness probe"
 
     alive = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
