@@ -13403,6 +13403,23 @@ class TortoiseSDK:
                         if (isinstance(_existing_key, str) and _existing_key
                                 and _existing_key != _supplied_key):
                             props.pop("key", None)
+                            # …and SAY it (#10481 review, P3): the CONTENT-hit
+                            # branch below already warns when it refuses to
+                            # reassign a key, so a caller whose spelling was not
+                            # applied is told there. Popping silently here made
+                            # the same refusal invisible on the KEY-hit path —
+                            # the caller writes `"  PK  "`, gets a correct fold,
+                            # and never learns the graph kept `"PK"`. Same
+                            # posture as #6110's "say so, or the collision stays
+                            # silent", and for the same reason: the spelling the
+                            # graph holds is a fact about THEIR identity.
+                            _logger.warning(
+                                "create_point: key %r not applied — the key "
+                                "resolved point %s, which already holds key %r. "
+                                "A dedup hit never reassigns an existing key "
+                                "(#6110 first-writer-wins); the stored spelling "
+                                "is kept verbatim",
+                                _supplied_key, pid, _existing_key)
                     else:
                         # The hit came from CONTENT, not from the key: never
                         # silently REASSIGN an existing point's key. A key

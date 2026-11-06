@@ -2589,6 +2589,39 @@ def test_the_seek_answers_the_SAME_with_and_without_the_key_INDEX(sdk):
         "#6110 duplicate is re-created in that state")
 
 
+def test_a_padded_spelling_that_was_NOT_applied_is_AUDIBLE(sdk, caplog):
+    """#10481 review P3 — the KEY-hit branch popped the stale spelling SILENTLY
+    while the CONTENT-hit branch warns, so a caller whose spelling was not
+    applied was told on one path and not the other.
+
+    Same content on purpose: that keeps the content-collision warning out of
+    the log, so the assertion can only pass on the SPELLING warning. Pre-fix
+    (silent pop) this FAILS — the fold happened, the stored key stayed ``"PK"``
+    and the caller was told nothing.
+    """
+    a = sdk.create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        caplog.clear()
+        b = sdk.create_point("statement", "AUDIBLE-A", key="  PK  ", dedup=True)
+    assert b["id"] == a["id"], "the padded re-run did not fold"
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == "PK", (
+        f"the stored spelling changed to {stored!r} — a dedup hit must never "
+        "reassign an existing key (#6110)")
+    assert any("not applied" in r.getMessage() for r in caplog.records), (
+        "the caller's spelling was refused SILENTLY: "
+        f"{[r.getMessage() for r in caplog.records]}")
+    # …and an EXACT spelling stays quiet — the warning is about a refusal, not
+    # about every dedup hit (#490 churn is the reason the pop exists at all).
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        caplog.clear()
+        sdk.create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
+    assert not [r for r in caplog.records if "not applied" in r.getMessage()], (
+        "an exact-spelling dedup hit warned that a key was not applied")
+
+
 def test_a_blank_to_PYTHON_key_agrees_across_the_simulation_and_the_writer(sdk):
     """OBSERVATION PINNED (recorded by the #10481 review, not charged as a
     finding): ``_item_dedup_key`` gates PRESENCE with Python's ``str.strip()``
