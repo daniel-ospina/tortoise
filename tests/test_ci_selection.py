@@ -61,6 +61,17 @@ def _sel(changed, event="pull_request"):
     return select(changed, event, load_manifest())
 
 
+#: A string literal that IS a path to the operator runbook — the shape a test
+#: builds the path from (`REPO_ROOT / "docs" / "infra-runbook.md"`,
+#: `Path(__file__)… / "docs/infra-runbook.md"`). Deliberately anchored so it does
+#: NOT match a prose mention (`"docs/infra-runbook.md §4.6 …"`), which is a
+#: citation, not a reader. Used by
+#: `test_the_record_schema_placement_pins_run_on_a_doc_only_diff` to DERIVE the set
+#: of tests that read the doc (#11064 review round 9, P2: a hand-written census of
+#: that set was false — four readers were asleep on a runbook-only diff).
+_RUNBOOK_PATH_LITERAL = re.compile(r'''(["'])(?:[^"'\n]*/)?infra-runbook\.md\1''')
+
+
 def _expand(legs: dict) -> dict:
     """Compare leg membership without caring about the .py suffix.
 
@@ -230,22 +241,32 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured at this head: 150 files for the STORAGE diff, 73 for the EXTRACTOR
+    Measured at this head: 155 files for the STORAGE diff, 78 for the EXTRACTOR
     diff (empty surfaces, the early return); the gate is in the selected set in
     both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
     measurements, not constants, and they move for DIFFERENT reasons:
 
-    * the **150** is `onboarding` ∪ `tier1` **minus 14** — the union is 164 at
-      this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
+    * the **155** is `onboarding` ∪ `tier1` **minus 14** — the union is 169 at
+      this head (97 + 78 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
-    * the **73** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1097 at
-      this head (1094 on `main` before this fold's three new test files), and it
-      moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
-      The `60` this sentence carried was that same `tier1` set **13 rows ago**
+    * the **78** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool" — that is a
+      DIFFERENT measurement, `len(fast_pool(manifest))`, and this bullet
+      deliberately carries no figure for it: these three registrations do not
+      change it (all three files were already classified), and it moves for
+      other reasons again, so re-derive it rather than reading this sentence.
+      ⚠️ And `fast_pool` subtracts `ENV_BROKEN_FILES`
+      itself, so a hand count of the classification sets lands one high — which
+      is how a figure re-derived by counting can look like it disagrees with the
+      code that produced it (#11064 review r15, P3).
+      The `60` this sentence carried was that same `tier1` set **18 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
-      and 73 here), i.e. the very "a past state quoted as a current one"
-      defect the line below warns about.
+      and 78 here), i.e. the very "a past state quoted as a current one"
+      defect the line below warns about — and the constant this bullet used to
+      publish for the pool decayed faster still (written `1109`, already `1110`
+      at the commits that wrote it, `1111` measured on this tree, which merges
+      `4f2d09778c`), which is why the figure is gone rather than corrected
+      again.
 
     Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
     trusting either — the assertions below are the pin, this
@@ -259,6 +280,32 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+    # ⛔ AND THE FAST-POOL CLAUSE STATES NO FIGURE — EXECUTED (#11064 review r15,
+    # P3, r16 P2). That clause carried `1109`, a number no tree returned (#11064
+    # review r15). Its replacement published a different one, which was already
+    # stale on `main` when it was written and moved twice more inside this single
+    # lane — once when an unrelated test file landed on `main`, once when
+    # `origin/main` was integrated — so the figure is now GONE rather than
+    # corrected a third time, exactly as was done for `1109` (#11064 review r16,
+    # P2). (A hand count of the classification sets lands one high anyway, because
+    # `fast_pool` subtracts `ENV_BROKEN_FILES` itself.) A pool size is a
+    # measurement with several independent reasons to move, so restating it is the
+    # decay this docstring warns about; the derivation pointer is the durable form
+    # and this pin holds it there.
+    _doc = test_v4_membership_gate_runs_on_both_architecture_docs.__doc__ or ""
+    _clause = re.search(r"full`-less fast pool(.{0,600}?)re-derive\s+it", _doc, re.S)
+    assert _clause, (
+        "the fast-pool clause lost its `len(fast_pool(manifest))` derivation "
+        "pointer — without it the sentence has no referent and a reader must "
+        "invent the pool size (#11064 review r15, P3)"
+    )
+    assert not re.search(r"\b\d{3,}\b", _clause.group(0)), (
+        "the fast-pool clause states a figure again, and a pool size is a "
+        "measurement that moves for three reasons — keep the derivation "
+        "pointer instead of a number (#11064 review r15, P3: the figure this "
+        "clause carried matched no tree when it was read)"
+    )
 
     # #10980 review (P2): the §9.4/§12.1b source-vector pin lives in the
     # narrative-home module, and it guards the SAME document — so a STORAGE-only
@@ -494,6 +541,116 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
         "the #8614 runbook owner must stay in tier1 — #9548 adds a second "
         "runbook reader, it does not replace the first"
     )
+
+
+def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
+    """#11064 review (P1): the pins must run on the DOCS that can break them.
+
+    `tests/test_record_schema_placement.py` reads several doc paths, and they do
+    not all select the same surface. `08-hosted-prerequisites.md`, `docs/00_index.md`,
+    `docs/architecture/STORAGE-ARCHITECTURE.md` and the capstone `README.md` are
+    surface-selecting, so the pins on them run through those rows. But
+    `docs/infra-runbook.md` (the §9 drill row that
+    `test_the_epic_r8_drill_blocker_agrees_with_the_runbook` requires to keep
+    naming a `captured` session and a `direct` DSN),
+    `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
+    (the `_ARMED_SOURCE_OF_TRUTH` anchors) and
+    `docs/epics/2026-10-10-7879-postgres-record/04-projection.md` (its
+    resolved-totals sentence) match no SOURCE_PATTERNS entry, and `docs/` is in
+    NON_PYTHON_PREFIXES — so a diff touching only one of them filters to
+    `changed == []` and takes the docs-only early return: tier1 ONLY.
+    Registered in `core` but not in `tier1`, those pins were therefore asleep on
+    exactly the diffs that can re-break them: deleting `captured`/`direct` from
+    the §9 drill row (which is what the pre-#11064 row said — the stale premise
+    sent a lane back to the arming), dropping 09's arming anchor, or editing 04's
+    sentence would merge green and leave 08 §R8 silently disagreeing with the
+    runbook it is derived from (#4309 silent-drop class; the #8614 / #9548 shape
+    one file over).
+
+    A `core` registration cannot cover this on its own: a surface's test files
+    run only once that surface is ALREADY selected, which a docs-only diff never
+    does. Measured at the pre-fix tree: `surfaces=[]` for each of the three, and
+    this file absent from `test_files` — and selected once the `tier1` entry is
+    in. (Counts are deliberately not restated here: a copied figure is what goes
+    stale, per `tools/ci_selection.py`'s own rule.)
+    """
+    for doc in (
+        "docs/infra-runbook.md",
+        "docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md",
+        "docs/epics/2026-10-10-7879-postgres-record/04-projection.md",
+    ):
+        r = _sel([doc])
+        assert r["full"] is False
+        assert r["surfaces"] == [], (
+            f"{doc} is expected to select NO surface (that is what puts it on "
+            "the docs-only early return) — if a SOURCE_PATTERNS row now matches "
+            "it, this pin's premise changed and the tier1 registration should "
+            "be re-derived rather than assumed"
+        )
+        assert "test_record_schema_placement.py" in r["test_files"], (
+            f"a {doc}-only diff must select `test_record_schema_placement.py` — "
+            "it binds that doc, and a `core`-only registration is asleep on "
+            "every docs-only diff (#11064 review, #4309 class)"
+        )
+    # ... and EVERY test that READS the runbook must stay selected alongside it:
+    # these files pin DIFFERENT sections of the same doc, so none substitutes for
+    # another.
+    #
+    # ⛔ The set is DERIVED, not enumerated (#11064 review round 9, P2). It used to
+    # be a hand-written assertion over "the pre-existing runbook owners" carrying
+    # the message "a third runbook reader … does not replace the earlier two" — a
+    # census that read as complete and was not: `test_record_backup.py` (the §9
+    # exit-1 row's failure class), `test_session_extraction_modes.py` (§4.6's
+    # `VENICE_API_KEY` row), `test_durability_posture.py` (the runbook in its
+    # `SCAN_FILES`) and `test_retention_promise.py` (it in `LINKED_FILES`) all READ
+    # the doc. TWO of them were asleep on a runbook-only diff —
+    # `test_record_backup.py` and `test_session_extraction_modes.py`, measured
+    # UNSELECTED at `origin/main` — so editing a row they pin merged green with the
+    # pin never run; the other two were already reachable through their own `tier1`
+    # arms, which is exactly why a list of "the runbook-specific owners" could not
+    # see the whole set (the #4309 silent-drop class the registration exists to
+    # close). A census that is not one is not: the fix was to register the two AND
+    # to make the list derive itself.
+    #
+    # The signal is a string literal that IS the doc's path — `"infra-runbook.md"`
+    # or `"docs/infra-runbook.md"`, the shape a path is built from
+    # (`REPO_ROOT / "docs" / "infra-runbook.md"`,
+    # `Path(__file__)… / "docs/infra-runbook.md"`). A PROSE mention inside a
+    # docstring or message (`"docs/infra-runbook.md §4.6 …"`, `` `…` ``) does not
+    # END at the extension and is correctly not a reader. Residual, stated because
+    # a derivation that cannot see a shape is not a proof of absence: a reader that
+    # builds the path by concatenation or from a variable is invisible here and must
+    # still be registered by hand.
+    runbook_readers = set()
+    r = _sel(["docs/infra-runbook.md"])
+    for reader_path in sorted(Path(__file__).resolve().parent.rglob("*.py")):
+        if reader_path.name == Path(__file__).name:
+            # this pin names the doc as a `select()` INPUT and never reads it
+            continue
+        if _RUNBOOK_PATH_LITERAL.search(
+            reader_path.read_text(encoding="utf-8", errors="replace")
+        ):
+            runbook_readers.add(reader_path.name)
+    assert runbook_readers == {
+        "test_deploy_workflow.py",
+        "test_durability_posture.py",
+        "test_fly_secret_drift.py",
+        "test_record_backup.py",
+        "test_record_schema_placement.py",
+        "test_retention_promise.py",
+        "test_session_extraction_modes.py",
+    }, (
+        "the derived runbook-reader set changed — a NEW reader must be registered "
+        f"in tier1 (and added here) or a retired one removed: {sorted(runbook_readers)}"
+    )
+    for owner in sorted(runbook_readers):
+        assert owner in r["test_files"], (
+            f"{owner} READS docs/infra-runbook.md but is NOT selected on a "
+            "runbook-only diff — its pins are asleep on the only diff that can "
+            "break them (a docs-only diff filters to `changed == []` and takes "
+            "the tier1 early return, so an `api`/`core` registration cannot reach "
+            "it; #4309 silent-drop class, #11064 review rounds 1 and 9)"
+        )
 
 
 def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
@@ -3148,7 +3305,7 @@ def test_gh_read_cache_tool_change_selects_core_not_tier1():
     (`"core" in r["surfaces"]` and `"test_gh_read_cache.py" in r["test_files"]`);
     only the third (`r["full"] is False`) survives, unexercised. MEASURED both ways:
     with the entry `surfaces=['core']`, `full=False`, file present; without it
-    `surfaces=[]`, `full=False`, 73 tier-1 files and the pin ABSENT. Stated as two
+    `surfaces=[]`, `full=False`, 78 tier-1 files and the pin ABSENT. Stated as two
     because the tier-1 fallback genuinely does not carry this file — the very premise
     three lines above — so an earlier cut of this docstring that claimed only the
     FIRST assert fails understated the pin and mis-described its own failure mode.
@@ -3157,6 +3314,44 @@ def test_gh_read_cache_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_gh_read_cache.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_issue_process_lint_tool_change_selects_core_not_tier1():
+    """A change to the issue-process lint must run the cases that pin its false-positive bound
+    (#11077 review P1).
+
+    `tests/test_issue_process_lint.py` is registered on the `core` surface and owns the whole
+    claim-vs-mention boundary — the measured 68 % false-positive population (criterion ids, a cited
+    precedent, a PR's own number, inline code, HTML comments) and the quoted-example shapes — plus
+    the pin that keeps the lint OUT of every required check. That registration is INERT for a
+    tool-only diff: `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/issue_process_lint.py`, so `select()` returns NO surface, takes the docs-only early
+    return and falls back to the tier-1 smoke set, which does not contain the file. Widening the
+    claiming-word window would then be the one PR that never ran the negatives it must not break.
+
+    Mutation check: removing the CORE_ALSO entry fails the first TWO asserts
+    (`"core" in r["surfaces"]` and `test_issue_process_lint.py in r["test_files"]`); the third
+    (`r["full"] is False`) survives, unexercised, because the docs-only early return also yields
+    `full: False`. Measured with the entry removed: `surfaces=[]`, `full=False`, file ABSENT —
+    so the first assert fails FIRST and the second fails too. Stated as the pair because the
+    sibling `test_gh_read_cache_tool_change_selects_core_not_tier1` says the same thing, and a
+    reader re-deriving this pin by hand should not get a different answer from each test.
+    """
+    r = _sel(["tools/issue_process_lint.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_issue_process_lint.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+    # ⛔ AND THE DOC IS THE OTHER HALF OF THE SAME CONTRACT (measured at `06bc97f30`, review P2):
+    # `docs/` is a flat NON_PYTHON_PREFIXES entry too, so a DOC-ONLY edit selected `surfaces=[]`,
+    # 74 tier-1 files and NO suite — and the two pins whose whole purpose is "the paste-ready block
+    # cannot drift" (`test_the_doc_block_matches_the_template`,
+    # `test_every_bash_example_in_the_doc_parses`) would then never run on the one PR that edits
+    # that block or a `bash` example. The template side is already covered (a `.github/` change
+    # selects `full: True`); this asserts the docs side.
+    d = _sel(["docs/ops/ISSUE-WORKING-PROCESS.md"])
+    assert "core" in d["surfaces"], d
+    assert "test_issue_process_lint.py" in d["test_files"], d
 
 
 def test_ci_catch_history_tool_change_selects_core_not_tier1():
@@ -5237,8 +5432,8 @@ def test_ready_for_owner_tool_change_fails_closed_to_full():
     # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
     # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
     #
-    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 73 since #10980,
-    # so re-derive it rather than reading this as a current count):
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 78 at the
+    # #11064 head, so re-derive it rather than reading this as a current count):
     #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
     #       -> surfaces: []  full: False  tier-1 `test_files`,
     #          with `test_ready_for_owner.py` ABSENT
@@ -5839,6 +6034,842 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     rc = cs.main()
     assert rc == 1, "a duplicate same-surface entry must redden --integrity"
     assert "core: test_a.py" in capsys.readouterr().out
+
+
+# ── #10790: a duplicate YAML MAPPING key, the class the PARSED dict cannot see ──
+# #5373 (above) reddens a file listed twice WITHIN one surface — a duplicate the
+# parsed dict still expresses. A duplicate *mapping key* is invisible by the
+# time any check holds a dict: `yaml.safe_load` keeps only the LAST value of a
+# repeated key (pyyaml 6.0.3 `BaseConstructor.construct_mapping` is
+# `mapping[key] = value`, and its own comment says it does not check duplicates
+# because that is "too CPU-expensive"), so the earlier row is gone before a
+# dict-level validator can ask about it. YAML itself forbids the shape (1.2.2
+# §3.2.1.3, "each of the keys is unique"), and `yamllint` ships
+# `key-duplicates: enable` in its DEFAULT rule set for exactly this reason.
+#
+# ⛔ This is NOT "the class #5373 cannot see", and the earlier wording here
+# claimed that wrongly (#10790 review 1, measured). `tools/registry_integrity.py`
+# IS the #5373 pair for `merge=union` and it reads with `yaml.compose`, i.e.
+# before any constructor collapses the keys, so it sees a duplicate mapping key
+# at ANY depth in both unioned registries. It runs in the SAME
+# `manifest-integrity` job as `ci_selection.py --integrity`, one step later, and
+# a duplicate `durations` key reddens it. What the arms below pin is the OTHER
+# half: the parse every in-tool reader constructs its dict through, including
+# the refresher's pre-write gate — the only one of the two that can refuse
+# BEFORE an edit is written. Both are kept deliberately; see
+# `DuplicateManifestKeyError`'s docstring for which answers which question.
+#
+# It is not a theoretical shape: `config/ci-surfaces.yml` carries
+# `merge=union`, and MEASURED 2026-11-03 on #10790, merging `origin/main` into
+# the branch produced TWENTY-FOUR duplicate `durations` keys — each a stale
+# pre-refresh row beside main's refreshed twin — while
+# `python3 tools/ci_selection.py --integrity` printed
+# `✅ integrity: all test files classified`. One of them silently reverted the
+# PR's own `test_mcp_bridge.py` weight from 23.8 to 2.0, because its stale
+# duplicate happened to be the LAST one. That check was green on a map whose
+# weights were not the ones the packer would use.
+#
+# What NEITHER guard may refuse is a `<<:` merge override: the YAML merge type
+# is "each of its key/value pairs is inserted into the current mapping, unless
+# the key already exists in it" (https://yaml.org/type/merge.html, Example 1's
+# `# Override`), so the document's own pair deliberately wins.
+# `test_a_merge_key_override_is_NOT_a_duplicate` is that arm, and
+# `test_the_two_duplicate_key_guards_agree_on_a_merge_override` pins that the
+# two guards agree in that direction too — as
+# `test_the_two_duplicate_key_guards_agree_on_a_duplicate` does for the shape
+# they both must refuse, so the pair cannot drift into disagreeing verdicts.
+
+
+def _text_with_a_duplicated_durations_row(path: Path) -> tuple[str, str]:
+    """The real manifest with one `durations` row repeated verbatim.
+
+    Built from the file's own TEXT, not from a parsed dict re-dumped: a
+    ``yaml.safe_dump`` of a dict cannot emit a duplicate key at all, so the
+    reproduction has to start from text — which is also how the union merge
+    produced the real one (it concatenated both sides' rows).
+    """
+    lines = path.read_text().splitlines(keepends=True)
+    start = lines.index("durations:\n")
+    row = lines[start + 1]
+    assert re.match(r"^  [A-Za-z0-9_.\-]+\.py: ", row), row
+    return path.read_text().replace(row, row + row, 1), row.split(":", 1)[0].strip()
+
+
+def test_a_duplicate_mapping_key_is_refused_at_the_parse():
+    """The refusal is at the PARSE, so no reader can be half-wired."""
+    from tools import ci_selection as cs
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    # The PRE-FIX behaviour, stated as a fact about the library this repo uses:
+    # the plain loader ACCEPTS the shape and silently keeps the last row. If a
+    # future pyyaml starts refusing it, this arm is what says so.
+    assert yaml.safe_load(poisoned)["durations"][key] is not None
+
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.parse_manifest_text(poisoned)
+    issues = excinfo.value.issues
+    assert len(issues) == 1, issues
+    assert repr(key) in issues[0]
+    # Both lines are named: a reader must be able to find the pair, since the
+    # whole defect is that one of them is unreachable through the dict.
+    assert re.search(r"line \d+ repeats line \d+", issues[0]), issues[0]
+
+
+def test_integrity_cli_reds_on_a_duplicate_mapping_key(tmp_path, monkeypatch, capsys):
+    """The REQUIRED `manifest-integrity` check must not print green on one.
+
+    Pre-fix this exited 0 (silently collapsing the duplicate). Driven through
+    the real `main()` + the module-level `MANIFEST`, which is exactly what the
+    workflow runs (`python3 tools/ci_selection.py --integrity`).
+    """
+    from tools import ci_selection as cs
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    path = tmp_path / "dup-ci-surfaces.yml"
+    path.write_text(poisoned)
+    monkeypatch.setattr(cs, "MANIFEST", path)
+    monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+
+    rc = cs.main()
+    err = capsys.readouterr().err
+    assert rc == 1, "a duplicate mapping key must redden --integrity, not collapse"
+    assert repr(key) in err, err
+    assert "duplicate mapping key" in err, err
+
+
+def test_the_manifest_validator_calls_a_duplicate_RED_not_UNKNOWN(tmp_path, capsys):
+    """#10790: an observed duplicate is RED (1), not "could not evaluate" (2).
+
+    `ci_manifest.main()`'s catch-all returns 2 for anything it cannot evaluate,
+    which is right for a broken shape and WRONG for this one: the map was
+    evaluated, and what it says is that a row was thrown away.
+    """
+    from tools import ci_manifest
+    from tools import ci_selection as cs
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    path = tmp_path / "dup-ci-surfaces.yml"
+    path.write_text(poisoned)
+
+    rc = ci_manifest.main(["--manifest", str(path)])
+    err = capsys.readouterr().err
+    assert rc == 1, f"a duplicate mapping key must be RED (1), got rc={rc}"
+    assert repr(key) in err, err
+
+
+def test_the_writer_refuses_to_render_a_duplicate_mapping_key():
+    """The refresher's PRE-WRITE gate must NAME a duplicate key, not collapse it.
+
+    ⛔ THE MECHANISM CHANGED AT THE `origin/main` MERGE, and this test is the
+    pin that keeps it from swinging back (#10790). This branch first hardened
+    `ci_timing._manifest_of` to parse through the strict
+    `ci_selection.parse_manifest_text`, so a duplicate raised
+    `DurationsBridgeError` there. `origin/main` landed the SAME hole fixed the
+    other way — `integrity_problems` composes
+    `ci_selection.duplicate_mapping_key_issues(text=…)` and returns the key in
+    its problem list, a NAMED RED. Merged, the raise pre-empted that walk, so
+    `integrity_problems` threw instead of returning its full list, and
+    `validate_refreshed_manifest` refused the top-level-`durations:` shape that
+    main's own arm asserts it must NOT report.
+
+    So the surviving contract is main's, and it is also the better one: a
+    duplicate is a RED the writer reports BY NAME, not a could-not-evaluate.
+    What this test adds over main's `test_integrity_problems_catches_a_duplicate_
+    durations_key` is the direction that was reverted — it fails if anyone
+    re-hardens `_manifest_of`, which is exactly the regression the merge
+    produced.
+
+    Non-vacuous: `_manifest_of` is asserted LENIENT first (it silently keeps the
+    last row — the collapse the walk exists to make loud), so re-adding the
+    raise reds the first arm, and dropping the composed term reds the second.
+    """
+    from tools import ci_selection as cs
+    from tools import ci_timing
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    # (1) The bridge parse stays LENIENT — the silent collapse is the premise.
+    assert ci_timing._manifest_of(poisoned)["durations"][key] is not None
+    # (2) …and the writer's pre-write gate still NAMES the key.
+    problems = ci_timing.integrity_problems(poisoned)
+    assert any("duplicate mapping key" in p and repr(key) in p for p in problems), (
+        f"the refresh's pre-write gate must compose the duplicate-key walk and "
+        f"name {key!r}; it returned {problems!r}")
+
+
+def test_the_documented_split_matches_the_EXECUTED_split_at_every_site(tmp_path,
+                                                                       monkeypatch):
+    """#10790: the prose about WHICH parse refuses a duplicate must match the code.
+
+    Three consecutive reviews on this branch raised this same contradiction and
+    it survived every round, because the FALSE half is the half a maintainer
+    acts on. `ci_timing._manifest_of` parses with the plain `yaml.safe_load`
+    (LENIENT ON PURPOSE, its own note in `tools/ci_timing.py`), yet three other
+    artefacts claimed it reaches the strict `ci_selection.parse_manifest_text`:
+    the `DuplicateManifestKeyError` and `parse_manifest_text` docstrings (which
+    list it as a consumer) and `paid_vs_selected_cli`'s comment ("it parses
+    through `ci_selection.parse_manifest_text` (which refuses a duplicate
+    mapping key)").
+
+    Why it is load-bearing rather than cosmetic: the write path's safety rests
+    ENTIRELY on `ci_timing.integrity_problems` composing
+    `duplicate_mapping_key_issues(text=…)`. A reader who believes the parse
+    already refuses has a documented reason to delete that term as redundant —
+    reopening the #5373 fail-open where the refresher rewrites the FIRST copy of
+    a duplicated row while every reader loads the LAST.
+
+    Non-vacuous in the direction that regressed: the EXECUTED split is asserted
+    first, so the prose is graded against behaviour and not against itself, and
+    each textual arm names a claim that was literally false at the head this was
+    written for (verified red before the prose was corrected).
+    """
+    import inspect
+
+    from tools import ci_selection as cs
+    from tools import ci_timing
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+
+    # (1) The executed split. `_manifest_of` is LENIENT (silently keeps the last
+    #     row — the collapse the composed walk exists to make loud)…
+    assert ci_timing._manifest_of(poisoned)["durations"][key] is not None, (
+        "`_manifest_of` began refusing the shape, so it is no longer the "
+        "documented exception these docstrings must keep naming")
+    # (2) …while the reader-side parse refuses it by construction…
+    with pytest.raises(cs.DuplicateManifestKeyError):
+        cs.parse_manifest_text(poisoned)
+    # (3) …and `load_manifest` — the reader path — reaches that refusal, which is
+    #     what makes the "structurally blind to the class" premise HISTORICAL.
+    poisoned_path = tmp_path / "dup-ci-surfaces.yml"
+    poisoned_path.write_text(poisoned)
+    monkeypatch.setattr(cs, "MANIFEST", poisoned_path)
+    with pytest.raises(cs.DuplicateManifestKeyError):
+        cs.load_manifest()
+
+    def _flat(text: str) -> str:
+        return " ".join(text.split())
+
+    paid = _flat(inspect.getsource(ci_timing.paid_vs_selected_cli))
+    assert "parses through `ci_selection.parse_manifest_text`" not in paid, (
+        "`paid_vs_selected_cli`'s comment claims `_manifest_of` parses through "
+        "the STRICT `parse_manifest_text`. It does not (arm 1), and this entry "
+        "point composes no duplicate walk of its own — a reader who believes "
+        "the comment deletes the composed term from `integrity_problems`")
+    assert "LENIENT" in paid and "safe_load" in paid, (
+        "the comment at this call site must say the seam is the LENIENT one "
+        f"(and name its loader), not leave the split to be inferred: {paid}")
+
+    walk = _flat(cs.duplicate_mapping_key_issues.__doc__ or "")
+    assert "load_manifest`` goes through ``yaml.safe_load" not in walk, (
+        "`duplicate_mapping_key_issues`'s docstring states as CURRENT the "
+        "pre-#10790 premise that `load_manifest` collapses the map. It now "
+        "raises `DuplicateManifestKeyError` (arm 3)")
+    assert "DuplicateManifestKeyError" in walk, (
+        "the walk's docstring must say what `load_manifest` does TODAY, or the "
+        "next lane re-derives its rationale from a superseded sentence")
+
+    for name, doc in (
+        ("DuplicateManifestKeyError", cs.DuplicateManifestKeyError.__doc__),
+        ("parse_manifest_text", cs.parse_manifest_text.__doc__),
+    ):
+        text = _flat(doc or "")
+        if "ci_timing._manifest_of" in text:
+            assert "EXCEPTION" in text or "does NOT" in text, (
+                f"`{name}`'s docstring lists `ci_timing._manifest_of` as a "
+                "consumer of the strict parse. It is the documented "
+                "EXCEPTION — say so, or delete the claim")
+
+
+_NUMBER_WORDS = {
+    "ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
+    "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10, "ELEVEN": 11,
+    "TWELVE": 12, "THIRTEEN": 13, "FOURTEEN": 14, "FIFTEEN": 15,
+    "SIXTEEN": 16, "SEVENTEEN": 17, "EIGHTEEN": 18, "NINETEEN": 19,
+    "TWENTY": 20,
+}
+
+
+def test_the_registration_comment_states_the_hermetic_arm_count_it_has():
+    """#10790: the `core` entry's `sdk`/hermetic split must match the file.
+
+    The comment exists to stop a reader mis-sizing the shard ("would think the
+    wrapper is untested on the URI-less lane"), and the same PR's `durations`
+    row re-derived the split as 14/4 while the `surfaces` comment still said
+    "THIRTEEN" — 13 + 4 = 17 against a file of 18, i.e. the stale half was doing
+    the exact harm its paragraph was written to prevent.
+
+    Both numbers are DERIVED from the test file here rather than restated, so
+    adding a 19th arm reds this instead of silently ageing the comment.
+    """
+    target = "test_vocabulary_gap_run_reader_10626.py"
+    tree = ast.parse((TESTS_DIR / target).read_text())
+    tests = [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name.startswith("test_")
+    ]
+
+    def _takes(fn, arg: str) -> bool:
+        a = fn.args
+        return any(
+            x.arg == arg
+            for x in (*a.posonlyargs, *a.args, *a.kwonlyargs)
+        )
+
+    db_arms = [fn.name for fn in tests if _takes(fn, "sdk")]
+    hermetic = [fn.name for fn in tests if not _takes(fn, "sdk")]
+
+    from tools import ci_selection as cs
+
+    lines = cs.MANIFEST.read_text().splitlines()
+    try:
+        entry = lines.index(f"  - {target}")
+    except ValueError:  # pragma: no cover - registration is separately pinned
+        # `from None`: the `ValueError` is a `list.index` MISS, not the cause of
+        # the failure this assertion reports — chaining it would print
+        # "'  - <target>' is not in list" over the real message (B904).
+        raise AssertionError(f"{target!r} is not registered in the manifest") from None
+    block: list[str] = []
+    for line in reversed(lines[:entry]):
+        if not line.strip().startswith("#"):
+            break
+        block.append(line)
+    comment = " ".join(
+        " ".join(re.sub(r"^\s*#\s?", "", line) for line in reversed(block)).split())
+    assert comment, f"no registration comment above {target!r} in the manifest"
+
+    db_claim = re.search(
+        r"([A-Z]+) arms drive a REAL searchable graph", comment)
+    hermetic_claim = re.search(r"other ([A-Z]+) are hermetic", comment)
+    assert db_claim, comment
+    assert hermetic_claim, comment
+
+    assert _NUMBER_WORDS[db_claim.group(1)] == len(db_arms), (
+        f"the manifest claims {db_claim.group(1)} `sdk`-fixture arms; "
+        f"{target} has {len(db_arms)}: {db_arms}")
+    assert _NUMBER_WORDS[hermetic_claim.group(1)] == len(hermetic), (
+        f"the manifest claims {hermetic_claim.group(1)} hermetic arms; "
+        f"{target} has {len(hermetic)} ({len(tests)} tests - "
+        f"{len(db_arms)} `sdk`)")
+
+
+def test_the_real_manifest_has_no_duplicate_mapping_key():
+    """The live pin: this file must parse under the strict loader.
+
+    At the #10790 merge head this was RED (24 duplicates) while the
+    `ci_selection.py --integrity` step was green, so it is the reader-side arm
+    that catches the union merge even where that step does not run (the
+    `registry_integrity.py` step of the same job catches it too, from the text).
+    """
+    from tools import ci_selection as cs
+
+    manifest = cs.parse_manifest_text(cs.MANIFEST.read_text())
+    assert manifest["durations"], "the durations map must not be empty"
+
+
+def test_a_duplicate_inside_an_anchored_mapping_is_still_refused():
+    """The merge override must not widen into "ignore everything merged".
+
+    A genuine repeat inside an anchor is data loss and must still raise — but NOT
+    for the reason this docstring used to give ("an anchor's own mapping is
+    constructed on its own, with no merge in play"). That premise is false:
+    `Constructor.flatten_mapping` recurses into the merged value node, so a
+    parent's `<<:` flattens an anchor BEFORE that anchor is constructed (pyyaml
+    completes nested mappings from its generator queue after the shallower ones),
+    and its own `<<` is already gone when its `construct_mapping` runs. What keeps
+    an anchor's own rows distinguishable from the merged ones is the inherited/own
+    split by OBJECT IDENTITY in `_NoDuplicateKeyLoader.flatten_mapping`
+    (`tools/ci_selection.py`), which survives that pre-flatten.
+
+    Both orderings are checked, because only the second exercises the
+    parent-flatten: in the first the anchor is constructed before the merge is
+    seen, in the second `top` merges `mid` and flattens it first.
+    """
+    from tools import ci_selection as cs
+
+    anchor_constructed_first = """\
+base: &b
+  a: 1
+  a: 2
+child:
+  <<: *b
+  c: 3
+"""
+    # The anchor sits inside an EARLIER sibling that `top` merges, so `top`'s
+    # flatten reaches `&m` (and, through it, `&b`) before either is constructed.
+    anchor_flattened_by_its_parent_first = """\
+group:
+  base: &b
+    a: 1
+  mid: &m
+    <<: *b
+    a: 2
+    a: 3
+top:
+  <<: *m
+  c: 3
+"""
+
+    for doc, key in (
+        (anchor_constructed_first, "'a'"),
+        (anchor_flattened_by_its_parent_first, "'a'"),
+    ):
+        with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+            cs.parse_manifest_text(doc)
+        assert key in str(excinfo.value), excinfo.value
+    # The refusal above is the duplicate and not the merge: the library accepts
+    # the same document, keeping the last of the two own rows.
+    assert yaml.safe_load(anchor_flattened_by_its_parent_first)["group"][
+        "mid"] == {"a": 3}
+
+
+def test_the_two_duplicate_key_guards_agree_on_a_duplicate(tmp_path):
+    """#10790 review r2 Issue 1: the division of labour is executable, not prose.
+
+    `tools/registry_integrity.py` (file-as-text, `yaml.compose`, the validator
+    `.gitattributes` pairs with `merge=union`) and
+    `ci_selection.parse_manifest_text` (the parse every READER takes) are two
+    guards on one hazard. This pins that they return the same VERDICT on the
+    same document, so a future "consolidation" that deletes one of them has to
+    delete a failing test rather than an unstated assumption.
+    """
+    from tools import ci_selection as cs
+    from tools import registry_integrity
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    path = tmp_path / "dup-ci-surfaces.yml"
+    path.write_text(poisoned)
+
+    issues = registry_integrity.check_registry(path)
+    assert any("duplicate mapping key" in issue for issue in issues), issues
+    assert any(repr(key) in issue for issue in issues), issues
+    with pytest.raises(cs.DuplicateManifestKeyError):
+        cs.parse_manifest_text(poisoned)
+
+
+def test_the_two_duplicate_key_guards_agree_on_a_merge_override(tmp_path):
+    """The agreement runs both ways: neither guard may refuse a legal override.
+
+    Measured pre-fix: `parse_manifest_text` raised on `MERGE_KEY_OVERRIDE_DOC`
+    while `registry_integrity.check_registry` accepted it — one hazard, two
+    verdicts, in one required job. Every legal `<<:` SHAPE is checked here —
+    both anchor ORDERINGS and the nested-anchor shape — because a carve-out
+    proven in one ordering is not a carve-out, and a pair of guards that agree
+    on one shape and disagree on another is one hazard with two verdicts again.
+    """
+    from tools import ci_selection as cs
+    from tools import registry_integrity
+
+    for name, doc in LEGAL_MERGE_DOCS.items():
+        path = tmp_path / f"merge-override-{name}.yml"
+        path.write_text(doc)
+        assert registry_integrity.check_registry(path) == [], (
+            f"registry_integrity reads the node graph and accepts a merge "
+            f"override ({name})")
+        assert cs.parse_manifest_text(doc) == yaml.safe_load(doc), (
+            f"the two guards must reach the same verdict on the same legal "
+            f"document ({name})")
+
+
+def test_the_registrar_loads_through_the_strict_parse(tmp_path):
+    """Issue 1's other half: no in-tool reader loads AROUND the refusal.
+
+    `register()` is the CLI registrar — an in-tool reader of
+    `config/ci-surfaces.yml` that kept its own bare `yaml.safe_load`. That is
+    exactly the half-wiring the parse-level refusal exists to make impossible:
+    it would have edited a manifest whose duplicate row was already collapsed,
+    preserving both rows on disk while reasoning about the wrong weights.
+
+    Non-vacuity: with the pre-fix body
+    (`_normalize_surfaces(yaml.safe_load(text))`) this call did NOT raise — it
+    returned `[]`, having proceeded against the collapsed map.
+    """
+    from tools import ci_selection as cs
+
+    poisoned, key = _text_with_a_duplicated_durations_row(cs.MANIFEST)
+    path = tmp_path / "dup-ci-surfaces.yml"
+    path.write_text(poisoned)
+
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.register(path, tmp_path, "core")
+    assert repr(key) in str(excinfo.value), str(excinfo.value)
+
+
+# A YAML merge key (`<<:`) makes a key appear TWICE in the node pyyaml hands the
+# constructor: `flatten_mapping` PREPENDS the merged pairs, so the document's own
+# pair and the inherited twin both sit in `node.value`. That is the SPEC's
+# documented override — yaml.org/type/merge.html: the pairs are inserted "unless
+# the key already exists in it", Example 1 is literally titled `# Override` —
+# and `yaml.safe_load` resolves it to the document's own value. Reporting it as a
+# duplicate reds a legal document in a REQUIRED check, with a diagnostic that
+# actively misleads ("usually a stale union-merge copy") for a shape that is by
+# construction not one.
+#
+# Only pairs the DOCUMENT itself wrote can be a duplicate, and "own" is decided
+# by OBJECT IDENTITY (`_NoDuplicateKeyLoader.flatten_mapping`): a count of either
+# kind is wrong on one of the three shapes below. Measured on the pre-fix loader:
+# `parse_manifest_text` raised `duplicate mapping key 'weight': line 7 repeats
+# line 3` on the document below while `yaml.safe_load` and
+# `tools/registry_integrity.check_registry` (the sibling gate in the same
+# `manifest-integrity` job) both accepted it.
+MERGE_KEY_OVERRIDE_DOC = """\
+defaults: &defaults
+  weight: 2.0
+  note: carried
+fresh:
+  <<: *defaults
+  weight: 9.5
+"""
+
+# The SAME document with the anchor's two rows swapped. Only the ORDER changed —
+# `yaml.safe_load` resolves both identically — and the order is exactly what a
+# positional carve-out gets wrong: `flatten_mapping` prepends the merged pairs
+# and DELETES the `<<:` key node, so a pre-flatten `len(node.value)` is short by
+# one per merge key and makes the merged mapping's LAST pair look
+# document-written. In the document above the overridden key is FIRST in the
+# anchor, so the misclassified pair is `note` and collides with nothing — which
+# is how the off-by-`n_merge_keys` shipped. Here the overridden key is LAST, and
+# a legal override — identical to `yaml.safe_load`, identical to the sibling
+# gate — was refused as a duplicate pointed at the anchor's own line:
+# `duplicate mapping key 'weight': line 6 repeats line 3`.
+MERGE_KEY_OVERRIDE_ANCHOR_LAST_DOC = """\
+defaults: &defaults
+  note: carried
+  weight: 2.0
+fresh:
+  <<: *defaults
+  weight: 9.5
+"""
+
+# A nested anchor merged by a LATER sibling key: the shape a COUNT of `<<:` keys
+# still gets wrong once the off-by-`n_merge_keys` is repaired. `flatten_mapping`
+# recurses into the merged value node, and pyyaml completes nested mappings from
+# its generator queue AFTER the shallower ones, so `top` flattens `mid`'s node
+# BEFORE `mid` is ever constructed: `mid` then arrives with no `<<:` and with
+# `base`'s pair already prepended, every count reads BOTH pairs as
+# document-written, and `x: 1` / `x: 2` collide. Measured on the count-based
+# repair of the parser: `duplicate mapping key 'x': line 6 repeats line 3`,
+# where `yaml.safe_load` accepts the document and gives `mid == {'x': 2}`.
+MERGE_NESTED_ANCHOR_DOC = """\
+group:
+  base: &b
+    x: 1
+  mid: &m
+    <<: *b
+    x: 2
+top:
+  <<: *m
+  y: 3
+"""
+
+#: Every legal `<<:` override shape, keyed by the name a failure reports.
+LEGAL_MERGE_DOCS = {
+    "anchor-overridden-key-first": MERGE_KEY_OVERRIDE_DOC,
+    "anchor-overridden-key-last": MERGE_KEY_OVERRIDE_ANCHOR_LAST_DOC,
+    "nested-anchor-merged-by-a-later-sibling": MERGE_NESTED_ANCHOR_DOC,
+}
+
+#: The two anchor ORDERINGS, for the arms whose document is otherwise identical.
+MERGE_KEY_OVERRIDE_DOCS = pytest.mark.parametrize(
+    "doc",
+    [MERGE_KEY_OVERRIDE_DOC, MERGE_KEY_OVERRIDE_ANCHOR_LAST_DOC],
+    ids=["anchor-overridden-key-first", "anchor-overridden-key-last"],
+)
+
+#: Every legal shape, for the arms that must hold for all of them.
+LEGAL_MERGE_DOC_PARAMS = pytest.mark.parametrize(
+    "doc", LEGAL_MERGE_DOCS.values(), ids=LEGAL_MERGE_DOCS)
+
+
+@LEGAL_MERGE_DOC_PARAMS
+def test_a_merge_key_override_is_NOT_a_duplicate(doc):
+    """`<<:` overriding an inherited key is the spec's purpose, not data loss.
+
+    Non-vacuity, stated as the measurement that caught each defect:
+
+    * `anchor-overridden-key-last` — with `own_pairs = len(node.value)` taken
+      before the flatten this raised `duplicate mapping key 'weight': line 6
+      repeats line 3`, an INHERITED anchor pair named as the duplicate, while
+      the anchor-first document passed. That also breaks the diagnostic's own
+      promise ("a reader is pointed at the edit that created the duplicate").
+    * `nested-anchor-merged-by-a-later-sibling` — still raised after the
+      off-by-`n_merge_keys` was subtracted (`duplicate mapping key 'x'`), because
+      `mid` is flattened by `top` before it is constructed.
+
+    So this arm is not satisfied by fixing one shape: identity is what pins all
+    three at once.
+    """
+    from tools import ci_selection as cs
+
+    # The authority: what the library (and every plain reader) resolves this to.
+    expected = yaml.safe_load(doc)
+    assert cs.parse_manifest_text(doc) == expected, (
+        "the strict loader must resolve a merge-key override exactly as "
+        "`yaml.safe_load` does — the document's own pair wins"
+    )
+
+
+def test_a_merge_key_override_resolves_to_the_documents_own_value():
+    """The resolved VALUE, not just "no exception" — the override really wins.
+
+    A carve-out that skipped the document's own pair along with the inherited one
+    would also stop raising, while handing readers the anchor's stale value. Every
+    ordering is checked so the value is pinned independently of the shape.
+    """
+    from tools import ci_selection as cs
+
+    for name in ("anchor-overridden-key-first", "anchor-overridden-key-last"):
+        parsed = cs.parse_manifest_text(LEGAL_MERGE_DOCS[name])
+        assert parsed["fresh"] == {"weight": 9.5, "note": "carried"}, name
+    nested = cs.parse_manifest_text(MERGE_NESTED_ANCHOR_DOC)
+    assert nested["group"]["mid"] == {"x": 2}
+    assert nested["top"] == {"x": 2, "y": 3}
+
+
+@MERGE_KEY_OVERRIDE_DOCS
+def test_a_real_duplicate_beside_a_merge_key_is_still_refused(doc):
+    """The merge-key carve-out must not blind the detector: own pairs still red."""
+    from tools import ci_selection as cs
+
+    doc = doc + "  weight: 10.0\n"
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.parse_manifest_text(doc)
+    issues = excinfo.value.issues
+    assert len(issues) == 1, issues
+    # The pair named is the DOCUMENT's two rows (7 and 6), never an inherited
+    # anchor line — a reader is pointed at the edit that created the duplicate.
+    assert "'weight'" in issues[0], issues[0]
+    assert "line 7 repeats line 6" in issues[0], issues[0]
+
+
+def test_one_merge_key_carrying_MANY_pairs_is_still_a_carve_out():
+    """The carve-out is per PAIR, not per `<<:` key: one key inserts many pairs.
+
+    A single `<<: *defaults` inserts every pair of the anchor, so a rule that
+    exempted only "the one pair a merge key brings" would refuse the rest as
+    inherited duplicates. Overriding the anchor's THIRD and LAST pair is still
+    one merge key, still legal.
+    """
+    from tools import ci_selection as cs
+
+    doc = """\
+defaults: &defaults
+  first: 1
+  second: 2
+  third: 3
+fresh:
+  <<: *defaults
+  third: 33
+"""
+    expected = yaml.safe_load(doc)
+    assert expected["fresh"] == {"first": 1, "second": 2, "third": 33}, expected
+    assert cs.parse_manifest_text(doc) == expected
+
+
+def test_a_REPEATED_merge_key_is_a_duplicate_for_BOTH_guards(tmp_path):
+    """Two `<<:` keys in ONE mapping: a key repeat, not a carve-out.
+
+    The merge key is a key like any other, so YAML's uniqueness rule (1.2.2
+    §3.2.1.3) makes the second one a duplicate — and this loader DELETES the
+    merge keys during the flatten, so without an explicit check the repeat is
+    invisible here while the node-graph gate (`registry_integrity`, the sibling
+    step of the same required job) refuses it. That would be the one-hazard,
+    two-verdicts shape `test_the_two_duplicate_key_guards_agree_on_a_merge_override`
+    exists to prevent, so both must refuse it.
+
+    Non-vacuity: on the pre-fix loader this document raised too, but for the
+    WRONG key — `duplicate mapping key 'd': line 11 repeats line 6`, the last
+    pair of an INHERITED anchor mapping — which is the misdiagnosis of the
+    same off-by-one, not a verdict this document should ever have earned.
+    """
+    from tools import ci_selection as cs
+    from tools import registry_integrity
+
+    doc = """\
+left: &left
+  a: 1
+  b: 2
+right: &right
+  c: 3
+  d: 4
+fresh:
+  <<: *left
+  <<: *right
+  b: 22
+  d: 44
+"""
+    path = tmp_path / "repeat-merge-key.yml"
+    path.write_text(doc)
+
+    sibling = registry_integrity.check_registry(path)
+    assert any("duplicate mapping key '<<'" in issue for issue in sibling), (
+        "the node-graph gate's verdict is the one this parse must agree with",
+        sibling)
+
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.parse_manifest_text(doc)
+    issues = excinfo.value.issues
+    assert len(issues) == 1, issues
+    assert "'<<'" in issues[0], issues[0]
+    # The pair named is the two merge-key lines (8 and 9), never an inherited
+    # anchor pair.
+    assert "line 9 repeats line 8" in issues[0], issues[0]
+
+
+#: Two `<<:` keys in ONE mapping, in the shape a count in `construct_mapping`
+#: cannot see: the repeat lives in an ANCHORED mapping that a LATER sibling
+#: merges, so the parent's `flatten_mapping` recursion DELETES those key nodes
+#: before the anchor is ever constructed in its own right.
+REPEATED_MERGE_KEY_NESTED_DOC = """\
+b: &b
+  x: 1
+outer:
+  inner: &m
+    <<: *b
+    <<: *b
+top:
+  <<: *m
+  y: 2
+"""
+
+
+def test_a_repeated_merge_key_inside_an_anchor_flattened_first_is_refused(
+        tmp_path):
+    """The repeat a `construct_mapping` count cannot see (#10790 review r7 P3).
+
+    `flatten_mapping` recurses into the mapping a `<<:` merges, and pyyaml
+    constructs nested mappings from its generator queue AFTER the shallower
+    ones, so `top` flattens `m`'s node — DELETING its `<<` key nodes — before
+    `outer.inner` is constructed. A count taken in `construct_mapping` then
+    reads an empty merge-key list: MEASURED pre-fix, this document was
+    ACCEPTED, while `tools/registry_integrity.py` — the sibling step of the
+    SAME required `manifest-integrity` job — refused it at `.outer.inner`. One
+    hazard, two verdicts, in one required job: exactly the divergence
+    `test_the_two_duplicate_key_guards_agree_on_a_duplicate` exists to prevent.
+    Recording the repeat in `flatten_mapping` (while the key nodes still exist)
+    is what closes it — and it is the only point where every shape converges,
+    because every MappingNode is flattened with its merge keys intact once.
+    """
+    from tools import ci_selection as cs
+    from tools import registry_integrity
+
+    path = tmp_path / "nested-repeat-merge-key.yml"
+    path.write_text(REPEATED_MERGE_KEY_NESTED_DOC)
+
+    sibling = registry_integrity.check_registry(path)
+    assert any("duplicate mapping key '<<'" in issue for issue in sibling), (
+        "the node-graph gate refuses this shape; the parse must agree", sibling)
+
+    with pytest.raises(cs.DuplicateManifestKeyError) as excinfo:
+        cs.parse_manifest_text(REPEATED_MERGE_KEY_NESTED_DOC)
+    issues = excinfo.value.issues
+    assert len(issues) == 1, issues
+    assert "'<<'" in issues[0], issues[0]
+    # The pair named is the two merge-key lines INSIDE the anchor (5 and 6),
+    # never an inherited pair and never the alias site.
+    assert "line 6 repeats line 5" in issues[0], issues[0]
+
+
+def test_a_sequence_merge_overrides_the_LAST_applied_mapping():
+    """`<<: [*a, *b]` applies b then a (pyyaml reverses the sequence), so
+    the LAST-inherited pairs belong to `a` — the ones a pre-fix count reads as
+    document-written."""
+    from tools import ci_selection as cs
+
+    doc = """\
+first: &first
+  shared: from-first
+  tail: first-tail
+second: &second
+  shared: from-second
+fresh:
+  <<: [*first, *second]
+  tail: overridden
+"""
+    expected = yaml.safe_load(doc)
+    # pyyaml gives the sequence merges in REVERSE order, so `first` wins `shared`
+    # and `tail` comes from `first` too — overridden by the document here.
+    assert expected["fresh"] == {
+        "shared": "from-first", "tail": "overridden"}, expected
+    assert cs.parse_manifest_text(doc) == expected
+
+
+def test_an_override_of_a_NESTED_anchor_is_NOT_a_duplicate():
+    """The nested anchor arrives ALREADY FLATTENED — the shape no count survives.
+
+    `flatten_mapping` recurses into the merged value node, and pyyaml completes
+    nested mappings from its generator queue after the shallower ones, so `top`
+    flattens `mid`'s node BEFORE `mid` is constructed. By then `mid` carries
+    `base`'s pair with no `<<:` left, so a count taken here sees two
+    document-written pairs and `x: 1` / `x: 2` collide: measured on the
+    count-based repair, `duplicate mapping key 'x': line 6 repeats line 3` —
+    while `yaml.safe_load` accepts the document and gives `mid == {'x': 2}`.
+    Identity is what holds here: `base`'s pair is the very tuple object that was
+    prepended, whichever construction order reached it.
+    """
+    from tools import ci_selection as cs
+
+    expected = yaml.safe_load(MERGE_NESTED_ANCHOR_DOC)
+    assert expected["group"]["mid"] == {"x": 2}, expected
+    assert expected["top"] == {"x": 2, "y": 3}, expected
+    assert cs.parse_manifest_text(MERGE_NESTED_ANCHOR_DOC) == expected
+
+
+def test_the_same_chain_flat_in_document_order_is_also_accepted():
+    """The SAME chain with the anchor defined at top level — a control arm.
+
+    Here `mid` is constructed before `top` flattens it, so even a count gets it
+    right; keeping both orders pinned means a future mechanism cannot "fix" one
+    shape by breaking the other, and shows the defect above is construction
+    ORDER, not the chain itself.
+    """
+    from tools import ci_selection as cs
+
+    doc = """\
+base: &b
+  x: 1
+mid: &m
+  <<: *b
+  x: 2
+top:
+  <<: *m
+  y: 3
+"""
+    expected = yaml.safe_load(doc)
+    assert expected["mid"] == {"x": 2}, expected
+    assert expected["top"] == {"x": 2, "y": 3}, expected
+    assert cs.parse_manifest_text(doc) == expected
+
+
+def test_an_unhashable_key_is_refused_with_pyyaml_OWN_exception():
+    """`safe_load` parity is a claim of this module's own docstrings, and it is
+    the claim a caller catching pyyaml's error relies on.
+
+    Re-implementing `construct_mapping` instead of delegating to it drops
+    `BaseConstructor`'s `isinstance(key, collections.abc.Hashable)` arm, so a
+    sequence used as a mapping key surfaced as a bare
+    `TypeError: unhashable type: 'list'` — a DIFFERENT exception type for the
+    same document, from a loader that documents itself as a subclass keeping
+    `safe_load` parity (#10790 review note 1). MEASURED pre-fix: this document
+    raised `TypeError` here and `yaml.constructor.ConstructorError` there.
+
+    Not a bypass fix — every CLI caller ends non-zero either way
+    (`ci_manifest.main` maps any failure to exit 2) — so this pins parity, and
+    it reds if the guard is dropped again.
+    """
+    from tools import ci_selection as cs
+
+    doc = "[1, 2]: a\n[1, 2]: b\n"
+    with pytest.raises(yaml.constructor.ConstructorError) as safe:
+        yaml.safe_load(doc)
+    with pytest.raises(yaml.constructor.ConstructorError) as strict:
+        cs.parse_manifest_text(doc)
+    assert "found unhashable key" in safe.value.problem, safe.value.problem
+    assert "found unhashable key" in strict.value.problem, strict.value.problem
+    # Same input character pointed at, so the two refusals are the same refusal.
+    assert strict.value.problem == safe.value.problem
+    assert strict.value.context == safe.value.context, (
+        strict.value.context, safe.value.context)
+
 
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
@@ -7644,8 +8675,18 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
     # anchored to a determiner so a note that merely SAYS `is` somewhere and then
     # describes the counterfactual ("the file is in the fast pool, so its absence
     # packs it at the flat 2.0s default") is not read as a claim.
-    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+2\.0s?\s+default"
-    r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+2\.0s?\s+default",
+    #
+    # The default is ALSO spelled by its constant's NAME, and a note that says "it
+    # takes the flat `DEFAULT_FAST_WEIGHT`" asserts exactly the same basis while
+    # carrying no `2.0s` token — which is how `test_oauth_consent_page_step4.py:
+    # 3.1` and `test_5095_s3_identity_policy.py: 0.4` kept a false basis statement
+    # past this guard after the 2026-11-02 census refreshed them (#10790 review,
+    # P3). Both spellings are matched; the VERB gate is what keeps the legitimate
+    # counterfactual forms silent ("its absence packs it at the flat
+    # `DEFAULT_FAST_WEIGHT`", "the flat default is what it REPLACED").
+    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
+    r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+"
+    r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)",
     re.IGNORECASE)
 
 
@@ -7818,16 +8859,32 @@ def test_flat_default_claim_check_is_not_vacuous():
     stale = (
         "  test_a.py: 2.2  # a new file takes the #3400 flat 2.0s default."
         "\n"
-        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required.")
+        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required."
+        "\n"
+        # The CONSTANT-NAME spelling of the same claim: measured on the real
+        # manifest as `test_oauth_consent_page_step4.py: 3.1` and
+        # `test_5095_s3_identity_policy.py: 0.4`, both invisible to the value-only
+        # pattern (#10790 review, P3).
+        "  test_g.py: 3.1  # a PR-added file, so it takes the flat"
+        " `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading."
+        "\n"
+        "  test_h.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
     legitimate = (
         "  test_c.py: 7.2  # unmeasured — without this row the file packs at the"
         " flat 2.0s default.\n"
         "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
         "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
-        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.")
-    durations = {f"test_{c}.py": 1.0 for c in "abcdef"}
+        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.\n"
+        # The counterfactual forms, spelled with the constant's name.
+        "  test_i.py: 0.4  # THAT SWEEP HAS NOW LANDED: the flat"
+        " `DEFAULT_FAST_WEIGHT` is what it REPLACED rather than what it needs.\n"
+        "  test_j.py: 23.8  # must carry a row or it packs at the flat 2.0 s"
+        " `DEFAULT_FAST_WEIGHT`, not a dev-box reading.")
+    durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
     assert _durations_rows_claiming_the_flat_default(stale, durations) == [
-        ("test_a.py", 2.2), ("test_b.py", 3.7)]
+        ("test_a.py", 2.2), ("test_b.py", 3.7),
+        ("test_g.py", 3.1), ("test_h.py", 0.4)]
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
 
 
@@ -11165,6 +12222,119 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
         "wheel either way")
 
 
+# ── #11063 / #10182: a POST cache SAVE is charged against the job's cap ──
+#
+# `actions/cache` writes in a POST step, and (#10182) that step counts against
+# the job's own `timeout-minutes` exactly like a work step — with NO timeout of
+# its own, so it is UNBOUNDED, not merely large. Measured twice, on two jobs,
+# with the same ~3.6 GB `~/.cache/pip` archive:
+#
+#   run 41100829071 `test-carve-out (b)` (124223444008) — green pytest, then
+#     17m13s inside the post save, killed by the 30m cap  -> `cancelled`
+#   run 42090497973 `test-record-postgres` (127519984967) — `192 passed,
+#     1 xfailed in 349.59s` at 21:39:44Z, teardown green at 21:39:58Z, then the
+#     post step tarred for 5m43s and pushed 3.6 GB at ~7 MB/s (`Sent 0 of
+#     3616384780`), reaching 76% when the 20m cap elapsed at 21:51:53Z
+#     -> `cancelled`
+#
+# `python-ci-gate` reads `cancelled` as red BY DESIGN (#5219: a cancelled leg
+# certifies nothing), so in BOTH cases a GREEN leg that failed no test withheld
+# a REQUIRED check. The first instance got the carve-out job fixed (#10182);
+# the second shows the fix was applied to ONE job and the class stayed open.
+#
+# So the rule is stated over the class: a job may only carry an IMPLICIT SAVE of
+# the pip cache when its cap can absorb one. `_PIP_CACHE_SAVE_MIN_CAP_MINUTES` is
+# the measured floor: the jobs at or above it WRITE the shared key (`test-slow`
+# 60m, `test-d14-hosted-api` 50m), and every job below it (carve-out 30m,
+# record-postgres 20m, concurrency-falkor 15m) only ever READS it.
+#
+# `test` (90m) is NOT a pip writer in the merged tree: it restores pip and saves
+# `~/.cache/uv` through an explicit, BOUNDED `actions/cache/save@` step. Its
+# 3.88 GB implicit post save inside a 90 m cap is what reddened run 42000057137
+# (#11063), and that shape is pinned by
+# `test_the_test_job_carries_no_unbounded_cache_post_step` BELOW — the two pins
+# are complementary: that one fixes the job, this one states the class.
+_PIP_CACHE_SAVE_MIN_CAP_MINUTES = 40
+#: The jobs that WRITE the shared `pip-<os>-<hash uv.lock>` key. Pinned so a
+#: future edit cannot leave the key with no writer at all (every reader then
+#: downloads torch's 140 wheels cold on every run), and so a new saver has to
+#: argue its headroom here rather than inherit it silently.
+_PIP_CACHE_WRITER_JOBS = frozenset({"test-slow", "test-d14-hosted-api"})
+#: Jobs that must keep a pip-cache step at all — `actions/cache/restore@` has no
+#: post step, so "delete the step" would red on the cold-install cost instead.
+_PIP_CACHE_READER_JOBS = frozenset({
+    "test-carve-out", "test-record-postgres", "test-concurrency-falkor"})
+#: GitHub's default job cap when `timeout-minutes` is absent.
+_GH_DEFAULT_JOB_CAP_MINUTES = 360
+
+
+def _pip_cache_steps(job: dict) -> list:
+    """The job's steps that address `~/.cache/pip` (exact or multi-path)."""
+    out = []
+    for step in job.get("steps") or []:
+        path = (step.get("with") or {}).get("path")
+        if isinstance(path, str) and "~/.cache/pip" in path:
+            out.append(step)
+    return out
+
+
+def test_only_a_job_that_can_absorb_the_pip_cache_save_carries_one():
+    """#11063: a POST cache SAVE must never be charged against a tight cap.
+
+    `actions/cache`'s post save is UNBOUNDED (no `timeout-minutes` of its own)
+    and is charged against the job's cap. A job whose cap is calibrated to its
+    WORK therefore cannot amortize it: the cap kills the save, GitHub records
+    the green job as `cancelled`, and `python-ci-gate` reds that class by design
+    (#5219) — a required check withheld on a diff that never touched the job.
+
+    Non-vacuous at the pre-fix head in BOTH directions this change made:
+    `test-record-postgres` (cap 20) and `test-concurrency-falkor` (cap 15) each
+    carried a bare `actions/cache@v4` on `~/.cache/pip`, so the first assertion
+    inside the loop reds for each. Deleting those steps instead of switching
+    them cannot pass either: `_PIP_CACHE_READER_JOBS` is asserted to still hold
+    a pip-cache step, and the writer set is pinned to exactly the jobs that
+    keep the shared key warm.
+    """
+    jobs = _load_python_ci()["jobs"]
+    savers, readers = set(), set()
+    for job_id, job in jobs.items():
+        steps = _pip_cache_steps(job)
+        if not steps:
+            continue
+        readers.add(job_id)
+        cap = job.get("timeout-minutes", _GH_DEFAULT_JOB_CAP_MINUTES)
+        saving = [s.get("uses") for s in steps
+                  if str(s.get("uses") or "").startswith("actions/cache@")]
+        if saving:
+            savers.add(job_id)
+            assert cap >= _PIP_CACHE_SAVE_MIN_CAP_MINUTES, (
+                f"job {job_id!r} carries an implicit post-step SAVE of "
+                f"~/.cache/pip ({saving}) under a {cap}m cap. That save is "
+                "charged against the cap and has no timeout of its own, so at "
+                "this cap it can never complete — the job is killed, GitHub "
+                "records a GREEN leg as `cancelled`, and `python-ci-gate` reds "
+                "it by design (#5219), withholding a REQUIRED check (#11063, "
+                "#10182). Use `actions/cache/restore@v4` "
+                "(`continue-on-error: true`) here and let one of"
+                f" {sorted(_PIP_CACHE_WRITER_JOBS)} write the shared key.")
+        for step in steps:
+            uses = str(step.get("uses") or "")
+            if uses == "actions/cache/restore@v4":
+                assert step.get("continue-on-error") is True, (
+                    f"job {job_id!r}: the pip-cache restore must be "
+                    "`continue-on-error: true` — a cache-SERVICE error "
+                    "(transport/503) must never red the leg.")
+    assert savers == set(_PIP_CACHE_WRITER_JOBS), (
+        "the set of jobs carrying an implicit pip-cache SAVE moved: "
+        f"{sorted(savers)} against the pinned {sorted(_PIP_CACHE_WRITER_JOBS)}. "
+        "Adding a writer means arguing its cap absorbs an unbounded save "
+        "(#11063); removing one leaves the shared key with a hole.")
+    missing = _PIP_CACHE_READER_JOBS - readers
+    assert not missing, (
+        f"{sorted(missing)} lost their pip-cache step entirely. `actions/cache/"
+        "restore@v4` is the fix for #11063, not deletion: without it every "
+        "shard downloads torch's 140 wheels cold.")
+
 def test_the_test_job_carries_no_unbounded_cache_post_step():
     """#11063: the `test` job must carry NO unbounded cache post step, and each
     dependency-cache writer must be bounded twice — in SIZE and in TIME.
@@ -12271,7 +13441,7 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
         wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)"),
         *wf_lines[real_marker + 1:],
     ]
-    detached = dropped[:jobs_at] + decoy + dropped[jobs_at:]
+    detached = [*dropped[:jobs_at], *decoy, *dropped[jobs_at:]]
     with pytest.raises(AssertionError, match="different block"):
         _test_job_cache_overrides_block(detached, prune_name)
 

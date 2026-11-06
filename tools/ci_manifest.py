@@ -174,10 +174,15 @@ def _load(path: Path) -> dict:
     ``surfaces`` directly, is what makes this validator see the same manifest
     the selector gates — a hand-reading of the raw YAML could disagree with the
     gate about which files a leg holds.
-    """
-    import yaml
 
-    return _ci_selection()._normalize_surfaces(yaml.safe_load(path.read_text()))
+    The PARSE is the selector's own too, and that matters for one more reason
+    (#10790): ``ci_selection.parse_manifest_text`` refuses a duplicate mapping
+    key, which ``yaml.safe_load`` silently collapses to its last value. A
+    validator reading through a plain ``safe_load`` would therefore validate a
+    manifest with a DIFFERENT weight than the one the selector packs by.
+    """
+    return _ci_selection()._normalize_surfaces(
+        _ci_selection().parse_manifest_text(path.read_text()))
 
 
 # ── staleness / age ──────────────────────────────────────────────────────
@@ -635,6 +640,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = _load(path)
         red, unknown = check(manifest)
+    except _ci_selection().DuplicateManifestKeyError as exc:
+        # #10790: a duplicate mapping key is an OBSERVED defect, so it is RED
+        # (exit 1) — not UNKNOWN (exit 2), the code for "could not evaluate".
+        # Falling through to the generic arm below would mislabel it, and that
+        # mislabel is what let a collapsed map read as merely unobservable.
+        for issue in exc.issues:
+            print(f"x {issue}", file=sys.stderr)
+        return 1
     except Exception as exc:
         # Never a traceback and never 0: the exit code has to carry the same
         # meaning as the report does, or a caller reads "could not look" as

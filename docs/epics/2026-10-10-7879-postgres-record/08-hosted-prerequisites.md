@@ -117,11 +117,11 @@ narrowed PRIMARY exception — an author-set prior is a non-reconstructible inpu
 
 ### A2. The journal → record projection — **EXISTS and is registry-complete**
 
-`tortoise/record_projection.py` (1,824 lines): a declarative mutation algebra with one registry entry
+`tortoise/record_projection.py`: a declarative mutation algebra with one registry entry
 per journal record type, totality as a registry property, idempotence by statement shape
 (`INSERT … ON CONFLICT (org_id, graph_id, node_key) DO UPDATE`), and the property→column decision
-**read from the migrations on disk** rather than restated (`RECORD_MIGRATIONS`,
-`tortoise/record_projection.py:172`; `table_columns()`, `refused_props_names()`).
+**read from the migrations on disk** rather than restated (`RECORD_MIGRATIONS` in
+`tortoise/record_projection.py`; `table_columns()`, `refused_props_names()`).
 
 `EntityMutated op=rename` is the remaining **declared refusal** (`PointsMerged` was one until
 `#9892`: it projects now — one hard delete per loser, the graph fold's own `DETACH DELETE`),
@@ -130,12 +130,17 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 
 ### A3. The write path — **EXISTS, WIRED, and measured working end-to-end**
 
-| piece | file:line |
+| piece | where — cited by SYMBOL, never by line |
 |---|---|
-| the seam | `tortoise/record_writer.py:920` (`write_live_record`), `:654` (`_default_connect`) |
-| arming surface | `tortoise/record_writer.py:232` — `TORTOISE_RECORD_DSN`, **default OFF** |
-| production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py:939`, `tortoise/sdk.py` (`_emit_event`) |
-| tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py:110`; by-value on the hosted REST lane |
+| the seam | `tortoise/record_writer.py` — `write_live_record`, `_default_connect` |
+| arming surface | `tortoise/record_writer.py` — `RECORD_DSN_ENV` (`TORTOISE_RECORD_DSN`), **default OFF** |
+| production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py` (`_emit_event`), `tortoise/sdk.py` (`_emit_event`) |
+| tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py`; by-value on the hosted REST lane |
+
+⛔ **Symbols, not line numbers, on purpose.** Every number this table used to carry had drifted onto
+unrelated text — a bare `)`, a `contextvars` line, a tuple member, a blank line — because a line
+number in a living module is a claim that decays on the next merge. A symbol cannot re-stale. That is
+the rule `docs/00_index.md` records for `sdk.py`, applied here where it was still missing.
 
 **Measured (§G, run 2): the SDK's public capture path wrote layers 1–3 into a real Postgres** — layer 4 is views, and
 the run left `subject` 0 and `relation` 0 (A8, R4, R5), so it does **not** demonstrate edge or Subject
@@ -185,12 +190,12 @@ idempotent, total, and stores no EP scalar`.
 
 | thing that looks live | its actual state | evidence |
 |---|---|---|
-| **the record, in the hosted deployment** | ⛔ **NOT ARMED** *at the census point below* — **superseded on the live deployment, 2026-11-02** ⛔ **and superseded as a task by the owner ruling: DO NOT PROVISION IT** (quoted at R1 below). ⚠️ **Other live-state statements in this file — `:193`, `:589`, `:593`, `:596`, `:718`, `:1016`, and `09-record-tenancy-decision.md` — were written at the census point below and read as `NOT_ARMED`; they describe the tree that was, not the deployment now.** The live app reports `armed: true` with `record_write_failures: {"write_failed": 32}` (measured 2026-11-02, recorded on `#9548`) — so *"the remaining half is the secret itself"* is **no longer outstanding**: the secret is set and the app is armed, which is a state to report, not a step to finish. `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh` or `.github/workflows/deploy-hosted.yml`; the runbook **documented** it (its Secrets Matrix row and the "connecting role" example, #9600) and never provisioned it — documented, not provisioned. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — so the record path **was** inert at the census point and its behaviour **was** unchanged then. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — at the census tree the remaining half was the secret itself; it is now set and the app is armed (see the opening of this cell), so that clause is history, not the live state. ⚠️ A future arming (only after the ruling lifts) must name R6's application role (`tortoise_record_app`, `NOBYPASSRLS`) — never `postgres`/`service_role`, which bypass RLS and would make the tenancy boundary false for the only path that writes customer data ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md)). | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → **5 lines at `ff6379eb2`** — the `origin/main` this branch merges, i.e. what "immediately before #9548" means — not empty and not one: `docs/infra-runbook.md:382` and `:528` (#9557/R9's `record-backup` documentation), `:2774` (#9556/R8's §9 `record-restore` operator example — an **invocation**), and `:2971`/`:3004` (#9600's Secrets Matrix row and its §"The record's connecting role" example — the name **documented**, not provisioned). ⚠️ **The count is per tree:** **0** at this branch's start point `d5c71a470`, **1** at `473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), **5** at `ff6379eb2` — see the supersession note under the census commands, which is the one place the series is maintained. Line numbers are `ff6379eb2`'s and drift as the runbook grows. No hit in `fly.toml`, `entrypoint.sh` or `.github/workflows/`. |
+| **the record, in the hosted deployment** | ✅ **ARMED — AND THE ACT IS AUTHORISED (owner, 2026-11-03).** *At the census point below* it was `NOT_ARMED`, and the 2026-11-01 ruling that then forbade provisioning is **SUPERSEDED** (quoted at R1 below, relabelled — kept as the record of what was overridden, not as an instruction). ⚠️ **The census-point statements in this file — and the live-state sentences in `09-record-tenancy-decision.md` — describe the tree that was, not the deployment now.** Read any statement here that does not carry its own measurement date that way; **this list is NOT exhaustive**, and an enumeration that claims completeness makes everything unlisted read as vetted-current (that is how the last stale sentence survived a sweep scoped to "the files this PR touched"). The sites since labelled and dated **in place**: the RLS row *in A8* ("`NOLOGIN` until ops grants LOGIN"), the §G paragraph that said the name was staged and the secret absent, **R6**'s read-back note, **R7** item 2, and **R8**'s drill attribution. `GET /health` re-measured **2026-11-05T13:11:13Z** reports `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0}` on build `fc6a8a64b` / `migrations_head: 20261030000001_oauth_consent_tickets` — so *"the remaining half is the secret itself"* is **no longer outstanding**. ⚠️ **Read that emptiness for exactly what it is:** it falsifies *"writes are failing"* (the `write_failed: 32` this cell used to quote is a 2026-11-02 reading) but it **cannot establish that a row was written** — the runbook's own rule, *"`record_write_failures: {}` is NOT evidence that a row was written"* — and it does **not** attribute the drop's fix (the dropped rows recorded on `#9548` — 302 at 2026-11-02, 331 in the 2026-11-03 decision — remain unreaped). ⚠️ **The build this cell used to name is SUPERSEDED:** it read *"this build predates `#10648` / `fafb8fdcc` and does not carry it"* on build `fc6a8a64b` / `migrations_head: 20261030000001_oauth_consent_tickets` — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`**, `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **`migrations_head` is the highest migration the IMAGE CARRIES, not the applied schema** (the runbook's own `migrations_head` row); whether `20261102000002` is applied is a database fact read from `supabase_migrations.schema_migrations` — and it **WAS measured, 2026-11-05T23:07:38Z**: the repo's fail-closed drift gate (run `42117073101`, the deploy that shipped `46ea687dc`) read that ledger in prod and printed `OK (no blocking drift)` with no warn-only and no remote-ahead note, so **both `20261102000001` and `20261102000002` are RECORDED APPLIED**. ⛔ The gate reads **version ROWS only** — its own note, *"`supabase migration list --linked` — version ROWS only, so it cannot tell you whether the objects exist"* — so the **OBJECTS remain unread**: recorded is not proven-applied. The full reading, its corroboration and the run that may have recorded them are in the runbook, §"Arming the Postgres record". Re-read `/health` before reusing any of those values — a build sha and a migrations head are measurements, not standing facts. `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh` or `.github/workflows/deploy-hosted.yml`; the runbook **documented** it (its Secrets Matrix row and the "connecting role" example, #9600) and never provisioned it — documented, not provisioned. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — so the record path **was** inert at the census point and its behaviour **was** unchanged then. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — at the census tree the remaining half was the secret itself; it is now set and the app is armed (see the opening of this cell), so that clause is history, not the live state. ⚠️ Any re-arming (authorised since 2026-11-03, and already done — see the opening of this cell) must name R6's application role (`tortoise_record_app`, `NOBYPASSRLS`) — never `postgres`/`service_role`, which bypass RLS and would make the tenancy boundary false for the only path that writes customer data ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md)). | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → **5 lines at `ff6379eb2`** — an ancestor of this branch's base (the #9601 merge, 2026-10-23), and **NOT** the tree immediately before #9548 (that is `047c91f7a`, the arming commit's parent) — not empty and not one: `docs/infra-runbook.md:382` and `:528` (#9557/R9's `record-backup` documentation), `:2774` (#9556/R8's §9 `record-restore` operator example — an **invocation**), and `:2971`/`:3004` (#9600's Secrets Matrix row and its §"The record's connecting role" example — the name **documented**, not provisioned). ⚠️ **The count is per tree:** **0** at this branch's start point `d5c71a470`, **1** at `473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), **5** at `ff6379eb2` — see the supersession note under the census commands, which is the one place the series is maintained. Line numbers are `ff6379eb2`'s and drift as the runbook grows. No hit in `fly.toml`, `entrypoint.sh` or `.github/workflows/`. |
 | **the end-to-end proof, in CI** | ✅ **ARMED by #9551** (PR #9772). The dedicated `test-record-postgres` job provisions a throwaway `postgres:16` on an ephemeral loopback port (`.github/actions/postgres-provision`), sets `TEST_RECORD_DB_URI`, installs the `[postgres]` extra and asserts **zero** skips from the junit XML — so the two Postgres legs run instead of skipping, and an armed-but-skipping job cannot read as green. It is a REQUIRED leg of `python-ci-gate`. | measured on the arming tree (the collection is **70** — 61 record legs + the 9 CI-leg tests this change adds): unarmed → `68 passed, 2 skipped`; armed → **`70 passed, 0 skipped`**, the record migrations applied inside that run |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert` (`record_projection`)), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — and #10620 narrowed `point.search_keys` to `text` — the `_SCHEMA_DISAGREEMENTS` vocabulary AND its detector were DELETED in #10620, so no allowance remains (both halves of R4 fixed). | migrations `20261022000001`, `20261102000002`; `tests/test_9078_record_written_by_production_path.py` (the vocabulary and its detector are DELETED, #10620) |
 | **rebuild the graph from the record** | ✅ **The operator half exists now** — `python -m tortoise record-restore` (`tortoise/record_restore.py`, #9556/R8), with `docs/infra-runbook.md` §9 and its drill table (the drill's *armed-record* row is still **NOT MEASURED**, #9548/#9551). ⛔ **The production door is still blocked**: the wipe runs #2944's L2 name guard and the disposable-graph registry that would admit `org_*` graphs is not landed, so today only a `test_`-named graph can be restored. | `grep -rn 'rebuild_from_record' tortoise/__main__.py` → 1 (the verb's docstring); `grep -rn 'rebuild_from_record(' tortoise/ \| grep -v 'def '` → 1 (`record_restore.py`, the verb's caller) |
-| **RLS as the tenancy boundary** | ✅ **SHIPPED by R6 (#9554) — the GUC is set by the shipped code, and the connecting role is the non-bypass one.** `record_projection.scope_connection()` is the single prologue both record doors install *before their first plan statement* — the write door (`replay()`) and the cache read door (`cache_projection.read_record_view()`) — and it (a) sets `set_config('app.current_org_id', $1, true)` transaction-locally, then (b) on ONE statement reads that GUC back AND reads the connecting role's posture `pg_roles`/`pg_has_role` — **refusing** a superuser, `BYPASSRLS`, a member of either, or the owner of a record table (`RecordProjectionError: … BYPASSES RLS`), and refusing a GUC that did not take. The role is `tortoise_record_app` (`NOBYPASSRLS NOSUPERUSER`), created by `20261025000001_record_tenancy_role_and_guc.sql`; it is **`NOLOGIN` until ops grants LOGIN + a password** (R1, `docs/infra-runbook.md` → "The record's connecting role"), so until R1 lands no production traffic exercises the boundary — it is proven in PGlite, not yet by production writes. The old reading below is kept because it is what the census said before R6: §4's bypass rule fires for the table owner and for `service_role` (the record migrations' own comment still says the write path connects as `service_role`, which R6 superseded). | `grep -n 'def scope_connection' tortoise/record_projection.py` → 1; `grep -rn 'set_config(' tortoise/record_projection.py` → the `TENANT_GUC_SQL` prologue; pins `tests/test_record_tenancy_guc.py` + PGlite `supabase/tests/20261022000001_record_tenancy_posture.sql` |
+| **RLS as the tenancy boundary** | ✅ **SHIPPED by R6 (#9554) — the GUC is set by the shipped code, and the connecting role is the non-bypass one.** `record_projection.scope_connection()` is the single prologue both record doors install *before their first plan statement* — the write door (`replay()`) and the cache read door (`cache_projection.read_record_view()`) — and it (a) sets `set_config('app.current_org_id', $1, true)` transaction-locally, then (b) on ONE statement reads that GUC back AND reads the connecting role's posture `pg_roles`/`pg_has_role` — **refusing** a superuser, `BYPASSRLS`, a member of either, or the owner of a record table (`RecordProjectionError: … BYPASSES RLS`), and refusing a GUC that did not take. The role is `tortoise_record_app` (`NOBYPASSRLS NOSUPERUSER`), created by `20261025000001_record_tenancy_role_and_guc.sql`, which ships it `NOLOGIN` — and ⛔ **that sentence used to read "it is `NOLOGIN` until ops grants LOGIN + a password … no production traffic exercises the boundary": measured false since 2026-10-26.** The grant WAS made out of band and the credential with it (`#9548` comment `6407834085`: `tortoise_record_app.<ref>` as `LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`, verified by connecting as the role), so the boundary **is** exercised by production writes — though ⛔ **not because of the 302 `22P02` failures**, which this cell used to cite: an invalid-JSON cast fires for any **non-bypassing** role — `scope_connection()` refuses `postgres`/`service_role` before the first statement, so those never reach the cast — so it proves the role PASSED the posture gate and an `INSERT` was attempted, never WHICH non-bypassing role made it (the role proof is `6407834085`'s connect-as-the-role). ⚠️ **What remains unproven is the proof, not the posture:** no `journal_event` + `point` row has been shown to land (an empty `record_write_failures` cannot stand in for one), and the 302/331 dropped rows are unreaped. ⛔ **Do not re-run the grant to "finish" it:** `\password tortoise_record_app` ROTATES the live credential the deployed DSN names and needs the GitHub **and** Fly secrets re-set in the same change. The old reading below is kept because it is what the census said before R6: §4's bypass rule fires for the table owner and for `service_role` (the record migrations' own comment still says the write path connects as `service_role`, which R6 superseded). | `grep -n 'def scope_connection' tortoise/record_projection.py` → 1; `grep -rn 'set_config(' tortoise/record_projection.py` → the `TENANT_GUC_SQL` prologue; pins `tests/test_record_tenancy_guc.py` + PGlite `supabase/tests/20261022000001_record_tenancy_posture.sql` |
 | **the record's durability** | ✅ **R9's mechanism is on main — the record now HAS a backup module.** `tortoise/record_backup.py` and its one trigger, `python -m tortoise record-backup`: `pg_dump --data-only` over the record's ten tables → AES-256-GCM → R2 under `record-backups/`, with a restore **drill** that compares per-table counts. Documented in `docs/infra-runbook.md` §3.5, with a row of its own in `docs/durability-posture.md`. The graph archives (`tortoise/backup.py` — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` — `hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`) still copy **the graph**, and are not this. ⚠️ **Two gaps remain, and neither is a missing module**: no cron invokes the verb yet (the window is the operator's manual cadence — `docs/durability-posture.md` states it as UNBOUNDED), and the drill has not been run against the **hosted** Supabase record, so *"the artifact restores, verified per table"* is measured while *"the hosted record has been restored"* is not. ⚠️ It reads the **same** `TORTOISE_RECORD_DSN` and **refuses a pooler DSN** (`record_backup.require_direct_dsn`, exit 2): a dump/restore session needs the **direct** connection (`db.<ref>.supabase.co:5432`), so it is invoked with `--record-dsn <direct DSN>` — the app's pooler value is not usable here. Whether the Supabase plan's own PITR also covers the record stays an owner question; the tree's statements about it are plan-level and about the **control plane** (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`). §R9's checklist item below was written **pre-landing** and still reads as unbuilt — its mechanism half is what landed. | `grep -n 'def require_direct_dsn' tortoise/record_backup.py` → 1; runbook §3.5; `docs/durability-posture.md` (the record row); §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
 
 ---
@@ -202,31 +207,66 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 
 ### R1 — Arm the record in the hosted deployment · **S** · ops + decision · **BLOCKER**
 
-> ⛔ **POSTPONED BY OWNER RULING (2026-11-01) — do not execute this item.** `#9548`'s
-> `Owner decision` comment ([verbatim](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515),
-> quoted (its headline and operational point 3) in the runbook's
-> [Arming the Postgres record](../../infra-runbook.md#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548))
-> says, in the owner's words: "**Do not arm, provision, or point anything at the hosted store.**" — and
-> names this item explicitly as **not** work to pick up. The **BLOCKER** graded below is a statement
-> about the first hosted customer, not a dispatch signal: the secret is **already set** on both the
-> GitHub and Fly surfaces (the app reports `armed: true` with `write_failed: 32`, measured 2026-11-02
-> and recorded on `#9548`), so **R1 has no provisioning step left to do** — that live state is evidence
-> to report on `#9548`, never a step to finish. The bar for lifting the ruling, and where the reopen is
-> argued, are in that runbook note.
+> ✅ **AUTHORISED (owner, 2026-11-03) — AND THE ARMING HALF IS ALREADY DONE. READ THIS BOX BEFORE THE
+> SUPERSEDED QUOTE UNDER IT.** On **2026-11-03T19:06:10Z** the owner **superseded** the 2026-11-01
+> postponement **for this issue**, in a comment on `#9548` headed
+> `## DECISION (owner, 2026-11-03) — no customers on the hosted deployment; arming it is authorised`
+> ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6612968196)), which
+> carries its own marker:
+>
+> > **OVERRIDES:** the standing "hosted postponed" ruling — superseded for this issue by the owner's
+> > explicit clarification that no customer is on the service and that the beta is blocked on P0/P1 closure.
+>
+> So R1 **is** work to pick up, and the runbook's
+> [Arming the Postgres record](../../infra-runbook.md#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
+> — its AUTHORISED box and its provisioning block — is the live procedure.
+> **What is left is not the arming.** The secret is set on both the GitHub and Fly surfaces and the app
+> has reported `armed: true` since at least **2026-10-26** (measured on `#9548`, comment `6407834085`);
+> `GET /health` re-measured **2026-11-05T13:11:13Z** reports `armed: true` with
+> `record_write_failures` **EMPTY**. ⚠️ That emptiness **falsifies "writes are failing"** (the
+> `write_failed: 32` this item used to quote is a 2026-11-02 reading) and **cannot establish that a row
+> was written** — see the runbook's own rule, *"`record_write_failures: {}` is NOT evidence that a row
+> was written"*, and its capture-verification step. ⚠️ **The live blocker is a missing CREDENTIAL, not a
+> ruling:** the 2026-11-03 decision's non-negotiable **first** step is a verified backup, and
+> `TORTOISE_RECORD_BACKUP_DSN` / `TORTOISE_RECORD_SCRATCH_DSN` are absent, and the DSNs this deployment
+> does provision are **DOCUMENTED to have the shape the dump's FIRST gate refuses**: `create_record_backup`
+> runs `require_direct_dsn` **before** `require_bypassing_role`, and the shape prescribed for both is a
+> pooler (`.env.example`'s HOSTED block for `TORTOISE_AUDIT_DSN`; the app's pooler DSN for
+> `TORTOISE_RECORD_DSN`), which gate 1 refuses — so gate 2 is never reached. ⚠️ **That is a documentation
+> INFERENCE about a SHAPE, not a measurement of a value:** no lane in this fleet has read either value
+> (`#9548` comment `6613140019` records that its box held none at all). If a held value does not follow its
+> documented shape the inference is simply **false** — and then the backup is possible today with a
+> credential already held. Read the value before treating this blocker as settled; the runbook's credential
+> table states the same bound. ⚠️ **Do not go hunting for a brand-new ROLE** — a bypassing role
+> already exists; what is missing is a DIRECT connection string for one. The runbook's Secrets-Matrix section
+> carries the same correction as a table (row-by-row, gate-by-gate). The accurate state is **`AUTHORISED-BUT-BLOCKED-CRED`, not postponed**; a lane
+> reading this item must report the missing backup credential on `#9548`, never re-derive "postponed".
+>
+> ---
+>
+> ⛔ **SUPERSEDED — kept as the record of the ruling that was overridden, not as an instruction.**
+> What follows is the 2026-11-01 postponement **as it stood**: `#9548`'s `Owner decision` comment
+> ([verbatim](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515), quoted
+> with its headline and operational point 3 in the runbook note above) says, in the owner's words:
+> "**Do not arm, provision, or point anything at the hosted store.**" — and names this item explicitly
+> as **not** work to pick up. Its `OVERRIDES:` target was epic #7879 **R1**, this item, and it **was
+> superseded on 2026-11-03** (AUTHORISED box above).
 
 **What:** set `TORTOISE_RECORD_DSN` on `tortoise-y4mjjq` to the project's **pooler** DSN
 (`postgresql://tortoise_record_app.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres`, `?sslmode=require`
-— the shape `.env.example:305` already documents for `TORTOISE_AUDIT_DSN`), add it to the deploy
+— the shape `.env.example`'s "HOSTED (post-#669 flip, #771)" block documents for `TORTOISE_AUDIT_DSN`), add it to the deploy
 workflow's secret-provisioning step (the runbook's Secrets Matrix row already landed with #9600 — see
 A8), and **leave `TORTOISE_RECORD_SINGLE_TENANT` unset** — unset is already multi-tenant, which is
 what makes the env tenant pair be refused rather than silently used
-(`tortoise/record_writer.py:577`; setting `=0` only restates the default).
+(`RECORD_SINGLE_TENANT_ENV` in `tortoise/record_writer.py`; setting `=0` only restates the default).
 > ⚠️ **The user is `tortoise_record_app`, NOT `postgres`** — corrected by R6's decision
 > ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md), #9554). `postgres` is the
 > **table owner** and bypasses RLS, which would make §4's tenancy decision unimplemented for the one
 > path that writes customer data. The role exists after the migration applies (`NOLOGIN`, no
-> password); granting it `LOGIN` + a password is the operator step in
-> `docs/infra-runbook.md` → "The record's connecting role".
+> password). ⛔ **This sentence used to present "granting it `LOGIN` + a password" as an outstanding operator
+> step — it is DONE (2026-10-26, `#9548` comment `6407834085`), and the runbook's step 1 now says so.** The
+> step is kept only as the rotation / re-mint reference; re-running it rotates the live credential the
+> deployed `TORTOISE_RECORD_DSN` names and requires re-setting the GitHub **and** Fly secrets.
 **What it blocks:** **everything that needs a written record.** Until this is set the record receives
 nothing, so no item in this list that depends on reading one is observable in production — R2 is the
 exception, because the schema lands on a dispatch whether or not R1 has happened.
@@ -244,22 +284,28 @@ Matrix carries a row plus an "Arming the Postgres record" section (DSN shape, th
 never-do-this rules, the verify recipe); `fly.toml`'s `[env]` block documents that it is a SECRET and
 must never be an `[env]` key. What then remained was **the provisioning act itself**, which no lane
 could perform — the value is a credential in the operator's Supabase console. That act **has since
-been performed**: the app reports `armed: true` with `write_failed: 32` (measured 2026-11-02, recorded
-on `#9548`) — and it is ⛔ **postponed by the owner ruling quoted at the head of this item**: it must
-not be repeated or resumed. A value hand-set on Fly instead of staged from the GitHub secret is
-reported `UNSOURCED` and **blocks the deploy** — that ordering rule governs a *future*, un-postponed
-arming only. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere and a test pins that
+been performed**: the app reports `armed: true` (the `write_failed: 32` once quoted here is a
+2026-11-02 reading; `/health` re-measured 2026-11-05T13:11:13Z reports `record_write_failures` EMPTY,
+which falsifies "writes are failing" but does not establish that a row was written) — and it is
+✅ **authorised, not postponed**: the 2026-11-03 owner decision superseded the 2026-11-01 ruling
+quoted at the head of this item. ⚠️ **Re-running it is not neutral and is not the remaining step:**
+`\password`-style re-minting rotates the credential the deployed DSN names, so the GitHub **and** Fly
+secrets must be re-set in the same change or the record stops authenticating; the remaining step the
+decision names is its backup-first precondition. A value hand-set on Fly instead of staged from the
+GitHub secret is reported `UNSOURCED` and **blocks the deploy** — that ordering rule still governs
+any re-arming. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere and a test pins that
 (`tests/test_deploy_workflow.py::test_the_record_is_not_armed_single_tenant_on_the_hosted_app`).
 
 ### R2 — Land the schema on the hosted project, and keep the name gate honest · **S** · ops · **BLOCKER**
 
 **What:** apply the migrations. `supabase-deploy` **applies** them only on `workflow_dispatch` —
 `supabase db push --linked --include-all`, gated on
-`github.event_name == 'workflow_dispatch'` (`.github/workflows/supabase-deploy.yml:239-243`); its
+`github.event_name == 'workflow_dispatch'` (the `supabase db push --linked --include-all --yes`
+step in `.github/workflows/supabase-deploy.yml`, its `if:` at `:298`); its
 `push` trigger on `supabase/**` runs the drift checks, not the apply — so the record tables will
 land on the next dispatch
 whether or not R1 has happened. Two couplings to respect: the record reader is **name-gated** on
-`RECORD_MIGRATIONS` (`record_projection.py:172`, no glob) so a **new** `.sql` is invisible to the
+`RECORD_MIGRATIONS` (`record_projection.py`, no glob) so a **new** `.sql` is invisible to the
 image until its name is added there; and `deploy-hosted.yml` deliberately does **not** trigger on
 `supabase/migrations/**` for that reason.
 **What it blocks:** any write at all; and a schema change that silently no-ops in the image.
@@ -624,15 +670,29 @@ exactly this question and the tree cannot answer it today.
 > (`cache_projection.read_record_view`, i.e. `tortoise record-reconcile`), which shares R1's one DSN:
 > before it, a reconciler armed with the app role WOULD have read zero rows, landed every cache key
 > in `extra_in_cache` with `missing_in_cache = 0` (the chokepoint-violation signature, not a lag),
-> and reported a coherent pair as divergent. That is the counterfactual the read-back prevents, not
-> an observed event (the DSN is unset on the deployment).
+> and reported a coherent pair as divergent. That is the counterfactual the read-back prevents — it
+> was never an observed event, because at the census point the DSN was unset on the deployment.
+> ⚠️ **SUPERSEDED (2026-10-26):** the record has been **ARMED** since then (`#9548` comment
+> `6407834085`: `armed: true`, `tortoise_record_app` granted `LOGIN`), so the read-back now runs on the
+> live deployment's connection — the one production write ATTEMPTS traverse. ⛔ **That is not the same
+> as "a connection that carries production writes"** (this sentence used to say exactly that, and it
+> read as *the write path works* — the empty-counter-as-health misread this section exists to close):
+> an attempt is not a landing, and an empty `record_write_failures` is *not* evidence that a row was
+> written. What is still not observed is a landing
+> `journal_event` + `point` row.
 > ⚠️ **This corrects R1's DSN above**: its `postgres.<ref>` user is the table owner and would
 > bypass RLS. R1 must arm
 > `postgresql://tortoise_record_app.<ref>:…@…pooler.supabase.com:5432/postgres?sslmode=require`
-> (the role's `LOGIN` credential is provisioned per `docs/infra-runbook.md`). R1 is unarmed at the
-> time of writing, so this is a correction to a plan, not a migration.
+> (the role's `LOGIN` credential is provisioned per `docs/infra-runbook.md`). ⚠️ **SUPERSEDED
+> (2026-10-26):** this sentence read *"R1 is unarmed at the time of writing, so this is a correction
+> to a plan, not a migration"* — R1 has **been armed** since 2026-10-26 (`#9548` comment
+> `6407834085`), so the correction is in force on the live connection, not merely on the plan. ⛔ Do
+> **not** re-run the grant to "finish" it: `\password tortoise_record_app` rotates the credential
+> the deployed DSN names (R1 records the procedure and that hazard).
 
-**Decision needed:** none — decided (above). The remaining work is R1's DSN, which is R1's.
+**Decision needed:** none — decided (above). The remaining work this box named was R1's DSN, and
+**R1 was armed on 2026-10-26** (`#9548` comment `6407834085`): nothing in R6 is outstanding, and what
+R1 keeps is the rotation hazard, not a pending arming.
 
 ### R7 — Raw text and the S1 narrative in Postgres (§9.1) · **L** · schema + code · **BLOCKER**
 
@@ -754,7 +814,8 @@ work that already exists.
    capture-path work and must not be improvised alongside a schema change.
 2. **No caller serves from the record yet.** Wiring the read arm into `rebuild_from_record`'s operator
    verb (R8, `#9556`) and into the ask/answer verbatim path is where D7's end-to-end measurement runs,
-   and the production record DSN is still unarmed (R1, `#9548`).
+   and the production record DSN was unarmed at the time (R1, `#9548`) — **it has since been armed**
+   (2026-10-26, `#9548` comment `6407834085`; see R1), so this paragraph narrates the `#9638` tree.
 
 So the **home, the projection and the record-only reader** landed in #9638; D7's measurement did not
 close with that change, and #9555 stayed open on (1) and (2) — both of which have since landed, as the
@@ -768,7 +829,15 @@ close with that change, and #9555 stayed open on (1) and (2) — both of which h
 section is `docs/infra-runbook.md` §9, and a drill table states which steps are measured. **Not
 landed, and the reason this item stays open:** the production graph name (`org_*`) is refused by
 `#2944`'s L2 name guard until the disposable-graph registry exists, and the drill's armed-record row is
-unmeasured (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). The repo's own
+unmeasured — ⚠️ **and the blocker is not the arming.** Both attributions this sentence used to carry are
+*satisfied*: `#9548`'s hosted arming has been measured since 2026-10-26 (`/health` `armed:true`), and
+`#9551`'s CI `TEST_RECORD_DB_URI` is armed and closed 2026-10-23. What is missing is a **captured
+session that actually wrote a `journal_event` + `point` row** — an empty `record_write_failures`
+cannot stand in for one — and, for the record leg, a backup-capable **direct** DSN.
+⚠️ **SUPERSEDED, kept as the record of what this row claimed:** it read *"the drill's armed-record row
+is unmeasured (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`)"* — i.e. blocked on two things
+`docs/infra-runbook.md` §9's drill table states are both satisfied, which is the disagreement this
+correction closes. The repo's own
 precedent is that restores fail at the *artifact* boundary, not at the API: **`#3895`** (CLOSED
 COMPLETED, 2026-09-25) is the drill that restored **9,687 / 10,000** edges, and it failed because
 its logical dump filtered the **node** export but not the **edge** export, so **313** edges
@@ -803,7 +872,7 @@ wrong store.
 
 ### R10 — Connection pooling on the record write path · **S/M** · ops + code · **FOLLOW**
 
-**What:** `_default_connect` (`record_writer.py:654`) opens **one connection, one transaction per
+**What:** `_default_connect` opens **one connection, one transaction per
 journal record**, and the module states the cost in place: *"~one connection + commit and ~4 ms of
 plan materialization"* — `table_columns()` is **deliberately uncached**, so every record re-reads the
 migrations. No pool exists.
@@ -1014,9 +1083,9 @@ grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_bac
 (`fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md`) it now returns the deploy
 workflow's bind/probe/stage lines, the runbook's row and section, and `fly.toml`'s `[env]` comment.
 ⛔ **It was NOT empty immediately before #9548 — and it was not one line either.** Measured over
-that command's own path set at **`ff6379eb2`** — the `origin/main` this branch merged, i.e. the tree
-"immediately before #9548" actually means — the pre-#9548 reading is **5 lines**, all in the
-runbook, none of them an arming surface:
+that command's own path set at **`ff6379eb2`** — an ancestor of this branch's base (the #9601
+merge, 2026-10-23), and **NOT** the tree immediately before #9548 — that tree reads
+**5 lines**, all in the runbook, none of them an arming surface:
 
 1. `docs/infra-runbook.md:382` — #9557/R9's `record-backup` section: the DSN is read from the
    environment. **Documentation** of a verb, one lane over;
@@ -1030,9 +1099,13 @@ runbook, none of them an arming surface:
 
 ⚠️ **The count is per tree — pin the tree or the number is a stale flag, and pin BOTH ends of an
 interval or it silently re-stales.** It is **0** at this branch's start point `d5c71a470`, **1** at
-`473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), and
-**5** at `ff6379eb2` (#9601/R9 added the two `record-backup` mentions) — which is the tree this
-branch merges, so **5** is the number the "before #9548" comparison is against. An earlier version of
+`473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554);
+**5** at `ff6379eb2` (an ancestor of this branch's base — the #9601 merge, 2026-10-23 — which
+added the two `record-backup` mentions), **10** at `047c91f7a` (the commit immediately before
+the #9548 arming landed in `785bb2b59`), and **20** after it. The pre-#9548 reading is
+**10 lines** at `047c91f7a` — the number the "before #9548" comparison is against, and it is
+NOT the 5 this note used to quote (that is the `ff6379eb2` ancestor, 12 commits earlier, which
+is the "pin one end of an interval" error this paragraph exists to warn about). An earlier version of
 this note pinned `c5cbcbb4f` and **3**, and was stale by the very next main-side doc edit: R9's two
 lines were invisible to the pin because nothing bound the interval's upper end. ⚠️ The `:NNNN`
 above are `ff6379eb2`'s line numbers and they drift as the runbook grows — re-measure by grepping
@@ -1052,8 +1125,17 @@ grep -rn TORTOISE_RECORD_DSN .github/scripts/fly-managed-secrets.txt   → 1 lin
 
 `entrypoint.sh` is deliberately still empty: R1's components are the
 three surfaces above, and boot-time arming output is not part of it. What the old grep stood in for
-(`NOT_ARMED`) is unchanged until the GitHub secret exists; only its evidence moved, from *"the name
-is written nowhere"* to *"the name is staged and the secret is absent"*. ⛔ **The remaining census
+(`NOT_ARMED`) was a **census reading, and it is not one state** — which is why the sentence that stood here was
+wrong twice over. *At `ff6379eb2`* the name was **documented, and nowhere on an arming surface** — 5 lines in the runbook, and
+none in `fly.toml`, `entrypoint.sh` or `.github/` (`git grep TORTOISE_RECORD_DSN ff6379eb2 -- fly.toml
+entrypoint.sh .github/` returns nothing), so `NOT_ARMED`: not staged, not provisioned. (⛔ **Not "the runbook
+only"** — `git grep -c TORTOISE_RECORD_DSN ff6379eb2` also matches `.env.example`,
+`config/ci-surfaces.yml`, `docs/00_index.md`, this file, `09-record-tenancy-decision.md`, six
+`tortoise/*.py` modules and the migrations/tests — **21 files in total** at that tree, so this
+list is illustrative, not exhaustive. The *arming-surface* claim is the one the
+grep supports.) *After #9548 landed the surfaces* the name was **staged** and the secret still absent.
+⛔ **Neither is the state now:** the GitHub and Fly secrets both exist and `/health` reports `armed: true`, so this
+paragraph is the census point's evidence, not a present-tense fact. ⛔ **The remaining census
 lines were re-measured at this head, not assumed unchanged — and two of them no longer return what
 the block states**: the `narrative|raw_turn|…` grep (0 → non-zero since #9555) and the
 `app.current_org_id` setter count (0 → the hits #9554 shipped; see the notes below). The `pgvector`,

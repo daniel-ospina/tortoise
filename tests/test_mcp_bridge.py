@@ -131,6 +131,100 @@ def test_the_timeout_knob_is_declared_and_matches_the_code_default():
 # ── A spec-shaped Streamable-HTTP upstream that records what it receives ──────
 
 
+def test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close():
+    """#10790 review (P2): the residual's declared home must OUTLIVE the fold.
+
+    `docs/client-server-split.md` §8a records the half of #10605 that the bridge
+    does NOT retire: the onboarding generator (`_harness_mcp_config`) and the
+    committed `.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}`
+    capture for the hosted shape. It used to name #10605 as that record — and
+    #10605 is CLOSED, so the residual was reachable only by someone who already
+    knew to read a closed issue's comments plus a code docstring. Its open home is
+    now #10885, filed with the residual's own `file:line` scope.
+
+    The assertion is a BICONDITIONAL on purpose, so the guard does not rot into a
+    tautology in either direction:
+
+    * the capture is still emitted and the doc has lost its open home -> RED
+      (the residual survives with no reachable record: the defect this pins);
+    * the capture is RETIRED and the doc still declares it -> RED (a stale claim
+      sending the next reader to a closed issue). Retiring the capture means
+      deleting the residual paragraph, and this test says so when it happens.
+    """
+    main_py = (REPO_ROOT / "tortoise" / "__main__.py").read_text(encoding="utf-8")
+    doc = (REPO_ROOT / "docs" / "client-server-split.md").read_text(encoding="utf-8")
+
+    # The residual is REAL while the onboarding generator still hands a user a
+    # config whose credential is captured at process start.
+    emitted = '"auth_header": "Bearer ${TORTOISE_API_KEY}"' in main_py
+
+    # Read the residual PARAGRAPH, not the whole file: a passing mention of the
+    # number anywhere else would let the declaration itself lose its home.
+    marker = "What this does NOT do"
+    assert marker in doc, (
+        "docs/client-server-split.md §8a no longer declares the hosted-recipe "
+        "residual (#10605 / #10885) — if the capture was retired, delete this "
+        "test with the paragraph rather than leaving it dangling")
+    start = doc.index(marker)
+    end = doc.find("\n\n", start)
+    paragraph = doc[start:] if end == -1 else doc[start:end]
+    declared = "#10885" in paragraph
+
+    assert emitted == declared, (
+        "the residual and its declared home disagree (#10605 is CLOSED; its open "
+        f"home is #10885): capture_still_emitted={emitted}, "
+        f"doc_names_the_open_home={declared}. If emitted, add #10885 to the §8a "
+        "paragraph; if retired, DELETE the paragraph instead of re-pointing it.")
+
+    # Naming #10605 as the ORIGIN is fine; the sentence that says where the
+    # residual is TRACKED must name an issue that is still OPEN.
+    assert "tracked OPEN on #10885" in paragraph, (
+        "the §8a residual paragraph must say where the residual is TRACKED "
+        "(#10885, OPEN), not only where it was recorded — #10605 is CLOSED")
+
+    # ⛔ THE RELAY NAMES WHICH PIN HOLDS WHICH HALF (#10790 review, P2).
+    #
+    # §8a relays TWO residuals — the hosted-recipe capture (#10885) and the
+    # `503 consent_store_unavailable` arm + keyless-re-entry hole (#10884) — and the
+    # paragraph used to say "Both sentences are held in place by a biconditional
+    # pin (`test_the_hosted_recipe_residual_...`)". It does not: `paragraph` above
+    # stops at the first blank line, and the #10884 sentence lives in the PARAGRAPH
+    # AFTER it, so deleting `#10884` from the page left the suite green — a false
+    # coverage claim, which is worse than an admitted gap because it stops the next
+    # reader from checking. The #10884 half is really held by the two pins in
+    # `tests/test_oauth_consent_bff_routes.py` (they read `start.ts` and
+    # `tortoise/oauth.py`, which is where those residuals live). Both halves are
+    # checked here so the credited guards must exist, not merely be named.
+    assert "Both sentences are held" not in doc, (
+        "§8a still claims a single biconditional pin covers BOTH relayed residuals — "
+        "the pin it names reads only the `What this does NOT do` paragraph, which "
+        "cannot see the #10884 sentence in the next one")
+    relay_start = doc.index("#10605 is CLOSED")
+    relay_end = doc.find("\n\nBoth modules are staged", relay_start)
+    relay = doc[relay_start:] if relay_end == -1 else doc[relay_start:relay_end]
+    bff_routes = (REPO_ROOT / "tests" / "test_oauth_consent_bff_routes.py").read_text(
+        encoding="utf-8")
+    holders = (
+        "test_the_store_fault_residual_names_a_home_this_fold_does_not_close",
+        "test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close",
+    )
+    for holder in holders:
+        assert holder in relay, (
+            f"§8a relays the #10884 residual but does not name the guard that holds "
+            f"it ({holder}) — a coverage claim has to say WHICH pin covers which "
+            "sentence, or the half nobody reads rots silently")
+        assert f"def {holder}(" in bff_routes, (
+            f"§8a credits `{holder}` for the #10884 half, but no such test exists in "
+            "tests/test_oauth_consent_bff_routes.py — a named guard that does not "
+            "exist is a false coverage claim, not a pointer")
+    assert "#10884" in relay, (
+        "§8a's relay no longer names #10884 for the store-fault / keyless-re-entry "
+        "residual, yet both code pins still declare that open home")
+
+
+# ── A spec-shaped Streamable-HTTP upstream that records what it receives ──────
+
+
 class _Upstream:
     """Minimal MCP endpoint: `initialize` + `tools/list`, and an auth-refusal mode.
 

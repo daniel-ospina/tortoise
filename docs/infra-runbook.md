@@ -3265,7 +3265,7 @@ part of this section, and its status is stated rather than implied:
 | drill step | status |
 |---|---|
 | verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (the file's whole collected set — 42 pins / 43 collected cases when this row was written; `--collect-only` is the authority, and this numeral is a measurement, not a promise, live cache graph included) |
-| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
+| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — and the blocker is **not** the arming any more: the record has reported `armed: true` since at least 2026-10-26 (see the Secrets Matrix row for `TORTOISE_RECORD_DSN`), and CI's `TEST_RECORD_DB_URI` is **already armed** (`#9551`, closed 2026-10-23; the `test-record-postgres` job provisions it via `.github/actions/postgres-provision`). What is missing is a **captured session that actually wrote a `journal_event` + `point` row** — an empty `record_write_failures` cannot stand in for one (this section's own rule: it is *NOT* evidence a row was written) — and, for the record leg, a backup-capable **direct** DSN. No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 
 When the record is armed, the drill is: capture into the record (scenario A of
@@ -3387,15 +3387,206 @@ operator who read the line above as "CI defends this" would never run it.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | ⛔ **POSTPONED — do not arm, provision or re-point it** (owner ruling 2026-11-01, quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below). The value **is already on Fly**: `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,…,"record_write_failures":{"write_failed":32},…}` on 2026-11-02 (**measured by another lane and recorded on #9548** — quoted here, not re-measured). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) and is ⛔ postponed above |
+| TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
-> ⛔ **POSTPONED BY OWNER RULING — this section's command is not to be run.** The owner postponed the
+> ✅ **AUTHORISED AND PARTLY DONE — BUT THE 2026-11-01 POSTPONEMENT BELOW IS NO LONGER LIVE. READ
+> THIS BOX BEFORE THE QUOTE UNDER IT.** On **2026-11-03T19:06:10Z** the owner **superseded** the
+> postponement for this issue, in a comment on `#9548` headed
+> `## DECISION (owner, 2026-11-03) — no customers on the hosted deployment; arming it is authorised`
+> ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6612968196)), verbatim:
+>
+> > Owner verbatim: *"we dont have customers because i have been postponing for the beta launch until
+> > p0 and p1s are fixed. only me is using the service."*
+> >
+> > **OVERRIDES:** the standing "hosted postponed" ruling — superseded for this issue by the owner's
+> > explicit clarification that no customer is on the service and that the beta is blocked on P0/P1 closure.
+>
+> **What that changes here, precisely.** The *arming* act this section describes is **authorised**, and
+> the DSN is **already armed** (`GET /health` → `"record":{"armed":true,…}` at 2026-11-05T11:38:16Z).
+>
+> ⚠️ **Two LATER owner decisions on `#9548` postdate the 2026-11-03 authorisation, and they are
+> relayed here because they lived ONLY on the issue** — which is the defect this section was
+> corrected for:
+>
+> - **2026-11-05T20:58:18Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6669289145),
+>   `owner-decision-relay`) — *"#9548 yes i never authorised to wait. we need this asap."* So
+>   **"wait for authorisation" is no longer a valid state**, no lane may cite `#9548` as a reason to
+>   pause, and *"the only legitimate stop is a **specific technical blocker**, named with its failing
+>   step."*
+> - **2026-11-05T22:10:54Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6670861090),
+>   `owner-decision-relay`) — *"doesn't matter much because i'm the only one using tortoise before we
+>   finish the p0 and p1 … so just do what's fastest."* So: **arm the hosted deployment directly and
+>   apply the pending migrations directly — no staging detour, no rehearsal deploy, no extra cycle to
+>   be safe.** *"Fastest" keeps the proofs*: a written row read back, the migrations visible in
+>   `supabase_migrations`, a deploy reaching green.
+>
+> ⛔ **What those two do NOT settle — and a lane must not settle it either:** whether the 2026-11-05
+> *"no extra cycle to be safe"* lifts the 2026-11-03 decision's **backup-first** step (1) below. The
+> two owner decisions are in tension on exactly that point, and the later one carves out *"anything
+> **irreversible to data that cannot be regenerated** — a purge, a drop, an overwriting backfill."*
+> The owner resolves it; a lane reports it. Steps (2)–(4) stand either way.
+>
+> The 2026-11-03 decision keeps a **non-negotiable procedure** in exchange: *(1)* a **verified backup
+> first** — dump the Postgres record and confirm it restores, no migration on an unbacked store;
+> *(2)* deploy the record migrations, including `20261102000002_record_point_search_keys_text.sql` and
+> the tenancy/role migration; *(3)* **measure**, do not assert, `record_write_failures.write_failed == 0`
+> on the running deployment plus indicator (a) — a captured session writes `journal_event` + `point`
+> rows; *(4)* close `#9548` only once (3) is posted there. ⚠️ **The closure happened WITHOUT it:**
+> `#9548` closed **2026-11-06T01:57:25Z** on PR **#11109**'s merge (`74fdd9ca0`), and its **last**
+> comment — **2026-11-05T23:15:15Z**, the `arm-9548` status — still reports **indicator (a)** as
+> **unreachable**. So **step (3) is still owed**, and the closure is **not** evidence that a
+> measurement was taken. Re-read the issue before quoting either state: this sub-section describes a
+> sequence whose step (3) has not run.
+> ⚠️ **Step (1) is the live blocker, and it is a missing CREDENTIAL, not a ruling:**
+> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and the DSNs this
+> deployment DOES provision fail the backup's checks — on two independent gates, which
+> `create_record_backup` applies in this order — `require_direct_dsn` **before** `require_bypassing_role`
+> (⚠️ **shapes, not read values**: the table below states what the documented shapes are, never what a
+> held value was measured to be):
+>
+> | held value | gate 1 — `require_direct_dsn` | gate 2 — `require_bypassing_role` |
+> |---|---|---|
+> | `TORTOISE_RECORD_DSN` | ⛔ **refused by construction** — §"The value" below prescribes the project's **pooler** DSN for the app, and gate 1 refuses a `*pooler*` host | not reached; it also names the RLS-bound app role |
+> | `TORTOISE_AUDIT_DSN` | ⛔ **refused if set to its documented shape** — `.env.example` (`TORTOISE_AUDIT_DSN`) prescribes the **Supabase Postgres pooler connection string** for it | not reached; its user is a *bypassing* role (`postgres` per `.env.example`'s shape; `audit_writer` per `#9548`) |
+>
+> ⚠️ **Read that table for what it is: the GATES are code, the SHAPES are documentation — the held
+> VALUES were never read.** An earlier draft of this correction attributed a measurement of them to
+> lane `hosted-arm-9548` on `#9548`; that comment (`6613140019`) records the **opposite** — *"No
+> local escape: `psql`/`pg_dump`/`pg_restore` are not installed; no `TORTOISE_RECORD_DSN` /
+> `SUPABASE_DB_URL` / `DATABASE_URL` in the env"* — and it names `TORTOISE_AUDIT_DSN` nowhere. What
+> that comment **does** measure is the pair that is absent: `TORTOISE_RECORD_BACKUP_DSN` and
+> `TORTOISE_RECORD_SCRATCH_DSN`, both from its secret listing. ⛔ Its own recommendation — *"a
+> Supabase **pooler** DSN … for a role that bypasses RLS"* — is exactly what **gate 1 refuses**, and
+> is superseded here.
+> ⚠️ **So do not go hunting for a brand-new ROLE** — a bypassing role already exists. What is missing is a
+> **DIRECT** connection string (`db.<ref>.supabase.co:5432`, never the pooler) for one, which is exactly
+> what `TORTOISE_RECORD_BACKUP_DSN` resolves (`record_backup.py`'s `RECORD_BACKUP_DSN_ENV`). That value has never been held
+> in this environment — the blocker is a **credential**, not a ruling.
+>
+> ⚠️ **NO BACKUP CAN BE TAKEN FROM THIS ENVIRONMENT ON THE DOCUMENTED SHAPES — and the wording that
+> made the migrations look outstanding is now false, so it is corrected here rather than left to
+> mislead.** ⛔ **"On the documented shapes" is load-bearing, not a hedge:** the credential table above
+> states what each held value is *documented* to look like, and `08` §R1 carries the same falsifier —
+> *if a held value does not follow its documented shape this inference is FALSE, and then the backup
+> is possible today with a credential already held.* Read the value before treating this as settled.
+> `GET /health` re-read **2026-11-05T23:54:47Z** serves build **`46ea687dc`**
+> (`started_at 2026-11-05T23:14:03Z`). Two facts follow, and they are DIFFERENT facts:
+>
+> - **The deployed CODE carries `#10648`** (`fafb8fdcc`) — verified in-tree, not from the endpoint:
+>   `git merge-base --is-ancestor fafb8fdcc 46ea687dc` → **0**. So "the serving build predates the
+>   fix and does not carry it" is **false as of that deploy**, and the drop can no longer be
+>   attributed to an unfixed build.
+> - **The deployed IMAGE carries both migrations** — `migrations_head:
+>   20261102000002_record_point_search_keys_text`, i.e. `20261102000001_graphs_promote_default` and
+>   `20261102000002_…_search_keys_text` are in the image too. ⛔ **That is NOT "applied to the
+>   database"** — this file's own `migrations_head` row says so in as many words: the value
+>   is *"the highest numeric-prefixed `supabase/migrations/*.sql` file this IMAGE CARRIES"*, and
+>   *"It is NOT 'which migration has been APPLIED to the database'"*. The applied set is a database
+>   fact, read from `supabase_migrations.schema_migrations` — and it was **not** read AT THAT
+>   `/health` READING, so it is not claimed there. (⛔ **Not the 2026-11-05 decision's own proof,
+>   which is collected:** its proof list is *"a written row read back, the migrations visible in
+>   `supabase_migrations`, a deploy run reaching green"*, and the SECOND of the three is precisely
+>   the ledger read reported in the next bullet — so that proof IS held. The THIRD, *"a deploy run
+>   reaching green"*, is the one this section does not claim.)
+> - **Whether they are APPLIED has a measurement too, and calling it "unmeasured" would be the same
+>   defect one layer down.** The repo's own fail-closed drift gate, run **2026-11-03T18:56:04Z**
+>   (run `41694722380`, quoted in `#9548` comment
+>   [`6613140019`](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6613140019)),
+>   read `supabase_migrations.schema_migrations` — the artefact that row names — and reported:
+>
+>   ```text
+>   BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):
+>       - 20261102000001
+>       - 20261102000002
+>     note: BLOCKING list above is the COMPLETE repo-ahead set — 2 of 2 repo-ahead pending
+>   ```
+>
+>   A **complete-set** verdict **at that reading** — so **as of 2026-11-03T18:56:04Z** both were
+>   PENDING. (⛔ **Not "independently corroborated then":** the residual-plan row that says *"present in
+>   the repo, unapplied in production"* was written **2026-11-05**, so it cannot corroborate a
+>   2026-11-03 reading — and its own evidence column is the two migration **filenames**, not a
+>   `schema_migrations` read. The gate log above is the measurement; this row only repeats the
+>   conclusion.) ⛔ **That is no longer the last measurement either.** The
+>   repo's own fail-closed drift gate ran again **2026-11-05T23:07:38Z** — run `42117073101`,
+>   `deploy-api` job `127578919481`, the deploy that shipped `46ea687dc` — against prod project
+>   `ybetwichurajbfswfeqa`, and printed in full:
+>
+>   ```text
+>   check-migration-drift: repo migrations vs prod (project ybetwichurajbfswfeqa)
+>   check-migration-drift: OK (no blocking drift)
+>   ```
+>
+>   With **no** `warn-only repo-ahead migrations` line and **no** `remote-ahead (WARN …` line beside
+>   it — the two branches that print one — so `REPO_AHEAD` was **empty**: prod's
+>   `supabase_migrations.schema_migrations` **has a row for both**. The gate is fail-closed by
+>   contract (its own exit-code table: a missing token, a non-201/200 Management-API answer, or a
+>   body that is not a JSON array each exit **2**, never 0), so this is a positive read, not a skip.
+>   ⛔ **What it does NOT establish:** the gate reads VERSION ROWS, and says so itself — *"`supabase
+>   migration list --linked` — version ROWS only, so it cannot tell you whether the objects exist"*,
+>   and *"'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks the objects"*
+>   (both `.github/scripts/check-migration-drift`). A version row is present because the DDL ran
+>   **or** because it was recorded by `supabase migration repair` after a bookkeeping drift (#9613).
+>   So: **both are RECORDED APPLIED; the OBJECTS are unread.**
+>
+>   ⚠️ **WHICH run first recorded them is NOT established — and that is a finding, not a
+>   reassurance.** The `supabase-deploy` history around that gate names no clean single apply:
+>
+>   | run | when | its `deploy` job |
+>   |---|---|---|
+>   | `41694722380` | 2026-11-03T18:32Z | **`skipped`** — a `push`, not a `workflow_dispatch`; only `check-drift` ran, and that is the 18:56 BLOCKING reading above |
+>   | `42091073635` | 2026-11-05T19:45Z | failed in ~17 s (job `2026-11-05T19:45:43Z` → `19:46:00Z`; the `Apply migrations` step itself took 1 s) — its apply never landed |
+>   | `42107006180` | 2026-11-05T21:40Z | failed the same way |
+>   | `42134064961` | 2026-11-06T00:04Z→00:17Z | ⚠️ **CANCELLED after ~13 min** — the one window nobody has examined, and a half-run `supabase db push` is exactly the shape that can leave a partial apply |
+>   | `42136459903` | 2026-11-06T00:55Z | the *job* is marked **failed**, but its *`Apply migrations` step SUCCEEDED* — `supabase db push --linked --include-all` → **«Remote database is up to date.»** The failure is the follow-on `deploy-hosted` dispatch. So this is a **second, later green ledger read**, not evidence of a pending apply |
+>
+>   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z). ⛔ **And no
+>   run in that table can be the one that first RECORDED them:** the two runs inside the window died
+>   in `Apply migrations` — which **is** the step that runs `supabase db push --linked --include-all`
+>   in that workflow (the `--yes` that workflow carries today — `.github/workflows/supabase-deploy.yml`'s
+>   `supabase db push --linked --include-all --yes` — was added on 2026-11-06 by #11104, after
+>   every run in this table), so there is no earlier `db push` for them to have died "before" — when
+>   that push refused `supabase/config.toml` (`[inbucket]` is no longer supported, exit 1) before
+>   opening a connection,
+>   and the two that could have applied — the cancelled one and the 00:55 one — were both CREATED
+>   after 23:07:38Z (the cancelled run 56 minutes after it), so they postdate the reading that first
+>   saw the rows. The recorder is therefore an act **this run history does not contain**: an
+>   out-of-band `supabase db push`, or a `supabase migration repair` recording a version whose
+>   objects were already present (#9613) — which is exactly what the gate's own version-ROWS-only
+>   bound permits. ⛔ **Do not read `supabase-deploy`'s red as "the apply never ran"**: that
+>   is the same *a red signal means nothing happened* misread this section exists to correct, and on
+>   `42136459903` the apply step is **green inside a failed job**. The quoted `#9548` `6669720078`
+>   (*"the deployment cannot be refreshed until the migration apply runs"*) was written
+>   **2026-11-05T21:14:09Z — before that gate ran** and before the deploy of 2026-11-05T23:14:03Z.
+>
+> So: the reason this section gave for believing the `point.search_keys` narrowing was absent —
+> *"the serving build predates `#10648`"* — **is gone**; and the reason the first cut of *this*
+> correction gave for believing it was still pending (*"last read 2026-11-03, both pending, not
+> re-measured since"*) **is also gone**, because a later fail-closed read exists and says the ledger
+> has both. What survives unchanged is the blocker and the bound: **no backup can be taken from this
+> environment on the documented shapes** until a **direct** backup-capable DSN exists (below) — and,
+> as the credential table's own falsifier says, a held value that does not follow its documented shape
+> would make that false today; and *whether the objects exist*
+> is read from **schema**, not from the ledger — `supabase_migrations.schema_migrations` answers
+> "recorded", never "applied".
+>
+> **So the accurate state is AUTHORISED · CODE DEPLOYED (2026-11-05T23:54:47Z) · BOTH MIGRATIONS
+> RECORDED APPLIED IN PROD'S LEDGER (fail-closed gate, 2026-11-05T23:07:38Z) · DDL PRESENCE UNREAD ·
+> BACKUP CREDENTIAL STILL MISSING.**
+> A lane reading this section must not re-derive "postponed"; it reports the missing backup
+> credential, and it re-reads the ledger (and, if the objects matter, the schema) before asserting
+> either. Both readings are **measurements**, not standing facts — the 2026-11-03 one says what was
+> true then, and this one will be stale the moment another deploy lands.
+>
+> ---
+>
+> ⛔ **SUPERSEDED — kept as the record of the ruling that was overridden, not as an instruction.** What
+> follows is the 2026-11-01 postponement **as it stood**: The owner postponed the
 > hosted deployment setup on **2026-11-01T05:58:03Z**, in a comment on `#9548` headed
 > `## Owner decision — the hosted setup is POSTPONED` (the issue carries the `owner-decision` label;
 > the [comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515) itself is
-> the ruling's home), verbatim:
+> that ruling's home), verbatim:
 >
 > > **The hosted deployment setup is postponed until the storage-architecture work and the
 > > extractor-architecture work are complete — otherwise we risk filling the hosted store with noise.**
@@ -3406,16 +3597,50 @@ operator who read the line above as "CI defends this" would never run it.
 >
 > **`OVERRIDES:`** epic #7879 **R1** — this section's own objective, "arm the record in the hosted
 > deployment" — and the provisioning steps further down (`gh secret set TORTOISE_RECORD_DSN`, the
-> deploy, `fly secrets list`). The owner postponed that act, so **this section is reference, not a task
-> list**: read it for the DSN's shape, its role rule and the verify reads; do not execute the
-> provisioning block. ⚠️ **The store is already armed** (`armed: true`) and already failing writes
-> (`write_failed: 32`, measured 2026-11-02 and recorded on `#9548`), so "finish what was started" is
-> *also* a resumption of the postponed act — the live state is evidence to report, never a licence.
-> Until the ruling lifts, the authority for captured sessions is the **local** record under
-> `~/.tortoise/session-events/`, never the hosted store.
+> deploy, `fly secrets list`). ⛔ **SUPERSEDED ON 2026-11-03 — the owner authorised this act; see the
+> AUTHORISED box at the head of this section.** What stands from the paragraphs below is the DSN's
+> **shape** and its **role rule**, plus the fact that the store is already armed. What does **not**
+> stand is "this section is reference, not a task list": the procedure is live again, gated by its own
+> backup-first precondition (and that gate is currently a missing `TORTOISE_RECORD_BACKUP_DSN`).
+> ⚠️ **The store is already armed** (`armed: true`) — and, re-measured
+> 2026-11-05T11:38:16Z, `record_write_failures` is EMPTY (the `write_failed: 32` quoted in this note was
+> a 2026-11-02 reading). That emptiness **falsifies "writes are failing"; it does not establish that a
+> write happened** — see this section's own rule — *"`record_write_failures: {}` is NOT evidence
+> that a row was written"* — and its capture-verification step: presence is shown by a
+> `journal_event` / `point` row appearing, never by a zero counter.
+> It also does **not** prove the drop stopped happening: the dropped rows recorded on `#9548` (302
+> measured 2026-11-02, 331 in the 2026-11-03 decision) are still unreaped. ⚠️ **The reason this
+> paragraph used to give is now FALSE and is recorded as such:** it read *"the serving build
+> `fc6a8a64b` predates `#10648` (`fafb8fdcc`)"* — true until the deploy at **2026-11-05T23:14:03Z**,
+> which now serves **`46ea687dc`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits
+> **0**, so the deployed code carries the fix (re-read 2026-11-05T23:54:47Z; `migrations_head:
+> 20261102000002` — the IMAGE-carried head, not the applied set, per this file's own
+> `migrations_head` row). So the drop can no longer be attributed to a build that lacks the fix;
+> whether it stopped is still **unproven**, because a zero counter cannot prove a write (the bound
+> above is unchanged). ⛔ **This paragraph's "never a licence" clause is SUPERSEDED with the ruling it
+> serves:** the 2026-11-03 decision authorises the act, so the live state is evidence *and* the
+> procedure above is the licence. The authority for **captured sessions** is the **local** record
+> under `~/.tortoise/session-events/` — that half is unchanged by either ruling, because it is a
+> read-authority statement, not a postponement, and no arming decision touches it. (This sentence
+> used to read *"Until the ruling lifts, the authority for captured sessions …"*; the 2026-11-01
+> ruling was **superseded**, not lifted — so a condition on *lifting* could never fire — hence the
+> unconditional form. `#9548` also closed (2026-11-06T01:57:25Z), but this rule never depended on
+> it: hanging an unconditional rule on a lapsed condition is what left a lane unable to tell
+> whether the rule still applied.)
 >
-> **The reopening route — where it lives, and what would lift it.** The ruling lives on `#9548`, in
-> that `Owner decision` comment, and nowhere else. Its own words for the bar: *"The ruling lifts when the
+> **The reopening route — where it lives, and what would lift it.** ⛔ **SUPERSEDED — but NOT by this
+> route.** The paragraph below describes the route the 2026-11-01 ruling itself prescribed, and that
+> route **was not taken**: it required *"a lane that believes both are complete states that on the
+> respective epic **with evidence**"*, and the storage half (`#10000`) is **still OPEN** and the
+> extractor work is open too. ⚠️ **Do not quote this section as evidence that the storage
+> architecture work is complete — it is not, and the owner did not lift the ruling on that ground.**
+> What actually happened is at the head of this section: a **separate** owner decision (2026-11-03,
+> no customers on the hosted deployment) superseded the postponement **for `#9548`'s arming (R1)
+> only**, and its own marker says so — *"superseded **for this issue**"*. The 2026-11-01 ruling's
+> **other** operational consequences are untouched and still stand: an expected `HTTP 402
+> quota_exceeded` is not a defect, the **local** record is the read-authority for captured sessions,
+> and a client retrying a postponed endpoint is still a defect. The 2026-11-01
+> ruling lived on `#9548`, in that `Owner decision` comment, and nowhere else. Its own words for the bar: *"The ruling lifts when the
 > **storage architecture** work and the **extractor architecture** work are complete — not on a date,
 > and not because a quota became available"*, and **the lifting is the owner's call, not a lane's**. So a lane
 > that believes both are complete states that on the respective epic **with evidence**, and asks the
@@ -3451,12 +3676,18 @@ database per team (refused on cost grounds).
 
 **Provisioning — one operator act, then the deploy does the rest.**
 
-⛔ **DO NOT RUN THESE UNTIL `#9548`'s RULING LIFTS.** Every command in the block below performs, or confirms, the
-postponed act (see the POSTPONED note at the top of this section, which quotes the
-ruling and names where it lives). They are written down so a *future*, un-postponed arming is not
-improvised, **not because they are scheduled**. Nothing about the arming being partly done makes any
-step below safe to resume: `armed: true` with `write_failed: 32` is a state to report on `#9548`, not
-a step to complete.
+✅ **AUTHORISED — the 2026-11-01 postponement this note used to carry was SUPERSEDED on 2026-11-03**
+(see the AUTHORISED box at the top of this section). Every command in the block below performs, or
+confirms, an act the owner authorised. ⚠️ **They are still not a licence to improvise:** the 2026-11-03
+procedure is non-negotiable and **backup-first**, but that ordering is a precondition on the
+**migration apply** (R2's `supabase-deploy.yml` dispatch), **not on this block** — this block only
+sets the credential and confirms it reached the machine (`gh secret set` → deploy → `fly secrets
+list`), so it neither takes a backup nor migrates anything. The backup (dump + restore test) must
+run before that R2 dispatch, and **it is blocked today on a missing `TORTOISE_RECORD_BACKUP_DSN`**,
+not on any ruling. `armed: true` with `record_write_failures` EMPTY
+(re-measured 2026-11-05T11:38:16Z) is the current state to record on `#9548`. The former sentence here
+— *"`armed: true` with `write_failed: 32` is a state to report on #9548, not a step to complete"* —
+is stale on both counts: the count is 0 and the act is authorised.
 
 ```bash
 # 1. the value's ONLY home (never a file, never a shell history):
@@ -3838,14 +4069,13 @@ pooler value §"The value" prescribes for the app.
 
 ### The record's connecting role (R6 decision, 2026-10-22, #9554)
 
-> ⛔ **Its steps 1 and 2 (granting the role `LOGIN` with a credential, and arming the DSN) are
-> postponed** by the `#9548` owner ruling of 2026-11-01, quoted
-> (its headline and operational point 3) in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
-> above — read that note before acting on anything here. The **role** decision (`tortoise_record_app`,
-> `NOBYPASSRLS`, never `postgres`/`service_role`) stands and is what a future arming must obey; the
-> **arming** does not happen until the ruling lifts — and **step 1 is provisioning too**
-> (`ALTER ROLE … LOGIN` + `\password` are run against the hosted project, which is exactly what the
-> ruling's "do not arm, provision, or point anything at the hosted store" forbids).
+> ✅ **Its steps 1 and 2 are AUTHORISED as of 2026-11-03** — the `#9548` owner ruling of 2026-11-01
+> that postponed them was **superseded** (AUTHORISED box in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
+> above). Read that box before acting here. What is now true: the **role** decision
+> (`tortoise_record_app`, `NOBYPASSRLS`, never `postgres`/`service_role`) stands unchanged and is what
+> any arming must obey; the **DSN is already armed**; and step 1's `ALTER ROLE … LOGIN` is still a
+> *provisioning* act on the hosted project — permitted now, but the 2026-11-03 procedure puts a
+> **verified backup first**, and that is the blocking precondition today (no backup credential).
 
 The Postgres record's tenancy boundary is **row-level security**, and it is enforceable only if the
 application path connects as a role that does not bypass it. The role, the policies and the reason
@@ -3867,9 +4097,18 @@ in git, re-minted on every deploy.
 **1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
 keeps the plaintext out of the statement and off the logs):
 
-⛔ **Do not run this until `#9548`'s ruling lifts** (quoted at the head of this section): `ALTER ROLE …
-LOGIN` plus a credential is a *provisioning* act on the hosted store, which the ruling names explicitly.
-The step is kept because the role rule still governs a future arming; it is not scheduled.
+✅ **AUTHORISED (2026-11-03) — AND ALREADY SATISFIED, which this note previously denied.** The role
+was granted `LOGIN` and its credential provisioned out of band on **2026-10-26** (`#9548` comment
+`6407834085`: `tortoise_record_app.<ref>` as `LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`,
+with that lane verifying the boundary by connecting **as** the role). The migration itself ships
+`NOLOGIN` (`supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql`: *"`LOGIN` and setting
+its password is an OPERATOR act, done once"*), so the measured `LOGIN` state **is** proof this step ran.
+⛔ **The `22P02` write failures are NOT a second, independent proof of it** — this note used to say they
+were: an invalid-JSON cast fires for any **non-bypassing** role — `scope_connection()` refuses `postgres`/`service_role` before the first statement, so those never reach the cast — so it proves the role PASSED the posture gate and an `INSERT` was attempted, never WHICH non-bypassing role made it.
+⚠️ **So do NOT re-run it casually:** `\password tortoise_record_app` **rotates the live credential
+that the deployed `TORTOISE_RECORD_DSN` names**, and the GitHub secret **and** the Fly secret must be
+re-set with the new value in the same change, or the record stops authenticating. Keep this step as
+the rotation / re-mint reference, not as a pending task.
 
 ```sql
 ALTER ROLE tortoise_record_app LOGIN;
@@ -3877,10 +4116,10 @@ ALTER ROLE tortoise_record_app LOGIN;
 ```
 
 **2. Arm the DSN** (R1) with that role — for the shared pooler this is
-`<role>.<project-ref>` as the user. ⛔ **Do not do this until `#9548`'s ruling lifts** (2026-11-01;
-quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)):
-this text is the DSN's *shape*, which the ruling does not change — the act it describes is what the
-ruling postpones:
+`<role>.<project-ref>` as the user. ✅ **Authorised (2026-11-03) — and ALREADY DONE**: `/health` reports
+`"record":{"armed":true,…}`. The 2026-11-01 postponement this note used to cite is superseded (see
+[Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)).
+This text is the DSN's *shape*, which no ruling changed:
 
 ```text
 TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
