@@ -33,7 +33,7 @@ moving a single number.**
 | Child | Assertion | Verdict | Decisive evidence |
 |---|---|---|---|
 | `#10984` | A1 — declared part-whole relations become graph edges, **answering a rollup** | **STILL-MISSING** (its *blocker* is closed) | the declaration now reads and a writer exists, but nothing production calls it and no rollup query exists anywhere (§1) |
-| `#10985` | A2 — S3 attaches instead of minting; E1 `after_share <= 0.50 × before_share` | **STILL-MISSING** | the HOLD seam it names **landed** (`#11212`, 21:33:54Z) and the share still moves `0.600000 → 0.600000` (§2) |
+| `#10985` | A2 — S3 attaches instead of minting; E1 `after_share <= 0.50 × before_share` | **STILL-MISSING** | the HOLD seam it names **landed** (`#11212`, 21:33:54Z) and the share still moves `0.600000 → 0.600000` — but that HOLD covers **operator endpoints**, not the Object mint A2's population needs (§2) |
 | `#10987` | A5 — `Subject` count above 26, four edge families non-zero | **STILL-MISSING** | the census reads `Subject: 19` and three of the four families are absent from a **complete** edge-type enumeration (§3) |
 
 ## 0. The world moved during this lane — and the verdicts did not
@@ -178,7 +178,8 @@ deictics, generic heads**. Its scope is explicitly *not* A2's population:
 
 **What the shipped selection path does, measured — re-run AFTER `#11212` landed.** `probes/e1_e2_probe.py`
 on the committed 25-candidate corpus, on a tree that contains `tortoise/identity_hold.py` (exit 3 =
-`UNPREREGISTERED`, by design — a verdict needs a frozen threshold):
+`UNPREREGISTERED`, by design — a verdict needs a frozen threshold). **Selected lines** — the §5 command
+prints all twelve arm lines; the ones quoted here are the four that decide the reading:
 
 ```text
 e1 before_share=0.600000 after_share=0.600000 reduction=-0.000000 threshold=n/a observed=NO_REDUCTION verdict=UNPREREGISTERED
@@ -200,6 +201,13 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
 - Why: `apply_vet` Rule 2 downgrades **all 3** mechanical discards back to `KEEP` (`vet-downgrades
   count=6`, 3 per pass), because each discarded entity is referenced by a surviving candidate — Layer-1
   referential integrity. That is structural, not a threshold.
+- **And the 0.0 pp is a property of the CORPUS, not of S2.2 — the probe's own control shows it.** Strip
+  the 9 `about_entities` references and the *same* arbiter arm then removes all 9
+  (`control variant=unreferenced-definite-descriptions arm=after-vet-arbiter stripped_objects=9
+  stripped_references=9 objects=16 share=0.375000 real_facts=90 removed=9`; the probe's own note: *"the
+  0.0 pp is a corpus property (every Object wired to its statement), not a property of S2.2"*). So nothing
+  is removed here because on this corpus every Object is defended by a reference — which is the same fact
+  that makes E1b's `90 of 90` hold **vacuously**.
 - And the mechanism that *would* move it is foreclosed: `#5333` (OPEN) records that a pass may not
   remove a committed row, and E1's share is moved by **no non-destructive mechanism**.
 
@@ -207,9 +215,22 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
 is `#10997` (S3 — an unresolved identity is HELD, never minted)"*. `#10997` is **CLOSED
 2026-11-06T21:33:55Z**; `tortoise/identity_hold.py` is **PRESENT** on `origin/main`; the share above was
 re-measured on a tree containing it (`tests/test_10997_identity_hold.py`, 33 tests, green — and the
-four-suite run below is 254). So the seam
-`#10985` declared itself blocked by is **no longer the gap** — what remains is the measurement, which is
-the half `#10985` actually owns. Its other premise blocker, `#10996`, is CLOSED too, and S2.2's
+four-suite run below is 254).
+
+⛔ **But the HOLD that landed is not the gate A2 needs, and an earlier revision of this record read it as
+if it were.** The HOLD has exactly **one** kind (`identity_hold.py:125` `HOLD_ENDPOINT =
+"operator_endpoint"`, and `KINDS = (HOLD_ENDPOINT,)`) and exactly **one** call site —
+(`extractor_v2.py:9617`), inside `_mint_endpoint`, which fabricates a `statement` **Point** from an
+operator ref. A2's population is the **Object** mint: every emitted entity is appended unfiltered at `extractor_v2.py:8880`
+(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16414-16428`. Nothing
+filters it, and the tree's own registry says so in `#10997`'s own words —
+`config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
+*"the gate covers the MINTED candidate only"*, and it still carries the pin built to red the day a create
+gate lands (`tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints`).
+So `#10985`'s own premise — *"the **MINT** half does not — 'nothing suppresses a create'"* — is **still
+true for Objects**, and the 0.0 pp above is explained by the arm that *did* run (Rule 2 re-KEEPs every
+referenced entity), not by a HOLD the probe's arms never reach. Its other premise blocker, `#10996`, is
+CLOSED, and S2.2's
 mechanical half now defaults ON — the composition is `extractor_v2.py:11731-11732`
 (`vet_enabled = (vet_arbiter is not None or _vet_enabled() or _value_gate_enabled())`), and the
 default-ON itself lives at `tortoise/value_gate.py:81` (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
@@ -220,10 +241,12 @@ defect §0 exists to catch — a number true at one base and false at the base t
 
 **Exact remaining gap for `#10985`:** (a) the attach rate must be a reported census number, per candidate,
 with HOLD as a third bucket; (b) E1/E1b must be scored against the registered arithmetic rather than
-reported as `NO_REDUCTION`; (c) it must state which non-destructive path moves the share, given `#5333`.
-The seam it said it needed is in the tree, so **(a)–(c) are the whole remaining scope** — and (c) is the
-hard one, because the only arm that moves the share on this corpus is `counterfactual-mint-skip`
-(`0.600000 → 0.375000`), a mechanism that does not exist.
+reported as `NO_REDUCTION`; (c) it must state which non-destructive path moves the share, given `#5333`;
+and **(d) the Object-mint HOLD/attach gate does not exist** — `#10997` gated operator endpoints only, so
+the child's *"consume the seam or declare itself blocked by id"* is **still open** and has to be re-decided
+against `#10997`'s actual scope (its own body names `_mint_endpoint`). (a)–(b) are the measurement half;
+(c) and (d) are the hard ones, because the only arm that moves the share on this corpus is
+`counterfactual-mint-skip` (`0.600000 → 0.375000`), a mechanism that does not exist.
 
 ## 3. A5 / `#10987` — STILL-MISSING, and already measured *below* its target
 
@@ -257,8 +280,11 @@ accurate **then**: the capture spine wrote **every** emitted entity through one 
 named a Subject and the spine relabelled it an Object.
 
 ⛔ **That mechanism has since been FIXED, and it must not be relayed in the present tense** — the four ids
-`#4889` routed it to are all **CLOSED**, and `#4934` (CLOSED 2026-09-29T23:50:40Z, *"the capture entity
-spine mints SUBJECT-kind entities as Objects"*) **is** the fix. At the head this record is measured on,
+`#4889` routed it to are all **CLOSED**, and the fix landed in PR `#5230` (`cec2e0e957`, merged
+2026-09-26T12:35:31Z, issue `#1370`) — `#4934` (CLOSED 2026-09-29T23:50:40Z, *"the capture entity spine
+mints SUBJECT-kind entities as Objects"*) is the **report** whose own closure says **"No code change
+remains"** and names `#5230` as the landing, so cite it for the diagnosis, not for the code. At the head
+this record is measured on,
 the write seam routes by kind (`tortoise/sdk.py:16414-16428`): `_ekind = _payload_entity_kind(e)` →
 `_is_subject = is_subject_kind(_ekind or "")` → `create_entity("subject", …)` **or**
 `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z), `#1370` (CLOSED
@@ -285,11 +311,14 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 
 - **`#10984` is dispatchable.** Its `blocked-by #11001` is CLOSED; nothing else blocks it. It has no
   **implementation** lane and no implementation PR — ⚠️ the only open thing under `#10984` is **this
-  record's own docs PR `#11265`**, which builds nothing. `tools/who-is-on.sh 10984 --repo .` therefore
-  returns four signals (a local branch, a worktree, the open PR, a remote branch) and every one of them
-  is this record — the same self-matching hazard this document warns about for its own `git grep`, in the
-  tracker surface. ⛔ **But that command exits 2 and reports the holder surface UNQUERIED** (the fleet
-  board could not be read), so it does **not** certify that no lane holds `#10984` — an unmeasured
+  record's own docs PR `#11265`**, which builds nothing. `tools/who-is-on.sh 10984 --repo .` names only
+  this record's own surfaces — on a clean checkout the open PR and
+  `refs/remotes/origin/reconcile/10984`, with **no local branch and no worktree** (a checkout that holds
+  this record's own branch or worktree names those too: the same self-matching hazard this document warns
+  about for its own `git grep`, in the tracker surface). ⛔ **And its exit status is not a stable verdict**:
+  the `who_is_on.py` run behind it answers **exit 0** with a complete holder list when the fleet board is
+  readable, and **exit 2** with the holder surface **UNQUERIED** when it is not — both observed on this box,
+  an hour apart — so it never certifies that no lane holds `#10984`. An unmeasured
   surface is not a free one, which is the read-vs-verdict rule §0/§7 exist for. Treat `#10984` as
   dispatchable **subject to a clean `collision_preflight.py 10984` run** at dispatch time. The sequence is: census leg (§1(b)) → rollup query + ground truth
   (§1(c)) → re-run (d). ⛔ **Its `config/v4-mechanisms.yml` row does not exist today** — the file carries
@@ -298,11 +327,17 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
   `state_value_carve_out`, `atomic_point_write`, `failure_policy`) and **none for the declared-hierarchy
   mechanism**, despite `#10984`'s body asserting that `#11001` ships the `implemented` row. `#11001` is
   CLOSED and shipped no such row, so A1 is a mechanism that is now **implemented but undeclared** — the
-  inverse of the `#5064` failure (*"a declared mechanism read exactly like a shipped one"*). Either
-  `#11001` owes the row or `#10984` ships it; it must be **one** owner, and neither has it today.
-- **`#10985` no longer has a seam blocker.** `#10997` landed (21:33:55Z) and `#10996` is closed, so (a)–(c)
-  of §2 are the whole remaining scope. Dispatching it does not need `#11212` re-reviewed or re-landed —
-  that PR is `main`.
+  inverse of the `#5064` failure (*"a declared mechanism read exactly like a shipped one"*). ⛔ **`#10984`
+  cannot simply take it:** its own body forecloses that (*"this child does not ship an `implemented` row and
+  must not duplicate one"* — the row belongs to the producer, `#11001`). `#11001` is CLOSED without it, so
+  the row is **orphaned** and needs its own tracker decision (reopen `#11001`, or file the declaration row
+  against the mechanism registry), not a coin flip between two owners who both decline it.
+- **`#10985` still has a seam gap, and it is narrower than "no seam blocker" would suggest.** `#10997`
+  landed (21:33:55Z) and `#10996` is closed, so the *measurement* is unblocked and (a)–(b) of §2 can start
+  today — but the HOLD it landed is operator-endpoint-only (`identity_hold.HOLD_ENDPOINT`, called from
+  `_mint_endpoint`), so **(d) still needs an owner**: the Object-mint gate, or an explicit re-scope that
+  says the attach rate is measured against a gate somebody else ships. Dispatching the measurement does not
+  need `#11212` re-reviewed or re-landed — that PR is `main`.
 - **`#10987` needs no producer work to be adjudicated; it needs a measurement and a decision.** Its
   census leg partly exists already; what is missing is the per-point attach rate and the `#4889` call.
 - **None of the three is closed by tonight's merges.** Closing any of them on the strength of
@@ -317,7 +352,13 @@ gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
+git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
+                                                          # without this the next line exits 128
+                                                          # "Not a valid object name" — a sha read is
+                                                          # reproducible only while the branch ref lives
 git merge-base --is-ancestor 78e8abae6 origin/main; echo $?   # 1 EVEN THOUGH IT LANDED (squashed)
+                                                          # (128 = "cannot even ask" — also NOT a
+                                                          # landing; either way, never 0-for-landed)
 git cat-file -e origin/main:tortoise/identity_hold.py && echo PRESENT   # not `ls` — that reads the checkout
 gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
@@ -353,7 +394,7 @@ sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#
 # A5 (§3) — Subject 19, three of four families at zero
 grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
-sed -n '16414,16428p' tortoise/sdk.py        # the kind→label routing at the write seam (#4934's fix)
+sed -n '16414,16428p' tortoise/sdk.py        # the kind→label routing at the write seam (#5230/#1370's fix)
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'
