@@ -103,6 +103,7 @@ slow_shards: 5
 
 surfaces:
   api:
+  - test_11092_sentry_loop_stall.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
   # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
@@ -2671,6 +2672,13 @@ surfaces:
   # reason: `cache_projection.py` is the subject and this is the arm that pins
   # the new rule, so a change to it runs here rather than going silently green.
   - test_10853_session_source_prose.py
+  # #11070: the pre-#10852 `:Source` prose REPAIR
+  # (`tortoise/session_source_prose_migration.py`) and the census predicate it
+  # has to reach zero with. `session_source_prose_migration.py` matches no named
+  # SOURCE_PATTERN, so it falls through to `core` — registering the guard on the
+  # same surface as the #10853 narrowing above is what makes the repair's own
+  # suite run on a change to the module alone, instead of going silently green.
+  - test_11070_source_prose_repair.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -3787,6 +3795,16 @@ surfaces:
   # guard is dropped on every hosted_api.py-only diff.
   - test_health_build_identity_10447.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
+  # #11092 (review round 2, P1): the ONLY non-vacuous guard for the Sentry
+  # disconnect fix. Dual-registered for the reason the hosted_api.py guards above
+  # are: the handler half lives in `tortoise/hosted_api.py` (an exact `api`
+  # SOURCE_PATTERN that REPLACES the `core` fallback → the `api` row above), while
+  # the `ignore_errors` / `include_source_context` / `is_benign_exception` half
+  # lives in `tortoise/sentry.py`, which selects `core`. Without this row the fix
+  # round 1 asked for is pinned by a test that NO diff of either file runs —
+  # `tests/test_sentry.py` carries none of those three, and it sits in the frozen
+  # `_SELF_GUARD_DEBT` so a `sentry.py`-only diff does not run it either.
+  - test_11092_sentry_loop_stall.py
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_context_confinement.py  # #10612: one fresh contextvars.Context per invocation (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
@@ -10599,6 +10617,10 @@ durations:
   # cannot have measured it — the flat `DEFAULT_FAST_WEIGHT` is the only honest
   # row. `tools/ci_timing.py --refresh-durations` replaces it.
   test_10853_session_source_prose.py: 2.0  # unmeasured — new in #10853
+  # #11070: new in this PR, same reason as the row above — unmeasured, and the
+  # flat `DEFAULT_FAST_WEIGHT` is the only honest row until the refresher can
+  # sample it.
+  test_11070_source_prose_repair.py: 2.0  # unmeasured — new in #11070
   # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
   # per-test graphs; two of the functions are parametrised, so the collected
   # count is larger than the function count — deliberately not restated here,
