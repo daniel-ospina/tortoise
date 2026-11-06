@@ -7591,6 +7591,29 @@ tier1:
 # tests/test_ci_selection.py::
 # test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff.
 - test_deploy_workflow.py
+# #11064 review (P1): the SAME shape AGAIN, and the third member of this family.
+# `test_record_schema_placement.py` now reads TWO doc paths that select NO
+# surface at all — `docs/infra-runbook.md` (§"Secrets Matrix" / the §9 drill row)
+# and `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
+# (the `_ARMED_SOURCE_OF_TRUTH` anchors) — while it is registered only on `core`
+# (`:2725`). `docs/` is in NON_PYTHON_PREFIXES and neither path matches a
+# SOURCE_PATTERNS row, so a runbook-only OR 09-only diff filters to
+# `changed == []` and takes the docs-only early return: tier1 ONLY. Measured on
+# this tree (`tools.ci_selection.select`): `[docs/infra-runbook.md]` →
+# `surfaces=[]`, 73 tier1 files, pin NOT selected; same for the 09 path. So its
+# runbook pin (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which
+# requires the §9 drill row to still name a `captured` session and a `direct`
+# DSN) and its 09 anchor were ASLEEP on the only diffs that can break them —
+# delete `captured`/`direct` from that row, or drop the 09 arming anchor, and the
+# PR merges green while 08 §R8 silently stops agreeing with the runbook it is
+# derived from (#4309 silent-drop class; the #8614 / #9548 shape one file over).
+# A `core` registration cannot help: a surface's test files only run once that
+# surface is already selected, which a docs-only diff never does
+# (`tools/ci_selection.py:2039-2041`). Hermetic — doc + migration scans, no graph,
+# no DB, measured weight 0.2 in the durations map — so tier1 is the correct lane.
+# Pinned by tests/test_ci_selection.py::
+# test_the_record_schema_placement_pins_run_on_a_doc_only_diff.
+- test_record_schema_placement.py
 # #8135 review (P1, twice): `test_b7_runbook_ok_semantics_8135.py` binds the B7
 # operator runbook's meaning of `mcp_tool_call.status == "ok"`
 # (`docs/runbook/b7-activation-scorecard.md` — the claim #8135 corrected, whose

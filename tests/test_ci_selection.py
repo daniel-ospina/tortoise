@@ -465,6 +465,58 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
     )
 
 
+def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
+    """#11064 review (P1): the pins must run on the DOCS that can break them.
+
+    `tests/test_record_schema_placement.py` reads four doc paths, and they do not
+    select the same surface. `08-hosted-prerequisites.md` and `docs/00_index.md`
+    are `core`-selecting, so the pins on them run through that row. But
+    `docs/infra-runbook.md` (§"Secrets Matrix", and the §9 drill row that
+    `test_the_epic_r8_drill_blocker_agrees_with_the_runbook` requires to keep
+    naming a `captured` session and a `direct` DSN) and
+    `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
+    (the `_ARMED_SOURCE_OF_TRUTH` anchors) match no SOURCE_PATTERNS entry, and
+    `docs/` is in NON_PYTHON_PREFIXES — so a runbook-only or 09-only diff
+    filters to `changed == []` and takes the docs-only early return: tier1 ONLY.
+    Registered in `core` but not in `tier1`, those pins were therefore asleep on
+    exactly the diffs that can re-break them: deleting `captured`/`direct` from
+    the §9 drill row (which is what the pre-#11064 row said — the stale premise
+    sent a lane back to the arming) or dropping 09's arming anchor would merge
+    green and leave 08 §R8 silently disagreeing with the runbook it is derived
+    from (#4309 silent-drop class; the #8614 / #9548 shape one file over).
+
+    A `core` registration cannot cover this on its own: a surface's test files
+    run only once that surface is ALREADY selected, which a docs-only diff never
+    does. Measured at the pre-fix tree: `surfaces=[]`, 73 tier1 files, this file
+    absent from both.
+    """
+    for doc in (
+        "docs/infra-runbook.md",
+        "docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md",
+    ):
+        r = _sel([doc])
+        assert r["full"] is False
+        assert r["surfaces"] == [], (
+            f"{doc} is expected to select NO surface (that is what puts it on "
+            "the docs-only early return) — if a SOURCE_PATTERNS row now matches "
+            "it, this pin's premise changed and the tier1 registration should "
+            "be re-derived rather than assumed"
+        )
+        assert "test_record_schema_placement.py" in r["test_files"], (
+            f"a {doc}-only diff must select `test_record_schema_placement.py` — "
+            "it binds that doc, and a `core`-only registration is asleep on "
+            "every docs-only diff (#11064 review, #4309 class)"
+        )
+    # ... and the pre-existing runbook owners must stay selected alongside it:
+    # these files pin DIFFERENT sections of the same doc, so none substitutes.
+    r = _sel(["docs/infra-runbook.md"])
+    for owner in ("test_fly_secret_drift.py", "test_deploy_workflow.py"):
+        assert owner in r["test_files"], (
+            f"{owner} must stay in tier1 — #11064 adds a third runbook reader, "
+            "it does not replace the earlier two"
+        )
+
+
 def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
     """#11104 review (P1): the applier's own guard must run on the applier's docs.
 
@@ -489,6 +541,8 @@ def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
         "otherwise a README edit dropping `--yes` merges green (#11104 review, "
         "#4309 class)"
     )
+
+
 
 
 def test_the_8503_docs_pins_run_on_a_docs_only_diff():
