@@ -1049,9 +1049,15 @@ class ParityDiff:
 
     ``unexplained_missing``  cache fields the record did not answer, and that NO
                              declared asymmetry explains — not the schema's
-                             carve-out, not a fold `ON CREATE` default, and not
-                             the not-projectable set — i.e. a projection gap.
-                             Non-empty = RED.
+                             carve-out, not a fold `ON CREATE` default, not the
+                             §9.1/D1 decline, and not the not-projectable set —
+                             i.e. a projection gap. Non-empty = RED. ⚠️ FOUR
+                             classes, not three: the decline (an episodic
+                             Source's `summary`/`_searchText`, #10853) is one of
+                             the explainers, so a reader resolving against only
+                             the other three concludes RED on a field that is
+                             correctly explained. The four are the same four
+                             ``explained_missing`` enumerates below.
     ``invented``             record fields the cache does not have, and that no
                              declared ``ON CREATE`` default explains — i.e. a
                              field the record path made up. Non-empty = RED.

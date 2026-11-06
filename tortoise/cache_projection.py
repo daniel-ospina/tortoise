@@ -73,26 +73,37 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    table for the rule, its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
-   set equals the record view's field set exactly (never a superset). ⚠️ One
-   declared, named exception: the properties in
-   :data:`FOLD_ON_CREATE_DEFAULTS`, whose DEFAULT belongs to the fold, not the
-   record — a record row that is silent about a kind materializes the same
-   constant the live fold would have written (#9634). Named honestly, including
-   its cost: the exactness test (:mod:`tests.test_cache_projection`) compares the
-   plan against the VIEW, so it cannot see a property the VIEW carries — the
-   bound on the exception is the drift pin, not that test. A **second** declared
-   exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half, #9974): a
-   property the record is FORBIDDEN to store and the cache must COMPUTE from the
-   columns it does carry — `status` from a supersession carrier
-   (`supersededBy`/`supersededAt`). Same bound, same pin shape; the divergences
-   from the record's own `public.*_current_status` views (their `ELSE 'live'`
-   branch, and their `IS NOT NULL` reading of an empty carrier) are measured and
-   named at that table, as is the residue it deliberately does NOT derive. A
-   **third** declared exception is :data:`EVENT_STREAM_FOLDS` (#10198): the same
-   `status`, derived not from a COLUMN but from the record's own EVENT STREAM
-   (`public.journal_event`), because the connector/pack lifecycle vocabulary is
-   declared at RUNTIME by packs and is not reconstructible from any row. Its
-   source is ordered by `seq`, its vocabulary is imported from
+   set equals the record view's field set exactly (never a superset) — an
+   identity with **no** exceptions, because every property the declared classes
+   below add is materialised in :func:`node_from_row` and is therefore already
+   IN the view. ⚠️ The five declared classes are exceptions to a DIFFERENT
+   identity — *the view against the record's PRIMARY column set* — and they run
+   in BOTH directions (the count and the classification are stated once here and
+   mirrored by §17.2 of `STORAGE-ARCHITECTURE.md` and by
+   :mod:`tests.test_cache_projection`'s own enumeration):
+   ONE **value-filling** class does not widen the field set at all — the
+   properties in :data:`FOLD_ON_CREATE_DEFAULTS`, whose DEFAULT belongs to the
+   fold, not the record: a record row that is silent about a kind materializes the
+   same constant the live fold would have written (#9634), for a column the
+   record HAS (the placement table spells `subjectKind`/`objectKind`/`title` `P`),
+   so only a silent row's VALUE is supplied. Reading it as a widening is the
+   field-set/value conflation this paragraph exists to avoid. Its bound is the
+   drift pin, not an exactness test: the plan is compared against the VIEW, and a
+   constant the VIEW carries is on both sides of that comparison. A **second**
+   declared exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half,
+   #9974): a property the record is FORBIDDEN to store and the cache must COMPUTE
+   from the columns it does carry — `status` from a supersession carrier
+   (`supersededBy`/`supersededAt`), for which `public.object` has NO column at
+   all, so this one DOES widen the field set. Same bound, same pin shape; the
+   divergences from the record's own `public.*_current_status` views (their
+   `ELSE 'live'` branch, and their `IS NOT NULL` reading of an empty carrier) are
+   measured and named at that table, as is the residue it deliberately does NOT
+   derive. A **third** declared exception is :data:`EVENT_STREAM_FOLDS` (#10198):
+   the same `status`, derived not from a COLUMN but from the record's own EVENT
+   STREAM (`public.journal_event`), because the connector/pack lifecycle
+   vocabulary is declared at RUNTIME by packs and is not reconstructible from any
+   row — also a widening, for the same reason.
+   Its source is ordered by `seq`, its vocabulary is imported from
    :mod:`tortoise.status_folds` (never restated here), and its bound — the
    terminal statuses the record has no carrier for — is stated at the table.
    That exception reads THREE writers of the field (`EventRecorded` connector/
@@ -100,8 +111,9 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    field is covered on every writer the record can carry — with the residues the
    table names (birth-on-ON-MATCH, ordering, ambiguous names, a null clear).
    A **fourth** declared exception is :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`
-   (#10853, narrowed by #10965), and unlike the three above it narrows the field
-   set instead of widening it: an EPISODIC Source's `summary` and `_search_text`
+   (#10853, narrowed by #10965), and unlike the two WIDENING classes above it
+   narrows the field set instead of widening it (the fold class neither widens nor
+   narrows — it supplies a value for a column that exists): an EPISODIC Source's `summary` and `_search_text`
    columns (graph property `_searchText`) are §9.1/D1 turn prose **on a
    pre-#10000 row**, the record keeps them and the cache declines them. The drop
    is decided per ROW, from the row itself, because #10000 replaced the

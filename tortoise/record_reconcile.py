@@ -393,11 +393,15 @@ class RecordReconcileResult:
     def graph_only_total(self) -> int:
         """Properties the CACHE holds that the comparison did not judge.
 
-        ⛔ NOT "cache-owned": `graph_only` carries THREE omission classes
-        (`:375-390`), and `owned` is §17.5's term for only ONE of them — naming
-        the total `owned` sends the operator to the wrong repair for the other
-        two, which is why the rendered label says `cache-held` (`:611`). This
-        docstring must not keep the term the label retracted.
+        ⛔ NOT "cache-owned": `graph_only` carries THREE omission classes (see
+        the field's own declaration comment above, and :meth:`verdict` for how a
+        clean verdict is reached), and `owned` is §17.5's term for only ONE of
+        them — naming the total `owned` sends the operator to the wrong repair
+        for the other two, which is why the label :func:`log_result` renders says
+        `cache-held`. This docstring must not keep the term the label retracted.
+        ⚠️ Cited by SYMBOL, not by line: a line number in this module rots the
+        same way a line in a Markdown table does, and the citation that used to
+        be here already pointed one function away from the label it described.
         """
         return sum(count for _, count in self.graph_only)
 

@@ -820,7 +820,7 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record's — never a superset.
 
-    ⚠️ FOUR CLASSES THIS COMPARISON CANNOT SEE — and every one of them is
+    ⚠️ FIVE CLASSES THIS COMPARISON CANNOT SEE — and every one of them is
     declared, with a pin of its own. `_view()` builds every fixture row through
     `cp.node_from_row`, so any property the VIEW adds is on BOTH sides of the
     assertion below and the assertion is silent about it:
@@ -843,13 +843,23 @@ def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     SILENT-LOSS surface, so it is pinned by a leg that MEASURES the drop set:
     `tests/test_10853_session_source_prose.py::test_the_DROP_SET_itself_is_exactly_the_declared_pair`
     (and its widening mutation).
+    (5) #10394: `cp.CACHE_FORBIDDEN_COLUMNS` (`source`/`event` → `story_arc`) —
+    authority the record KEEPS and the cache must never materialise, dropped in
+    `node_from_row` by name on the column door and the `props` tail. Bound by
+    `test_every_primary_property_has_a_canonical_spelling_that_is_projected`
+    (which pins the declaration's CONTENTS, so an over-broad entry reds) and by
+    `tests/test_9555_narrative_cache_rebuild.py::test_the_record_restore_writes_no_story_arc_on_any_node`.
 
-    ⛔ AND THE BLINDNESS IS NOT LIMITED TO THOSE FOUR — it is the whole of
+    ⛔ AND THE BLINDNESS IS NOT LIMITED TO THOSE FIVE — it is the whole of
     `node_from_row`, because that is what BUILDS `node.props`: the schema
     REFUSAL set (a column dropped by name, `if column in refused: continue`) is
-    equally invisible here, and so is any column the projection stops placing.
-    Listing only the four above would close the question too early; they are
-    listed because each has a named pin, not because they are the whole bound.
+    equally invisible here, and so is any column the projection stops**projecting**
+    (note: NOT "stops placing" — class (5) is still PLACED, `P` in the placement
+    table, and dropped by the projector only; the two words are distinct in this
+    module and conflating them is what made this disclaimer miss the one case it
+    needed to cover). Listing only the five above would close the question too
+    early; they are listed because each has a named pin, not because they are the
+    whole bound.
 
     What this assertion DOES pin is the STATEMENT layer: `node_statement` must
     write exactly the props the plan's model carries. A field IT drops or invents
