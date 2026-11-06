@@ -2342,3 +2342,51 @@ def test_a_parenthetical_does_not_reopen_the_cross_paragraph_claim():
         assert L.classify_pr(body, 1) == [], body
     # control: a gloss followed by a comma-separated list is still one list
     assert L.claims("Closes #100 (the parent), #200 (the child).\n", 1)["weak"] == [200]
+
+
+@pytest.mark.parametrize("body, why", [
+    ("Refs <!-- an explanation\nover two lines --> #1234\n", "a wrapped comment"),
+    ("Part of <!-- x\ny --> #1234\n", "a wrapped comment after a linking word"),
+    ("Closes <!-- x\ny --> #1234\n", "…and after a closing word"),
+])
+def test_a_multi_line_comment_between_a_claiming_word_and_its_ref_still_claims(body, why):
+    """Blanking a comment PRESERVED its newlines, so a comment wrapped over two lines was not the
+    run of HORIZONTAL whitespace `CLAIM_RE`'s `mid` widening exists to consume — and the claim the
+    author made was silently dropped, arm 1 CLEAN (measured at `8c74e5fca`, review P3):
+
+        Refs <!-- an explanation
+        over two lines --> #1234        -> no claim at all, NOTHING FLAGGED
+
+    A comment is now blanked character-for-character INCLUDING its newlines, so the claim survives.
+    RED against the newline-preserving blanking: `claims()` returns `{}` and there is no finding.
+    The closing-word spelling is included because it is the one that never broke (`cmid` is
+    `[\\s:]*`, so it crossed the blanked newline) — the pair keeps the two keyword classes honest.
+    """
+    claimed = L.claims(body, 1)
+    assert claimed["weak"] + claimed["closing"] == [1234], why
+    assert claimed["declined"] == [], why
+
+
+def test_a_gloss_ending_on_an_auxiliary_cannot_carry_a_clause_subject_past_the_bridge():
+    """The bridge's gloss was `_GLOSS` — opaque, any ≤ 80 characters without `)` or `#` — so a
+    clause could move its SUBJECT one level into the parenthetical and go CLEAN, while the inlined
+    form of the SAME sentence flags (measured at `8c74e5fca`, review P3):
+
+        Refs #1234 (the outage on the other box is) — not closed.   -> declined, CLEAN
+        Refs #1234 — the outage on the other box is not closed.     -> flagged
+
+    The bridge's closed vocabulary exists so a real subject noun is prose about that noun and not a
+    decline; a gloss whose content ENDS on an auxiliary is that subject with its verb parked
+    outside, so `_GLOSS_BRIDGE` refuses it. The honest glosses the feature exists for still decline
+    — asserted here, so the narrowing cannot be made green by removing the gloss altogether.
+    """
+    subject = "Refs #1234 (the outage on the other box is) — not closed.\n"
+    assert L.claims(subject, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(subject, 1)] == [[1234]]
+
+    for honest in (
+        "Refs #10892 (blind spot), #10602 (latency) — deliberately not closing them.\n",
+        "Refs #100 (the parent) — deliberately not closing it.\n",
+        "Refs #100 (a) — not closing it.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
