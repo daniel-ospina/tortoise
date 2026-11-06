@@ -210,11 +210,11 @@ case deletes the mentions, because the first version of the case **renamed** the
 never built the consistent shrink its own label claimed.
 
 **The width case is load-bearing, and that is measured, not asserted.** The arm that matters most is
-the one covering the rule added *last*: with `parse_surface_rows` monkeypatched back to the previous
-`< 7` floor — the exact false PASS the exact-7 rule closes — and `MIN_SELF_TEST_MUTATIONS` lowered to
-match, `--self-test` withdraws this one case and reports **10/10 refused, exit 0** (ten, not eleven:
-the case is the one removed), so a quietly relaxed width rule would have kept the REQUIRED `docs` job
-green. With the case present, the same relaxation exits **1**. ⚠️ The floor is why the reproduction now
+the one covering the rule added *last*. Three edits reproduce the hole this case closes: **delete this
+case**, `parse_surface_rows` monkeypatched back to the previous `< 7` floor — the exact false PASS the
+exact-7 rule closes — and `MIN_SELF_TEST_MUTATIONS` lowered to match the ten that remain. Then
+`--self-test` reports **10/10 refused, exit 0** (ten, not eleven: the case is the one removed), so a
+quietly relaxed width rule would have kept the REQUIRED `docs` job green. With the case present, the same relaxation exits **1**. ⚠️ The floor is why the reproduction now
 costs TWO edits: at the shipped floor, simply deleting the case is red on its own
 (`self-test: 10 mutation(s) registered, at least 11 required`, exit 1), so the false PASS cannot be
 re-opened by removing the case alone. ⚠️ And state the mechanism rather than overclaiming it: on this
@@ -233,13 +233,25 @@ path-filter-free** context, and it is the only one that can see a docs-only edit
 selects no test surface. So a lane that deletes a row here gets a red `docs` check rather than a green
 one and a smaller checklist. `.github/workflows/*` is a surface worth naming explicitly: the change that
 added this line touches a workflow file, which a lane's own preflight cannot prove it may write —
-so the PR body says so. ⚠️ **A residual worth stating:** the population pin lives inside the tool an
-editor edits, so a change can still shrink the row, the pin and the self-test case together. Any
-in-repo pin has that property; the honest statement is that it converts a silent shrink into a
-deliberate three-place edit that a reviewer can see, not that it makes the shrink impossible. What it
-does **not** leave open is the cheaper edit: `MIN_SELF_TEST_MUTATIONS` makes a **shrunk** mutation
-population exit 1, because a green `self-test: 0/0 … not a rubber stamp` would be the same false PASS
-one place short of the three.
+so the PR body says so. ⚠️ **A residual worth stating, measured rather than estimated.** The
+population pin lives inside the tool an editor edits, and `--self-test` mutates only the **document**,
+so it cannot see a pin edit at all. The two therefore cover different surfaces, and the honest limit is:
+
+- **Two places beyond the row itself** — delete a surface row, **every mention of it** (R1/R4/R5 all
+  referentially check what they read, so a row cannot go alone) *and* drop it from `SURFACES` — stays
+  **green on both arms** (measured: `14 surface(s) · CLEAN`, exit 0, *and* `11/11 refused`, exit 0).
+  This is the case the paragraph above measures: deleting the row *without* its mentions is already a
+  violation, so the **pin is the only edit the arm cannot see**. That is because only three surfaces
+  (SF2, SF10, SF13) have a self-test case naming them, so the mutation population is untouched for the
+  other twelve.
+- **Three places** — for one of those three, also delete the cases that name it (SF13 has three: two
+  delete-row cases and the `#11088` child-row case) — drops the population below the floor and reds the
+  arm (measured: `8 mutation(s) registered, at least 11 required`, exit 1).
+
+So the claim this arm supports is narrower than "a silent shrink is impossible": a shrink is
+**silent for a surface no case names**, and a reviewer sees it only in the row-and-pin diff. What the
+floor does add is that the *third* edit cannot buy back the green — `MIN_SELF_TEST_MUTATIONS` reds a
+shrunk population instead of printing a reassuring `self-test: 0/0 … not a rubber stamp`.
 
 This is what lets **#11089** cite the map as its checklist: the capstone walks `SF1…SF15`, and a
 deleted row, a blanked layer, or a consistently-shrunk population reds the check instead of quietly
