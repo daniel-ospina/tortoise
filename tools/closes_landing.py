@@ -689,6 +689,12 @@ def _consume_blockquote_markers(line: str, depth: int) -> tuple[int, str]:
     left is BLANK. A block that lives at `depth` ends only on a line that is blank in THAT
     container — a deeper quote's marker on the same line is the block's own literal text, not a
     blank line — so the end condition must not consume every `>` in the prefix.
+
+    Primary source (§4.6, `spec.commonmark.org/0.31.2/spec.txt`:2409): *"It ends with the first
+    subsequent line that meets a matching end condition, or the last line of the document, or the
+    LAST LINE OF THE CONTAINER BLOCK containing the current HTML block"* — the container is entered
+    (and its markers consumed) before the leaf block sees the line, which is why the reading is at
+    the block's own depth and why a marker deeper than it is TEXT.
     """
     i = 0
     consumed = 0
@@ -1323,7 +1329,9 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # the blank line stayed INSIDE the item's own quote (a deeper marker opens a container the item
     # cannot hold, and then the item really has closed — `- a` + `>`), and it is consulted for
     # exactly ONE non-blank line, to bind a block that opens while still inside the item. That is
-    # the renderer's own rule for when the `<li>` ends.
+    # the renderer's own rule for when the `<li>` ends, and the spec states it outright (§4.6: an
+    # HTML block also ends at "the LAST LINE OF THE CONTAINER BLOCK containing the current HTML
+    # block", which is why a type-1 `<pre>` with no `</pre>` still ends with its item).
     blank_carried: _ListItem | None = None
     # The spaces after this line's own list marker (0 = not a marker line, or a blank one).
     own_gap = 0
