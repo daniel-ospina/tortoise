@@ -1584,10 +1584,21 @@ class CacheTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, f"{' '.join(expr)} is not a verdict field: {r.stderr}")
 
     def test_encoded_and_uppercase_route_spellings_are_refused(self) -> None:
-        """gh resolves these; a guard that only knows one spelling is not a guard.
+        """Refused because the GUARD NORMALISES them before matching — not because gh resolves them.
 
-        `p%75lls` percent-decodes to `pulls` inside gh, `PULLS` is the same route, and an
-        `api graphql` query is a live read whose content cannot be classified from argv.
+        ⛔ THIS DOCSTRING USED TO CLAIM THE OPPOSITE, and the tool records the measurement that
+        refutes it: `p%75lls` does NOT "percent-decode to `pulls` inside gh". Measured against
+        the live API, `gh` forwards the escape verbatim and GitHub answers 404
+        (`/rate_lim%69t` -> 404, `/rate_limit` -> 200), so refusing the encoded spelling is
+        deliberate OVER-refusal of something that could not have worked — while the
+        route-level `unquote` that performs it is genuinely load-bearing, because it is what
+        also refuses `api --paginate graph%71l`. See `_route_candidates`' note in
+        `tools/gh_read_cache.py`.
+
+        `PULLS` is matched by the same route-level CASE-FOLDING (which is the guard's rule, not
+        a claim about the server). An `api graphql` query is the case that must be refused
+        whatever any of that says: its content cannot be classified from argv, so a guard that
+        let it through on spelling grounds would be serving a live read it cannot vet.
         """
         spellings = (
             ("api", "repos/o/n/p%75lls/42"),
