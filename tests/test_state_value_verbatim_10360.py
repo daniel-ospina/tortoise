@@ -1409,7 +1409,7 @@ _RESIDUAL_CLOSED_VERDICT = (
     # separates the two (measured both ways).
     r"\b(?:does|do|did|would|will|can|could)n['\u2019]?t\s+(?:yet\s+)?close[sd]?\b",
     r"\b(?:does|do|did|would|will|can|could)\s+not\s+(?:yet\s+)?close[sd]?\b",
-    r"\b(?:far\s+from|anything\s+but)\s+closed\b",
+    r"\b(?:far\s+from|anything\s+but)\s+(?:being\s+)?closed\b",
 )
 
 #: The affirmations that something IS open / STOPPED being closed. TWO ARMS,
@@ -1452,6 +1452,19 @@ _RESIDUAL_CLOSED_VERDICT = (
 #: to catch the shapes a lane actually writes, not to be a semantic reader of
 #: English; closing that needs a human or a different instrument, not a longer
 #: regex.
+#: ⛔ ONE WINDOW for every `no longer …` arm (#11258 review round 12, MEASURED):
+#: three separate arms each required the verb to follow `no longer` IMMEDIATELY, so
+#: `no longer BEING fused`, `no longer EVEN judged`, `no longer ACTIVELY fused` were
+#: GREEN in whichever arm was supposed to read them, and the floor — the ONLY tuple
+#: the honest-SPELLING path runs — had the same hole. `\bno\s+longer\b` (word
+#: boundaries, not `\s+`) also stops a PUNCTUATED insertion from defeating all
+#: three: `no longer, strictly speaking, closed` was GREEN.
+#: ⛔ `fused`/`fusing` are NOT in the unanchored arm below; they stay in the
+#: subject-gated ones. The falsifier is `` `percent`/`pct` is no longer fused ``
+#: (a must-stay-GREEN proof), and `percent`/`pct` are absent from those gates'
+#: vocabularies, which is what makes a window there free.
+_NO_LONGER_WINDOW = r"\bno\s+longer\b[^.;]{0,25}?"
+
 _RESIDUAL_OPENNESS = (
     # `not closed`, allowing an adverb inside the negation (`is not yet / not
     # fully / not really closed`) — the adverb-free form was the whole class
@@ -1500,8 +1513,8 @@ _RESIDUAL_OPENNESS = (
     # window for exactly this reason. It is phrased with `no longer` + `closed`/
     # `judged`, i.e. the vocabulary this arm CLAIMS to read, so it is not the
     # disclosed residual.
-    r"\bno\s+longer\s+[^.;]{0,20}?"
-    r"(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    _NO_LONGER_WINDOW
+    + r"(closed|fuses|judged|caught|compared|enforced|retained)\b",
     # ⛔ THE PARTICIPLE, SUBJECT-GATED. The `no longer` arm above carries only the
     # 3sg `fuses`, so "the ADJACENCY half is no longer fused" — the row's OWN
     # register (`the unit word IS fused`, `THE FUSION ITSELF MULTIPLIES`) — stayed
@@ -1539,13 +1552,14 @@ _RESIDUAL_OPENNESS = (
     # row's own `, after the widen, ` register (MEASURED: `\`minute\` is, after the
     # widen landed, no longer fused` → GREEN at 20, RED at 80).
     r"\b(?:adjacency|the\s+half|carve-?out|value\s+class|numeric\s+side|"
-    r"time[- ]unit)\b[^.;]{0,80}?\bno\s+longer\s+[^.;]{0,20}?(?:fused|fusing)\b",
+    r"time[- ]unit)\b[^.;]{0,80}?"
+    + _NO_LONGER_WINDOW + r"(?:fused|fusing)\b",
     r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
     r"week|weeks|month|months|mos|year|years|mile|miles|mi|millisecond|"
     r"milliseconds|millisec|millisecs|min|mins|ms|sec|secs|hr|hrs|km|kg|"
     r"(?<![\'\u2019])\bm\b|(?<![\'\u2019])\bs\b)"
     r"\b[^.;]{0,80}?\b(?:is|are|remains?|stays?|was|were)\b[^.;]{0,80}?"
-    r"\bno\s+longer\s+(?:fused|fusing)\b",
+    + _NO_LONGER_WINDOW + r"(?:fused|fusing)\b",
     r"\bunclosed\b",
     # ⛔ NEGATION IS NOT A REOPENING, and this arm is the UNANCHORED one — so it is
     # where a plain `not` would otherwise reach an `open` phrase: `the ADJACENCY
@@ -1662,7 +1676,8 @@ _RESIDUAL_ANCHORED_OPENNESS = (
 #: `not closed` / `is open` are deliberately absent — the SPELLING gap IS open and
 #: saying so is the row's own honest disclosure.
 _SPELLING_FLOOR = (
-    r"\bno\s+longer\s+(closed|fuses|fused|judged|caught|compared|enforced|retained)\b",
+    _NO_LONGER_WINDOW
+    + r"(closed|fuses|fused|fusing|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
     # ⛔ THE WAIVED SENTENCE IS STILL READ FOR `open again`, which is why it is here
     # and not only in `_RESIDUAL_OPENNESS`: the honest path runs ONLY this tuple, so
@@ -2084,6 +2099,18 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is no longer even judged.",
     "the ADJACENCY half is no longer actively judged.",
     "the ADJACENCY half is no longer being fused.",
+    # ⛔ ROUND 12 (#11258 review round 12, MEASURED): the window was fixed in ONE
+    # arm and left out of the other three, and `\s+` after `longer` let a
+    # punctuated insertion defeat all of them. One shared `_NO_LONGER_WINDOW`
+    # primitive now serves every arm — these are its probes, one per arm.
+    "`minute` is no longer being fused.",
+    "the units are no longer being fused.",
+    "the SPELLING gap is no longer being fused.",
+    "the ADJACENCY half is no longer, strictly speaking, closed.",
+    "the value class is no longer, once the widen lands, fused.",
+    "the ADJACENCY half is no longer, at this head, judged.",
+    "the ADJACENCY half is far from being closed.",
+    "the ADJACENCY half is anything but being closed.",
     # ⛔ THE APOSTROPHE-LESS CONTRACTIONS (#11258 review round 10 `P1`, MEASURED):
     # these four were RED, then went GREEN when round 9 made the apostrophe
     # mandatory to avoid `point`/`count` — a REGRESSION introduced by a fix. They
@@ -2450,10 +2477,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 105, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 113, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (105), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (113), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -2541,6 +2568,12 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # GREEN with both tests GREEN.
             "the ADJACENCY half is no longer closed.",
             "the ADJACENCY half is no longer judged.",
+            # ⛔ AND THE SHARED WINDOW (#11258 review round 12 `P1`): three arms
+            # ran the same rule and only one had the window, and the floor — the
+            # ONLY tuple the waived path runs — had none, so one filler word
+            # defeated it. These two are the unit-vocabulary and floor arms.
+            "`minute` is no longer being fused.",
+            "the SPELLING gap is no longer being fused.",
             # ⛔ THE `yet to be closed` SYNONYM ARM (#11258 review round 9 `P2`).
             "the ADJACENCY half remains to be closed.",
             # ⛔ AND ONE SHAPE PER ARM/PATTERN THAT HAS FEW EXCLUSIVE PROOFS. The
