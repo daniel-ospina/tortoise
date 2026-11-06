@@ -60,6 +60,11 @@ by construction):
 | `affected_entity_types` | the `entity_type` values the product translates onto this label |
 | `removal_changes_query_results` | `true` iff the label stores unindexed vectors **and** some `entity_type` reaches it; `false` when it does not; **`UNMEASURED(...)`** when either input is unmeasured (a consequence is never claimed from a hole) |
 
+A label whose consequence is `UNMEASURED` is carried in
+`surface_consequence.unmeasured_labels` and **never dropped**: `labels` (and
+`entity_types_whose_query_results_change`) is a **MEASURED** set, so a non-empty `unmeasured_labels`
+means that set is not the whole population. Both the JSON and the text path say so.
+
 **⛔ `entity_type` is not 1:1 with a label, and that is why the row carries it.** `security.entity_label`
 sends **two** entity types to `:Source` (`document`, `source`) and **two** to `:Point` (`point`,
 `operator`). A census that named only labels would state the wrong population for the surface question
@@ -114,10 +119,39 @@ MCP tortoise_search / tortoise_query,  REST GET /v1/search
              ⛔ on a label with no vector index this raises → brute-force full scan
 ```
 
-So `entity_type='object'` / `'event'` searches **return rows today by full scan** — the mechanism key
-in the leg trace reports `ok` for that path, which is why the scan is unobservable to a caller
-(`#4999` fixed the *reporting*; it did not fix the scan). Removing those labels' vectors makes those
-queries return **zero rows**.
+So `entity_type='object'` / `'event'` searches **return rows today by full scan**. Two keys in the
+leg trace describe that path, and they say different things: `reason` reports **`ok`**, while
+`mechanism` reports **`scan_fallback`** — so since `#4999` (PR `#5159`) the scan *is* observable to a
+caller without reading the source; what `#4999` did not do is fix the scan. ⚠️ Neither key values the
+cost: `ok` is not "cheap", and `scan_fallback` is a mechanism name, not a warning.
+
+### 3.1 ⛔ What removal actually changes — measured, and NOT "zero rows"
+
+An earlier draft of this document, following the issue body's own wording, said that removing these
+labels' vectors "makes those queries return **zero rows**". **That is false, and a surface request
+resting on it would be a request on a false premise.** Measured on the pinned
+`falkordb-server:v4.20.6` with `:Object` carrying a `name` fulltext index (the inventory §12.1b records)
+and one embedding, through the same `degradation_chain(entity_type="object", is_embedded=False)` path
+the diagram above draws:
+
+```text
+WITH the vectors     : fts=2, vector=1                               → 3 rows
+AFTER removing them  : fts=2, vector=0 (reason=no_embeddings)         → 2 rows
+```
+
+`classify_query` turns **every** leg on for a text query (`{"fts": True, "vector": True,
+"structural": True}`), `run_fts_query` serves `Object`/`Event`/`Subject` by `entity_type.capitalize()`
+and `document` → `:Source`, and those labels carry fulltext indexes. So after removal:
+
+- a query that matched **only by meaning** — the semantic case the dense leg exists for — returns
+  **zero** rows: that is the real loss;
+- a query with **lexical** matches keeps answering from the FTS leg and RRF fusion, with the dense
+  contribution gone;
+- the structural leg is unaffected.
+
+**The surface consequence is therefore: five `entity_type` values lose semantic recall** — including the
+answers no lexical match could produce — **not the loss of retrieval.** Stated this way because the
+weaker claim is the true one, and because the owner is being asked to rule on the true one.
 
 ---
 
@@ -134,18 +168,18 @@ The transcript below is the tool's **text mode**, pasted unedited:
 
 ```text
 $ uv run python tools/dod_5090_probe.py --census --uri <lane-uri> --graph census11088_demo
-Census — graph `census11088_demo` at 2026-11-06T21:18:55+00:00 (CALL db.indexes()):
+Census — graph `census11088_demo` at 2026-11-06T21:46:04+00:00 (CALL db.indexes()):
   command: uv run python tools/dod_5090_probe.py --census --uri docker://:pw@host:6379/<graph> --graph <graph>
   Event      stored=2            indexed=False  unindexed=2            payload=3072
-             entity_type(s) served by this label: ['event'] — removal changes query results: True
+             entity_type(s) served by this label: ['event'] — removing the UNINDEXED remainder changes query results: True
   Object     stored=2            indexed=False  unindexed=2            payload=3072
-             entity_type(s) served by this label: ['object'] — removal changes query results: True
+             entity_type(s) served by this label: ['object'] — removing the UNINDEXED remainder changes query results: True
   Point      stored=3            indexed=True   unindexed=0            payload=4608
-             entity_type(s) served by this label: ['operator', 'point'] — removal changes query results: False
+             entity_type(s) served by this label: ['operator', 'point'] — removing the UNINDEXED remainder changes query results: False
   Source     stored=1            indexed=False  unindexed=1            payload=1536
-             entity_type(s) served by this label: ['document', 'source'] — removal changes query results: True
+             entity_type(s) served by this label: ['document', 'source'] — removing the UNINDEXED remainder changes query results: True
   Subject    stored=1            indexed=False  unindexed=1            payload=1536
-             entity_type(s) served by this label: ['subject'] — removal changes query results: True
+             entity_type(s) served by this label: ['subject'] — removing the UNINDEXED remainder changes query results: True
   surface consequence — removal is REQUESTED, not performed; it needs the owner's approval (MCP/SDK surface):
     affected entity_type values: ['document', 'event', 'object', 'source', 'subject']
     path: tortoise_query (MCP only (no REST route)) / tortoise_search (GET /v1/search) → tortoise_fts_query(entity_type=…) → tortoise.search_engine.run_vector_query
@@ -205,9 +239,16 @@ never as the answer.
 node count, edge count, the engine's index catalogue and every per-label embedding count **before and
 after** the call and asserts they are identical.
 
+⚠️ **The guarantee that FORBIDS a write is the read-only verb** — `GRAPH.RO_QUERY` is rejected
+server-side for a write, and the fakes (`_NoWriteCensusGraph`, `_WriteVerbForbidden`) fail on any use of
+`graph.query`. The live snapshot is a corroborating observation, not the proof: it cannot see a
+same-shape property mutation (`SET n.embedding = vecf32($x)` on an existing node leaves every counter it
+reads unchanged). Stated because a test docstring calling that "byte-identical" claims more than the
+assertion measures.
+
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
-110 passed, 1 skipped in 18.52s
+113 passed, 1 skipped in 19.95s
 ```
 
 **Row 2 — an unreadable catalogue exits non-zero and does not report an empty population.**
@@ -258,9 +299,11 @@ The contradiction they are qualified against, verbatim from `STORAGE-ARCHITECTUR
 ## 7. The request this evidence supports — and everything it does not do
 
 **Requested:** the owner's decision on whether to **remove** the `embedding` property from the
-unindexed labels (`:Event`, `:Object`, `:Source`, `:Subject`). Doing so makes
-`tortoise_search` / `tortoise_query` / `GET /v1/search` return **zero rows** for `entity_type ∈
-{event, object, document, source, subject}` where they return rows today by full scan. That is an
+unindexed labels (`:Event`, `:Object`, `:Source`, `:Subject`). The affected surface is
+`tortoise_search` / `tortoise_query` / `GET /v1/search` for `entity_type ∈ {event, object, document,
+source, subject}`, and what they lose is **semantic recall**: a query that matched only by meaning
+returns zero rows afterwards, while a lexically-matching query keeps answering from the FTS leg (§3.1
+is the measurement, and the reason it is stated this way rather than as "zero rows"). That is an
 MCP/SDK surface change, and no lane may take it.
 
 **⚠️ The cost argument is GONE, in both directions — do not resurrect it.** The 2026-10-08 billing

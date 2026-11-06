@@ -2064,6 +2064,17 @@ def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
     `_safe`-wrapped handler in this repo uses). A scan that only matched the
     first would miss `tortoise_search`, the tool the claim is primarily about.
 
+    ⚠️ **DECLARED BOUND: this names handlers that call it DIRECTLY.** A handler
+    that delegates to a sibling helper which forwards the argument is NOT named
+    (`_hybrid` would be, and it is not a registry tool, so it surfaces as an
+    `UNMEASURED(handler not in TOOL_REGISTRY …)` entry beside the real tools
+    rather than disappearing). `**{…}` keyword unpacking is likewise unmatched.
+    At this head neither shape exists — the two module-level handlers are the
+    whole population — and a new one is REPORTED, not silently dropped, because
+    the unmatched name lands in that `UNMEASURED` entry. Stated rather than
+    claimed complete: this scan's promise is over what a walk of the tree can
+    see (review round 1, P3).
+
     Returns `(names, error)`; `error` is the reason when the scan could not be
     taken, so the caller reports it instead of reading an empty set as "no tool
     is affected".
@@ -2304,6 +2315,18 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             unindexed = stored
         if isinstance(stored, int) and stored == 0:
             payload = {"derived_payload_B": 0, "how": "no stored vectors on this label"}
+        elif unreadable_here:
+            # ⛔ The catalogue row could not be read, so COVERAGE is unknown —
+            # and `not covering` cannot tell "no index" from "an index we could
+            # not see" (`covering` is empty for both). `how` may not say either
+            # way, and the byte figure refuses for the same reason `indexed`
+            # and `unindexed` already do (review round 1, P2: the row said
+            # `indexed: UNMEASURED(...)` and, one field over, "NO covering
+            # index" — a coverage fact it had not measured).
+            payload = {"derived_payload_B": "UNMEASURED(the catalogue row was "
+                                            "unreadable, so coverage is not "
+                                            "provable)",
+                       "how": f"catalogue row unreadable: {unreadable_here[0]}"}
         elif width is None:
             # ⛔ The refusal, BEFORE the index is consulted: without a measured
             # width there is no byte figure, indexed or not.
@@ -2350,15 +2373,31 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                               f"probed width {width} agrees"}
         # ── #11088: WHICH entity_type values stop answering ──────────────
         # `unindexed` above is a COUNT. The surface question is a SET: removing
-        # this label's vectors does not change "a query", it changes the query
-        # for every `entity_type` the product translates onto this label — and
-        # returns zero rows for it, because the leg falls back to a full scan
-        # (`CALL db.idx.vector.queryNodes` on an unindexed label raises, and
-        # `run_vector_query` degrades to brute force). A label with no
-        # `entity_type` at all is the worst class: stored, unindexed AND
-        # unqueryable — so it is reported as affected-for-nobody, not omitted.
+        # the unindexed remainder does not change "a query", it changes the
+        # query for every `entity_type` the product translates onto this label.
+        # ⛔ What changes is SEMANTIC RECALL, not retrieval: with the vectors
+        # gone the dense leg has nothing to answer
+        # (`CALL db.idx.vector.queryNodes` on an unindexed label raises today,
+        # so `run_vector_query` degrades to a brute-force scan), but
+        # `classify_query` turns the FTS leg on for every text query and these
+        # labels carry fulltext indexes — so a lexically-matching query keeps
+        # answering, and only a query that matched ONLY by meaning goes to zero
+        # rows. Measured, §3.1 of `docs/epics/2026-11-04-5090-vector-layer/`
+        # `S3-VECTOR-CENSUS.md` (review round 1: this comment said "returns zero
+        # rows", which the measurement refuted). A label with no `entity_type`
+        # at all is the worst class: stored, unindexed AND unqueryable — so it
+        # is reported as affected-for-nobody, not omitted.
         ets = affected_entity_types(label)
-        if isinstance(unindexed, int) and isinstance(stored, int):
+        # ⛔ Derived from the FINAL cell values, not from the locals above: an
+        # unreadable catalogue row leaves `covering` empty, so the `else:
+        # unindexed = stored` branch fabricates a full "unindexed" coverage —
+        # and computing `changes` from it published `True`, plus a
+        # `surface_consequence` entry, for a label whose own `unindexed` cell
+        # read `UNMEASURED` three lines away (review round 1, P1).
+        if unreadable_here:
+            changes = ("UNMEASURED(the catalogue row was unreadable, so whether "
+                       "any stored vector is unindexed is not provable)")
+        elif isinstance(unindexed, int) and isinstance(stored, int):
             changes = bool(unindexed > 0 and ets)
         else:
             # Neither the count nor the coverage is measured, so neither is
@@ -2399,18 +2438,34 @@ def surface_consequence(labels: dict) -> dict:
     stored, unindexed and served by NO `entity_type` is reported in its row
     (empty `affected_entity_types`) and is deliberately absent here: nothing
     queries it, so nothing changes.
+
+    ⛔ A label whose consequence is `UNMEASURED(...)` is listed under
+    `unmeasured_labels`, NEVER dropped. Dropping it would shrink
+    `entity_types_whose_query_results_change` silently — the UNDER-reporting
+    direction this module's own §3 calls the dangerous one, since a surface
+    request whose consequence is understated is a request the owner can approve
+    by mistake (review round 1, P1). It is reachable on a live engine: an
+    unreadable catalogue row, and a per-label count that times out.
     """
-    affected = []
+    affected, unmeasured = [], []
     for label, row in sorted(labels.items()):
-        if row.get("removal_changes_query_results") is not True:
-            continue
-        affected.append({
-            "label": label,
-            "entity_types": row["affected_entity_types"],
-            "unindexed": row["unindexed"],
-            "stored": row["stored"],
-            "derived_payload_B": row["payload"]["derived_payload_B"],
-        })
+        changes = row.get("removal_changes_query_results")
+        if changes is True:
+            affected.append({
+                "label": label,
+                "entity_types": row["affected_entity_types"],
+                "unindexed": row["unindexed"],
+                "stored": row["stored"],
+                "derived_payload_B": row["payload"]["derived_payload_B"],
+            })
+        elif changes is not False:
+            # `True` / `False` are the only measured answers; anything else is a
+            # hole, and a hole is carried, not discarded.
+            unmeasured.append({
+                "label": label,
+                "entity_types": row["affected_entity_types"],
+                "why": changes,
+            })
     return {
         "requested_not_performed": True,
         "sdk_method": VECTOR_LEG_SDK_METHOD,
@@ -2419,6 +2474,10 @@ def surface_consequence(labels: dict) -> dict:
         "entity_types_whose_query_results_change": sorted(
             {et for a in affected for et in a["entity_types"]}),
         "labels": affected,
+        # ⛔ The under-reporting channel. `entity_types_whose_query_results_change`
+        # is a MEASURED set; a reader must not take it as the whole population
+        # while this is non-empty.
+        "unmeasured_labels": unmeasured,
     }
 
 
@@ -2648,9 +2707,14 @@ def main(argv: list[str] | None = None) -> int:
             # `entity_type` values is. Printed on the row it belongs to, so a
             # reader cannot lift the number without reading what removing it
             # would change.
+            # ⛔ `removal of the UNINDEXED remainder`, not `removal`: the field
+            # is about the unindexed share, and on an INDEXED label (`:Point`,
+            # the only one) the bare sentence read "removal changes query
+            # results: False" — one paraphrase from "deleting every Point's
+            # embedding is harmless" (review round 1, P2).
             print(f"  {'':10s} entity_type(s) served by this label: "
                   f"{d.get('affected_entity_types') or 'none (no query path)'}"
-                  f" — removal changes query results: "
+                  f" — removing the UNINDEXED remainder changes query results: "
                   f"{d.get('removal_changes_query_results')}")
         sc = c.get("surface_consequence")
         if sc:
@@ -2658,8 +2722,19 @@ def main(argv: list[str] | None = None) -> int:
                   "performed; it needs the owner's approval (MCP/SDK surface):")
             print(f"    affected entity_type values: "
                   f"{sc.get('entity_types_whose_query_results_change') or 'none'}")
+            # ⛔ An UNMEASURED surface is PRINTED, not skipped — dropping it left
+            # the `path:` line starting with a bare `/` and understated the
+            # surface (review round 1, P3).
+            for entry in sc.get("surface") or []:
+                if "tool" not in entry:
+                    print(f"    ⛔ surface: {entry.get('tools')}")
             print(f"    path: {' / '.join(t['tool'] + ' (' + t['rest'] + ')' for t in sc.get('surface') or [] if 'tool' in t)}"
                   f" → {sc.get('sdk_method')}(entity_type=…) → {sc.get('runner')}")
+            for entry in sc.get("unmeasured_labels") or []:
+                print(f"    ⛔ UNMEASURED — {entry['label']} "
+                      f"({entry['entity_types'] or 'no entity_type'}): {entry['why']}")
+                print("       the affected set above is MEASURED ONLY; it is not "
+                      "the whole population")
         if "error" in c:
             print(f"  {c['error']}")
         if c.get("population"):
