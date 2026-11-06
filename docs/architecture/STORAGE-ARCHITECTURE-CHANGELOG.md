@@ -1866,7 +1866,7 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   `tests/test_9555_narrative_carrier.py::test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so`).
   ⚠️ That pin was RENAMED by `#10394` to `test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so`
   — the name above is this entry's historical reference, and a grep for it now finds this line only.
-  **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
+  **So any clearance of that copy is not durable while door 2 is open** — the next
   restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
   table, plus that test's premise), which is why it is filed rather than absorbed.
 - **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
@@ -2065,7 +2065,7 @@ a node. The chain had four hops and no single bug —
 4. `node_statement`'s `SET n += $props` wrote it onto the node.
 
 so `record_restore.restore_from_record_view` / `rebuild_from_record` (`python -m tortoise record-restore`,
-`docs/infra-runbook.md` §9) put the prose back on every restore and `#10017`'s graph-side purge was undone
+`docs/infra-runbook.md` §9) put the prose back on every restore and any clearance of it was undone
 by the next routine recovery. MEASURED at the head before this change, one call each:
 `node_from_row("Source", {…, "story_arc": "PROSE"}).props["story_arc"] == "PROSE"`, and the same on
 `Event`. The red-first pin failed at its FIRST arm with `projected_columns('source')` still keeping the key.
@@ -2096,7 +2096,7 @@ cannot take the drop for an omission while `#7968`'s two-way pin (PRIMARY ⇒ co
 
 **Why the seam and not a sweep.** The alternative fix — purge after the restore — would rent the RAM for
 the duration of the write and would have to run on every restore forever. The write had to stop, which is
-also what makes `#10017`'s purge durable: purge → restore → `sum(size(n.story_arc))` = 0.
+also what makes a targeted clear durable: clear → restore → `sum(size(n.story_arc))` = 0.
 
 **What a reader keeps seeing, and what a reconciler now reports.** The narrative is served to every reader
 from `public.session_narrative` (`record_text.serve_from_record` never consults the projection module), so
@@ -2111,11 +2111,14 @@ purges the pre-#10000 **turn nodes** (`MATCH (s:Session {id:$sid})-[:CONTAINS]->
 `tools/purge_legacy_turns.py`) and touches neither `:Source` nor `:Event`, so it deletes turns and leaves the
 narrative where it was. ⛔ And bound what the clear COSTS, because two populations reach this class: where the
 record's row CARRIES the value, the clear frees a stale duplicate and the only thing missing is a PERMITTED
-WRITE (§9.1/D1 forbids every projection from materialising it); where the prose arrived by the pre-#10000
-commit write's RAW CYPHER (`hosted_api.py`'s removed `SET s.story_arc=$arc` / `e.story_arc=$arc`), the value was
+WRITE (§9.1/D1 forbids every projection from materialising it); where NO record home holds the text — key
+it on what the record HOLDS, not on the arrival route, since the `SessionNarrated` carrier and the pre-#10000
+commit write's raw `SET s.story_arc=$arc` coexisted 2026-10-24 → #10000 — the value was
 never journalled by that write — raw Cypher is not a journal record, and measured for #9555 the record's narrative home had
 its two COUNT columns filled and its two TEXT columns NULL on every live capture — so the graph copy is the
-ONLY copy and the clear destroys the last one, with nothing to restore it from. ⛔ **One** of the three classes has a repair that RESTORES the value, plus one case: the declined pair has one, shipped
+ONLY copy and the clear destroys the last one, with nothing to restore it from. ⛔ And `record-restore` is
+itself refused on a production graph name (`_assert_test_graph`, #2944), so on a live deployment the clear is
+an explicit `REMOVE n.story_arc` on the anchor. ⛔ **One** of the three classes has a repair that RESTORES the value, plus one case: the declined pair has one, shipped
 (`session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place), and a cache-only `status` the mint CAN CARRY does too (re-assert it through the write door —
 `update_entity(id, status=<value>)` — which journals the `EntityMutated` state op the fold reads, so the value is

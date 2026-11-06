@@ -140,7 +140,11 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
   ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy — and it has NO route that RESTORES the value. ⛔ BOUND THAT CLAIM,
+  legacy copy — ⛔ and that route is itself BLOCKED on a production graph:
+  ``rebuild_from_record`` runs ``_assert_test_graph`` (#2944), which refuses every
+  ``org_<org_id>`` graph name, so on a live deployment the clear is an explicit
+  ``REMOVE n.story_arc`` on the anchor. It has NO route that RESTORES the value.
+  ⛔ BOUND THAT CLAIM,
   because two populations reach this class and a clear costs them different
   things:
 
@@ -150,16 +154,24 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   WRITE — §9.1/D1 forbids any projection from materialising it in the graph —
   not a source to re-derive it from. Here the clear frees a stale duplicate.
 
-  (ii) **the prose arrived by the pre-#10000 commit write's RAW CYPHER**
-  (``hosted_api.py``: ``SET s.story_arc=$arc`` / ``e.story_arc=$arc``, removed for
-  NEW writes by #10000): the value was never JOURNALLED by that write, and raw Cypher is not a
+  (ii) **no record home holds the prose.** The pre-#10000 commit write's RAW
+  CYPHER (``hosted_api.py``: ``SET s.story_arc=$arc`` / ``e.story_arc=$arc``,
+  removed for NEW writes by #10000) was never JOURNALLED — raw Cypher is not a
   journal record
-  (``supabase/migrations/20261023000001_record_session_narrative.sql``). Measured
-  for #9555, the record's narrative home had its two COUNT columns filled and its
-  two TEXT columns NULL on every live capture. On this population the graph copy
-  is the ONLY copy, so a clear does not free a duplicate — it destroys the last
-  one, and there is nothing to restore it from. That cost belongs BEFORE the
-  repair advice, not after it.
+  (``supabase/migrations/20261023000001_record_session_narrative.sql``) — and
+  measured for #9555 the record's narrative home had its two COUNT columns filled
+  and its two TEXT columns NULL on every live capture. On this population the
+  graph copy is the ONLY copy, so a clear does not free a duplicate — it destroys
+  the last one, and there is nothing to restore it from.
+
+  ⛔ Key the partition on what the RECORD HOLDS, not on how the prose ARRIVED:
+  the ``SessionNarrated`` carrier (#9555) and the raw node write coexisted for
+  about a week (2026-10-24 -> #10000 on 2026-10-31), so prose that came in by the
+  raw write can still sit in ``public.session_narrative``. That is population
+  (i): the record holds it, every reader keeps it, and the clear frees a stale
+  duplicate. The question to ask is therefore whether
+  ``public.{source,event}.story_arc`` OR
+  ``public.session_narrative.narrative`` carries the text for this session.
 
   ⛔ ``#10017`` is NOT this class's repair, and reading it as one is how a §9.1
   narrative gets deleted: that tool purges the pre-#10000 **turn nodes**
@@ -638,11 +650,18 @@ def reconcile_record_and_cache(
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
     against a record that is correct. The repair for that occurrence is a
-    DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full
+    DESTRUCTIVE CLEAR — an explicit ``REMOVE n.story_arc`` on the anchor, or a full
     ``record-restore`` (whose wipe is whole-graph, so it clears the copy too;
     measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm
     (3)) — never a non-destructive one, which is the only sense in which this
-    class differs from the declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
+    class differs from the declined pair. ⛔ NOT `#10017`: that tool purges the
+    pre-#10000 turn ``:Point`` nodes (``tools/purge_legacy_turns.py``) and touches
+    neither ``:Source`` nor ``:Event``. Two bounds on the clear itself: where no
+    record home carries the text (the module docstring's population (ii)) the
+    graph copy is the ONLY copy, so backing it up is the operator's step; and
+    ``record-restore`` is refused on a production graph name (``_assert_test_graph``,
+    #2944), which leaves the explicit REMOVE as the route there. Nothing here
+    performs it. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
