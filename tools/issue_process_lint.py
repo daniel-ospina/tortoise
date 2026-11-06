@@ -205,6 +205,17 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # plural decline CLEARS have to be the same list.
 _LIST_SEP = r"[\s*_`]*"
 _GLOSS = rf"(?:{_LIST_SEP}\([^)\n#]{{0,80}}\))?"
+# ⛔ A LIST DOES NOT CONTINUE ACROSS A BLANK LINE (review round 22, P3-1). The continuation's separator
+# was `\s`, which includes `\n`, so a conjunction or comma in a FOLLOWING PARAGRAPH continued the
+# list and a legitimate mention was claimed and flagged:
+#     `Closes #100\n\nand #200 is tracked separately.`  -> closing=[100], weak=[200]  -> rc 3
+#     `Refs #100,\n\n#200`                            -> weak=[100, 200]            -> rc 3
+# The mirror grammar already refuses that gap (`_REF_RUN_GAP_RE`/`_LIST_SEP`: "bare whitespace is
+# excluded because `#100 #200` is not an English list"), so this was the two-populations-one-grammar
+# inconsistency again, in the false-positive direction. ONE newline is still admitted —
+# `Part of #10085,\n#10063` is a legitimately wrapped list and stays claimed — but a BLANK line ends it, which is
+# exactly the `\n?`-never-`\n\n` rule `closes_landing` states for its own separator.
+_SOFT_GAP = r"[ \t]*(?:\n[ \t]*)?"
 CLAIM_RE = re.compile(
     rf"\b(?:(?P<kw>refs?|part\s+of|serves?|addresses)\b"
     # A BLANKED COMMENT IS A WHITESPACE GAP, and it may be longer than the 16-character window: the
@@ -243,7 +254,7 @@ CLAIM_RE = re.compile(
     rf"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{{1,7}})\b"
     rf"(?P<more>(?:"
     rf"{_GLOSS}"
-    rf"(?:\s*,\s*(?:(?:and|or|&)\s+)?|\s+(?:and|or|&)\s+)"
+    rf"(?:{_SOFT_GAP},{_SOFT_GAP}(?:(?:and|or|&)[ \t]+)?|{_SOFT_GAP}(?:and|or|&)[ \t]+)"
     rf"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{{1,7}}\b)*)",
     re.IGNORECASE,
 )
