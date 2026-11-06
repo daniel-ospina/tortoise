@@ -49,6 +49,7 @@ the PR that makes it so lifts the ceiling deliberately.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -254,14 +255,27 @@ def _requested_version(workflow_text: str) -> str:
 def _config_declares_inbucket(config_text: str) -> bool:
     """True when `supabase/config.toml` still carries an `[inbucket]` table.
 
-    The trailing-comment arm is load-bearing: TOML reads `[inbucket]   # local email` as the same
-    table, and so does the CLI — a detector that missed it would green-light a major-3 pin while
-    the deploy still dies at config load, which is the false PASS this file exists to prevent.
+    ASK A TOML PARSER, NOT A LINE REGEX. The table header may be spelled `[inbucket]`,
+    `[ inbucket ]`, `["inbucket"]`, `['inbucket']`, or declared through the dotted form
+    `inbucket.enabled = true` — every one of those is the SAME table to any TOML parser, the CLI's
+    included, and the CLI rejects every one of them alike. A detector that accepts only the
+    canonical spelling green-lights a major-3 pin over a config that still dies at config load,
+    which is the false PASS this file exists to prevent. Measured: the line regex this replaces
+    read `[ inbucket ]` and `["inbucket"]` as "no [inbucket] table" while `tomllib` reads both as
+    `{'inbucket': …}`, so the guard went GREEN over a header its own docstring names as load-bearing.
+
+    The trailing-comment arm survives for the same reason: TOML reads `[inbucket]   # local email`
+    as the same table, and so does the CLI.
+
+    ⛔ FAILS CLOSED: a config this reader cannot parse returns True (treated as still declaring the
+    table), so an unreadable `config.toml` refuses a major-3 pin instead of silently permitting one
+    — `db push` cannot load an unparseable config either, so the refusal is the correct verdict.
     """
-    return any(
-        re.match(r"^\s*\[inbucket\]\s*(?:#.*)?$", line)
-        for line in config_text.splitlines()
-    )
+    try:
+        declared = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return True
+    return "inbucket" in declared
 
 
 def _violations(workflow_text: str, config_text: str) -> list[str]:
@@ -448,8 +462,9 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     )
     assert _literal_version_lines(duplicated) == ["latest", "2.122.1"], (
         "mutation did not apply to the step's own pins — this test would be vacuous. The check is "
-        "step-scoped on purpose: a FILE-wide search is satisfied by this workflow's own prose, "
-        "which quotes `version: latest` while explaining #10593"
+        "step-scoped on purpose: a FILE-wide search is satisfied by a decoy literal in an unrelated "
+        "step — the `actions/setup-node` pin mutated in directly above, which is exactly the shape "
+        "review used to turn the old file-wide search green"
     )
     # Two `version:` keys in one mapping is a DUPLICATE KEY, which the structural check refuses
     # before the count does — the count remains for the case of two pins in different mappings.
@@ -542,3 +557,56 @@ def test_the_coupling_moves_from_the_section_to_the_major() -> None:
 
     # The live tree is green: a v2 pin against the migrated config.
     assert not _violations(workflow, live_config)
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["[inbucket]", "[ inbucket ]", '["inbucket"]', "['inbucket']", "[  inbucket  ]", "\t[inbucket]"],
+)
+def test_a_major_three_pin_is_refused_over_every_toml_spelling_of_the_section(
+    header: str,
+) -> None:
+    """TOML accepts the header in several spellings; the CLI rejects them all alike.
+
+    Measured before this arm existed: the detector matched only `[inbucket]`, so a config spelling
+    it `[ inbucket ]` or `["inbucket"]` — the SAME table to every TOML parser, the CLI's included —
+    read as "no [inbucket] table", and a major-3 pin went GREEN over a config that still dies at
+    load. That is the false PASS this file exists to prevent, reached through whitespace, and it is
+    why the detector asks a parser instead of a line regex.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    mutated_config = re.sub(r"(?m)^\[local_smtp\]\s*$", header, CONFIG.read_text("utf-8"))
+    assert header in mutated_config, "the config mutation did not apply — this test would be vacuous"
+    assert _config_declares_inbucket(mutated_config), (
+        f"`{header}` declares the `inbucket` table to TOML, so it must be detected"
+    )
+    mutated_workflow = re.sub(r"(?m)^(\s*version:\s*).*$", r"\g<1>3.0.0", workflow, count=1)
+    assert "version: 3.0.0" in mutated_workflow, "mutation did not apply — this test would be vacuous"
+    problems = _violations(mutated_workflow, mutated_config)
+    assert problems and "DbConfigLoadError" in problems[0], problems
+
+
+def test_the_dotted_declaration_of_the_section_is_detected() -> None:
+    """`inbucket.enabled = true` declares the same table as a `[inbucket]` header."""
+    dotted = "inbucket.enabled = true\ninbucket.port = 54324\n"
+    assert "inbucket" in tomllib.loads(dotted), "the premise of this test is wrong"
+    assert _config_declares_inbucket(dotted)
+
+
+def test_an_unparseable_config_refuses_a_major_three_pin() -> None:
+    """FAIL CLOSED: a config this reader cannot parse must not read as "no [inbucket] table".
+
+    A detector that returns False on a parse error turns an unreadable config into permission for a
+    major-3 pin — the same false PASS through a third door. `db push` cannot load an unparseable
+    config either, so refusing the pin is the correct verdict, and it is asserted end to end.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    unparseable = "[this is not toml\n"
+    with pytest.raises(tomllib.TOMLDecodeError):
+        tomllib.loads(unparseable)
+    assert _config_declares_inbucket(unparseable)
+    mutated_workflow = re.sub(r"(?m)^(\s*version:\s*).*$", r"\g<1>3.0.0", workflow, count=1)
+    assert "version: 3.0.0" in mutated_workflow, "mutation did not apply — this test would be vacuous"
+    assert _violations(mutated_workflow, unparseable), (
+        "an unparseable config let a major-3 pin through"
+    )
