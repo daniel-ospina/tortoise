@@ -429,17 +429,23 @@ USAGE
                      `tortoise` for --db-path). It selects the GRAPH leg only
                      — it never scopes the record read; the record's tenant is
                      chosen with --org-id/--graph-id. A wrong --graph-name is
-                     NOT the same answer as a drained graph: the name is
-                     checked against the store BEFORE anything is opened
-                     ("Presence", above), so a name the store does not hold
-                     exits 3 naming what it does hold, and never becomes a
-                     graph. A drained graph is the OTHER exit 3 — see
-                     --expect-empty.
+                     checked against the store BEFORE any graph is opened or
+                     queried ("Presence", above): a name the store does NOT
+                     hold exits 3 naming what it does hold, and never becomes
+                     a graph. ⛔ That check proves the NAME EXISTS — it does
+                     not prove it is the graph you meant. A wrong name the
+                     store DOES hold (another tenant's graph of that name, a
+                     typo that a previous run created, or a wrong --db-path
+                     pointing at another store) is still indistinguishable
+                     from a drained graph, and --expect-empty will certify it
+                     CLEAN. Pass --expect-empty only when you know THIS graph
+                     is the one that was drained.
     --expect-empty   allow a graph holding ZERO turn-shaped nodes to certify.
-                     Without it that is exit 3. It does NOT bless a wrong
-                     --graph-name / --db-path: the presence check runs first
-                     and refuses those regardless, so this flag can never be
-                     used to pass a target that does not exist.
+                     Without it that is exit 3. It does not make a wrong
+                     target safe: presence refuses a name the store does not
+                     hold, but a name that EXISTS and is not the intended one
+                     still certifies under this flag, so it is an armed flag,
+                     not a convenience.
 """
 
 from __future__ import annotations
@@ -2280,10 +2286,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="sample size per session in the dry-run report")
     parser.add_argument("--expect-empty", action="store_true",
                         help="allow a graph holding ZERO is_episodic nodes to "
-                             "certify; without it that is exit 3 (a drained "
-                             "graph). A wrong --graph-name is refused "
-                             "EARLIER, by the presence check, and cannot be "
-                             "blessed by this flag)")
+                             "certify; without it that is exit 3. Presence "
+                             "refuses a name the store does not hold; a "
+                             "name it DOES hold but that was not the "
+                             "intended graph still certifies under this "
+                             "flag, so pass it only for a graph known to "
+                             "have been drained")
     args = parser.parse_args(argv)
 
     if args.sample < 0:
@@ -2404,15 +2412,19 @@ def main(argv: list[str] | None = None) -> int:
                          f"established\n")
         return 3
 
-    # Zero episodic nodes is not evidence of parity — it is the same answer a
-    # wrong --graph-name, or a --db-path typo that opens a fresh empty DB, gives
-    # (`FalkorProjection.from_uri` does not verify the graph exists; the presence
-    # check above does, and it runs FIRST, so by the time this branch is reached
-    # the named graph is KNOWN to exist). The record axis refuses a wrong tenant
-    # loudly; the graph axis refuses a wrong target too — with a DIFFERENT
-    # message and before anything is opened — so an existing-but-empty graph is
-    # exit 3 unless the operator says the draining is expected (#10017's
-    # post-purge re-run).
+    # Zero episodic nodes is not evidence of parity — it is also the answer a
+    # wrong --graph-name gives when the store HAPPENS to hold a graph of that
+    # name, or when a wrong --db-path points at another store that does. (A
+    # --db-path typo that opens a FRESH store does NOT reach this branch: the
+    # store lists nothing, so the presence check above refuses it first — which
+    # is why the presence check, not this branch, is what closed the create-a-
+    # graph defect #11112.) So by the time this branch is reached the named graph
+    # is KNOWN to EXIST, but not known to be the one the operator meant. The
+    # record axis refuses a wrong tenant loudly; the graph axis can only refuse
+    # an absent name, and this branch is exit 3 unless the operator says the
+    # draining is expected (#10017's post-purge re-run) — an affirmative claim
+    # about THIS graph, which is why --expect-empty is not a way to silence a
+    # suspicious run.
     # ... and `unidentifiable` is part of that population: a graph whose
     # episodic nodes ALL came back without a usable `t.id` is not an EMPTY
     # graph, and reporting it as "ZERO is_episodic nodes" would be factually
