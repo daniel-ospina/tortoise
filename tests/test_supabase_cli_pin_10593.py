@@ -73,6 +73,29 @@ _EXACT_PIN = re.compile(r"^\d+\.\d+\.\d+$")
 #: major, two breaks — which is why the guard below is a MAJOR-ceiling, not a check on either symptom.
 _V3_MAJOR = 3
 
+#: The action this guard is about, matched the way GITHUB matches it. `owner/repo` is
+#: case-INSENSITIVE — `supabase/setup-cli`, `Supabase/setup-cli` and `SUPABASE/SETUP-CLI` all resolve
+#: to the same action (`git ls-remote` returns the same HEAD for all three) — so a case-sensitive
+#: match lets a second step spell the action differently, install a different major, and stay
+#: invisible to the reader. The ref must follow, so a DIFFERENT action whose name merely starts with
+#: this one (`supabase/setup-cli-fork@v1`) is not mistaken for *the* step.
+_SETUP_CLI_USES = re.compile(r"(?i)^\s*supabase/setup-cli(?:@|$)")
+
+
+def _is_setup_cli_step(uses: object) -> bool:
+    """True when a step's `uses:` names the `supabase/setup-cli` action — the ONE predicate.
+
+    `_setup_cli_step` (the comparison) and `_setup_cli_step_node` (the literal-line check) both
+    resolve "which step is this?" through this function, so the two readers cannot disagree about
+    it. Measured before it was shared: a second step spelled `Supabase/setup-cli@v1` carrying
+    `version: 3.0.0` was invisible to the case-sensitive filter, so `len(steps) == 1` held, the
+    reader resolved `2.122.1`, and `_violations()` returned `[]` over a deploy job that installs a
+    major-3 CLI — the exact false PASS this file exists to prevent, reached through a capital
+    letter, and the same class (2) (`a pin this reader resolves differently from CI`) that the
+    `with:`-key normalization arm closes for input names.
+    """
+    return bool(_SETUP_CLI_USES.match(str(uses)))
+
 
 def _setup_cli_step(workflow_text: str) -> dict:
     """The `supabase/setup-cli` step of the migration job, as a dict."""
@@ -82,7 +105,7 @@ def _setup_cli_step(workflow_text: str) -> dict:
         step
         for job in (doc.get("jobs") or {}).values()
         for step in (job.get("steps") or [])
-        if str(step.get("uses", "")).startswith("supabase/setup-cli")
+        if _is_setup_cli_step(step.get("uses", ""))
     ]
     assert steps, "no `supabase/setup-cli` step found — the migration door changed shape"
     assert len(steps) == 1, f"expected exactly one setup-cli step, found {len(steps)}"
@@ -108,7 +131,7 @@ def _setup_cli_step_node(text: str) -> yaml.MappingNode:
                     isinstance(key, yaml.ScalarNode)
                     and key.value == "uses"
                     and isinstance(value, yaml.ScalarNode)
-                    and str(value.value).startswith("supabase/setup-cli")
+                    and _is_setup_cli_step(value.value)
                 ):
                     found.append(node)
                 walk(value, seen)
@@ -262,7 +285,7 @@ def _setup_cli_node(workflow_text: str) -> yaml.MappingNode:
                             isinstance(item_key, yaml.ScalarNode)
                             and item_key.value == "uses"
                             and isinstance(item_value, yaml.ScalarNode)
-                            and item_value.value.startswith("supabase/setup-cli")
+                            and _is_setup_cli_step(item_value.value)
                         ):
                             nodes.append(item)
     assert nodes, "no `supabase/setup-cli` step found — the migration door changed shape"
@@ -728,6 +751,62 @@ def test_a_legal_spelling_of_the_step_is_read_not_refused() -> None:
     )
     assert _requested_version(reordered) == pin, "`with:` before `uses:` was not read as the step"
     assert not _violations(reordered, config), "the reordered step produced a false violation"
+
+
+def test_a_case_variant_second_step_cannot_pin_a_different_major() -> None:
+    """GitHub resolves `owner/repo` case-INSENSITIVELY; the reader must too.
+
+    Measured before this arm existed: inserting `- uses: Supabase/setup-cli@v1` with
+    `version: 3.0.0` directly after the real pin left `_requested_version` resolving `2.122.1`,
+    `len(steps) == 1` HOLDING (the case-sensitive filter never saw the second step), and
+    `_violations()` returning `[]` — a major-3 CLI installed by the deploy job, GREEN. Measured
+    against this box's own remote: `git ls-remote` returns the SAME HEAD for
+    `supabase/setup-cli`, `Supabase/setup-cli` and `SUPABASE/SETUP-CLI`, so the action really is
+    case-insensitive and the second step really is a second install.
+
+    That is class (2) of the declared surface — "a pin this reader resolves differently from CI" —
+    which is the class the `with:`-key normalization arm closes for input NAMES, left open for
+    `uses:`. Both readers resolve through the one `_is_setup_cli_step` predicate, so neither can
+    disagree with the other about how many steps there are.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    config = CONFIG.read_text(encoding="utf-8")
+
+    for spelling in ("Supabase/setup-cli@v1", "SUPABASE/SETUP-CLI@v1"):
+        smuggled = workflow.replace(
+            "        with:\n          version: 2.122.1",
+            "        with:\n          version: 2.122.1\n"
+            f"      - uses: {spelling}\n        with:\n          version: 3.0.0",
+            1,
+        )
+        assert spelling in smuggled, f"mutation did not apply for {spelling!r} — vacuous"
+        # Each reader must refuse IN ITS OWN RIGHT — not merely be saved by the other one. A
+        # single `_requested_version` assertion would pass even if only `_setup_cli_step_node`
+        # grew the fix, leaving the comparison reader silently blind again.
+        with pytest.raises(AssertionError, match="expected exactly one setup-cli step"):
+            _setup_cli_step(smuggled)
+        with pytest.raises(AssertionError, match="expected exactly one setup-cli step"):
+            _setup_cli_step_node(smuggled)
+        with pytest.raises(AssertionError, match="expected exactly one setup-cli step"):
+            _requested_version(smuggled)
+        # `_violations` reaches the same refusal through `_requested_version`, so the end-to-end
+        # guard FAILS CLOSED (raises) rather than returning a violation — assert the refusal it
+        # actually emits, so this arm cannot pass by asserting a shape the guard never produces.
+        with pytest.raises(AssertionError, match="expected exactly one setup-cli step"):
+            _violations(smuggled, config)
+
+    # The boundary arm: a DIFFERENT action whose name merely STARTS with ours is not the step, so
+    # widening the match for case-insensitivity must not swallow a fork/decoy into the count.
+    decoy = workflow.replace(
+        "        with:\n          version: 2.122.1",
+        "        with:\n          version: 2.122.1\n"
+        "      - uses: supabase/setup-cli-fork@v1\n        with:\n          version: 3.0.0",
+        1,
+    )
+    assert "supabase/setup-cli-fork@v1" in decoy, "mutation did not apply — vacuous"
+    assert _requested_version(decoy) == "2.122.1", (
+        "an action whose name merely starts with `supabase/setup-cli` was counted as the step"
+    )
 
 
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
