@@ -1543,7 +1543,7 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
     review). The fixture used `capstone_on_54922a800_other`, whose HEAD TOKEN is
     still the right one — but `_names_head` requires the last segment to be a
     numeric epoch, so `other` fails the shape test and `score()`'s
-    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1769`) refused it
+    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1773`) refused it
     FIRST. With `pass` in place of that guard the earlier mutation runs showed
     it, and with the guard live the assertion below was satisfied by ITS message
     — which also contains the graph string. So this pin was measuring the wrong
@@ -9228,20 +9228,40 @@ def test_the_legacy_head_really_predates_the_flip():
     exactly as `test_no_legacy_token_path.py` does for the same `git show <sha>:…`
     read. A skip is not a pass: the licence premise is UNCHECKED on a shallow
     clone, and this says so rather than passing silently as if it had checked.
+
+    ⛔ BUT "UNREADABLE" IS NOT ONE STATE (`#10996` review). Catching the failed
+    `git show` alone cannot tell a SHALLOW checkout — where the ancestor is
+    absent by construction — from a WRONG `_PRE_FLIP_HEAD`, where the sha this
+    licence rests on does not exist at all. The first is a skip; the second is a
+    defect in the pin, and it would skip forever. So the skip is licensed by
+    `git rev-parse --is-shallow-repository` itself, and an unreadable head in a
+    FULL clone FAILS: the premise is then underivable, not merely unchecked.
     """
     head = scores_probe._PRE_FLIP_HEAD
     try:
         shown = subprocess.run(
             ["git", "show", f"{head}:tortoise/value_gate.py"],
-            cwd=_REPO, capture_output=True, text=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        pytest.skip(
-            f"{head[:9]} (the licensed pre-flip head) is not in this clone's "
-            f"history ({exc.__class__.__name__}) — a `fetch-depth: 1` checkout "
-            "cannot contain an ancestor, so the licence premise is UNCHECKED "
-            "here, not disproved. Re-derive it on a full clone: "
-            "`git fetch --unshallow origin` (or the worktree this branch was "
-            "written in).")
+            cwd=_REPO, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        pytest.skip("`git` is not installed here, so no commit can be read")
+    if shown.returncode != 0:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=_REPO, capture_output=True, text=True).stdout.strip()
+        if shallow == "true":
+            pytest.skip(
+                f"{head[:9]} (the licensed pre-flip head) is not in this "
+                "clone's history — a `fetch-depth: 1` checkout cannot contain "
+                "an ancestor, so the licence premise is UNCHECKED here, not "
+                "disproved. Re-derive it on a full clone: "
+                "`git fetch --unshallow origin` (or the worktree this branch "
+                "was written in).")
+        pytest.fail(
+            f"{head[:9]} (the licensed pre-flip head) is not readable in a FULL "
+            "clone, so the sha this licence rests on is WRONG rather than "
+            "merely unreachable — a skip here would license an absence reading "
+            "at a head nobody can verify. "
+            f"git: {shown.stderr.strip()}")
     source = shown.stdout
     assert 'os.environ.get(ENV_FLAG, "1")' not in source, (
         f"{head[:9]} already carries the post-`#10996` default — the legacy "
