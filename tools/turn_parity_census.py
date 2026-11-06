@@ -1377,8 +1377,8 @@ def _pending_prewipe_snapshot(events_dir: str) -> str | None:
     CLEAN — the same false-PASS class the arm exists to prevent.
     """
     try:
-        from tortoise.projection import prewipe_snapshot_path
         from tortoise.consistency import _load_prewipe_snapshot
+        from tortoise.projection import prewipe_snapshot_path
     except Exception:             # pragma: no cover - import env problem
         return None
     try:

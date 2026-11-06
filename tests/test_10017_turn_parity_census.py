@@ -1830,21 +1830,23 @@ def test_a_pending_prewipe_SNAPSHOT_alone_is_the_LOST_shape_too(
     only record is that sidecar must not be certified `CLEAN` either.
     """
     db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
-    from tortoise.projection import prewipe_snapshot_path
     import json as _json
+
+    from tortoise.projection import prewipe_snapshot_path
 
     # the loader's own section vocabulary (`_SNAPSHOT_SECTIONS`): an unknown
     # key would make this an INVALID sidecar, i.e. a different refusal path.
     # the loader validates shape AND value types, and the `type` must be one the
     # replay dispatches on (`PointAdded`/`OperatorAdded`) — an unknown shape is a
     # DIFFERENT refusal path, not the pending-sidecar this pin is about.
-    _json.dump(
-        {"synthetic_events": [{
-            "type": "PointAdded",
-            "point": {"id": "p-synthetic", "content": "x",
-                      "pointKind": "point", "is_episodic": False},
-        }]},
-        open(prewipe_snapshot_path(str(tmp_path)), "w"))
+    with open(prewipe_snapshot_path(str(tmp_path)), "w") as fh:
+        _json.dump(
+            {"synthetic_events": [{
+                "type": "PointAdded",
+                "point": {"id": "p-synthetic", "content": "x",
+                          "pointKind": "point", "is_episodic": False},
+            }]},
+            fh)
 
     with pytest.raises(tpc.CensusError) as exc:
         tpc.read_graph_turns(None, db_path, "tortoise")
@@ -1884,14 +1886,16 @@ def test_a_pending_sidecar_with_TWO_logs_says_RECOVERY_REFUSES_not_replays(
     Refusing to certify is right; claiming "recovery would REPLAY" is not.
     """
     db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
-    from tortoise.projection import prewipe_snapshot_path
     import json as _json
 
-    _json.dump({"synthetic_events": [{
-        "type": "PointAdded",
-        "point": {"id": "p-synthetic", "content": "x",
-                  "pointKind": "point", "is_episodic": False},
-    }]}, open(prewipe_snapshot_path(str(tmp_path)), "w"))
+    from tortoise.projection import prewipe_snapshot_path
+
+    with open(prewipe_snapshot_path(str(tmp_path)), "w") as fh:
+        _json.dump({"synthetic_events": [{
+            "type": "PointAdded",
+            "point": {"id": "p-synthetic", "content": "x",
+                      "pointKind": "point", "is_episodic": False},
+        }]}, fh)
     for name in ("a.jsonl", "b.jsonl"):
         (tmp_path / name).write_text('{"event_type": "SessionStarted"}\n')
 
