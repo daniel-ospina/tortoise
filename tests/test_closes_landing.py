@@ -1743,6 +1743,341 @@ def test_a_code_block_on_a_marker_line_cannot_buy_a_lands_on_the_default_base():
     assert cl.classify(pr, _by_head(pr), DEFAULT) == []
 
 
+def test_the_item_content_column_collapses_a_wide_gap_to_one():
+    """Round 30 review, P2 — ONE definition of CommonMark's item CONTENT column.
+
+    `_fence_candidate` collapsed a gap wider than four spaces to one column (§5.2: such a line
+    starts an INDENTED code block, not a wider item); the item PUSH used
+    `len(marker.group(0))`, i.e. marker + the WHOLE gap. Harmless while only the fence path read
+    it — and a class-A false PASS once arm 2's `indented_code` threshold was read from the push,
+    because the blanking threshold then sat up to four columns too far out:
+
+        `-     item` + `        - [ ] x`   renderer `<pre><code>`  ->  must be hidden, was CLEARED
+
+    These expected columns were checked against `MarkdownIt("commonmark")` (the renderer puts
+    `item` itself in `<pre><code>` at a 5-space gap, which is the tell that the content column is
+    2 and not 6).
+    """
+    assert cl._content_column("- item") == 2
+    assert cl._content_column("-     item") == 2          # gap > 4 collapses to ONE column
+    assert cl._content_column("1. Criteria") == 3
+    assert cl._content_column("10. Criteria") == 4
+    assert cl._content_column("    - item") == 6           # 4 columns of indent + `- `
+    assert cl._content_column("plain prose") is None
+    # …and the two call sites agree, which is the point: the fence path and the item push read
+    # the same column for the same line (a marker line that OPENS a fence carries its content
+    # column as `close_base`; a gap > 4 opens no fence at all, so it is asserted above).
+    for rest in ("- item", "1. Criteria", "10. Criteria", "    - item"):
+        marker = cl._LIST_MARKER_RE.match(rest).group(0)
+        fence = cl._fence_candidate("", marker + "```", [])
+        assert cl._content_column(rest) == fence.close_base, rest
+    assert cl._fence_candidate("", "-     ```", []) is None, "gap > 4 opens no fence"
+
+
+def test_strip_code_strict_is_keyword_only():
+    """Round 31 review, P3 — the record said `strict` was keyword-only; the code was not.
+
+    The round-30 record (and the round-28 one it repeated) states `strip_code(body, *, strict=False)`.
+    The signature kept `strict` positional and three in-module callers passed it that way, so the
+    record and the artifact disagreed in the one direction that breaks the next lane who makes them
+    match. The `*` is real now; this pin is what keeps it real.
+    """
+    assert cl.strip_code("Refs #1\n", strict=True) == cl.strip_code("Refs #1\n")
+    with pytest.raises(TypeError):
+        cl.strip_code("Refs #1\n", True)
+    with pytest.raises(TypeError):
+        cl.strip_code("Refs #1\n", False, {})
+
+
+def test_a_line_that_IS_prose_but_ENDS_the_paragraph_does_not_open_one():
+    """Round 34 review, P2 — the FAIL-OPEN half of the consumer-side rule.
+
+    `_ordered_marker_at_least_two` narrowed `own_code` to keep an ordered marker `>= 2` that CONTINUES
+    an open paragraph, and read "is a paragraph open" as "was the previous line emitted as prose".
+    Four families are emitted as prose and END the paragraph anyway, so the NEXT line was read as a
+    continuation and a wide-gap marker after them was KEPT — a quoted `Closes #N` credited as a claim
+    in BOTH arms, which is the direction this module forbids. The renderer is the oracle:
+
+        `# H`         + `2.     Closes #100`  -> `<h1>H</h1>` then a new `<ol>`: `<pre><code>`  CODE
+        `***`         + …                    -> `<hr />` then the same                            CODE
+        `Notes`/`---` + …                    -> a SETEXT heading, then the same                   CODE
+        `    Notes`   + …                    -> an INDENTED code block, then the same             CODE
+
+    The container test is the block grammar's and NOT `strict`'s, which is why `- item` + `    cont`
+    still opens a paragraph (4 <= 2 + 3) and the marker after it really is prose — that pair is the
+    control, pinned beside the four, and it is what keeps this from becoming "blank every wide gap".
+    """
+    md = MarkdownIt("commonmark")
+    text = "Closes #100"
+
+    def block_kind(body: str) -> str | None:
+        for token in md.parse(body):
+            if text in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    def kept(body: str, strict: bool) -> bool:
+        return any(text in line for line in cl.strip_code(body, strict=strict).splitlines())
+
+    # The paragraph the consumer-side rule must still honour (the fix this pins did not lose it).
+    for body in ("Notes\n2.     Closes #100\n",
+                 "To be derived.\n2.     Closes #100\n"):
+        assert block_kind(body) == "inline", body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    # …including one INSIDE a list item, where the block grammar's 4+3 allowance (not `strict`'s)
+    # is what says the paragraph is still open. Lenient only: `strict` blanks every indented line by
+    # its own contract, so the `    cont` above it is blanked there and this shape is one of its
+    # declared over-blanks (the direction that costs a warning, not a pass).
+    item_body = "- item\n    cont\n   2.     Closes #100\n"
+    assert block_kind(item_body) == "inline", item_body
+    assert cl.parse_closing_refs(item_body) == [100], item_body
+    assert cl.strip_code("- item\n   2.     Closes #100\n", strict=True) != "", "unindented control"
+    assert cl.parse_closing_refs("- item\n   2.     Closes #100\n", None, strict=True) == [100]
+    # …and the three families that END a paragraph AND put the marker line in CODE, each of which
+    # was credited before this fix.
+    # ⛔ `<div>` IS NOT ONE OF THEM (round 43 review, P2 — this loop used to assert `[]` for it).
+    # An HTML block ends the paragraph, but it also SWALLOWS the following lines as its own raw text:
+    # no list opens inside it, so the marker line is content, not code — the same rule the module
+    # states in `_leaves_no_paragraph` ("WHAT AN HTML BLOCK DOES NOT DO IS HIDE ITS OWN TEXT … only
+    # FENCED content is blanked") and the same answer `origin/main` gives. Blanking it lost a real
+    # close (90 bodies per opener family over the 32-opener grid) and left the family incoherent
+    # with itself: a gap of 4 inside the block was credited, a gap of 5 blanked.
+    for body, kind, why in (("# H\n2.     Closes #100\n", "code_block", "an ATX heading"),
+                            ("***\n2.     Closes #100\n", "code_block", "a thematic break"),
+                            ("Notes\n---\n2.     Closes #100\n", "code_block", "a setext underline"),
+                            ("    Notes\n2.     Closes #100\n", "code_block",
+                             "an indented code block (§4.4)")):
+        assert block_kind(body) == kind, (why, body)
+        assert cl.parse_closing_refs(body) == [], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [], (why, body)
+    # The HTML-block half, asserted where it now belongs: the block still ENDS the paragraph (so the
+    # line is not a lazy continuation), and its content is raw text, so the keyword is read.
+    assert block_kind("<div>\n2.     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n") == [100]
+    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n", None, strict=True) == [100]
+    # The sweep: every paragraph-ENDER x marker x gap x indent, both arms, against the renderer.
+    sweep = 0
+    for ctx in ("# H\n", "***\n", "Notes\n---\n", "    Notes\n", "<div>\n"):
+        for marker in ("-", "*", "+", "1.", "2.", "10.", "2)"):
+            for gap in range(1, 10):
+                for indent in (0, 1, 2, 3):
+                    sweep += 1
+                    body = ctx + " " * indent + marker + " " * gap + text + "\n"
+                    kind = block_kind(body)
+                    assert kind is not None, (ctx, marker, gap, indent)
+                    for strict in (False, True):
+                        # Never keep a line the renderer puts in a CODE block: crediting a quotation
+                        # is the fail-open direction, in the finding arm and in the PASS arm alike.
+                        assert not (kind == "code_block" and kept(body, strict)), \
+                            ("fail-open", ctx, marker, gap, indent, strict)
+    assert sweep == 1260, sweep
+    # ⛔ THE DECLARED RESIDUAL ABOVE IS CLOSED (round 43 review, P2), not re-declared: the gap <= 4
+    # and gap > 4 halves of an HTML block now answer the SAME way, which is what the renderer says and
+    # what `_leaves_no_paragraph` states. Both are pinned.
+    assert block_kind("<div>\n- Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<div>\n- Closes #100\n") == [100]
+    assert cl.parse_closing_refs("<div>\n-     Closes #100\n") == [100]
+
+
+def test_the_paragraph_ender_is_NOT_over_applied_in_either_direction():
+    """Round 36 review — the two halves `_leaves_no_paragraph` got wrong, pinned together.
+
+    A predicate that decides "did this line leave a paragraph open?" while holding none of the state
+    that decision needs fails in BOTH directions, and the two halves are one test because fixing one
+    is how the other gets re-opened:
+
+    **A LEAF BLOCK ON A MARKER LINE ends the paragraph too** (false PASS, both arms). `rest` starts
+    with `-`, so testing only `rest` read `- # H` as prose-that-leaves-a-paragraph-open and credited
+    a quoted close below it; the line's own content starts at its CONTENT COLUMN:
+
+        `- # H` + `  2.     Closes #100`   renderer `<li><h1>H</h1><ol start="2"><li><pre><code>`
+
+    **Three ordinary paragraphs were being treated as paragraph ENDERS** (lost closes, a REGRESSION
+    against `origin/main`): a bare `=` is a paragraph rather than a setext underline (there is no
+    paragraph above it to underline), `<3 items` and `<https://e.com>` are paragraphs rather than
+    HTML blocks (a start condition needs a tag NAME), and §4.4 says an indented code block cannot
+    INTERRUPT a paragraph — so a 4-column line under an open paragraph is its continuation, not code.
+    Measured on `origin/main`: 228 lenient and 72 strict closes were lost before this was fixed.
+
+    The controls that must NOT move: a genuine `<div>` still ends the paragraph (raw HTML is not
+    markdown, so a close inside it is a quotation — GitHub does not act on it), and a wide-gap bullet
+    that opens a real item is still code.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    # (A) A leaf block sitting ON the marker line — the false PASS.
+    for leaf in ("- # H", "- ***", "1. # H"):
+        body = leaf + "\n  " + "2.     Closes #100\n"
+        assert token_type(body) == "code_block", (leaf, body)
+        assert cl.parse_closing_refs(body) == [], (leaf, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [], (leaf, body)
+    # (B) The shapes that are ordinary PARAGRAPHS, so the close below them is real. Lenient only for
+    # the indented pair: `strict` blanks every indented line by its own documented contract.
+    for body, why in (("=\n2.     Closes #100\n", "a bare `=` is a paragraph, not an underline"),
+                      ("==\n2.     Closes #100\n", "…and `==` with nothing to underline either"),
+                      ("<3 items\n2.     Closes #100\n", "`<3` is not an HTML block start"),
+                      ("<https://e.com>\n2.     Closes #100\n", "an autolink is a paragraph"),
+                      ("**bold**\n2.     Closes #100\n", "bold text is a paragraph")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], (why, body)
+    for body, why in (("Notes\n    cont\n2.     Closes #100\n",
+                       "§4.4: an indented code block cannot INTERRUPT a paragraph"),
+                      ("Notes\n    -     Closes #100\n",
+                       "…so a 4-column BULLET line under one is a continuation, not code")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+    # (C) The controls. A genuine HTML block still ENDS the paragraph (raw HTML is not markdown, so
+    # the marker line is not a lazy continuation); a wide-gap bullet that opens a real item is still
+    # code; and the `- item` + `  2.` lazy continuation is still prose.
+    # ⛔ AND ITS CONTENT IS READ (round 43 review, P2 — this control asserted `[]`). An HTML block is
+    # a LEAF block: no list opens inside it, so the line is the block's own raw text, which the
+    # renderer keeps in `html_block` (not a `code_block`) and `origin/main` credits. The old
+    # expectation reversed the module's own rule and lost a real close.
+    assert token_type("<div>\n2.     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n") == [100]
+    assert cl.parse_closing_refs("Notes\n-     Closes #100\n") == []
+    assert cl.parse_closing_refs("Notes\n\n-     Closes #100\n") == []
+    assert token_type("- item\n  2.     Closes #100\n") == "inline"
+    assert cl.parse_closing_refs("- item\n  2.     Closes #100\n") == [100]
+
+
+def test_a_marker_that_opens_NO_item_has_no_content_column_to_inspect():
+    """Round 37 review, P2 — the ORDERED half of the leaf-block rule, and its second mechanism.
+
+    Round 36 taught `_leaves_no_paragraph` to inspect a marker line's CONTENT COLUMN, which fixed
+    `- # H` and left its ordered sibling wrong: an ordered marker >= 2 under an open paragraph opens
+    NO item (§5.2's consumer rule), so its `# H` is INLINE TEXT rather than a heading and the
+    paragraph is still open. Reading it as a heading ended the paragraph and blanked the real
+    `Closes #100` below it — a lost close in the direction this module ranks second-worst.
+
+    ⛔ AND THE PREDICATE ALONE DOES NOT FIX IT. The line also pushed a list item, so the NEXT line was
+    measured against a content column the renderer never created and came out blanked anyway. The
+    reviewer measured the pair: predicate-only `[]`, predicate + no-push `[100]`. Both halves are
+    here because each is invisible while the other is wrong.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for leaf, why in (("2. # H", "an ordered marker >= 2 opens no item, so `# H` is text"),
+                      ("2. ***", "…and `***` is a horizontal rule only inside an item"),
+                      ("10. # H", "any start number above 1")):
+        body = "Notes\n" + leaf + "\n3.     Closes #100\n"
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], (why, body)
+    # The controls: a BULLET opens its item even under a paragraph, so its leaf block DOES end it…
+    body = "- # H\n  2.     Closes #100\n"
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    # …and with no paragraph above, the ordered marker opens its item too.
+    # ⛔ ONE ANSWER, NOT "EITHER" (round 41 review, P3). `in ([], [100])` accepted both possible
+    # answers, so it could not detect a regression in the very control it documents: the ordered
+    # marker DOES open its item here (no paragraph to interrupt), so `3.     Closes #100` is CODE.
+    body = "2. # H\n  3.     Closes #100\n"
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+
+def test_the_HTML_block_rule_is_the_SPEC_s_two_rules_not_one():
+    """Round 37 review, P2 — §4.6 has types 1-6 (they CAN interrupt) and type 7 (it CANNOT).
+
+    One regex accepting "a tag name" treated `<span>`, `<br />`, `<custom-tag>` and `<x` as
+    paragraph enders, so a real `Closes #N` below them was blanked — 24 lenient + 24 strict closes
+    lost per shape against `origin/main`, 0 fixed. Type 6 requires a name FROM THE SPEC'S LIST, and
+    type 7 — a complete tag alone on a line — never ends a paragraph at all:
+
+        `<div>`            in the type-6 list  -> a real HTML block, ends the paragraph
+        `<span>x</span>`   type 7              -> the marker line below it is still prose
+        `<br />`           type 7              -> same (the regex's docstring used to cite it wrongly)
+        `<x`               not a complete tag  -> same
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for tag in ("<span>x</span>", "<br />", "<x", "<custom-tag>", "<em>x</em>"):
+        # AFTER a paragraph the marker line is unambiguously prose — the shape round 36 broke.
+        body = "Notes\n" + tag + "\n2.     Closes #100\n"
+        assert token_type(body) == "inline", (tag, body)
+        assert cl.parse_closing_refs(body) == [100], (tag, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], (tag, body)
+        # AT THE DOCUMENT START the renderer makes the tag a type-7 html_block that swallows the
+        # marker line, and this module CREDITS the keyword there — which is its standing stance for
+        # HTML-block content (only FENCED content is blanked; see the `<div>` assertion below). The
+        # ender therefore leaves the paragraph open rather than manufacturing a boundary the module
+        # does not otherwise honour.
+        body = tag + "\n2.     Closes #100\n"
+        assert cl.parse_closing_refs(body) == [100], (tag, body)
+    # ⛔ TYPES 1-6 ANSWER THE SAME WAY AS TYPE 7 NOW (round 43 review, P2 — this loop asserted `[]`).
+    # The tag list decides where the block BOUNDARY is, never whether the block's own text is read:
+    # the text lands in an `html_block` token, not a `code_block`, for every one of these openers, and
+    # `origin/main` credits all of them. Blanking them was a lost close, and an incoherent one.
+    for tag in ("<div>", "<blockquote>", "<p>", "<?php", "<pre>", "<script>"):
+        body = tag + "\n2.     Closes #100\n"
+        assert cl.parse_closing_refs(body) == [100], (tag, body)
+    # ⛔ EXCEPT THE ONES THAT CLOSE ON THEIR OWN LINE (round 44 review, P2): `<!-- c -->` carries its
+    # `-->`, so the block ends there and the next line is a FRESH line — a `2.` at column 0 opens a
+    # list whose wide-gap content is `<pre><code>`, which the renderer confirms.
+    for closed in ("<!-- c -->", "<?php ?>", "<!DOCTYPE html>", "<![CDATA[x]]>"):
+        body = closed + "\n2.     Closes #100\n"
+        assert cl.parse_closing_refs(body) == [], (closed, body)
+    # What an HTML block does NOT do is hide its own text: only FENCED content is blanked, and that
+    # is parity with every head before this one — stated here so the ender's justification cannot be
+    # read as a claim about GitHub's behaviour for raw HTML.
+    assert cl.parse_closing_refs("<div>\nCloses #100\n</div>\n") == [100]
+
+
+def test_the_44_indent_arm_is_a_DISTANCE_from_the_container_not_no_container():
+    """Round 37 review, P2 — §4.4's rule is about the PARAGRAPH, not about the outermost container.
+
+    Round 36 bounded the lazy-indent excuse to `container is None`, which lost the same close one
+    level in: at content-column + 4 inside an item — or on a lazy line that dropped its `> ` — an
+    open paragraph makes the line its continuation, so the close is prose GitHub acts on:
+
+        `- Notes` + `      -     Closes #100`   renderer `<p>`       (6 columns = 2 + 4)
+        `> Notes` + `    -     Closes #100`     renderer `<p>`       (a lazy line may drop its `>`)
+        `- Notes` + `    -     Closes #100`     renderer `<pre>`     CONTROL: 4 columns = 2 + 2
+
+    So the term is `rest_indent > container.rest_col + 4` — a DISTANCE — and the flip really is at 4
+    past the content column, holding at every indent 0-12. The marker half keeps its depth term: a
+    marker at another blockquote depth opens its own list.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body, why in (("- Notes\n      -     Closes #100\n", "6 columns = item content col 2 + 4"),
+                      ("> Notes\n    -     Closes #100\n", "a lazy continuation may drop its `>`")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+    # The control, which must stay CODE: 4 columns is only 2 past the item's content column.
+    control = "- Notes\n    -     Closes #100\n"
+    assert token_type(control) == "code_block", control
+    assert cl.parse_closing_refs(control) == [], control
+
+
 # ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──
 
 @pytest.mark.parametrize("body,expected,why", [
@@ -3132,3 +3467,588 @@ if __name__ == "__main__":  # pragma: no cover
 
     os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     raise SystemExit(pytest.main([str(Path(__file__).resolve()), "-q"]))
+
+
+def test_a_whitespace_only_line_does_not_carry_the_previous_line_s_per_line_state():
+    """Round 38 review, P1 — a CRASH, and a regression against `origin/main`.
+
+    `pushed`, `container` and `own_gap` are per-LINE state, but they were assigned only inside
+    `if line.strip():`, so a whitespace-only line kept the PREVIOUS line's `pushed=True` while the
+    `indent_code` branch had already popped the items that flag referred to. Two shapes then raised
+    `IndexError`, and `main` answers both:
+
+        '- [ ] b' + 8 spaces + blank                     strict=True -> pop from empty list
+        '- [ ] criterion' + 5 spaces + 5 spaces + 'Closes #N'        -> list index out of range
+
+    ⛔ A crash is not a narrow blast radius here: `sweep()` has no per-PR guard, so ONE such PR body
+    aborts the whole sweep and the run exits 1 against a documented 0/3/2 contract — every other
+    PR's result is lost with it. The state is reset at the top of the iteration, where "this line's
+    own" begins, and these bodies are the pin because the shipped sweeps cannot see the shape (each
+    of their families supplies at most one whitespace-only line).
+    """
+    bodies = ["- [ ] b\n        \n\n", "- [ ] criterion one\n     \n     \nCloses #100\n",
+              "- item\n        \n        \n", "> - [ ] a\n        \n\n", "\t\n\t\n- [ ] b\n"]
+    for body in bodies:
+        for kw in ({}, {"strict": True}, {"indented_code": True}, {"strict": True, "indented_code": True}):
+            cl.strip_code(body, **kw)          # must not raise
+            cl.parse_closing_refs(body, None, strict=kw.get("strict", False))
+    # …and the answer is `main`'s, not a crash-shaped placeholder: the indented blank tail is
+    # dropped and the paragraph before it survives.
+    assert cl.strip_code("- [ ] b\n        \n\n", strict=True) == "- [ ] b\n\n"
+
+
+def test_the_INDENT_term_is_measured_in_the_ITEMS_own_space():
+    """Round 41 review, P2 — class A (fail-open): §4.4's distance is measured in ONE space.
+
+    `_ListItem.rest_col` is the item's content column *in the space `rest` lives in*, while
+    `_fence_line_column` returns BOTH that residual indent (index 1) and the RAW content column
+    (index 2). `_lazy_indent` read the RAW one and compared it against `rest_col`, so for any
+    container opened INSIDE a blockquote it asked the §4.4 question `len(prefix)` columns too early
+    and suppressed `own_code` — the rule that blanks a marker line whose own content is code:
+
+        `> - item` + `>      -     Closes #100`
+            the item's content column is 2 and the line's residual indent is 5 = 2 + 3 + 1, so
+            §4.4 puts `Closes #100` in `<pre><code>` (renderer: `code_block`), but the RAW column 7
+            cleared `2 + 3` and the line was emitted as PROSE — `[100]`, a `lands` GitHub never
+            fires, and the same blanking arm 2 relies on (`own_code` is mode-independent).
+
+    It is a DISTANCE, not "blank anything deep", so the two controls below stay: 5 columns past the
+    same item is a lazy PARAGRAPH continuation (§4.4 cannot interrupt a paragraph), and the
+    unquoted sibling of the same shape is the round-37 pin.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    # The defect: exactly four columns past a QUOTED item's content column -> §4.4 code.
+    body = "> - item\n>      -     Closes #100\n"
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # Control 1: a nested marker at the item's own content column — code, and it always was.
+    body = "> - item\n>    -     Closes #100\n"
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    # Control 2: five columns past is a LAZY PARAGRAPH continuation, not code — the fix must not
+    # turn the false positive into a silent miss.
+    body = "> - item\n>       -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+    # Control 3: the same shape with no blockquote is the round-37 pin and stays prose too.
+    body = "- item\n      -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+
+
+def test_a_paragraph_one_container_deeper_than_its_line_is_STILL_another_container():
+    """Round 38 review, P2 — `_lazy_marker`'s depth term could not see INTERIOR nesting.
+
+    The term was the line's own PREFIX depth, which misses two shapes where the open paragraph sits
+    a container deeper than that prefix shows — and in both the renderer opens a NEW list, so the
+    wide-gap content is CODE and crediting it is a `lands` GitHub never fires:
+
+        '- > q' + '  2.     Closes #100'   the `> ` sits AFTER the marker -> paragraph at depth 1
+        '> Notes' + 'lazy' + '2.     …'    a lazy line has no `>` prefix, so depth 0 was recorded
+                                           and the open quote was forgotten
+
+    The depth carried is now the PARAGRAPH's: a marker line adds the depth of its own content, and a
+    line shallower than the paragraph it continues keeps the paragraph's depth (that is what lazy
+    means). Control, which must stay prose: the same depth on both sides.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body, why in (("- > q\n  2.     Closes #100\n", "the `> ` is after the marker"),
+                      ("> Notes\nlazy\n2.     Closes #100\n", "the lazy line dropped its `>`"),
+                      ("- > q\n  10.     Closes #100\n", "same, a two-digit marker")):
+        assert token_type(body) == "code_block", (why, body)
+        assert cl.parse_closing_refs(body) == [], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [], (why, body)
+    # The control: SAME container depth on both sides is still a lazy continuation.
+    body = "> Notes\n> 2.     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+
+
+def test_the_CONTAINER_a_paragraph_lives_in_is_not_the_depth_a_line_REMEMBERS():
+    """Round 39 review, 2 × P2 — the round-38 container-depth fix carried state across the lines that
+    END the container, and separately counted a `>` that the renderer renders as inline TEXT.
+
+    Both are delta-measured against `MarkdownIt("commonmark")` at HEAD (`23d7a77abd`) and at the head
+    the behaviour last agreed with (`origin/main` for the first, `2a76c68888` for the second).
+
+    (1) class A, BOTH arms — a real claim blanked. `- > q` puts a paragraph at depth 1; the next line
+        `- x` opens a NEW item at depth 0 and ends that blockquote, but the depth was carried forward
+        because the line was prose. The claim below then failed the "same container" term:
+
+            `- > q` + `- x` + `    2.      Closes #100`
+                renderer `<ul><li><blockquote><p>q</p></blockquote></li><li>x2.      Closes #100</li></ul>`
+                — plain INLINE text; HEAD `[]` in both arms, `origin/main` `[100]`
+
+    (2) class A **and** class B from one line — `_own_depth` counted the `>` of a marker line's CONTENT
+        even when that line opened no item, so the `>` of a lazy continuation was read as a container:
+
+            `Notes` + `2. > q` + `3.      Closes #100`     renderer: ONE `<p>` (prose)  HEAD `[]` BOTH arms
+            `Notes` + `2. > q` + `> 2.      Closes #100`   renderer: `<blockquote><ol …><pre><code>`
+                                                           HEAD `[100]` in BOTH arms
+
+        The pair differs by one `>` on the third line, so both directions are pinned here together.
+    """
+    md = MarkdownIt("commonmark")
+    text = "Closes #100"
+
+    def in_code(body: str) -> bool:
+        def walk(tokens):
+            for token in tokens:
+                # ⛔ `html_block` IS NOT "HIDDEN" HERE (round 43 review, P3). Raw HTML text
+                # is READ by the module (`_leaves_no_paragraph`: only FENCED content is
+                # blanked; `strip_code` now carries the same rule for `own_code`), so counting
+                # an `html_block` as code in this oracle would pin the opposite of the rule
+                # the code follows. No body in either sweep is an `html_block` today, so the
+                # clause was inert — removing it keeps it inert and keeps it honest.
+                if token.type in ("code_block", "fence") and text in token.content:
+                    return True
+                if walk(token.children or []):
+                    return True
+            return False
+        return walk(md.parse(body))
+
+    # (1) the closed container must not be remembered past the line that closed it.
+    for body in ("- > q\n- x\n    2.      Closes #100\n",
+                 "> Notes\n- x\n    2.      Closes #100\n",
+                 "> - item\n- x\n  2.      Closes #100\n"):
+        assert not in_code(body), body
+        assert cl.parse_closing_refs(body) == [100], body
+    # (2A) the `>` of a lazy continuation is TEXT, not a container — both arms.
+    for body in ("Notes\n2. > q\n3.      Closes #100\n",
+                 "Notes\n2. > q\n3.     Closes #100\n"):
+        assert not in_code(body), body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    # (2B) …but a `>` that really opens a quote is code — the one-character sibling of (2A).
+    for body in ("Notes\n2. > q\n> 2.      Closes #100\n",):
+        assert in_code(body), body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+
+def test_a_NEW_CONTAINER_can_interrupt_a_paragraph_and_an_EMPTY_content_opens_none():
+    """Round 39 review, 2 × P2 — two places where "no paragraph is open" was got wrong.
+
+    (1) §5.2's "an ordered marker >= 2 cannot interrupt a paragraph" was applied WITHOUT checking that
+        there is a paragraph to interrupt. `> 2. x` raises the quote depth 0 -> 1, and §5.1 says a
+        blockquote CAN interrupt a paragraph, so that marker opens a real item — whose wide-gap next
+        line is code. Regressed at `2a76c68888`, still present at HEAD:
+
+            `Notes` + `> 2. x` + `> 3.      Closes #100`
+                renderer `<p>Notes</p><blockquote><ol start="2"><li>x</li><li><pre><code>`
+                HEAD `[100]` in both arms; `32a1d4f4fd` `[]`
+
+    (2) a line whose CONTENT is empty opens NO paragraph (`- ` renders `<ul><li></li></ul>`), so the
+        next wide-gap marker is a fresh list with code content. Every leaf test read "no ender
+        matched" as "a paragraph is open", which is right for text and wrong for nothing-at-all:
+
+            `- ` + `  2.      Closes #100`  renderer `<li><ol start="2"><li><pre><code>`
+                HEAD `[100]` in both arms; `32a1d4f4fd` `[]`
+
+        The same missing test shows up on a quote line whose content is only `>` — `> Notes` + `>` +
+        `> 2.     Closes #100` — where it is at parity with `origin/main` rather than a regression.
+    """
+    md = MarkdownIt("commonmark")
+    text = "Closes #100"
+
+    def in_code(body: str) -> bool:
+        def walk(tokens):
+            for token in tokens:
+                # ⛔ `html_block` IS NOT "HIDDEN" HERE (round 43 review, P3). Raw HTML text
+                # is READ by the module (`_leaves_no_paragraph`: only FENCED content is
+                # blanked; `strip_code` now carries the same rule for `own_code`), so counting
+                # an `html_block` as code in this oracle would pin the opposite of the rule
+                # the code follows. No body in either sweep is an `html_block` today, so the
+                # clause was inert — removing it keeps it inert and keeps it honest.
+                if token.type in ("code_block", "fence") and text in token.content:
+                    return True
+                if walk(token.children or []):
+                    return True
+            return False
+        return walk(md.parse(body))
+
+    for body in ("Notes\n> 2. x\n> 3.      Closes #100\n",
+                 "Notes\n> 2. x\n> 3.     Closes #100\n",
+                 "- \n  2.      Closes #100\n",
+                 "* \n  2.      Closes #100\n",
+                 "> Notes\n>\n> 2.     Closes #100\n"):
+        assert in_code(body), body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # Controls: the same second line under an open paragraph is still a lazy continuation…
+    for body in ("Notes\n2.     Closes #100\n", "- Notes\n  2.     Closes #100\n"):
+        assert not in_code(body), body
+        assert cl.parse_closing_refs(body) == [100], body
+    # …and a bullet CAN interrupt (§5.2), so `- ` opening an item leaves no paragraph open either way.
+    assert cl.parse_closing_refs("- Closes #100\n") == [100]
+
+def test_the_two_nested_container_SHAPES_that_WERE_declared_are_now_CLOSED():
+    """Round 40 review — both round-39 residuals are CLOSED, so neither is declared any more.
+
+    Round 39 declared two nested-container families as residuals because each needed the INNER
+    quote's content column rather than the outer container's, and fixing either meant deciding a new
+    item's paragraph state. Round 40 decided it: a line that DROPS a `>` is a lazy continuation only
+    when the dropped markers were the ITEM's own and the line stays indented into that item
+    (`_dropped_quote_is_lazy`). Both shapes then answer what the renderer answers:
+
+    * `> q` + `2. x` + `2.     Closes #100` — renderer `<pre><code>`. Was `[100]` (declared as
+      PARITY with `origin/main`, i.e. a false PASS this head merely inherited); now `[]`.
+    * `> - q` + `    -     Closes #100` — renderer keeps ONE `<p>` inside the item. Was `[]`
+      (declared as a regression against `origin/main`, warn direction); now `[100]`.
+
+    The controls below are the half that must NOT move: the same rules at the item's own content
+    column, and with a quote nested inside the item, still put the keyword in code.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    # The two families round 39 declared — now the renderer's answer, in both directions.
+    parity = "> q\n2. x\n2.     Closes #100\n"
+    assert token_type(parity) == "code_block", parity
+    assert cl.parse_closing_refs(parity) == [], parity
+    lost = "> - q\n    -     Closes #100\n"
+    assert token_type(lost) == "inline", lost
+    assert cl.parse_closing_refs(lost) == [100], lost
+    # …and the shapes the SAME mechanism must keep right, so the declaration cannot widen:
+    assert cl.parse_closing_refs("- > q\n  > 2.     Closes #100\n") == [100]
+    assert cl.parse_closing_refs("- > q\n  2.     Closes #100\n") == []
+    assert cl.parse_closing_refs("> q\n2. x\n   2.     Closes #100\n") == [100]
+
+
+def test_a_LAZY_marker_line_with_EMPTY_content_keeps_the_paragraph_OPEN():
+    """Round 40 review, P2 — class A, both arms: the empty-content test was asked FIRST.
+
+    `2. ` is an ordered marker ≥ 2 with nothing after it. With a paragraph open it does not open an
+    item either (§5.2's consumer rule does not care whether the content is empty), so the paragraph
+    is STILL open and the next line continues it — the renderer produces ONE `<p>`:
+
+        `Notes` + `2. ` + `2.     Closes #100`     renderer `<p>Notes\n2. \n2.     Closes #100</p>`
+
+    `_leaves_no_paragraph` answered "this marker has empty content, so no paragraph is open" before
+    it read the caller's lazy answer, which reported the paragraph CLOSED; the wide-gap marker below
+    then opened its own list and the real close was blanked (`[]`, a lost close in both arms). The
+    round-39 empty-content rule is about `- ` / `* ` / `> - `, which `_lazy_push` never answers true
+    for, so it is untouched — the control below is one of its pinned shapes.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    body = "Notes\n2. \n2.     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+    # Controls: the round-39 empty-content rule, and its bullet sibling, are unchanged.
+    for control in ("- \n  2.      Closes #100\n", "* \n  2.      Closes #100\n",
+                    "> - \n  2.      Closes #100\n"):
+        assert cl.parse_closing_refs(control) == [], control
+
+
+def test_a_line_that_DROPS_its_quote_is_lazy_only_when_the_ITEM_owns_the_markers():
+    """Round 40 review, P2 — class A, both arms: "fewer markers" is not "the item ended".
+
+    A lazy line drops its blockquote marker and continues the paragraph anyway, because it is still
+    indented into the item that holds that paragraph — and a marker there cannot open an item out of
+    a paragraph continuation, so its wide-gap content is TEXT, not code:
+
+        `Notes` + `> 2. x` + `    3.     Closes #100`   renderer ONE `<p>`   was `[]`
+        `Notes` + `> 2. x` + `    -     Closes #100`    renderer ONE `<p>`   was `[]`
+
+    Both were `[100]` on `origin/main`, so this was a lost close. THREE facts decide it, and the
+    controls below are the ones that must not move: whose markers went (a quote nested INSIDE the
+    item ends when its own go — `- > q`), how far in the line still is (at the item's own content
+    column the renderer opens a new block), and whether anything would start a new block once the
+    container is gone (a marker at raw column ≤ 3 starts a top-level list, which CAN interrupt a
+    paragraph, so nothing is lazy there).
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body, why in (("Notes\n> 2. x\n    3.     Closes #100\n", "an ordered marker ≥ 2"),
+                      ("Notes\n> 2. x\n    -     Closes #100\n", "a bullet, wide gap")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+
+    # Controls — every one of these is `[]` on `origin/main` too, and every one stays CODE:
+    for body, why in (
+        # the dropped markers were a quote nested INSIDE the item, not the item's own
+        ("- > q\n  2.     Closes #100\n", "the nested quote ended"),
+        # the line sits at the item's content column, where the renderer opens a new block
+        ("> - item\nlazy\n  2.     Closes #100\n", "not indented into the item"),
+        # nothing is left to hold the paragraph
+        ("> Notes\nlazy\n2.     Closes #100\n", "no item at all"),
+        # a marker at raw column ≤ 3 starts a top-level list once the quote is gone
+        ("> - item\n   2.     Closes #100\n", "the marker itself starts a new list"),
+        ("> - item\n   -     Closes #100\n", "same, bullet"),
+        # a marker that ADDS a `>` starts a new container (§5.1) — not a lazy indent continuation
+        ("Notes\n2. \n>     -     Closes #100\n", "a deeper container interrupts"),
+    ):
+        assert token_type(body) in ("code_block", "inline"), (why, body)
+        assert cl.parse_closing_refs(body) == [], (why, body)
+
+
+def test_the_PARAGRAPHS_container_is_not_always_the_ITEM():
+    """Round 42 review — a lost close this module introduced AGAINST `origin/main`.
+
+    When the open paragraph lives in a blockquote NESTED INSIDE the list item, the item is not the
+    container that holds it. `_lazy_indent` measured the line in the ITEM's space — consuming at most
+    `container.depth` markers, i.e. stopping BEFORE the inner quote's `>` — so §4.4's distance was
+    taken to the wrong column and a lazy paragraph continuation was blanked as code:
+
+        `- > q` + `  >     -     Closes #100`
+            renderer ONE `<p>` inside the inner quote (`q\\n    -     Closes #100`)
+            `origin/main` `[100]`; before this fix `[]` — a lost close, 60 per marker family
+
+    The paragraph's depth already exists (`prev_quote_depth`, which carries lazy continuation), so
+    when it is DEEPER than the item and the line is written at exactly that depth the line is inside
+    that quote: consume the line's own markers and measure from the quote's content column.
+
+    Swept against `MarkdownIt("commonmark")` in both directions — no body the renderer puts in
+    `<pre><code>` may be credited, and no prose body may be hidden — over 22,176 + 9,072 bodies at
+    the fix's head: lost closes 120 -> 0 and 45 -> 0, with no fail-open moved.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    body = "- > q\n  >     -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+
+    # Controls: the SAME item without the inner quote is CODE (no paragraph inside it holds the
+    # line), and a line at the item's own depth is the round-39 pin, not this one.
+    for control in ("- > q\n  2.     Closes #100\n",        # marker at the item's content column
+                    "> - item\n>      -     Closes #100\n"):  # §4.4 distance inside the item itself
+        assert token_type(control) == "code_block", control
+        assert cl.parse_closing_refs(control) == [], control
+    assert cl.parse_closing_refs("- > q\n  > 2.     Closes #100\n") == [100]
+
+    for prep, prefix in (("- > q\n", "  > "), ("- > q\n  > pre\n", "  > "), ("> - > q\n", "  > ")):
+        for marker in ("-", "*", "1.", "2.", "10."):
+            for gap in range(1, 10):
+                for indent in range(0, 7):
+                    candidate = (prep + prefix + " " * indent + marker + " " * gap
+                                 + "Closes #100\n")
+                    expected = [] if token_type(candidate) == "code_block" else [100]
+                    assert cl.parse_closing_refs(candidate) == expected, candidate
+
+
+def test_a_paragraph_TWO_quotes_deep_keeps_its_lazy_continuation():
+    """Round 43 review (P2) — the round-42 branch covered ONE level of nesting and stopped.
+
+    At two levels the real lazy continuation drops ONE `>` and the renderer keeps it in the same
+    `<p>`, but neither the round-42 branch (depth EQUAL to the paragraph's) nor
+    `_dropped_quote_is_lazy` (whose markers must be the ITEM's own) answered for it, so `own_code`
+    blanked the close:
+
+        `- > > q` + `  >     -     Closes #100`
+            renderer ONE `<p>` inside the inner quote; `origin/main` `[100]`, before this fix `[]`
+
+    Measured at the pre-fix head over 47,250 bodies of that family: 1,025 lost closes, every one
+    credited by `origin/main` and every one an `inline` token. The bound is ONE marker: dropping any
+    number of them credits bodies the renderer puts in `<pre><code>` (measured: +650 fail-opens on
+    `- > > > q` + a depth-1 line), which is why the third control below stays CODE.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    body = "- > > q\n  >     -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+
+    # Controls: dropping TWO markers is not a lazy continuation (the renderer makes it code), and
+    # the item's own space is still measured by the round-39/41/42 pins.
+    for control in ("- > > > q\n  >     -     Closes #100\n",   # two markers dropped -> CODE
+                    "- > > q\n  2.     Closes #100\n",          # at the item's content column
+                    "- > q\n  >     -     Closes #100\n"):      # the round-42 pin, unchanged
+        assert cl.parse_closing_refs(control) == ([] if token_type(control) == "code_block" else [100]), control
+    assert token_type("- > > > q\n  >     -     Closes #100\n") == "code_block"
+
+    # The sweep pins the two shapes where the tool agrees with the renderer at EVERY gap/indent.
+    # The out-of-item shapes (`> - > > q`, `1. > > q`) carry a PRE-EXISTING lenient divergence
+    # (measured in the same pass: 0 new fail-opens and 0 lost prose closes against `origin/main`),
+    # so they are not pinned here — a test that asserted the renderer's answer there would pin a
+    # behaviour change nobody made.
+    for prep, prefix in (("- > > q\n", "  > "), ("- > > q\n  > pre\n", "  > ")):
+        for marker in ("-", "*", "1.", "2.", "10."):
+            for gap in range(1, 10):
+                for indent in range(0, 7):
+                    candidate = (prep + prefix + " " * indent + marker + " " * gap
+                                 + "Closes #100\n")
+                    expected = [] if token_type(candidate) == "code_block" else [100]
+                    assert cl.parse_closing_refs(candidate) == expected, candidate
+
+
+def test_an_HTML_blocks_own_text_is_READ_not_hidden():
+    """Round 43 review (P2) — a LOST close this module introduced AGAINST `origin/main`.
+
+    §4.6 makes an HTML block a LEAF block: a `- ` inside it opens no list, so the line is raw HTML
+    text and not code — the rule this module already states for the paragraph question
+    (`_leaves_no_paragraph`: only FENCED content is blanked). `own_code` did not know that, so a
+    wide-gap marker line inside the block was blanked:
+
+        `<div>` + `-     Closes #100`      renderer `html_block` (text), `origin/main` `[100]`, before `[]`
+
+    Measured at the pre-fix head over the 32-opener grid (indents 0-8, every marker, gaps 1-9): 90
+    lost closes per opener family. Types 2-6 (and 7) END at the next blank line (§4.6), so the state
+    needs no closer scan — the control below that puts a blank line before the marker line stays
+    CODE, and a FENCE inside nothing is still blanked.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body in ("<div>\n-     Closes #100\n",
+                 "<details>\n-     Closes #100\n</details>\n",
+                 "<p>\n-     Closes #100\n",
+                 "<table>\n*     Closes #100\n",
+                 "- item\n\n<div>\n2.     Closes #100\n",
+                 # TYPE 1 has its own openers and is the arm a single "types 1-6" regex misses
+                 # (round 44 review, P2): `<pre>`/`<script>`/`<style>`/`<textarea>`.
+                 "<pre>\n-     Closes #100\n",
+                 "<script>\n-     Closes #100\n",
+                 "<style>\n-     Closes #100\n",
+                 "<textarea>\n-     Closes #100\n</textarea>\n"):
+        assert token_type(body) == "html_block", body
+        assert cl.parse_closing_refs(body) == [100], body
+
+    # Controls. A TYPE-6 block ENDS at the next blank line, so the same marker line after one is
+    # CODE; a wide-gap marker line OUTSIDE any HTML block is still CODE; and a fenced body still is.
+    for control in ("<div>\n\n-     Closes #100\n",
+                    "-     Closes #100\n"):
+        assert token_type(control) == "code_block", control
+        assert cl.parse_closing_refs(control) == [], control
+    assert token_type("```\n-     Closes #100\n```\n") == "fence"
+    assert cl.parse_closing_refs("```\n-     Closes #100\n```\n") == []
+
+    # ⛔ TYPES 1-5 END AT THEIR OWN CLOSER, NOT AT A BLANK LINE (round 44 review, P2 — the first
+    # version of this state machine ended every block at a blank line, which kept `<!-- c -->` open
+    # over the NEXT line and CREDITED it: 600 fail-open bodies). Each shape below is the renderer's
+    # `code_block`, and a TYPE-1 block must NOT end at a blank line (only type 6 does).
+    for closed in ("<!-- c -->\n-     Closes #100\n",
+                   "<!-- c\n-->\n-     Closes #100\n",
+                   "<?php ?>\n-     Closes #100\n",
+                   "<!DOCTYPE html>\n-     Closes #100\n",
+                   "<![CDATA[x]]>\n-     Closes #100\n",
+                   "<pre>\n</pre>\n-     Closes #100\n",
+                   "<script src=\"a\">\n</script>\n-     Closes #100\n"):
+        assert token_type(closed) == "code_block", closed
+        assert cl.parse_closing_refs(closed) == [], closed
+        assert cl.parse_closing_refs(closed, None, strict=True) == [], closed
+    # …and a TYPE-1 block survives a blank line (a `<!-- -->` close is what ends it, not a blank).
+    assert token_type("<pre>\n\n-     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<pre>\n\n-     Closes #100\n") == [100]
+    # INDENTED OPENER IS STILL A TOP-LEVEL BLOCK (round 45 review, P2). §4.6 allows a block to open
+    # at 0-3 spaces and gives it no indentation end-condition, so binding the block to the opener's
+    # COLUMN lost the close on the very next line.
+    for lead in (1, 2, 3):
+        indented = " " * lead + "<div>\n-     Closes #100\n"
+        assert token_type(indented) == "html_block", indented
+        assert cl.parse_closing_refs(indented) == [100], indented
+    # TYPE 7 IS A BLOCK TOO, though it can never END a paragraph (round 45 review, P2): a complete
+    # tag alone on a line swallows the next lines as its raw text — but ONLY when no paragraph is
+    # open, so `<span>x</span>` and a line after prose stay CODE.
+    for leaf in ("<br />", "<span>", "</span>", "</div>", "<em>", "<custom-tag>"):
+        body7 = leaf + "\n-     Closes #100\n"
+        assert token_type(body7) == "html_block", body7
+        assert cl.parse_closing_refs(body7) == [100], body7
+    for not_leaf in ("<span>x</span>", "Notes\n<span>"):
+        body_c = not_leaf + "\n-     Closes #100\n"
+        assert token_type(body_c) == "code_block", body_c
+        assert cl.parse_closing_refs(body_c) == [], body_c
+    # …and a block does not follow a line dedented out of the container that held it.
+    dedented = "- item\n  <div>\n-     Closes #100\n"
+    assert token_type(dedented) == "code_block", dedented
+    assert cl.parse_closing_refs(dedented) == [], dedented
+
+    for opener in ("<div>\n", "<p>\n", "<table>\n", "<details>\n<summary>x</summary>\n", "<li>\n",
+                   "<pre>\n", "<script>\n", "<style>\n", "<textarea>\n"):
+        for marker in ("-", "*", "+", "1.", "2.", "10."):
+            for gap in (1, 5, 9):
+                for indent in range(0, 5):
+                    for lead in (0, 1, 3):   # the OPENER's own indent (§4.6 allows 0-3)
+                        candidate = (" " * lead + opener + " " * indent + marker + " " * gap
+                                     + "Closes #100\n")
+                        expected = [] if token_type(candidate) == "code_block" else [100]
+                        assert cl.parse_closing_refs(candidate) == expected, candidate
+
+
+def test_the_shallower_reopened_quote_lazy_case_is_a_DECLARED_residual():
+    """Round 44 review (P2) — measured here so the next round does not rediscover it as news.
+
+        `- > > q` + `> y` + `> 2.     Closes #100`
+            renderer: TWO paragraphs — `q` (the item's nested quotes), then `y\n2.     Closes #100`
+            in a NEW outer blockquote — and the close lands in an `inline` token.
+            `origin/main` `[100]`; every head from round 39 to this one `[]`
+
+    When a shallower line RE-OPENS the outer quote (`> y`), the item closes (`container` -> `None`)
+    while round 39's carry leaves `prev_quote_depth` at 2, so the round-43 re-base is skipped (it
+    needs a container) and `_is_lazy_marker`'s depth term reads the marker line against a container
+    that no longer exists.
+
+    ⛔ THE BASELINE IS `origin/main`, AND IT CREDITS THESE BODIES (round 45 review, P3 — the first
+    version of this docstring said "NOT a regression" while quoting `origin/main [100]` in the same
+    breath). It is parity with THIS BRANCH'S heads from round 39 on, NOT with `origin/main`: the
+    divergence is real and is the LOST-CLOSE direction, which is why it is pinned rather than waved
+    through. One root also loses a SECOND shape — a quote line that opens a block whose closer sits
+    at column 0:
+
+        `> <!--` + `end -->` + `2.     Closes #100`     renderer `inline`, head `[]`, `origin/main` `[100]`
+
+    Both shapes are pinned below, so whoever fixes the carried-`prev_quote_depth` root has the
+    radius in front of them.
+    """
+    body = "- > > q\n> y\n> 2.     Closes #100\n"
+    md = MarkdownIt("commonmark")
+    assert [t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
+    assert cl.parse_closing_refs(body) == [], "DECLARED residual — not a regression against the branch"
+    # The SECOND shape out of the same root (round 45 review, P3): a quote line opens a block whose
+    # closer sits at column 0, and the marker after it is read against a container that has closed.
+    second = "> <!--\nend -->\n2.     Closes #100\n"
+    assert [t.type for t in md.parse(second) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
+    assert cl.parse_closing_refs(second) == [], "same DECLARED root, second shape"
+    # The control that must stay: with the item still open, the same lazy line IS credited.
+    control = "- > > q\n  > y\n  >     -     Closes #100\n"
+    assert [t.type for t in md.parse(control) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
+    assert cl.parse_closing_refs(control) == [100]
