@@ -4820,6 +4820,76 @@ def test_no_ITEM_opens_inside_an_HTML_block_and_none_of_its_text_is_HIDDEN():
         assert "#100" in cl.strip_code(body, indented_code=True), body
         assert cl.parse_closing_refs(body) == [100], body
 
+def test_a_WIDE_GAP_marker_in_a_NEW_blockquote_after_an_HTML_block_is_CODE():
+    """#11287 — the fail-open the review round reported, pinned on the shape it reported.
+
+    An HTML block takes NO lazy continuation: the unquoted `    x` ends the blockquote that held
+    `> <span>`, so it is a top-level indented CODE block, and the marker then arrives in a NEW
+    blockquote. `2.` + five spaces is §5.2's wide-gap item — one space is the delimiter and the
+    remaining four are the item's indented CODE block:
+
+        `> <span>` + `    x` + `> 2.     Closes #100`
+            renderer: `<blockquote><span></blockquote><pre><code>x</code></pre><blockquote>
+            <ol start="2">…<pre><code>Closes #100`  -> the keyword is CODE, so every arm owes `[]`.
+
+    The round-49..51 heads (from `282644682d`, the round-48 resolution) credited it in ALL FOUR
+    arms; the round-48 head (`4ef23920a5`) and pre-#11186 `main` (`80c912244f`) refused it in
+    `strict` and `indented_code` and credited it in `lenient` (the pre-existing #11156 direction).
+    Round 52 (`cc8f7baf02`, merged as #11186) closed both, and its term is `_html_leaf_text` — "a leaf
+    block's own raw text leaves no paragraph" — measured NECESSARY AND SUFFICIENT on these rows:
+    clearing that flag on the fixed tree restores `[100]` in all four arms, and nothing else is
+    needed. ⚠️ NOT `_html_here` (it is `False` on the marker line at every tree here, and its "this
+    line's own answer" comment predates round 52), and NOT `_html_rest` (round 52's §4.6
+    content-column allowance, an IDENTITY on these rows because `container is None`; it is the term
+    for the lost-close family, which is control 2 below). This test reds on the round-51 tree
+    (`1bbc16ce57`) — that is the property it exists to keep.
+    ⚠️ The baseline for the two "pre-existing" rows is **pre-#11186 `main`**, never `origin/main`:
+    after #11186 landed, `main` refuses these shapes in all four arms, so a reader re-deriving them
+    against today's `main` gets `[]` and would wrongly conclude the fail-open was never there.
+
+    ⚠️ Not #11268 (the `indented_code` arm crediting inside a DEEPER blockquote) and not #11156
+    (`strip_code` never blanks raw-HTML content): what is measured here is the HTML block's END,
+    not its text.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "#100" in getattr(t, "content", "")}
+
+    # The two rows #11287 reported: the container ends, then the marker arrives in a new quote.
+    for body in ("> <span>\n    x\n> 2.     Closes #100\n",
+                 "> </pre>\n      x\n> 2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+        assert "#100" not in cl.strip_code(body, indented_code=True), body
+        assert "#100" not in cl.strip_code(body, indented_code=True, strict=True), body
+
+    # The same body WITHOUT an indented line between the opener and the marker: the renderer also
+    # puts the keyword in `<pre><code>`, and both pre-#11186 `main` (`80c912244f`) and the series
+    # heads credited it — a pre-existing fail-open the same `_html_leaf_text` term closed. Pinned so "refuse
+    # this family" is the recorded answer rather than an accident of the two rows above.
+    pre_existing = "> <span>\nx\n> 2.     Closes #100\n"
+    assert keyword_types(pre_existing) == {"code_block"}, pre_existing
+    assert cl.parse_closing_refs(pre_existing) == [], pre_existing
+    assert cl.parse_closing_refs(pre_existing, None, strict=True) == [], pre_existing
+
+    # CONTROL 1 — the marker NOT in a new blockquote: already refused before the fix, and refused
+    # for the renderer's reason (`<pre><code>`), so this keeps the fix from spreading to shapes that
+    # were never wrong.
+    for body in ("> <span>\n      x\n2.     Closes #100\n",
+                 "x\n      x\n> 2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+
+    # CONTROL 2 — the fix must not have become "blank every wide gap after an HTML block": where
+    # the renderer puts the keyword in PROSE, it is still a close (round 52's own pinned shape).
+    prose = "- a\n    <div>\n<br />\n2.     Closes #100\n"
+    assert keyword_types(prose) == {"html_block"}, prose
+    assert cl.parse_closing_refs(prose) == [100], prose
+    assert cl.parse_closing_refs(prose, None, strict=True) == [100], prose
+
+
 def test_a_fence_that_DROPS_a_NESTED_items_marker_is_still_inside_the_OUTER_one():
     """Round 49 review, P1 — a LOST close, a regression against `origin/main`.
 
