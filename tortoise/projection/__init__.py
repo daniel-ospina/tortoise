@@ -18581,10 +18581,36 @@ class FalkorProjection(
 
         Sets ``self._vector_index_served_labels`` to the declared served set and
         ``self._vector_indexed_labels`` to its INTERSECTION with the engine's
-        VECTOR-indexed labels — or BOTH to ``None`` when the pair could not be
-        measured, so the pair is never half-populated. Never raises and never
-        writes: ``_ensure_indexes`` is reached unguarded from
-        ``FalkorProjection.__init__`` as well as from two ``hosted_api``
+        VECTOR-indexed labels. The THREE lanes, stated exactly, because a pair is
+        only readable if a caller can tell them apart:
+
+        * **measured** — ``db.indexes()`` RETURNED rows: both halves are SET.
+          That includes the deliberately-empty case: a catalogue with no VECTOR
+          index anywhere gives ``indexes=set()``, which means "measured, and
+          nothing is indexed" — never "unknown".
+        * **NOT MEASURED** — the catalogue could not be read (the call raised, or
+          it answered ``None``): BOTH halves are ``None``, so the pair is never
+          half-populated. ``None`` never means "serves nothing".
+        * **NOT APPLICABLE** — the gate-skip lane (an embedded engine, or a <4.x
+          engine with no index API) returns BEFORE touching either half, so the
+          pair is left exactly as it was. That is safe rather than sloppy only
+          because both gates read init-immutable attributes (``_is_embedded``,
+          ``_falkordb_version``): a projection that skips here never measured
+          earlier, so there is no stale pair for it to leave behind.
+
+        ⛔ Malformed ROWS are a separate, PRE-EXISTING lane and are **NOT**
+        "not measured": rows are parsed PER ROW and an unparseable row is
+        skipped (#4997, pinned by ``test_malformed_rows_are_skipped_per_row``).
+        A catalogue that is RETURNED but parses to nothing therefore reports
+        ``serves=<every declared label> indexes=[]`` — "measured and empty" —
+        and warns on the gap. That is the pre-existing half's semantic and
+        #11087 does not change it; what #11087 changes is that this lane is now
+        REPORTED POSITIVELY too, instead of only warned about. Separating
+        "returned but unparseable" from "measured empty" would be a behaviour
+        change to the pinned half, deliberately not made here.
+
+        Never raises and never writes: ``_ensure_indexes`` is reached unguarded
+        from ``FalkorProjection.__init__`` as well as from two ``hosted_api``
         per-request paths, so a hostile or unavailable catalog must not break
         store construction.
 

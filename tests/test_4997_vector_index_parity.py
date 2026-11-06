@@ -163,8 +163,11 @@ class _NoneCatalogueGraph(_RecordingGraph):
     mistake "measured and empty" for "not measured"."""
 
     def query(self, cypher, params=None, timeout=None):
-        self.calls.append(cypher)
+        # No `self.calls.append` on the delegating path: `_RecordingGraph.query`
+        # records the call itself, and appending on both sides double-counted
+        # every non-catalogue query (#11087 review).
         if "db.indexes()" in cypher.lower():
+            self.calls.append(cypher)
             return _MockResult(None)
         return super().query(cypher, params=params, timeout=timeout)
 
@@ -495,32 +498,40 @@ def test_a_gap_reports_the_pair_and_still_warns(caplog):
     assert len(warnings) == 1, "the gap must still WARN — #11087 adds a report only"
 
 
-def test_the_reported_served_set_is_the_one_declaration(caplog):
+def test_the_reported_served_set_is_the_one_declaration(monkeypatch, caplog):
     """Plan §7 D8 — one label declaration, no third vocabulary.
 
-    The reported served set must BE `ENTITY_TYPE_LABELS.values()`, not a copy
-    re-derived from anything else. Patching the module-global binding proves
-    provenance the way `test_run_vector_query_reads_the_declaration` does: a
-    re-derived literal would ignore the sentinel.
+    The reported served set must BE the `ENTITY_TYPE_LABELS` binding that
+    `tortoise.projection` imports from `security`, not a copy re-derived from
+    anything else. Patching that binding proves provenance the way
+    `test_run_vector_query_reads_the_declaration` does: a re-derived literal
+    would ignore the sentinel. `monkeypatch` (not a hand-rolled try/finally) so
+    the binding is restored even if the test fails mid-way (#11087 review).
     """
     import tortoise.projection as projection_mod
+    from tortoise.security import ENTITY_TYPE_LABELS as declared
 
-    original = projection_mod.ENTITY_TYPE_LABELS
-    try:
-        projection_mod.ENTITY_TYPE_LABELS = {"widget": "WidgetLabel"}
-        proj = _bare([_vector_row("WidgetLabel")])
-        with caplog.at_level(logging.INFO):
-            proj._ensure_indexes()
-        assert proj._vector_index_served_labels == {"WidgetLabel"}, (
-            "the served set must be READ from the declaration, not re-derived"
-        )
-        # Provenance is a claim about what was EMITTED, so this stays on the
-        # record — the sentinel reaches it only through the declaration — but
-        # it names the label rather than pinning `repr()` (plan §7).
-        assert "WidgetLabel" in _pair_records(caplog)[0].getMessage()
-        assert proj._vector_indexed_labels == {"WidgetLabel"}
-    finally:
-        projection_mod.ENTITY_TYPE_LABELS = original
+    # The binding under test must BE the declaration's: patching it proves
+    # provenance only if the module reads that one name, so assert the identity
+    # first — a re-declaration inside `tortoise.projection` would satisfy the
+    # sentinel while having quietly created the second vocabulary D8 forbids.
+    assert projection_mod.ENTITY_TYPE_LABELS is declared, (
+        "`tortoise.projection` must import the ONE declaration, not copy it"
+    )
+
+    monkeypatch.setattr(projection_mod, "ENTITY_TYPE_LABELS",
+                        {"widget": "WidgetLabel"})
+    proj = _bare([_vector_row("WidgetLabel")])
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+    assert proj._vector_index_served_labels == {"WidgetLabel"}, (
+        "the served set must be READ from the declaration, not re-derived"
+    )
+    # Provenance is a claim about what was EMITTED, so this stays on the record —
+    # the sentinel reaches it only through the declaration — but it names the
+    # label rather than pinning `repr()` (plan §7).
+    assert "WidgetLabel" in _pair_records(caplog)[0].getMessage()
+    assert proj._vector_indexed_labels == {"WidgetLabel"}
 
 
 def test_unmeasured_pair_is_none_in_both_halves(caplog):
@@ -611,6 +622,53 @@ def test_a_re_read_that_cannot_measure_clears_an_already_populated_pair(caplog):
         )
         assert proj._vector_indexed_labels is None
         assert not _pair_records(caplog)
+
+
+def test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty(caplog):
+    """#11087: the MALFORMED-ROW lane is **not** the NOT-MEASURED lane.
+
+    Pre-existing semantics (#4997, pinned by
+    `test_malformed_rows_are_skipped_per_row`): rows are parsed per row and an
+    unparseable row is skipped. A catalogue that is RETURNED but parses to
+    nothing therefore yields `indexes=[]` — "measured and empty" — and the gap
+    warning fires; it does NOT yield `None` ("unknown").
+
+    This is pinned here because #11087 makes that lane SAY so out loud (the
+    positive report), and because an earlier draft of this PR claimed the
+    opposite — that a malformed catalogue leaves BOTH halves `None`. It does
+    not, and the difference is user-visible: `indexes=[]` tells a caller
+    "nothing is indexed" when the store merely could not parse the answer.
+    Separating the two is a behaviour change to the pinned half and is
+    deliberately out of #11087's scope; the honest thing it owes is this pin.
+    """
+    proj = _bare(graph="test_11087_malformed")
+    proj.g = _RecordingGraph(index_rows=[
+        ("TooShort",),                                 # len(row) < 3
+        ("NonDictTypes", [], "not-a-dict"),            # types not a dict
+    ])
+    with caplog.at_level(logging.INFO):
+        proj._record_vector_index_inventory()
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 1, (
+        "a returned-but-unparseable catalogue is still a MEASURED lane"
+    )
+    assert pairs[0].levelno == logging.INFO
+    msg = pairs[0].getMessage()
+    # Markers only — the CONTENT is asserted on the attributes below. Pinning
+    # `indexes=[]` would pin `repr()` of an empty Python list, which the D5
+    # sibling forbids (:468) and plan §7 "Brittleness avoided" rules out: the
+    # natural reformat that renders an empty set as `none` (the way the WARNING
+    # already renders it) would red this test with no behaviour change.
+    assert "serves=" in msg and "indexes=" in msg, msg
+    assert proj._vector_index_served_labels == set(SERVED)
+    assert proj._vector_indexed_labels == set(), (
+        "documented consequence: unparseable rows read as 'nothing indexed'"
+    )
+    assert [r for r in caplog.records
+            if "#4997" in r.getMessage() and r.levelno >= logging.WARNING], (
+        "the gap warning must still fire on this lane"
+    )
 
 
 def test_distinct_graphs_each_report_once(caplog):
