@@ -735,56 +735,167 @@ def _non_owned_handles(block: str) -> list[str]:
     neither satisfy this census nor red it (#11182), so every match is validated
     against the MASKED block at the same offset.
 
-    TWO shapes carry that f-string, and the second one had no assignment line for
-    the first to read (#11217 re-review, measured at `c84c3d68`): a site can hand
-    the f-string STRAIGHT to the journal —
+    TWO shapes carried that f-string, and the second one had no assignment line
+    for the first to read (#11217 re-review, measured at `c84c3d68`): a site can
+    hand the f-string STRAIGHT to the journal —
 
         _journal_append(f"evict_{os.urandom(6).hex()}")   # read NO violation
 
     which journals the same inert record and stays GREEN, i.e. the exact false
-    PASS this arm exists to close, in the shape that skips its matcher. Both are
-    read here.
+    PASS this arm exists to close, in the shape that skips its matcher.
 
-    DECLARED fail-open on a prefix that could still COMPLETE into an owned one
-    (`te` → `test_`): the built name starts with the prefix, so an unownable
-    prefix of an owned prefix is undecidable from the literal alone, and this arm
-    must not turn that into a violation on a site it cannot judge (it was one
-    before this note, measured at `c84c3d68`: `f"te{hex}"` read as a violation
-    before its interpolation was known). An EMPTY prefix fails both tests and is
-    clean by construction. Note the boundary is exact — `te_` is NOT ambiguous,
-    because `"test_".startswith("te_")` is false, so it is still reported.
+    IT READS THE NAME THE JOURNAL RECEIVES, NOT A SHAPE OF ASSIGNMENT. Both
+    earlier revisions enumerated construction shapes, and each enumeration left
+    the next equivalent form GREEN — measured at `ede858414` on this module's own
+    helpers, `name = "evict_" + os.urandom(6).hex()`, `name = (f"evict_…")`,
+    `name: str = f"evict_…"`, a multi-line continuation, `str(f"evict_…")`,
+    `_mk(f"evict_…")` and `"evict_%s" % …` all read NO violation while
+    `os.urandom` + `_journal_calls` still satisfied the outer half (a shape
+    enumeration cannot converge: every fix moves the bypass one form over). This
+    arm therefore resolves the JOURNALED EXPRESSION — one hop through a named
+    handle, then the first string literal in it — so parenthesised, annotated,
+    multi-line, concatenated, `%`-formatted, wrapper-called and one-hop-variable
+    constructions all classify identically. Reading only the journaled name also
+    keeps it from reding an UNRELATED random token in the same block (measured at
+    `ede858414`: `tok = f"n{os.urandom(6).hex()}"` red a block whose journaled
+    handle was owned).
+
+    DECLARED fail-opens, each because the prefix is not decidable from the
+    literal alone:
+
+    * a prefix that could still COMPLETE into an owned one (`te` → `test_`): the
+      built name starts with the prefix, so the arm must not violate on a site it
+      cannot judge (it did once — `c84c3d68`);
+    * an EMPTY prefix (`f"{name}"`, `"" .join([…])` whose first element is not a
+      literal): the name begins in a value, not in the literal;
+    * an expression with NO readable literal at all (`_journal_append(pick())`):
+      there is no prefix to classify, and inventing one is a false block.
+
+    The ambiguity boundary is exact — `te_` is NOT ambiguous, because
+    `"test_".startswith("te_")` is false, so it is still reported.
     """
     from tests._embedded import _SWEEP_OWNED_PREFIXES
 
     masked = _mask_strings_and_comments(block)
-    exprs: list[str] = []
-    # shape 1: `name = f"<prefix>{os.urandom(...)}"`
-    for m in re.finditer(
-            r"(?m)^[ \t]*(?P<name>\w+)\s*=\s*f([\"'])(?P<rhs>[^\n]*)", block):
-        if masked[m.start("name")] == " ":
-            continue  # inside a comment or a string literal
-        exprs.append(m.group("rhs"))
-    # shape 2: the f-string handed STRAIGHT to the journal
-    for call in re.finditer(r"_journal_append\(", masked):
-        line_start = masked.rfind("\n", 0, call.start()) + 1
-        if re.fullmatch(r"\s*(?:async\s+)?def\s+", masked[line_start:call.start()]):
-            continue  # a definition of the symbol, not a use of it
-        m = re.match(r"_journal_append\(\s*f([\"'])(?P<rhs>[^\n]*)",
-                     block[call.start():])
-        if m:
-            exprs.append(m.group("rhs"))
-
     out: list[str] = []
-    for rhs in exprs:
-        if "os.urandom" not in rhs:
-            continue
-        prefix = rhs.split("{", 1)[0]
+    for prefix in _journaled_prefixes(block, masked):
+        if not prefix:
+            continue  # declared fail-open: nothing readable to classify
         if prefix.startswith(_SWEEP_OWNED_PREFIXES):
             continue
         if any(p.startswith(prefix) for p in _SWEEP_OWNED_PREFIXES):
             continue  # ambiguous: the name may still complete into an owned prefix
-        out.append(prefix)
+        if prefix not in out:  # one entry per distinct prefix in the message
+            out.append(prefix)
     return out
+
+
+def _journaled_prefixes(block: str, masked: str) -> list[str]:
+    """The static prefix of every handle `_journal_append` is CALLED with in
+    `block` — the name that becomes an ownership record, whichever shape builds
+    it. A `def _journal_append(...)` and a comment naming the symbol are not
+    calls (#11182), so both are skipped, and the argument span is balanced on the
+    MASKED block so a paren inside a literal (`hint="("`) cannot unbalance it."""
+    out: list[str] = []
+    for call in re.finditer(r"_journal_append\(", masked):
+        line_start = masked.rfind("\n", 0, call.start()) + 1
+        if re.fullmatch(r"\s*(?:async\s+)?def\s+", masked[line_start:call.start()]):
+            continue  # a definition of the symbol, not a use of it
+        depth, i = 1, call.end()
+        while i < len(masked) and depth:
+            if masked[i] == "(":
+                depth += 1
+            elif masked[i] == ")":
+                depth -= 1
+            i += 1
+        out.append(_handle_prefix(block, masked, block[call.end():i - 1]))
+    return out
+
+
+def _handle_prefix(block: str, masked: str, expr: str, _depth: int = 0) -> str:
+    """The static prefix of the name `expr` builds, one identifier hop deep.
+
+    `""` means "not decidable from a literal" (a declared fail-open)."""
+    prefix = _literal_prefix(expr)
+    if prefix is not None:
+        return prefix
+    ident = re.match(r"\s*([A-Za-z_]\w*)\s*(?:[%+]|$)", expr)
+    if ident and _depth < 2:
+        # `prefix = "evict_"` then `name = prefix + os.urandom(...)`: the literal
+        # is one hop away, and a site must not evade the arm by naming it.
+        for assigned in reversed(_assigned_exprs(block, masked, ident.group(1))):
+            hop = _handle_prefix(block, masked, assigned, _depth + 1)
+            if hop:
+                return hop
+    return ""
+
+
+def _literal_prefix(expr: str) -> str | None:
+    """The leading literal text of `expr` — the part of the built name that is
+    known BEFORE any interpolation — or None when `expr` holds no string literal.
+
+    `"evict_" + os.urandom(...)` → `evict_`; `f"evict_{...}"` → `evict_`;
+    `"evict_%s" % ...` → `evict_` (a `%` conversion starts the dynamic tail, the
+    same way `{` does in an f-string); `"".join(["evict_", ...])` → `evict_`.
+    """
+    m = re.search(r"""(?s)[rRbBfFuU]{0,3}(?P<q>\"\"\"|'''|\"|')""", expr)
+    if not m:
+        return None
+    q = m.group("q")
+    rest = expr[m.end():]
+    cut = len(rest)
+    for sep in ("{", q, "%"):
+        k = rest.find(sep)
+        if k != -1:
+            cut = min(cut, k)
+    prefix = rest[:cut]
+    if prefix:
+        return prefix
+    # An empty first element of a `"".join([...])` is not the name's head — the
+    # list's first element is. Any other empty prefix is undecidable (declared).
+    join = re.match(r"""[rRbBfFuU]{0,3}(?P<q>\"\"\"|'''|\"|')\s*\.\s*join\(""", rest)
+    if join:
+        inner = _literal_prefix(rest[join.end():])
+        if inner:
+            return inner
+    return ""
+
+
+def _assigned_exprs(block: str, masked: str, name: str) -> list[str]:
+    """The RAW right-hand sides of every `name = …` statement in `block`
+    (annotations and a doubled `==` excluded), statement-bounded so a
+    parenthesised continuation is read WHOLE."""
+    pat = re.compile(rf"(?m)^[ \t]*(?P<n>{re.escape(name)})\s*(?::[^=\n]*)?=(?!=)")
+    out: list[str] = []
+    for m in pat.finditer(masked):
+        if masked[m.start("n")] == " ":
+            continue  # prose, not code
+        out.append(block[m.end():_statement_end(masked, m.end())])
+    return out
+
+
+def _statement_end(masked: str, start: int) -> int:
+    """Index where the statement whose expression starts at `start` ends: the
+    matching close of a leading bracketed expression, else the next newline.
+    Computed on the MASKED block, so a bracket inside a literal cannot unbalance
+    it."""
+    i, n = start, len(masked)
+    while i < n and masked[i] in " \t":
+        i += 1
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    if i < n and masked[i] in pairs:
+        stack = [pairs[masked[i]]]
+        i += 1
+        while i < n and stack:
+            ch = masked[i]
+            if ch in pairs:
+                stack.append(pairs[ch])
+            elif ch == stack[-1]:
+                stack.pop()
+            i += 1
+        return i
+    nl = masked.find("\n", i)
+    return nl if nl != -1 else n
 
 
 def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
@@ -931,6 +1042,117 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
     )
     assert not _raw_detach_violations(root=tmp_path), (
         "the inline shape with an owned prefix must be clean")
+
+    # SHAPES 3+ (#11217 review round 1, measured on this module's own helpers at
+    # `ede858414`): shape 1 was anchored on `name = f"…"`, and shape 2 on the
+    # f-string being the journal's FIRST argument, so every construction below —
+    # each carrying the SAME decidable literal prefix — read NO violation while
+    # `os.urandom` + `_journal_calls` still satisfied the outer half. That is the
+    # same false PASS one shape over that round 2 fixed, so the arm reads the name
+    # the block JOURNALS instead of guessing which assignments are handles.
+    for journaled in (
+        '"evict_" + os.urandom(6).hex()',                 # concatenation
+        'f"evict_{os.urandom(6).hex()}"',                 # inline (shape 2)
+        'str(f"evict_{os.urandom(6).hex()}")',            # wrapper call
+        '_mk(f"evict_{os.urandom(6).hex()}")',            # helper call
+        '"evict_%s" % os.urandom(6).hex()',               # percent-format
+    ):
+        site.write_text(
+            "def test_evictor_lane():"
+            "\n    import os"
+            "\n    from falkordb import FalkorDB"
+            f"\n    _journal_append({journaled})"
+            "\n    c = FalkorDB(host=\"h\")"
+            "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+            "\n",
+            encoding="utf-8",
+        )
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "'evict_'" in bad[0], (
+            f"a handle journaled as `{journaled}` read NO violation: {bad}")
+
+    # The SAME shapes with an OWNED prefix must stay clean, so the arm cannot go
+    # vacuous by flagging every journaled site.
+    for journaled in (
+        '"test_evict_" + os.urandom(6).hex()',
+        'str(f"test_evict_{os.urandom(6).hex()}")',
+    ):
+        site.write_text(
+            "def test_evictor_lane():"
+            "\n    import os"
+            "\n    from falkordb import FalkorDB"
+            f"\n    _journal_append({journaled})"
+            "\n    c = FalkorDB(host=\"h\")"
+            "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+            "\n",
+            encoding="utf-8",
+        )
+        assert not _raw_detach_violations(root=tmp_path), (
+            f"an OWNED handle journaled as `{journaled}` was reported: "
+            f"{_raw_detach_violations(root=tmp_path)}")
+
+    # The journal NAMES an assignment, and the assignment's own shape must not
+    # matter: parenthesised continuation, annotated, concatenated, and one hop
+    # through an intermediate literal variable.
+    for assignment, journaled in (
+        ('name = (\n        f"evict_{os.urandom(6).hex()}"\n    )', 'name'),
+        ('name: str = f"evict_{os.urandom(6).hex()}"', 'name'),
+        ('name = "evict_" + os.urandom(6).hex()', 'name'),
+        ('prefix = "evict_"\n    name = prefix + os.urandom(6).hex()', 'name'),
+    ):
+        site.write_text(
+            "def test_evictor_lane():"
+            "\n    import os"
+            "\n    from falkordb import FalkorDB"
+            f"\n    {assignment}"
+            f"\n    _journal_append({journaled})"
+            "\n    c = FalkorDB(host=\"h\")"
+            "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+            "\n",
+            encoding="utf-8",
+        )
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "'evict_'" in bad[0], (
+            f"the journaled name built as `{assignment!r}` read NO violation: "
+            f"{bad}")
+
+    # FALSE BLOCK (#11217 review round 1, measured at `ede858414`): reading the
+    # RHS of EVERY `x = f"…"` in the block meant an UNRELATED random token red the
+    # census even though the handle the block JOURNALS is owned — a violation line
+    # asserting a falsehood about a compliant site.
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    name = f\"test_evict_{os.urandom(6).hex()}\""
+        "\n    token = f\"n{os.urandom(6).hex()}\""
+        "\n    _journal_append(name)"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        f"an UNRELATED random token red the census: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # DECLARED fail-open: nothing readable to judge. A handle built with NO
+    # literal anywhere in the expression the journal receives (`pick()`) has no
+    # prefix to classify; the arm must stay silent rather than invent one.
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    os.urandom(6)"
+        "\n    _journal_append(pick())"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        f"a handle with no readable literal was reported: "
+        f"{_raw_detach_violations(root=tmp_path)}")
 
     # PROSE is not a site in either direction (#11182): a comment showing an
     # unowned handle must not make the census red, exactly as it must not make it
