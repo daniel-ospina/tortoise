@@ -1041,6 +1041,8 @@ def read_graph_turns(uri: str | None, db_path: str | None,
         # creates it. A caller that already holds `g` is exempt by construction
         # — it is addressing a store it can already read.
         _refuse_unless_graph_present(proj, graph_name)
+        # ⛔ A LOST STORE IS NOT A DRAINED ONE (#11113 review cycle 4, P1).
+        _refuse_if_the_store_looks_LOST(proj)
         g = proj.g
     try:
         if ids is None:
@@ -1074,6 +1076,88 @@ def read_graph_turns(uri: str | None, db_path: str | None,
             "torn. Refusing to certify parity over a population it did not "
             "see: an absence is NOT established")
     return {"nodes": nodes, "unidentifiable": unidentifiable}
+
+
+def _graph_total_node_count(g) -> int:
+    """How many nodes the graph holds, of ANY label.
+
+    Distinct from the CENSUS population on purpose: `is_episodic` counts the
+    delete set, and the lost-versus-drained question is about the whole graph.
+    """
+    return int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+
+
+def _refuse_if_the_store_looks_LOST(proj) -> None:
+    """Refuse the LOST-STORE shape, which `--expect-empty` must never bless.
+
+    ⛔ #11113 review cycle 4, P1. The write-free bind (`skip_health_check=True`)
+    is load-bearing — the open-time probe replays the adjacent event log, which
+    would RESURRECT purged turns — but the probe was also a DETECTOR, and
+    `recover_from_log` draws the line precisely: it rebuilds only when the graph
+    has **0 TOTAL nodes** and the adjacent log has events (`tortoise/consistency.py`:
+    "Only rebuilds when db has 0 total nodes and the log has > 0 events").
+
+    So the two states ARE distinguishable, and this arm distinguishes them the
+    same way:
+
+      * a PURGED graph keeps its non-turn nodes (the bind's `(:Meta)`, any
+        neighbouring Points) — total > 0 — and the emptiness verdict is the
+        legitimate #10017 post-purge state. This arm does not touch it.
+      * a LOST graph has ZERO nodes of any label while a replayable log sits
+        beside it (redislite starts fresh on a corrupt RDB, an interrupted
+        restore, a manual deletion). Pre-PR, the bind replayed it and the
+        census then refused; with the probe skipped it read as "drained" and
+        `--expect-empty` certified it CLEAN — a false PASS about a store that
+        lost its graph.
+
+    Embedded leg only (a remote graph is never rebuilt from a local log, and
+    `_find_local_jsonl_dir` is embedded-only by construction). Answering "I could
+    not ask" is NOT this arm's job: a failed count is left to the read arm,
+    which already refuses with its own message.
+    """
+    finder = getattr(proj, "_find_local_jsonl_dir", None)
+    if finder is None:            # a URI leg: recovery never applies there
+        return
+    try:
+        if _graph_total_node_count(proj.g):
+            return                # non-empty graph: drained, not lost
+    except Exception:
+        return                    # the read arm owns an unreadable graph
+    try:
+        events_dir = finder()
+    except Exception:
+        return
+    if not events_dir:
+        return                    # no adjacent log: nothing would replay
+    replayable = None
+    try:
+        for name in sorted(os.listdir(events_dir)):
+            if not name.endswith(".jsonl"):
+                continue
+            path = os.path.join(events_dir, name)
+            try:
+                with open(path, "rb") as fh:
+                    if any(line.strip() for line in fh):
+                        replayable = path
+                        break
+            except OSError:
+                continue
+    except OSError:
+        return
+    if replayable is None:
+        return                    # the log is empty too: nothing to lose
+    raise CensusError(
+        "the graph EXISTS and holds ZERO nodes of ANY label, while a replayable "
+        f"event log sits beside the store ({replayable!r}) — that is the "
+        "LOST-STORE shape (a fresh redislite daemon on a corrupt RDB, an "
+        "interrupted restore, a manual delete), not a drained graph: tortoise's "
+        "own recovery would REPLAY that log and refill the graph. An empty "
+        "graph with a replayable log is NOT evidence of a drained graph, so "
+        "--expect-empty must not certify it. This gate never recovers — a "
+        "replay here would resurrect purged turns (#10017). Restore or rebuild "
+        "deliberately (python -m tortoise rebuild --dir <log-dir> --db <db>) and "
+        "re-run; if the store really is meant to be empty, remove or archive "
+        "the log first so the state is unambiguous.")
 
 
 def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:

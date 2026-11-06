@@ -1471,6 +1471,77 @@ def test_an_EMPTY_graph_name_is_refused_by_the_LIBRARY_not_substituted(
     assert sorted(graph["nodes"]) == ["live_t1"], graph["nodes"]
 
 
+def _write_replayable_log(tmp_path):
+    """A non-empty adjacent event log beside the store (the LOST-store signal)."""
+    path = tmp_path / "session-events.jsonl"
+    path.write_text('{"event_type": "SessionStarted", "session_id": "s1"}\n')
+    return str(tmp_path)
+
+
+def _embedded_store_with_NO_nodes(tmp_path, monkeypatch):
+    """A store whose graph EXISTS but holds zero nodes of ANY label.
+
+    This is what a LOST graph looks like (redislite starts fresh on a corrupt
+    RDB, an interrupted restore, a manual `MATCH (n) DETACH DELETE n`) — NOT
+    what a purged graph looks like, because a purge leaves the non-turn nodes
+    the bind wrote.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_lost.db")
+    proj = FalkorProjection(db_path, graph_name="tortoise")
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert _tpc_total_nodes(proj.g) == 0, _tpc_total_nodes(proj.g)
+    finally:
+        proj.close()
+    return db_path
+
+
+def _tpc_total_nodes(g):
+    return int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+
+
+def test_a_LOST_graph_with_a_replayable_log_is_REFUSED_not_certified(
+        tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 4, P1: `--expect-empty` must not bless a lost store.
+
+    The write-free bind skips the health probe, and the probe was also a
+    DETECTOR: `recover_from_log` rebuilds only when the graph has 0 TOTAL nodes
+    and the adjacent log has events, so pre-PR this state was replayed and the
+    census refused. With the probe skipped it read as "drained" and certified
+    CLEAN — a false PASS about a store that lost its graph.
+
+    Measured red-first: on the pre-fix module this call RETURNS (nodes {}).
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "LOST-STORE shape" in message, message
+    assert "event log" in message, message
+
+
+def test_a_DRAINED_graph_is_never_mistaken_for_a_LOST_one(
+        tmp_path, monkeypatch):
+    """The other half, and the one #10017's terminal run depends on.
+
+    A PURGED graph keeps its non-turn nodes (the bind's `(:Meta)`), so its TOTAL
+    count is non-zero even with zero episodic nodes — exactly the line
+    `recover_from_log` draws. The lost-store refusal must therefore NOT fire
+    here, or the post-purge re-run the issue ends on would be blocked by the
+    gate that is supposed to bless it.
+    """
+    db_path = _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)          # same log, same directory
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(
         monkeypatch):
     """Fail closed: "I could not ask" is not "the graph is there"."""
