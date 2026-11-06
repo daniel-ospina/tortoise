@@ -11527,7 +11527,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # the one that can vanish on a run which still reaches this job — so a COUNT of
     # writers names the wrong population: it cannot tell the unconditional writers
     # from the diff-gated one, and its message named `test-carve-out` twice while
-    # omitting `test-d14-hosted-api` and `test-record-postgres` (#11065 cycle 4).
+    # omitting `test-d14-hosted-api` and `test-record-postgres` — a writer THEN (#11065 cycle 4).
     # (`test-carve-out` is not in the population at all: its pip step is
     # restore-only by `test_the_carve_out_job_restores_the_pip_cache_without_saving_it`.)
     test_gate = str(job.get("if") or "").strip()
@@ -11552,11 +11552,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"this job's `{test_gate}`. A writer that needs `slow_run`/`carve_out_run` "
         "to be true does not populate the key on a run that still executes `test`, "
         "so this job reads an entry nothing wrote. The unconditional writers are "
-        "`test-d14-hosted-api` and `test-record-postgres` (`always() && "
-        "needs.changes.result == 'success'`), and `test-concurrency-falkor` shares "
-        "this job's own gate; `test-slow` (`slow_run`) is the only diff-gated pip "
-        "writer, and `test-carve-out` is NOT a writer — its pip step is "
-        "restore-only by its own pin.")
+        "`test-d14-hosted-api` (`always() && needs.changes.result == 'success'`) "
+        "and `test-concurrency-falkor`, which shares this job's own gate; "
+        "`test-slow` (`slow_run`) is the only diff-gated pip writer. NOT writers at "
+        "all: `test-carve-out` and `test-record-postgres` — both pip steps are "
+        "restore-only by their own pins (the latter since this branch).")
 
 
     # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
