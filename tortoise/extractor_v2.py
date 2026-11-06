@@ -10290,16 +10290,24 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     _attached = sum(len(p.get("mentions") or []) for p in payload_points
                     if isinstance(p, dict))
     _armed = _referentiality.enabled()
-    _records = ([m for m in (embed_list.get("mentions") or []) if isinstance(m, dict)]
-                if _armed else [])
-    # ⛔ The ACCOUNTING is deduped at its source, not only on the lists that are
-    # published: `_dedupe_mentions` runs inside `route_mentions`, the call that may
-    # have raised, so on the fail-open path ONE hold was counted twice here while
-    # `result["mentions"]["records"]` said one — `mentions_recorded` is the number
-    # plan R1's arming gate reads, and the "did not emit" warning counted two
-    # records while naming one surface (review at `d785f3da8`, P2: deduping the
-    # published lists left the number it protects un-fixed).
-    _records = _dedupe_mentions(_records)
+    # ⛔ The ACCOUNTING is built from the SAME clamped projection the evidence
+    # surface publishes, not from the raw channel:
+    #   • `_dedupe_mentions` runs inside `route_mentions` — the call that may have
+    #     raised — so on the fail-open path one hold was counted twice while the
+    #     published lists said one (review at `d785f3da8`, P2);
+    #   • and two RAW entries whose surfaces agree only after the 200-character cap
+    #     were still counted twice because the raw keys differ (`"a"*201+"X"` vs
+    #     `"a"*201+"Y"`), so `mentions_recorded` exceeded what the run published —
+    #     the self-disagreement the dedupe was supposed to close (review at
+    #     `b791a3eb2`, P3);
+    #   • and a raw `claim_ref` over `_MAX_CONTENT` keyed apart from its own emitted
+    #     claim, reporting a HAD-emitted claim as unresolved (review at `b791a3eb2`,
+    #     P2).
+    # Counting the clamped records answers all three by construction.
+    _records = (_dedupe_mentions([
+        r for r in (_clamped_mention(m) for m in (embed_list.get("mentions") or [])
+                    if isinstance(m, dict)) if r is not None])
+        if _armed else [])
     _emitted_refs = {_norm(str(p.get("content") or "")) for p in payload_points
                      if isinstance(p, dict)}   # payload content IS the write's form
     unresolved = [m for m in _records
@@ -11498,15 +11506,24 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
     """One record per (surface, claim) — the S2 and union passes both run the
     selection, and a duplicated record is a duplicated measurement."""
     out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    at: dict[tuple[str, str], int] = {}
     for m in mentions:
         if not isinstance(m, dict):
             continue
         key = (_norm(str(m.get("surface") or "")),
                _norm(str(m.get("claim_ref") or "")))
-        if not key[0] or key in seen:
+        if not key[0]:
             continue
-        seen.add(key)
+        if key in at:
+            # ⛔ FIRST-IN-LIST is not the right winner: a spanless duplicate listed
+            # first replaced a VERIFIED address listed second, so the shipped record
+            # had no address while one was available — and the address is the
+            # record's whole point (review at `b791a3eb2`, P3). The
+            # entry that carries a pair wins; otherwise the first one stands.
+            if "span_start" not in out[at[key]] and "span_start" in m:
+                out[at[key]] = m
+            continue
+        at[key] = len(out)
         out.append(m)
     return out
 
@@ -11628,9 +11645,19 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
             record[k] = v if isinstance(v, int) else None
         elif k == "rule_id":
             record[k] = _mention_rule(str(m.get("surface") or ""), v)
+        elif k == "claim_ref":
+            # ⛔ The ref is the claim's identity AS THE WRITE KEEPS IT — cut
+            # through the same window `_mention_ref` gives every record and every
+            # lookup. Copied raw, a claim over `_MAX_CONTENT` keyed apart from its
+            # own (truncated) point, so the mention never attached and the run
+            # reported a claim it HAD emitted as folded away by a NOOP/duplicate/
+            # MERGE that never happened — the defect `_mention_record` fixed at
+            # its own call site (review cycle 4, P1-c), left open at the last door
+            # on the fail-open path (review at `b791a3eb2`, P2).
+            record[k] = _mention_ref({"content": str(v)})
         else:
-            # `claim_ref`/`span_source` are `str` on the model: a non-str value
-            # 422'd the payload (review cycle 3, P3).
+            # `span_source` is `str` on the model: a non-str value 422'd the
+            # payload (review cycle 3, P3).
             record[k] = str(v)
     if record.get("span_start") is None:
         record.pop("span_start", None)
@@ -11728,7 +11755,16 @@ def _mentions_for_claim(embed_list: dict, content: str,
     """
     if not armed:
         return []
-    key = _norm(str(content or ""))
+    # ⛔ BOTH sides of the match go through `_mention_ref`: the record's `claim_ref`
+    # is cut to the write's window, so an over-cap claim did not match itself —
+    # the mention attached to nothing and was reported as a claim the run folded
+    # away (review at `b791a3eb2`, P2).
+    # ⚠️ WHICH SIDE IS LOAD-BEARING, measured: the ENTRY comparison below is (mutant
+    # G3 reddens the row). This one is idempotent on the content `execute_embed`
+    # passes (already `_write_span`-cut, 1000 chars measured), so removing it alone
+    # leaves the file green (G2) — kept because the two sides of one identity must be
+    # computed the same way, not because a test pins it.
+    key = _norm(_mention_ref({"content": str(content or "")}))
     if not key:
         return []
     out: list[dict] = []
@@ -11736,7 +11772,11 @@ def _mentions_for_claim(embed_list: dict, content: str,
         if not isinstance(m, dict):
             continue
         ref = str(m.get("claim_ref") or "").strip()
-        if not ref or _norm(ref) != key:
+        # ⛔ BOTH sides go through the SAME window: `key` is the write's cut of the
+        # claim, so comparing it to the model's RAW ref failed for any claim over
+        # `_MAX_CONTENT` — the entry was skipped as "not this claim" and a
+        # HAD-emitted claim was reported unresolved (review at `b791a3eb2`, P2).
+        if not ref or _norm(_mention_ref({"content": ref})) != key:
             continue
         record = _clamped_mention(m, narrative=narrative)
         if record is not None:

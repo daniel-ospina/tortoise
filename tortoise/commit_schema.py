@@ -583,18 +583,25 @@ class Mention(BaseModel):
     - the run's evidence block — ``result["mentions"]["records"]``, assembled in
       ``extract_session_v2``;
     - **the producer channel** — ``result["embed_list"]["mentions"]`` and
-      ``result["s2_embed"]["mentions"]``. ``s2_embed`` is S2's raw list by
-      definition and ``embed_list`` is ``route_mentions``' own output, so on the
-      fail-open path (``route_mentions`` raised) BOTH carry the model's entry
-      verbatim — an unverified ``rule_id`` and span included. Those two are
-      inputs, never a claim about what was held.
+      ``result["s2_embed"]["mentions"]``. ⚠️ These two are NOT one kind (review at
+      ``b791a3eb2``, P3 — the earlier text ranked both as raw on every path, which
+      is false for the armed one):
+      ``embed_list`` is ``route_mentions``' own output, and ``s2_embed`` is
+      REBOUND to it once the cue is armed (``extract_session_v2`` assigns
+      ``result["s2_embed"] = embed_list`` after the route), so armed they carry
+      ``_mention_record``'s VERIFIED records — a re-derived ``rule_id``, a
+      cue-derived span and a deduped list. On the **fail-open** path
+      (``route_mentions`` raised) they carry the model's entry verbatim, an
+      unverified ``rule_id`` and span included. Read them as "what S2 chose", never
+      as the clamped committed shape the first two surfaces publish.
 
     Only the first two go through ``extractor_v2._clamped_mention``, which
-    re-derives ``rule_id`` against ``referentiality.judge`` and ships a declared
-    ``quote``/``narrative`` address only where that text still puts the surface at
-    those offsets. ``span_source`` ``model`` is not a verification: it is the
-    honest label for "the model asserted these bytes" (an unverified offset pair
-    survives under it — it is demoted, never droppped).
+    re-derives ``rule_id`` against ``referentiality.judge``, cuts ``claim_ref``
+    through the write's own window, and ships a declared ``quote``/``narrative``
+    address only where that text still puts the surface at those offsets.
+    ``span_source`` ``model`` is not a verification: it is the honest label for
+    "the model asserted these bytes" (an unverified offset pair survives under it
+    — it is demoted, never dropped).
 
     No declared write door carries it, and there are **three** of them: the REST
     ``CreatePointRequest`` (no ``mentions`` field at all), the SDK capture
