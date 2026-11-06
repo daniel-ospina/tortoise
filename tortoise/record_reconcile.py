@@ -147,13 +147,16 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
   → the projection's ``_assert_test_graph``, #2944), and no production name does
   (``org_<org_id>``, its ``org_<org_id>_<gid>`` child and a legacy
-  ``team_<org_id>`` alike), so on a production cache nothing SHIPPED clears it
-  (an embedded ``path=`` DB is exempt from the name check, not from
-  supervision) — and it has NO repair that RESTORES the value. ⛔ That is the
+  ``team_<org_id>`` alike), so on a production cache no shipped route clears the
+  PROPERTY while keeping the entity (``tortoise_delete`` reaches the node only by
+  REMOVING it, and journals the delete that removes its record row; an embedded
+  ``path=`` DB is exempt from the name check, not from supervision) — and it has
+  NO repair that RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
-  forbids every projection from writing it into the graph and no in-tree route
-  re-derives it, so no repair can put the value back. ⛔ Not "no
+  forbids every RECORD→CACHE projection from writing it into the graph and no
+  in-tree route re-derives it on either ANCHOR (the ``:Point`` journal REPLAY
+  half is ``#10429``'s, below), so no repair can put the value back. ⛔ Not "no
   IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
   clear — what is missing is a route that KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge

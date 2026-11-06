@@ -544,9 +544,7 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
         non-vacuous: it is one key dropped, not an empty row.
     (3) a REAL restore into a graph that already holds a legacy node carrying
         the prose leaves `sum(size(n.story_arc))` at 0 over every node — this is
-        the "restore → 0" acceptance (`#10017`'s own purge → restore → 0 is about
-        the legacy TURN population, which no purge-free restore touches —
-        #11325), and it is the arm that would
+        the "restore → 0" acceptance, and it is the arm that would
         red if the deny were implemented in the reader only.
     (scope) `public.session_narrative` is untouched by this change: the record
         READER is not on this path at all (`record_text.serve_from_record` reads
