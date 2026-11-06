@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import tempfile
+import traceback
 from pathlib import Path
 
 import pytest  # noqa: F401
@@ -186,6 +187,12 @@ class _RecordingConnection:
         return "Background saving started"
 
 
+#: The function under test. ``_bgsave`` is the ONLY place ``tortoise/backup.py``
+#: constructs a FalkorDB client (``backup.py:903``), so "was ``_bgsave`` on the
+#: stack" is the exact question "did the code under test build this client".
+_SUT_FUNC = "_bgsave"
+
+
 def _install_fake_falkordb(monkeypatch, instances, exc=None):
     """Replace ``falkordb.FalkorDB`` with a recorder so no socket is opened."""
 
@@ -193,6 +200,19 @@ def _install_fake_falkordb(monkeypatch, instances, exc=None):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             self.connection = _RecordingConnection(exc)
+            # WHAT separates "a client the code under test built" from "a
+            # client some live worker from an earlier file in this shard
+            # built": the recorder is PROCESS-wide (the fake replaces
+            # ``falkordb.FalkorDB`` for EVERY constructor in the process), so
+            # membership in ``instances`` says nothing about who asked. The
+            # CONSTRUCTION STACK does, and it exists only here, so it is
+            # recorded here — that is what lets ``_snapshot_client`` restore
+            # the count pin #2974 shipped with without reviving the flake.
+            frames = traceback.extract_stack()
+            self.stack_files = tuple(
+                f.filename.replace("\\", "/") for f in frames)
+            self.stack_funcs = tuple(f.name for f in frames)
+            self.constructed_by_the_code_under_test = _SUT_FUNC in self.stack_funcs
             instances.append(self)
 
     monkeypatch.setattr("falkordb.FalkorDB", _FakeFalkorDB)
@@ -219,12 +239,46 @@ def _snapshot_client(instances):
     issuing commands is NOT tolerated — that would be a real signal, so it
     still fails here — but a foreign client that sends nothing is simply not
     this test's business.
+
+    ⛔ THE COUNT PIN IS NOT DROPPED, IT MOVED (#11038 review finding 1). The
+    assertion this replaced — ``len(instances) == 1`` — answered "how many
+    clients exist in this process", which is not the question: it reddened on
+    a worker that had nothing to do with the snapshot, AND deleting it was a
+    new FALSE PASS in the one pin guarding #2974. A second client built
+    against the embedded ``localhost:16379`` defaults — the exact endpoints
+    the fix exists to stop the snapshot path from dialing — became invisible,
+    because nothing asserted another constructor's ``host``/``port`` at all.
+    So the count is asserted over the RIGHT population: the clients whose
+    CONSTRUCTION STACK names ``_bgsave``, i.e. the ones the code under test
+    actually built.
+
+    A foreign client is still required only to send nothing, deliberately: its
+    ENDPOINT is not assertable here. The recorder is process-wide, so a live
+    ``session_indexer`` worker legitimately dials whatever URI IT was handed
+    (``session_indexer.py:236-238`` parses it per call), which in CI is the
+    docker lane's own ``localhost`` — asserting the subject's endpoint over
+    foreign clients would re-create the order-dependent flake in the mirror
+    direction. The endpoint of the client that MATTERS is pinned exactly, by
+    kwargs, in each test that calls this.
     """
     recorded = [(i, list(i.connection.commands)) for i in instances]
     snapshotted = [i for i, cmds in recorded if cmds == [("BGSAVE",)]]
     assert len(snapshotted) == 1, (
         "exactly one constructed client must be asked to BGSAVE; recorded "
         f"{[(i.kwargs.get('host'), i.kwargs.get('port'), cmds) for i, cmds in recorded]}")
+
+    subjects = [i for i in instances if i.constructed_by_the_code_under_test]
+    assert len(subjects) == 1, (
+        "exactly one client must be constructed by the code under test "
+        f"(`_bgsave`); it built {len(subjects)}: "
+        f"{[(i.kwargs.get('host'), i.kwargs.get('port')) for i in subjects]} — a "
+        "second one is a #2974 regression (a fallback to the embedded "
+        "``localhost:16379`` defaults that nothing else would notice)")
+    assert subjects[0] is snapshotted[0], (
+        "the client `_bgsave` constructed is not the one that received the "
+        "BGSAVE — the snapshot went to a handle the code under test did not "
+        "build, so its endpoint is unpinned")
+
     for inst, cmds in recorded:
         if inst is snapshotted[0]:
             continue
@@ -232,6 +286,34 @@ def _snapshot_client(instances):
             "a client constructed during this test received commands but was "
             f"not the snapshot client: {cmds}")
     return snapshotted[0]
+
+
+def test_the_restored_count_pin_reds_on_a_second_client_from_the_code_under_test(
+        monkeypatch):
+    """The count pin has TEETH: a SECOND `_bgsave`-built client must red.
+
+    Non-vacuity for the #11038 review finding 1 fix. The pin is only worth
+    having if the shape it guards actually fails: `backup.py` building a
+    second client against the embedded ``localhost:16379`` defaults while the
+    first one does the snapshot. That is precisely what a #2974 fallback looks
+    like, and it is invisible to the recorded-command selector alone because
+    the stray client is never asked to BGSAVE.
+    """
+    instances: list = []
+    fake = _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://cloud.example.com:6379/tortoise")
+    assert _bgsave() == "ok"
+    stray = fake(host="localhost", port=16379)
+    assert stray.constructed_by_the_code_under_test is False, (
+        "guard: a construction from THIS test's own frame is not a subject — "
+        "attribution is by the construction stack, not by list membership")
+    # …now make it the regression shape: a second client `_bgsave` built.
+    stray.constructed_by_the_code_under_test = True
+
+    with pytest.raises(AssertionError,
+                       match="exactly one client must be constructed by"):
+        _snapshot_client(instances)
 
 
 def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
