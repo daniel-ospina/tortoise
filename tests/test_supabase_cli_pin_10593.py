@@ -191,6 +191,95 @@ def _normalized_input_collisions(with_mapping: dict) -> list[str]:
     ]
 
 
+#: PyYAML's tag for an EXPLICIT merge key (`<<` written plain). A QUOTED `"<<"` is NOT this tag: it
+#: is an ordinary string key, which PyYAML keeps and GitHub keeps too — so the structural check below
+#: deliberately does not refuse it (#11134 review: an earlier `"<<" in with_` arm fired on exactly
+#: that harmless spelling and claimed a merge-key mechanism it did not have).
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
+def _setup_cli_node(workflow_text: str) -> yaml.MappingNode:
+    """The setup-cli step's COMPOSED node, before PyYAML resolves any construct away.
+
+    `yaml.safe_load` is the wrong reader for a question about CONSTRUCTS: by the time a dict exists,
+    merge keys are flattened and aliases are followed, so no probe over the dict can see them. That
+    is the whole reason this function exists next to `_setup_cli_step` — one answers "what did this
+    parse to", the other answers "what did the author write".
+    """
+    doc = yaml.compose(workflow_text)
+    assert isinstance(doc, yaml.MappingNode), "workflow did not parse as a mapping"
+    nodes: list[yaml.MappingNode] = []
+    for top_key, top_value in doc.value:
+        if not (isinstance(top_key, yaml.ScalarNode) and top_key.value == "jobs"):
+            continue
+        for _job_key, job_node in getattr(top_value, "value", []) or []:
+            if not isinstance(job_node, yaml.MappingNode):
+                continue
+            for job_key, job_value in job_node.value:
+                if not (isinstance(job_key, yaml.ScalarNode) and job_key.value == "steps"):
+                    continue
+                for item in getattr(job_value, "value", []) or []:
+                    if not isinstance(item, yaml.MappingNode):
+                        continue
+                    for item_key, item_value in item.value:
+                        if (
+                            isinstance(item_key, yaml.ScalarNode)
+                            and item_key.value == "uses"
+                            and isinstance(item_value, yaml.ScalarNode)
+                            and item_value.value.startswith("supabase/setup-cli")
+                        ):
+                            nodes.append(item)
+    assert nodes, "no `supabase/setup-cli` step found — the migration door changed shape"
+    assert len(nodes) == 1, f"expected exactly one setup-cli step, found {len(nodes)}"
+    return nodes[0]
+
+
+def _construct_refusals(workflow_text: str) -> list[str]:
+    """Every YAML CONSTRUCT inside the setup-cli step that PyYAML resolves and GitHub Actions does not.
+
+    Scoped to the step and walked over composed nodes, because a check over the parsed dict cannot
+    see these at any level (see `_setup_cli_node`). Two constructs, both found live in review:
+
+    * a **merge key** — plain `<<`, tagged `tag:yaml.org,2002:merge`. Refused at EVERY depth, because
+      `with: {version: …}` supplied by a step-level `<<:` is the same fail-open as one inside `with:`:
+      PyYAML synthesizes the `with` mapping, so `_requested_version` reads a pin out of a construct
+      CI does not implement (the action then falls back to `latest`, 3.x). Measured before this walk
+      existed: the step-level spelling returned `[]` from `_violations` — green — while the module
+      docstring declared merge keys refused outright.
+    * an **alias** — `with: *pin`. PyYAML follows it; the value asserted here would be read from
+      another node, not from the step's own literal pin (which the literals arm below also refuses).
+      ⚠️ This one CANNOT be found in the composed tree: PyYAML 6 has no `AliasNode` — it substitutes
+      the anchored node object in place, so an alias and its anchor are indistinguishable afterwards.
+      It is therefore found by scanning TOKENS (`AliasToken`) inside the step's line span.
+
+    A QUOTED `"<<"` is deliberately NOT refused: it is an ordinary string key in both parsers, so it
+    is not a divergence and refusing it would be a false block.
+    """
+    found: list[str] = []
+    step_node = _setup_cli_node(workflow_text)
+    first_line, last_line = step_node.start_mark.line, step_node.end_mark.line
+
+    def walk(node: object) -> None:
+        if isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                if getattr(key_node, "tag", None) == _MERGE_TAG:
+                    found.append(
+                        f"a merge key (`<<`) at line {key_node.start_mark.line + 1}"
+                    )
+                walk(value_node)
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                walk(item)
+
+    walk(step_node)
+    for token in yaml.scan(workflow_text):
+        if isinstance(token, yaml.tokens.AliasToken) and first_line <= token.start_mark.line <= last_line:
+            found.append(
+                f"an alias (`*{token.value}`) at line {token.start_mark.line + 1}"
+            )
+    return found
+
+
 def _requested_version(workflow_text: str) -> str:
     """The CLI version the workflow pins, and proof that CI resolves the same value.
 
@@ -199,10 +288,20 @@ def _requested_version(workflow_text: str) -> str:
     step could carry no `version:` line at all, PyYAML would synthesize one, and the
     `version is None` arm below would never fire while the action fell back to `latest` (3.x). The
     same class covers a duplicate `version:` key, where PyYAML takes the last one and GitHub's
-    tie-break is not measured, and a CASE-VARIANT key, where PyYAML sees two distinct keys but the
-    action sees one input (see `_normalized_input_collisions`). So the step must carry EXACTLY ONE
-    literal `version:` line, and it must be the resolved value. Merge keys are refused outright.
+    tie-break is not measured, and a CASE-VARIANT key, where PyYAML sees two distinct keys but
+    the action sees one input (see `_normalized_input_collisions`). So the step must carry
+    EXACTLY ONE literal `version:` line, and it must be the resolved value. Merge keys and
+    aliases are refused outright — STRUCTURALLY, over the composed step node and its tokens
+    (`_construct_refusals`), not by looking inside the parsed `with:` mapping.
     """
+    constructs = _construct_refusals(workflow_text)
+    assert not constructs, (
+        "the setup-cli step carries a YAML construct GitHub Actions does not implement: "
+        + "; ".join(constructs)
+        + ". PyYAML resolves it, so the `version` read here is not the version CI resolves — the "
+        "action would see no `version` input and fall back to its own default (`latest`), which is "
+        "exactly the float this pin exists to remove. Declare the pin literally, in this step."
+    )
     step = _setup_cli_step(workflow_text)
     with_ = step.get("with") or {}
     collisions = _normalized_input_collisions(with_)
@@ -212,12 +311,6 @@ def _requested_version(workflow_text: str) -> str:
         + ". GitHub upper-cases an input name and turns spaces into underscores, so these are ONE "
         "input to the action and two keys to this reader — the tie-break is unmeasured, so the pin "
         "asserted here is not provably the one installed"
-    )
-    assert "<<" not in with_, (
-        "the setup-cli step's `with:` uses a YAML merge key (`<<`). GitHub Actions does not implement "
-        "merge keys, so the `version` PyYAML reads here is not the version CI resolves — the action "
-        "would see no `version` input and fall back to its own default (`latest`), which is exactly "
-        "the float this pin exists to remove"
     )
     version = with_.get("version")
     assert version is not None, (
@@ -285,7 +378,10 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
       (1) a floating pin (`latest`, `v2`, `^2.122.1`, …) — any shape that is not an exact x.y.z;
       (2) a pin this reader resolves differently from CI (merge key, duplicate key, alias, or an
           input key that collides with `version` after GitHub's own normalization), so the value
-          asserted is not the value installed;
+          asserted is not the value installed. Merge keys and aliases are enforced STRUCTURALLY
+          over the composed step node and its tokens (`_construct_refusals`), at every depth — a
+          merge key that supplies the step's whole `with:` is the same fail-open as one written
+          inside it, and a probe over the parsed dict sees neither;
       (3) a major-3 pin — the config-load break while `[inbucket]` is declared, and the hosted-
           mutation consent gate once it is not.
 
@@ -396,27 +492,70 @@ def test_a_major_the_committed_config_cannot_load_is_refused() -> None:
     assert "DbConfigLoadError" in problems[0], problems[0]
 
 
-def test_a_pin_this_reader_cannot_see_literally_is_refused() -> None:
-    """A pin must be a LITERAL `version:` line, not a YAML construct PyYAML resolves for it.
+def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
+    """A pin must be a LITERAL `version:` line in the step — never a YAML construct PyYAML resolves.
 
-    PyYAML implements the merge key (`<<:`); GitHub Actions does not. Measured by review: a step
-    whose `with:` is `<<: {version: 2.122.1}` carries no `version:` line anywhere in the file, yet
-    PyYAML synthesizes `{'version': '2.122.1'}` — so the `version is None` arm never fired and the
-    action would fall back to `latest` (3.x), a fail-open identical to #10593.
+    PyYAML implements the merge key (`<<`) and follows aliases; GitHub Actions does not implement
+    merge keys, and does not follow our anchors either. So a step can carry no `version:` line of its
+    own while `yaml.safe_load` hands this reader a pin — the action then sees no `version` input and
+    falls back to `latest` (3.x), a fail-open identical to #10593.
+
+    ⛔ THREE spellings, at three depths, because a dict-level probe covers none of them and the
+    step-level one was measured GREEN before `_construct_refusals` existed (#11134 review, P1):
+
+    | spelling | how PyYAML sees it | refused by |
+    |---|---|---|
+    | `<<:` INSIDE `with:` | `with` = `{'version': …}` | the merge tag, at depth ≥ 1 |
+    | `<<:` supplying `with:` on the STEP | the step = `{'with': {'version': …}}` | the merge tag, at depth 0 |
+    | `with: *pin` | the anchored mapping, followed | the `AliasToken` arm |
+
+    The step-level row is the expensive one: it reads as green everywhere a `with`-shaped probe looks,
+    because by then `with` is a perfectly ordinary mapping.
+
+    A QUOTED `"<<"` is deliberately NOT here: it is an ordinary string key in both parsers, so
+    refusing it would be a false block rather than a guard (see `_construct_refusals`).
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    merged = re.sub(
-        r"(?m)^(\s*)version:\s*\S+\s*$",
-        r"\1<<: {version: 2.122.1}",
-        workflow,
-        count=1,
+    pin = _requested_version(workflow)  # the live pin, so no mutation hardcodes a version
+    canonical = re.compile(r"(?m)^        with:\n          version: [^\s#]+\n")
+    assert len(canonical.findall(workflow)) == 1, (
+        "the setup-cli step's `with:` no longer has the canonical shape these mutations drive — "
+        "update them rather than silently proving nothing"
     )
-    assert "<<: {version:" in merged, "mutation did not apply — this test would be vacuous"
-    assert not re.search(r"(?m)^\s*version:\s*2\.122\.1\s*$", merged), (
-        "the mutation left a literal `version:` line behind — the arm would not test the reader"
+
+    # (a) a merge key INSIDE `with:` — no `version:` line survives in the step.
+    inside = canonical.sub(f"        with:\n          <<: {{version: {pin}}}\n", workflow)
+    assert f"<<: {{version: {pin}}}" in inside, "mutation (a) did not apply — vacuous"
+    assert not re.search(r"(?m)^\s*version:\s*" + re.escape(pin), inside), (
+        "a literal pin line survived mutation (a) — the arm would not test the merge tag"
     )
     with pytest.raises(AssertionError, match="merge key"):
-        _requested_version(merged)
+        _requested_version(inside)
+
+    # (b) a merge key that SUPPLIES `with:` — the shape the dict-level probe could not see at all.
+    supplying = canonical.sub(f"        <<:\n          with:\n            version: {pin}\n", workflow)
+    assert "        <<:\n          with:" in supplying, "mutation (b) did not apply — vacuous"
+    assert not _structural_duplicate_keys(supplying), (
+        "mutation (b) introduced a duplicate key — the structural-key arm would be what fires, "
+        "not the merge arm this case is for"
+    )
+    with pytest.raises(AssertionError, match="merge key"):
+        _requested_version(supplying)
+
+    # (c) an ALIAS — the step's `with:` is `*pin`, anchored on the step above it. PyYAML follows it;
+    #     the pin's literal line is no longer in the setup-cli step's own block.
+    aliased = workflow.replace(
+        "      - uses: supabase/setup-cli@v1",
+        "      - uses: actions/checkout@v9\n"
+        "        with: &pinned\n"
+        f"          version: {pin}\n"
+        "      - uses: supabase/setup-cli@v1",
+        1,
+    )
+    aliased = canonical.sub("        with: *pinned\n", aliased)
+    assert "with: *pinned" in aliased, "mutation (c) did not apply — vacuous"
+    with pytest.raises(AssertionError, match="alias"):
+        _requested_version(aliased)
 
 
 def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
