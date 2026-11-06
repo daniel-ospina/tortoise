@@ -138,6 +138,19 @@ rule: ``_load``'s single ``0 <= age < ttl`` comparison is untouched. Every way t
 is a MISS — a stale, torn or absent negative entry costs one live read, never a wrong answer —
 which is the only reason a second lane is affordable here at all.
 
+⛔ WHAT THAT COSTS, STATED RATHER THAN LEFT TO BE INHERED — the sentinel shares the REAL answer's
+shape, so it cannot be told apart from one. A branch that IS protected and requires no checks
+projects to ``{"contexts": [], "checks": []}`` too, and that genuine answer is therefore ALSO
+cached for :data:`NEGATIVE_ANSWER_TTL_S` instead of the key's 30 minutes. The trade is taken
+DELIBERATELY and in the fail-SAFE direction: paying an extra live read a minute on a merge-gating
+key costs pool, while reading a negative as an unchanged answer hands a merge gate a false PASS.
+On the key's common shapes it is still strictly better than #11052's baseline, which could not
+declare this key at all and read live EVERY time.
+
+The declaration is guarded where it is declared and where it is read (``_validate_negative`` from
+``declare_invariant()``, ``read()``, and the import check), because the short TTL IS this lane's
+safety: a negative that outlives its ceiling would be the same fail-OPEN window in slower motion.
+
 USAGE
     import gh_read_cache as C
 
@@ -1002,6 +1015,20 @@ def _validate_spec(key: str, argv: Sequence[str], projection: str, project: Any)
         )
 
 
+class _KeepNegative:
+    """The sentinel TYPE for "the caller did not mention the negative".
+
+    A distinct class and not ``object``: the parameter's meaning is three-way (preserve / drop /
+    re-declare), so the annotation says so instead of collapsing to ``object`` and letting a reader
+    assume ``None`` is the only alternative.
+    """
+
+
+#: "the caller did not mention the negative", which is NOT the same as "drop it". See
+#: :func:`declare_invariant`.
+_KEEP_NEGATIVE = _KeepNegative()
+
+
 def declare_invariant(
     key: str,
     *,
@@ -1009,6 +1036,7 @@ def declare_invariant(
     argv: Sequence[str],
     projection: str,
     project: Callable[[Sequence[Any]], Any],
+    negative: NegativeAnswer | _KeepNegative | None = _KEEP_NEGATIVE,
 ) -> None:
     """Add a key to the registry.
 
@@ -1016,9 +1044,20 @@ def declare_invariant(
     carrying gh's projection flags, an argv that is not ONE ``gh api`` READ of an endpoint on the
     invariant allow-list (:data:`_INVARIANT_ENDPOINTS` — an unlisted endpoint, a second operand, or
     any ``-X``/``--method``/``-f``/``-F``/``--input`` is refused, because a cached MUTATION replays
-    its response without running the mutation), and any attempt to WIDEN an existing key's ceiling.
+    its response without running the mutation), a declared ``negative`` that this key's own
+    projection refuses or that is not SHORTER-lived than ``ttl_s`` (:func:`_validate_negative`),
+    and any attempt to WIDEN an existing key's ceiling.
     That last one matters because this function is the documented way to add a key — so without the
     check the ceiling that ``read()`` defends could be raised by a one-line call.
+
+    ⛔ THE DECLARED NEGATIVE SURVIVES A TIGHTENING BY DEFAULT, and that default used to be a silent
+    LOSS. This function rebuilt the ``Invariant`` without the field it did not know about, so the
+    documented-allowed call
+    ``declare_invariant('repo.required_set', ttl_s=900, …)`` returned normally and left
+    ``negative=None`` behind (measured at ``224aa3704``+): the key's whole documented-negative
+    contract — and the P2 that contract fixes — silently vanished through the public door, with no
+    error and no test red. ``negative=`` now says what happens: omitted PRESERVES the declaration,
+    ``negative=None`` DROPS it explicitly, and an object STATES a new one.
     """
     if _is_mutable_name(key):
         raise MutableReadRefused(
@@ -1035,9 +1074,33 @@ def declare_invariant(
             f"{key!r} already declares a {existing.ttl_s}s ceiling; refusing to widen it to "
             f"{ttl_s}s. Tightening is allowed; widening is how a TTL quietly becomes a stale read."
         )
-    INVARIANTS[key] = Invariant(
-        ttl_s=ttl_s, argv=tuple(argv), projection=projection, project=project
+    declared: NegativeAnswer | None = (
+        existing.negative if negative is _KEEP_NEGATIVE and existing is not None else None
     )
+    if isinstance(negative, NegativeAnswer):
+        declared = negative
+    # ⛔ A TIGHTENING THAT OUTRUNS THE NEGATIVE'S OWN TTL IS REFUSED WITH A WAY OUT, not left to
+    # `_validate_negative`'s generic message: the preserved declaration is the reason, and the
+    # caller is the only one who can say what replaces it.
+    if declared is not None and declared.ttl_s >= ttl_s:
+        raise TtlNotPermitted(
+            f"{key!r} is being tightened to {ttl_s}s, at or below its declared "
+            f"{declared.ttl_s}s NEGATIVE ttl. Pass negative=NegativeAnswer(..., ttl_s=<shorter "
+            f"than {ttl_s}>) to re-declare it, or negative=None to DROP the documented negative "
+            f"explicitly (a documented 404 then becomes a read failure again)."
+        )
+    spec = Invariant(
+        ttl_s=ttl_s,
+        argv=tuple(argv),
+        projection=projection,
+        project=project,
+        negative=declared,
+    )
+    # ⛔ THE DECLARATION GUARD RUNS AT THE DOOR, not only at import: this is the documented way to
+    # add a key, so a negative declared here must meet the same two conditions the static registry
+    # meets — projectable by THIS key, and shorter-lived than it.
+    _validate_negative(key, spec)
+    INVARIANTS[key] = spec
 
 
 def _validate_negative(key: str, spec: Invariant) -> None:
@@ -1396,6 +1459,16 @@ def _is_negative_answer(key: str, projected: bytes) -> bool:
     through the key's OWN projection — the same function a caller uses. A caller supplying its own
     reader therefore cannot opt this key into a 60-second negative unless it returns a body that
     projects to the declared negative, which is exactly the answer that TTL is priced for.
+
+    ⛔ AND A GENUINE ANSWER THAT PROJECTS TO THE SENTINEL LANDS HERE TOO — stated, not hidden. A
+    branch that IS protected with NO required checks projects to the same
+    ``{"contexts": [], "checks": []}``, so that real answer is cached for
+    :data:`NEGATIVE_ANSWER_TTL_S` rather than the key's 30 minutes. That is the deliberate price of
+    not being able to tell the two apart by value, and it is paid in the fail-SAFE direction: an
+    extra live read a minute costs pool, while treating a negative as an unchanged answer is the
+    fail-OPEN one on a merge-gating key. Do NOT "fix" it by pricing on the RAW body alone — a
+    caller-supplied reader that returns the sentinel raw would then have its negative cached for
+    the full ceiling.
     """
     neg = INVARIANTS[key].negative
     if neg is None:
@@ -1451,6 +1524,14 @@ def read(
     # with no projection at all. Cheap, and it makes guard 2 hold on the path that actually runs.
     _spec = INVARIANTS[key]
     _validate_spec(key, _spec.argv, _spec.projection, _spec.project)
+    # ⛔ AND THE NEGATIVE'S OWN TWO INVARIANTS, ON THIS PATH TOO — the SAME defence-in-depth, for
+    # the SAME bypass. Measured on a spec inserted straight into INVARIANTS after import: a negative
+    # priced at the key's own 1800 s ceiling was accepted and ``read()`` SERVED it — one reader call
+    # across 1700 s of a merge-gating key, i.e. exactly the 30-minute fail-OPEN window
+    # :func:`_validate_negative` and the whole negative lane exist to prevent. The import check runs
+    # once and cannot see a spec that arrives later, so the short-TTL guarantee is enforced here,
+    # where the read actually happens.
+    _validate_negative(key, _spec)
     # ⛔ A repo-scoped key derived from an EMPTY repo yields `"@main"`, which passes the
     # non-empty-scope test and then spends one call from the very pool this module exists to
     # protect, on `gh api repos/` (a guaranteed 404) reported as a GitHub fault.

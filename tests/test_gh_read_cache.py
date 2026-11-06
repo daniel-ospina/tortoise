@@ -1761,6 +1761,214 @@ def test_a_negative_body_the_keys_own_projection_REFUSES_is_not_declared() -> No
         C._validate_negative("repo.required_set", spec)
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 11c. THE DECLARATION GUARD MUST HOLD AT EVERY DOOR, NOT ONLY AT IMPORT
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+#: A REAL protection body for a branch that IS protected and requires NO checks — measured shape
+#: (`gh api repos/daniel-ospina/tortoise/branches/main/protection`). It projects to the SAME
+#: `{"contexts": [], "checks": []}` the 404 sentinel does, which is the whole point of the arm below.
+_PROTECTED_NO_CHECKS_BODY = json.dumps(
+    {
+        "url": "https://api.github.com/repos/o/r/branches/main/protection",
+        "required_status_checks": None,
+        "enforce_admins": {"enabled": False},
+        "required_signatures": {"url": "https://api.github.com/x", "enabled": False},
+        "required_linear_history": {"enabled": False},
+    }
+).encode()
+
+
+def test_a_GENUINE_no_checks_answer_is_priced_on_the_short_lane_too(tmp_path: Path) -> None:
+    """⛔ THE STATED COST OF THE SENTINEL'S SHAPE — pinned so no later lane "fixes" it silently.
+
+    A branch that IS protected with NO required checks projects to the SAME
+    `{"contexts": [], "checks": []}` as the 404 sentinel, so the two cannot be told apart BY VALUE
+    and this genuine answer is cached for `NEGATIVE_ANSWER_TTL_S`, not the key's 30 minutes. That is
+    the deliberate fail-SAFE trade (an extra live read a minute vs. a merge gate read as "nothing
+    is required" after someone adds a rule) and it is documented in `_is_negative_answer`.
+
+    ⛔ IT MUST NOT BE PRICED ON THE RAW BODY ALONE INSTEAD: a caller-supplied reader returning the
+    sentinel raw would then have its negative cached for the full ceiling, which is the fail-OPEN
+    direction. This arm is what a change to that line reds.
+    """
+    calls: list[str] = []
+
+    def reader(key: str) -> bytes:
+        calls.append(key)
+        return _PROTECTED_NO_CHECKS_BODY
+
+    assert json.loads(
+        _read("repo.required_set", now=1000.0, reader=reader, cache_dir=tmp_path)
+    ) == {"contexts": [], "checks": []}
+    assert len(calls) == 1
+    # One second short of the negative's ttl: served, like any fresh entry.
+    _read(
+        "repo.required_set",
+        now=1000.0 + C.NEGATIVE_ANSWER_TTL_S - 1,
+        reader=reader,
+        cache_dir=tmp_path,
+    )
+    assert len(calls) == 1, "a genuine no-checks answer lost even the short lane"
+    # ⛔ AND IT RE-READS AT 60s — i.e. it is NOT sitting on the key's 1800s lane. If this ever
+    # becomes 1 here, the sentinel-shape answer was quietly priced at the ceiling.
+    _read(
+        "repo.required_set",
+        now=1000.0 + C.NEGATIVE_ANSWER_TTL_S,
+        reader=reader,
+        cache_dir=tmp_path,
+    )
+    assert len(calls) == 2, "the no-checks answer was cached past the negative lane's short ttl"
+
+
+def test_the_declaration_guard_runs_at_the_PUBLIC_DOOR_not_only_at_import() -> None:
+    """⛔ `declare_invariant()` IS the documented way to add a key, so it is a DOOR, not a helper.
+
+    Measured at `224aa3704`+: `_validate_negative` was called only from
+    `_assert_every_key_projects`, which runs ONCE at import over the STATIC registry — so a key
+    declared at runtime could carry a negative its own projection refuses, and nothing refused it.
+    """
+    key = "repo.required_set"
+    saved = C.INVARIANTS[key]
+    try:
+        # A sentinel this key's projection does not understand: the door must refuse it.
+        with pytest.raises(C.TtlNotPermitted):
+            C.declare_invariant(
+                key,
+                ttl_s=1800,
+                argv=saved.argv,
+                projection=saved.projection,
+                project=saved.project,
+                negative=C.NegativeAnswer(body=b'{"message": "oops"}', ttl_s=60, why="probe"),
+            )
+        # ⛔ THE CONTROL ARM: a VALID negative through the same door is ACCEPTED and lands on the
+        # spec. Without this, the arm above would pass on a door that refused every negative.
+        C.declare_invariant(
+            key,
+            ttl_s=1800,
+            argv=saved.argv,
+            projection=saved.projection,
+            project=saved.project,
+            negative=C.NegativeAnswer(
+                body=C._NO_REQUIRED_CHECKS_BODY, ttl_s=C.NEGATIVE_ANSWER_TTL_S, why="probe"
+            ),
+        )
+        assert C.INVARIANTS[key].negative is not None
+        assert C.INVARIANTS[key].negative.ttl_s == C.NEGATIVE_ANSWER_TTL_S
+    finally:
+        C.INVARIANTS[key] = saved
+
+
+def test_declare_invariant_PRESERVES_a_declared_negative_when_it_TIGHTENS() -> None:
+    """⛔ THE SILENT-LOSS BUG, MEASURED. A tightening call is the DOCUMENTED-ALLOWED operation.
+
+    `declare_invariant` rebuilt the `Invariant` without the field it did not know about, so on
+    `224aa3704`+ this returned normally and left `negative=None` behind: the key's documented
+    negative — and the P2 it fixes — vanished through the public door with no error and no red test,
+    so every unprotected-branch read became `Unreadable` again. A tighten must not silently reverse
+    a declaration the caller never mentioned.
+    """
+    key = "repo.required_set"
+    saved = C.INVARIANTS[key]
+    assert saved.negative is not None, "the key under test must carry a declared negative"
+    try:
+        C.declare_invariant(
+            key,
+            ttl_s=saved.ttl_s - 900,
+            argv=saved.argv,
+            projection=saved.projection,
+            project=saved.project,
+        )
+        assert C.INVARIANTS[key].ttl_s == saved.ttl_s - 900
+        assert C.INVARIANTS[key].negative is saved.negative, (
+            "a tightening call dropped the declared negative — the public door silently reversed "
+            "a declaration the caller never mentioned"
+        )
+        # ⛔ AND `negative=None` STILL DROPS IT, EXPLICITLY — the omission is what must not decide.
+        C.declare_invariant(
+            key,
+            ttl_s=saved.ttl_s - 900,
+            argv=saved.argv,
+            projection=saved.projection,
+            project=saved.project,
+            negative=None,
+        )
+        assert C.INVARIANTS[key].negative is None
+    finally:
+        C.INVARIANTS[key] = saved
+
+
+def test_declare_invariant_REFUSES_to_tighten_past_the_negative_and_names_the_WAY_OUT() -> None:
+    """A tighten that outruns the negative's own ttl is refused — and the message says how to
+    resolve it, because generic text would send the caller looking for a bug in `read()`."""
+    key = "repo.required_set"
+    saved = C.INVARIANTS[key]
+    try:
+        with pytest.raises(C.TtlNotPermitted) as excinfo:
+            C.declare_invariant(
+                key,
+                ttl_s=C.NEGATIVE_ANSWER_TTL_S - 30,
+                argv=saved.argv,
+                projection=saved.projection,
+                project=saved.project,
+            )
+        msg = str(excinfo.value)
+        assert "negative=None" in msg, f"the refusal does not name the way out: {msg}"
+        assert "NEGATIVE ttl" in msg
+    finally:
+        C.INVARIANTS[key] = saved
+
+
+def test_read_REFUSES_a_spec_injected_with_a_negative_it_would_not_accept(
+    tmp_path: Path,
+) -> None:
+    """⛔ `read()`'s DEFENCE-IN-DEPTH COVERED GUARD 2 ONLY, AND THIS IS THE SAME BYPASS.
+
+    The import check runs ONCE, so a spec inserted straight into `INVARIANTS` afterwards skips it.
+    Measured at `224aa3704`+: with a negative priced at the key's own 1800 s ceiling, `read()`
+    accepted it and SERVED it — **one reader call across 1700 s** of a merge-gating key, i.e.
+    exactly the 30-minute fail-OPEN window the short negative TTL exists to prevent.
+    """
+    key = "repo.required_set"
+    saved = C.INVARIANTS[key]
+    calls: list[str] = []
+
+    def reader(k: str) -> bytes:
+        calls.append(k)
+        return C._NO_REQUIRED_CHECKS_BODY
+
+    try:
+        C.INVARIANTS[key] = C.Invariant(
+            ttl_s=saved.ttl_s,
+            argv=saved.argv,
+            projection=saved.projection,
+            project=saved.project,
+            negative=C.NegativeAnswer(
+                body=C._NO_REQUIRED_CHECKS_BODY, ttl_s=saved.ttl_s, why="a ceiling-priced negative"
+            ),
+        )
+        with pytest.raises(C.TtlNotPermitted):
+            _read(key, now=1000.0, reader=reader, cache_dir=tmp_path)
+        assert calls == [], "the refused spec reached the pool before the guard ran"
+
+        # ⛔ THE CONTROL ARM: a WELL-FORMED injected spec still reads normally, so the arm above
+        # cannot pass on a `read()` that refused every negative it was handed.
+        C.INVARIANTS[key] = C.Invariant(
+            ttl_s=saved.ttl_s,
+            argv=saved.argv,
+            projection=saved.projection,
+            project=saved.project,
+            negative=C.NegativeAnswer(
+                body=C._NO_REQUIRED_CHECKS_BODY, ttl_s=C.NEGATIVE_ANSWER_TTL_S, why="probe"
+            ),
+        )
+        assert json.loads(
+            _read(key, now=1000.0, reader=reader, cache_dir=tmp_path)
+        ) == {"contexts": [], "checks": []}
+        assert len(calls) == 1
+    finally:
+        C.INVARIANTS[key] = saved
+
+
 @pytest.mark.parametrize(
     ("key", "body"),
     [
