@@ -5391,6 +5391,14 @@ class WaitBoundMiddleware:
                     else _monitoring.WAIT_BOUND_SURFACE_REST)
             except Exception:
                 _logger.debug("wait-bound count failed", exc_info=True)
+        # ⛔ THE COUNT IS EXACTLY-ONCE; THIS EMIT IS NOT, IN THE REVERSE ORDER.
+        # When the seam refused FIRST it already scheduled its own event on the
+        # telemetry pool, and `_emit_wait_bound_breach` has no dedupe — so this
+        # emit can be the second analytics row for one request while the
+        # counter reports one. Stated rather than "fixed": gating the emit on
+        # `counted_now` would keep the SEAM's event and drop THIS one, inverting
+        # the #3834 F-2 rule that the detector which ANSWERED the caller owns the
+        # truthful event. Tracked on #10602.
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))

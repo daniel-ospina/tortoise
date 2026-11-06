@@ -2,6 +2,7 @@
 from __future__ import annotations  # noqa: I001
 
 import ast
+import functools
 import os
 import sys
 import tempfile
@@ -69,17 +70,44 @@ def _guard_subprocess_budget() -> float:
     derivation misses it and silently pins a SECOND hard-coded number — the
     defect #3349 names, restored. Pinned by
     ``test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound``.
+
+    ⛔ READ FROM THE PROCESS BEING BOUND, NOT FROM THIS ONE (#11054 review P2).
+    ``tests/conftest.py:280`` raises the class attribute to 270 s for the test
+    lane (#6960) and the bounded subprocess is a FRESH interpreter that override
+    never reaches — so reading it here derived a budget from a number the child
+    does not use, inflating every attempt by 180 s. The probe below asks a
+    child-shaped interpreter what it will actually apply.
     """
-    load_bound = 90.0  # the documented bound, used only if it cannot be read
+    return _bounded_process_cold_load_bound() + _INGEST_WORK_ALLOWANCE_S
+
+
+@functools.lru_cache(maxsize=1)
+def _bounded_process_cold_load_bound() -> float:
+    """``_LOAD_TIMEOUT_S`` as the BOUNDED subprocess resolves it (#11054).
+
+    The test lane's 270 s override is in-process only, so the child gets the
+    product default. Probed once per session in a fresh interpreter — the same
+    shape ``_run_guard_subprocess`` spawns — so raising the PRODUCT default still
+    moves this budget (the property #3349's fix exists for) while the test-lane
+    override no longer does. Falls back to the documented default when the probe
+    cannot run; a failed probe must never SHRINK the budget below the bound.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
-        from tortoise.embeddings import EmbeddingModel
-        load_bound = float(EmbeddingModel._LOAD_TIMEOUT_S)
-    except Exception:  # pragma: no cover — a missing bound must not SHRINK it
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "from tortoise.embeddings import EmbeddingModel as E\n"
+             "print(float(E._LOAD_TIMEOUT_S))"],
+            cwd=repo_root, capture_output=True, text=True, timeout=120,
+            env={**os.environ,
+                 "PYTHONPATH": os.pathsep.join(
+                     [repo_root] + [p for p in os.environ.get("PYTHONPATH", "")
+                                    .split(os.pathsep) if p])})
+        if proc.returncode == 0:
+            return float(proc.stdout.strip().splitlines()[-1])
+    except Exception:  # pragma: no cover — a failed probe must not shrink it
         pass
-    # The work allowance: the ingest itself, on a host slow enough that the
-    # cold load alone approached its bound. Named at module level so the pin
-    # below derives from the same value instead of re-stating it.
-    return load_bound + _INGEST_WORK_ALLOWANCE_S
+    return 90.0  # the documented product default (#1349)
 
 
 def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
@@ -94,7 +122,13 @@ def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
     """
     from tortoise.embeddings import EmbeddingModel
 
-    declared = float(EmbeddingModel._LOAD_TIMEOUT_S)
+    # ⛔ THE DECLARED BOUND HERE IS THE ONE THE CHILD APPLIES, NOT THIS PROCESS'S
+    # (#11054 review P2). `tests/conftest.py:280` raises the in-process class
+    # attribute to 270 s for the test lane (#6960); the bounded subprocess is a
+    # fresh interpreter that override never reaches. Comparing against the
+    # in-process value is what let a budget for 90 s pass a test that claimed to
+    # certify a budget for 270 s.
+    declared = _bounded_process_cold_load_bound()
     budget = _guard_subprocess_budget()
     assert budget > declared, (
         f"a {budget}s subprocess budget cannot absorb a {declared}s cold load "
@@ -116,19 +150,20 @@ def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
 #: The pytest per-item budget these guards must FIT INSIDE, stated once.
 #: ``pyproject.toml``'s ``timeout = 300`` is the per-item cap (the python-ci gate
 #: passes ``--timeout=300`` for the same reason). `_run_guard_subprocess` spends
-#: it PER ATTEMPT and retries once, so the item needs two full budgets plus
-#: interpreter/teardown overhead — otherwise pytest-timeout kills the item in
+#: it PER ATTEMPT and retries once — including on a timeout, which is the #3349
+#: scenario the retry exists for — so the item needs two full budgets plus
+#: interpreter/teardown overhead. Without it, pytest-timeout kills the item in
 #: the middle of an attempt, which is strictly worse than the failure the retry
 #: exists for: the report names neither attempt and the spawned redislite child
 #: is left orphaned.
 #:
-#: ⛔ The per-attempt figure is NOT 90 + 180 = 270 under pytest. The test lane
-#: raises the cold-load bound to 270 s (`tests/conftest.py:280`,
-#: `_EmbeddingModelForTestLane._LOAD_TIMEOUT_S = 270.0`, #6960), so one attempt
-#: is 270 + 180 = **450 s** and the pair is 900 s. The pre-derivation fixed 120 s
-#: fitted twice inside 300 s; the derived budget does not fit even ONCE — which
-#: is why these two items carry an explicit marker above the global default.
-_GUARD_ITEM_TIMEOUT_S = 1200
+#: The per-attempt figure is the BOUNDED PROCESS's bound: 90 (product default;
+#: the test lane's 270 s override does not cross the process boundary) + 180
+#: allowance = **270 s**, so the pair is 540 s and 720 leaves room for two
+#: interpreter starts and teardown. The pre-derivation fixed 120 s fitted twice
+#: inside 300; 270 does not, which is why these two items carry an explicit
+#: marker above the global default.
+_GUARD_ITEM_TIMEOUT_S = 720
 
 
 def _run_guard_subprocess(argv, cwd, timeout=None):
@@ -172,14 +207,28 @@ def _run_guard_subprocess(argv, cwd, timeout=None):
     )
     full_argv = [sys.executable, "-c", code]
     last = None
+    timed_out = None
     if timeout is None:
         timeout = _guard_subprocess_budget()
     for _ in range(2):
-        proc = subprocess.run(full_argv, cwd=cwd, capture_output=True,
-                              text=True, timeout=timeout, env=env)
+        try:
+            proc = subprocess.run(full_argv, cwd=cwd, capture_output=True,
+                                  text=True, timeout=timeout, env=env)
+        except subprocess.TimeoutExpired as exc:
+            # ⛔ A TIMEOUT IS THE CASE THIS RETRY EXISTS FOR (#11054 review P2).
+            # The docstring's own reason is "under a loaded runner the spawn can
+            # exceed a tight timeout", so letting `TimeoutExpired` escape made
+            # the retry cover only the failures that were already returning.
+            timed_out = exc
+            continue
         if proc.returncode == 0:
             return proc
         last = proc
+    if last is None and timed_out is not None:
+        raise AssertionError(
+            f"guard subprocess timed out after {timeout}s on BOTH attempts "
+            f"(#3349: the budget is the embedded cold-load bound + "
+            f"{_INGEST_WORK_ALLOWANCE_S}s of ingest work)")
     raise AssertionError(
         f"guard subprocess failed (rc={last.returncode}):\n"
         f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
@@ -197,9 +246,7 @@ def test_the_guard_retry_fits_inside_its_pytest_item_budget():
     Pre-derivation 120 × 2 = 240 fitted inside 300; the derived 270 + 180 does
     not, which is why the two guards carry an explicit ``@pytest.mark.timeout``.
     """
-    from tortoise.embeddings import EmbeddingModel
-
-    per_attempt = float(EmbeddingModel._LOAD_TIMEOUT_S) + _INGEST_WORK_ALLOWANCE_S
+    per_attempt = _guard_subprocess_budget()
     assert 2 * per_attempt < _GUARD_ITEM_TIMEOUT_S, (
         f"a {_GUARD_ITEM_TIMEOUT_S}s item budget cannot carry two {per_attempt}s "
         "attempts — the retry would be unreachable and pytest-timeout would kill "

@@ -803,8 +803,12 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
 #: that pre-SSE stall is served with the JSON-RPC `-32009` body — the exact
 #: shape #10602 recorded. Labelling it by ARM would report the P0's own refusal
 #: class as `rest`, sending an operator to the REST routes while the failing
-#: operation is an MCP tool call. Both writers therefore classify with
-#: ``_is_jsonrpc_surface`` (see the REST call site).
+#: operation is an MCP tool call. So `WaitBoundMiddleware` classifies with
+#: ``_is_jsonrpc_surface`` on the path it serves (label and response body decided
+#: by the same predicate), while the MCP dispatch seam passes
+#: ``WAIT_BOUND_SURFACE_MCP`` UNCONDITIONALLY — it only ever runs inside the
+#: mounted MCP app, so it has no route to classify, and it deliberately cannot
+#: import ``hosted_api`` on that path (see its own docstring).
 #:
 #: Two values, both literals — a FIXED label set by construction. The
 #: client-supplied route path and tool name stay where they already were (the
