@@ -1219,15 +1219,22 @@ _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
     ("tools/longmem_eval/retrieve.py", 941):
         ('entry["span_end"] = p["span_end"]',
          "the annotated end offset"),
-    ("tortoise/sdk.py", 37859):
+    # ⛔ Re-pinned +1 by the main-health-offline lane: 641e5f1b3 (#10895/#10856)
+    # added ONE line to `tortoise/sdk.py` at 22696 — the `create_operator`
+    # mitigation prose, and 22694 < 37826 — so every pinned line below shifted by
+    # exactly one. Verified: `git show 76f422bd3:tortoise/sdk.py` is 49016 lines
+    # and carries this text at 37826/37842/37859/37865; HEAD is 49017 lines and
+    # carries it at +1. The mechanism is the one this dict exists to catch, so the
+    # entries move and the labels stay. The runbook's cites move with them.
+    ("tortoise/sdk.py", 37860):
         ("rows = graph.query(", "the provenance query's opener"),
-    ("tortoise/sdk.py", 37865):
+    ("tortoise/sdk.py", 37866):
         ('+ ", n.quote, n.source_turn_id, n.span_start, n.span_end",',
          "the RETURN continuation appending #8658's four columns"),
-    ("tortoise/sdk.py", 37826):
+    ("tortoise/sdk.py", 37827):
         ("# ⛔ KNOWN LIMITATION — this read is the PROJECT-search point",
          "the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/sdk.py", 37842):
+    ("tortoise/sdk.py", 37843):
         ("# or of #8658.", "the end of the ⛔ KNOWN LIMITATION comment"),
     ("tortoise/retrieval.py", 3066):
         ("at = _pkg_turn_key(a)",
