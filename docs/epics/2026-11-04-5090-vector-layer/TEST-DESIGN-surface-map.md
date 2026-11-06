@@ -257,7 +257,7 @@ so it cannot see a pin edit at all. The two therefore cover different surfaces, 
   edit the arm cannot see**.
 - **For SF2, SF10 or SF13 — the three surfaces a mutation targets — the arm reds one step EARLIER**, on
   the self-test arm. Delete the row those cases target and the cases become `UNTESTABLE` rather than
-  "not caught" (measured: SF13 `6/12 case(s) UNTESTABLE`, SF2 `4/12`, SF10 `1/12` — each exit 1, and
+  "not caught" (measured: SF13 `2/12 case(s) UNTESTABLE`, SF2 `4/12`, SF10 `1/12` — each exit 1, and
   the summary line names a moved mutation target instead of accusing the checker), before any case is
   deleted.
 - **SF15 reds one step earlier too, on the CHECK arm** — it is the one surface a child names and
