@@ -379,9 +379,12 @@ class EventAPI:
         # payload: a foreign vector is carried (so it is restored verbatim), but
         # with NO attestation, because its origin is not ours to vouch for.
         #
-        # (The SDK surface refuses caller-supplied `embedding` outright — see
-        # `TortoiseSDK._sanitize_props` — so this path is reachable only from a
-        # direct `EventAPI` caller, which never gets an MCP/SDK guarantee.)
+        # (The SDK surface does NOT refuse a caller-supplied `embedding`: `create_point`
+        # and `update_point` store one VERBATIM by a recorded decision (PR #3018 review
+        # P2 — see `TortoiseSDK._sanitize_props`, which rejects the embedding IDENTITY
+        # props but deliberately not `embedding` itself). So this path is reachable from
+        # the MCP/SDK surfaces too, and the carry-with-no-attestation below is the ONLY
+        # reason a foreign vector cannot forge an attestation here.)
         if "embedding" in fields:
             # The key stays PRESENT in both branches: an explicit None is the
             # journal saying "this id has no vector", which the replay must

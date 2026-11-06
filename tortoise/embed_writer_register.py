@@ -40,7 +40,7 @@ rule exists to close.
 no wider. Two write shapes are worth naming, because the difference is the difference between a
 claim and a slogan:
 
-* **Container keys are SEEN** (`record["embedding"] = …`). This shape was invisible to the
+* **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`). This shape was invisible to the
   instrument's clause regex until `#11274`, so a writer using it added nothing to the population and
   this register's guard stayed green over it; discovery now decides it on the AST, and the four
   live instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
@@ -66,20 +66,24 @@ write shapes `tools/dod_5090_probe.py` can *decide*, not by "every writer". `#11
 `tortoise.sdk::_write_capture_turns` — invisible when this module was first written — is in the
 census), and it named the shape it deliberately will not decide:
 `UNDECIDABLE_WRITE_SHAPES` (`SET n += $p` — whether the merged map carries a vector is DATA FLOW,
-not syntax). Measured at this head, three further shapes are still ABSENT from the census — not
+not syntax). Measured at this head, four further shapes are still ABSENT from the census — not
 unclassified, absent, which is why the guard in `tests/test_embed_writer_register.py` stays green
 for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace
-(`SET n = $map`), and a property name INTERPOLATED into the clause — and that last one is **live**:
-`tortoise.cache_projection::node_statement` (`cache_projection.py:3141`,
-`cypher += f", n.{prop} = {form}"`) stores a vector and has no key in the census. A writer is also
+(`SET n = $map`), a property name INTERPOLATED into the clause, and the container-HELPER /
+COMPUTED-KEY forms a regex and a literal-slice test both miss
+(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and two of those four are **live**: the
+interpolation in `tortoise.cache_projection::node_statement` and the helper in
+`tortoise.sdk::_emit_event`, whose direct analogue `tortoise.sdk::_journal_event_raw_write` IS
+declared only because it spells the same write as a literal subscript. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
 *named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
 module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
 `tortoise.sdk::create_point` and `tortoise.sdk::update_point` reach `encode_for_row` on the normal
 path, so discovery classes them `gated` and owes them no declaration — yet **a caller-supplied
-`embedding` is stored VERBATIM by a recorded decision** (`tortoise/sdk.py:6457-6460`;
-`_create_map["embedding"] = "$embedding"` assigned AFTER the props loop, `:14048-14057`; PR `#3018`
-review P2), i.e. the gate does not decide that path. Both are reachable from the MCP surface
+`embedding` is stored VERBATIM by a recorded decision** (PR `#3018` review P2: `TortoiseSDK._sanitize_props`
+rejects the embedding IDENTITY props and deliberately not `embedding` itself, and
+`tortoise.sdk::create_point` assigns `_create_map["embedding"]` from `_embedding_expr` AFTER the
+props loop), i.e. the gate does not decide that path. Both are reachable from the MCP surface
 (`tortoise_create_point`, `tortoise_update_point`), so the sentence this register can keep is
 **"no writer discovery finds OUTSIDE the gate is undeclared"** — never "no caller can supply a
 vector the gate never saw". Closing the second is `#11086`'s seam, not this file's claim.
@@ -357,9 +361,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its "
             "own entry). ⛔ The caller vector is NOT refused by the SDK — `create_point`/"
             "`update_point` store one VERBATIM by a recorded decision "
-            "(`tortoise/sdk.py:6457-6460`; `_create_map[\"embedding\"] = \"$embedding\"` is "
-            "assigned AFTER the props loop, `:14048-14057`; PR `#3018` review P2), so this door "
-            "is tenant-reachable through the MCP tools and this row is its JOURNAL-side half. "
+            "(`TortoiseSDK._sanitize_props` rejects the embedding IDENTITY props, not "
+            "`embedding` itself; `_create_map[\"embedding\"]` is assigned AFTER the props "
+            "loop from `_embedding_expr`; PR `#3018` review P2), so this door is "
+            "tenant-reachable through the MCP tools and this row is its JOURNAL-side half. "
             "The gate-side half is a `gated` classification and therefore OUTSIDE this "
             "register's population — see the closure-claim caveat below",
             "#5004",
