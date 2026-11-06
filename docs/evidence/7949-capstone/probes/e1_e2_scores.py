@@ -883,6 +883,22 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                     "the passes were OFF — a missing key is not an unset one, "
                     "and a before arm's provenance cannot be assumed")
             state = arm.get(var)
+            # ⛔ A SWITCH IS A STRING OR `null` (#10610 review at `2ffc5db19`, P3).
+            # `_is_truthy` stringifies, so a JSON list or object reads FALSY — `[]`
+            # and `{"a": 1}` both certified a before arm. Measured at
+            # `bde94f89d3`: setting arm 1's `TORTOISE_VET` to `[]` and to `{"a": 1}`
+            # each exited 0 with a byte-identical score, i.e. an edited provenance
+            # certified the arm the docstring below says the guard refuses. No
+            # producer writes either shape (`e1_paired_arm.py` writes `os.environ`
+            # strings, or `null` for an unset key), so a non-string here is an edited
+            # record either way.
+            if state is not None and not isinstance(state, str):
+                raise _refuse(
+                    f"{name}'s `arm` block carries {var}={state!r}, which is not "
+                    "a switch value — a producer writes the environment string "
+                    "it read (or `null` when the key was unset), so a list or an "
+                    "object is an edited record and cannot certify the pass was "
+                    "OFF")
             # ⛔ NOT A SPELLING LIST (#10610 review at `f12471075`, P1): a before arm's
             # switch is OFF exactly when the pipeline would read it as falsy, which is
             # `is_truthy`'s rule. `"off"` and `"no"` are OFF (`FALSY`), and so is
@@ -1775,6 +1791,24 @@ def score(repo: Path = _ROOT) -> dict:
         e2["decided_by"] = ("E2a" if e2["e2a"]["outcome"] != "PASS" else
                             "E2b" if (e2b_share > bars["E2b"]["max_fused_share"])
                             else "both")
+    # ⛔ EVERY COUNT IN THE RECORD PASSES `_count` — including the gate-drops block
+    # (#10610 review at `2ffc5db19`, P2; the census above and the two disarmed guards
+    # were closed by `bde94f89d3`, this one was left). `objects` and `bare_definite`
+    # are reconciled by the head loop and `predicate_alive` by its own `is not True`,
+    # but `drops_total` was emitted as a bare `.get()` — so it was the ONE count a
+    # caller could set to `Infinity` (or a string, or a negative) and still get a
+    # RECORD back. Measured at this head: `Infinity`, `-Infinity`, `NaN`, `61.5`,
+    # `"61"`, `true`, `null`, `62` and `-1` each scored and exited 0, and `Infinity`
+    # wrote a record that is not valid STRICT JSON. It is not cosmetic:
+    # `capstone_measure.py` reads it into `gate_drops_total` and renders it into the
+    # scored E1 note as `reports value_gate drops <N> of <M> Objects with its positive
+    # controls alive`, so an unvalidated value publishes a mechanism claim nothing
+    # measured. The ceiling is this same run's `objects` (`e1_gate_drops.py:84`
+    # writes `len(drops)`, and `drops` is keyed by object name), and the head loop has
+    # already refused a record whose `objects` disagrees with the ON arm's census.
+    gate_record = _read_json(repo / EVIDENCE / GATE_DROPS)
+    gate_objects = _count(f"{EVIDENCE / GATE_DROPS}", "objects",
+                          gate_record.get("objects"))
     return {
         "schema": "e1-e2-scores/1",
         "corpus_sha256": floors["fixtures_hash"],
@@ -1853,11 +1887,11 @@ def score(repo: Path = _ROOT) -> dict:
         "e2": e2,
         "gate_drops": {
             "artifact": f"{EVIDENCE / GATE_DROPS}",
-            "objects": _read_json(repo / EVIDENCE / GATE_DROPS).get("objects"),
-            "drops_total": _read_json(repo / EVIDENCE / GATE_DROPS)
-            .get("drops_total"),
-            "predicate_alive": _read_json(repo / EVIDENCE / GATE_DROPS)
-            .get("predicate_alive"),
+            "objects": gate_objects,
+            "drops_total": _count(f"{EVIDENCE / GATE_DROPS}", "drops_total",
+                                  gate_record.get("drops_total"),
+                                  ceiling=gate_objects),
+            "predicate_alive": gate_record.get("predicate_alive"),
         },
     }
 

@@ -9320,3 +9320,89 @@ def test_a_graph_naming_the_head_under_the_producers_eight_chars_scores(tmp_path
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
+
+
+# ── the last unguarded count, and the switch that stringified (#10610 review at `2ffc5db19`) ──
+
+@pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN", "61.5",
+                                   '"61"', "true", "null", "62", "-1"])
+def test_gate_drops_total_is_a_count_or_a_refusal(value, tmp_path, capsys):
+    """P2: `drops_total` is the ONE count the record emitted without `_count`.
+
+    Every sibling count passes `_count` (`objects`/`bare_definite` in the head loop,
+    E2a's denominators, `e1b real_facts`), and `predicate_alive` is `is not True`
+    -checked — but the gate-drops block emitted `drops_total` as a bare `.get()`.
+    So it was the one count a caller could set to `Infinity` (or a string, or a
+    negative) and still get a RECORD back. Measured at this head, one arm per value
+    below: each scored and exited 0, and `Infinity` wrote a record that is not valid
+    STRICT JSON (`json.loads(..., parse_constant=… )` rejects it; the record is read
+    by tools that do).
+
+    Not cosmetic either: `capstone_measure.py` reads this field into
+    `gate_drops_total` and renders it into the scored E1 note as
+    `reports value_gate drops <N> of <M> Objects with its positive controls alive`
+    — a mechanism claim nothing measured. The ceiling is the same run's `objects`
+    (`e1_gate_drops.py:84` writes `len(drops)` over a dict keyed by object name).
+
+    Non-vacuity, measured rather than assumed: ALL NINE arms exit 0 at this head's
+    predecessor and exit 2 here. The two JSON-literal arms are `true`/`null` and NOT
+    `True`/`None` — the uppercase spellings make the DOCUMENT invalid JSON, so they
+    would exercise the parser rather than the coercion and would pass at BOTH heads,
+    which is a pin that discriminates nothing (a first cut of this pin did exactly
+    that, and the pre-fix run is what caught it).
+    """
+    repo = _bundle(tmp_path / "drops")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    text = path.read_text()
+    record = json.loads(text)
+    assert record["drops_total"] == 0, (
+        "the SHIPPED gate-drops record no longer reads 0 drops — re-derive this pin")
+    # Splice the RAW token, so the non-standard constants (`Infinity`, `NaN`) reach
+    # the reader instead of being rejected by `json.dumps` on the way out.
+    record["drops_total"] = "__DROPSTOTAL__"
+    path.write_text(json.dumps(record).replace('"__DROPSTOTAL__"', value))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "drops_total" in err, err
+
+    # …and the shipped 0 still scores, so the guard refuses the edited count rather
+    # than the whole record.
+    path.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+@pytest.mark.parametrize("value", ["[]", '{"a": 1}', "[1, 2]"])
+def test_a_before_arm_switch_value_of_another_type_is_refused(value, tmp_path, capsys):
+    """P3: `_is_truthy` stringifies, so a list or object certified a before arm.
+
+    `_is_truthy` is `str(raw).strip().lower() in _TRUTHY`, so `[]` and `{"a": 1}`
+    both stringify to something outside the truthy set and read FALSY — and the
+    before-arm guard only refuses a TRUTHY value. A non-string switch therefore
+    passed as "the pass was OFF", which is the one thing the comment above it says
+    the guard establishes: the arm's provenance is the environment it was measured
+    in, and a list is not an environment value.
+
+    Measured at this head's predecessor: setting arm 1's `TORTOISE_VET` to `[]` and
+    to `{"a": 1}` each exited 0 with a byte-identical score. No producer writes
+    either shape (`e1_paired_arm.py` writes `os.environ` strings and `null`), so
+    both are edited provenance. Non-vacuity: all three arms exit 0 pre-fix, exit 2
+    here.
+    """
+    repo = _bundle(tmp_path / "switch")
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    text = path.read_text()
+    record = json.loads(text)
+    assert record["arm"]["TORTOISE_VET"] is None     # the shipped arm is OFF
+    record["arm"]["TORTOISE_VET"] = "__SWITCH__"
+    path.write_text(json.dumps(record).replace('"__SWITCH__"', value))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "which is not a switch value" in err, err
+
+    # …and the shipped `null` still scores.
+    path.write_text(text)
+    assert scores_probe.score(repo)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
