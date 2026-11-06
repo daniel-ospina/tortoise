@@ -458,15 +458,15 @@ def test_a_store_with_no_gap_reports_the_serves_indexes_pair(caplog):
         "a fully-indexed store must report the pair, exactly once per setup"
     )
     assert pairs[0].levelno == logging.INFO
-    msg = pairs[0].getMessage()
-    # The record must ATTRIBUTE itself: the sibling #4997 warning names the
-    # graph, and a contract line that drops it is unusable in a multi-graph
-    # store. Asserted as content (the graph name is present), not as `repr()`
-    # of a format string — see plan §7, "Brittleness avoided".
-    assert proj._graph_name in msg, msg
-    assert "serves=" in msg and "indexes=" in msg, msg
-    for label in SERVED:
-        assert label in msg, msg
+    # The record's payload is asserted POSITIONALLY on the call's args, not on
+    # `repr()` of a format string (plan §7, "Brittleness avoided"): both halves,
+    # and the graph it attributes itself to, are read off the record itself.
+    graph_seen, serves_seen, indexes_seen = pairs[0].args
+    assert graph_seen == proj._graph_name, (
+        "a contract line that drops the graph is unusable in a multi-graph store"
+    )
+    assert serves_seen == SERVED, serves_seen
+    assert indexes_seen == SERVED, indexes_seen
     assert not [r for r in caplog.records
                 if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
     assert proj._vector_index_served_labels == set(SERVED)
@@ -483,12 +483,14 @@ def test_a_gap_reports_the_pair_and_still_warns(caplog):
     pairs = _pair_records(caplog)
     assert len(pairs) == 1
     assert pairs[0].levelno == logging.INFO
-    msg = pairs[0].getMessage()
-    assert "serves=" in msg and "indexes=" in msg, msg
-    for label in SERVED:
-        assert label in msg, msg  # the SERVED half is every declared label
-    # The INDEXED half is the measured subset. Asserted on the attribute (plan
-    # §7: the level is the record's contract, not its formatting).
+    # ⛔ THE ONLY CASE WHERE THE TWO HALVES DIFFER, so the only case where a
+    # swapped or duplicated argument is observable at all. A record reading
+    # `serves=['Point'] indexes=[all five]` on a store whose own warning says
+    # `(indexed: ['Point'])` tells an operator the OPPOSITE of the truth, and
+    # every attribute-level assertion still passes. Hence: the record's args.
+    _graph_seen, serves_seen, indexes_seen = pairs[0].args
+    assert serves_seen == SERVED, serves_seen  # every declared label
+    assert indexes_seen == ["Point"], indexes_seen  # the measured subset
     assert proj._vector_indexed_labels == {"Point"}
     warnings = [r for r in caplog.records
                 if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
@@ -664,6 +666,64 @@ def test_the_pair_is_reported_on_every_setup_and_a_repaired_store_announces_it(c
     assert len(warnings) == 1, (
         "the WARNING stays latched — #11087 unlatches the REPORT only"
     )
+
+
+def test_the_reused_catalogue_fast_path_still_reports_the_pair(caplog):
+    """#11087: the report is not a full-sweep-only event.
+
+    `_ensure_indexes` passes the rows `_schema_is_current` already read on the
+    steady-state repeat sweep (#5434) — the path where the write path took the
+    "already indexed" branch. Gating the report on `catalogue_rows is None`
+    would silence exactly the repeat setup an operator watches, and nothing else
+    in the file reaches this call with rows supplied.
+    """
+    proj = _bare([_vector_row("Point")])
+    rows = _rows(*[_vector_row(label) for label in SERVED])
+    with caplog.at_level(logging.INFO):
+        proj._record_vector_index_inventory(rows)
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 1, "a reused-rows read must still report the pair"
+    _graph_seen, serves_seen, indexes_seen = pairs[0].args
+    assert serves_seen == SERVED, serves_seen
+    assert indexes_seen == SERVED, indexes_seen
+    assert proj.g.calls == [], (
+        "the supplied rows must be REUSED — no second catalogue read (#5434)"
+    )
+
+
+def test_an_unorderable_served_set_fails_open_instead_of_raising(caplog):
+    """#11087: the report's `sorted()` must live INSIDE the fail-open guard.
+
+    `sorted()` runs the labels' own ordering, and `measured & served` does not
+    sanitise a label's type, so a label without a total order reached the
+    report and made it raise OUT of a method whose contract is "never raises" —
+    `_ensure_indexes` is reached unguarded from `FalkorProjection.__init__`, so
+    that breaks store construction. Sorts now happen inside the `try`; this pins
+    that they stay there.
+
+    ⛔ TWO labels, not one: `sorted()` on a ONE-element sequence never calls
+    `__lt__`, so a single-label probe passes on the unfixed code and proves
+    nothing (measured — that is how the first version of this check lied).
+    """
+    import tortoise.projection as projection_mod
+
+    original = projection_mod.ENTITY_TYPE_LABELS
+    try:
+        projection_mod.ENTITY_TYPE_LABELS = {"a": object(), "b": object()}
+        proj = _bare()
+        with caplog.at_level(logging.DEBUG):
+            proj._ensure_indexes()  # must not raise
+            assert proj._vector_index_served_labels is None
+            assert proj._vector_indexed_labels is None
+            assert not _pair_records(caplog), (
+                "a report that cannot be built must not be emitted"
+            )
+            assert "inventory read failed" in caplog.text, (
+                "the lane must be the fail-open one, not a silent skip"
+            )
+    finally:
+        projection_mod.ENTITY_TYPE_LABELS = original
 
 
 def test_distinct_graphs_each_report_once(caplog):
