@@ -763,10 +763,18 @@ class RecordStatementError(RecordProjectionError):
     measured, on a `Statement` cause: ``ValueError("line one\\nline two")``
     reported ``ValueError: line one`` where the pre-fix arm carried both. It is
     the same narrowing the message arm has always applied (:func:`replay` at
-    ``:5768``), so the two arms are now consistent rather than newly wrong, and
-    no in-tree caller passes a multi-line cause. Stated because ``_bounded_cause``
-    escapes newlines rather than dropping them (`record_writer.py:1297`), i.e.
-    pre-fix those lines DID reach the log stream.
+    ``record_projection.py:5779-5782``), so the two arms are now consistent
+    rather than newly wrong. Stated because ``_bounded_cause`` escapes newlines
+    rather than dropping them (`record_writer.py:1297`), i.e. pre-fix those
+    lines DID reach the log stream.
+
+    ⚠️ THE COST IS BOUNDED TO A MULTI-LINE **NON-DRIVER** CAUSE, and that
+    qualifier is load-bearing rather than decorative (#11124 review cycle 2):
+    the only in-tree multi-line cause is DRIVER-SHAPED — the ``pgcode``/``diag``
+    double in this module's own test file — and for that shape
+    :func:`_primary_message` returns the protocol's single-line ``M`` field, so
+    nothing is lost. It is the plain ``Exception("a\\nb")`` shape that loses its
+    tail, and no in-tree caller passes one.
 
     No in-tree PRODUCTION caller builds this form today (only :func:`replay`
     raises the class, via the message form; the cause form is built by this
