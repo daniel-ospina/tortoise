@@ -810,7 +810,10 @@ def frozen_denominators(repo: Path) -> dict:
     #  * E1 is a REDUCTION (`after <= m × before`). At `m >= 1` the criterion is
     #    satisfied by the null result — an after arm that improved nothing, or got
     #    worse-but-not-more-than-m-times-worse — so it is not the reduction E1 is
-    #    defined to measure. It binds iff `0 < m < 1`.
+    #    defined to measure. It binds iff `0 <= m < 1`: `m == 0` is MAXIMALLY strict
+    #    (only a zero after-share passes it), which is why the boundary at zero is
+    #    INCLUSIVE here and in E2b above — the two rules must agree at the strict
+    #    end (#10610 review at `52d7173d5`).
     #
     # ⛔ SCOPE: the four bars this driver SCORES. `parse_bars` also returns E4's and
     # E5's, and this record grades neither; refusing a pre-registration over a bar

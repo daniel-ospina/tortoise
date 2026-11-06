@@ -9590,7 +9590,9 @@ def test_a_frozen_bar_that_binds_nothing_is_refused(bar, new, tmp_path, capsys):
     The rules are provable from each bar's population rather than a policy about
     how strict a pre-registration should be: a `>= n of m` count binds iff
     `0 < n <= m`; E2b's share is in `[0, 1]`, so it binds iff `0 <= t < 1`; E1's
-    multiplier is relative and binds iff `0 < m < 1`.
+    multiplier is relative and binds iff `0 <= m < 1` (at `m == 0` only a zero
+    after-share passes, so the strict end of the window is INCLUSIVE, exactly as
+    E2b's is).
 
     Non-vacuity: measured, all six exit 0 at the pre-fix head and exit 2 here. The
     SHIPPED bars (0.50, 90/90, 13/14, 0.05) are all inside those windows, which the

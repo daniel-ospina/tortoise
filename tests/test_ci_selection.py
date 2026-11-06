@@ -8530,8 +8530,30 @@ def test_the_unchanged_weight_claim_check_is_not_vacuous():
 #: clean map — the `=`-vs-`->` FALSE PASS this file's sibling guard was widened for one
 #: round earlier (`_CASE_COUNT_CLAIM_RE`, whose note states the rule: "a spelling the
 #: guard cannot see is a FALSE PASS, not a wording preference").
-_HEAD_TOTAL_CLAIM_RE = re.compile(
-    r"\(`?(?P<n>\d+)`? at this head, with #\d+'s `?\d+`? added cases\)")
+#:
+#: ⛔ AND THE TAIL IS NOT PART OF THE SHAPE (#10610 review at `52d7173d5`, P2). The
+#: first cut required the literal `, with #N's M added cases)` after the number, and
+#: this PR's own row was then re-spelled to `(215 at this head: origin/main's 190 plus
+#: the twenty-five net new cases this PR adds, …)`. Measured on the live map:
+#: `grep -c 'added cases)' config/ci-surfaces.yml` -> **0**, so the selector matched
+#: ZERO rows tree-wide and the guard reported `[]` as a pass over a subject set that
+#: was EMPTY — a no-op gate, defeated inside the PR that added it. The shape that is
+#: stable across both spellings is the parenthetical's HEAD: `(` + the total + ` at
+#: this head` + `,` or `:` (the separator is required so a bare `(N at this head)` — a
+#: `--collect-only` count — is still excluded).
+_HEAD_TOTAL_CLAIM_RE = re.compile(r"\(`?(?P<n>\d+)`? at this head[,:]")
+
+
+def _head_total_claims(text: str) -> list[tuple[str, int]]:
+    """`(key, stated)` for every durations row that states a prose head total.
+
+    This is the guard's SUBJECT SET, exposed so a test can assert it is not empty:
+    a selector that matches nothing turns its caller's `assert offenders == []` into
+    a pass over nothing, which is the defect (#10610 review at `52d7173d5`, P2).
+    """
+    return [(key, int(m.group("n")))
+            for key, note in _durations_row_comments(text)
+            for m in _HEAD_TOTAL_CLAIM_RE.finditer(note)]
 
 
 def _durations_rows_with_a_stale_head_total(text: str, tests_dir: Path):
@@ -8549,7 +8571,10 @@ def _durations_rows_with_a_stale_head_total(text: str, tests_dir: Path):
     (a `--collect-only` count, e.g. "34 functions / 35 executions at this head"), for
     POOL sizes, and inside quoted HISTORY of a past row revision. A guard over the
     bare phrase would red those correct notes; this one reads the sentence that
-    asserts the very total the cite beside it asserts.
+    asserts the very total the cite beside it asserts. What the shape requires is
+    only that the claim OPENS a parenthetical with the number and CONTINUES with the
+    phrase (`(`…` at this head,` / `:`), never the tail that follows it — requiring
+    the tail is what made the first cut inert (#10610 review at `52d7173d5`, P2).
     """
     out = []
     for key, note in _durations_row_comments(text):
@@ -8579,6 +8604,32 @@ def test_no_durations_row_states_a_head_total_its_file_refutes():
         f"{offenders}. The row's own `grep -c '^def test_'` cite is the instrument; "
         "a second total beside it that does not equal it hands a maintainer two "
         "numbers for one file.")
+
+
+def test_the_head_total_guard_has_a_live_subject():
+    """The guard must READ something: `[]` from an empty subject set is a no-op.
+
+    #10610 review at `52d7173d5` (P2), measured on the live map: the selector
+    required the tail `, with #N's M added cases)`, the `test_7949_capstone_measure.py`
+    row was re-spelled to the colon form, and `grep -c 'added cases)'
+    config/ci-surfaces.yml` returned **0** — so every row was skipped and
+    `test_no_durations_row_states_a_head_total_its_file_refutes` reported a clean map
+    over nothing. The stale-total arms above cannot catch that class (they feed the
+    selector a row it CAN read); only reading the live manifest can.
+    """
+    claims = _head_total_claims(cs.MANIFEST.read_text(encoding="utf-8"))
+    assert claims, (
+        "the prose-total guard matched ZERO rows in the live manifest — it is a "
+        "no-op gate: its `assert offenders == []` is a pass over an EMPTY subject "
+        "set, so any `(N at this head, …)` / `(N at this head: …)` total would ship "
+        "unread. Re-point `_HEAD_TOTAL_CLAIM_RE` at the spelling the map actually "
+        "uses, or retire this guard.")
+    keys = {key for key, _ in claims}
+    assert "test_7949_capstone_measure.py" in keys, (
+        "the row this guard was written for no longer states a prose head total "
+        f"that it can read — claims found: {sorted(keys)}. If the parenthetical was "
+        "deliberately dropped, re-point the guard at the row that now carries one "
+        "(or retire it); do not leave it reading a subject set the map no longer has.")
 
 
 def test_the_head_total_guard_is_not_vacuous(tmp_path):
@@ -8636,6 +8687,27 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
         "the BACKTICKED spelling is this map's convention — a guard that cannot read "
         "it reports a clean map over a stale total")
     assert _durations_rows_with_a_stale_head_total(fresh_ticked, tmp_path) == []
+    # …and the COLON spelling, which is what the live `test_7949_capstone_measure.py`
+    # row actually uses (#10610 review at `52d7173d5`, P2). The first cut required the
+    # `, with #N's M added cases)` tail, so this row was skipped and a stale total in
+    # it was a clean map — the guard was inert on the very row it was written for.
+    stale_colon = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(3 at this head: `origin/main`'s 2 plus the one net new case this PR "
+        "adds), no case counted twice.\n"
+        "surfaces: []\n")
+    fresh_colon = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(2 at this head: `origin/main`'s 2 plus the zero net new cases this PR "
+        "adds), no case counted twice.\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_head_total(stale_colon, tmp_path) == [
+        ("test_two.py", 3, 2)], (
+        "the COLON spelling is what the live row uses — a guard that cannot read it "
+        "is a no-op on the only row that states a prose total")
+    assert _durations_rows_with_a_stale_head_total(fresh_colon, tmp_path) == []
 
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
