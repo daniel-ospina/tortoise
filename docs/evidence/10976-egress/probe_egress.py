@@ -58,6 +58,7 @@ touches a graph anyone reads. `--keep` leaves it behind for inspection.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import secrets
 import sys
@@ -65,23 +66,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tortoise.cache_eviction import (  # noqa: E402
+from tortoise.cache_eviction import (
     PARITY_INSTRUMENTS,
     ParityReport,
     assess,
     node_total,
 )
-#: ⛔ The byte meter's ONE home is `tortoise/graph_storage.py` (#5331) — it carries the
-#: caveats (`PRECISION_NOTE`: sampling estimate, and BLIND to the HNSW index) that make
-#: the reading usable-or-not. A second reading here would be a second, caveat-free
-#: number, which is exactly what indicator (c) says must not exist.
-from tortoise.graph_storage import measure_graph_storage  # noqa: E402
-from tortoise.cache_evictor import (  # noqa: E402
+from tortoise.cache_evictor import (
     Candidate,
     EvictionPolicy,
     evict,
 )
-from tortoise.projection import resolve_db_endpoint  # noqa: E402
+
+#: ⛔ The byte meter's ONE home is `tortoise/graph_storage.py` (#5331) — it carries the
+#: caveats (`PRECISION_NOTE`: sampling estimate, and BLIND to the HNSW index) that make
+#: the reading usable-or-not. A second reading here would be a second, caveat-free
+#: number, which is exactly what indicator (c) says must not exist.
+from tortoise.graph_storage import measure_graph_storage
+from tortoise.projection import resolve_db_endpoint
 
 #: How many `:Point` turn-shaped nodes the probe seeds. Enough that a batch budget is
 #: a real fraction of the population and the ~156 B/node the engine allocates is
@@ -190,7 +192,6 @@ def run(uri: str, *, seed: int = SEED_NODES, keep: bool = False) -> dict:
         keys = _seed(graph, seed)
         record = _make_record_leg(keys)
         unservable = {k for i, k in enumerate(keys) if _unservable(k, i)}
-        index = {k: i for i, k in enumerate(keys)}
 
         def probe(candidate: Candidate) -> bool:
             # ⛔ A keyless candidate is UNDELETABLE (the executor holds it back), and
@@ -321,10 +322,9 @@ def run(uri: str, *, seed: int = SEED_NODES, keep: bool = False) -> dict:
         return out
     finally:
         if not keep:
-            try:
+            # A cleanup failure never changes the verdict the probe reports.
+            with contextlib.suppress(Exception):
                 client.execute_command("GRAPH.DELETE", graph_name)
-            except Exception:  # noqa: BLE001 — cleanup never changes the verdict
-                pass
 
 
 def main(argv: list[str] | None = None) -> int:
