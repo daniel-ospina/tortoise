@@ -6017,16 +6017,11 @@ surfaces:
   # `scripts/admin-merge.sh` runs in its own session (setsid) and outlives the
   # lane that launched it, plus the fail-closed verdict vocabulary (a rail with
   # no `EXIT=` line is `lost`, never `merged`; `ALREADY MERGED` never fabricates
-  # a `merge_sha`) and the `flock` duplicate-rail guard. Before this row the file
-  # the tier-2 cost gates): `tests/test_rail_detach.py` pins the rail's
-  # DURABILITY — that `scripts/admin-merge.sh` runs in its own session (setsid)
-  # and outlives the lane that launched it, plus the fail-closed verdict
-  # vocabulary (a rail with no `EXIT=` line is `lost`, never `merged`;
-  # `ALREADY MERGED` never fabricates a `merge_sha`), the liveness probe's
-  # fail DIRECTION and the `flock` duplicate-rail guard. Before this row the file
-  # was in NO surface, so `ci_selection.py --integrity` listed it as drift
-  # (redding the REQUIRED `manifest-integrity` leg) and no leg selected the suite
-  # at all — the whole suite the change rests on had zero CI signal.
+  # a `merge_sha`), the liveness probe's fail DIRECTION and the `flock`
+  # duplicate-rail guard. Before this row the file was in NO surface, so
+  # `ci_selection.py --integrity` listed it as drift (redding the REQUIRED
+  # `manifest-integrity` leg) and no leg selected the suite at all — the whole
+  # suite the change rests on had zero CI signal.
   #
   # `core` is the right home: the subject is `tools/rail_detach.py`, and the
   # suite is hermetic (synthetic stub rail, temp dirs, no DB/network/FalkorDB),
@@ -6040,19 +6035,13 @@ surfaces:
   # each time a test was added — the fix is to drop the number, not to refresh
   # it.
   #
-  # The registration alone does NOT make the pin run on the file it guards:
-  # `tools/` is a flat
-  # a test count on purpose: a count re-derives at every revision and restales
-  # silently; the fix is to drop the number, not to refresh it.
-  #
-  # ⚠️ The registration alone
-  # does NOT make the pin run on the file it guards: `tools/` is a flat
-  # `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py` matches no
-  # `SOURCE_PATTERNS` row, so a tool-only diff filters to `changed == []` and
-  # takes the docs-only early return (measured: `select(["tools/rail_detach.py"])`
-  # → `surfaces=[]`, 72 files, this file ABSENT). That half is closed by the
-  # `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
-  # #1349/#3332/#3616 silent-drop class.
+  # ⚠️ The registration alone does NOT make the pin run on the file it guards:
+  # `tools/` is a flat `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py`
+  # matches no `SOURCE_PATTERNS` row, so a tool-only diff filters to
+  # `changed == []` and takes the docs-only early return (measured:
+  # `select(["tools/rail_detach.py"])` → `surfaces=[]`, 72 files, this file
+  # ABSENT). That half is closed by the `CORE_ALSO` entry beside this one in
+  # `tools/ci_selection.py` — the #1349/#3332/#3616 silent-drop class.
   - test_rail_detach.py
   # #10920: the runner-label coverage gate. `tools/ci_runner_labels.py` parses every
   # `runs-on:` in the tree and checks it against the committed runner snapshot
