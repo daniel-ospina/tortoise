@@ -5248,6 +5248,32 @@ surfaces:
   - test_pack_shipping.py
   - test_pack_shipping_wheel.py
   - test_pack_state.py
+  # #11001: the pack's DECLARED hierarchy (`tortoise/pack_hierarchy.py` +
+  # `pack_registry` carrying `ontology.hierarchies`) — the declaration is READ and
+  # never inferred, because an invented edge is a structure nobody asserted.
+  # ⛔ NOT #11021's file and NOT #11021's change: this row repairs a `main` breakage
+  # merged minutes before this branch integrated it (`e918f3d6dd`, PR #11213, landed
+  # the test file with no manifest row — measured: `tools/ci_selection.py --integrity`
+  # at `origin/main` `9732106fdc` reports `manifest drift:
+  # ['test_pack_hierarchy_11001.py']`, so the REQUIRED `manifest-integrity` leg is
+  # red on main and no leg runs the suite). `core` because its subjects
+  # (`tortoise/pack_hierarchy.py`, `tortoise/pack_registry.py`) match no
+  # `SOURCE_PATTERNS` row and fall through to the `core` fallback; hermetic —
+  # manifest YAML plus the two modules, no DB, no graph, no network.
+  # (#11001: this file is ALSO registered above, beside the pack suites. Removed
+  # here — #11210, #11211 and #11222 each registered it independently while repairing
+  # the same `main` drift, so `origin/main` `eee753b48` carried three rows and
+  # `--integrity` reds on the duplicate. The `core` row beside the pack suites is
+  # the survivor; NOT a removal of the registration.)
+  # ⛔ THREE LANES REGISTERED THIS SAME ROW and the manifest only takes one:
+  # #11210 (`7bfbc4669`) and #11222 (`eee753b48`) each added the identical entry
+  # while this one was in flight, so `--integrity` reported
+  # `duplicate entry 'test_pack_hierarchy_11001.py' at .surfaces.core[]` and the
+  # REQUIRED `manifest-integrity` leg went red again — on the REPAIR. The copies
+  # are deduped to this one; the append class (a conflict-free replay duplicating
+  # a `core` entry, with the file still valid YAML) is **#10032**, which owns the
+  # root — this note is the instance, not a second report of it.
+  - test_pack_hierarchy_11001.py
   # #9068: the #5475 pack-approval-set residuals MEASURED — a :Pipeline row,
   # a journal-less fold, and the DECLARED offline re-typing. Registered beside
   # the pack tests it reads (`pack_state.graph_kind_namespaces` /
