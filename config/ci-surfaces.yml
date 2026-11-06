@@ -3113,6 +3113,18 @@ surfaces:
   # so the aggregate reds), and no leg selects the tests at all — measured
   # `❌ manifest drift: ['test_ready_for_owner.py']` before this line.
   - test_ready_for_owner.py
+  # #10991: pins `tools/required_set.py` — the credential-free derivation of the REQUIRED
+  # status-check set, and the refusals that stop it shrinking (a config that drops a
+  # `check-success=` line, a record deleted or emptied, and a branch editing config AND
+  # record together to shrink the set that judges it). Registered under `core` beside its
+  # consumer `test_ready_for_owner.py`: no DB, no network, no live `gh`. Two cases read
+  # THIS REPO's own tracked `.mergify.yml` and `docs/ci/required-contexts.json` (the live
+  # set must be pinned against what the repo actually declares); every other case builds
+  # its own `tmp_path` tree. So `core` is the right surface and the fast band is where it
+  # belongs. LOAD-BEARING, not cosmetic: without it `ci_selection --integrity`
+  # reds `manifest-integrity` (which `python-ci-gate` needs, so the aggregate reds) —
+  # measured `❌ manifest drift: ['test_required_set.py']` before this line.
+  - test_required_set.py
   # #10131: the catch-history measurement (which pre-merge `slow_files` have ever gone red
   # on a PR head). Registered under `core` beside its sibling instrument `test_ci_verdict.py`
   # — the module is pure/offline (an archived `runs.json` + `jobs/<run_id>.json` + artifact zips,
@@ -10374,6 +10386,13 @@ durations:
   # that re-derives it; this row has no such pin, so it quotes none.)
   # `tools/ci_timing.py --refresh-durations` replaces this row from junit once a push-to-main
   # run includes it.
+  test_required_set.py: 2.0  # #10991: pre-merge estimate for a NEW file — a file that never ran
+  # cannot appear in a CI artifact, so a local wall is the only available input and is
+  # FORBIDDEN as a shard-layout input (#2818/#3419/#9003). This is `DEFAULT_FAST_WEIGHT`,
+  # stated as a placeholder, not a measurement. No DB, no network, no live `gh`; two cases
+  # read this repo's own tracked `.mergify.yml` and `docs/ci/required-contexts.json`, and
+  # every other case builds its own `tmp_path` tree. Refresh it from the
+  # first push-to-main sweep that includes the file (`tools/ci_timing.py --refresh-durations`).
   test_ci_catch_history.py: 3.1  # #10131: the offline tests, 69 of them — `grep -c '^def test_'`, re-run by `test_the_durations_note_counts_the_tests_this_file_actually_has` so the count cannot go stale silently — 9.0-28 s at the #10359 fix head (box-load dependent; the eleven tests added across the fix rounds are sub-second), `-q -p no:cacheprovider`. Every test is pure: an archived runs.json/jobs fixture plus in-memory JUnit zips, no DB and no network. Refresh it from the first post-merge run that includes the file — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 9.5
   test_compute_attribution.py: 0.6  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.2
   test_connector_scope.py: 1.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
