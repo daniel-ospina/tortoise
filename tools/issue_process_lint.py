@@ -1213,6 +1213,16 @@ def in_flight_markers(comment_bodies: list[str]) -> list[str]:
 
 
 # --- the two arms ---------------------------------------------------------------------------
+def _subject(kind: str, number: int | str) -> str:
+    """`PR #11078` for a real number, `PR body-file` for an OFFLINE source label.
+
+    ⛔ A LABEL IS NOT A NUMBER (round 44 review, P3). The offline modes pass a source name
+    (`"body-file"`, `"issue-body-file"`) through the same parameter, so the subject line printed
+    `PR #body-file` — a name formatted as a number, which reads as an issue id nobody can open.
+    """
+    return f"{kind} #{number}" if isinstance(number, int) else f"{kind} {number}"
+
+
 def classify_pr(body: str, number: int | str, repo: str | None = None,
                 labels: list[str] | None = None,
                 notes: list[str] | None = None,
@@ -1264,7 +1274,7 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
         # An owner-authored BODY is a record; the PR body is still the author's own, so the label
         # changes nothing. Stated so nobody "fixes" this by exempting it.
         detail += " (an owner-authored body is not exempt: the PR body is the author's)"
-    return [Finding(arm=ARM_PR, subject=f"PR #{number}", detail=detail,
+    return [Finding(arm=ARM_PR, subject=_subject("PR", number), detail=detail,
                     evidence={"claimed": claimed, "unresolved": unresolved,
                               "resolved_by_closing": c["closing"],
                               "resolved_by_satisfies": c["satisfies"]})]
@@ -1305,7 +1315,7 @@ def classify_issue(comment_bodies: list[str], number: int | str,
               "finished (SCOPING posts that comment)")
     populations = ([] if source == "injected"
                    else ["branches", "worktrees", "ref-claims"])
-    return [Finding(arm=ARM_ISSUE, subject=f"issue #{number}", detail=detail,
+    return [Finding(arm=ARM_ISSUE, subject=_subject("issue", number), detail=detail,
                     evidence={**measured, "populations_not_consulted": populations})], measured
 
 

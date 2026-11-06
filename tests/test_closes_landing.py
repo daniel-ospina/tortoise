@@ -2030,9 +2030,15 @@ def test_the_HTML_block_rule_is_the_SPEC_s_two_rules_not_one():
     # The tag list decides where the block BOUNDARY is, never whether the block's own text is read:
     # the text lands in an `html_block` token, not a `code_block`, for every one of these openers, and
     # `origin/main` credits all of them. Blanking them was a lost close, and an incoherent one.
-    for tag in ("<div>", "<blockquote>", "<p>", "<!-- c -->", "<?php"):
+    for tag in ("<div>", "<blockquote>", "<p>", "<?php", "<pre>", "<script>"):
         body = tag + "\n2.     Closes #100\n"
         assert cl.parse_closing_refs(body) == [100], (tag, body)
+    # ⛔ EXCEPT THE ONES THAT CLOSE ON THEIR OWN LINE (round 44 review, P2): `<!-- c -->` carries its
+    # `-->`, so the block ends there and the next line is a FRESH line — a `2.` at column 0 opens a
+    # list whose wide-gap content is `<pre><code>`, which the renderer confirms.
+    for closed in ("<!-- c -->", "<?php ?>", "<!DOCTYPE html>", "<![CDATA[x]]>"):
+        body = closed + "\n2.     Closes #100\n"
+        assert cl.parse_closing_refs(body) == [], (closed, body)
     # What an HTML block does NOT do is hide its own text: only FENCED content is blanked, and that
     # is parity with every head before this one — stated here so the ender's justification cannot be
     # read as a claim about GitHub's behaviour for raw HTML.
@@ -3937,12 +3943,18 @@ def test_an_HTML_blocks_own_text_is_READ_not_hidden():
                  "<details>\n-     Closes #100\n</details>\n",
                  "<p>\n-     Closes #100\n",
                  "<table>\n*     Closes #100\n",
-                 "- item\n\n<div>\n2.     Closes #100\n"):
+                 "- item\n\n<div>\n2.     Closes #100\n",
+                 # TYPE 1 has its own openers and is the arm a single "types 1-6" regex misses
+                 # (round 44 review, P2): `<pre>`/`<script>`/`<style>`/`<textarea>`.
+                 "<pre>\n-     Closes #100\n",
+                 "<script>\n-     Closes #100\n",
+                 "<style>\n-     Closes #100\n",
+                 "<textarea>\n-     Closes #100\n</textarea>\n"):
         assert token_type(body) == "html_block", body
         assert cl.parse_closing_refs(body) == [100], body
 
-    # Controls. The block ENDS at the next blank line, so the same marker line after one is CODE;
-    # a wide-gap marker line OUTSIDE any HTML block is still CODE; and a fenced body still is too.
+    # Controls. A TYPE-6 block ENDS at the next blank line, so the same marker line after one is
+    # CODE; a wide-gap marker line OUTSIDE any HTML block is still CODE; and a fenced body still is.
     for control in ("<div>\n\n-     Closes #100\n",
                     "-     Closes #100\n"):
         assert token_type(control) == "code_block", control
@@ -3950,10 +3962,57 @@ def test_an_HTML_blocks_own_text_is_READ_not_hidden():
     assert token_type("```\n-     Closes #100\n```\n") == "fence"
     assert cl.parse_closing_refs("```\n-     Closes #100\n```\n") == []
 
-    for opener in ("<div>\n", "<p>\n", "<table>\n", "<details>\n<summary>x</summary>\n", "<li>\n"):
+    # ⛔ TYPES 1-5 END AT THEIR OWN CLOSER, NOT AT A BLANK LINE (round 44 review, P2 — the first
+    # version of this state machine ended every block at a blank line, which kept `<!-- c -->` open
+    # over the NEXT line and CREDITED it: 600 fail-open bodies). Each shape below is the renderer's
+    # `code_block`, and a TYPE-1 block must NOT end at a blank line (only type 6 does).
+    for closed in ("<!-- c -->\n-     Closes #100\n",
+                   "<!-- c\n-->\n-     Closes #100\n",
+                   "<?php ?>\n-     Closes #100\n",
+                   "<!DOCTYPE html>\n-     Closes #100\n",
+                   "<![CDATA[x]]>\n-     Closes #100\n",
+                   "<pre>\n</pre>\n-     Closes #100\n",
+                   "<script src=\"a\">\n</script>\n-     Closes #100\n"):
+        assert token_type(closed) == "code_block", closed
+        assert cl.parse_closing_refs(closed) == [], closed
+        assert cl.parse_closing_refs(closed, None, strict=True) == [], closed
+    # …and a TYPE-1 block survives a blank line (a `<!-- -->` close is what ends it, not a blank).
+    assert token_type("<pre>\n\n-     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<pre>\n\n-     Closes #100\n") == [100]
+    # …and a block does not follow a line dedented out of the container that held it.
+    dedented = "- item\n  <div>\n-     Closes #100\n"
+    assert token_type(dedented) == "code_block", dedented
+    assert cl.parse_closing_refs(dedented) == [], dedented
+
+    for opener in ("<div>\n", "<p>\n", "<table>\n", "<details>\n<summary>x</summary>\n", "<li>\n",
+                   "<pre>\n", "<script>\n", "<style>\n", "<textarea>\n"):
         for marker in ("-", "*", "+", "1.", "2.", "10."):
             for gap in range(1, 10):
                 for indent in range(0, 5):
                     candidate = opener + " " * indent + marker + " " * gap + "Closes #100\n"
                     expected = [] if token_type(candidate) == "code_block" else [100]
                     assert cl.parse_closing_refs(candidate) == expected, candidate
+
+
+def test_the_shallower_reopened_quote_lazy_case_is_a_DECLARED_residual():
+    """Round 44 review (P2) — measured here so the next round does not rediscover it as news.
+
+        `- > > q` + `> y` + `> 2.     Closes #100`
+            renderer ONE `<p>` (`q\\ny\\n2.     Closes #100`)   `origin/main` `[100]`, head `[]`
+
+    When a shallower line RE-OPENS the outer quote (`> y`), the item closes (`container` -> `None`)
+    while round 39's carry leaves `prev_quote_depth` at 2, so the round-43 re-base is skipped (it
+    needs a container) and `_is_lazy_marker`'s depth term reads the marker line against a container
+    that no longer exists. NOT a regression: every head from round 39 to this one answers `[]` — it
+    is parity with the reviewed tree, and it is the LOST-CLOSE direction, so it is pinned rather
+    than left implicit. Measured over a 25,920-body grid of the family: 48 lost closes, 0 fail-opens,
+    so whoever fixes it has a bounded target and a known blast radius.
+    """
+    body = "- > > q\n> y\n> 2.     Closes #100\n"
+    md = MarkdownIt("commonmark")
+    assert [t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
+    assert cl.parse_closing_refs(body) == [], "DECLARED residual — not a regression"
+    # The control that must stay: with the item still open, the same lazy line IS credited.
+    control = "- > > q\n  > y\n  >     -     Closes #100\n"
+    assert [t.type for t in md.parse(control) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
+    assert cl.parse_closing_refs(control) == [100]

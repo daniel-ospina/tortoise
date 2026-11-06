@@ -911,6 +911,41 @@ _HTML_TYPE6_TAGS = (
 _HTML_BLOCK_INTERRUPT_RE = re.compile(
     rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
 
+#: ⛔ §4.6's SIX TYPES DO NOT END THE SAME WAY, AND THE START SET IS NOT ONE REGEX (round 44 review,
+#: P2 — a fail-open: crediting a CODE line). Types 2-5 end at their OWN closing token (`-->`, `?>`,
+#: `>`, `]]>`), type 1 at its closing tag, and only type 6 at a blank line. A state machine that
+#: ended every block at a blank line kept `<!-- c -->` open over the NEXT line, so
+#: `<!-- c -->` + `-     Closes #100` (renderer `code_block`) was CREDITED in both arms — 600
+#: fail-open bodies over one grid. And `_HTML_BLOCK_INTERRUPT_RE` has no type-1 arm at all (its
+#: `<!` sigil is not `<script`), so `<pre>` + `-     Closes #100` stayed blanked while the renderer
+#: says `html_block` and `origin/main` credits it. One root, both halves, one table.
+_HTML_TYPE1_TAG_RE = re.compile(r" {0,3}<(script|pre|style|textarea)(?:[ \t]|/?>|$)", re.IGNORECASE)
+_HTML_TYPE1_CLOSERS = {"script": "</script>", "pre": "</pre>",
+                       "style": "</style>", "textarea": "</textarea>"}
+
+
+def _html_block_open(rest: str) -> str | None:
+    """§4.6's html-block START for types 1-6, with the token that ENDS it ("" = a blank line).
+
+    `None` means "this line opens no HTML block". Type 7 is deliberately absent: it cannot
+    interrupt a paragraph, and the paragraph rule tests only this function's types (see
+    `_HTML_BLOCK_INTERRUPT_RE`'s own note).
+    """
+    match = _HTML_TYPE1_TAG_RE.match(rest)
+    if match:
+        return _HTML_TYPE1_CLOSERS[match.group(1).lower()]
+    if re.match(r" {0,3}<!--", rest):
+        return "-->"                      # type 2 (§4.6: the block ends at the `-->`)
+    if re.match(r" {0,3}<\?", rest):
+        return "?>"                       # type 3
+    if re.match(r" {0,3}<!\[CDATA\[", rest, re.IGNORECASE):
+        return "]]>"                      # type 5 — BEFORE the `<!` arm below, which also matches it
+    if re.match(r" {0,3}<![A-Za-z]", rest):
+        return ">"                        # type 4 (a declaration: `<!DOCTYPE html>`)
+    if _HTML_BLOCK_INTERRUPT_RE.match(rest):
+        return ""                         # type 6 — the only one a blank line ends
+    return None
+
 
 def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
                     prev_quote_depth: int, container: _ListItem | None,
@@ -1267,10 +1302,15 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     #     `<div>` + `-     Closes #100`      renderer `html_block` (text), `origin/main` `[100]`, head `[]`
     # MEASURED at this head over the 32-opener grid (indents 0-8, every marker, gaps 1-9): 90 lost
     # closes per opener family (`<div>`, `<p>`, `<table>`, `<details><summary>`), none of them a code
-    # block. Types 2-6 (and 7) END at the next blank line (§4.6), so the state needs no closer scan;
-    # the start condition is the SAME `_HTML_BLOCK_INTERRUPT_RE` the paragraph rule uses — types 1-6,
-    # which are exactly the HTML blocks that can interrupt a paragraph.
-    in_html_block = False
+    # block. ⛔ THE STATE CARRIES THE BLOCK'S OWN CLOSER, NOT JUST "OPEN" (round 44 review, P2 — a
+    # fail-open the first version created by ending every block at a blank line): types 2-5 end at
+    # `-->`, `?>`, `>` and `]]>`, type 1 at its closing tag, and only type 6 at a blank line, so
+    # `<!-- c -->` + `-     Closes #100` (renderer `code_block`) was CREDITED. `_html_block_open`
+    # owns both the start set (types 1-6, type 1 included) and the closer.
+    html_closer: str | None = None
+    # The block lives in a CONTAINER: a line dedented out of it is not the block's content any more
+    # (`- item` + `<div>` + a column-0 line belongs to a new block, which `own_code` must measure).
+    html_min_indent = 0
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.
     hidden_lines = 0
@@ -1376,11 +1416,28 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             container = None
             own_gap = 0
             _lazy_push = False
-            # §4.6: an HTML block (types 2-6, and 7) ends at the next blank line. Reset here, at the
-            # one place that already owns "this line is blank", rather than in a second scan.
-            in_html_block = False
-        if line.strip() and not in_html_block and _HTML_BLOCK_INTERRUPT_RE.match(rest):
-            in_html_block = True
+        # ── §4.6 html-block state: the state FOR THIS LINE, advanced once per line ────────────────
+        # Computed here, before every `continue` below, so the fence branch and the code branches all
+        # read the same answer (a state advanced inside a branch is a bug waiting for the next shape).
+        if html_closer is not None:
+            if rest_indent < html_min_indent:
+                _html_here = False            # dedented out of the container that held the block
+                html_closer = None
+            else:
+                _html_here = True
+                if html_closer:
+                    if html_closer.lower() in rest.lower():
+                        html_closer = None    # types 1-5: this line carries the block's own closer
+                elif not line.strip():
+                    _html_here = False        # type 6: the next blank line ends the block
+                    html_closer = None
+        else:
+            _html_here = False
+            _opened = _html_block_open(rest) if line.strip() else None
+            if _opened is not None:
+                html_min_indent = rest_indent
+                _html_here = True
+                html_closer = None if (_opened and _opened.lower() in rest.lower()) else _opened
         if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
@@ -1593,7 +1650,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         ordered_continuation = (_lazy_indent or _lazy_marker
                                 or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                           prev_container, rest_indent, indent))
-        own_code = own_gap > 4 and not ordered_continuation and not in_html_block
+        own_code = own_gap > 4 and not ordered_continuation and not _html_here
         indent_code = rest_indent > _MAX_FENCE_INDENT and (
             strict or (indented_code
                        and (container is None
