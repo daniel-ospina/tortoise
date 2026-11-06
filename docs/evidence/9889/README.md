@@ -101,6 +101,21 @@ EXPLICITLY armed is still refused), so the OFF arm is run with
 is OFF"); the frozen record's *wording* predates the flip and is left unedited —
 amending a pre-registration is its owner's call, not a probe's.
 
+**And the SCORER enforces the same rule on the records, not just the probes.**
+`probes/e1_e2_scores.py` refuses a record that expresses this switch's OFF state
+by **absence** — `null` in a before arm's `arm` block, `<unset>` on the ON log's
+`arm:` line — on both sides of E1's pair, because `_is_truthy(None)` is False and
+that is exactly what certifies a gate-armed run as a control. The one exception
+is the records committed HERE: they predate the flip, so absence really was OFF
+when they were taken, and they are admitted only under the pre-`#10996` campaign
+head (`54922a800…`) — the licence is that head, so a record from any other head
+with the switch absent is refused, and stripping the pin fields to look old is
+not enough on its own. What the licence was used for travels with the numbers:
+`e1-e2-scores.json` carries a `value_gate_pin` block naming every arm read as
+`legacy-absent`. A re-take of E1's arms with `TORTOISE_VALUE_GATE=0` written and
+read back is what closes the residual (`#7949`), and it cannot be done from the
+repo: these graphs lived in a disposable container that no longer exists.
+
 ```bash
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n 's/^export TORTOISE_DB_URI=//p' | tr -d "'")"
 uv run python docs/evidence/7949-capstone/probes/e1_paired_arm.py \
