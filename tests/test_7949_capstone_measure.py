@@ -10140,3 +10140,55 @@ def test_the_re_run_recipe_states_the_arm_the_probe_actually_sets():
         "the README must STATE that capstone_measure pins the two OFF switches "
         "to an explicit \"0\" — a corrected recipe whose reason is not written "
         "down is the one the next lane reverts")
+
+
+def test_the_control_arm_definition_names_the_frozen_records_divergence():
+    """The frozen pre-registration and this bundle must not silently disagree.
+
+    Review cycle 4 (P2): `PRE-REGISTRATION.md` §3 still defines CONTROL as "the
+    selection flags unset … their default is OFF". Since `#10996` an unset
+    `TORTOISE_VALUE_GATE` is the TREATMENT, so that bullet is the PRE-flip
+    definition — and this bundle's README now says the opposite (`"0"`, not
+    `<unset>`), leaving two definitions of one arm in the same bundle.
+
+    The frozen record is NOT amended here: editing a registered arm definition
+    after an evidence log exists is §8's owner decision, and the committed
+    artifacts genuinely ran OFF at their pre-flip heads. What a lane owes is that
+    the divergence is STATED where the arm is read — this pin holds the statement
+    in place, and holds the frozen bullet itself un-rewritten, so neither side can
+    drift into quiet agreement with the other.
+    """
+    bundle = (_REPO / "docs" / "evidence" / "7949-capstone")
+    doc = (bundle / "E1-E2.md").read_text()
+    prereg = (bundle / "PRE-REGISTRATION.md").read_text()
+
+    for phrase in (
+        "`PRE-REGISTRATION.md` §3 still DEFINES the control arm as the flags ABSENT",
+        "definition is now the pre-`#10996` one",
+        "left unamended here on purpose",
+        "a re-take sets `TORTOISE_VALUE_GATE=0`",
+    ):
+        assert phrase in doc, (
+            f"E1-E2.md no longer states the frozen record's divergence "
+            f"({phrase!r}) — without it the bundle carries two definitions of "
+            "the control arm and a reader takes whichever one they read first")
+
+    assert "their default is OFF" in prereg, (
+        "PRE-REGISTRATION.md §3 no longer carries the pre-#10996 CONTROL "
+        "definition — if it WAS amended, this pin and the E1-E2.md disclosure "
+        "must move together (and the amendment needs a §8 Deviations entry plus "
+        "a re-cut `document_sha256`, which is the owner's call, not a silent edit)")
+
+    # ⛔ The disclosure is inside a BLOCKQUOTE, and the paragraph it was added to
+    # was mid-sentence here (review-cycle-4's staging caught it: the insertion
+    # split "…even against an explicit" from "`TORTOISE_VET=0`…", leaving a
+    # truncated claim above and an orphaned fragment below — merge-damage prose in
+    # the one artifact this round exists to make readable). Both halves must stay
+    # adjacent and quoted.
+    assert ("> `TORTOISE_S2_DECISION_SEAM` would arm the pass even against an explicit\n"
+            "> `TORTOISE_VET=0`") in doc, (
+        "the arm-table paragraph was broken across the disclosure — the sentence "
+        "ends mid-clause and a fragment resumes after the blockquote")
+    assert ">\n> ⛔ **`PRE-REGISTRATION.md`" in doc, (
+        "the disclosure must be a separate quoted paragraph, not wedged into a "
+        "sentence")

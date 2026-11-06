@@ -872,3 +872,31 @@ def test_the_section_the_e1_probe_cites_really_carries_the_sentence_it_quotes():
     assert " ".join(quote.split()) in " ".join(doc.split()), (
         "the probe's quoted refusal must be the one §3.2 states, not a paraphrase of it"
     )
+
+
+def test_the_arm_drivers_truthiness_copy_is_the_repos_contract():
+    """The mirrored vocabulary in the PRODUCER must be `tortoise.env_truthy`'s.
+
+    Review cycle 4 (P3), measured not asserted: `off_arm_readback`'s refusal now
+    runs on `_is_truthy`, and widening the repo's `TRUTHY` by `"y"` left the
+    scorer's pinned mirror RED but this file's copy GREEN — the driver then
+    accepted `TORTOISE_VALUE_GATE=y` as the OFF arm (`_is_truthy("y")` False in
+    the copy, `is_truthy("y")` True in the pipeline). For
+    `TORTOISE_S2_DECISION_SEAM` that is a billable call inside an arm this file
+    declares OFF, which is the exact concern `DEFAULT_ON_KEYS`' comment raises.
+
+    `tests/test_7949_capstone_measure.py::test_the_arm_vocabulary_is_the_repos_
+    truthiness_contract` holds the SCORER's copy to the contract; this holds the
+    DRIVER's, because a second unpinned mirror is how the two directions of one
+    comparison drift apart.
+    """
+    from tortoise.env_truthy import FALSY, TRUTHY, is_truthy
+
+    assert set(e1_paired_arm._TRUTHY) == set(TRUTHY), (
+        e1_paired_arm._TRUTHY, sorted(TRUTHY))
+    for sample in [*sorted(TRUTHY), *sorted(FALSY), "off", "OFF", " off ", "",
+                   "  ", None, "disabled", "true", "TRUE", "1", "0", 1, 0]:
+        assert e1_paired_arm._is_truthy(sample) == is_truthy(sample), (
+            f"the arm driver reads {sample!r} as truthy="
+            f"{e1_paired_arm._is_truthy(sample)} but the repo's contract says "
+            f"{is_truthy(sample)}")
