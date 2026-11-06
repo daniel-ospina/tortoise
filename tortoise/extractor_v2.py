@@ -11602,8 +11602,26 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
             # nothing on the normal path (review at `9561959ed7`, P2).
             # ⛔ The ADDRESS is merged into the FIRST record rather than swapping the
             # record: a whole-record swap replaced the cue's `rule_id`/`reason` with
-            # the duplicate's channel-labelled ones, i.e. it fixed the address by
-            # losing the provenance that says the cue derived it.
+            # the duplicate's channel-labelled ones — it fixed the address by losing
+            # the provenance that says the cue derived it.
+            # ⛔ ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX. Copying the
+            # offsets and `span_source` while keeping the FIRST record's `quote`
+            # (the old code adopted the winner's quote only when the kept one was
+            # EMPTY) shipped a `"quote"`-labelled address into a text it does not
+            # index: `quote[start:end]` read bytes the surface never occupied, and
+            # `Mention._span_is_an_address` cannot see it (it checks completeness,
+            # order and range only). Measured on the fail-open path, where the clamp
+            # runs BEFORE this dedupe: `{'quote': 'the budget is 40k',
+            # 'span_start': 2, 'span_end': 4, 'span_source': 'quote'}` →
+            # `quote[2:4] == 'e '` for surface `it` — the fabricated-address class
+            # #5007 forbids (review at `d59000f10`, P2; the peer lane found the same
+            # defect independently at `2a1153519`). The adopted pair therefore takes
+            # ITS OWN quote with it; a `narrative`/`model` pair needs none, since the
+            # narrative is not replaced here and `model` asserts nothing verified.
+            # Pinned as a PROPERTY by
+            # `test_a_deduped_address_must_INDEX_the_text_the_record_carries`: a
+            # shipped `"quote"` address must index its own surface in its own quote,
+            # whichever entry won.
             kept = out[at[key]]
             # ⛔ The ADDRESS is only adoptable for the SAME SPELLING of the surface: the
             # key folds case and whitespace runs (`_norm`) while `_mention_span` is
@@ -11625,7 +11643,11 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
                 # different quote — offsets that index bytes the record does not
                 # name, which is the forgery the whole clamp exists to refuse, and
                 # no later clamp can catch it because every published surface
-                # clamps BEFORE deduping (review at `2a1153519`, P2).
+                # clamps BEFORE deduping (review at `2a1153519`, P2; found
+                # independently as the round-7 blocker at `d59000f10`).
+                # ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX: the shipped
+                # quote is therefore the one that indexes the shipped pair, and the
+                # surviving record's own quote is kept when it already indexes it.
                 if m.get("quote") and (kept.get("span_source") == "quote"
                                        or not kept.get("quote")):
                     kept["quote"] = m["quote"]
@@ -11718,9 +11740,9 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
       rule only when :func:`referentiality.judge` agrees with it for THAT surface,
       else ``referentiality.channel``. This is the last door: the caller that
       keeps the raw channel whenever ``route_mentions`` raises is
-      :func:`extract_session_v2` (the ``try`` at `:12064`; ``execute_embed`` never
-      calls ``route_mentions``), so a record can reach here without ever passing
-      :func:`_mention_record`.
+      :func:`extract_session_v2` — the ``try`` guarding its FIRST ``route_mentions``
+      call; ``execute_embed`` never calls it — so a record can reach here without
+      ever passing :func:`_mention_record`.
     - ``span_source`` — a declared space is honoured only when the offsets are
       EXACTLY where that haystack puts the surface; otherwise it is demoted to
       ``"model"`` ("the model asserted these bytes"), never shipped as an address
@@ -12470,13 +12492,15 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ⛔ FOUR keys carry a record, not two — and only the two PUBLISHED ones go
     # through the clamp. `result["s2_embed"]` and `result["embed_list"]` are this
     # pass's OUTPUT, not S2's raw list: both are assigned from the list
-    # `route_mentions` rewrote (`:12065` rebinds `embed_list`, the value stored at
-    # `:12464`), and the raw identity holds ONLY on the fail-open path, where
-    # `route_mentions` raised and the list was never rewritten. Both are the
-    # PRODUCER channel, and a reader who believed "two surfaces" would not look at
-    # them (review at `5da3575b7a`, P2; the citation this replaces pointed at
-    # `:11908`, which is neither the store nor the rebind — re-cited at
-    # `0c15ad04d`, and corrected again here).
+    # `route_mentions` rewrote — its first call REBINDS `embed_list` in place, and
+    # `result["s2_embed"]` stores that same list — and the raw identity holds ONLY
+    # on the fail-open path, where `route_mentions` raised and the list was never
+    # rewritten. Both are the PRODUCER channel, and a reader who believed "two
+    # surfaces" would not look at them (review at `5da3575b7a`, P2).
+    # ⚠️ CITED BY SYMBOL, NOT BY LINE: three rounds of this PR shipped a stale
+    # absolute line number here (the branch merges, so every number rots), and a
+    # citation a reader cannot trust is worse than none (review at `d59000f10`,
+    # P3).
     # ⛔ `records` is the surface plan R1's arming measurement READS, so it is
     # clamped by the SAME function the payload uses (`_clamped_mention`), not
     # copied from the merged list: on the fail-open path the entries there are

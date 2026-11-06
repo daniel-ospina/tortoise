@@ -2119,3 +2119,53 @@ def test_a_deduped_pair_does_not_lend_its_address_to_a_DIFFERENT_SPELLING():
     assert rec.get("span_start") is None, (
         "an address verified for `it` was adopted by a record named `It`: "
         f"{rec!r}")
+
+
+def test_a_deduped_address_must_INDEX_the_text_the_record_carries():
+    """⛔ ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX. The merge that made
+    a verified address win the dedupe copied `span_start`/`span_end`/
+    `span_source` from the winner while keeping the FIRST record's `quote` — unless
+    that quote was EMPTY. So for two duplicates carrying DIFFERENT non-empty
+    quotes, the record shipped a `"quote"`-labelled address into text it does not
+    index: `quote[start:end]` reads bytes the surface never occupied, and
+    `Mention._span_is_an_address` cannot see it (it checks completeness, order and
+    range only). Measured on the fail-open path, where the clamp runs BEFORE the
+    dedupe: `{'quote': 'the budget is 40k', 'span_start': 2, 'span_end': 4,
+    'span_source': 'quote'}` → `quote[2:4] == 'e '` for surface `it` (review at
+    `d59000f10`, P2 — the fabricated-address class #5007 and this PR's own
+    `test_a_mention_only_response_is_verified_by_the_last_builder` exist to close).
+
+    The invariant, asserted as a property so any variant is caught: a shipped
+    `"quote"` address MUST index its own surface in its OWN quote. The positive
+    half below proves the fix is not "stop merging": an address that DOES verify
+    against the kept quote is still adopted."""
+    from tortoise.extractor_v2 import _mentions_for_claim
+
+    claim = "the budget is 40k"
+    spanless = {"surface": "it", "claim_ref": claim, "quote": claim}
+    carrying = {"surface": "it", "claim_ref": claim, "quote": "x it y",
+                "span_source": "quote", "span_start": 2, "span_end": 4}
+
+    for armed_entries in ([spanless, carrying], [carrying, spanless]):
+        out = _mentions_for_claim({"mentions": [dict(e) for e in armed_entries]},
+                                  claim, armed=True, narrative="")
+        assert len(out) == 1, f"the pair was not deduped: {out!r}"
+        rec = out[0]
+        if rec.get("span_source") == "quote" and rec.get("span_start") is not None:
+            q = str(rec.get("quote") or "")
+            got = q[rec["span_start"]:rec["span_end"]]
+            assert got == rec["surface"], (
+                "a `quote`-labelled address does not index the text the record "
+                f"carries: quote[{rec['span_start']}:{rec['span_end']}] == {got!r} "
+                f"for surface {rec['surface']!r} — {rec!r}")
+
+    # POSITIVE CONTROL: the same duplicate, but the address verifies against the
+    # KEPT record's quote — the address must still be adopted (the dedupe's job).
+    ok = {"surface": "it", "claim_ref": claim, "quote": "x it y",
+          "span_source": "quote", "span_start": 2, "span_end": 4}
+    kept_ok = {"surface": "it", "claim_ref": claim, "quote": "x it y"}
+    out = _mentions_for_claim({"mentions": [dict(kept_ok), dict(ok)]}, claim,
+                              armed=True, narrative="")
+    assert len(out) == 1
+    assert out[0].get("span_start") == 2 and out[0].get("span_source") == "quote", (
+        f"a VERIFIED address was dropped by the dedupe: {out[0]!r}")
