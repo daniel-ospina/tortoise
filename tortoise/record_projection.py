@@ -3851,6 +3851,42 @@ def _op_dispatch_statements(
             # on a property, which is the class this change exists to close.
             drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
         )
+        # ⛔ A RENAME THAT APPLIES NO NAME IS THE SILENT-KEEP DEFECT (#9881).
+        #
+        # `_patch_statement`'s "a patch with nothing to write is a 0-row no-op by
+        # construction" fallback (`SET node_key = node_key`) is DELIBERATE for an
+        # op whose content lives in a column the layer table refuses — #9974's
+        # status-only `restatus` is exactly that shape (`never_store={"status"}`,
+        # and that residual is tracked there, not changed here). A RENAME has no
+        # such shape: its whole content IS the new name, so the same fallback can
+        # only ever mean "keep the OLD name and report the mutation consumed".
+        #
+        # The shape is REACHABLE and this tree declares it: `name` is a reserved
+        # `EntityMutated` envelope key (`projection::_ENTITY_MUTATION_RESERVED_KEYS`,
+        # accepted by the one builder, `sdk._journal_entity_mutation(name=…)`),
+        # and the GRAPH's fold is loud about a record carrying it — that builder's
+        # own note says such a record "unfolds and is reported as a fold miss"
+        # (`_warn_entity_mutation_fold_miss`: "a state-op miss is not exempt",
+        # #3585). A silent RECORD half is how a replay and a rebuild come to
+        # disagree about a node's name with no error at any layer, which is the
+        # class #9881 exists to end.
+        #
+        # So: refuse it, by name, and say where the name has to arrive instead.
+        # The producer's own record can never hit this — the ONE classifier
+        # returns `"rename"` only where the applied map carries `name`
+        # (`projection::classify_entity_mutation_op`) — so this guards the
+        # unproduced/legacy shapes without blocking a real write.
+        if op == "rename" and "name" not in col_values and "name" not in tail:
+            raise RecordProjectionError(
+                "EntityMutated op='rename' applies no `name`: the record would "
+                "keep the OLD name and report the mutation consumed, in "
+                "silence. A rename's whole content is the new name, so it must "
+                "arrive in `state['name']` — the applied map the writer "
+                "journals (#3590, `sdk._journal_entity_mutation`) — and not "
+                "only as the envelope's reserved top-level `name`, which the "
+                "graph's own fold does not read (#4769) and which would leave "
+                "the two stores disagreeing with no error at any layer. "
+                "Refusing here instead of emitting a 0-effect patch.")
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail,
                                  match=match)]
     raise RecordProjectionError(
