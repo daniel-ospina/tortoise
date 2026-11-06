@@ -491,6 +491,43 @@ def test_a_plural_decline_clears_the_whole_list_it_names():
     assert L.classify_pr("Refs #100, #200 — deliberately not closing it.\n", 1) != []
 
 
+def test_a_plural_decline_clears_the_list_it_names_not_the_whole_line():
+    """Measured at the merge head (review, P2): the plural branch took EVERY ref earlier on the
+    physical line, so a list in a LATER sentence swept a previous sentence's claim into the
+    decline and arm 1 read CLEAN — the silent-drop direction this module ranks worst.
+
+        Refs #100. Refs #200, #300 — deliberately not closing them.   -> rc 0, `#100` dropped
+
+    `them` cannot refer to `#100` there: a full stop is not a list separator. The run now walks
+    back from the nearest reference and stops at the first non-list gap, so the decline is about
+    `#200, #300` and `#100`'s claim survives to be flagged.
+
+    Both directions are pinned together, because narrowing a sweep is exactly how the previous
+    rounds traded one error for the other: the single-sentence LIST control must still clear every
+    ref in it (the case round 13 added), and so must the `and`-spelled list.
+
+    RED against the pre-fix tool: `declined == [100, 200, 300]` and no finding.
+    """
+    cross = "Refs #100. Refs #200, #300 — deliberately not closing them.\n"
+    assert L.claims(cross, 1)["declined"] == [200, 300]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(cross, 1)] == [[100]]
+
+    # The same shape through alternative (b): the ordinary-English spelling must not be weaker.
+    cross_b = "Part of #100. Refs #200 — does not close them.\n"
+    assert L.claims(cross_b, 1)["declined"] == [200]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(cross_b, 1)] == [[100]]
+
+    # CONTROLS — the decline sentences the narrowing must not delete.
+    for control in (
+        "Refs #100, #200 — deliberately not closing them.\n",
+        "Refs #100, #200 and #300 — deliberately not closing them.\n",
+        "Refs #100 and #200 — deliberately not closing them.\n",
+    ):
+        assert L.classify_pr(control, 1) == [], control
+    assert L.claims("Refs #100, #200 and #300 — deliberately not closing them.\n",
+                    1)["declined"] == [100, 200, 300]
+
+
 def test_two_declines_on_one_line_each_own_their_reference():
     """Two independent declines joined by `and`: alternative (a)'s clause-terminal lookahead
     admitted `$` and `[,;]` but not a conjunction, so the FIRST sentence was not recognised and its
@@ -1878,3 +1915,83 @@ def test_naming_the_parent_as_the_declines_object_is_a_DECLARED_residual():
     body = "Refs #100 — deliberately not closing the parent.\n"
     assert L.claims(body, 1)["declined"] == []
     assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]]
+
+
+@pytest.mark.parametrize("spelling, body", [
+    ("does not close", "Part of #11000 — does not close `#11078`.\n"),
+    ("not closing", "Part of #11000 — not closing `#11078`.\n"),
+    ("no closing", "Part of #11000 — no closing of `#11078`.\n"),
+    ("html comment", "Part of #11000 — does not close <!-- #11078 -->.\n"),
+    ("deliberately not closing", "Part of #11000 — deliberately not closing `#11078`.\n"),
+])
+def test_an_unreadable_object_is_unreadable_in_every_spelling(spelling, body):
+    """The unreadable-object guard was gated on alternative (a) (`deliberately not …`), so the SAME
+    sentence read two ways depending on which spelling the author used (review, P3):
+
+        Part of #11000 — deliberately not closing `#11078`.   -> flagged (guard fires)
+        Part of #11000 — does not close `#11078`.             -> CLEAN, `#11000` dropped
+
+    `strip_code` blanks the inline-code span (or the HTML comment) to whitespace, so the object is
+    unreadable in every spelling; a decline the scan cannot read is not evidence, and falling
+    through to PROXIMITY cleared the reference BEFORE the sentence. Both stems are now captured and
+    the guard covers both.
+
+    RED against the pre-fix tool for the three ordinary-English spellings (`declined == [11000]`,
+    no finding); the `deliberately` row is the control that was already correct, kept here so the
+    fix cannot be read as "the guard now fires on everything".
+
+    The clause-terminal convention stays a decline, and is pinned here so the guard cannot be made
+    to pass by suppressing the proximity path altogether.
+    """
+    assert L.claims(body, 1)["declined"] == [], spelling
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]], spelling
+
+    terminal = ("Part of #11000 — does not close.\n" if spelling != "deliberately not closing"
+                else "Part of #11000 — deliberately not closing.\n")
+    assert L.claims(terminal, 1)["declined"] == [11000], spelling
+    assert L.classify_pr(terminal, 1) == [], spelling
+
+    # A READABLE noun object is still a decline — the guard must not swallow the honest sentence.
+    assert L.classify_pr("Part of #11000 — does not close the issue.\n", 1) == [], spelling
+    # …and a prose subject is still prose, so the claim stays flagged (the round-12 negative).
+    assert L.classify_pr("Refs #1234 — the sprint is not closed.\n", 1) != [], spelling
+
+
+@pytest.mark.parametrize("body, why", [
+    ("Part of #11000 — does not close `#11078` because it is a measurement PR.\n",
+     "inline code, alternative (b)"),
+    ("Part of #11000 — deliberately not closing `#11078` (measurement only).\n",
+     "inline code, alternative (a)"),
+    ("Part of #11000 — does not close <!-- #11078 --> because it is a measurement PR.\n",
+     "HTML comment"),
+])
+def test_a_reason_does_not_rescue_a_blanked_object(body, why):
+    """The reason tail lets an honest decline carry WHY (round 20, P2). It must not become a route
+    past the unreadable-object guard: a blanked object WITH a reason is still an object the scan
+    cannot read, and clearing the reference before the sentence is the silent drop the guard exists
+    to stop.
+
+    The two are distinguishable because `strip_code` blanks a span to SPACES (length preserved) and
+    DELETES an HTML comment, so a blanked object leaves a whitespace run of two or more characters
+    between the stem and the reason, while an honest sentence has exactly one space there.
+    RED without the run test: all three bodies decline `#11000` and arm 1 reports CLEAN.
+    """
+    assert L.claims(body, 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]], why
+
+
+def test_a_reason_with_no_object_is_an_honest_decline():
+    """The other half of the discriminator: with nothing blanked, a reason attached to a sentence
+    that names no object is the author answering the question, so proximity applies.
+
+    This is the pinned round-20 case (`no close intended.`) plus its two sibling spellings; it is
+    asserted beside the run test so neither half can be "fixed" by tweaking the other without the
+    pair moving together.
+    """
+    for body in (
+        "Refs #100 — no close intended.\n",
+        "Refs #100 — does not close because it is a measurement PR.\n",
+        "Refs #100 — not closing (measurement only).\n",
+    ):
+        assert L.claims(body, 1)["declined"] == [100], body
+        assert L.classify_pr(body, 1) == [], body

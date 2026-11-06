@@ -287,6 +287,17 @@ _LIST_SEP = r"[\s*_`]*"
 _REF_LIST = (rf"(?:{_REF_OBJ})"
              rf"(?:(?:,{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
              rf"|(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))#\d{{1,7}})*")
+# The INVERSION of `_REF_LIST`'s separator: what may sit BETWEEN two references of the same list.
+# It exists so the plural (`them`) declaration clears the run it NAMES without sweeping in a
+# previous sentence's claim — see `_ref_run_back`. The separator is the list grammar's own (a
+# comma or a conjunction, never a clause end and never bare whitespace), so the two directions
+# cannot drift apart; bare whitespace is excluded because `#100 #200` is not an English list and
+# the conservative reading of an ambiguous gap is to END the run.
+_REF_RUN_GAP_RE = re.compile(
+    rf"^{_LIST_SEP}(?:,{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
+    rf"|{_LIST_SEP}(?:and|or){_LIST_SEP})$",
+    re.IGNORECASE,
+)
 _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
 # ⛔ THE OBJECT MAY NAME THE REFERENCE BY ITS KIND — `a closing one`, `the closing ref`,
 # `a resolving one`. The object slot admitted `_DET` immediately followed by `_REF_NOUN`, so the
@@ -318,10 +329,10 @@ DECLINE_RE = re.compile(
     rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})"
     rf"(?P<obj_a>{_EMPH}(?:{_DET}{_REF_LIST}|{_CLOSING_OBJ}))?"
     rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}"
-    rf"|{_REASON_TAIL}))"
+    rf"|(?P<reason_a>{_REASON_TAIL})))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
-    rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
-    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}$|{_REASON_TAIL})",
+    rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}(?P<stem_b>{_CLOSING_STEM})"
+    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}$|(?P<reason_b>{_REASON_TAIL}))",
     re.IGNORECASE,
 )
 # ⛔ A DECLINE IS ABOUT *ITS OWN* REFERENCE — the two properties the grammar alone cannot express,
@@ -489,6 +500,29 @@ def claims(body: str, own_number: int | None = None,
     return _claims_in(strip_code(body)[0], own_number, repo)
 
 
+def _ref_run_back(line: str,
+                  refs: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
+    """The contiguous LIST run ending at the LAST of `refs` (which must be ascending).
+
+    Used by the plural (`them`) decline: the list a plural pronoun names is the run of references
+    joined by the list grammar's own separators, NOT every reference earlier on the physical line.
+    A full stop, a semicolon, a dash, a heading or any prose ends the run, so
+    `Refs #100. Refs #200, #300 — deliberately not closing them.` is about `#200, #300` only and
+    `#100`'s claim stays flagged.
+
+    The gap grammar is `_REF_RUN_GAP_RE` — the INVERSION of `_REF_LIST`'s separator — so the run
+    this clears and the list a decline NAMES cannot be defined differently.
+    """
+    if not refs:
+        return []
+    run = [refs[-1]]
+    for ref in reversed(refs[:-1]):
+        if not _REF_RUN_GAP_RE.match(line[ref[1]:run[-1][0]]):
+            break
+        run.append(ref)
+    return run
+
+
 def _decline_targets(text: str) -> dict[int, set[int]]:
     """The references each decline is ABOUT, keyed by line — `DECLINE_RE` alone is not enough.
 
@@ -550,8 +584,38 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # `2219dfe86`): searching `_REF_NOUN` over `after_stem` matched `one\b` inside `none`,
             # `pr\b` inside `PR` and `it\b` inside `commit`, so appending any ordinary clause
             # (`… `#11078`, the review issue.`) re-opened the drop.
-            if m.group("stem_a") is not None and not obj.strip():
-                after_stem = line[m.end("stem_a"):]
+            # ⛔ AN UNREADABLE OBJECT IS NOT EVIDENCE — IN EITHER SPELLING, AND NOT EVEN WITH A
+            # REASON ATTACHED. The guard used to be gated on `stem_a`, so the SAME sentence read two
+            # ways depending on which spelling the author used (measured at `7e3fe379d`'s
+            # predecessor, review P3):
+            #     `Part of #11000 — deliberately not closing `#11078`.`   -> flagged (guard fires)
+            #     `Part of #11000 — does not close `#11078`.`             -> CLEAN, `#11000` dropped
+            # Both stems are captured so the guard covers both.
+            #
+            # ⛔ AND A REASON MUST NOT RESCUE A BLANKED OBJECT. `_REASON_TAIL` lets an honest
+            # decline carry WHY, and its capture (`reason_a`/`reason_b`) is the one mechanical
+            # signal that separates a reason from prose. The two are distinguishable because
+            # `strip_code` blanks a span to SPACES (length preserved) and DELETES an HTML comment:
+            # a blanked object leaves a whitespace run of two or more characters between the stem
+            # and the reason, while an honest sentence has exactly one space there.
+            #     `does not close `#11078` because …`   -> 10 spaces  -> unreadable -> FLAGGED
+            #     `no close intended.`                  ->  1 space   -> honest     -> declines
+            # Both directions are pinned as a pair, so neither half can be "fixed" by tweaking the
+            # other; without the run test the reason reading wins in both and the blanked-object
+            # silent drop comes back through a new door.
+            #
+            # ⛔ THE TEST IS ON THE CAPTURED OBJECT, NOT ON THE REST OF THE LINE (measured at
+            # `2219dfe86`): searching `_REF_NOUN` over `after_stem` matched `one\b` inside `none`,
+            # `pr\b` inside `PR` and `it\b` inside `commit`, so appending any ordinary clause
+            # (`… `#11078`, the review issue.`) re-opened the drop.
+            stem_end = (m.end("stem_a") if m.group("stem_a") is not None
+                        else m.end("stem_b") if m.group("stem_b") is not None
+                        else None)
+            reason = m.group("reason_a") or m.group("reason_b")
+            honest_reason = (reason is not None and stem_end is not None
+                             and not re.match(r"[ \t]{2,}", line[stem_end:]))
+            if stem_end is not None and not obj.strip() and not honest_reason:
+                after_stem = line[stem_end:]
                 # …but a clause that CONTINUES (`Closes and #200 is deliberately not Closes.`) also
                 # begins with a space, and there the space is the conjunction's, not a blanked span's.
                 # ⛔ A CONJUNCTION IS ADMITTED ONLY WHEN IT INTRODUCES THE NEXT REFERENCE
@@ -578,10 +642,18 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # `them` is PLURAL by construction, so it is about every reference in the list it
             # follows — `Refs #100, #200 — deliberately not closing them.` declined only `#200`,
             # leaving `#100` flagged on a sentence that answers both (measured at `e7dd41058`,
-            # review P3). A singular object keeps the proximity rule; a plural one takes the whole
-            # preceding run on that line, which is the only thing `them` can refer to.
+            # review P3). A singular object keeps the proximity rule.
+            #
+            # ⛔ THE RUN IS THE LIST, NOT THE LINE. Taking every ref before the decline on the line
+            # swept a DIFFERENT SENTENCE's claim into the decline and arm 1 read CLEAN on a claim
+            # nothing resolved — the direction this module ranks worst (measured at `0b6cb52ca`,
+            # review P2):
+            #     Refs #100. Refs #200, #300 — deliberately not closing them.   -> CLEAN, `#100`
+            # `them` cannot refer to `#100` there: the two are separated by a full stop, not by a
+            # list separator. The run walks back from the nearest preceding reference and stops at
+            # the first gap that is not the list grammar's own separator (`_ref_run_back`).
             if re.search(r"\bthem\b", obj, re.IGNORECASE):
-                targets.update(r[2] for r in before)
+                targets.update(r[2] for r in _ref_run_back(line, before))
             else:
                 targets.add(num)
         if targets:
