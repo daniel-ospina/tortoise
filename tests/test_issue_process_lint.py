@@ -2157,3 +2157,88 @@ def test_a_blanked_comment_between_a_claiming_word_and_its_ref_still_claims(body
     """
     assert L.claims(body, 1)["weak"] == [1234]
     assert L.claims("Refs\n#1234\n", 1)["weak"] == [], "a claim must not cross a newline"
+
+
+# --- review round 22 (the same head, the whole artifact): contractions, the doubled colon, the PR --
+# Three findings from the third fresh-context review, each a ONE-DIRECTION defect with a paired
+# control: two are class B (an honest decline flagged) and one is class A (a claim dropped). Pinned
+# in pairs for the same reason as rounds 20 and 21 — a fix that only moves one direction is the
+# pattern this grammar spent seven rounds on.
+
+
+@pytest.mark.parametrize("negation", [
+    "isn't", "wasn't", "aren't", "doesn't", "don't", "didn't", "can't", "cannot", "won't",
+    "hasn't", "couldn't", "shouldn't", "never",
+])
+def test_a_contracted_negation_is_the_same_honest_decline(negation):
+    """Measured at `53646f1f6fd0` (review round 22, P2) — the FALSE POSITIVE direction.
+
+    Alternative (b) admitted `does not` / `not` / `no ` / `non-` and NO contraction, so the most
+    natural spelling of the honest sentence was flagged while its uncontracted twin declined:
+
+        `Refs #100 — it isn't closed.`        -> FLAGGED   (`it is not closed.`      -> clean)
+        `Refs #100 — this doesn't close it.`  -> FLAGGED   (`this does not close it.` -> clean)
+        `Refs #100 — we can't close it.`      -> FLAGGED
+
+    Contractions are neither pinned nor mentioned anywhere else in this file, so this was a gap and
+    not a decision. They are ALTERNATIONS of the negation, not a wider tail: the clause-end and
+    reference-naming rules still apply to each (the negative pair below).
+    """
+    body = f"Refs #100 — it {negation} closed.\n" if negation in ("isn't", "wasn't", "aren't") \
+        else f"Refs #100 — this {negation} close it.\n"
+    assert L.claims(body, 1)["declined"] == [100], body
+    assert L.classify_pr(body, 1) == [], body
+
+
+def test_a_contracted_negation_about_another_subject_is_still_prose():
+    """The bound on the case above: the bridge still decides WHOSE state the sentence is about, so a
+    contraction about an ordinary noun leaves the claim flagged (the round-12 negative, contracted)."""
+    for body in ("Refs #100 — the sprint isn't closed.\n",
+                 "Refs #100 — the estimate doesn't close the delta.\n",
+                 "Refs #100 — the outage wasn't fixed.\n"):
+        assert L.claims(body, 1)["declined"] == [], body
+        assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]], body
+
+
+@pytest.mark.parametrize("body", [
+    "Refs #100\n\nCloses:: #100\n",
+    "Refs #100\n\nCloses: :#100\n",
+    "Refs #100\n\nFixes:: #100\n",
+    "Refs #100\n\nResolves::#100\n",
+])
+def test_a_doubled_colon_does_not_manufacture_a_close(body):
+    """Measured at `53646f1f6fd0` (review round 22, P3) — the FALSE PASS direction.
+
+    `cmid` was written as the character class `[\\s:]*` while its own comment claimed the separator
+    was `closes_landing`'s `\\s*:?\\s*`. A class cannot express "at most one colon", so `Closes::
+    #100` was credited as a resolution the landing grammar does not credit — measured as 33
+    divergences across a keyword × separator sweep, all doubled-colon, all in this direction.
+    """
+    assert L.claims(body, 1)["closing"] == [], body
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]], body
+    # …and the two grammars now AGREE on every legal spelling, which is the invariant the comment
+    # claims: a keyword the landing grammar credits is a resolution here, and vice versa.
+    import closes_landing
+    for legal in ("Closes #100", "Closes: #100", "Closes : #100", "closes #100"):
+        assert closes_landing.parse_closing_refs(legal, "o/r") == [100], legal
+        assert L.claims(legal + "\n", 1)["closing"] == [100], legal
+
+
+def test_the_pull_request_is_not_the_object_of_a_decline():
+    """Measured at `53646f1f6fd0` (review round 22, P3) — the FALSE PASS direction, and the mirror of
+    round 20's subject fix: `pr` was removed from the SUBJECT words and left in the OBJECT nouns.
+
+        Refs #100 — not closing the PR.        -> CLEAN, declined=[100]   (#100 dropped)
+        Refs #100 — does not close the PR.     -> CLEAN, declined=[100]
+
+    "not closing the PR" is a statement about the pull request's merge state — the very thing
+    `test_the_pull_requests_own_merge_state_is_not_a_decline` says "says NOTHING about whether #100
+    is closed" — so it must not clear `#100`. The honest objects (`this issue`, `#100`) are pinned
+    here as controls so the removal cannot be made green by deleting the object grammar.
+    """
+    for body in ("Refs #100 — not closing the PR.\n", "Refs #100 — does not close the PR.\n"):
+        assert L.claims(body, 1)["declined"] == [], body
+        assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]], body
+    for body in ("Refs #100 — not closing this issue.\n", "Refs #100 — does not close #100.\n"):
+        assert L.claims(body, 1)["declined"] == [100], body
+        assert L.classify_pr(body, 1) == [], body
