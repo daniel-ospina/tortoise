@@ -1032,10 +1032,10 @@ jobs:
       #
       # ARM 2, ARITHMETICALLY (`docs/ops/ci-wall-clock.md` §2: `cap >= SUM x 1.5`
       # and the `test` cap stays 90 ⇒ SUM <= 60 m). The measured `test` SUM without
-      # any cache-write term is 49.6 m — 10 m last-failed pre-phase + 26 m emitted
+      # any cache-write term is 50.6 m — 10 m last-failed pre-phase + 27 m emitted
       # worst shard watchdog + 6 m embedder + 3.03 m `Set up job` + 4.23 m of
-      # uncapped pre-suite + 0.38 m last-failed save — so <= 10.4 m is available;
-      # this shape takes 8 (1 m prune + 7 m save), SUM 57.6, x 1.5 = 86.5.
+      # uncapped pre-suite + 0.38 m last-failed save — so <= 9.4 m is available;
+      # this shape takes 8 (1 m prune + 7 m save), SUM 58.6, x 1.5 = 87.9.
       #
       # WHY SPLIT RATHER THAN JUST BOUND 3.88 GB, at its real size: the degraded
       # uplink this run measured is 0.9 MB/s sustained (3,019,898,880 B in 3,412 s),
