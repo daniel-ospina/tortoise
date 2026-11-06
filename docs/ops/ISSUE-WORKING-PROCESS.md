@@ -122,7 +122,11 @@ uv run python tools/issue_process_lint.py --issue-body-file /tmp/i.md --wip   # 
 ⚠️ `--label` filters the **issue** population (`--sweep-issues`); `--sweep` reads PRs and has no
 label filter, so the combination is refused rather than silently measuring an unfiltered
 population. `--body-file` and `--issue-body-file` are mutually exclusive for the same reason: a PR
-body and an issue body are different populations, and one run answers one of them.
+body and an issue body are different populations, and one run answers one of them. Two further pairs
+are **refused, never resolved in silence**, because the flag would otherwise be accepted and dropped:
+`--limit` is read by the two sweeps and by nothing else (the other modes read a fixed subject), and
+`--json` + `--annotate` have no union — the JSON mode would run and emit no `::warning`/`::notice`
+line at all.
 
 ⚠️ **`--sweep` / `--sweep-issues` are a CAP, not the population.** Each reads ONE `gh … list
 --limit N` call (default 50), and `gh` lists newest-first — so the subjects skipped are the

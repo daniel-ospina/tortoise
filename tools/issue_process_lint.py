@@ -354,10 +354,25 @@ _CLOSING_STEM = (r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]?|ing)?"
 # (`deliberately not closing it.`, `deliberately not closing #1234.`) — measured as FLAGGED by the
 # round-12 grammar, i.e. a false positive on exactly the honesty the block asks for.
 _REF_NOUN = (r"(?:one|ones|ref|refs|reference|references|issue|issues|keyword|keywords"
-             r"|commit|commits|it|them|this|that)\b")
+             r"|it|them|this|that)\b")
 # ⛔ `pr` IS NOT AN OBJECT NOUN (round 22, P3) — the mirror of round 20's subject fix. `the PR` names
 # the PULL REQUEST, so `Refs #100 — not closing the PR.` cleared `#100` while saying nothing about it
 # (`declined=[100]`, rc 0). The honest forms (`this issue`, `this ref`, `#100`) are all admitted.
+#
+# ⛔ `commit` IS NOT AN OBJECT NOUN EITHER (review round 25, P2) — round 22's ruling one noun over.
+# A closing keyword closes an ISSUE (GitHub's own "Linking a pull request to an issue": the object
+# of `close/fix/resolve` is an issue), so `does not close the commit` says nothing about `#100` and
+# must not clear it. Left in the object list it was a class-A FALSE PASS, measured at `afd6de51d`:
+#     Refs #100 — does not close the commit.          -> declined=[100]  (rc 0, #100 dropped)
+#     Refs #100 — this PR does not close the commit.  -> declined=[100]  (rc 0)
+#     Refs #100 — no closing commit.                  -> declined=[100]  (rc 0)
+# while the mirror spelling `this commit does not close it` — the honest sentence, whose object IS
+# the reference — was FLAGGED, because `commit` was in neither subject vocabulary. Removing it from
+# the OBJECT list alone fixes the false PASS and leaves that false positive, so it is admitted where
+# `pr` is: as the two-word subject whose demonstrative makes it the reference (`this commit does not
+# close it` declines). Bare `commit` and `the commit` stay refused, so `does not close the commit`
+# has no route. The invariant either way is this module's own: the object list, the subject
+# vocabulary and the bridge must give the SAME answer to "is this sentence about the reference".
 _REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
 # A decline may name a LIST — `#100, #200`, `#100 and #200`. Captured as ONE group so every named
 # ref is visible to the target logic; the continuation requires a `#N` right after the separator, so
@@ -485,7 +500,11 @@ _DECLINE_TAIL_BRIDGE = _DECLINE_TAIL
 _SUBJECT_WORD = r"(?:this|it|that|which|we|i|they|author)"
 # `pr` is NOT a subject word: it is admitted only in the two-word form whose demonstrative makes it
 # the reference (`this PR`), so `the PR is not closed` cannot reach the decline.
-_SUBJECT_PHRASE = rf"(?:this|these){_EMPH}(?:pr|prs)"
+# `commit` is admitted the same way, and for the mirror reason (review round 25): it left the OBJECT
+# list because a closing keyword's object is an issue, and the demonstrative form is how an author
+# says the honest decline about the reference — `this commit does not close it`. Bare and
+# `the`-prefixed `commit` remain refused, so `does not close the commit` stays prose.
+_SUBJECT_PHRASE = rf"(?:this|these){_EMPH}(?:pr|prs|commit|commits)"
 # An ACT (do-support or a modal): the subject may be a human agent and the verb takes an object.
 _COPULA = (r"(?:does|do|did|has|have|had|will|would|should|must|could|can"
            r"|may|might)")
@@ -1203,14 +1222,21 @@ def main(argv: list[str] | None = None) -> int:
                          "single-issue modes only")
     ap.add_argument("--no-wip", action="store_true", help="inject the opposite verdict")
     ap.add_argument("--label", default=None, help="--sweep-issues only: restrict the population")
-    ap.add_argument("--limit", type=int, default=50,
+    ap.add_argument("--limit", type=int, default=None,
                     help="--sweep/--sweep-issues: how many open subjects to read, newest-first "
                          "(one `gh` list call — a CAP, not a page count, and a run that hits it "
-                         "says so)")
+                         "says so). Refused elsewhere: no other mode has a population to cap "
+                         "(default 50)")
     ap.add_argument("--annotate", action="store_true",
-                    help="emit GitHub Actions ::warning lines (for a warn-only workflow step)")
-    ap.add_argument("--json", action="store_true", help="emit JSON")
+                    help="emit GitHub Actions ::warning lines (for a warn-only workflow step) "
+                         "— mutually exclusive with --json")
+    ap.add_argument("--json", action="store_true", help="emit JSON (mutually exclusive with --annotate)")
     args = ap.parse_args(argv)
+    # `--limit` is read by the two sweeps and by NOTHING else, so on every other mode it used to be
+    # accepted and silently ignored — the caller read the output as a capped population it never
+    # asked for (review round 25, P4). Resolve it AFTER the refusal below, so the refusal tests the
+    # flag the caller actually passed rather than the default that makes every run look explicit.
+    limit = 50 if args.limit is None else args.limit
 
     wip: bool | None = None
     if args.wip and args.no_wip:
@@ -1248,6 +1274,23 @@ def main(argv: list[str] | None = None) -> int:
         # a flag that cannot be honoured is refused, never read as a smaller population.
         ap.error("--comments-file supplies the comment bodies of --issue-body-file only; "
                  "the other modes read their comments themselves (or have none)")
+    if args.limit is not None and not (args.sweep or args.sweep_issues):
+        # `--limit` caps a SWEEP, and the two sweeps are the only modes with a population to cap —
+        # every other mode reads one subject (or one file), so a `--limit 3` there was accepted and
+        # dropped without a word while the caller believed the run had been narrowed. Same doctrine
+        # as `--label` above: a flag that cannot be honoured is refused, never read as a population
+        # the caller did not ask for.
+        ap.error("--limit applies to --sweep/--sweep-issues only; the other modes read a fixed "
+                 "subject, so the cap would be dropped in silence")
+    if args.json and args.annotate:
+        # `--annotate` is the mode a workflow step uses, and `--json` the machine mode; `main()`
+        # dispatches `if args.json: … elif args.annotate: …`, so BOTH flags together ran the JSON
+        # mode and the requested ::warning/::notice lines were never emitted — a step that asked
+        # for annotations silently emitted none (review round 25, P4). There is no meaningful union
+        # of the two surfaces, so they are refused together rather than resolved in silence.
+        ap.error("--json and --annotate are mutually exclusive: --json emits one JSON document, "
+                 "--annotate emits ::warning/::notice lines — passing both silently dropped the "
+                 "annotations")
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
@@ -1294,19 +1337,19 @@ def main(argv: list[str] | None = None) -> int:
             measured_rows.append(measured)
             population = f"1 issue ({len(bodies)} comment(s) + body)"
         elif args.sweep:
-            rows = sweep_prs(repo, args.limit)
+            rows = sweep_prs(repo, limit)
             for number, body, labels in rows:
                 findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
             population = f"{len(rows)} open PR(s)"
-            _note_truncation(notes, rows, args.limit, "open PR")
+            _note_truncation(notes, rows, limit, "open PR")
         else:  # --sweep-issues
-            rows = sweep_issues(repo, args.limit, args.label)
+            rows = sweep_issues(repo, limit, args.label)
             for number, bodies in rows:
                 found, measured = classify_issue(bodies, number, wip, notes)
                 findings += found
                 measured_rows.append(measured)
             population = f"{len(rows)} open issue(s)"
-            _note_truncation(notes, rows, args.limit, "open issue")
+            _note_truncation(notes, rows, limit, "open issue")
     except Unmeasurable as exc:
         print(f"issue_process_lint: UNMEASURED — {exc}", file=sys.stderr)
         return RC_UNMEASURABLE

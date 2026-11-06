@@ -2521,3 +2521,104 @@ def test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts(
     # An UNticked list in a later comment is some other checklist, not this one's criteria.
     assert [f.arm for f in L.classify_issue([inv, "## Satisfies\n\nTo be derived.\n",
                                             "- [ ] unrelated\n"], 1)[0]] == [L.ARM_ISSUE]
+
+
+# --- review round 25: `commit` is not the reference, and two flags that could not be honoured -----
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — does not close the commit.", "a COMMIT is the closing verb's object"),
+    ("Refs #100 — this PR does not close the commit.", "…same, behind a two-word subject"),
+    ("Refs #100 — no closing commit.", "`no closing commit` names a commit, not `#100`"),
+    ("Refs #100 — does not close commits.", "the plural spelling, same object"),
+    ("Refs #100 — deliberately not closing the commit.", "the convention word does not change the object"),
+])
+def test_the_commit_is_not_the_object_of_a_decline(body, why):
+    """Measured at `afd6de51d` (review round 25, P2) — the FALSE PASS direction, class A.
+
+    `commit|commits` sat in `_REF_NOUN`, the object list a decline may name, so a sentence about a
+    COMMIT cleared the reference on the line while saying nothing about it (declined=[100], rc 0):
+
+        Refs #100 — does not close the commit.    -> CLEAN, declined=[100]   (#100 dropped)
+
+    A closing keyword closes an ISSUE (GitHub's own "Linking a pull request to an issue"), so a
+    commit is not the reference — the same ruling round 22 made for `pr`/`prs`, one noun over. The
+    constant's own comment already said the list admits "the reference, and nothing else".
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[100]], why
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — this commit does not close it.", "the commit as SUBJECT, the reference as object"),
+    ("Refs #100 — these commits do not close it.", "the plural demonstrative form"),
+])
+def test_the_commit_that_does_not_close_it_is_still_an_honest_decline(body, why):
+    """The mirror half of the removal above, pinned so the fix cannot be made green by deleting the
+    noun outright: deleting `commit` from the OBJECT list alone left the honest sentence FLAGGED
+    (`declined=[]` at `afd6de51d`), a class-B false positive on exactly the honesty the block asks
+    for. `commit` is now admitted where `pr` is — as the two-word subject whose demonstrative makes
+    it the reference — so both spellings of the same sentence agree."""
+    assert L.claims(body + "\n", 1)["declined"] == [100], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
+def test_the_commit_subject_narrowing_keeps_the_bare_and_the_forms_out():
+    """`commit` is admitted ONLY behind `this`/`these`, exactly as `pr` is (round 20's narrowing) —
+    so the forms that say nothing about the reference still take the object route and still flag."""
+    for body in ("Refs #100 — the commit is not closed.\n",
+                 "Refs #100 — commit is not closed.\n"):
+        assert L.claims(body, 1)["declined"] == [], body
+        assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]], body
+    # …and the objects that genuinely ARE the reference keep declining, so the grammar is not
+    # narrowed shut.
+    for body in ("Refs #100 — not closing this issue.\n",
+                 "Refs #100 — does not close #100.\n",
+                 "Refs #100 — this PR does not close the issue.\n"):
+        assert L.claims(body, 1)["declined"] == [100], body
+        assert L.classify_pr(body, 1) == [], body
+
+
+def test_json_and_annotate_are_refused_together(tmp_path):
+    """Measured at `afd6de51d` (review round 25, P4): `main()` dispatches `if args.json: … elif
+    args.annotate: …`, so both flags together ran the JSON mode and emitted NO `::warning`/`::notice`
+    line at all — a workflow step that asked for annotations silently produced none. There is no
+    union of one JSON document and a stream of annotations, so the pair is refused rather than
+    resolved in silence, the same doctrine as `--label` / `--comments-file` above it."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    r = _run("--body-file", str(body), "--json", "--annotate")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "--json and --annotate are mutually exclusive" in r.stderr
+    # the controls: each flag alone still runs its own surface
+    assert _run("--body-file", str(body), "--json").returncode == L.RC_FINDINGS
+    assert "::warning title=issue-process-lint" in _run("--body-file", str(body), "--annotate").stdout
+
+
+@pytest.mark.parametrize("argv", [
+    ("--pr", "1"),
+    ("--issue", "1"),
+    ("--body-file", "{body}"),
+    ("--issue-body-file", "{body}"),
+])
+def test_limit_is_refused_on_every_mode_that_reads_a_fixed_subject(argv, tmp_path):
+    """Measured at `afd6de51d` (review round 25, P4): `--limit` is read by the two sweeps and by
+    nothing else, so on every other mode it was accepted and silently ignored while the caller
+    believed the run had been narrowed. Refused here for the same reason `--label` is — and the
+    sweeps stay the control, so the refusal cannot be made green by refusing the flag everywhere."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    r = _run(*(a.format(body=str(body)) for a in argv), "--limit", "3")
+    assert r.returncode == 2, (argv, r.returncode, r.stderr)
+    assert "--limit applies to --sweep/--sweep-issues only" in r.stderr
+
+
+def test_the_default_limit_is_not_refused_offline(tmp_path):
+    """The control for the refusal above: `--limit`'s default must not read as an explicit flag, or
+    every offline run would be refused for a cap it never asked for. Only the OFFLINE modes are run
+    here — the live ones would reach `gh`, and this file is on the required `core` surface, which is
+    hermetic (no network, modelled by the `fetch_*`/`sweep_*` monkeypatch seam elsewhere)."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    for argv in (("--body-file", str(body)), ("--issue-body-file", str(body))):
+        assert _run(*argv).returncode in (L.RC_CLEAN, L.RC_FINDINGS), argv
