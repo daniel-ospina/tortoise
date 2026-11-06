@@ -1124,3 +1124,77 @@ def test_a_slot_only_hold_survives_the_union_pass():
     assert [m["surface"] for m in twice["mentions"]] == ["it"]
     payload = execute_embed(copy.deepcopy(twice), {}, session_id="slot-union")["payload"]
     assert "it" not in _entity_names(payload)
+
+
+# ── the mention-only response: the gate must not sit behind `entities[]` ──
+
+def test_a_mention_only_response_cannot_smuggle_a_rule_that_never_ran():
+    """⛔ `route_mentions` returned early whenever `entities` was not a list, so a
+    section the parsed output OMITS (`_validate_output_shape`: `if section not in
+    parsed: continue`) skipped the cue re-verification entirely — and
+    `_mentions_for_claim` then copied the model's `rule_id` verbatim, storing
+    `referentiality.pronoun` as a cue attribution on a surface `judge()` calls a
+    REFERENT (review at `591906397`, P2). Reachable in ONE model output: the armed
+    prompt asks for `mentions[]`, and a model that believes the session has no
+    entities can emit the channel without `entities[]`.
+
+    Proven at the MINT boundary, which is where the record is actually stored."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "the admin-merge rail",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "the admin-merge rail",
+                       "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]                     # the mention-only response
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        "the mention-only response dropped the record it was asked for")
+    assert records[0]["rule_id"] == ref.RULE_CHANNEL, (
+        "a cue rule that never ran on this surface was stored as evidence")
+
+
+def test_a_mention_only_response_keeps_a_rule_the_cue_AGREES_with():
+    """POSITIVE CONTROL for the row above: the clamp must not flatten every
+    `rule_id` to `referentiality.channel` — a cue rule the cue re-derives for the
+    same surface is the one value the record exists to carry."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "it",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "it",
+                       "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["it"]
+    assert records[0]["rule_id"] == ref.RULE_PRONOUN
+
+
+# ── the record's boundary: it is payload-only, and the tree says so ───────
+
+def test_the_mention_record_is_payload_only_and_says_so():
+    """⛔ THE DECLARED DEFERRAL, PINNED (review at `591906397`, Issue 1). DM1
+    names the claim Point as the record's home and `Point.mentions` exists, but
+    BOTH declared write doors drop it — `hosted_api.create_point` enumerates its
+    props and the SDK capture whitelist is `#2949`'s response-parity surface. So
+    an armed run's `mentions_recorded` counts records the write discards, and a
+    reader of the graph sees the claim and no mention on it.
+
+    Persisting it is `#11239`, deliberately not this slice. This row exists so the
+    boundary cannot become a silent claim: adding `mentions` to the whitelist (or
+    removing the disclosure) REDs here and forces the docstring, the PR body and
+    `#11239` to be updated together."""
+    from tortoise.commit_schema import Mention
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+
+    # the record EXISTS at the payload — "payload-only" is not "nothing"
+    payload, _ = _mint(_embed_list("it"))
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"]
+
+    # …and the write door does not take it, which is the whole deferral
+    assert "mentions" not in _CAPTURE_PASSTHROUGH_PROPS, (
+        "the capture whitelist now carries mentions: the payload-only deferral "
+        "is over — update Mention's docstring and #11239, and turn this row into "
+        "a persistence assertion")
+    assert "11239" in (Mention.__doc__ or ""), (
+        "Mention's docstring no longer names the slice that owns persistence, so "
+        "the model reads as graph state")

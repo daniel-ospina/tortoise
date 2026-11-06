@@ -10333,7 +10333,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     4. it is recorded as a mention on **every** claim that used it —
        ``{surface, claim_ref, quote, span_start, span_end, span_source,
        kind_guess, rule_id}`` — which is where the information a hold would
-       otherwise destroy now lives. ⚠️ Every POINT carrier, exactly: an EVENT is
+       otherwise destroy now lives, **in the payload** (see the boundary below). ⚠️ Every POINT carrier, exactly: an EVENT is
        a carrier too (its ``about_entities`` is stripped like a claim's), but
        ``execute_embed``'s ref set is points-only, so a record written against an
        EVENT can never resolve and would be reported as a fold that never
@@ -10341,6 +10341,14 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
        surface is listed in ``mention_unrecorded_surfaces`` and counted in
        ``mention_carrier_is_event``. The surface is still HELD (never minted) —
        only the DM1 record is missing, and that gap is the persistence slice's.
+
+    ⛔ **The record stops at the PAYLOAD, and that is stated, not implied.** Both
+    declared write doors — ``hosted_api.create_point``'s enumerated props and the
+    SDK capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``) — drop
+    ``mentions``, so an armed run's ``stats["mentions_recorded"]`` counts records
+    the WRITE discards. That is #11239's slice (DM1's home on the Point is
+    declared and unfulfilled): the count is an extraction measurement, never a
+    claim that the graph holds it.
 
     **Held on the SURFACE, not on a live reference — because a hold removes the
     reference it was decided from.** An earlier draft required
@@ -10400,11 +10408,23 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # byte-identical" is the whole promise; a key is not byte-identical.
         return embed_list
 
-    entities = embed_list.get("entities")
-    if not isinstance(entities, list):
-        return embed_list
     channel = embed_list.get("mentions")
     channel = channel if isinstance(channel, list) else []
+    entities = embed_list.get("entities")
+    if not isinstance(entities, list):
+        # ⛔ A CHANNEL-ONLY response is reachable, and returning here skipped the
+        # channel entirely: ``_validate_output_shape`` accepts a section the
+        # parsed output omits (``if section not in parsed: continue``), and the
+        # armed prompt now ASKS for ``mentions[]``, so a model that believes the
+        # session has no entities could emit the channel and no ``entities[]``.
+        # The early return then handed the model's RAW entries to the payload —
+        # including a ``rule_id`` naming a cue that never ran on that surface
+        # (review at `591906397`, P2). No entity candidates is a legitimate
+        # state; no *verification* is not, so the channel is processed against
+        # an empty candidate set instead of being dropped.
+        if not channel and not isinstance(embed_list.get("mention_held"), list):
+            return embed_list
+        entities = []
     points = [p for p in (embed_list.get("points") or []) if isinstance(p, dict)]
     events = [e for e in (embed_list.get("events") or []) if isinstance(e, dict)]
     # ── the decisions an EARLIER pass carried (see `_carried_holds`) ────────
@@ -11165,6 +11185,17 @@ def _mentions_for_claim(embed_list: dict, content: str,
                 record[k] = str(v)[:_MENTION_CAPS[k]]
             elif k in ("span_start", "span_end"):
                 record[k] = v if isinstance(v, int) else None
+            elif k == "rule_id":
+                # ⛔ THE LAST DOOR, and the only one every stored record passes.
+                # A cue ``rule_id`` is a CLAIM about a rule that may never have
+                # run, so it is re-verified HERE as well as in
+                # :func:`_mention_record` — because a record can reach this
+                # function without ever going through that builder when
+                # ``route_mentions`` did not process the channel (review at
+                # `591906397`, P2: a mention-only response shipped
+                # ``referentiality.pronoun`` on a surface ``judge()`` calls a
+                # REFERENT, and no cue ran on it at all).
+                record[k] = _mention_rule(str(m.get("surface") or ""), v)
             else:
                 # `claim_ref`/`rule_id`/`span_source` are `str` on the model: a
                 # non-str value 422'd the payload (review cycle 3, P3).

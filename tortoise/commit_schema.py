@@ -574,6 +574,20 @@ class Mention(BaseModel):
     ``span_start``, ``span_end``, ``kind_guess`` — and deliberately **no
     ``claim_id``**, because the point carrying the property IS the claim.
 
+    ⛔ **PAYLOAD-ONLY TODAY — this is not graph state, and must not be read as it.**
+    The record reaches the extraction payload and ``result["mentions"]["records"]``
+    (``extractor_v2._mentions_for_claim``), and then STOPS: neither declared write
+    door carries it. ``hosted_api``'s ``create_point`` calls enumerate their
+    properties, and the SDK capture whitelist
+    (``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s response-parity surface) holds
+    ``quote/when/search_keys/source_turn_id/span_start/span_end`` only. So a
+    capture's ``stats["mentions_recorded"]`` counts records the write DISCARDS.
+    DM1's home on the Point is declared but unfulfilled; persisting it (a
+    flat/scalar projection, or an explicit session-evidence-only ruling) is
+    **#11239**, deliberately not this slice. ``tests/test_referentiality_11021.py
+    ::test_the_mention_record_is_payload_only_and_says_so`` pins the boundary so
+    this docstring cannot quietly become a lie.
+
     ``span_start``/``span_end`` are the same "pointer, not payload" pair the
     Point carries (E4 / ``#5007``): all-or-nothing and ``end > start``, or both
     absent. Absent means "the surface was not uniquely locatable in the text the
@@ -638,6 +652,9 @@ class Point(BaseModel):
     # #11021: the phrases this claim POINTED with but did not NAME. Additive-
     # optional, so a pre-#11021 payload validates unchanged, and the write path
     # never promotes a member to an :Object — a mention is a record, not a node.
+    # ⛔ PAYLOAD-ONLY: no writer persists this list (see `Mention`'s docstring),
+    # so a graph read after a capture holds the claim and no mention on it.
+    # Persistence is #11239, not this slice.
     mentions: list[Mention] = Field(default_factory=list)
 
     @model_validator(mode="after")
