@@ -55,10 +55,14 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    pre-#10000 derivation**, because §9.1/D1 places captured turn text in the
    record and never on a graph node. The authority for the pair is
    `STORAGE-ARCHITECTURE.md:527`: *"`summary`/`title` stay on the node — they
-   are §4.6 metadata, not the S1 narrative"* — which is exactly why a
-   post-#10000 row's lexicon `_searchText` IS projected (it is that §4.6
-   metadata, not the narrative) while `summary` stays declined as a named
-   CHOICE, and why the test is on the row's PROVENANCE rather than its name.
+   are §4.6 metadata, not the S1 narrative"*. That sentence is why a
+   post-#10000 row's lexicon `_searchText` IS projected — it is that §4.6
+   metadata value, not the narrative — and why this test is on the row's
+   PROVENANCE rather than on the column's NAME. ⛔ It does NOT sanction refusing
+   `summary`: that is a DEPARTURE from §527's own sentence, taken deliberately
+   and recorded at that table (#10965 — the declared set exists for the FTS
+   field, and restoring a display label gains no retrieval), never something the
+   authority implies.
    The decision is per ROW, from the row's own
    values (#10000's rows carry the topic lexicon there — token-shaped, not a copy of the row's prose, though a space-less CJK run arrives whole and a Thai one fragments) — see that
    table for the rule, its bound, and its costs.

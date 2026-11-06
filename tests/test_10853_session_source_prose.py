@@ -1308,8 +1308,8 @@ def test_the_identity_view_NEVER_aliases_the_record_row():
 def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
     """The quote the `#10852` narrowing rests on must be VERBATIM.
 
-    ⚠️ WHAT THIS GUARDS CHANGED, and the change is recorded here rather than
-    left in the pin's old name. It was written for an OBLIGATION — `#10852` was
+    ⚠️ WHAT THIS GUARDS CHANGED, and the change is recorded here because the pin
+    kept its name. It was written for an OBLIGATION — `#10852` was
     expected to DELETE this narrowing, and the quotation was the authority that
     obligation rested on. `#10852` landed on `main` (`ba87797c4`) and did NOT
     delete it: it made the decision PROVENANCE-correct instead (the lexicon
@@ -1349,16 +1349,17 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         inspect.getsource(cp),
     )
     assert match, (
-        "the `#10852` obligation no longer quotes `STORAGE-ARCHITECTURE.md:527`, "
-        "so the authority it rests on is unstated — restore the quotation")
+        "the narrowing's authority is no longer quoted in the source — the pin "
+        "extracts `STORAGE-ARCHITECTURE.md:527` from `cache_projection`, so "
+        "restore the quotation")
     # The quotation wraps across lines in the docstring; the document states it
     # as one sentence, so compare on normalised whitespace.
     quote = " ".join(match.group("quote").split())
     assert quote in authority, (
-        "the `#10852` obligation quotes a sentence `STORAGE-ARCHITECTURE.md:527` "
+        "the narrowing quotes a sentence `STORAGE-ARCHITECTURE.md:527` "
         f"no longer contains: {quote!r}. The ruling was restated (#10978 is the "
         "precedent) — re-quote the authority as it now reads rather than leaving "
-        "the obligation resting on a sentence that is gone.")
+        "the citation resting on a sentence that is gone.")
 
     # The other three sites cite the same ruling by its section number rather
     # than by quotation, so hold them to that number in the same leg: a stale
