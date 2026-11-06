@@ -252,16 +252,191 @@ class TestTheHoldIsDrainable:
         assert len({h["key"] for h in result["held"]}) == 1
 
     def test_a_resolved_identity_is_never_re_held(self, tmp_path):
+        """⛔ Review round 4 P2: the refusal to reopen is not enough — the CALLER
+        must read it, or an identity committed turns ago is re-reported as held.
+
+        The old arm asserted only `reopened is False` and the store state, so the
+        false census it produced was pinned as acceptable by omission: the run
+        counted the candidate in `held`/`stats["held"]`, said "carried in the hold
+        store", and then dropped the operator on the ordinary "did not resolve"
+        arm — three false signals at once, and the epic's acceptance ("the held
+        count returns to zero") unreachable, because every ambiguous run after a
+        resolution re-inflated it by one.
+        """
         store = hold.HoldStore(tmp_path / "hold.jsonl")
         v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
         key = store.pending()[0]["key"]
         store.claim(key)
         store.confirm(key, "pt_canonical")
         again = v2.execute_embed(_EMBED, {}, session_id="s2", hold_store=store)
-        assert again["held"][0]["reopened"] is False, again["held"][0]
         assert store.get(key)["state"] == hold.HOLD_RESOLVED
         assert store.pending() == [], (
             "a resolved identity came back into the drainable population")
+        assert again["held"] == [], (
+            "an identity resolved on an earlier run was reported as newly held: "
+            f"{again['held']}")
+        assert again["stats"]["held"] == 0, again["stats"]
+        # …and the EDGE is not dropped: the ref is wired to the id the store
+        # already recorded for this graph (idempotent consumer: return the
+        # recorded outcome for a completed key).
+        assert [o["src"] for o in again["payload"]["operators"]] == ["pt_canonical"], \
+            again["payload"]["operators"]
+        assert any("already resolved" in w for w in again["warnings"]), \
+            again["warnings"]
+
+
+class TestEveryHeldEdgeIsCarried:
+    """⛔ Review round 4, P1/P2: `hold()` kept ONE operator per key, and the key is
+    the REF — so a second operator naming the same unresolved ref had its edge
+    discarded while the run reported it as carried.
+
+    Both arms below are the two shapes that collapse: two DISTINCT operators over
+    one ref (one record, two edges) and ONE operator over two unresolved refs (two
+    records, one edge each) — the second was emitted twice.
+    """
+
+    _TWO_OPERATORS: ClassVar[dict] = {
+        "entities": [], "events": [], "chain_notes": [],
+        "points": [{"content": "the budget is 40k", "pointKind": "statement"},
+                   {"content": "margin holds at 12%", "pointKind": "statement"}],
+        "link_before_create": [],
+        "operators": [
+            {"src": _REF, "dst": "the budget is 40k", "op_type": "IMPL"},
+            {"src": _REF, "dst": "margin holds at 12%", "op_type": "IMPL"},
+        ],
+    }
+
+    def test_two_edges_over_one_ref_are_both_carried_and_both_drained(
+            self, tmp_path):
+        """End to end: one record, two edges in; two edges out.
+
+        Both operators name the SAME unresolved ref, so both land on ONE store
+        record (the key is the ref). Run 2 does not re-emit either operator, so
+        every edge it wires is the one the hold carried — the shape the old
+        singular `operator` field lost half of while reporting both as carried.
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        first = v2.execute_embed(self._TWO_OPERATORS, {}, session_id="s1",
+                                 hold_store=store)
+        assert len(first["held"]) == 2, (
+            f"one record per held OCCURRENCE: {first['held']}")
+        assert first["stats"]["held"] == 1, (
+            f"one ref named twice is ONE held identity: {first['stats']}")
+        assert len(store.pending()) == 1, store.summary()
+        rec = store.pending()[0]
+        assert len(rec["operators"]) == 2, (
+            "the store kept only the first operator naming this ref — the "
+            f"second edge is already lost: {rec['operators']}")
+
+        second = v2.execute_embed(
+            {"entities": [], "events": [], "chain_notes": [],
+             "points": [{"content": "the budget is 40k",
+                         "pointKind": "statement"},
+                        {"content": "margin holds at 12%",
+                         "pointKind": "statement"}],
+             "link_before_create": [], "operators": []},
+            _search(True), session_id="s2", hold_store=store)
+        ops = second["payload"]["operators"]
+        assert len(ops) == 2, (
+            "only one of the two held edges came back from the drain: "
+            f"{ops}")
+        by_content = {p["content"]: p["id"] for p in second["payload"]["points"]}
+        assert {o["dst"] for o in ops} == {by_content["the budget is 40k"],
+                                           by_content["margin holds at 12%"]}, \
+            ops
+        assert len({o["src"] for o in ops}) == 1, (
+            f"both edges must name the ONE drained endpoint: {ops}")
+        assert second["held_drained"][0]["committed"] is True, second["held_drained"]
+        assert store.pending() == []
+
+    def test_two_operators_over_one_ref_carry_two_edges(self, tmp_path):
+        """The load-bearing arm: `hold()` ACCUMULATES, so the second operator
+        naming one unresolved ref is carried instead of silently discarded."""
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        embed = {"entities": [], "events": [], "chain_notes": [],
+                 "points": [{"content": "the budget is 40k",
+                             "pointKind": "statement"}],
+                 "link_before_create": [],
+                 "operators": [
+                     {"src": _REF, "dst": "the budget is 40k", "op_type": "IMPL"},
+                 ]}
+        v2.execute_embed(embed, {}, session_id="s1", hold_store=store)
+        key = hold.hold_key(hold.HOLD_ENDPOINT, _REF)
+        store.hold(hold.HOLD_ENDPOINT, _REF, where="IMPL src",
+                   operator={"src": _REF, "dst": "margin holds at 12%",
+                             "op_type": "IMPL"})
+        rec = store.get(key)
+        assert len(rec["operators"]) == 2, (
+            "a second operator over one unresolved ref was DISCARDED — only the "
+            f"first edge survives: {rec['operators']}")
+        assert rec["operators"][0]["dst"] == "the budget is 40k"
+        assert rec["operators"][1]["dst"] == "margin holds at 12%"
+        # the same edge twice is ONE operator
+        store.hold(hold.HOLD_ENDPOINT, _REF, where="IMPL src",
+                   operator={"src": _REF, "dst": "margin holds at 12%",
+                             "op_type": "IMPL"})
+        assert len(store.get(key)["operators"]) == 2, (
+            "a re-asserted identical edge was appended as a second operator")
+
+    def test_one_operator_with_two_unresolved_endpoints_drains_once(self, tmp_path):
+        """P2: the dedupe must also run AMONG the held operators.
+
+        `_mint_endpoint` is asked about each side of one operator, so an operator
+        whose src AND dst are both unresolved is held twice — two records, each
+        carrying the same `_op`. Deduping only against the run's own operators let
+        both copies into `payload_operators`: the same edge twice, `stats["operators"]`
+        reporting 2 for one edge, and `reconcile_payload` marking each copy `new`
+        (budget/census inflation).
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        both = {"entities": [], "events": [], "points": [], "chain_notes": [],
+                "link_before_create": [],
+                "operators": [{"src": "claim alpha", "dst": "claim beta",
+                               "op_type": "IMPL"}]}
+        first = v2.execute_embed(both, {}, session_id="s1", hold_store=store)
+        assert len(store.pending()) == 2, store.summary()
+        assert first["stats"]["held"] == 2, first["stats"]
+
+        second = v2.execute_embed(
+            {"entities": [], "events": [], "points": [], "chain_notes": [],
+             "link_before_create": [], "operators": []},
+            _search(True), session_id="s2", hold_store=store)
+        assert len(second["payload"]["operators"]) == 1, (
+            "one operator with two unresolved endpoints was emitted twice — the "
+            f"held copies were never deduped: {second['payload']['operators']}")
+        assert second["stats"]["operators"] == 1, second["stats"]
+        assert second["stats"]["held_drained"] == 2, second["stats"]
+
+
+class TestTheAggregateHoldSentenceIsTrue:
+    def test_a_store_that_cannot_write_is_not_reported_as_carried(self):
+        """⛔ Review round 4 P3: the run-level line keyed on `hold_store is not
+        None`, so with a store that RAISES on write (read-only volume, full disk,
+        bad permissions) it said "carried in the hold store" while the
+        per-occurrence warnings in the same list said the write FAILED. Two
+        contradicting warnings, and the aggregate is the one a census reads."""
+
+        class _FailingStore:
+            def hold(self, *a, **k):
+                raise OSError("Read-only file system")
+
+            def summary(self):
+                return {"path": "<unwritable>", "total": 0,
+                        "by_state": {}, "by_kind": {}}
+
+        result = v2.execute_embed(_EMBED, {}, session_id="s1",
+                                  hold_store=_FailingStore())
+        aggregate = [w for w in result["warnings"] if "S3 HOLD (#10997)" in w]
+        assert len(aggregate) == 1, result["warnings"]
+        assert "0 of 1 occurrence(s) carried" in aggregate[0], aggregate[0]
+        assert "NOT persisted" in aggregate[0], aggregate[0]
+        assert "carried in the hold store for the next run" not in aggregate[0], (
+            "the aggregate sentence contradicts the per-occurrence warning it "
+            f"sits beside: {aggregate[0]}")
+        assert any("hold store write FAILED" in w for w in result["warnings"]), \
+            result["warnings"]
+        assert result["held"][0]["persisted"] is False
+        assert "OSError" in result["held"][0]["persist_error"]
 
 
 class TestTheDrainCensus:

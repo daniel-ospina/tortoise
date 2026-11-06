@@ -227,7 +227,7 @@ checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
 the `result["classify_later"]` block at `:11040-11046` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:11050-11054` here — **not** to the `:8574-8578`
+the `result["vet"]` block, and it is corrected to `:11050-11054` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
@@ -718,7 +718,7 @@ by a probe with two defects this bundle has since fixed — it printed an arm it
 measured the default-OFF population under a log declaring both passes ON) and it counted the E3
 anchor in one direction (so its `:Event 0/41` contradicted its own `references=7/7`). `7c9c34d84`
 fixed both, but its envelope was stale: every `tortoise/sdk.py` line it cited (`:12196` for the meta
-fold, `:12697` for `link_source_to_event`, `:2307-2332` for `_TURN_WRITE_CYPHER`) had moved under
+fold, `:12477` for `link_source_to_event`, `:2306-2331` for `_TURN_WRITE_CYPHER`) had moved under
 it when `main` advanced, so the one instruction it carried for #9116 — "the fix targets
 `sdk.py:12196`" — pointed into unrelated code. `8a8bbcba2` fixed
 the OFF-block witness hazard, but its rule accepted `enabled: true` on its own — and `enabled` is the

@@ -28,6 +28,15 @@ The held item is the **edge together with its endpoint**, not the endpoint alone
 operator edge, which is precisely the loss I2 forbids. So a held record carries
 the operator that referenced the unresolved ref, and the drain re-emits both.
 
+⛔ **Every** operator, not the first one (#10997 review round 4, P1). The hold
+key is content-addressed on the *ref* (``hold_key``), so two operators naming one
+unresolved ref land on ONE record; storing a single ``operator`` kept the first
+edge and silently discarded the second, while the caller reported BOTH as
+carried. The record therefore carries ``operators`` — a list, deduped on
+``(src, dst, op_type[, target])`` — and the drain replays every distinct one.
+A legacy record carrying the old singular ``operator`` is still read (see
+``operators_of``), so a store written by an earlier run does not lose its edge.
+
 **The home is a durable local store, and it is not the graph** — decided here and
 recorded, because the two obvious alternatives are both wrong:
 
@@ -168,6 +177,48 @@ def hold_key(kind: str, content: str) -> str:
     return hashlib.sha256(f"{kind}\0{text}".encode()).hexdigest()
 
 
+def operator_identity(op: object) -> tuple[str, str, str, str]:
+    """The identity of ONE operator, for deduping the edges a hold carries.
+
+    ``(src, dst, op_type)`` is the edge; a ``MITIGATES`` also names its
+    ``target``, so that is folded in as a fourth element — two MITIGATES that
+    dampen different edges are not the same operator and must both survive.
+
+    Whitespace-normalised on the endpoint names exactly as ``hold_key`` is, so
+    two spellings of one ref are ONE operator; case and punctuation are left
+    alone for the same reason they are left alone in ``hold_key`` — a
+    conservative second copy is visible, a silent merge is not.
+    """
+    if not isinstance(op, dict):
+        return ("", "", "", "")
+    target = op.get("target") or op.get("target_edge") or {}
+    if not isinstance(target, dict):
+        target = {}
+    return (
+        _WS.sub(" ", str(op.get("src", "") or "").strip()),
+        _WS.sub(" ", str(op.get("dst", "") or "").strip()),
+        str(op.get("op_type", "") or "").upper(),
+        f"{_WS.sub(' ', str(target.get('src', '') or '').strip())}"
+        f"\0{_WS.sub(' ', str(target.get('dst', '') or '').strip())}"
+        f"\0{str(target.get('op_type', '') or '').upper()}",
+    )
+
+
+def operators_of(rec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every operator a held record carries, legacy-singular included.
+
+    The drain replays these, so this is the one reader: a record written before
+    ``operators`` existed carries ``operator`` (one dict), and dropping it would
+    lose the edge the store exists to keep.
+    """
+    if not isinstance(rec, dict):
+        return []
+    ops = [o for o in (rec.get("operators") or []) if isinstance(o, dict)]
+    if not ops and isinstance(rec.get("operator"), dict) and rec["operator"]:
+        ops = [dict(rec["operator"])]
+    return ops
+
+
 def open_store(graph: str, root: str | Path | None = None) -> HoldStore:
     """The caller's entry point: a store for ONE graph.
 
@@ -277,6 +328,15 @@ class HoldStore:
         ``reopened`` is ``False`` for a key this store has already RESOLVED,
         which is the load-bearing half: a later ambiguous run must not re-arm an
         item that was already committed, or the next drain would mint it twice.
+        The caller must READ it — the run that does not is the one that reports
+        an already-committed identity as newly held (#10997 review round 4).
+
+        ⛔ ``operator`` ACCUMULATES (review round 4, P1). The key is the REF, so
+        this is called once per operator naming that ref; keeping only the first
+        edge lost every edge after it while the caller reported them all as
+        carried. The record now carries ``operators`` (deduped on
+        ``operator_identity``) and mirrors the first into the legacy
+        ``operator`` field, so an older reader still finds something it knows.
         """
         key = hold_key(kind, content)
         with self._lock:
@@ -286,8 +346,13 @@ class HoldStore:
                     return {**existing, "reopened": False,
                             "note": "already resolved — a resolved identity is never re-held"}
                 updated = {**existing, "runs_held": int(existing.get("runs_held", 1)) + 1}
-                if operator and not updated.get("operator"):
-                    updated["operator"] = operator
+                if operator:
+                    _ops = operators_of(existing)
+                    _seen = {operator_identity(o) for o in _ops}
+                    if operator_identity(operator) not in _seen:
+                        _ops.append(dict(operator))
+                    updated["operators"] = _ops
+                    updated.setdefault("operator", _ops[0])
                 return {**self._transition(updated), "reopened": True}
             rec = {
                 "key": key,
@@ -297,7 +362,8 @@ class HoldStore:
                 "ref": str(ref or content),
                 "where": where,
                 "session_ref": session_ref,
-                "operator": operator or {},
+                "operator": dict(operator or {}),
+                "operators": [dict(operator)] if operator else [],
                 "state": HOLD_PENDING,
                 "minted_id": None,
                 "runs_held": 1,

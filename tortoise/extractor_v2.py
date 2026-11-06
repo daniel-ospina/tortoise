@@ -3130,6 +3130,9 @@ def _hold_endpoint(hold_store: object | None, held: list[dict], *,
         "where": where,
         "session_ref": session_ref,
         "operator": dict(operator or {}),
+        # the same edge in the store's list form, so the run's own `held` and the
+        # persisted record read identically (#10997 review round 4, P1)
+        "operators": [dict(operator)] if operator else [],
         "persisted": False,
     }
     # ⛔ The run's `held` list is an IDENTITY report, and `stats.held` is read off
@@ -3149,6 +3152,20 @@ def _hold_endpoint(hold_store: object | None, held: list[dict], *,
             session_ref=session_ref, operator=rec["operator"], ref=rec["ref"])
         rec["persisted"] = True
         rec["reopened"] = bool(stored.get("reopened"))
+        # ⛔ AN ALREADY-RESOLVED KEY IS NOT A HOLD (#10997 review round 4, P2).
+        # `hold()` refuses to reopen a RESOLVED key and returns the record it
+        # already has — carrying the id it minted on an earlier resolved run.
+        # Reporting that as "held, and carried in the hold store" was three false
+        # signals at once: the caller then dropped the operator on the ordinary
+        # "src/dst did not resolve" arm, the census counted a candidate that was
+        # committed turns ago, and the epic's own acceptance ("the held count
+        # returns to zero") became unreachable — every ambiguous run after a
+        # resolution re-inflated it by one. The store already knows the answer for
+        # a completed key, so the caller wires the ref to it (the idempotent
+        # consumer's "return the recorded outcome" rule) and holds nothing.
+        if not rec["reopened"] and stored.get("state") == _identity_hold.HOLD_RESOLVED:
+            rec["already_resolved"] = True
+            rec["minted_id"] = stored.get("minted_id")
     except Exception as exc:  # a store failure must not lose the hold itself
         rec["persist_error"] = f"{type(exc).__name__}: {exc}"
     return rec
@@ -9598,6 +9615,29 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if _lookup != _failure_policy.LOOKUP_RESOLVED:
             rec = _hold_endpoint(hold_store, held, content=content, where=where,
                                  session_ref=session_id, operator=operator, ref=ref)
+            # ⛔ The store already RESOLVED this identity on an earlier run: the
+            # ref is not ambiguous any more, it is KNOWN — wiring it to the id the
+            # store recorded is the idempotent-consumer "return the recorded
+            # outcome" arm, and it is the only one that neither re-holds a
+            # committed identity (#10997 review round 4, P2) nor drops the edge
+            # (I2). The recorded id was committed against THIS graph (the store is
+            # per-graph), so the endpoint it names exists there.
+            if rec.get("already_resolved") and rec.get("minted_id"):
+                pid = str(rec["minted_id"])
+                point_ids[n] = pid
+                _full_prev = _norm(ref)
+                if _full_prev != n:
+                    point_ids.setdefault(_full_prev, pid)
+                # It is not held and it is not dropped, so it is not in `held`:
+                # the census stays the epic's own acceptance (a resolved identity
+                # returns the held count to zero).
+                held.remove(rec)
+                warnings.append(
+                    f"operator endpoint WIRED, not re-held (#10997 S3 HOLD): "
+                    f"{where} named {content[:60]!r}, whose identity was already "
+                    f"resolved to {pid} by an earlier run against this graph — "
+                    "the edge is wired to it and nothing is held")
+                return pid
             if rec.get("persist_error"):
                 _carried = (", and the hold store write FAILED ("
                             f"{rec['persist_error']}) so it is NOT carried forward")
@@ -9935,8 +9975,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             held_drained.append({"key": _rec["key"], "content": _rec["content"],
                                  "point_id": _pid, "where": _rec.get("where") or "",
                                  "committed": False})
-            if _rec.get("operator"):
-                _held_operators.append(dict(_rec["operator"]))
+            if _rec.get("operators") or _rec.get("operator"):
+                # ⛔ EVERY edge the record carries (#10997 review round 4, P1).
+                # The store key is the REF, so two operators naming one unresolved
+                # ref share a record; replaying only the first dropped the second
+                # edge for good while the run reported both as carried.
+                for _held_op in _identity_hold.operators_of(_rec):
+                    _held_operators.append(dict(_held_op))
 
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
@@ -9953,9 +9998,26 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         return (_norm(str(o.get("src", ""))), _norm(str(o.get("dst", ""))),
                 str(o.get("op_type", "")).upper())
 
+    # ⛔ And deduplicated AMONG THEMSELVES, not only against the run's own
+    # operators (#10997 review round 4, P2). One operator whose `src` AND `dst`
+    # are both unresolved is held twice — the pre-pass asks `_mint_endpoint`
+    # about each side, each call carrying the same `_op` — so the drain
+    # restored the same edge twice. Both copies survived the old filter, both
+    # were appended to `payload_operators` (the IMPL/NAND arm has no membership
+    # check), and `reconcile_payload` then marked EACH copy `new` against an
+    # unchanged GraphState: `net_new` and the declared write count — the budget
+    # numerators — counted one edge twice. The `#4971` probe keeps the graph
+    # write itself idempotent, so this was census/budget inflation, not a
+    # duplicate node.
     _run_op_ids = {_op_identity(o) for o in _run_ops}
-    _all_ops = _run_ops + [o for o in _held_operators
-                           if _op_identity(o) not in _run_op_ids]
+    _dropped_ids: set[tuple[str, str, str]] = set()
+    _all_ops = list(_run_ops)
+    for _held_op in _held_operators:
+        _oid = _op_identity(_held_op)
+        if _oid in _run_op_ids or _oid in _dropped_ids:
+            continue
+        _dropped_ids.add(_oid)
+        _all_ops.append(_held_op)
     for op in _all_ops:
         if not isinstance(op, dict):
             warnings.append(f"non-dict operator entry {op!r} skipped")
@@ -10240,12 +10302,28 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     if held:
         _held_ids = {r.get("key") or (r["content"], r["where"]) for r in held}
+        # ⛔ The carry-forward clause describes what ACTUALLY persisted, not
+        # whether a store object was passed (#10997 review round 4, P3). With a
+        # store that raises on write (read-only volume, full disk, bad
+        # permissions) each per-occurrence warning already said "the hold store
+        # write FAILED … so it is NOT carried forward", and this aggregate line
+        # said the opposite — two contradicting warnings in one list, on the line
+        # an operator/census reads.
+        _persisted = sum(1 for r in held if r.get("persisted"))
+        if hold_store is None:
+            _carried = "; NOT carried forward — no hold store was supplied"
+        elif _persisted == len(held):
+            _carried = ("; carried in the hold store for the next run against "
+                        "this graph")
+        else:
+            _carried = (
+                f"; {_persisted} of {len(held)} occurrence(s) carried in the "
+                f"hold store, {len(held) - _persisted} NOT persisted (the store "
+                "write failed) and therefore NOT carried forward")
         warnings.append(
             f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held because their "
             f"identity lookup was {_lookup} — not minted (I1) and not dropped "
-            "(I2)" + ("; carried in the hold store for the next run against "
-                      "this graph" if hold_store is not None else
-                      "; NOT carried forward — no hold store was supplied"))
+            "(I2)" + _carried)
 
     return {
         "payload": payload,
