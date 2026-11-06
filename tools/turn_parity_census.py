@@ -17,6 +17,28 @@ copy the run itself touched. On the URI leg the bind issues no graph write
 (measured: `GRAPH.LIST` unchanged), but it IS a connection, and "no graph
 write" is not "no server-side effect" — the census never claims the latter.
 
+⚠️ THE URI LEG NEEDS A CREDENTIAL THAT MAY RUN `GRAPH.LIST` (#11113 review P2).
+That refusal is proven by LISTING the store (`GRAPH.LIST`, which creates
+nothing), and `GRAPH.LIST` is an INDIVIDUALLY GRANTED command — FalkorDB's own
+ACL docs grant it separately, and `-@all +GRAPH.QUERY` does not imply it
+(`docs.falkordb.com/commands/acl`). So a credential that cannot list graphs is
+a REFUSAL on this leg (exit 3, "nothing was created"), never a pass, and the
+message names the credential rather than blaming the store.
+
+⛔ Do NOT answer that refusal by granting `GRAPH.LIST` to a per-graph tenant
+user. That user is minted with `+GRAPH.QUERY +GRAPH.RO_QUERY +PING` over `-@all`
+and is expressly forbidden every unkeyed enumeration command — `GRAPH.LIST`
+lists EVERY graph in the keyspace, so the grant would let a single-tenant
+credential enumerate every other tenant's graph name (`tortoise/acl_graph_users.py`,
+#2113/#8617, pinned by `tests/test_acl_graph_users.py`). Run this gate with an
+administrative credential instead.
+
+⚠️ REPLACING THE PROBE IS A REOPEN, NOT A FIX. `GRAPH.RO_QUERY` is measured
+non-creating (`tortoise/cache_eviction.py`) and IS in the tenant user's grant
+set, so a probe on that verb would work for a tenant credential — but #11112
+records `GRAPH.LIST` as the presence source for both legs, so swapping it out
+is a decision to take back to that issue, not a fix to make here.
+
     For every turn node the graph holds, does the record hold a row with the
     SAME key and the SAME transcript-bearing fields — so that deleting the
     graph copy loses nothing?
@@ -800,12 +822,51 @@ def _refuse_unless_graph_present(proj, requested: str | None) -> None:
 
     A store that cannot be listed is a refusal, never a skip — in a gate, "I
     could not ask" is not "it is there".
+
+    ⛔ A REFUSED LISTING IS DIAGNOSED AS THE CREDENTIAL, NOT THE STORE (#11113
+    review P2). `GRAPH.LIST` is an individually-granted command, and the repo's
+    own per-graph tenant user is forbidden it by design, so "the store could
+    not be listed" sent an operator after the wrong cause — the store was
+    healthy and their credential was scoped to one graph. The two refusals stay
+    distinct: which one fired is the difference between "check the deployment"
+    and "change the credential". Both are fail-closed and both create nothing.
+
+    The classification is the ACL layer's OWN predicate, imported rather than
+    respelled (`tortoise.acl_graph_users._is_permission_refusal` — the module
+    that mints the per-graph user, so the rule that defines the grant and the
+    rule that diagnoses its refusal cannot drift apart). Measured on the pinned
+    client (`redis` 7.4.1): the vendor parser maps every `NOPERM` wording —
+    `NOPERM this user has no permissions …`, Redis 7's `NOPERM User <u> has no
+    permissions …`, and the key-scoped form — onto
+    `redis.exceptions.NoPermissionError`, whose message the predicate matches.
+    It is NOT a `ConnectionError` test: on this client `AuthenticationError`
+    and `AuthorizationError` SUBCLASS `ConnectionError`, so a transport check
+    would classify an ANSWERED refusal as an outage (`tortoise/retry.py`
+    records that trap from its own incident, #8827).
     """
     wanted = getattr(proj, "_graph_name", None) or getattr(
         proj, "graph_name", None) or requested or "tortoise"
     try:
         present = sorted(str(n) for n in proj.db.list_graphs())
     except Exception as exc:
+        try:
+            from tortoise.acl_graph_users import _is_permission_refusal
+            refused_by_credential = _is_permission_refusal(exc)
+        except Exception:  # pragma: no cover - import env problem
+            # An unimportable classifier must not turn a refusal into a pass or
+            # into a crash: the generic arm below still REFUSES, it just cannot
+            # say whose problem it is.
+            refused_by_credential = False
+        if refused_by_credential:
+            raise CensusError(
+                f"this credential may not run GRAPH.LIST ({type(exc).__name__}: "
+                f"{exc}) — the command this gate uses to prove {wanted!r} "
+                "already exists was REFUSED, so an absence is NOT established "
+                "and the graph was not opened (nothing was created). Run this "
+                "gate with a credential that may list graphs. Do NOT grant "
+                "GRAPH.LIST to a per-graph tenant user: it is unkeyed, so the "
+                "grant would let that credential enumerate every tenant's "
+                "graph name (#2113/#8617, tortoise/acl_graph_users.py).") from exc
         raise CensusError(
             f"the store could not be listed ({type(exc).__name__}: {exc}) — "
             "an absence is NOT established") from exc
@@ -2108,7 +2169,16 @@ def main(argv: list[str] | None = None) -> int:
                     "graph turn nodes vs record turn rows. Read-only.",
     )
     src = parser.add_mutually_exclusive_group(required=True)
-    src.add_argument("--uri", help="FalkorDB URI of the target graph")
+    # ⚠️ The presence check lists the store, so the credential has to be allowed
+    # to run GRAPH.LIST — and that is an individually-granted command a
+    # per-graph tenant user deliberately does not hold (#2113/#8617). The help
+    # is where an operator reads the requirement BEFORE choosing the flag, so
+    # the requirement is stated here rather than discovered from a refusal.
+    src.add_argument("--uri", help="FalkorDB URI of the target graph; the graph "
+                                   "leg proves the graph already exists with "
+                                   "GRAPH.LIST, so this credential must be "
+                                   "allowed to run it (a per-graph tenant user "
+                                   "is not, by design)")
     src.add_argument("--db-path", help="embedded graph path instead of a URI")
     # ⛔ THE HELP MUST NOT CLAIM A SCOPE THE CODE DOES NOT HAVE (review P3).
     # This read "applies to BOTH legs" while `--graph-name` is passed to
