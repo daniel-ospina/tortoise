@@ -167,12 +167,26 @@ def _record(candidate: Candidate) -> bool:
 # --------------------------------------------------------------------------------------
 # the four refusal gates
 # --------------------------------------------------------------------------------------
-@pytest.mark.parametrize("verdict", ["REFUSED", "UNBOUNDED"])
+@pytest.mark.parametrize("verdict", [
+    "REFUSED", "UNBOUNDED",
+    # ⛔ THE ALLOW-LIST PROPERTY ITSELF. Gate 1 is an allow-list — `PLAN`/`CLEAN` and
+    # nothing else — because `refused` is True only for `REFUSED`/`UNBOUNDED`, so a
+    # deny-list would arm the delete path for a verdict this module has never heard of
+    # whenever the caller ALSO supplied a populated plan. These words are that case:
+    # a future census verdict, a typo, a stray space. Measured before they were here:
+    # rewriting gate 1 as `if assessment.refused:` left 187 tests green, because every
+    # test fed `PLAN`, `CLEAN`, or one of the two words already refused.
+    "PARTIAL", "clean", "", "PLAN ",
+])
 def test_the_census_gates_the_pass_and_issues_no_mutating_statement(verdict):
     graph = _FakeGraph()
     report = evict(
+        # `_assessment` still supplies a POPULATED licence: that is what made the
+        # deny-list mutation dangerous rather than merely wrong.
         _assessment(verdict=verdict), _FakeClient(), graph,
-        population=POPULATION, selector=lambda *a: [], record_probe=_record,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record,
         dry_run=False, policy=EvictionPolicy(max_nodes=1),
     )
     assert report.verdict == "REFUSED"
@@ -780,7 +794,14 @@ def test_a_key_property_carrying_a_TRAILING_NEWLINE_is_still_safe():
 
 
 def test_a_pathological_key_property_refuses_the_WHOLE_pass_before_any_statement():
-    """The gate is on the PASS, not only the helper: nothing is read, nothing is issued."""
+    """The gate is on the PASS, not only the helper: nothing is ISSUED.
+
+    ⚠️ "Nothing is READ" would be false, and an earlier version of this docstring said it:
+    the pass reads the node count (`node_total`) and `INFO memory` BEFORE the config gate,
+    so `graph.mutating` — not `graph.statements` — is the property asserted here. The
+    executor deliberately checks the CENSUS verdict before resolving the policy; the
+    statement, not every read, is what a refused config prevents.
+    """
     graph = _FakeGraph()
     report = evict(
         _assessment(), _FakeClient(), graph,
@@ -793,3 +814,26 @@ def test_a_pathological_key_property_refuses_the_WHOLE_pass_before_any_statement
     assert report.verdict == "REFUSED"
     assert "config refused" in report.reason, report.reason
     assert graph.mutating == [], f"a refused config mutated: {graph.mutating}"
+
+
+def test_a_MIXED_selection_aborts_rather_than_sweeping_the_other_population():
+    """A selector that labels a candidate with another population must ABORT.
+
+    The candidate would otherwise be counted against the licence of the population being
+    swept and then deleted — a node no instrument measured for THIS population. The block
+    was pinned by nothing: deleting it left 84 tests green.
+    """
+    graph = _FakeGraph()
+    other = [Candidate(node_id=0, key="k0", population="somewhere else")]
+
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: other,
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=1),
+    )
+
+    assert report.verdict == "REFUSED"
+    assert "mixed selection" in report.reason, report.reason
+    assert graph.mutating == [], f"a mixed selection mutated: {graph.mutating}"

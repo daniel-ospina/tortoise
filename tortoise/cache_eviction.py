@@ -127,7 +127,10 @@ CACHE_CEILING_ENV = "TORTOISE_CACHE_CEILING_BYTES"
 # Exit codes, aligned with the two census instruments this composes
 # (`tools/graph_census.py`, `tools/turn_parity_census.py`): a caller must be able
 # to tell "I passed the wrong flags" from "this cache may not be evicted".
-CACHE_EVICTION_EXIT_CLEAN = 0     # measured; within the bound — nothing to evict
+CACHE_EVICTION_EXIT_CLEAN = 0     # measured; within the declared BYTE ceiling.
+                                  # ⛔ NOT "nothing to evict": `plan["evictable"]` is
+                                  # published on this verdict too, and a consumer
+                                  # enforcing a NODE budget may still sweep.
 CACHE_EVICTION_EXIT_PLAN = 2      # over the bound; `plan["evictable"]` is the LICENCE
 CACHE_EVICTION_EXIT_REFUSED = 3   # over the bound, and NOTHING is proven — nothing may go
 CACHE_EVICTION_EXIT_UNBOUNDED = 4  # there is no bound anywhere (see `CacheState`)
