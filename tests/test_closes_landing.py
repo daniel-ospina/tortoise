@@ -5555,9 +5555,11 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
 
     ⚠️ The gate protected exactly ONE body, and it is DECLARED, not pinned as correct:
         `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`
-            renderer ONE `html_block` whose raw text is the marker line -> PROSE, `[100]` on
-            `origin/main`; this head blanks it in both arms (this module's `_html_here` is False on
-            every line of it — a shape it already models wrongly).
+            renderer ONE `html_block` whose raw text is the marker line -> PROSE, `[100]` at the
+            branch point `origin/main` `80c912244`; this head blanks it in both arms (this module's
+            `_html_here` is False on every line of it — a shape it already models wrongly).
+            ⚠️ `main` has since moved: at `1177c6708` it blanks this body too, for the same reason,
+            so the divergence is against the branch point and NOT against the current tip.
     """
     md = MarkdownIt("commonmark")
 
@@ -5583,7 +5585,8 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
         assert cl.parse_closing_refs(body, None, strict=True) == [], body
 
     # …and the ONE body the removed gate used to keep as prose, recorded as the known blanking it is
-    # (`origin/main` credits it; this head does not, in either arm) so the trade is a pinned fact
+    # (the branch point `origin/main` `80c912244` credits it and this head does not, in either arm;
+    # current `main` `1177c6708` blanks it too) so the trade is a pinned fact
     # rather than a docstring claim. Repairing it needs a discriminator this module does not have —
     # `_html_here` is False on every line of it — not a paragraph-state gate here.
     abandoned = "- Text\n> <br />\n> <span>\n> - *\n>   2.     Closes #100\n"
@@ -5660,7 +5663,7 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
 
 
 def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm():
-    """Round-53, P1 — a FAIL-OPEN in the `indented_code` arm, restored to `origin/main`'s answer.
+    """Round-53, P1 — a FAIL-OPEN in the `indented_code` arm, restored to the BRANCH POINT's answer.
 
     §4.4's protection ("an indented code block cannot interrupt a paragraph") was applied to a line
     that ADDS a blockquote marker. A lazy continuation may DROP a marker; one that adds it opens a
@@ -5671,8 +5674,11 @@ def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm
         `Notes` + `>     IN FLIGHT: 3.2c — branch fix/x`   renderer `code_block` in a blockquote
         `## Satisfies` + `Notes` + `>     - [ ] criterion`  renderer `code_block` in a blockquote
 
-    `origin/main` blanks all three in this arm; the pre-fix head credited all three — a fail-open
-    the branch introduced against `main`, which this restores.
+    the branch point `origin/main` `80c912244` blanks all three in this arm; the pre-fix head
+    credited all three — a fail-open the branch introduced against that baseline, which this
+    restores. ⚠️ `main` has since moved: at `1177c6708` it still carries the `>=` term and KEEPS all
+    three, so this is a DIVERGENCE from the current tip in the renderer-correct direction, not
+    parity with it — measure the baseline, do not assume the name still means the same tree.
 
     ⛔ WHAT THIS FIX IS NOT (measured, not assumed — fresh-context review of this very change).
     The two `issue_process_lint` consumers do NOT see these bodies: `IN_FLIGHT_RE` and `CHECKBOX_RE`
