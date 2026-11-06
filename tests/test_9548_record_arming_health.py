@@ -39,6 +39,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import socket
 import sys
 from pathlib import Path
@@ -682,9 +683,12 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         f"metrics() publishes {sorted(published)}"
     )
     # …and the same two names must appear where the claim is MADE, not only in
-    # the code that makes it true. Scoped to the whole runbook file: the field
-    # row and the §"Arming the Postgres record" prose are both inside it, and a
-    # tighter section slice would pin a heading's wording rather than the names.
+    # the code that makes it true: `_record_health`'s own docstring, and the
+    # runbook's FIELD ROW. ⛔ The runbook leg pins the ROW, not the file: a bare
+    # `name in runbook` stayed green when the row was renamed to keys the payload
+    # never publishes (`record_applied_total` / `record_last_commit_at`), because
+    # each name occurs elsewhere in the 3,800-line file — measured (#9548 review
+    # P3). The row is the artifact an operator reads; that is what is pinned.
     contract = hosted_api._record_health.__doc__ or ""
     runbook = _RUNBOOK.read_text(encoding="utf-8")
     for name in ("record_writes_applied", "record_last_write_at"):
@@ -692,10 +696,13 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
             f"`_record_health`'s docstring no longer names {name!r} — the field is "
             "published but undocumented, which is the paper-only claim inverted"
         )
-        assert name in runbook, (
-            f"docs/infra-runbook.md no longer names {name!r} — the operator has no "
-            "reading to take, however correct the payload is"
-        )
+    assert re.search(
+        r"\|\s*`record_writes_applied`\s*/\s*`record_last_write_at`\s*\|", runbook
+    ), (
+        "docs/infra-runbook.md's field row no longer documents the pair under the "
+        "published names — the operator has no reading to take, however correct "
+        "the payload is"
+    )
 
 
 def test_an_unread_applied_counter_publishes_none_never_a_zero(monkeypatch):
