@@ -5420,10 +5420,18 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             #    "it", "that", "this"), so the clause is about the same tree and its
             #    complement is the equivalence. A clause with its OWN named subject is not
             #    ("the #9601 merge is `ff6379eb2`"), which is why the subject set is closed.
-            if _COREF_ASSERTS_FALSE.search(norm) and not _CORRECTION_CUE.search(norm):
-                return False
             clause, clause_end = _clause_containing(norm, phrase.start())
             own = _occurrence_span(norm, phrase, clause, clause_end)
+            # ⛔ THE CUE IS SCOPED TO THE OCCURRENCE, NOT THE SENTENCE (#11191 review r14,
+            # P2 — MEASURED). Read on `norm`, ONE correction word anywhere in the sentence
+            # switched the co-reference veto off, so the equivalence could be asserted next
+            # to a correction of something else — re-opening the r12 F5 class one level up,
+            # and on the LIVE §A8 row: `row + " The 3-line figure was corrected to 10; the
+            # tree is `ff6379eb2`."` was ACCEPTED, i.e. the pin disabled by a sentence in
+            # the cell it guards. Every other correction arm is clause- or subject-bound for
+            # exactly this reason; the cue is the one that was still sentence-wide.
+            if _COREF_ASSERTS_FALSE.search(norm) and not _CORRECTION_CUE.search(own):
+                return False
 
             def _copulated_to_phrase(_clause: str) -> bool:
                 """True when a NON-true sha-shaped token in `_clause` is copulated to the phrase.
