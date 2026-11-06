@@ -9543,13 +9543,28 @@ class CollisionPreflightTest(unittest.TestCase):
         return mod.StaleHolder("git", str(self.repo), ISSUE, 60, [])
 
     def set_process_table(self, *rows: str) -> None:
-        """Replace the stubbed process table — `pid ppid uid command` rows."""
-        self.ps_rows = list(rows)
-        _write_ps_stub(self.ps_dir, self.ps_rows)
+        """Replace the stubbed process table — `pid ppid uid command` rows.
+
+        ⛔ ONE LIST, TWO SEAMS, ONE ANSWER (#10833 merge). This fixture serves the census
+        through a shadowed `ps` on the child's `PATH` (`PS_STUB_ROWS`), while `main`'s
+        cases serve the SAME surface through `COLLISION_PREFLIGHT_PROCESS_TABLE` — a FILE
+        the tool reads INSTEAD of running `ps` (`_process_rows`). Keeping the served rows
+        in `self.ps_rows` collided with this class's own `PATH` attribute of that name: the
+        env value became a LIST REPR (`str(self.ps_rows)` → `"['1 0 1000 /sbin/init']"`),
+        every scan reported `process-table-unreadable` → INCOMPLETE (exit 2), and 109 cases
+        red. The rows live in `ps_stub_rows`, and the table file is rewritten beside them,
+        so a test that injects a lane sees it through EITHER seam rather than one — a
+        fixture whose two censuses could disagree is the defect this resolves, not a
+        preference between them.
+        """
+        self.ps_stub_rows = list(rows)
+        _write_ps_stub(self.ps_dir, self.ps_stub_rows)
+        self.ps_rows.write_text(
+            "".join(f"{row}\n" for row in self.ps_stub_rows), encoding="utf-8")
 
     def add_process_row(self, row: str) -> None:
         """Serve ONE more row (a fixture's own fake lane) beside the default."""
-        self.set_process_table(*self.ps_rows, row)
+        self.set_process_table(*self.ps_stub_rows, row)
 
     def _start_fake_pi(self, cwd: Path) -> subprocess.Popen:
         """A process the census will see as `pi`, standing in `cwd` (see test (c2) above).
