@@ -742,6 +742,108 @@ stall (the #2924 shape) reds. It complements
 `tests/test_health_ready_nonblocking.py`, which pins nonblocking *structure*
 in-process and names no client-visible budget.
 
+### 4.1.1 The read path's own signal — `wait_bound_breaches` (#10602)
+
+**Symptom this exists for.** `status: "ok"` and `db.ok: true` while the core
+read path fails. Measured on 2026-11-02T15:44Z: `tortoise_health` answered `ok`
+with `db.latency_ms` 3,030 – 6,080 ms while **6/6** single-agent
+`tortoise_search` calls were refused
+
+```text
+HTTP 504  {"error":{"code":-32009,"message":"The server's wait budget for this
+           request was exceeded before a response was ready. …",
+           "data":{"retry_after":10}}}
+```
+
+`status` is **not** the field that reports this, and that is a recorded decision
+rather than an oversight: `degraded` is tied to an observed *failure*, never to a
+latency reading, so a slow-but-reachable store must not flip it. Do not "fix" the
+miss by deriving `status` from latency — that reverses the decision.
+
+⚠️ What `degraded` folds differs by surface, and reading this section as if it
+did not is how an operator debugs the wrong thing:
+
+- on the MCP health report (`monitoring.metrics`) it is the data-plane probe
+alone;
+- on the hosted `/health` body this section's `curl` reads, `status` is `ok`
+only when `db.ok` **and** `backup_watcher.ok` **and** `record.ok` are all true
+(`tortoise/hosted_api.py`'s `health()`; the `record` counters' own section states
+the `record.ok` leg, and §4.1 states which fields the body carries — it
+deliberately does not restate the `status` rule, so this is the place it is
+written down). So `degraded` with
+`db.ok: true` there means the backup watcher or the `record` leg — not the probe.
+
+The `wait_bound_breaches` counter below feeds **neither**: it is additive, and it
+never rewrites `status` on either surface.
+
+**Read this field instead.** The health body carries
+
+```json
+"wait_bound_breaches": {"total": 0, "by_surface": {"mcp": 0, "rest": 0}, "error": null}
+```
+
+cumulative since process start, incremented on every wait-bound refusal — the
+`-32009` JSON-RPC body on the MCP surface, the `{"detail"}` 504 on the REST one.
+On a **successful** read both surface keys are present, at `0`, so a measured
+zero is distinguishable from a build that cannot see breaches at all.
+
+`error` is `null` when the read succeeded and names the reason when it did not.
+A failed read is **not** zeroed: `total` and `by_surface` are both `null` in that
+case, because a failed read reported as `0` would be the same false reassurance
+as an absent key — the None-not-zero rule this same body already applies to its
+`record` counters (#9548 review P2). **Check `error` before trusting a `0`:** a
+`total`-keyed alert rule sees `null` (not `0`) while the family is unreadable.
+
+```bash
+# CUMULATIVE since this process started — not a rate, not a current state.
+curl -sS https://api.premiselabs.co/health | jq '.wait_bound_breaches'
+```
+
+Three properties of this number, because a counter misread as a gauge is its own
+false reassurance:
+
+- **Cumulative, not a rate.** A non-zero `total` means "breached since boot", not
+  "breaching now". It resets to `0` on every deploy. Sample twice to get a rate.
+- **Per process and per machine.** Every Fly machine keeps its own; a `0` from
+  one `curl` is not a fleet-wide `0`. Read **each machine** over SSH against the
+  app's own port — there is **no `/metrics` route on the hosted app** (§6.9
+  item 2 below says the same thing about the 9090 listener: `/healthz` only,
+  404 for everything else, and `serve_health` is not a `fly.toml` process):
+
+  ```bash
+  fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:8000/health" | jq .wait_bound_breaches
+  ```
+
+  `jq` runs on YOUR side of the quote on purpose — the hosted image carries
+  `curl` but no `jq` (§6.0's rule: probe with what the image has, parse on the
+  operator's side; §6.9 item 2 is the same trap for `ss`).
+- **Attributed by SURFACE, not by arm.** `mcp` covers everything under `/mcp`,
+  including the pre-SSE stall the transport refuses with the JSON-RPC `-32009`
+  body — which is the shape `#10602` recorded. So a recurrence of *this* P0
+  shows up as `mcp`, never as `rest`.
+
+The same field is on the MCP health tool (`tortoise_health`, or
+`tortoise_overview(section="health")`) — the surface `#10602` itself was
+measured on — and in `monitoring.serve_health`'s **`/health`** body.
+
+⛔ Do not go looking for this JSON shape on `serve_health`'s **`/metrics`**: that
+endpoint is the Prometheus exposition (`generate_latest`), not the health report.
+It carries the family `tortoise_wait_bound_breaches_total{surface="mcp"|"rest"}`,
+with both children declared at import so a scrape never reads "absent" — but it
+has **no** `total`, `by_surface` or `error` member, so the "check `error` before
+trusting a `0`" rule above has no carrier there, and a failed in-process read is
+not expressible on that surface. Read `/health` for the abstention; read
+`/metrics` for the scrape **series** — `rate()` across two scrapes gives the
+rate, but ONE sample is still a since-boot total, the same misread the bullet
+above forbids for this field.
+
+**What its absence used to cost.** Breaches were emitted to exactly one place —
+a best-effort external analytics write, swallowed at `debug` on failure — so
+finding this P0 required an agent to hand-measure six sequential calls. A
+non-zero `total` with a healthy `db.ok` means the store is too slow for the
+bound, not unreachable: the refusal is legible, the work may still complete, and
+the fix is capacity or a narrower query, never a retry loop.
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.
@@ -1330,7 +1432,7 @@ The flap only became an outage because of three independent defects:
 
 | # | Defect | Status |
 |---|---|---|
-| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` are true; read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days). `backup_watcher.expected` rides every state and is what disambiguates `disabled`: `true` = this boot intended to run the watcher (it is a host where backups were supposed to be on — the hosted-boot marker), `false` = the non-hosted/TestClient default. It is a reader's disambiguation and does **not** affect `status`/`ok`. `change_feed` (#9208) reports how many graphs' event feeds are DEGRADED in this process (`{degraded, feeds, stages}` — counts only, no graph names, because the endpoint is unauthenticated), which is the ONLY view of that state from outside: it is process memory whose acknowledgement is a Python call (`event_store.clear_degraded`) inside the process, so a 503 on `GET /v1/events` with `change_feed.degraded: true` on this worker means clear it there or restart that worker. It deliberately does **not** fold into `status` — folding it would restart-loop the worker holding the only acknowledgement path |
+| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` **and** `record.ok` are all true (the three-term rule and its rationale: §4.1.1); read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days). `backup_watcher.expected` rides every state and is what disambiguates `disabled`: `true` = this boot intended to run the watcher (it is a host where backups were supposed to be on — the hosted-boot marker), `false` = the non-hosted/TestClient default. It is a reader's disambiguation and does **not** affect `status`/`ok`. `change_feed` (#9208) reports how many graphs' event feeds are DEGRADED in this process (`{degraded, feeds, stages}` — counts only, no graph names, because the endpoint is unauthenticated), which is the ONLY view of that state from outside: it is process memory whose acknowledgement is a Python call (`event_store.clear_degraded`) inside the process, so a 503 on `GET /v1/events` with `change_feed.degraded: true` on this worker means clear it there or restart that worker. It deliberately does **not** fold into `status` — folding it would restart-loop the worker holding the only acknowledgement path |
 | 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level liveness signal is the now-**live** non-routing `[checks.loop_liveness]` check (§6.0/§6.4), which cannot affect routing |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 

@@ -56,20 +56,35 @@ install_scan_guard()
 def _inner_pytest_cmd(tmp_path: Path, test_file: Path) -> list[str]:
     """argv for an inner pytest run over a fixture file written under `tmp_path`.
 
-    ⛔ ``--confcutdir`` is LOAD-BEARING, not tidiness. pytest does not collect
-    just the argument: it builds the path list from ``/`` down to it and
+    ⛔ ``--confcutdir`` is LOAD-BEARING, not tidiness — but only under a
+    CONDITION, so read the reason before treating a green run as proof.
+    pytest does not collect just the argument: it builds the path list from the
+    ``--confcutdir`` down to it (that option DEFAULTS to the rootdir) and
     collects EVERY level (`_pytest/main.py::Session.collect`,
-    ``paths.insert(0, path)`` for each parent while ``_is_in_confcutdir``),
-    and each level's ``Dir.collect()`` is an ``os.scandir`` of that ancestor.
-    So an argument under the shared temp dir makes the child scan ``/tmp`` and
-    ``/`` — the O(whole-host) discovery (#3752) that
-    ``tests/_tmpdir_hygiene``'s scan guard exists to refuse. When the child
-    inherits that guard, the scan is refused and the run dies during
-    COLLECTION, before either pin below can observe what it was written to
-    observe: measured on the required `test (f)` leg of PR #11066, where the
-    inner run reported ``ERROR collecting .`` /
-    ``SharedTmpdirScanError: os.scandir('/tmp')`` instead of the `#7655`
-    refusal — the `#7655` signal guard was fine, the collection was not.
+    ``paths.insert(0, path)`` for each parent while ``_is_in_confcutdir``), and
+    each level's ``Dir.collect()`` is an ``os.scandir`` of that ancestor.
+    ⛔ WHEN a ``pyproject.toml``/``pytest.ini``/``setup.cfg``/``tox.ini`` at or
+    above the shared temp dir — or a rootdir otherwise resolved there — puts
+    that bound above the argument, the child scans ``/tmp`` and every level down
+    to it (``/`` too, when the rootdir is ``/``) — the O(whole-host) discovery
+    (#3752) that ``tests/_tmpdir_hygiene``'s scan guard exists to refuse — and,
+    with that guard inherited, the run dies during COLLECTION
+    (``ERROR collecting .`` / ``SharedTmpdirScanError: os.scandir('/tmp')``)
+    before either pin below can observe what it was written to observe. That is
+    what was measured on the required `test (f)` leg of PR #11066: the `#7655`
+    signal guard was fine, the collection was not. ⛔ ``conftest.py`` alone does
+    NOT do this: pytest resolves the rootdir from ``locate_config``'s config
+    files, not from a conftest (measured: a parent ``conftest.py`` leaves
+    ``rootdir`` at the fixture's own directory; a parent ``pyproject.toml``
+    moves it up one level).
+
+    ⛔ The condition is not decoration: on a box whose shared temp dir carries no
+    such file, pytest infers the rootdir from the fixture file ITSELF
+    (measured: ``rootdir: /tmp/tt_*/case``), the ancestor walk stops at that
+    directory, and stripping the flag still passes (measured: 2 passed, not 2
+    failed). So the cut is DEFENCE against runner state — it makes the child's
+    walk bounded whatever the host carries — NOT a reproduction that reds on its
+    own; do not read "the pins are green" as "the flag is unnecessary".
 
     Pinning the cut to `tmp_path` bounds the walk to the ONE directory that is
     this test's own, so only that directory is scanned (descendants are what
