@@ -1671,6 +1671,21 @@ def test_the_contract_shape_still_cannot_hold_a_REFERENT():
     assert held["points"][0]["about_entities"] == ["the admin-merge rail"]
 
 
+def test_a_mention_only_response_is_REFUSED_without_a_carrier():
+    """POSITIVE CONTROL for the counter above: a channel entry that no claim names
+    and whose `claim_ref` resolves to nothing is still REFUSED, counted, and named —
+    the gate above must not be a blanket silence. (The hold gate refuses it because
+    `_claims_naming` is empty; the record loop then has no claim and no carrier.)"""
+    el = _embed_list("the admin-merge rail", point_about=[])
+    el["mentions"] = [{"surface": "it", "claim_ref": "a claim this run never emits"}]
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 0, held["mention_stats"]
+    assert held["mention_stats"]["channel_refused_no_claim"] == 1, held["mention_stats"]
+    assert held["mention_stats"].get("channel_refused_surfaces") == ["it"]
+    assert held["mentions"] == []
+
+
 def test_a_mention_the_model_cannot_TIE_to_a_claim_is_still_held():
     """⛔ The hold is a fact about the PAYLOAD, not about the model's
     `claim_ref` string — which the prompt allows to be `null`
@@ -1690,9 +1705,13 @@ def test_a_mention_the_model_cannot_TIE_to_a_claim_is_still_held():
         assert held["mention_stats"]["held_surfaces"] == 1, (
             claim_ref, held["mention_stats"])
         assert held["points"][0]["about_entities"] == [], claim_ref
-        # the model's own entry is still refused as a RECORD (it names no claim);
-        # the hold writes its record against the carrier that does name it.
-        assert held["mention_stats"]["channel_refused_no_claim"] == 1, claim_ref
+        # ⛔ NOT a refusal: the hold is real and the carrier-driven loop wrote the
+        # record, so counting the unresolvable ref here made ONE run report "held"
+        # and "lost for lack of a claim" at once, naming that same surface (review
+        # at `ea790070d`, P3). The refusal still fires when nothing can carry the
+        # entry — covered by `test_a_mention_only_response_is_REFUSED_without_a_carrier`.
+        assert held["mention_stats"]["channel_refused_no_claim"] == 0, claim_ref
+        assert not held["mention_stats"].get("channel_refused_surfaces"), claim_ref
         assert [m["surface"] for m in held["mentions"]] == ["it"], claim_ref
         payload, _ = _mint(el)
         verdict, _parsed = validate_payload_dict(payload)
@@ -2129,6 +2148,26 @@ def test_a_deduped_address_must_INDEX_the_text_the_record_carries():
                 "a `quote`-labelled address does not index the text the record "
                 f"carries: quote[{rec['span_start']}:{rec['span_end']}] == {got!r} "
                 f"for surface {rec['surface']!r} — {rec!r}")
+
+    # ⛔ AND THE ADDRESS MUST NAME THIS SURFACE, character for character. The dedupe
+    # key is `_norm(surface)` (case-folded), so two entries for one claim can differ
+    # in spelling; adopting the duplicate's pair then shipped offsets landing on the
+    # right bytes of a DIFFERENT spelling than the record's own `surface` (review at
+    # `ea790070d`, P3).
+    mixed = _mentions_for_claim(
+        {"mentions": [{"surface": "The Thing", "claim_ref": claim},
+                      {"surface": "the thing", "claim_ref": claim,
+                       "quote": "the thing is late", "span_source": "quote",
+                       "span_start": 0, "span_end": 9}]},
+        claim, armed=True, narrative="")
+    assert len(mixed) == 1, mixed
+    rec = mixed[0]
+    if rec.get("span_start") is not None and rec.get("span_source") == "quote":
+        q = str(rec.get("quote") or "")
+        assert q[rec["span_start"]:rec["span_end"]] == rec["surface"], (
+            "a `quote` address indexes a different SPELLING than the record's own "
+            f"surface: {q[rec['span_start']:rec['span_end']]!r} vs "
+            f"{rec['surface']!r} — {rec!r}")
 
     # POSITIVE CONTROL: the same duplicate, but the address verifies against the
     # KEPT record's quote — the address must still be adopted (the dedupe's job).
