@@ -870,6 +870,49 @@ def _marker_gap(rest: str) -> int:
     return len(marker.group("gap")) if marker else 0
 
 
+#: A line that STARTS a LEAF block — one that leaves NO PARAGRAPH OPEN behind it, so the next line
+#: cannot be a lazy continuation of it (§5.2's consumer side). The LIST-MARKER alternative that
+#: `_BLOCK_START_RE` carries is deliberately ABSENT here: a marker line's content IS a paragraph,
+#: and whether that marker opens an item at all is the question `_ordered_marker_at_least_two`
+#: answers — a "block start" that treated every marker as a paragraph-ender would read
+#: `- item` + `2.     Closes #100` (renderer: a NEW top-level list, i.e. CODE) as prose.
+_NO_PARAGRAPH_RE = re.compile(
+    r"(?: {0,3}#{1,6}(?:[ \t]|$)"                                      # an ATX heading
+    r"| {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"    # a thematic break
+    r"| {0,3}(?:=+|-+)[ \t]*$"                                         # a SETEXT underline
+    r"| {0,3}<)"                                                       # an HTML block
+)
+
+
+def _leaves_no_paragraph(rest: str, rest_indent: int,
+                        container: _ListItem | None) -> bool:
+    """Does this PROSE-EMITTED line leave NO PARAGRAPH OPEN behind it?
+
+    ⛔ "THE PREVIOUS LINE WAS EMITTED AS PROSE" IS NOT "a paragraph is open" (round 34 review, P2 —
+    the half that `_ordered_marker_at_least_two` needed and did not get). Four families are written
+    to `out` as prose yet END the paragraph, and each one left the consumer-side gate above treating
+    the NEXT line as a continuation, so a wide-gap ordered marker after it was KEPT — the fail-open
+    direction, a quoted `Closes #N` credited as a claim in BOTH arms. Measured, `MarkdownIt("commonmark")"
+    as the oracle (each body is `<line>\n` + `2.     Closes #100`):
+
+        `# H`        -> `<h1>H</h1>` then a NEW `<ol>` whose content is `<pre><code>`   CODE
+        `***`        -> `<hr />` then the same                                      CODE
+        `Notes`/`---`-> a SETEXT heading, then the same                              CODE
+        `    Notes`  -> an INDENTED CODE BLOCK, then the same                        CODE
+
+    …and `<div>` (an HTML block) does the same, which is why it is named here even though a marker
+    line inside such a block was already blanked before this rule existed.
+
+    The INDENTED case is measured against the CONTAINER, which is the block grammar's test and not
+    `strict`'s: `- item` + `    cont` is a paragraph INSIDE the item (4 <= 2 + 3), so it does open
+    one — the renderer keeps `- item` + `    cont` + `2.     x` in one `<li>`.
+    """
+    if _NO_PARAGRAPH_RE.match(rest):
+        return True
+    return rest_indent > _MAX_FENCE_INDENT and (
+        container is None or rest_indent > container.rest_col + _MAX_FENCE_INDENT)
+
+
 def _fence_candidate(prefix: str, rest: str,
                      list_items: list[_ListItem]) -> _Fence | None:
     """The fence `(prefix, rest)` opens, or None if the line is prose.
@@ -1259,7 +1302,12 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         out.append(raw)   # prose: keep it, keywords and all
         # A blank line emits a blank `raw`, and a blank line ENDS a paragraph — so the state is
         # `raw.strip()`, not "we took the prose branch".
-        prev_prose = bool(raw.strip())
+        # ⛔ AND "PROSE-EMITTED" IS NOT "A PARAGRAPH IS OPEN": a heading, a thematic break, a setext
+        # underline, an HTML block and an INDENTED CODE BLOCK are all written to `out` and all end
+        # the paragraph, so the next line cannot lazily continue it (`_leaves_no_paragraph`). Four
+        # families of credited quotations came from reading only `raw.strip()` here.
+        prev_prose = bool(raw.strip()) and not _leaves_no_paragraph(
+            rest, rest_indent, container)
         prev_quote_depth = _quote_depth(prefix)
         # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
         # text inside the `<li>`), not in the item it sat in before.

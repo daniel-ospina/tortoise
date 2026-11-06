@@ -1789,6 +1789,89 @@ def test_strip_code_strict_is_keyword_only():
         cl.strip_code("Refs #1\n", False, {})
 
 
+def test_a_line_that_IS_prose_but_ENDS_the_paragraph_does_not_open_one():
+    """Round 34 review, P2 — the FAIL-OPEN half of the consumer-side rule.
+
+    `_ordered_marker_at_least_two` narrowed `own_code` to keep an ordered marker `>= 2` that CONTINUES
+    an open paragraph, and read "is a paragraph open" as "was the previous line emitted as prose".
+    Four families are emitted as prose and END the paragraph anyway, so the NEXT line was read as a
+    continuation and a wide-gap marker after them was KEPT — a quoted `Closes #N` credited as a claim
+    in BOTH arms, which is the direction this module forbids. The renderer is the oracle:
+
+        `# H`         + `2.     Closes #100`  -> `<h1>H</h1>` then a new `<ol>`: `<pre><code>`  CODE
+        `***`         + …                    -> `<hr />` then the same                            CODE
+        `Notes`/`---` + …                    -> a SETEXT heading, then the same                   CODE
+        `    Notes`   + …                    -> an INDENTED code block, then the same             CODE
+
+    The container test is the block grammar's and NOT `strict`'s, which is why `- item` + `    cont`
+    still opens a paragraph (4 <= 2 + 3) and the marker after it really is prose — that pair is the
+    control, pinned beside the four, and it is what keeps this from becoming "blank every wide gap".
+    """
+    md = MarkdownIt("commonmark")
+    text = "Closes #100"
+
+    def block_kind(body: str) -> str | None:
+        for token in md.parse(body):
+            if text in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    def kept(body: str, strict: bool) -> bool:
+        return any(text in line for line in cl.strip_code(body, strict=strict).splitlines())
+
+    # The paragraph the consumer-side rule must still honour (the fix this pins did not lose it).
+    for body in ("Notes\n2.     Closes #100\n",
+                 "To be derived.\n2.     Closes #100\n"):
+        assert block_kind(body) == "inline", body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    # …including one INSIDE a list item, where the block grammar's 4+3 allowance (not `strict`'s)
+    # is what says the paragraph is still open. Lenient only: `strict` blanks every indented line by
+    # its own contract, so the `    cont` above it is blanked there and this shape is one of its
+    # declared over-blanks (the direction that costs a warning, not a pass).
+    item_body = "- item\n    cont\n   2.     Closes #100\n"
+    assert block_kind(item_body) == "inline", item_body
+    assert cl.parse_closing_refs(item_body) == [100], item_body
+    assert cl.strip_code("- item\n   2.     Closes #100\n", strict=True) != "", "unindented control"
+    assert cl.parse_closing_refs("- item\n   2.     Closes #100\n", None, strict=True) == [100]
+    # …and the four families that END a paragraph, each of which was credited before this fix.
+    # `<div>` is an HTML block: its content is raw HTML, so a `Closes #N` there is a quotation too.
+    for body, kind, why in (("# H\n2.     Closes #100\n", "code_block", "an ATX heading"),
+                            ("***\n2.     Closes #100\n", "code_block", "a thematic break"),
+                            ("Notes\n---\n2.     Closes #100\n", "code_block", "a setext underline"),
+                            ("    Notes\n2.     Closes #100\n", "code_block",
+                             "an indented code block (§4.4)"),
+                            ("<div>\n2.     Closes #100\n", "html_block", "an HTML block")):
+        assert block_kind(body) == kind, (why, body)
+        assert cl.parse_closing_refs(body) == [], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [], (why, body)
+    # The sweep: every paragraph-ENDER x marker x gap x indent, both arms, against the renderer.
+    sweep = 0
+    for ctx in ("# H\n", "***\n", "Notes\n---\n", "    Notes\n", "<div>\n"):
+        for marker in ("-", "*", "+", "1.", "2.", "10.", "2)"):
+            for gap in range(1, 10):
+                for indent in (0, 1, 2, 3):
+                    sweep += 1
+                    body = ctx + " " * indent + marker + " " * gap + text + "\n"
+                    kind = block_kind(body)
+                    assert kind is not None, (ctx, marker, gap, indent)
+                    for strict in (False, True):
+                        # Never keep a line the renderer puts in a CODE block: crediting a quotation
+                        # is the fail-open direction, in the finding arm and in the PASS arm alike.
+                        assert not (kind == "code_block" and kept(body, strict)), \
+                            ("fail-open", ctx, marker, gap, indent, strict)
+    assert sweep == 1260, sweep
+    # ⚠️ DECLARED RESIDUAL, measured here so it is not rediscovered as news: a marker line with a
+    # gap of 4 or LESS inside an HTML block is KEPT (`own_code` only ever claimed the gap > 4
+    # family, at every head this series touched), so `<div>` + `- Closes #100` is credited while the
+    # renderer puts it in `html_block`. Pre-existing, outside this fix's rule, and left alone rather
+    # than widened here: blanking the CONTENT of every HTML block is its own change with its own
+    # blast radius. The two directions are separate tests (`…the paragraph does not open one`
+    # above closes the gap > 4 half).
+    assert block_kind("<div>\n- Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<div>\n- Closes #100\n") == [100], "residual, not a regression"
+
+
 # ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──
 
 @pytest.mark.parametrize("body,expected,why", [
