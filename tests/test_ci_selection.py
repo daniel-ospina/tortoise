@@ -11031,8 +11031,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     Nothing is lost by not saving here: the key is SHARED
     (`pip-<os>-<hash uv.lock>`) and is still written by `test-d14-hosted-api`
     whenever it MISSES (unconditional, PR + push — on a warm exact hit
-    `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run, so
-    this job only ever READ it. The ~90 MB HF embedding cache in the same job is
+    `actions/cache@v4` POSTs no save), by `test-slow` when its legs run and by
+    `test-concurrency-falkor`, so this job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
     the pip cache is the ~3.6 GB term that does not fit.
@@ -11181,8 +11181,8 @@ def test_the_record_postgres_job_restores_the_pip_cache_without_saving_it():
     Nothing is lost by not saving: the key is SHARED
     (`pip-<os>-<hash uv.lock>`) and is written by `test-d14-hosted-api`
     whenever it MISSES (unconditional, PR + push — on a warm exact hit
-    `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run, so
-    this job — p50 1.62 m, the fastest pip site — only ever READ it, and what it adds
+    `actions/cache@v4` POSTs no save), by `test-slow` when its legs run and by
+    `test-concurrency-falkor`, so this job — p50 1.62 m, the fastest pip site — only ever READ it, and what it adds
     (`.[test,postgres]` wheels) is a rounding error beside the 3.6 GB
     torch/embeddings archive it would re-tar.
 
@@ -11203,7 +11203,8 @@ def test_the_record_postgres_job_restores_the_pip_cache_without_saving_it():
         "UNBOUNDED: measured 2026-11-05 it held a green job from 1 m 49 s to "
         "20 m 25 s and GitHub reported `cancelled`, which reds the REQUIRED "
         "`python-ci-gate` (#5219). Use `actions/cache/restore@v4` here — the key "
-        "is shared and still written by `test-d14-hosted-api` and `test-slow`.")
+        "is shared and still written by `test-d14-hosted-api`, `test-slow` and "
+        "`test-concurrency-falkor`.")
     restores = [s for s in pip_caches
                 if s.get("uses") == "actions/cache/restore@v4"]
     assert len(restores) == 1, (

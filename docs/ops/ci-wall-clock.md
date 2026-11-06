@@ -161,7 +161,7 @@ archive, so on a `uv.lock` bump it restores that archive and re-tars all of it
 (`restoreImpl.ts:45` extracts a `restore-keys` partial hit into `~/.cache/pip`; `saveImpl.ts:50`
 skips the save **only** on an exact primary-key match). Nothing is lost by not saving: the key is
 SHARED (`pip-<os>-<hash uv.lock>`) and is written by `test-d14-hosted-api` whenever it MISSES
-(unconditional, PR + push — on a warm exact hit `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run, so this job only ever READ it. **Paying 20 more
+(unconditional, PR + push — on a warm exact hit `actions/cache@v4` POSTs no save), by `test-slow` when its legs run and by `test-concurrency-falkor`, so this job only ever READ it. **Paying 20 more
 minutes of held slot under an UNBOUNDED term (the save has no timeout of its own) is exactly what
 the `test-carve-out` note rejects**, and #3239 is about the cap being the stale-head exposure.
 

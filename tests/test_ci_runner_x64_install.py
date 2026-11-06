@@ -3873,9 +3873,9 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     )
 
     # The required aggregate whose `needs:` the runbook argues `repo-harnesses` is ABSENT from.
-    # It USED to be cited by line — `python-ci.yml:4525` — which is exactly the coordinate this PR's
-    # ~45 net lines above it moved (`:4525` landed inside `ci-introduced-failure`'s run block and
-    # still passed the only check the arms above make, `1 <= n <= EOF`). It is cited by JOB NAME now,
+    # It USED to be cited by line — `python-ci.yml:4702`, which was CORRECT at this branch's base and
+    # is moved by this branch's own insertions ahead of the list — and a stale number stays green
+    # against the only check the arms above make (`1 <= n <= EOF`). It is cited by JOB NAME now,
     # and a name is only better than a number if something RESOLVES it — otherwise the next rename
     # leaves the sentence pointing at nothing, which is the same silent drift one shape over. So the
     # name is resolved here, AND the absence the sentence asserts is asserted rather than assumed

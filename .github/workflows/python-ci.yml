@@ -3482,8 +3482,8 @@ jobs:
         # Nothing is lost by not saving here: the key is SHARED
         # (`pip-<os>-<hash uv.lock>`), and it is written by `test-d14-hosted-api`
         # whenever it MISSES (unconditional, PR + push — on a warm exact hit
-        # `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run.
-        # This job only ever READ it.
+        # `actions/cache@v4` POSTs no save), by `test-slow` when its legs run, and by
+        # `test-concurrency-falkor`. This job only ever READ it.
         #
         # `continue-on-error`: a cache-SERVICE error (transport/503) must never
         # red this leg — a miss is the fail-open case, and install-cpu-torch
@@ -4563,8 +4563,8 @@ jobs:
         # Nothing is lost by not saving here: the key is SHARED
         # (`pip-<os>-<hash uv.lock>`) and is written by `test-d14-hosted-api`
         # whenever it MISSES (unconditional, PR + push — on a warm exact hit
-        # `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run.
-        # This job — the fastest of the pip sites on a warm key (p50 1.62m) —
+        # `actions/cache@v4` POSTs no save), by `test-slow` when its legs run, and by
+        # `test-concurrency-falkor`. This job — the fastest of the pip sites on a warm key (p50 1.62m) —
         # only ever READ it, and what it adds on top is its own `.[test,postgres]`
         # wheels, a rounding error beside the torch/embeddings archive it would
         # re-tar. Raising the cap instead would buy finite headroom under that
