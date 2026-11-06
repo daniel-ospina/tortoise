@@ -57,7 +57,10 @@ residuals — row 2b's *"the catalog union (#2714 indicator 3)"* clause and the
 starter set's `TORTOISE_STARTER_PACKS` override. Only **one printed row changes**
 there (2b's evidence line gains the write-gate reading the clause now measures:
 `None` admits, an explicit set constrains; every other row, and the `25 premises, 0
-unmeasured sections` total, is unchanged); deployed
+unmeasured sections` total **that run printed**, is unchanged). The total reads **26**
+at the current head because #4282's container added one row; this file records the
+`a310c1d9c` run, so the number here is the one its log printed (`02-step-premise-census.log`,
+`MEASURED: 25 premises`). Deployed
 `commit_sha 81f5594dce` — an
 ancestor of `origin/main` `2bf86487c1`, **39 commits behind** it
 (`git rev-list --count 81f5594dce..2bf86487c1` → `39`; deploy lag, not a stale or

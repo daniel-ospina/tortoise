@@ -42,7 +42,9 @@ Runnable with:
 """
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 
 import pytest
 
@@ -1615,6 +1617,14 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     pinned unchanged by ``test_supersede_repoint_reads_a_junk_direction_as_both
     _ways`` (junk = both ways = REFUSED on the backward leg), which is why the
     deletion is behaviour-preserving except here.
+
+    ⛔ WHAT THIS DOES *NOT* PIN, measured: the DELETION itself. Restoring the
+    three-branch filter beside the landed ``_judged`` keeps every assertion here
+    green — the filter's token is never rendered for a PRESENT value, and its
+    verdict is identical — so a lane that re-added the second copy #10520 exists
+    to delete would see this test pass. The code SHAPE is pinned by
+    ``test_the_repoint_door_carries_no_door_local_direction_filter``; this test
+    pins the refusal MESSAGE.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -1663,6 +1673,77 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     assert "direction 3" in _hmsg, _hmsg
     assert "judged 3" not in _hmsg, _hmsg
     assert "judged 'bidirectional'" not in _hmsg, _hmsg
+
+
+#: The 2a-DIRECT pre-flight's single read of the stored direction. The shape
+#: (a Call, not a branch or a literal) is what #10520 A4 requires; this is the
+#: region the AST pin below reads.
+_REPOINT_DIRECTION_READ = "_canonical_direction"
+
+
+def test_the_repoint_door_carries_no_door_local_direction_filter():
+    """#10520 (A4) — the 2a-DIRECT pre-flight keeps ONE direction read.
+
+    ⛔ WHY THIS IS STRUCTURAL, measured: the deletion is BEHAVIOUR-INVISIBLE. It
+    was made safe precisely because the door-local three-branch filter verdicts
+    identically to the plain call, so restoring it beside the landed ``_judged``
+    leaves every behavioural pin in this file GREEN — including
+    ``test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer``
+    (measured on this branch: filter restored, that pin -> 1 passed). What
+    #10520 asks for is a property of the CODE SHAPE — "the door-local filter can
+    be deleted (it should be, so the two cannot drift)" — so it is pinned on the
+    shape: the pre-flight assigns ``_eff_dir`` exactly ONCE, that assignment IS
+    the canonicalizer call, and the call's ARGUMENTS are the two plain reads
+    (``_rtype``, ``_raw_dir``) with no keyword. All three clauses are measured
+    to be load-bearing: a filter that writes ``_eff_dir`` itself reds the count,
+    and a copy smuggled into a SIBLING local or into the argument position
+    (``_raw_dir if isinstance(...) else "bidirectional"``) reds the argument
+    check — the last one is behaviour-identical and invisible to every
+    verdict-level pin, which is exactly the regression this test exists for.
+
+    ⛔ AST, not a text search: the comment above the assignment NAMES the deleted
+    branch (``⛔ Do NOT reintroduce a per-value branch here``, with its
+    ``isinstance(..., str)`` screen quoted in prose) — a substring test over
+    ``getsource`` would resolve that prose as the defect it warns about, the trap
+    ``tests/test_9079_handle_write_authority.py`` records for the same idiom.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(
+        TortoiseSDK.supersede_point)))
+    _assigns = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for _target in (node.targets if isinstance(node, ast.Assign)
+                        else [node.target])
+        if isinstance(_target, ast.Name) and _target.id == "_eff_dir"
+    ]
+    assert _assigns, (
+        "the 2a-DIRECT pre-flight no longer assigns `_eff_dir` — if the "
+        "canonicalizer read was renamed or hoisted, update "
+        "_REPOINT_DIRECTION_READ/this pin; if it was REPLACED, the ONE-reader "
+        "rule (#10520 A4) needs re-arguing, not this test")
+    assert len(_assigns) == 1, (
+        "the 2a-DIRECT pre-flight assigns `_eff_dir` "
+        f"{len(_assigns)} times — a second assignment IS the door-local copy of "
+        "the direction policy #10520 A4 deleted")
+    _value = _assigns[0].value
+    assert isinstance(_value, ast.Call), (
+        "`_eff_dir` is no longer a plain call to the ONE canonicalizer: "
+        f"{ast.dump(_value)[:200]}")
+    assert isinstance(_value.func, ast.Attribute), ast.dump(_value.func)
+    assert _value.func.attr == _REPOINT_DIRECTION_READ, (
+        "`_eff_dir` must come from "
+        f"`self.{_REPOINT_DIRECTION_READ}(...)`, got `{_value.func.attr}`")
+    # ⛔ The ARGUMENTS matter as much as the call: a door-local copy can be
+    # smuggled into a sibling local or into the argument position
+    # (``_raw_dir if isinstance(...) else "bidirectional"``) and is then
+    # behaviour-INVISIBLE, so no verdict-level pin can see it (measured).
+    assert not _value.keywords, ast.dump(_value)
+    assert [ast.unparse(_arg) for _arg in _value.args] == [
+        "_rtype", "_raw_dir"], (
+        "the pre-flight must hand the canonicalizer the TWO PLAIN READS "
+        f"(`_rtype`, `_raw_dir`); it passes {ast.unparse(_value)} — a computed "
+        "argument IS the door-local copy of the direction policy #10520 A4 "
+        "deleted")
 
 
 def test_supersede_repoint_reads_a_non_string_id_endpoints_own_marker(lane):
