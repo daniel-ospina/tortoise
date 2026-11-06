@@ -3403,8 +3403,9 @@ class TestCaptureOrgIngestBound:
 
     §3.1 asks for a per-org, per-window ingest rate on BOTH session write lanes
     ("``/v1/sessions/commit`` and ``/v1/sessions``"). Only the commit half
-    landed (#9798); the capture lane kept the per-KEY bucket (300/min × up to
-    20 keys) plus the instance-wide in-flight cap, and
+    landed (#9798); the capture lane kept the per-KEY bucket (100/min — the
+    general bucket; the 300/min one belongs to the commit lane, R-13 — times up
+    to 20 keys on Team) plus the instance-wide in-flight cap, and
     ``_count_resource("points")`` matches none of what it writes —
     ``:Session``, the ``sessionCaptured`` ``:Event``, the transcript
     ``:Source`` and one episodic ``:Point`` per turn — so the #5637 points gate
