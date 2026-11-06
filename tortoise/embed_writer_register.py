@@ -4,7 +4,7 @@
 move as writers are declared, so read `WRITER_CENSUS` rather than a number restated here) but the
 only place that classification lived was
 `tools/dod_5090_probe.py::WRITER_CENSUS`, which is a **read-only instrument** and says so in its own
-header (*"the census CLASSIFIES the unresolved set; it does not license moving this verdict"*). An
+words (*"the census CLASSIFIES the unresolved set; it does not license moving this verdict"*). An
 audit instrument is not a product decision: the answer to *"is this writer allowed to store a vector
 outside the gate?"* has to be resolvable **at runtime, from `tortoise/`**, or arming the EMBED gate
 (`#11086`) would let an undeclared writer bypass silently while the gap was merely *labelled*.
@@ -41,11 +41,17 @@ rule exists to close.
 no wider. Two write shapes are worth naming, because the difference is the difference between a
 claim and a slogan:
 
-* **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`). This shape was invisible to the
+* **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`), for every
+  module discovery walks. This shape was invisible to the
   instrument's clause regex until `#11274`, so a writer using it added nothing to the population and
   this register's guard stayed green over it; discovery now decides it on the AST, and the four
   live instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
-  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here.
+  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ "Every module discovery
+  walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
+  seam primitives are not write paths), and two functions there use exactly this form —
+  `stamp_journal_embedding` (`payload["embedding"] = vec`) and `_drop_journalled_embedding`
+  (`payload["embedding"] = None`). They are the seam, so they are declared nowhere and found
+  nowhere; an enforcement point must not read their absence as "no such write".
 * **Map-merges are NOT** (`SET n += $p`, `probe.UNDECIDABLE_WRITE_SHAPES`). Whether the merged map
   carries a vector is data flow, not syntax, and ~60 functions merge a props map. So the honest
   statement is not "no writer can bypass silently" but: **every writer discovery finds outside the
@@ -74,9 +80,10 @@ for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a who
 COMPUTED-KEY forms a regex and a literal-slice test both miss
 (`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and those forms are not hypothetical.
 ⚠️ The SHAPE is what is blind, not necessarily the WRITER carrying it: the interpolation is live in
-`tortoise.cache_projection::node_statement` (that writer is genuinely ABSENT), while the helper in
-`tortoise.sdk::_emit_event` and the computed key in `tortoise.sdk::update_point` are in the census
-through OTHER statements they hold (`update_point` as `gated`), and
+`tortoise.cache_projection::node_statement` and the helper in `tortoise.sdk::_emit_event`, and BOTH
+of those writers are genuinely ABSENT from the census (neither holds a decidable statement, so
+neither is in `WRITER_CENSUS` or this register at all); by contrast the computed key in
+`tortoise.sdk::update_point` is in the census through OTHER statements it holds (`gated`), and
 `tortoise.hosted_backup::restore_graph` is declared here off its `set_embedding_clause`, NOT off its
 whole-node replace. The full list is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which is the authority: a count written
@@ -527,7 +534,8 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: or an INTERPOLATED property name) are ABSENT from this population rather than declared here — one
 #: is live in `tortoise/` today (`cache_projection::node_statement`), and `#11274` NAMES the shape
 #: discovery will not decide (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
-#: Forward — every writer outside the gate is declared:
+#: Forward — every writer DISCOVERY FINDS outside the gate is declared (never "every writer", see the
+#: docstring's closure-claim caveat):
 #: `tests/test_embed_writer_register.py::test_every_writer_the_instrument_finds_outside_the_gate_is_declared`.
 #: Reverse — no declaration outlives its writer:
 #: `tests/test_embed_writer_register.py::test_the_instrument_and_the_product_declare_the_same_writers`.

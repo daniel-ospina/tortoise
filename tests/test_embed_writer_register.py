@@ -278,10 +278,12 @@ def test_the_live_guard_has_teeth_on_an_INJECTED_writer(tmp_path):
     Both shapes are injected, because a discovery filter can see one and miss the other:
 
     * the CLAUSE shape (`name.embedding = …` / `set_embedding_clause(…)`) — always seen;
-    * the CONTAINER-KEY shape (`record["embedding"] = …`) — INVISIBLE until `#11274`. Its live
-      instance is `sdk._write_capture_turns` (`sdk._journal_event_raw_write` uses the same key but
-      was already in the population through the `embedding=None` in its SIGNATURE, so it is not
-      evidence the shape was seen). This half of the test is RED on the pre-`#11274` filter.
+    * the CONTAINER-KEY shape (`record["embedding"] = …`) — INVISIBLE until `#11274`. The live
+      instances it was missing are the four the register's container-key bullet names
+      (`api::add_point`, `consistency::_graph_fingerprint`, `sdk::_index_gate_read`,
+      `sdk::_write_capture_turns`); `sdk._journal_event_raw_write` uses the same key but was already
+      in the population through the `embedding=None` in its SIGNATURE, so it is not evidence the
+      shape was seen. This half of the test is RED on the pre-`#11274` filter.
     """
     pkg = tmp_path / "tortoise"
     pkg.mkdir()
@@ -493,6 +495,15 @@ INVISIBLE_SHAPES = {
     # pinned here rather than only described in the docstring.
     "container_helper": 'def w(rec, v):\n    rec.setdefault("embedding", v)\n',
     "computed_key": 'def w(rec, key, v):\n    rec[key] = v\n',
+    # A clause held in a module CONSTANT (round-10 review): the regex reads the `query(...)` argument,
+    # which is a bare `Name` here, and the AST pass only inspects subscript targets — so the shape is
+    # absent with neither detector firing. It was NAMED in the register's docstring and in this
+    # file's live-guard docstring while nothing pinned it, which is the class this dict exists to make
+    # impossible.
+    "module_constant_clause": (
+        '_CLAUSE = "SET n.embedding = $e"\n'
+        'def w(tx):\n    tx.query(_CLAUSE)\n'
+    ),
 }
 
 

@@ -220,8 +220,10 @@ _EMBED_WRITE = re.compile(
 #: ⛔ It was INVISIBLE until `#11274` (found by `#11085`'s review, P2): a new
 #: writer using this shape added NOTHING to the population, so the register's
 #: "an undeclared writer cannot bypass silently" guard stayed green — the exact
-#: hole `#11085` exists to close. ⚠️ The live instance of the BLIND shape is
-#: `sdk._write_capture_turns`; `sdk._journal_event_raw_write` uses the same
+#: hole `#11085` exists to close. The live instances it was missing are the
+#: four named in `tortoise/embed_writer_register.py`'s container-key bullet
+#: (`api::add_point`, `consistency::_graph_fingerprint`, `sdk::_index_gate_read`,
+#: `sdk::_write_capture_turns`). ⚠️ `sdk._journal_event_raw_write` uses the same
 #: container key but was ALREADY in the population for a different reason (the
 #: `embedding=None` in its SIGNATURE matches `_EMBED_WRITE`), so it is not
 #: evidence that the shape was seen.
