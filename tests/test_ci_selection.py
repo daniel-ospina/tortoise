@@ -61,6 +61,17 @@ def _sel(changed, event="pull_request"):
     return select(changed, event, load_manifest())
 
 
+#: A string literal that IS a path to the operator runbook — the shape a test
+#: builds the path from (`REPO_ROOT / "docs" / "infra-runbook.md"`,
+#: `Path(__file__)… / "docs/infra-runbook.md"`). Deliberately anchored so it does
+#: NOT match a prose mention (`"docs/infra-runbook.md §4.6 …"`), which is a
+#: citation, not a reader. Used by
+#: `test_the_record_schema_placement_pins_run_on_a_doc_only_diff` to DERIVE the set
+#: of tests that read the doc (#11064 review round 9, P2: a hand-written census of
+#: that set was false — four readers were asleep on a runbook-only diff).
+_RUNBOOK_PATH_LITERAL = re.compile(r'''(["'])(?:[^"'\n]*/)?infra-runbook\.md\1''')
+
+
 def _expand(legs: dict) -> dict:
     """Compare leg membership without caring about the .py suffix.
 
@@ -230,22 +241,32 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured at this head: 150 files for the STORAGE diff, 73 for the EXTRACTOR
+    Measured at this head: 155 files for the STORAGE diff, 78 for the EXTRACTOR
     diff (empty surfaces, the early return); the gate is in the selected set in
     both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
     measurements, not constants, and they move for DIFFERENT reasons:
 
-    * the **150** is `onboarding` ∪ `tier1` **minus 14** — the union is 164 at
-      this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
+    * the **155** is `onboarding` ∪ `tier1` **minus 14** — the union is 169 at
+      this head (97 + 78 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
-    * the **73** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1097 at
-      this head (1094 on `main` before this fold's three new test files), and it
-      moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
-      The `60` this sentence carried was that same `tier1` set **13 rows ago**
+    * the **78** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool" — that is a
+      DIFFERENT measurement, `len(fast_pool(manifest))`, and this bullet
+      deliberately carries no figure for it: these three registrations do not
+      change it (all three files were already classified), and it moves for
+      other reasons again, so re-derive it rather than reading this sentence.
+      ⚠️ And `fast_pool` subtracts `ENV_BROKEN_FILES`
+      itself, so a hand count of the classification sets lands one high — which
+      is how a figure re-derived by counting can look like it disagrees with the
+      code that produced it (#11064 review r15, P3).
+      The `60` this sentence carried was that same `tier1` set **18 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
-      and 73 here), i.e. the very "a past state quoted as a current one"
-      defect the line below warns about.
+      and 78 here), i.e. the very "a past state quoted as a current one"
+      defect the line below warns about — and the constant this bullet used to
+      publish for the pool decayed faster still (written `1109`, already `1110`
+      at the commits that wrote it, `1111` measured on this tree, which merges
+      `4f2d09778c`), which is why the figure is gone rather than corrected
+      again.
 
     Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
     trusting either — the assertions below are the pin, this
@@ -259,6 +280,32 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+    # ⛔ AND THE FAST-POOL CLAUSE STATES NO FIGURE — EXECUTED (#11064 review r15,
+    # P3, r16 P2). That clause carried `1109`, a number no tree returned (#11064
+    # review r15). Its replacement published a different one, which was already
+    # stale on `main` when it was written and moved twice more inside this single
+    # lane — once when an unrelated test file landed on `main`, once when
+    # `origin/main` was integrated — so the figure is now GONE rather than
+    # corrected a third time, exactly as was done for `1109` (#11064 review r16,
+    # P2). (A hand count of the classification sets lands one high anyway, because
+    # `fast_pool` subtracts `ENV_BROKEN_FILES` itself.) A pool size is a
+    # measurement with several independent reasons to move, so restating it is the
+    # decay this docstring warns about; the derivation pointer is the durable form
+    # and this pin holds it there.
+    _doc = test_v4_membership_gate_runs_on_both_architecture_docs.__doc__ or ""
+    _clause = re.search(r"full`-less fast pool(.{0,600}?)re-derive\s+it", _doc, re.S)
+    assert _clause, (
+        "the fast-pool clause lost its `len(fast_pool(manifest))` derivation "
+        "pointer — without it the sentence has no referent and a reader must "
+        "invent the pool size (#11064 review r15, P3)"
+    )
+    assert not re.search(r"\b\d{3,}\b", _clause.group(0)), (
+        "the fast-pool clause states a figure again, and a pool size is a "
+        "measurement that moves for three reasons — keep the derivation "
+        "pointer instead of a number (#11064 review r15, P3: the figure this "
+        "clause carried matched no tree when it was read)"
+    )
 
     # #10980 review (P2): the §9.4/§12.1b source-vector pin lives in the
     # narrative-home module, and it guards the SAME document — so a STORAGE-only
@@ -494,6 +541,116 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
         "the #8614 runbook owner must stay in tier1 — #9548 adds a second "
         "runbook reader, it does not replace the first"
     )
+
+
+def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
+    """#11064 review (P1): the pins must run on the DOCS that can break them.
+
+    `tests/test_record_schema_placement.py` reads several doc paths, and they do
+    not all select the same surface. `08-hosted-prerequisites.md`, `docs/00_index.md`,
+    `docs/architecture/STORAGE-ARCHITECTURE.md` and the capstone `README.md` are
+    surface-selecting, so the pins on them run through those rows. But
+    `docs/infra-runbook.md` (the §9 drill row that
+    `test_the_epic_r8_drill_blocker_agrees_with_the_runbook` requires to keep
+    naming a `captured` session and a `direct` DSN),
+    `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
+    (the `_ARMED_SOURCE_OF_TRUTH` anchors) and
+    `docs/epics/2026-10-10-7879-postgres-record/04-projection.md` (its
+    resolved-totals sentence) match no SOURCE_PATTERNS entry, and `docs/` is in
+    NON_PYTHON_PREFIXES — so a diff touching only one of them filters to
+    `changed == []` and takes the docs-only early return: tier1 ONLY.
+    Registered in `core` but not in `tier1`, those pins were therefore asleep on
+    exactly the diffs that can re-break them: deleting `captured`/`direct` from
+    the §9 drill row (which is what the pre-#11064 row said — the stale premise
+    sent a lane back to the arming), dropping 09's arming anchor, or editing 04's
+    sentence would merge green and leave 08 §R8 silently disagreeing with the
+    runbook it is derived from (#4309 silent-drop class; the #8614 / #9548 shape
+    one file over).
+
+    A `core` registration cannot cover this on its own: a surface's test files
+    run only once that surface is ALREADY selected, which a docs-only diff never
+    does. Measured at the pre-fix tree: `surfaces=[]` for each of the three, and
+    this file absent from `test_files` — and selected once the `tier1` entry is
+    in. (Counts are deliberately not restated here: a copied figure is what goes
+    stale, per `tools/ci_selection.py`'s own rule.)
+    """
+    for doc in (
+        "docs/infra-runbook.md",
+        "docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md",
+        "docs/epics/2026-10-10-7879-postgres-record/04-projection.md",
+    ):
+        r = _sel([doc])
+        assert r["full"] is False
+        assert r["surfaces"] == [], (
+            f"{doc} is expected to select NO surface (that is what puts it on "
+            "the docs-only early return) — if a SOURCE_PATTERNS row now matches "
+            "it, this pin's premise changed and the tier1 registration should "
+            "be re-derived rather than assumed"
+        )
+        assert "test_record_schema_placement.py" in r["test_files"], (
+            f"a {doc}-only diff must select `test_record_schema_placement.py` — "
+            "it binds that doc, and a `core`-only registration is asleep on "
+            "every docs-only diff (#11064 review, #4309 class)"
+        )
+    # ... and EVERY test that READS the runbook must stay selected alongside it:
+    # these files pin DIFFERENT sections of the same doc, so none substitutes for
+    # another.
+    #
+    # ⛔ The set is DERIVED, not enumerated (#11064 review round 9, P2). It used to
+    # be a hand-written assertion over "the pre-existing runbook owners" carrying
+    # the message "a third runbook reader … does not replace the earlier two" — a
+    # census that read as complete and was not: `test_record_backup.py` (the §9
+    # exit-1 row's failure class), `test_session_extraction_modes.py` (§4.6's
+    # `VENICE_API_KEY` row), `test_durability_posture.py` (the runbook in its
+    # `SCAN_FILES`) and `test_retention_promise.py` (it in `LINKED_FILES`) all READ
+    # the doc. TWO of them were asleep on a runbook-only diff —
+    # `test_record_backup.py` and `test_session_extraction_modes.py`, measured
+    # UNSELECTED at `origin/main` — so editing a row they pin merged green with the
+    # pin never run; the other two were already reachable through their own `tier1`
+    # arms, which is exactly why a list of "the runbook-specific owners" could not
+    # see the whole set (the #4309 silent-drop class the registration exists to
+    # close). A census that is not one is not: the fix was to register the two AND
+    # to make the list derive itself.
+    #
+    # The signal is a string literal that IS the doc's path — `"infra-runbook.md"`
+    # or `"docs/infra-runbook.md"`, the shape a path is built from
+    # (`REPO_ROOT / "docs" / "infra-runbook.md"`,
+    # `Path(__file__)… / "docs/infra-runbook.md"`). A PROSE mention inside a
+    # docstring or message (`"docs/infra-runbook.md §4.6 …"`, `` `…` ``) does not
+    # END at the extension and is correctly not a reader. Residual, stated because
+    # a derivation that cannot see a shape is not a proof of absence: a reader that
+    # builds the path by concatenation or from a variable is invisible here and must
+    # still be registered by hand.
+    runbook_readers = set()
+    r = _sel(["docs/infra-runbook.md"])
+    for reader_path in sorted(Path(__file__).resolve().parent.rglob("*.py")):
+        if reader_path.name == Path(__file__).name:
+            # this pin names the doc as a `select()` INPUT and never reads it
+            continue
+        if _RUNBOOK_PATH_LITERAL.search(
+            reader_path.read_text(encoding="utf-8", errors="replace")
+        ):
+            runbook_readers.add(reader_path.name)
+    assert runbook_readers == {
+        "test_deploy_workflow.py",
+        "test_durability_posture.py",
+        "test_fly_secret_drift.py",
+        "test_record_backup.py",
+        "test_record_schema_placement.py",
+        "test_retention_promise.py",
+        "test_session_extraction_modes.py",
+    }, (
+        "the derived runbook-reader set changed — a NEW reader must be registered "
+        f"in tier1 (and added here) or a retired one removed: {sorted(runbook_readers)}"
+    )
+    for owner in sorted(runbook_readers):
+        assert owner in r["test_files"], (
+            f"{owner} READS docs/infra-runbook.md but is NOT selected on a "
+            "runbook-only diff — its pins are asleep on the only diff that can "
+            "break them (a docs-only diff filters to `changed == []` and takes "
+            "the tier1 early return, so an `api`/`core` registration cannot reach "
+            "it; #4309 silent-drop class, #11064 review rounds 1 and 9)"
+        )
 
 
 def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
@@ -3148,7 +3305,7 @@ def test_gh_read_cache_tool_change_selects_core_not_tier1():
     (`"core" in r["surfaces"]` and `"test_gh_read_cache.py" in r["test_files"]`);
     only the third (`r["full"] is False`) survives, unexercised. MEASURED both ways:
     with the entry `surfaces=['core']`, `full=False`, file present; without it
-    `surfaces=[]`, `full=False`, 73 tier-1 files and the pin ABSENT. Stated as two
+    `surfaces=[]`, `full=False`, 78 tier-1 files and the pin ABSENT. Stated as two
     because the tier-1 fallback genuinely does not carry this file — the very premise
     three lines above — so an earlier cut of this docstring that claimed only the
     FIRST assert fails understated the pin and mis-described its own failure mode.
@@ -5275,8 +5432,8 @@ def test_ready_for_owner_tool_change_fails_closed_to_full():
     # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
     # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
     #
-    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 73 since #10980,
-    # so re-derive it rather than reading this as a current count):
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 78 at the
+    # #11064 head, so re-derive it rather than reading this as a current count):
     #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
     #       -> surfaces: []  full: False  tier-1 `test_files`,
     #          with `test_ready_for_owner.py` ABSENT
@@ -12984,7 +13141,7 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
         wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)"),
         *wf_lines[real_marker + 1:],
     ]
-    detached = dropped[:jobs_at] + decoy + dropped[jobs_at:]
+    detached = [*dropped[:jobs_at], *decoy, *dropped[jobs_at:]]
     with pytest.raises(AssertionError, match="different block"):
         _test_job_cache_overrides_block(detached, prune_name)
 

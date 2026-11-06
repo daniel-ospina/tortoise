@@ -3862,10 +3862,10 @@ surfaces:
   # file is in NEITHER named surface a docs-only diff can select. `docs/` is in
   # NON_PYTHON_PREFIXES, so the mechanism differs by document: an
   # EXTRACTOR-V4-ARCHITECTURE.md-only diff takes `select()`'s early return
-  # (`surfaces=[]`, 73 files — re-measured at `#10980`, which is itself a `tier1`
+  # (`surfaces=[]`, 78 files — re-measured at `#11064`, which is itself a `tier1`
   # addition) while a STORAGE-ARCHITECTURE.md-only diff is
   # claimed by the `onboarding` SOURCE_PATTERNS entry (`surfaces=['onboarding']`,
-  # 150 files) — neither selects `core`. Measured for both: the gate is selected
+  # 155 files) — neither selects `core`. Measured for both: the gate is selected
   # only once this `tier1` row exists, which is the same placement every sibling
   # v4 doc-subject guard uses (#5092).
   - test_v4_declared_mechanisms.py
@@ -4693,9 +4693,9 @@ surfaces:
   # `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff does NOT take
   # `select()`'s early return — that path is claimed by the `onboarding`
   # `SOURCE_PATTERNS` entry, so `select()` returns `surfaces=['onboarding'],
-  # full=False, 150 files` (re-derived at `#10980`). The `131` this comment
-  # carried is 19 files short, and its history is NOT all `tier1`: 60 -> 73
-  # `tier1` rows account for **13** of the 19, and six more came from the
+  # full=False, 155 files` (re-derived at `#11064`). The `131` this comment
+  # carried is 24 files short, and its history is NOT all `tier1`: 60 -> 78
+  # `tier1` rows account for **18** of the 24, and six more came from the
   # `onboarding` surface itself growing (91 -> 97 members; measured through
   # `select()` on both manifest blobs, so "19 `tier1` rows" is wrong).
   # ⚠️ Re-derive that figure after any `tier1` addition,
@@ -7693,6 +7693,78 @@ tier1:
 # tests/test_ci_selection.py::
 # test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff.
 - test_deploy_workflow.py
+# #11064 review (P1): the SAME shape AGAIN — one more `docs/` path that selects NO
+# surface, whose pins were registered only on a surface a docs-only diff can never
+# reach. (#11064 review round 9, P2: this line used to call the entry "the third
+# member of this family", and that was a census the tree falsified — two FURTHER
+# runbook readers were asleep on the same diff. They are registered below, and the
+# claim is now DERIVED by a test rather than counted in prose, because the count is
+# what went stale.)
+# `test_record_schema_placement.py` reads THREE doc paths that select NO surface
+# at all — `docs/infra-runbook.md` (the §9 drill row),
+# `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
+# (the `_ARMED_SOURCE_OF_TRUTH` anchors) and
+# `docs/epics/2026-10-10-7879-postgres-record/04-projection.md` (its
+# resolved-totals sentence) — while its only registration is the `core`
+# surface's own entry, which no docs-only diff can reach. `docs/` is in
+# NON_PYTHON_PREFIXES and none of the three matches a SOURCE_PATTERNS row, so a
+# diff touching only one of them filters to `changed == []` and takes the
+# docs-only early return: tier1 ONLY, and `select()` emits a surface's test files
+# only for a surface it MATCHED — so no surface's `test_files` is ever reached.
+# So its runbook pin (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`,
+# which requires the §9 drill row to still name a `captured` session and a
+# `direct` DSN), its 09 anchor and its 04 sentence were ASLEEP on the only diffs
+# that can break them: delete `captured`/`direct` from that row, drop the 09
+# arming anchor, or edit 04's sentence, and the PR merges green while 08 §R8
+# silently stops agreeing with the runbook it is derived from (#4309 silent-drop
+# class; the #8614 / #9548 shape one file over). This is pinned by
+# tests/test_ci_selection.py::test_the_record_schema_placement_pins_run_on_a_doc_only_diff,
+# which asserts all THREE paths select no surface AND select this file.
+# Measured (`tools.ci_selection.select`, authoring tree BEFORE this entry): each
+# of the three -> `surfaces=[]`, pin NOT selected; pin SELECTED once the entry
+# below is in. (The tier-1 COUNT and every character offset are deliberately NOT
+# restated: a copied figure is what went stale here before, twice — re-measure
+# instead. `tools/ci_selection.py` carries that rule itself.) Named by mechanism,
+# not by line number, for the same reason: this comment used to pin
+# `tools/ci_selection.py:2039-2041` and, later, the `core` registration's own
+# line — both had moved onto unrelated text by the next merge (the decay mode
+# `3443ce66c` corrected across this PR).
+# Hermetic — doc + migration scans, no graph,
+# no DB, measured weight 0.2 in the durations map — so tier1 is the correct lane.
+# Pinned by tests/test_ci_selection.py::
+# test_the_record_schema_placement_pins_run_on_a_doc_only_diff.
+- test_record_schema_placement.py
+# #11064 review round 9 (P2): the two runbook readers that census left asleep. Same
+# mechanism as the entry above — `docs/infra-runbook.md` matches no SOURCE_PATTERNS
+# entry and `docs/` is in NON_PYTHON_PREFIXES, so a runbook-only diff filters to
+# `changed == []` and takes the docs-only early return: tier1 ONLY, and `select()`
+# emits a surface's test files only for a surface it MATCHED. Both were registered
+# on `api`/`core` alone, where a docs-only diff can never reach them, so their
+# runbook pins never ran on the one diff that can break them (the #4309 silent-drop
+# class this section exists for). Measured before these entries:
+# `select(['docs/infra-runbook.md'])` returned both as UNSELECTED.
+#   * `test_record_backup.py` pins §9's exit-1 row FAILURE CLASS — the row must keep
+#     `RecordRestoreFailed` and the 'nothing was published' sentence — and builds the
+#     same path twice more (`runbook = … read_text().split()`). Edit that row and it
+#     merged green;
+#   * `test_session_extraction_modes.py` pins §4.6's `VENICE_API_KEY` row — the table
+#     an operator reads BEFORE setting the key on the hosted deployment. Delete the
+#     row and it merged green.
+# ⛔ The other runbook READERS are reachable already, each through its own `tier1` arm
+# rather than through this block — `test_deploy_workflow.py`, `test_fly_secret_drift.py`,
+# `test_durability_posture.py` (`#2881` above) and `test_retention_promise.py` (`#4179`)
+# — which is exactly why a census that
+# enumerated only the *runbook-specific* owners could not see the whole set, and
+# why the set below is no longer asserted in prose at all:
+# tests/test_ci_selection.py::test_the_record_schema_placement_pins_run_on_a_doc_only_diff
+# DERIVES every reader from `tests/` and reds when any member is unselected, so a
+# NEW reader cannot be added silently and a retired one cannot linger. Two entries
+# were all that was missing; the derivation is what proves that, rather than a
+# reviewer's eye. The manifest's granularity is the FILE, so the cost is each whole
+# file; the durations map carries the weights and this comment does not copy them (a
+# copied figure is what went stale in this block twice — see the note above).
+- test_record_backup.py
+- test_session_extraction_modes.py
 # #8135 review (P1, twice): `test_b7_runbook_ok_semantics_8135.py` binds the B7
 # operator runbook's meaning of `mcp_tool_call.status == "ok"`
 # (`docs/runbook/b7-activation-scorecard.md` — the claim #8135 corrected, whose
@@ -7810,8 +7882,8 @@ tier1:
 # ⚠️ #9778 review (P1): the docs-only diff really does reach this entry, and the
 # mechanism differs by DOCUMENT — measured with `tools/ci_selection.py`:
 # EXTRACTOR-V4-ARCHITECTURE.md takes `select()`'s early return (`surfaces=[]`,
-# 73 files) while STORAGE-ARCHITECTURE.md matches the `onboarding` entry
-# (`surfaces=['onboarding']`, 150 files), and `core` is added only when NOTHING
+# 78 files) while STORAGE-ARCHITECTURE.md matches the `onboarding` entry
+# (`surfaces=['onboarding']`, 155 files), and `core` is added only when NOTHING
 # matched. Registered in `core` alone the gate was asleep on the exact diff class
 # that can red it (#1349/#3332/#3616 silent-drop class); pinned by
 # `tests/test_ci_selection.py::test_docs_scanning_gates_stay_in_tier1`.
