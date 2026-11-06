@@ -3129,7 +3129,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     # be captured as a Sentry event — and building that event re-reads the source
     # file of every frame on the event loop (see the sentry init note). Under a
     # probe storm the loop never got back to serving, which is the outage:
-    # loop_age_ms 43 444 s, every request hung, machine exited 1.
+    # loop_age_ms 43 444 ms (~43 s), every request hung, machine exited 1.
     #
     # So: log it low and do not capture it here. The response SHAPE is unchanged
     # (the 500 below) on purpose — review round 1 (P3) measured that a 204 for a

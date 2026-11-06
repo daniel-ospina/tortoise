@@ -128,7 +128,7 @@ def test_capture_exception_uses_the_NARROW_set_not_the_request_layer_one(
 ) -> None:
     """Round 5 (P3): the belt's direction scope was unpinned.
 
-    `capture_exception` is the GLOBAL belt — it is what `oauth._capture`'s
+    `capture_exception` is the GLOBAL belt — it is what `oauth._log_and_capture`'s
     "single capture" for the token boundary goes through. If it were changed to
     pass `inbound_request=True`, an OUTBOUND reset would be swallowed there and
     the oauth boundary would log at WARNING and capture nothing. Pinned at the
@@ -217,7 +217,7 @@ def test_direction_ambiguous_names_are_benign_only_on_the_inbound_layer() -> Non
     So the name is benign ONLY with `inbound_request=True`, and it is NOT in the
     client-global set — `ignore_errors` is applied by `Client._should_capture` to
     every event from every path, so a global entry would blind the whole process
-    to upstream resets (including `oauth._capture`'s "single capture").
+    to upstream resets (including `oauth._log_and_capture`'s "single capture").
     """
     for name, cls in (("ConnectionResetError", ConnectionResetError),
                       ("BrokenPipeError", BrokenPipeError)):

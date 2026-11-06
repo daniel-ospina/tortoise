@@ -50,7 +50,7 @@ BENIGN_EXCEPTION_NAMES = frozenset({"ClientDisconnect", "BrokenResourceError"})
 #: `ignore_errors`/`BENIGN_EXCEPTION_NAMES`, because that is a CLIENT-GLOBAL
 #: filter (`Client._should_capture` runs for EVERY event from every path) and a
 #: global entry would silence a real upstream reset everywhere in the process,
-#: including `oauth._capture`'s "single capture" for the token boundary.
+#: including `oauth._log_and_capture`'s "single capture" for the token boundary.
 #:
 #: The residual is bounded and measured: a reset on the ASGI send path still
 #: produces ONE event per abort via the re-raise, costing ~0.09 ms since
@@ -135,10 +135,20 @@ def init() -> bool:
             # wherever `transport.is_closing()`, outbound as well as inbound, and
             # `mcp_server.py` records it from a broken INTERNAL stream. It stays
             # global deliberately: nothing in `tortoise/` does raw anyio I/O, and
-            # every outbound HTTP path is httpx→httpcore, which maps
-            # `anyio.BrokenResourceError` to `ConnectError`/`WriteError`/`ReadError`
-            # — so an upstream break is still captured, while an inbound abort
-            # costs zero events. It is checked, not assumed (round 5, P3).
+            # the one outbound stack that DOES map `anyio.BrokenResourceError` is
+            # httpx→httpcore's anyio backend (`httpcore/_backends/anyio.py`), which
+            # converts it to `ConnectError`/`WriteError`/`ReadError` — so that path
+            # surfaces under a name not on this list. The stdlib `urllib.request`
+            # paths (54 `urlopen` call sites across 9 modules — `models.py`,
+            # `session_verify.py`, `hosted_backup.py`, …) cannot raise an anyio
+            # type at all: they raise `http.client.RemoteDisconnected`, a
+            # `ConnectionResetError` subclass that is NOT in the global set. Either
+            # way an upstream break is still captured, while an inbound abort costs
+            # zero events. It is checked, not assumed (round 5, P3; a later review
+            # falsified an earlier draft of THIS comment, which claimed every
+            # outbound path was httpx — the conclusion held, the stated reason did
+            # not, and that sentence is what a future editor would extend the set
+            # on).
             #
             # ⚠️ The SDK matches these by EXACT type name (`Client._is_ignored_error`),
             # not by MRO, so a SUBCLASS of ClientDisconnect is benign here and not
