@@ -233,8 +233,15 @@ modules so it cannot rot quietly.
 **What the acceptance run arms:** `TORTOISE_VET=1`, `TORTOISE_CLASSIFY_LATER=1`,
 `TORTOISE_VALUE_GATE=0`, `TORTOISE_S2_DECISION_SEAM=0`; the lane pinned to (unset ⇒) `v2`;
 `TORTOISE_S4_DELTA` pinned to `1`; `TORTOISE_LABEL_ORDER` pinned unset; `TORTOISE_EXTRACTOR` pinned
-unset. Every one is written in-process, **read back**, and a run whose read-back disagrees is
-**refused** (`probes/capstone_measure.py`). The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
+unset; and the three measurement switches an inherited shell must not supply —
+`TORTOISE_SESSION_LLM_MOCK` (the offline model seam, which swaps the model for `_V2SessionMock`
+**and** short-circuits the provider-key check, so an ambient `=1` would score canned output under a
+real key), `TORTOISE_EXTRACTOR_PROMPT` (a third render switch, not byte-identical to the default
+since `#9733`) and `TORTOISE_EXTRACT_MODEL` (selects the model and the legacy 4000-token bound) —
+all pinned **unset**. Every one is written in-process, **read back**, and a run whose read-back
+disagrees is **refused** (`probes/capstone_measure.py`); the three measurement switches were
+unpinned until the `#10983` review, which is the same declaration-versus-control gap one layer below
+the lane. The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
 default-ON predicate the arm would otherwise measure the predicate's population while declaring an
 arm that does not include it.
 

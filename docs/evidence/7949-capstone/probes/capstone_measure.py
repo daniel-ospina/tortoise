@@ -342,9 +342,26 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
 # rerouted all seven acceptance captures to the OTHER extractor while the log
 # still printed an ``arm:`` line that said nothing about it — the silent seam
-# #10983 exists to close. The lane, and the two switches that change the
-# rendered prompts rather than the pipeline, are pinned here and READ BACK like
-# every other switch (the ``arm:`` rule, applied to the door).
+# #10983 exists to close. The lane, and EVERY switch on this path that changes
+# what the run MEASURES (the render/diagnostic switches, the model selector and
+# the offline model mock), are pinned here and READ BACK like every other switch
+# (the ``arm:`` rule, applied to the door).
+#
+# ⚠️ The set below is what the #10983 review widened. The first revision pinned
+# the lane and the two render switches and called that "the seam set"; three
+# more switches on the same ``capture_session`` → ``_extract_session_v2`` path
+# were unpinned and unread, of which ``TORTOISE_SESSION_LLM_MOCK`` is decisive: it
+# swaps the model for ``_V2SessionMock`` (``sdk._session_llm_mock_enabled``) and
+# SHORT-CIRCUITS the provider-key check, so ``backend_ready()`` still passes on a
+# real key and a fully mocked run is byte-indistinguishable in the log from a
+# real one. A pin set that stops at "the pipeline" and leaves "what the pipeline
+# reads" ambient is the same declaration-versus-control defect, one layer down.
+#
+# The provider ROUTE is deliberately NOT pinned: ``TORTOISE_EXTRACTOR_PROVIDER``
+# only chooses among routes the box already has a key for, and the receipt
+# reports the route it took (``extraction_provider``), which the run records —
+# so it is OBSERVED rather than forced. Named here so the set below is not read
+# as an exhaustive list of every ``TORTOISE_`` variable in the process.
 
 #: The env var that selects the extraction lane.
 DOOR_LANE_ENV = "TORTOISE_SESSION_EXTRACTOR"
@@ -369,8 +386,22 @@ DOOR_LANE = "v2"
 #: * ``TORTOISE_LABEL_ORDER=shuffle`` — NOT a behaviour seam (#10983): it is a
 #:   render DIAGNOSTIC that reorders the kind lists per call, i.e. it makes two
 #:   runs of this probe differ for a reason that is not the arm. Pinned off.
+#: * ``TORTOISE_SESSION_LLM_MOCK`` — the offline model seam. It replaces the
+#:   model with ``_V2SessionMock`` AND short-circuits the provider-key check, so
+#:   an ambient ``=1`` makes every capture canned output while
+#:   ``backend_ready()`` still passes and the log still claims a real run. The
+#:   acceptance is scored on a REAL provider; a mock is only ever an explicit
+#:   arm, never an inherited one (#10983 review).
+#: * ``TORTOISE_EXTRACTOR_PROMPT=compact`` — a third render switch beside
+#:   ``TORTOISE_LABEL_ORDER`` (``extractor_v2.py`` renders a different master
+#:   under it, and that render is explicitly NOT byte-identical to the default
+#:   since #9733), so it changes what the run measures without changing the arm.
+#: * ``TORTOISE_EXTRACT_MODEL`` — selects the extractor's model AND drops the
+#:   output bound to the legacy 4000-token default, i.e. it changes both the
+#:   producer and its truncation contract.
 DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
-                   "TORTOISE_LABEL_ORDER")
+                   "TORTOISE_LABEL_ORDER", "TORTOISE_SESSION_LLM_MOCK",
+                   "TORTOISE_EXTRACTOR_PROMPT", "TORTOISE_EXTRACT_MODEL")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
@@ -568,7 +599,21 @@ def door_header(observed: dict[str, str | None]) -> str:
     on this run and the six-seam ledger with the DEFAULTS the pin suite resolves
     against the modules. A log therefore states the seam set it ran rather than
     the one a reader remembers (`#10983` Target 3).
+
+    ⛔ An EMPTY read-back is NOT a pinned door. For every switch here the target
+    state is ``<unset>``, so a header rendered from nothing used to print
+    byte-identical text to a header rendered from a run whose pins HELD —
+    ``render_log``'s ``door`` defaults to ``None`` and the repo's own fixtures
+    call it that way, so a fixture log asserted "read back from os.environ" about
+    a read-back that never happened (#10983 review). Absence is now said out
+    loud, on the same rule the ``arm:`` line already follows for a flag it did
+    not measure.
     """
+    if not observed:
+        return ("NOT MEASURED — this render carries NO measured_arm() read-back, "
+                "so no lane and no pinned switch is attested. Render the log from "
+                "a run that entered ``measured_arm()`` (``main`` does) before "
+                "citing the door")
     lane = observed.get(DOOR_LANE_ENV)
     lane_word = lane if lane not in (None, "") else "<unset>"
     pins = [f"{key}=<unset>" if observed.get(key) in (None, "")
@@ -587,8 +632,28 @@ def door_header(observed: dict[str, str | None]) -> str:
 
 
 def door_record(observed: dict[str, str | None]) -> dict:
-    """The machine half of the door: lane, pins, and the six-seam ledger."""
+    """The machine half of the door: lane, pins, and the six-seam ledger.
+
+    An empty read-back records ``measured: false`` and NO pin block, rather than
+    borrowing the measured record's ``source`` sentence — a machine record that
+    says "os.environ read-back after measured_arm() forced the door" about a
+    render that never ran one is the same false claim as the log line (#10983
+    review). ``measured`` is stated in BOTH directions so a consumer can key on
+    it instead of inferring it from an absent key.
+    """
+    if not observed:
+        return {
+            "measured": False,
+            "lane": DOOR_LANE,
+            "lane_env": DOOR_LANE_ENV,
+            "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                            "extractor_v2.extract_session_v2"),
+            "hosted_selector": "hosted_api._capture_lane",
+            "note": ("NOT MEASURED — render_log was called without a door "
+                     "read-back, so no pin is attested for this run"),
+        }
     return {
+        "measured": True,
         "lane": DOOR_LANE,
         "lane_env": DOOR_LANE_ENV,
         "lane_read_back": observed.get(DOOR_LANE_ENV),

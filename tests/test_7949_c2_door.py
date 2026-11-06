@@ -104,6 +104,27 @@ def _resolve(path: Path, name: str) -> str:
     return ast.get_source_segment(_source(path), node) or ""
 
 
+def _body(path: Path, name: str) -> str:
+    """The def's source segment WITHOUT its docstring.
+
+    ⛔ A substring test over the whole segment is satisfied by prose, not by
+    behaviour: `assert "extract_session_v2" in _resolve(SDK, "_extract_session_v2")`
+    stayed GREEN with the real call deleted, because the docstring and the
+    `from tortoise.extractor_v2 import extract_session_v2` line above the call
+    both contain the name (found in the #10983 review — the same defect this
+    file's CONNECT pin already records for a name grep). Callers assert a CALL
+    SHAPE on this, never a bare name.
+    """
+    src = _source(path)
+    node = _funcs(path)[name]
+    seg = ast.get_source_segment(src, node) or ""
+    first = node.body[0] if node.body else None
+    if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)):
+        seg = seg.replace(ast.get_source_segment(src, first) or "", "", 1)
+    return seg
+
+
 # ── 1. the door, in code ──────────────────────────────────────────────────
 
 def test_the_lane_selector_defaults_to_v2_and_m2_is_the_opt_in():
@@ -124,15 +145,26 @@ def test_the_lane_selector_defaults_to_v2_and_m2_is_the_opt_in():
 
 
 def test_the_v2_arm_calls_the_sdk_extractor_entry():
-    """The chain is a chain: hosted v2 arm → sdk method → extractor entry."""
+    """The chain is a chain: hosted v2 arm → sdk method → extractor entry.
+
+    ⛔ Both assertions below read a CALL SHAPE (from a docstring-stripped body
+    where one is needed). The first revision grepped for the bare NAMES:
+    `"sdk._extract_session_v2"` was satisfied by a COMMENT in `hosted_api.py`,
+    and `"extract_session_v2"` by `_extract_session_v2`'s docstring plus its own
+    import line — so deleting the real call left this test GREEN (#10983
+    review).
+    """
     hosted = _source(HOSTED)
-    assert "sdk._extract_session_v2" in hosted, (
-        "the hosted capture no longer calls sdk._extract_session_v2 — the v2 "
-        "arm of _capture_lane would then name a lane nothing runs (#10983)")
-    sdk_body = _resolve(SDK, "_extract_session_v2")
-    assert "extract_session_v2" in sdk_body, (
+    assert re.search(r"slot, sdk\._extract_session_v2,", hosted), (
+        "the hosted capture no longer PASSES sdk._extract_session_v2 as the "
+        "bounded call — the v2 arm of _capture_lane would then name a lane "
+        "nothing runs (#10983). A bare name also appears in a nearby comment, "
+        "so this asserts the call form")
+    sdk_body = _body(SDK, "_extract_session_v2")
+    assert re.search(r"out = extract_session_v2\(", sdk_body), (
         f"sdk._extract_session_v2 at {_cite(SDK, '_extract_session_v2')} no "
-        "longer reaches extractor_v2.extract_session_v2")
+        "longer CALLS extractor_v2.extract_session_v2 (its docstring and its "
+        "import both name the function, so only the call form proves the hop)")
     assert "extract_session_v2" in _funcs(EXTRACTOR), (
         f"extractor_v2.extract_session_v2 is GONE from "
         f"{EXTRACTOR.relative_to(REPO)} — the door's last hop does not exist")
@@ -335,6 +367,21 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
     assert "TORTOISE_LABEL_ORDER" in probe.DOOR_PINNED_OFF, (
         "TORTOISE_LABEL_ORDER=shuffle randomises the renders per call — it "
         "must be pinned off or two runs of the arm differ for a non-arm reason")
+    # The three the #10983 review added: each changes what the run MEASURES
+    # through this door, and none was pinned in the first revision.
+    assert "TORTOISE_SESSION_LLM_MOCK" in probe.DOOR_PINNED_OFF, (
+        "TORTOISE_SESSION_LLM_MOCK is the offline model seam: =1 swaps the "
+        "model for _V2SessionMock and short-circuits the provider-key check, "
+        "so an inherited mock makes every capture canned output while "
+        "backend_ready() still passes and the log claims a real run")
+    assert "TORTOISE_EXTRACTOR_PROMPT" in probe.DOOR_PINNED_OFF, (
+        "TORTOISE_EXTRACTOR_PROMPT=compact renders a different master prompt "
+        "(explicitly not byte-identical since #9733) — pinned off or two runs "
+        "of the arm differ for a non-arm reason")
+    assert "TORTOISE_EXTRACT_MODEL" in probe.DOOR_PINNED_OFF, (
+        "TORTOISE_EXTRACT_MODEL selects the extractor's model AND the legacy "
+        "4000-token bound — pinned off so the acceptance runs the default "
+        "producer and its truncation contract")
 
 
 def test_the_probe_refuses_a_leaked_lane(monkeypatch):
@@ -390,6 +437,33 @@ def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
         assert "REFUSED" in str(exc.value) and key in str(exc.value), (
             f"a leaked {key} was accepted: the run would declare a pinned-off "
             f"seam it did not actually run (got {exc.value})")
+
+
+def test_an_unmeasured_door_never_claims_a_read_back():
+    """Absence of a measurement is not a held pin, and the text must say so.
+
+    ⛔ Found in the #10983 review. ``render_log``'s ``door`` defaults to ``None``
+    and the repo's own fixtures call it that way, while every pinned-off target
+    state is ``<unset>`` — so a header rendered from NOTHING printed
+    byte-identical prose to one whose pins HELD, including "read back from
+    os.environ", and ``door_record({})`` carried the measured record's own
+    ``source`` sentence. A log that asserts a control ran when nothing was
+    measured is exactly what ``measured_arm`` refuses in the ``arm:`` line; the
+    door follows the same rule.
+    """
+    probe = _load_probe()
+    header = probe.door_header({})
+    assert "NOT MEASURED" in header, header
+    assert "read back from os.environ" not in header, header
+    record = probe.door_record({})
+    assert record["measured"] is False, record
+    assert "pinned_off" not in record and "source" not in record, record
+    # A read-back of an all-unset set IS a measurement (that is the passing
+    # state), so it must not be confused with the absent one.
+    all_unset = {key: None for key in
+                 probe.DOOR_PINNED_OFF + tuple(k for k, _ in probe.DOOR_PINNED_ON)}
+    assert probe.door_record(all_unset)["measured"] is True
+    assert "read back from os.environ" in probe.door_header(all_unset)
 
 
 def test_the_probe_records_the_door_in_the_log_and_the_machine_record():
