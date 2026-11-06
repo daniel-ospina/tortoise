@@ -459,11 +459,11 @@ def test_a_store_with_no_gap_reports_the_serves_indexes_pair(caplog):
     )
     assert pairs[0].levelno == logging.INFO
     msg = pairs[0].getMessage()
-    # Plan §7 "Brittleness avoided": "No test asserts a log *string* where a
-    # warning-vs-info LEVEL is the contract." So the record is held to the
-    # level and to the markers that identify its two halves; the CONTENT is
-    # asserted on the attributes below, never on `repr()` of a Python list — a
-    # reformat that still reports the pair must not red this test.
+    # The record must ATTRIBUTE itself: the sibling #4997 warning names the
+    # graph, and a contract line that drops it is unusable in a multi-graph
+    # store. Asserted as content (the graph name is present), not as `repr()`
+    # of a format string — see plan §7, "Brittleness avoided".
+    assert proj._graph_name in msg, msg
     assert "serves=" in msg and "indexes=" in msg, msg
     for label in SERVED:
         assert label in msg, msg
@@ -599,9 +599,21 @@ def test_a_re_read_that_cannot_measure_clears_an_already_populated_pair(caplog):
         )
 
     # Re-populate, then answer `None` — the `rows is None` lane must clear both.
-    proj.g = _RecordingGraph([_vector_row(label) for label in SERVED])
-    proj._record_vector_index_inventory()
+    # ⛔ The rows must be the 9-COLUMN shape `_bare()` builds: a bare
+    # `_vector_row` is a 2-tuple, which the scan skips at `len(row) < 3`, so a
+    # leg built from those re-populates the SERVED half only, leaves
+    # `_vector_indexed_labels == set()`, and reports a gap warning it never
+    # asserts. That is not "an already-populated pair" and the comment below
+    # would be untrue.
+    proj.g = _RecordingGraph(_rows(*[_vector_row(label) for label in SERVED]))
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        proj._record_vector_index_inventory()
     assert proj._vector_index_served_labels == set(SERVED)
+    assert proj._vector_indexed_labels == set(SERVED), (
+        "the re-populated pair must be whole — served AND indexed"
+    )
+    assert len(_pair_records(caplog)) == 1, "the re-populated pair is reported"
     proj.g = _NoneCatalogueGraph()
     caplog.clear()
     with caplog.at_level(logging.INFO):
@@ -611,6 +623,47 @@ def test_a_re_read_that_cannot_measure_clears_an_already_populated_pair(caplog):
         )
         assert proj._vector_indexed_labels is None
         assert not _pair_records(caplog)
+
+
+def test_the_pair_is_reported_on_every_setup_and_a_repaired_store_announces_it(caplog):
+    """#11087: the INFO is deliberately NOT latched — see the method docstring.
+
+    A latch is the obvious "dedupe this log spam" refactor (setup runs from
+    `__init__` and from the hosted construction paths). It would also delete the
+    property the docstring argues is the point: a store that GAPPED once and was
+    then repaired could never report its contract again. Two successive
+    measurements on ONE `(endpoint, graph)` must therefore both report, and the
+    second must name the repaired pair while the WARNING stays latched.
+
+    Falsifiable: with the report latched on the same key the `#4997` warning
+    uses (or on a dedicated key), `len(pairs)` is 1 and this fails.
+    """
+    proj = _bare([_vector_row("Point")])          # a gapped store
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()                    # read 1: pair + WARNING
+        proj.g = _RecordingGraph(
+            _rows(*[_vector_row(label) for label in SERVED])
+        )                                         # repaired: every label indexed
+        proj._record_vector_index_inventory()     # read 2: pair, no warning
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 2, (
+        "the pair must be reported on EVERY setup — latching it would hide a "
+        f"repaired store forever (got {len(pairs)} record(s))"
+    )
+    assert pairs[1].levelno == logging.INFO
+    assert proj._graph_name in pairs[1].getMessage(), (
+        "each report must name the graph it describes"
+    )
+    assert proj._vector_index_served_labels == set(SERVED)
+    assert proj._vector_indexed_labels == set(SERVED), (
+        "the second report must describe the REPAIRED pair, not the old gap"
+    )
+    warnings = [r for r in caplog.records
+                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, (
+        "the WARNING stays latched — #11087 unlatches the REPORT only"
+    )
 
 
 def test_distinct_graphs_each_report_once(caplog):
