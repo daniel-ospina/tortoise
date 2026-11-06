@@ -4272,7 +4272,10 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # above rather than retyped here), against the named sha.
     #
     # ⛔ AND IT MUST NOT RED ON A TREE THAT CANNOT SEE THE OBJECT (#11064 review, HIGH).
-    # This file is `tier1` (`config/ci-surfaces.yml:7593`), so it runs in python-ci's `test`
+    # This file is a `tier1` entry (named by MECHANISM — the `- test_deploy_workflow.py`
+    # row in `config/ci-surfaces.yml`'s `tier1` block — because the line number this
+    # comment used to carry, `:7593`, had rotted onto `test_s2_decision_record_5087.py`
+    # by the time it was read: #11064 review r15, P3). So it runs in python-ci's `test`
     # job, and that job's ONLY checkout is a bare `actions/checkout@v4`
     # (`.github/workflows/python-ci.yml:680` job header, `:898` the checkout) — the default
     # `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`
@@ -4287,6 +4290,17 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # "CI test jobs check out at `fetch-depth: 1`") and carries five `--is-shallow-repository`
     # guards for it; this is the sixth, in `_ensure_commit`'s shape (bounded deepen when
     # SHALLOW only, else an explicit skip — never a silent pass, never a false red).
+    # ... and the MECHANISM above is executed, not merely named: this file's `tier1`
+    # membership is the premise for the whole shallow-checkout guard below. If this
+    # file ever leaves `tier1` it can be scheduled onto a lane with a full clone, and
+    # the bound it is guarding against stops existing while the guard keeps passing —
+    # the premise has to red, not the silent-pass path (#11064 review r15, P3).
+    from tools.ci_selection import load_manifest
+    assert "test_deploy_workflow.py" in set(load_manifest()["tier1"]), (
+        "this file is no longer a `tier1` entry, so the `fetch-depth: 1` premise the "
+        "census guard below rests on has changed — re-derive which job runs this file "
+        "instead of trusting the comment above (#11064 review r15, P3)"
+    )
     if not _census_deepen_to(_REPO_ROOT, pre_sha):
         pytest.skip(
             f"`{pre_sha}` is not an object in this checkout (shallow: "

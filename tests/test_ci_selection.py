@@ -249,10 +249,14 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       this head (97 + 78 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
     * the **78** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1109 —
-      the same on `main`, so the pool does not move with these registrations —
-      and it moves for a third reason again, `len(fast_pool(manifest))`:
-      re-derive it rather than reading this sentence.
+      selects. It is NOT "the whole `full`-less fast pool" — the same on `main`,
+      so the pool does not move with these registrations — and it moves for a
+      third reason again, so this clause states NO figure for it: re-derive it
+      (`len(fast_pool(manifest))`). ⚠️ `fast_pool` subtracts `ENV_BROKEN_FILES`
+      itself, so a hand count of the classification sets comes out one higher and
+      the two "measurements" then look like they disagree (#11064 review r15, P3:
+      the `1109` this clause used to carry matched no tree at all — the very
+      "a past state quoted as a current one" decay the next sentences describe).
       The `60` this sentence carried was that same `tier1` set **18 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
       and 78 here), i.e. the very "a past state quoted as a current one"
@@ -270,6 +274,27 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+    # ⛔ AND THE FAST-POOL CLAUSE STATES NO FIGURE — EXECUTED (#11064 review r15,
+    # P3). That clause carried `1109`, a number no tree returned: the expression
+    # it names yields 1111 at `b8e3acc52b` and on `main`, while a hand count of
+    # the classification sets yields 1112 because `fast_pool` subtracts
+    # `ENV_BROKEN_FILES` itself. A pool size is a measurement with three separate
+    # reasons to move, so restating it is the decay this docstring warns about;
+    # the derivation pointer is the durable form and this pin holds it there.
+    _doc = test_v4_membership_gate_runs_on_both_architecture_docs.__doc__ or ""
+    _clause = re.search(r"full`-less fast pool(.{0,600}?)re-derive\s+it", _doc, re.S)
+    assert _clause, (
+        "the fast-pool clause lost its `len(fast_pool(manifest))` derivation "
+        "pointer — without it the sentence has no referent and a reader must "
+        "invent the pool size (#11064 review r15, P3)"
+    )
+    assert not re.search(r"\b\d{3,}\b", _clause.group(0)), (
+        "the fast-pool clause states a figure again, and a pool size is a "
+        "measurement that moves for three reasons — keep the derivation "
+        "pointer instead of a number (#11064 review r15, P3: the figure this "
+        "clause carried matched no tree when it was read)"
+    )
 
     # #10980 review (P2): the §9.4/§12.1b source-vector pin lives in the
     # narrative-home module, and it guards the SAME document — so a STORAGE-only
