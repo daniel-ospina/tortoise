@@ -2680,10 +2680,36 @@ class TestToolCallAdmissionBoundary:
         and is now measured on the OTHER filter: a registry tool outside
         ``HTTP_ALLOWED`` is never listed over HTTP, yet its ``tools/call``
         reaches the handler.
-        """
-        from tortoise.mcp_server import create_http_app
 
-        hidden = "tortoise_dream_health"  # registry tool, outside HTTP_ALLOWED
+        Retargeted a THIRD time by #4282 row 6. The witness used here was
+        ``tortoise_dream_health``, and that container RETIRED it — a retired
+        name leaves ``TOOL_REGISTRY`` entirely (it is served through the #3883
+        shim, not registered), so the old witness stopped being a registry
+        member and this test failed at its own precondition. The witness now is
+        ``tortoise_mine_conversations``, which carries the SAME transport guard
+        (`_transport_mode.get() == "http"` -> `_http_excluded_error()`, the
+        #1090 filesystem-walk exclusion) and is LIVE, so the measured property
+        is unchanged: a listing filter, not an admission rejection. The
+        witness's membership is now DERIVED and asserted rather than assumed,
+        so the next retirement fails with the live population named.
+        """
+        from tortoise.mcp_auth import ERR_EXCLUDED
+        from tortoise.mcp_server import create_http_app
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY, get_http_allowed
+
+        # The hidden state is DERIVED at this head: every live registry tool the
+        # HTTP filter leaves out. The witness must be one of them (a retired or
+        # re-listed name makes the measurement vacuous, so it is refused here).
+        live_hidden = {e.name for e in TOOL_REGISTRY} - get_http_allowed()
+        hidden = "tortoise_mine_conversations"
+        assert live_hidden, (
+            "no live tool is outside HTTP_ALLOWED — the hidden state is "
+            "unreachable, so this test would measure nothing")
+        assert hidden in live_hidden, (
+            f"the witness must be a LIVE HTTP-excluded tool; the derived "
+            f"population is {sorted(live_hidden)} — did {hidden} retire?")
+        assert hidden not in RETIRED_USE_INSTEAD, (
+            f"{hidden} is retired; a retired name is not a registry member")
         db_path = str(tmp_path / "hidden.db")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
@@ -2701,7 +2727,6 @@ class TestToolCallAdmissionBoundary:
         with tc:
             # The hidden state is ASSERTED, not assumed: the name is registered
             # yet absent from the listing.
-            from tortoise.tool_registry import TOOL_REGISTRY
             assert hidden in {e.name for e in TOOL_REGISTRY}
             assert hidden not in self._list_names(tc, key), (
                 "the fixture did not enter the hidden state")
@@ -2713,6 +2738,13 @@ class TestToolCallAdmissionBoundary:
             # refusal), never an admission rejection.
             assert "result" in body, body
             assert body.get("error", {}).get("code") != -32602, body
+            # ...and the result is the HANDLER's own payload, not a substitute
+            # for a name the transport could not route: `_http_excluded_error`
+            # carries ERR_EXCLUDED, which no "tool not found" answer produces.
+            blob = json.dumps(body["result"])
+            assert str(ERR_EXCLUDED) in blob, (
+                f"the handler was not reached — expected its transport refusal "
+                f"({ERR_EXCLUDED}), got {blob[:400]}")
 
     @staticmethod
     def _list_names(tc, key):
