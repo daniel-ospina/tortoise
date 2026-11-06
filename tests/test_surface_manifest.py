@@ -1489,6 +1489,12 @@ def test_code_digest_is_stable_across_PYTHONHASHSEED_for_a_set_constant():
         "sg = importlib.util.module_from_spec(spec); spec.loader.exec_module(sg)\n"
         "def f(x):\n"
         "    return x in frozenset({'kind', 'limit', 'skip', 'tag', 'offset'})\n"
+        # Guard the FIXTURE, not just the outcome: if this literal ever stops
+        # being folded into `co_consts` (interpreter change, refactor), the
+        # stability assertion below would pass vacuously -- the pre-fix encoding
+        # satisfies it too -- and the test would quietly stop testing anything.
+        "assert any(isinstance(c, frozenset) for c in f.__code__.co_consts), "
+        "f.__code__.co_consts\n"
         "print(sg._code_digest(f.__code__))\n"
     )
     digests = set()
@@ -1503,6 +1509,35 @@ def test_code_digest_is_stable_across_PYTHONHASHSEED_for_a_set_constant():
     assert len(digests) == 1, (
         f"the served-identity digest depends on PYTHONHASHSEED: {sorted(digests)} — "
         f"a set/frozenset constant must be encoded order-independently"
+    )
+
+
+def test_the_set_encoding_is_sensitive_to_the_set_contents():
+    """#10602: stability alone is not enough -- the encoding must also DISCRIMINATE.
+
+    Stability is satisfiable by an encoding that ignores the set entirely: replacing
+    the join with `h.update(b"{}")` keeps ONE digest across every seed and passes the
+    test above -- while silently making a handler's frozen key-set change stop moving
+    `served_from`, so the frozen baseline would report such a change as unchanged.
+    The `str`-constant sensitivity is pinned at
+    `test_code_digest_is_move_invariant_and_constant_sensitive`; the set case needs
+    its own, or the pair is asymmetric and the blind half is the newly-added one.
+    """
+    guard = _load_guard()
+
+    def key_set_a(x):
+        return x in frozenset({"kind", "limit", "skip"})
+
+    def key_set_b(x):
+        return x in frozenset({"kind", "limit", "sort"})
+
+    assert key_set_a.__code__.co_consts != key_set_b.__code__.co_consts, (
+        "the two fixtures must differ only in their frozenset constant"
+    )
+    assert guard._code_digest(key_set_a.__code__) != guard._code_digest(key_set_b.__code__), (
+        "two handlers differing only in their frozenset constant hashed the same -- "
+        "the set encoding ignores its contents, so a frozen key-set change would not "
+        "move `served_from` and the baseline would report it as unchanged"
     )
 
 

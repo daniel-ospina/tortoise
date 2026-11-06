@@ -3867,12 +3867,12 @@ def tortoise_query(kind: str | None = None,
     # lines away), and one guard above the branch closes the class rather than the
     # one instance of it.
     # The set is READ from its owner (`tortoise/security.py`), not re-typed here: a
-    # second copy is what drifted, and a `frozenset` literal in this handler is not
-    # even fingerprint-stable — `tools/surface_manifest.py::_code_digest` reprs
-    # `co_consts`, and a multi-element frozenset's repr order follows string hashes,
-    # so `tortoise_query`'s recorded `served_from` digest would differ between
-    # processes (measured: distinct digests across runs of one unchanged tree). A
-    # name lookup keeps the digest deterministic.
+    # second copy is what drifts. (A `frozenset` literal here ALSO used to make this
+    # handler's fingerprint non-deterministic — `_code_digest` repr'd `co_consts`, and
+    # a multi-element frozenset's repr order follows string hashes, so `served_from`
+    # differed between processes over one unchanged tree. That hazard is FIXED at its
+    # source: both digests now encode a set order-independently, #10602. The
+    # single-owner reason above stands on its own.)
     # `tag`/`text` forward no caller filters at all, so a refusal on those arms is
     # redundant-but-harmless rather than a check on a real collision.
     from tortoise.security import _RESERVED_FILTER_KEYS
