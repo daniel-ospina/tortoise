@@ -1604,6 +1604,72 @@ def test_TWO_adjacent_logs_are_ambiguous_so_the_arm_does_not_claim_a_replay(
     assert graph["nodes"] == {}, graph["nodes"]
 
 
+def test_an_UNREADABLE_log_REFUSES_rather_than_certifying_the_store(
+        tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 9, P2: the loader's THIRD answer, one record over.
+
+    The sidecar branch was fixed to distinguish "nothing here" (`None`) from
+    "here but untrustworthy" (a refusal); the log branch collapsed the same two
+    answers. `os.listdir` has just proved there IS exactly one `.jsonl`, so a
+    log this process cannot READ is not an ABSENT one — reporting it as `None`
+    let a ZERO-node store certify `CLEAN` under `--expect-empty`, the exact
+    false PASS the arm exists to prevent, while the identical store with the
+    same bytes at a readable mode REFUSED.
+
+    Measured red-first: on the parent of the fixing commit this call RETURNS
+    (`nodes={}`) instead of raising.
+    """
+    if os.geteuid() == 0:                       # root reads through the mode
+        pytest.skip("chmod 000 does not deny a root reader")
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    log = tmp_path / "session-events.jsonl"
+    log.write_text('{"event_type": "SessionStarted", "session_id": "s1"}\n')
+    os.chmod(log, 0o000)
+    try:
+        with pytest.raises(tpc.CensusError) as exc:
+            tpc.read_graph_turns(None, db_path, "tortoise")
+    finally:
+        os.chmod(log, 0o600)                    # let tmp_path teardown clean up
+    message = str(exc.value)
+    assert "could not be OPENED" in message, message
+    assert "UNKNOWN, not answered" in message, message
+    # It must NOT claim the LOST-STORE shape: that verdict needs a record the
+    # arm could actually read, and this one was never established.
+    assert "LOST-STORE shape" not in message, message
+
+
+def test_a_log_read_that_DIES_mid_file_REFUSES_too(tmp_path, monkeypatch):
+    """The same third answer one frame down: the read, not just the open.
+
+    A short read (`EIO`, a truncated FUSE mount) is "could not ask" exactly as
+    an `EACCES` open is; swallowing it into `None` certifies a 0-node store on
+    evidence the arm never obtained. Pinned at the seam the code actually
+    crosses (`os.fdopen`), because the failure is not reproducible from user
+    space on a healthy filesystem.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)
+
+    real_fdopen = os.fdopen
+
+    def _failing_fdopen(fd, *a, **kw):
+        handle = real_fdopen(fd, *a, **kw)
+
+        def _boom(*_a, **_kw):
+            raise OSError(5, "Input/output error")
+
+        handle.read = _boom                # type: ignore[method-assign]
+        return handle
+
+    monkeypatch.setattr(os, "fdopen", _failing_fdopen)
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "could not be READ to completion" in message, message
+    assert "UNKNOWN, not answered" in message, message
+    assert "LOST-STORE shape" not in message, message
+
+
 def test_a_SYMLINKED_log_is_still_replayable_because_recovery_follows_it(
         tmp_path, monkeypatch):
     """⛔ `O_NOFOLLOW` made this arm FAIL OPEN — measured, #11113 review cycle 6.

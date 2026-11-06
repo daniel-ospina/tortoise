@@ -1192,11 +1192,30 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
         "first so the state is unambiguous.")
 
 
-def _jsonl_names(events_dir: str) -> list[str]:
-    """The `*.jsonl` entries in `events_dir`, sorted (`[]` on any error)."""
+def _jsonl_names(events_dir: str, *, strict: bool = False) -> list[str]:
+    """The `*.jsonl` entries in `events_dir`, sorted (`[]` on any error).
+
+    ⛔ `strict=True` re-raises instead of answering `[]` (#11113 review cycle 9,
+    P2). `[]` means "no logs here", and one caller refuses on that answer — so
+    an UNLISTABLE directory must not be indistinguishable from an empty one.
+    The lenient default exists for the DIAGNOSIS callers, which only word a
+    message and never decide a verdict.
+    """
     try:
         return sorted(n for n in os.listdir(events_dir) if n.endswith(".jsonl"))
-    except OSError:
+    except FileNotFoundError:
+        return []                 # the directory is gone: nothing is adjacent
+    except OSError as exc:
+        if strict:
+            # `_find_local_jsonl_dir` only returns a directory it has just
+            # LISTED, so an unlistable one now is "could not ask".
+            raise CensusError(
+                f"the event-log directory beside the store ({events_dir!r}) "
+                f"could not be LISTED ({type(exc).__name__}: {exc}) — so "
+                "whether a replayable log sits there is UNKNOWN, not "
+                "answered. An unreadable directory is not an absent one, so "
+                "--expect-empty must not certify a graph whose replayability "
+                "this gate could not establish.") from exc
         return []
 
 
@@ -1231,17 +1250,43 @@ def _one_replayable_log(events_dir: str) -> str | None:
     UTF-8 byte is "0 events, torn tail" to the reader, so decoding the whole
     file with `errors="replace"` made this arm refuse where recovery does
     nothing.
+
+    ⛔ AND THE LOADER'S THIRD ANSWER IS A REFUSAL HERE TOO (#11113 review
+    cycle 9, P2). `None` means "recovery would have nothing to replay", and the
+    caller proceeds on it — so it is only ever a genuine NEGATIVE: zero or 2+
+    `*.jsonl`, an empty/garbage log, or `not S_ISREG` (a FIFO, where "not
+    replayable" is the honest answer precisely because a plain open would
+    block). A log that `os.listdir` has just shown to EXIST but that this
+    process cannot OPEN or READ is the third answer, and it was being reported
+    here as the second: measured on the parent of this commit, a 0-node store
+    with a readable log REFUSED while the identical store with the same log at
+    mode 000 RETURNED (`nodes={}`) and certified `CLEAN` — the same false PASS
+    the sidecar branch above was just fixed for, one record over. It is also a
+    divergence from the predicate this function claims to mirror: `recover_from_log`
+    opens with a plain `open()`, so `EACCES` RAISES there and recovery REFUSES.
+    It raises `CensusError` instead, for the reason the presence check states
+    three functions up: in a gate, "I could not ask" is not "it is absent".
     """
     import stat
 
-    names = _jsonl_names(events_dir)
+    names = _jsonl_names(events_dir, strict=True)
     if len(names) != 1:           # 0 = nothing; 2+ = ambiguous, recovery refuses
         return None
     path = os.path.join(events_dir, names[0])
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
-        return None
+    except OSError as exc:
+        # `os.listdir` has just proved this name EXISTS, so an unopenable one is
+        # NOT an absence — see the third-answer rule in the docstring.
+        raise CensusError(
+            f"the single event log beside the store ({path!r}) could not be "
+            f"OPENED ({type(exc).__name__}: {exc.strerror or exc}) — so whether "
+            "recovery would replay it is UNKNOWN, not answered. An unreadable "
+            "log is not an absent one, and tortoise's own recovery REFUSES on "
+            "this state rather than proceeding, so this gate refuses too "
+            "(#11113 review cycle 9). Inspect the file and make it readable, "
+            "or remove / archive it to accept the loss deliberately, then "
+            "re-run.") from exc
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -1250,8 +1295,16 @@ def _one_replayable_log(events_dir: str) -> str | None:
             return path           # too big to read, but it certainly has events
         with os.fdopen(os.dup(fd), "rb") as fh:
             raw = fh.read()
-    except OSError:
-        return None
+    except OSError as exc:
+        # The same third answer, one frame down: a read that DIES mid-file is
+        # "could not ask", not "nothing to replay".
+        raise CensusError(
+            f"the single event log beside the store ({path!r}) could not be "
+            f"READ to completion ({type(exc).__name__}: {exc.strerror or exc}) "
+            "— so whether recovery would replay it is UNKNOWN, not answered. "
+            "An unreadable log is not an absent one, so --expect-empty must "
+            "not certify a graph whose replayability this gate could not "
+            "establish.") from exc
     finally:
         os.close(fd)
     # Mirror `EventLog.read_all`'s READER, not only its event test (#11113 review
