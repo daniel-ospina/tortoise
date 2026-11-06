@@ -1539,7 +1539,7 @@ _RESIDUAL_OPEN_VERBS = (
 #: explicit allowlist — `only`/`merely`/`just`/`simply`/`far` flip the polarity and
 #: are deliberately absent, while the ones here do not.
 _RESIDUAL_NEGATED_OPEN = (
-    r"(?!\s*(?:\w+\s+)?(?:not|never)\s+"
+    r"(?!\s*(?:\w+\s+)?(?:not|never|no\s+longer)\s+"
     r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
     r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)"
     r"(?!\s*(?:\w+\s+)?n't\s+"
@@ -1611,7 +1611,7 @@ _RESIDUAL_ANCHORED_OPENNESS = (
 #: `not closed` / `is open` are deliberately absent — the SPELLING gap IS open and
 #: saying so is the row's own honest disclosure.
 _SPELLING_FLOOR = (
-    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    r"\bno\s+longer\s+(closed|fuses|fused|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
     # ⛔ THE WAIVED SENTENCE IS STILL READ FOR `open again`, which is why it is here
     # and not only in `_RESIDUAL_OPENNESS`: the honest path runs ONLY this tuple, so
@@ -1863,18 +1863,24 @@ def _is_honest_spelling(text: str) -> bool:
             and not _RESIDUAL_WAIVER_WITHHOLD.search(text))
 
 
-def test_the_registry_row_names_the_residual_that_still_stands():
-    """`config/v4-mechanisms.yml` must not describe a CLOSED gap as open.
+def _assert_the_row_names_its_closure(row: str) -> None:
+    """The pin's WHOLE assertion body, callable by its own proof (#11258).
 
-    The row's (d) is the artifact a lane reads ("⛔ WHAT IS STILL NOT ENFORCED —
-    read this before improving a number"). It named the ADJACENCY gap
-    (`seconds`, `minute`, `hour`, `day`, `mile`) as unjuged; that gap is closed
-    by the tables above, so the row was left FALSE and nothing red on it. This
-    pins both halves: the closed class must not come back into the row, and the
-    still-open RATE class must stay named there.
+    ⛔ A FUNCTION AND NOT INLINE, for a measured reason: with the body inline,
+    deleting its two wiring lines (`claims = _residual_reopening_claims(row)`
+    and `assert claims == []`) left BOTH the pin and its proof test GREEN, and
+    the pin then passed over `⛔ (d3) the ADJACENCY half is open again.`
+    appended at the residual list's end — the exact state #11223 exists to
+    refuse (#11258 review round 7 `P2`, reproduced by the reviewer). The proof
+    list called the helper directly, so it proved the HELPER and never that
+    the pin used it; `test_the_residual_region_is_scanned_WHERE_a_lane_
+    appends` now calls THIS function on the mutated row, so detaching the scan
+    from the assertion it feeds reds the proof.
+
+    Takes the row's TEXT rather than reading the file, so the proof can feed
+    it a mutated copy. `test_the_registry_row_names_the_residual_that_still_
+    stands` is the only caller that reads the artifact.
     """
-    row = (pathlib.Path(__file__).resolve().parent.parent
-           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
     residual = row.split("(d) a RATE unit", 1)
     assert len(residual) == 2, (
         "the registry row no longer states residual (d) as the RATE-unit gap — "
@@ -1967,6 +1973,21 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     assert "per day" in flat or "per\n      day" in block, block
 
 
+def test_the_registry_row_names_the_residual_that_still_stands():
+    """`config/v4-mechanisms.yml` must not describe a CLOSED gap as open.
+
+    The row's (d) is the artifact a lane reads ("⛔ WHAT IS STILL NOT ENFORCED —
+    read this before improving a number"). It named the ADJACENCY gap
+    (`seconds`, `minute`, `hour`, `day`, `mile`) as unjuged; that gap is closed
+    by the tables above, so the row was left FALSE and nothing red on it. This
+    pins both halves: the closed class must not come back into the row, and the
+    still-open RATE class must stay named there.
+    """
+    _assert_the_row_names_its_closure(
+        (pathlib.Path(__file__).resolve().parent.parent
+         / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8"))
+
+
 #: Reopenings a lane actually writes, appended AT THE END OF THE RESIDUAL LIST —
 #: the position all of them must RED from (#11223). Each names the class (a unit
 #: token, `adjacency`, the `time-unit` half, the carve-out, the value class, the
@@ -2041,6 +2062,17 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is not merely open.",
     "the ADJACENCY half is not just open, it is unjudged.",
     "the ADJACENCY half is never far from open.",
+    # ⛔ THE `no longer` NEGATOR IS THE SAME TRADE, ONE WORD FAMILY OVER (#11258
+    # review round 7 `P2`, MEASURED). `is no longer open` is the PLAINEST English
+    # for `is closed` and it was a false block; the veto now admits `no\s+longer`
+    # as a negator, keeping the same after-negator adverb allowlist. These three
+    # are what keeps that widening honest: each is an EMPHATIC `no longer` that
+    # still ASSERTS the gap is open, and each must stay RED. Without them the
+    # widening could creep (an adverb allowlist that forgot `only`/`merely`/`far`
+    # would turn all three GREEN, which is round 2's measured regression again).
+    "the ADJACENCY half is no longer merely open.",
+    "the ADJACENCY half is no longer only open.",
+    "the ADJACENCY half is no longer far from open.",
     # round 6 (#11258 review round 3 `P1`): THE WAIVER IS NOT A PREFIX. Each of
     # these was GREEN while its counterpart without the word `spelling` RED — the
     # waiver skipped `_RESIDUAL_OPENNESS` whole, so one word defeated the gate.
@@ -2212,6 +2244,46 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     #   "`miles` was no longer fused at that revision"
     #   "the units were no longer fused at `origin/main` `525fde4a9`, …"
     #   "the unit word was no longer fused in the revision the widen replaced"
+    # ⛔ AND `is no longer open` — the plainest closure English — is ACCEPTED, not
+    # an over-block, since the veto took `no\s+longer` as a negator (#11258 review
+    # round 7 `P2`). It is pinned here rather than merely claimed, and the three
+    # emphatic `no longer` forms in `_RESIDUAL_REOPENING_MUTATIONS` are its
+    # falsifier: `no longer merely/only/far from open` mean the OPPOSITE of closed.
+    "the ADJACENCY half is no longer open.",
+)
+
+#: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
+#: RED at the append point (#11258 review round 7 `P2`). This file's own rule is
+#: that an over-block is the direction the artifact chooses — over fail-open — but
+#: only if it is RECORDED rather than left to be discovered. So the cost is a
+#: tuple and `test_the_residual_region_is_scanned_WHERE_a_lane_appends` re-measures
+#: every entry, rather than a sentence in a comment that can drift.
+#:
+#: Each shape is honest, and each is refused for a reason that is NOT an oversight:
+#: * `CLOSED, not open` / `judged, not open` — the `is … open` veto binds a
+#:   negator DIRECTLY after the verb, and the comma puts a word in the slot. A
+#:   veto wide enough to cross the comma is the veto that let the EMPHATIC
+#:   reopenings through (`is not only open`, `is not merely open`, `is never far
+#:   from open` — a measured coverage REGRESSION, #11258 review round 2 `P1`).
+#: * `closed rather than open` — same slot, same trade.
+#: * `no longer an open question` — the veto admits an ADVERB between the negator
+#:   and `open`, not a noun phrase (`an`).
+#: * `the SPELLING case for \`minute\`, which is open by design` — the unit token
+#:   withholds the `spelling` waiver (that withholding is what stops one word
+#:   `the SPELLING ` from excusing every reopening), so the honest sentence and
+#:   its reopening twin are indistinguishable to a clause-scoped rule. This is
+#:   the cost a lane is most likely to meet, because the row's surviving gap IS
+#:   the unit-spelling class.
+#:
+#: ⛔ WHEN ONE OF THESE STOPS BEING REFUSED, THAT IS AN IMPROVEMENT — move it into
+#: `_RESIDUAL_TRUTHFUL_STATEMENTS` in the same commit. Do NOT delete the test's
+#: assertion to silence it: a ledger that cannot red is a comment.
+_RESIDUAL_REFUSED_TRUTHFUL = (
+    "the ADJACENCY half is CLOSED, not open.",
+    "the ADJACENCY half is judged, not open.",
+    "the ADJACENCY half is closed rather than open.",
+    "the ADJACENCY half is no longer an open question.",
+    "the remaining gap is the SPELLING case for `minute`, which is open by design.",
 )
 
 
@@ -2229,6 +2301,24 @@ def _with_appended(text: str, sentence: str) -> str:
         "do NOT derive it from the function under test")
     at = text.index(_RESIDUAL_ROW_END)
     return text[:at] + "\n      " + sentence + text[at:]
+
+
+def _reds(text: str) -> bool:
+    """Does the PIN refuse this row text? — asked of the pin itself.
+
+    ⛔ THIS ASKS `_assert_the_row_names_its_closure`, NOT `_residual_reopening_
+    claims`, and the difference is the whole point (#11258 review round 7 `P2`,
+    reproduced): with the proof list calling the HELPER, deleting the two wiring
+    lines that connect the helper to the pin left this test GREEN **and** the pin
+    GREEN over a real reopening. Driving the pin's own callable means the wiring
+    cannot be removed without reddening the proof — the assertion a lane deletes
+    is the one this test measures.
+    """
+    try:
+        _assert_the_row_names_its_closure(text)
+    except AssertionError:
+        return True
+    return False
 
 
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
@@ -2320,9 +2410,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             "the shape, so deleting it is a silent coverage regression")
     text = (pathlib.Path(__file__).resolve().parent.parent
             / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
-    assert _residual_reopening_claims(text) == [], (
-        "the row itself reds before any mutation is applied: "
-        + "; ".join(_residual_reopening_claims(text)))
+    assert not _reds(text), "the row itself reds before any mutation is applied"
     # ⛔ THE REGION BOUND IS THE POINT, so it is asserted rather than assumed — and
     # the append point is anchored on the LITERAL row that follows the list, never
     # on `_residual_region`. Deriving it from the scanner is how the first version
@@ -2362,7 +2450,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         assert mutated.index(sentence) >= mutated.index(old_bound) + len(old_bound), (
             f"the fixture appended {sentence!r} INSIDE the pre-#11223 `(d)` block "
             "— a mutation there proves nothing about the append point")
-        if not _residual_reopening_claims(mutated):
+        if not _reds(mutated):
             missed.append(sentence)
     assert missed == [], (
         "these reopenings appended after the residual list stayed GREEN — the "
@@ -2378,7 +2466,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "the row's entry start is now AFTER its own residual marker, so this "
         "fixture no longer inserts above it — re-measure the prefix claim")
     prefixed = text[:prefix_at] + "      ⛔ (2b) " + prefix_mutation + ".\n" + text[prefix_at:]
-    assert _residual_reopening_claims(prefixed), (
+    assert _reds(prefixed), (
         "a reopening inserted into the row's narrative ABOVE the residual marker "
         "stayed GREEN — the scanned region still starts at "
         f"{_RESIDUAL_MARKER!r}, so it reads only "
@@ -2387,10 +2475,23 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "defect, one bound further in)")
     false_alarms = [
         sentence for sentence in _RESIDUAL_TRUTHFUL_STATEMENTS
-        if _residual_reopening_claims(_with_appended(text, sentence))]
+        if _reds(_with_appended(text, sentence))]
     assert false_alarms == [], (
         "these TRUTHFUL statements red the scan — a false block is how a guard "
         f"gets deleted: {false_alarms}")
+    # ⛔ AND THE OVER-BLOCK LEDGER IS RE-MEASURED, not asserted in prose (#11258
+    # review round 7 `P2`). These five are honest and refused; the pin states the
+    # cost so it is a measured property of this revision rather than a discovery
+    # left to the next lane. A shape that stops being refused is an IMPROVEMENT —
+    # move it to `_RESIDUAL_TRUTHFUL_STATEMENTS` and drop it here.
+    now_accepted = [s for s in _RESIDUAL_REFUSED_TRUTHFUL
+                    if not _reds(_with_appended(text, s))]
+    assert now_accepted == [], (
+        "these over-blocked statements are no longer refused — that is an"
+        " improvement, so move each one into `_RESIDUAL_TRUTHFUL_STATEMENTS`"
+        " (with its measured verdict) rather than leaving two lists: "
+        f"{now_accepted}"
+    )
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
