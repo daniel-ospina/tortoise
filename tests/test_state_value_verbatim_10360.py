@@ -2654,11 +2654,12 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
     a lane editing a clause finds its verdict beside its siblings.
 
     ⛔ EVERY VERDICT BELOW WAS MEASURED AT `origin/main` `277a559b1`, this file's
-    own head, and each assert that holds a row clause names it. EIGHT of them are
+    own head, and each assert that holds a row clause names it. NINE of them are
     REFUSALS (`:MM` with a fused unit, its pre-existing `27:12` spelling, an
     identifier against a quantity, a different identifier, an identifier with a
     PLAIN unit tail against two different quantities — `x4 ms`/`5000 ms` and
-    `arr4 ms`/`9000 ms` — and the two range comparisons) and the ELEVEN others
+    `arr4 ms`/`9000 ms` — an identifier whose TAIL spells a known unit
+    (`arr4ms`/`4 seconds`), and the two range comparisons) and the TWELVE others
     are TOLERANCES — a tolerance is not a bug, but an UNDISCLOSED or
     UNPINNED tolerance is how a future narrowing ("why does this pair fail
     open?") quietly reverses a measured decision.
@@ -2750,6 +2751,33 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
         ("field", "4ms", "9000ms"),)
     assert v2._value_slot_divergence("the see was x4 ms",
                                      "the see was 4 ms") == ()
+
+    # ⛔ AND THE SUFFIX IS READ AS A UNIT WITH NO IDENTIFIER/UNIT DISTINCTION,
+    # which is what the row's THE DISCRIMINATOR paragraph states: the identifier's
+    # own letters reach the identity through the SUFFIX slot, so a tail drives BOTH
+    # directions. A tail that SPELLS a known unit is compared AS that unit —
+    # `arr4ms` IS `4 ms`, so against `4 seconds` it REFUSES — while a tail that
+    # spells NOTHING in `_UNIT_EQUIV` leaves the unit UNJUDGEABLE on equal cores,
+    # the module's own unknown-unit tolerance, so `arr4zz` against `4 hours` fails
+    # open. Both sides BIND in that tolerance (`_value_bindings` yields a token on
+    # each side), which is what makes it a FAIL-OPEN rather than an absent
+    # binding. Only the `k` tail is ADDITIONALLY read as a SCALE — that is (d2)
+    # above and arm (i)'s bare shape — so the row must not be read as saying these
+    # are the only tails that reach the identity: that is how a lane scoping the
+    # #10943 fix to the `k` shape misses this class entirely.
+    # ⛔ MUTATION, measured: narrowing the SUFFIX read by the token's HEAD (drop
+    # the suffix when the token does not start with a numeral — the `_NUMERIC_HEAD`
+    # scope applied one slot too far, an OVER-BROAD stand-in for #10943) reads
+    # `('', '4', None)` and flips the `4 seconds` refusal to a tolerance, so the
+    # two asserts below it red. The `arr4zz` fail-open does NOT move under that
+    # narrowing, which is precisely why a `k`-scoped fix does not close it.
+    assert v2._value_core("arr4ms") == ("", "4", "ms")
+    assert v2._value_core("arr4zz") == ("", "4", "zz")
+    assert v2._value_slot_divergence("the field was arr4ms",
+                                     "the field was 4 seconds") == (
+        ("field", "4ms", "4s"),)
+    assert v2._value_slot_divergence("the field was arr4zz",
+                                     "the field was 4 hours") == ()
 
     # a HYPHENATED compound is ONE token, so it never reaches the fusion arm and
     # the composition folds `kmile` into `k`+`mile`: `20k-mile`/`20000 miles` is

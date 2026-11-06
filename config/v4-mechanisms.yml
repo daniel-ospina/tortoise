@@ -738,11 +738,16 @@ mechanisms:
       retainable state value: it carries no identifier CLASSIFIER. What it judges
       is a token's trailing numeric CORE, whatever letters precede it (`x4` reads
       as `4`, so `x4`/`5` and `x4 ms`/`5000 ms` ARE judged). The identifier's own
-      letters enter the identity only where a `k` TAIL is read as a magnitude
-      prefix, and that happens in TWO shapes: BARE, where the ×1000 is closed by
-      arm (i) with no unit folded (`x4k` against `4000` TOLERATES, and
-      `_composed_identity` DECLINES it because `k` is already a known unit), and
-      over a KNOWN UNIT, which is residual (d2) below (`x4k`+`ms` → `4000 ms`).
+      letters reach the identity through the SUFFIX, which is read as a UNIT with
+      no identifier/unit distinction: a tail that SPELLS a known unit is compared
+      AS that unit (`arr4ms` IS `4 ms`, so `arr4ms` against `4 seconds` REFUSES),
+      and a tail that spells NOTHING in the table leaves the unit UNJUDGEABLE on
+      equal cores — a FAIL-OPEN, so `arr4zz` against `4 hours` TOLERATES. Of those
+      tails, ONLY the `k` one is ADDITIONALLY read as a SCALE, and that happens in
+      TWO shapes: BARE, where the ×1000 is closed by arm (i) with no unit folded
+      (`x4k` against `4000` TOLERATES, and `_composed_identity` DECLINES it
+      because `k` is already a known unit), and over a KNOWN UNIT, which is
+      residual (d2) below (`x4k`+`ms` → `4000 ms`).
       It judges
       VALUES over the engine's own bindings, in three tolerances (#10360 lane
       record): (i) value identity, not string identity — a numeric core with its
@@ -1002,7 +1007,9 @@ mechanisms:
       NOT a blanket identifier tolerance. (d2) does NOT reopen (d)'s ADJACENCY
       result — the unit word IS fused.
       ⚠️ Residuals (c) (`4:32` read as a marathon time), (d) (`per <unit>` rates),
-      (d2) and the `20k-mile`/`20000 miles` agreement are PINNED as a battery by
+      (d2), the `20k-mile`/`20000 miles` agreement and THE DISCRIMINATOR's
+      identifier-tail UNIT reading (`arr4ms` compared as `4 ms`, `arr4zz` failing
+      open) are PINNED as a battery by
       `tests/test_state_value_verbatim_10360.py::test_the_registry_rows_measured_disclosures_are_pinned`
       — a row claim with no pin is the drift this row exists to prevent.
       (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
