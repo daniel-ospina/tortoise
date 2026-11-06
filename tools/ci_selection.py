@@ -1665,6 +1665,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # entry above. Pinned by
              # tests/test_ci_selection.py::test_issue_process_lint_tool_change_selects_core_not_tier1.
              "tools/issue_process_lint.py",
+             # ⛔ THE DOC AND THE TEMPLATE ARE PART OF THE SAME CONTRACT, and `docs/` is a flat
+             # NON_PYTHON_PREFIXES entry too — so a DOC-ONLY edit selected no surface and fell to
+             # tier-1 smoke, which does not carry the suite (measured at `06bc97f30`, review P2:
+             # `select(["docs/ops/ISSUE-WORKING-PROCESS.md"])` -> surfaces [], 74 files, suite
+             # ABSENT). The two pins whose entire purpose is "the paste-ready block cannot drift"
+             # (`test_the_doc_block_matches_the_template`, `test_every_bash_example_in_the_doc_parses`)
+             # would then never run on the one PR that edits that block or a `bash` example — the
+             # drift lands unobserved. The template side is already covered (a `.github/` change
+             # selects `full: True`); this entry closes the docs side, the same way `docs/00_index.md`
+             # and `docs/capacity.md` are closed above. Pinned by
+             # tests/test_ci_selection.py::test_issue_process_lint_tool_change_selects_core_not_tier1.
+             "docs/ops/ISSUE-WORKING-PROCESS.md",
              # #11026: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py
              # (registered `core`), and it hit the SAME silent drop: `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY

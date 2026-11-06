@@ -195,11 +195,26 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # longer disagree about whether a body closed a reference. It is a NARROWING: the only error it can
 # introduce is a claim this lint no longer credits (a finding where there was none), never a close
 # it invents.
+# The list grammar's SHARED tokens, defined here above every reader. `_LIST_SEP` is the
+# emphasis/whitespace that may sit around a list separator; `_GLOSS` is the ONE balanced
+# parenthetical that may sit between a reference and its separator (`#100 (the parent), #200 (the
+# child)`) and which holds no `#`, so it can neither smuggle a reference into a list it is not part
+# of nor run past the clause it belongs to. ONE definition, read by `CLAIM_RE`, `_REF_LIST` and
+# `_REF_RUN_GAP_RE`: a token admitted in one reader and not the others is exactly the drift this
+# module keeps re-discovering — the list a claim CONTINUES, the list a decline NAMES, and the run a
+# plural decline CLEARS have to be the same list.
+_LIST_SEP = r"[\s*_`]*"
+_GLOSS = rf"(?:{_LIST_SEP}\([^)\n#]{{0,80}}\))?"
 CLAIM_RE = re.compile(
-    r"\b(?:(?P<kw>refs?|part\s+of|serves?|addresses)\b"
-    r"(?P<mid>[^\n#]{0,16}?)"
-    r"|(?P<ckw>satisf(?:y|ies|ied)|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b"
-    r"(?P<cmid>[\s:]*))"
+    rf"\b(?:(?P<kw>refs?|part\s+of|serves?|addresses)\b"
+    # A BLANKED COMMENT IS A WHITESPACE GAP, and it may be longer than the 16-character window: the
+    # two alternatives below are the same window PLUS a run of HORIZONTAL whitespace of any length,
+    # because that is the only thing blanking can insert. `[ \t]` and never `\s`: a claim must not
+    # cross a newline (measured at `06bc97f30`, review P2 — `Refs <!-- prettier-ignore --> #1234`
+    # claimed nothing once comments were blanked instead of deleted, a silent drop).
+    rf"(?P<mid>[^\n#]{{0,16}}?|[ \t]+)"
+    rf"|(?P<ckw>satisf(?:y|ies|ied)|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b"
+    rf"(?P<cmid>[\s:]*))"
     # A COMMA-CONTINUED list is claimed in full: `Part of #10085, #10063` claims BOTH, and
     # reading only the first dropped every subject after it (F3) — measured on three open PRs
     # (#11038, #11065, #11093). A CONJUNCTION / OXFORD-comma list is the SAME list: admitting only
@@ -209,10 +224,22 @@ CLAIM_RE = re.compile(
     # the two arms gave two different answers to "what is a list".
     # Every separator alternative requires a `#N` IMMEDIATELY after it, so a conjunction in ordinary
     # prose (`Part of #100 and the fix is …`) still claims only `#100`.
-    r"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b"
-    r"(?P<more>(?:"
-    r"(?:\s*,\s*(?:(?:and|or|&)\s+)?|\s+(?:and|or|&)\s+)"
-    r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{1,7}\b)*)",
+    # Every separator alternative requires a `#N` IMMEDIATELY after it — and `or` is one of them:
+    # `Part of #100 or #300` claimed `#100` alone, so a `#300` resolved by nothing read CLEAN
+    # (`53646f1f6`). The DECLINE shape already admitted `and|or`, and the two arms must agree about
+    # what a list is.
+    #
+    # ⛔ A PARENTHETICAL GLOSS DOES NOT END THE LIST — its token is `_GLOSS` (defined above), shared
+    # with the decline's list and the plural run. Measured at `06bc97f30` (review P2):
+    #     `Closes #100 (the parent), #200 (the child).`   -> claims `#100` alone, rc 0
+    # `#200` was never even evaluated, so a reference the author named under a closing keyword that
+    # GitHub does not close was reported CLEAN. Not hypothetical prose: #11093's live body carries
+    # the shape (`Refs #10892 (the served-but-unusable blind spot), #10602 (…).`).
+    rf"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{{1,7}})\b"
+    rf"(?P<more>(?:"
+    rf"{_GLOSS}"
+    rf"(?:\s*,\s*(?:(?:and|or|&)\s+)?|\s+(?:and|or|&)\s+)"
+    rf"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{{1,7}}\b)*)",
     re.IGNORECASE,
 )
 # One entry per continued ref; a named group inside a repeated group keeps only the LAST match, so
@@ -283,10 +310,10 @@ _REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
 # CLAUSE ENDS. Using it made `deliberately not closing #100. #300` capture `#100. #300` as one list,
 # so a ref claimed by a FOLLOWING sentence was swept into the decline and disappeared (measured at
 # `0e785300b`, review P2). A list separator is a comma or a conjunction, and nothing else.
-_LIST_SEP = r"[\s*_`]*"
+# `_LIST_SEP` and `_GLOSS` are defined above `CLAIM_RE` — the claim grammar reads them too.
 _REF_LIST = (rf"(?:{_REF_OBJ})"
-             rf"(?:(?:,{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
-             rf"|(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))#\d{{1,7}})*")
+             rf"(?:(?:{_GLOSS},{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
+             rf"|{_GLOSS}(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))#\d{{1,7}})*")
 # The INVERSION of `_REF_LIST`'s separator: what may sit BETWEEN two references of the same list.
 # It exists so the plural (`them`) declaration clears the run it NAMES without sweeping in a
 # previous sentence's claim — see `_ref_run_back`. The separator is the list grammar's own (a
@@ -294,8 +321,8 @@ _REF_LIST = (rf"(?:{_REF_OBJ})"
 # cannot drift apart; bare whitespace is excluded because `#100 #200` is not an English list and
 # the conservative reading of an ambiguous gap is to END the run.
 _REF_RUN_GAP_RE = re.compile(
-    rf"^{_LIST_SEP}(?:,{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
-    rf"|{_LIST_SEP}(?:and|or){_LIST_SEP})$",
+    rf"^{_GLOSS}(?:,{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
+    rf"|{_GLOSS}(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))$",
     re.IGNORECASE,
 )
 _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
@@ -391,15 +418,19 @@ _REF_ONLY_SUBJECT = r"(?:this|it|that|which)"
 _BRIDGE_WORD = rf"(?:{_SUBJECT_WORD}|{_SUBJECT_PHRASE}|{_COPULA}|the|a|an|deliberately)"
 _BRIDGE_WORDS_MAX = 3
 _DECLINE_BRIDGE_RE = re.compile(
+    # A parenthetical GLOSS may sit between the reference and the sentence that answers it —
+    # `Refs #10892 (blind spot), #10602 (latency) — deliberately not closing them.` The gloss is
+    # `_GLOSS` (balanced, no `#`), so it still cannot smuggle a subject or a reference into the
+    # bridge; what follows it is still only tail punctuation or the closed vocabulary.
     # (i) a STATE of the reference itself: `— it is not closed`, `— this is not closed`.
-    rf"^{_DECLINE_TAIL_BRIDGE}"
+    rf"^{_DECLINE_TAIL_BRIDGE}{_GLOSS}"
     rf"{_REF_ONLY_SUBJECT}{_EMPH}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
     # (ii) the reference IS the subject, with no separate subject word: `#200 is deliberately not
     #      Closes.`, `Part of #11000 — #11000 is not closed.` — the bridge is the copula alone.
-    rf"|^{_DECLINE_TAIL_BRIDGE}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
+    rf"|^{_DECLINE_TAIL_BRIDGE}{_GLOSS}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
     # (iii) an ACT by a named subject: `— this PR does not close the issue`,
     #       `— the author deliberately does not close the issue`.
-    rf"|^{_DECLINE_TAIL_BRIDGE}"
+    rf"|^{_DECLINE_TAIL_BRIDGE}{_GLOSS}"
     rf"(?:{_BRIDGE_WORD}{_EMPH}){{0,{_BRIDGE_WORDS_MAX}}}"
     rf"{_DECLINE_TAIL_BRIDGE}$",
     re.IGNORECASE,
@@ -489,11 +520,23 @@ def strip_code(body: str) -> tuple[str, int]:
     is stripped as code, and the remaining comment text is removed afterwards. An UNTERMINATED
     fence still hides the rest of the body — but it does so VISIBLY, through `hidden_lines`, which
     is the whole point of reporting that count.
+
+    ⛔ AND A COMMENT IS BLANKED, NOT DELETED (round 21, the peer finding). Deletion collapsed
+    `does not close<!-- #11078 -->` into `does not close ` — ONE space — which the
+    unreadable-object guard reads as an honest reason and clears the reference before it, the
+    silent drop that guard exists to stop. Equal-length spaces keep every offset AND leave a
+    whitespace run of two or more wherever a comment stood, which is the discriminator that
+    separates a blanked OBJECT from a sentence that simply names none.
     """
     stats: dict[str, int] = {}
     text = _strip_fenced_blocks(body, stats=stats)
-    # HTML comments, now that code regions are already blanked.
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    # HTML comments, now that code regions are already blanked. ⛔ BLANKED, NOT DELETED: deletion
+    # collapsed `does not close<!-- #11078 -->` to `does not close ` (ONE space), which the
+    # unreadable-object guard reads as an honest reason and clears the ref before it — the silent
+    # drop it exists to stop. Equal-length spaces keep every offset AND leave the whitespace run of
+    # two or more that separates a blanked OBJECT from a sentence that names none.
+    text = re.sub(r"<!--.*?-->", lambda m: re.sub(r"[^\n]", " ", m.group(0)), text,
+                  flags=re.DOTALL)
     # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim. Imported, not
     # re-derived — a single-backtick regex here read a ``Refs #1234`` span as prose (F1).
     text = _strip_inline_code_spans(text)
