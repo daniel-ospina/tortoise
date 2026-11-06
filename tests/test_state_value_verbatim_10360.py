@@ -1293,62 +1293,89 @@ _UNIT_TOKEN = re.compile(
 #: appended (#11223).
 _RESIDUAL_MARKER = "⛔ WHAT IS STILL NOT ENFORCED"
 
-#: What an openness assertion has to be ABOUT to reopen a gap this row says is
-#: CLOSED: the adjacency class (the word itself, a time/length UNIT token or its
-#: abbreviation, `time-unit`), the carve-out, or the retention guarantee.
-#: ⛔ THE ANCHOR IS REQUIRED, and it is deliberately NOT the word `adjacency`
-#: alone: review cycle 6 MEASURED that gating the scan on it let five reopenings
-#: through ("`minute` no longer fuses", "the time-unit half is no longer closed",
-#: "except `minute`, which is open again"). A clause that asserts openness about
-#: some OTHER subject — a false refusal, an owner's decision, a ruling, a
-#: two-group decimal — is honest and must pass, and that is what the anchor buys.
-#: The abbreviations are here because the row's own vocabulary uses them (`min`,
-#: `ms`, `km`); `\b` keeps `800ms` (one token) from matching.
+#: What marks a claim as being about THIS row's closed gap: the adjacency class
+#: (the word itself, a time/length UNIT token or its abbreviation, `time-unit`),
+#: the carve-out, or the retention guarantee.
+#: ⛔ THE ANCHOR IS NOT REQUIRED OF EVERY PHRASE — that is the difference between
+#: this revision and the one the #11258 review refused (`P1`, measured): requiring
+#: it of ALL of them let `the gap those tables closed is open again` through,
+#: which the PRE-change guard caught. It is required only of the OPENING VERB
+#: (`re-?open` / `reopened`), because that verb is the one the row itself uses
+#: honestly about OTHER subjects — a false refusal, an owner's decision, a
+#: ruling. Every other phrase below can only describe a gap being reopened, so it
+#: is matched wherever it appears.
+#: ⛔ AND THE ANCHOR IS NOT THE WORD `adjacency` ALONE: review cycle 6 MEASURED
+#: that gating the whole scan on it let five reopenings through ("`minute` no
+#: longer fuses", "the time-unit half is no longer closed", "except `minute`,
+#: which is open again"). The abbreviations are here because the row's own
+#: vocabulary uses them (`min`, `ms`, `km`); `\b` keeps `800ms` (one token) from
+#: matching.
 _RESIDUAL_CLASS_ANCHOR = re.compile(
     r"adjacency|\btime[- ]unit\b|carve[- ]out|\bthe guarantee\b|\bretention\b|"
     r"\bvalue class\b|\bnumeric side\b|\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
     + _UNIT_TOKEN.pattern, re.I)
 
-#: The assertions that something IS open / STOPPED being closed — each a phrase a
-#: lane writes when it reopens a gap, applied region-wide (see the marker above).
+#: The affirmations that something IS open / STOPPED being closed. TWO ARMS,
+#: and the split is the whole design — each arm was measured into place.
+#:
+#: 1. `_RESIDUAL_OPENNESS` — phrases that can only describe a gap being reopened.
+#:    Applied to EVERY sentence in the region, with NO class anchor, because a
+#:    reopening that names the gap in words outside the anchor vocabulary is still
+#:    a reopening: requiring the anchor here let `the gap those tables closed is
+#:    open again` through, which the PRE-change guard caught (#11258 review `P1`).
+#: 2. `_RESIDUAL_ANCHORED_OPENNESS` — the polysemous arm (`<verb> … open`, and the
+#:    opening verb `re-?open`). "is open" can be said of anything, and the row
+#:    says it about a false refusal and about an owner's decision, so this arm
+#:    requires `_RESIDUAL_CLASS_ANCHOR` somewhere in the sentence. Without that
+#:    requirement the arm's filler window read the row's own honest
+#:    "the pair is unjudgeable and fails open" as an openness claim (MEASURED).
 #: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
 #: a reopening phrased with none of these words passes — MEASURED, still GREEN at
 #: this revision: "the ADJACENCY half went back to being unjudged", "`minute` is
-#: once more outside the closed set", "adjacency is unjudged again". The pin's job
-#: is to catch the shapes a lane actually writes, not to be a semantic reader of
+#: once more outside the closed set", "adjacency is unjudged again", and
+#: "`minute` is back in the open set" (which the PREVIOUS revision DID catch, via a
+#: free `[^.;]{0,25}` filler window; that window also read the row's own honest
+#: "the pair is unjudgeable and fails open" as a claim, and the window won on
+#: measured evidence — a false block is how a pin gets deleted). The pin's job is
+#: to catch the shapes a lane actually writes, not to be a semantic reader of
 #: English; closing that needs a human or a different instrument, not a longer
-#: regex. ("`minute` is back in the open set" WAS on this list and is no longer —
-#: the verb arm reads standalone `open`, so it REDs; the example above is the
-#: replacement, measured rather than carried over.)
+#: regex.
 _RESIDUAL_OPENNESS = (
     # `not closed`, allowing an adverb inside the negation (`is not yet / not
     # fully / not really closed`) — the adverb-free form was the whole class
     # one word away (review cycle 6, MEASURED: all three PASSED before this).
+    # Scanned PER SENTENCE rather than per clause: `the ADJACENCY half is not, and
+    # never was, closed` splits into clauses that each carry only half of it
+    # (#11258 review `P2`, measured).
     r"\bnot\b[^.;]{0,30}\bclosed\b",
     r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
-    # ⛔ A NEGATED reopening is a DENIAL of one, not a reopening: `(d2) does not
-    # reopen (d)'s ADJACENCY result` is the row's own truthful scope boundary, and
-    # without this lookbehind widening the scan red on it (#11223 fix direction 2).
-    r"(?<!\bnot\s)(?<!\bnever\s)\bre-?open",
-    # The verb arm covers the INFLECTIONS, not just the present tense (review
-    # cycle 7, MEASURED: `stayed open`, `remained open`, `has stayed open`,
-    # `keeps open` and `is left open` all PASSED against the previous
-    # `stays?|remains?` arm — one inflection defeated it).
-    # ⛔ AND `(?<!-)open(?![\w-])` IS LOAD-BEARING: `\b` matches after a hyphen,
-    # so the plain arm read the row's OWN vocabulary — `fail-open` — as an
-    # openness claim (MEASURED on the widened region: `is the arm choosing
-    # fail-open` was its one match, #11223 fix direction 2).
-    r"\b(is|are|was|were|remain(s|ed)?|stay(s|ed)?|keep(s)?)\b[^.;]{0,25}"
-    r"(?<!-)open(?![\w-])",
     r"\bopen\s+again\b",
 )
 
-#: The floor for an EXEMPT clause — one that discloses the still-open SPELLING
+#: The ANCHORED arm: `<verb> … open` and the opening verb. ⛔ NO HYPHEN EXCEPTION —
+#: `fail-open` IS read, because failing open on the adjacency class is exactly the
+#: reopening this scan refuses (`the ADJACENCY half is fail-open.` stays GREEN with
+#: one, #11258 review `P2`). The filler is a CLOSED set of adverbs rather than an
+#: open `[^.;]{0,25}` window, so an unrelated second predicate inside the window
+#: cannot make the verb head a distant `open` (measured: the free window read
+#: "is unjudgeable and fails open" as a claim).
+_RESIDUAL_ANCHORED_OPENNESS = (
+    r"\b(is|are|was|were|remain(s|ed)?|stay(s|ed)?|keep(s|t)?)\b"
+    r"(?:\s+(?:still|now|again|back|left|once\s+more|effectively|deliberately|"
+    r"only|already|fully|openly|so))*"
+    r"\s+(?:fail-)?open(?!\w)",
+    # ⛔ A NEGATED reopening is a DENIAL of one: `(d2) does not reopen (d)'s
+    # ADJACENCY result` is the row's own truthful scope boundary (#11223 fix
+    # direction 2), so the lookbehind is what keeps it out of the scan.
+    r"(?<!\bnot\s)(?<!\bnever\s)\bre-?open",
+)
+
+#: The floor for an EXEMPT sentence — one that discloses the still-open SPELLING
 #: class and names no class anchor. It is not skipped: these say a unit stopped
-#: being fused/judged, which reopens the adjacency gap whatever else the clause is
-#: about (review cycle 7, MEASURED: exempting that sentence wholesale let "the
+#: being fused/judged, which reopens the adjacency gap whatever else the sentence
+#: is about (review cycle 7, MEASURED: exempting that sentence wholesale let "the
 #: SPELLING gap is not closed and `minute` no longer fuses" PASS; cycle 9:
 #: skipping it entirely let "… the value class is no longer judged" PASS).
 #: `not closed` / `is open` are deliberately absent — the SPELLING gap IS open and
@@ -1358,6 +1385,14 @@ _SPELLING_FLOOR = (
     r"\bunclosed\b",
     r"(?<!\bnot\s)(?<!\bnever\s)\bre-?open",
 )
+
+#: The row that FOLLOWS the residual list. The proof test anchors its append point
+#: on this literal, deliberately NOT on `_residual_region` — anchoring it there is
+#: what made the first version of that test self-referential: it inserted each
+#: mutation inside whatever region the function returned, so narrowing the bound
+#: moved the fixture with it and every mutation stayed GREEN (#11258 review `P1`,
+#: measured).
+_RESIDUAL_ROW_END = "\n  - id: atomic_point_write"
 
 
 def _residual_region(text: str) -> str:
@@ -1385,34 +1420,39 @@ def _residual_region(text: str) -> str:
 def _residual_reopening_claims(text: str) -> list[str]:
     """Every claim in the residual region that REOPENS a gap the row closed.
 
-    Region-wide and CLAUSE-scoped, in that order — the two properties that were
-    each missing once: the region used to stop at `(e) the` (#11223), and the
-    waiver used to travel to the next clause of the same sentence (review cycle
-    10, MEASURED: "The SPELLING gap is open, and the carve-out is still open."
-    PASSED with a sentence-scoped waiver).
+    REGION-WIDE, SENTENCE-scoped, and anchored only where it has to be. Each of
+    those three is a correction, measured — not a preference:
 
-    A clause REDS when it asserts openness AND names the class; a clause naming
-    the still-open SPELLING class is honest and gets only the `_SPELLING_FLOOR`.
-    Returns the offending phrase with its clause, so a red names both.
+    * region-wide: the region used to stop at `(e) the`, so a reopening appended
+      where a lane appends one was never read (#11223);
+    * SENTENCE-scoped, not clause-scoped: splitting a sentence on `;`/`, and` puts
+      the class anchor in one half and the openness phrase in the other, so
+      `the ADJACENCY half is now CLOSED, but the exception it carved is open
+      again.` and `the ADJACENCY half is not, and never was, closed.` both PASSED
+      a clause-scoped scan (#11258 review `P2`, measured);
+    * anchored ONLY for the opening verb, and for the SPELLING waiver: requiring
+      the class anchor of EVERY phrase let `the gap those tables closed is open
+      again` through — a shape the PRE-change guard caught (#11258 review `P1`).
+
+    A sentence that discloses the still-open SPELLING class and names no class
+    anchor is honest (that gap IS open) and gets only `_SPELLING_FLOOR`.
+    Returns the offending phrase with its sentence, so a red names both.
     """
     claims: list[str] = []
     flat = " ".join(_residual_region(text).split()).lower()
     for sentence in re.split(r"(?<=[.!?;])\s+", flat):
-        for clause in re.split(r";|,?\s+(?:and|but)\s+", sentence):
-            if ("spelling" in clause
-                    and not _UNIT_TOKEN.search(clause)
-                    and "adjacency" not in clause
-                    and "carve-out" not in clause):
-                patterns = _SPELLING_FLOOR      # honest: the SPELLING gap IS open
-            elif _RESIDUAL_CLASS_ANCHOR.search(clause):
-                patterns = _RESIDUAL_OPENNESS
-            else:
-                continue                        # about some OTHER subject
-            for pattern in patterns:
-                m = re.search(pattern, clause)
-                if m is not None:
-                    claims.append(f"{m.group(0)!r} in clause {clause.strip()!r}")
-                    break
+        honest_spelling = ("spelling" in sentence
+                           and not _UNIT_TOKEN.search(sentence)
+                           and not _RESIDUAL_CLASS_ANCHOR.search(sentence))
+        patterns = list(_SPELLING_FLOOR) if honest_spelling else list(
+            _RESIDUAL_OPENNESS)
+        if not honest_spelling and _RESIDUAL_CLASS_ANCHOR.search(sentence):
+            patterns += _RESIDUAL_ANCHORED_OPENNESS
+        for pattern in patterns:
+            m = re.search(pattern, sentence)
+            if m is not None:
+                claims.append(f"{m.group(0)!r} in sentence {sentence.strip()!r}")
+                break
     return claims
 
 
@@ -1468,7 +1508,7 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # statement about some OTHER subject from tripping it, and the closed-claim
     # rule stays scoped to `(d)` where that claim lives.
     # The block's own structural half is asserted here; the reopening half lives
-    # in `_residual_reopening_claims`, whose proof list (20 reopenings that must
+    # in `_residual_reopening_claims`, whose proof list (24 reopenings that must
     # RED, 10 truthful statements that must stay GREEN) is
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` below — that test
     # is what makes the list above a checked claim rather than a docstring.
@@ -1544,10 +1584,17 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # the strongest phrase is not weakened by the `fail-open` hyphen boundary
     "the time-unit half is fail-open again",
     "the ADJACENCY half is not closed yet",
-    # the shape the PREVIOUS revision documented as uncatchable — it is caught now
-    "`minute` is back in the open set",
     "the ADJACENCY gap is open",
     "the carve-out is no longer closed",
+    # ⛔ THE #11258 REVIEW'S OWN CASES, each one a shape the pre-review revision
+    # let through and the PRE-PR guard caught — the anchor is required of the
+    # polysemous arm only, so a reopening that names the gap in other words still
+    # reds (#11258 review P1/P2, measured: OLD=True / NEW=False before this).
+    "the gap those tables closed is open again.",
+    "the remaining gap is not closed.",
+    "the ADJACENCY half is now CLOSED, but the exception it carved is open again.",
+    "the ADJACENCY half is not, and never was, closed.",
+    "the ADJACENCY half is fail-open.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -1576,15 +1623,17 @@ def _with_appended(text: str, sentence: str) -> str:
     region ends (just before the row's own terminator), NOT inside the `(d)`
     block, so a guard that stops reading at `(e) the` cannot see it.
     """
-    region = _residual_region(text)
-    terminator = region.rstrip()
-    assert terminator and terminator in text
-    at = text.index(terminator) + len(terminator)
+    assert text.count(_RESIDUAL_ROW_END) == 1, (
+        f"the row that FOLLOWS the residual list ({_RESIDUAL_ROW_END!r}) is not "
+        "in this registry exactly once, so the append point cannot be fixed "
+        "independently of `_residual_region` — update this anchor deliberately, "
+        "do NOT derive it from the function under test")
+    at = text.index(_RESIDUAL_ROW_END)
     return text[:at] + "\n      " + sentence + text[at:]
 
 
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
-    """#11223: the pin's own proof list, executable — 20 REDs and 10 passes.
+    """#11223: the pin's own proof list, executable — 24 REDs and 10 passes.
 
     The pin above asserted a scan whose bounds were the `(d)` block; measured on
     the row at `af864a42a` that block is 10,019 chars and does NOT contain the
@@ -1597,18 +1646,37 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert _residual_reopening_claims(text) == [], (
         "the row itself reds before any mutation is applied: "
         + "; ".join(_residual_reopening_claims(text)))
-    # ⛔ THE REGION BOUND IS THE POINT, so it is asserted rather than assumed: the
-    # list runs PAST the `(d)` block, which is why the old bound could not see an
-    # append at its end.
+    # ⛔ THE REGION BOUND IS THE POINT, so it is asserted rather than assumed — and
+    # the append point is anchored on the LITERAL row that follows the list, never
+    # on `_residual_region`. Deriving it from the scanner is how the first version
+    # of this test became self-referential: the mutations moved with the bound, so
+    # narrowing the bound kept the suite GREEN (#11258 review P1, measured — with
+    # the literal anchor, narrowing it puts all 24 mutations outside the region and
+    # the fixture assertion below fires).
     region = _residual_region(text)
-    assert len(region) > len(text.split("(d) a RATE unit", 1)[1]
-                            .split("(e) the", 1)[0])
+    old_bound = text.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
+    assert len(region) > len(old_bound), (
+        "the residual region must reach PAST the pre-#11223 bound (the `(d)` "
+        "block): that bound is the defect this pin exists to remove")
+    # ⛔ AND THE APPEND POINT MUST BE OUTSIDE THAT OLD BOUND, or every mutation
+    # below would be inside the region the OLD guard read and would prove
+    # nothing. This is asserted on the FIXTURE, not on the scanner.
+    # The `(d2)` clause is the row's own text that the old bound could not see; its
+    # absence there is what makes "appended after the block" mean "invisible to the
+    # pre-#11223 guard" (a measured fact, not an inference).
+    assert "(d2)" not in old_bound, (
+        "the `(d2)` clause is now INSIDE the pre-#11223 bound, so this fixture no "
+        "longer demonstrates the append point being outside it — re-measure the "
+        "claim in the docstring before changing this assert")
     missed = []
     for sentence in _RESIDUAL_REOPENING_MUTATIONS:
         mutated = _with_appended(text, sentence)
         assert sentence in _residual_region(mutated), (
             f"the fixture appended {sentence!r} OUTSIDE the region it tests — "
             "the mutation would prove nothing")
+        assert mutated.index(sentence) > mutated.index(old_bound) + len(old_bound) - len(sentence), (
+            f"the fixture appended {sentence!r} INSIDE the pre-#11223 `(d)` block "
+            "— a mutation there proves nothing about the append point")
         if not _residual_reopening_claims(mutated):
             missed.append(sentence)
     assert missed == [], (
