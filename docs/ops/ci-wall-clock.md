@@ -167,7 +167,7 @@ the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.t
 matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
 exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
 everything the restore just put there. This job — p50 1.62 m, the fastest of them — is the likely
-payer: its own `.[test,postgres]` downloads (`python-ci.yml:4575` — the
+payer: its own `.[test,postgres]` downloads (`python-ci.yml:4623` — the
 `Install package + the postgres extra` step in `test-record-postgres`; `[embeddings]`/torch
 deliberately absent) are a rounding error beside the shared archive it restores and re-saves.
 
@@ -244,7 +244,7 @@ names:
   job at 10 m 15 s against a 10 m cap. **This row was missed by the audit above for a structural
   reason worth keeping: its save surface is created by a third-party action**, not by an
   `actions/cache` step of its own (`actions/setup-python` with `cache: pip`,
-  `python-ci.yml:3213`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
+  `python-ci.yml:3222`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
   like a comfortable 10 m. It is the only `cache: pip` site left in the workflow. Save arm:
   5 m in-step + ~1 + ~9 = 15 m × 1.5 = 22.5 → **30**.
 
@@ -283,7 +283,7 @@ cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at
 30). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
-because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2932-2937`, both
+because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2941-2946`, both
 in the `test-concurrency-falkor` job) and so
 writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
 move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
@@ -326,7 +326,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:4567-4569` — the `Cache pip dependency caches (#7612)` step's
+  writable shared key (`python-ci.yml:4615-4617` — the `Cache pip dependency caches (#7612)` step's
   `with:` block in `test-record-postgres`) and is therefore NOT an arm-1 row — on a key
   change its save IS the archive, measured at 3.6 GB / 15.9 m on 2026-11-05 (see the note under the
   table, and the cap it moved to). Arm 1 applies to a job whose save is
