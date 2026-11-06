@@ -555,12 +555,14 @@ the `{error}`-only shape whose retry action is different.
   mints **no** `:GraphEvent` from the sweep (only the `EntityMutated` JSONL
   row, which is not a node). The under-count is therefore a graph-held-turns
   phenomenon on the **journal-configured / record-unarmed** lane alone: the
-  journal-less lane returns before that sweep runs (`sdk.py`: `if
-  sdk._get_event_log() is None: return redacted_total`), so it mints no
-  `:GraphEvent` either, and the record-armed lane (what production runs)
-  mints none. Measured on the journal-configured / record-unarmed lane: a
-  1-turn re-capture of a 500-turn session was charged 5 120 B and
-  minted 499 nodes.
+  record-armed lane (what production runs) mints none, and on the
+  journal-less lane `sdk.py` returns
+  (`if sdk._get_event_log() is None: return redacted_total`) BEFORE the
+  journalling pass — its sweep's hard `DETACH DELETE` has already run above
+  that return — so that lane emits no `PointRetracted` and mints no
+  `:GraphEvent` either: its swept turns are REMOVED, never re-charged.
+  Measured on the journal-configured / record-unarmed lane: a 1-turn
+  re-capture of a 500-turn session was charged 5 120 B and minted 499 nodes.
 
   Exceeding the allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
