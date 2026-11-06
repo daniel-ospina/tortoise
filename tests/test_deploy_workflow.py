@@ -4257,9 +4257,11 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # baseline and nothing reds: the manifest grep above is executed, the baseline
     # census grep never was (#9548 review P1/P2).
     assert re.search(r"NOT empty", note), (
-        "the note claims the pre-#9548 census was empty — it returned one line, "
-        "#9556/R8's §9 operator example, and a later lane needs that line named to "
-        "tell it apart from a #9548 arming surface"
+        "the note claims the pre-#9548 census was empty — at `047c91f7a` (the "
+        "arming commit's parent) the same path set returns 10 lines, and a later "
+        "lane needs them named to tell them apart from a #9548 arming surface "
+        "(#11064 review r17, P3: this message still published the retired "
+        "\"one line\" reading)"
     )
     assert re.search(r"#9556", note), (
         "the note does not attribute the pre-existing census line to #9556/R8, so "
@@ -4450,17 +4452,73 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # sentence is not the correction — measured: the pre-fix sentence contains
     # "not empty and not one" AFTER the false clause and satisfied a whole-sentence
     # test, so this arm is windowed like the manifest denial above).
-    for sentence in re.split(r"(?<=\.)\s+", row):
+    #
+    # ⛔ AND NAMING THE TRUE TREE IS THE CORRECTION, not a violation of it (#11064
+    # review r17, P2). The arm as first written required a denial in EVERY sentence
+    # that named the phrase, so the most natural fix — "the tree immediately before
+    # #9548 is `047c91f7a`" — was refused: a false RED produced by a guard whose
+    # purpose is to stop false GREENs, the same class this file warns about ~130
+    # lines above. A sentence that names `047c91f7a` is exempt, and the three
+    # truthful shapes are EXECUTED below so the exemption cannot be the whole arm.
+    def _refuses_immediately_before_9548(sentence: str) -> bool:
+        """True when the sentence NAMES the phrase and neither denies nor corrects it.
+
+        Split out of the loop below so the arm can be exercised in BOTH directions
+        on fixed strings — the red direction (the bare equivalence) and the green
+        one (a correction naming the true pre-#9548 tree). A predicate that is only
+        ever run against the artefact it guards can go vacuous without anything
+        reding; these controls are what make its greenness a measurement.
+        """
         if not re.search(r"immediately\s+before\s+#9548", sentence, re.I):
-            continue
-        assert re.search(
+            return False
+        if "047c91f7a" in sentence:
+            return False  # names the TRUE pre-#9548 tree — a correction, not the defect
+        return not re.search(
             r"\b(?:not|never|isn't|is not)\b[^.]{0,40}?immediately\s+before\s+#9548",
             sentence,
             re.I,
-        ), (
-            "§A8's evidence cell names \"immediately before #9548\" without "
-            "denying it applies to ff6379eb2:\n  " + sentence
         )
+
+    offenders = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s+", row)
+        if _refuses_immediately_before_9548(sentence)
+    ]
+    assert not offenders, (
+        "§A8's evidence cell names \"immediately before #9548\" without "
+        "denying it applies to ff6379eb2:\n  " + "\n  ".join(offenders)
+    )
+    # Controls, executed — the arm must still RED on the shape it was written for …
+    assert _refuses_immediately_before_9548(
+        "`grep -rn TORTOISE_RECORD_DSN …` → 5 lines at `ff6379eb2`, which is "
+        'what "immediately before #9548" means.'
+    ), (
+        "the denial arm no longer reds on the bare equivalence it exists to catch — "
+        "the exemption above has swallowed the finding (#11064 review r17, P2)"
+    )
+    # … and must NOT red on any of the three truthful corrections the r17 review
+    # measured RED before the exemption.
+    _truthful = (
+        "The tree immediately before #9548 is `047c91f7a`, where the same path set returns 10.",
+        "`047c91f7a` is the tree immediately before #9548.",
+        "Measured at `047c91f7a` — the tree immediately before #9548 — the census returns 10.",
+    )
+    _false_reds = [s for s in _truthful if _refuses_immediately_before_9548(s)]
+    assert not _false_reds, (
+        "the denial arm refuses a TRUTHFUL correction — naming the true pre-#9548 "
+        "tree is the fix, so it may not be the shape this pin rejects:\n  "
+        + "\n  ".join(_false_reds)
+    )
+    # … and those strings are load-bearing in that direction: none of them carries a
+    # denial, so without the `047c91f7a` exemption the arm above would red them. A
+    # control that already denied the phrase would prove nothing.
+    _denial_arm = re.compile(
+        r"\b(?:not|never|isn't|is not)\b[^.]{0,40}?immediately\s+before\s+#9548", re.I
+    )
+    assert not any(_denial_arm.search(s) for s in _truthful), (
+        "a control string carries a denial, so it no longer demonstrates that the "
+        "exemption is what makes a truthful correction pass (review r17, P2)"
+    )
 
 
 def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp_path):
@@ -4484,13 +4542,21 @@ def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp
     unguarded), so this test reds at its first call — the defect, not the fixture. The two
     `pytest.raises` arms are the ones the pre-fix code could not produce at all.
     """
+    # ⛔ THE "FULL clone" FIXTURE IS A REAL CLONE, not a `git init` (review at
+    # `fb79abca4`, Finding 2, P2). With no `origin`, a `git fetch --depth=1 origin …`
+    # exits **128** instead of truncating, so the "never shallow-ify a full clone"
+    # arm at the end of this test stayed GREEN with the shallow gate DELETED — an
+    # inert arm under the exact mutation its comment documents. Cloning from a local
+    # seed gives `origin` a real target, so dropping that gate performs the fetch and
+    # really flips `--is-shallow-repository` to `true`, reddening the arm.
+    seed = tmp_path / "census-seed"
     repo = tmp_path / "census-repo"
-    runbook = repo / "docs" / "infra-runbook.md"
+    runbook = seed / "docs" / "infra-runbook.md"
     runbook.parent.mkdir(parents=True)
     # A path in the census set that selects NOTHING (the legitimate exit-1 reading), committed
     # so the "git grep exits 1 when it selects nothing" arm is measured on a real path.
-    (repo / "fly.toml").write_text('[app]\nname = "fixture"\n', encoding="utf-8")
-    assert _census_git(repo, "init", "-q", "-b", "main").returncode == 0
+    (seed / "fly.toml").write_text('[app]\nname = "fixture"\n', encoding="utf-8")
+    assert _census_git(seed, "init", "-q", "-b", "main").returncode == 0
 
     def commit(n_lines: int, message: str) -> str:
         runbook.write_text(
@@ -4504,15 +4570,25 @@ def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp
                 "commit", "-q", "-m", message,
             ),
         ):
-            done = _census_git(repo, *args)
+            done = _census_git(seed, *args)
             assert done.returncode == 0, f"fixture git {args} failed: {done.stderr}"
-        head = _census_git(repo, "rev-parse", "HEAD")
+        head = _census_git(seed, "rev-parse", "HEAD")
         assert head.returncode == 0, head.stderr
         return head.stdout.strip()
 
     census_paths = ["docs/infra-runbook.md"]
     old_sha = commit(2, "two census lines")
     commit(5, "five census lines")
+    # … and `repo` is that seed's FULL clone, so `origin` RESOLVES (the Finding-2 fix).
+    full_clone = _census_git(
+        tmp_path, "clone", "-q", f"file://{seed.resolve()}", str(repo)
+    )
+    assert full_clone.returncode == 0, full_clone.stderr
+    assert _census_git(repo, "remote", "get-url", "origin").returncode == 0, (
+        "the FULL-clone fixture has no `origin` — the never-shallow-ify arm below is "
+        "then inert, because a `git fetch --depth=1 origin …` with no remote exits 128 "
+        "instead of truncating (review at `fb79abca4`, Finding 2)"
+    )
 
     # The reachability predicate the old block never asked.
     assert _census_commit_available(repo, old_sha)
@@ -4549,7 +4625,10 @@ def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp
     # A bogus rev on a full clone returns False WITHOUT fetching: if the shallow gate were
     # dropped, `git fetch --depth=1` would truncate this repo's history and
     # `--is-shallow-repository` would flip to true — the destructive side effect
-    # `_ensure_commit` documents.
+    # `_ensure_commit` documents. `repo` is a CLONE (not a `git init`) so `origin`
+    # resolves and this arm actually reds under that mutation (review at
+    # `fb79abca4`, Finding 2: with no remote the fetch exited 128 and the arm could
+    # not fail).
     assert not _census_deepen_to(repo, "0" * 40, depths=(1,))
     assert not _census_is_shallow(repo), (
         "the deepen arm shallow-ified a FULL clone — that truncates a developer's history"
@@ -5127,6 +5206,13 @@ def test_any_ci_surfaces_line_citation_here_resolves_to_this_files_own_row():
     without the `:<n>` suffix (the surviving row's own name), or this pin will treat the
     quotation as a live claim — the distinction the rest of this file draws between a
     live instruction and a `SUPERSEDED` record.
+
+    ⚠️ **The pin is CONDITIONAL, and says so** (#11064 review r17, P3): it checks the
+    citations that EXIST, and at the head that added it this file carries NONE (the
+    sentence it was written for cites the manifest by mechanism now). A green run
+    therefore means *"no rotten pointer here"*, not *"a pointer was verified"* — the
+    distinction matters because a scanner that matches nothing looks identical to one
+    that checked everything. It reds the moment a `:<n>` pointer is added and rots.
 
     Falsified on the pre-fix text: the pointer resolved to another test's row.
     """

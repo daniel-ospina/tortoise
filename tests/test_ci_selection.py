@@ -68,7 +68,8 @@ def _sel(changed, event="pull_request"):
 #: citation, not a reader. Used by
 #: `test_the_record_schema_placement_pins_run_on_a_doc_only_diff` to DERIVE the set
 #: of tests that read the doc (#11064 review round 9, P2: a hand-written census of
-#: that set was false — four readers were asleep on a runbook-only diff).
+#: that set was false — two readers were asleep on a runbook-only diff, and two
+#: more were missing from the hand-written list).
 _RUNBOOK_PATH_LITERAL = re.compile(r'''(["'])(?:[^"'\n]*/)?infra-runbook\.md\1''')
 
 
@@ -262,11 +263,9 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       The `60` this sentence carried was that same `tier1` set **18 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
       and 78 here), i.e. the very "a past state quoted as a current one"
-      defect the line below warns about — and the constant this bullet used to
-      publish for the pool decayed faster still (written `1109`, already `1110`
-      at the commits that wrote it, `1111` measured on this tree, which merges
-      `4f2d09778c`), which is why the figure is gone rather than corrected
-      again.
+      defect the line below warns about — and the constant it used to publish
+      decayed in three consecutive commits, which is why the figure is gone
+      rather than corrected again (#11064 review r15, r16 P2, r17 P2).
 
     Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
     trusting either — the assertions below are the pin, this
@@ -293,14 +292,25 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     # measurement with several independent reasons to move, so restating it is the
     # decay this docstring warns about; the derivation pointer is the durable form
     # and this pin holds it there.
+    # ⛔ THE WINDOW IS THE WHOLE BULLET, not 600 characters (#11064 review r17,
+    # P2). The short window ended at "…so re-derive it", several hundred
+    # characters BEFORE the sentence that carried the `1111`, so the digit
+    # assertion below could not see the figure it exists to keep out — a pin that
+    # reads the wrong span is a false GREEN. It now runs to the next paragraph
+    # (`Re-derive both`), which is the bullet's real end.
     _doc = test_v4_membership_gate_runs_on_both_architecture_docs.__doc__ or ""
-    _clause = re.search(r"full`-less fast pool(.{0,600}?)re-derive\s+it", _doc, re.S)
+    _clause = re.search(r"full`-less fast pool(.+?)(?=Re-derive both)", _doc, re.S)
     assert _clause, (
         "the fast-pool clause lost its `len(fast_pool(manifest))` derivation "
         "pointer — without it the sentence has no referent and a reader must "
         "invent the pool size (#11064 review r15, P3)"
     )
-    assert not re.search(r"\b\d{3,}\b", _clause.group(0)), (
+    # ... and the digit test is scoped to FIGURES: the widened window also
+    # reaches `#<issue>` refs and shas, which are not measurements. A bare
+    # 3+-digit numeral is. (`\b` alone does not separate them — `#11064` starts a
+    # bare match, which is why this strips them rather than trusting the boundary.)
+    _figures = re.sub(r"#[0-9]+|`[0-9a-f]{7,40}`", "", _clause.group(0))
+    assert not re.search(r"\b\d{3,}\b", _figures), (
         "the fast-pool clause states a figure again, and a pool size is a "
         "measurement that moves for three reasons — keep the derivation "
         "pointer instead of a number (#11064 review r15, P3: the figure this "

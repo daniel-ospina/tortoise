@@ -813,7 +813,8 @@ _LABEL_CLOSES_ITS_OWN_CLAUSE = ".!?;"
 #: A `SUPERSEDED` that is a LABEL — a standalone token closed by `, ; : . ! ?`, by
 #: an em/en dash (with or without a preceding emphasis run, so both `SUPERSEDED —`
 #: and `**SUPERSEDED** —` are labels), by a trailing emphasis run
-#: (`**SUPERSEDED**`), or by end of text. The closer is a LOOKAHEAD so it stays in
+#: (`**SUPERSEDED**`), by end of text, or by the qualifier `in part` before any of
+#: those closers (`**SUPERSEDED\n  in part:**`). The closer is a LOOKAHEAD so it stays in
 #: the text between the label and the retired sentence, where the
 #: sentence-boundary test can see it — with the closer CONSUMED, `SUPERSEDED.` read
 #: as "same sentence" across the very boundary the label had just closed. ⛔ `)`
@@ -821,7 +822,16 @@ _LABEL_CLOSES_ITS_OWN_CLAUSE = ".!?;"
 #: i.e. a mention. This list is the whole accepted set — nothing else is
 #: documented in prose, so a fixer is never told to use a form the regex refuses.
 _SUPERSEDED_LABEL_RE = re.compile(
-    re.escape(_INDEX_SUPERSEDED_MARKER) + r"(?=[\s*_]*(?:[,;:.!?]|[\u2014\u2013]|[*_]+|$))"
+    re.escape(_INDEX_SUPERSEDED_MARKER)
+    # ⛔ `SUPERSEDED in part:` is a LABEL TOO (#11064 review r17, P3). The closer had
+    # to follow the token immediately (whitespace/emphasis only), so the form this
+    # repo itself ships — `**SUPERSEDED\n  in part:**`, `09-record-tenancy-decision.md`
+    # §5 — was not a label: a fixer copying the repo's own spelling got a false RED
+    # whose remedy ("add a SUPERSEDED label") did not fit the text in front of it.
+    # Latent when found (the guard is applied to the index row and 08 §R8, not 09),
+    # i.e. exactly the kind of hole that fires on the next file to use it.
+    + r"(?:\s+in\s+part)?"
+    + r"(?=[\s*_]*(?:[,;:.!?]|[\u2014\u2013]|[*_]+|$))"
 )
 
 
@@ -1362,6 +1372,20 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
     )
     _assert_retired_claim_is_labelled(
         mutated_dash, needle, where="the em-dash label", remedy="none"
+    )
+
+    # MUTATION 10 (inverse control): the `in part` label must stay GREEN. This is the
+    # spelling `09-record-tenancy-decision.md` §5 ships
+    # (`**SUPERSEDED\n  in part:** the sentence below said …`), and
+    # `_SUPERSEDED_LABEL_RE` refused it before r17 — the closer had to follow the
+    # token immediately, so the repo's own form was not a label. A fixer who copies
+    # the shipped spelling must not be told to add a label that is already there.
+    mutated_in_part = f"{row} **{marker}\n  in part:** {needle}, nothing lands."
+    assert mutated_in_part.rfind(needle) >= len(row), (
+        "the `in part` mutation did not land a second occurrence after the head row"
+    )
+    _assert_retired_claim_is_labelled(
+        mutated_in_part, needle, where="the `in part` label", remedy="none"
     )
 
 
