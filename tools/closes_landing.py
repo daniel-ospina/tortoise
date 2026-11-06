@@ -879,13 +879,24 @@ def _marker_gap(rest: str) -> int:
 _NO_PARAGRAPH_RE = re.compile(
     r"(?: {0,3}#{1,6}(?:[ \t]|$)"                                      # an ATX heading
     r"| {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"    # a thematic break
-    r"| {0,3}(?:=+|-+)[ \t]*$"                                         # a SETEXT underline
-    r"| {0,3}<)"                                                       # an HTML block
+    r")"
 )
+#: A SETEXT underline is an ender ONLY under a paragraph that exists (round 36 review, P2). `===` on
+#: its own is a PARAGRAPH of text, so treating it as an unconditional ender blanked the real
+#: `Closes #N` two lines below it — a lost close, and a REGRESSION against `origin/main`, measured:
+#:     `=` + `2.     Closes #100`   renderer `<p>= 2.     Closes #100</p>`   PROSE, main credits it
+#: The `-` spelling never reaches here as a lone underline (three or more is a thematic break above).
+_SETEXT_UNDERLINE_RE = re.compile(r" {0,3}(?:=+|-+)[ \t]*$")
+#: CommonMark §4.6's start conditions, approximated in the ONE direction this needs: a tag NAME
+#: followed by whitespace/`/>`/end-of-line (so `<div>`, `</p>`, `<br />`), or a sigil opener
+#: (`<!--`, `<?`, `<![CDATA[`, `<!X`). NOT a bare `<`, which is what made `<3 items` and
+#: `<https://e.com>` — plain paragraphs — look like HTML blocks.
+_HTML_BLOCK_START_RE = re.compile(
+    r" {0,3}(?:<!--|<\?|<![A-Za-z\[]|</?[A-Za-z][A-Za-z0-9-]*(?:[ \t]|/?>|$))")
 
 
 def _leaves_no_paragraph(rest: str, rest_indent: int,
-                        container: _ListItem | None) -> bool:
+                        container: _ListItem | None, prev_prose: bool) -> bool:
     """Does this PROSE-EMITTED line leave NO PARAGRAPH OPEN behind it?
 
     ⛔ "THE PREVIOUS LINE WAS EMITTED AS PROSE" IS NOT "a paragraph is open" (round 34 review, P2 —
@@ -900,17 +911,40 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
         `Notes`/`---`-> a SETEXT heading, then the same                              CODE
         `    Notes`  -> an INDENTED CODE BLOCK, then the same                        CODE
 
-    …and `<div>` (an HTML block) does the same, which is why it is named here even though a marker
-    line inside such a block was already blanked before this rule existed.
+    ⛔ AN HTML BLOCK IS AN ENDER, BUT ` {0,3}<` IS NOT AN HTML-BLOCK START CONDITION (round 36 review,
+    P2). `_BLOCK_START_RE` counts any leading `<`, which is right where `_paragraph_end` uses it and
+    was a REGRESSION here: `<3 items` and `<https://e.com>` are ordinary PARAGRAPHS, so ending the
+    paragraph at them blanked a real `Closes #N` below — measured at 24 lenient + 24 strict closes
+    lost on each shape, with 0 fixed. `_HTML_BLOCK_START_RE` is the start condition instead (a tag
+    name followed by `[ \t]`, `/>` or end of line, or one of the four sigil openers), so a genuine
+    `<div>` still ends the paragraph — a quoted close inside raw HTML is not one GitHub acts on —
+    while `<3` and an autolink do not.
 
     The INDENTED case is measured against the CONTAINER, which is the block grammar's test and not
     `strict`'s: `- item` + `    cont` is a paragraph INSIDE the item (4 <= 2 + 3), so it does open
     one — the renderer keeps `- item` + `    cont` + `2.     x` in one `<li>`.
     """
-    if _NO_PARAGRAPH_RE.match(rest):
+    # ⛔ THE QUESTION IS ABOUT THE LINE'S OWN CONTENT, WHICH ON A MARKER LINE IS NOT `rest` (round 36
+    # review, P2 — a false PASS in both arms). A leaf block may sit ON a bullet-marker line
+    # (`- # H`, `- ***`), and testing only `rest` read that as prose-that-leaves-a-paragraph-open, so
+    # a quoted wide-gap `Closes #N` under it was credited:
+    #     `- # H` + `  2.     Closes #100`   renderer `<li><h1>H</h1><ol start="2"><li><pre><code>`
+    # The content column is the one `_content_column` already defines for the fence path and the item
+    # push, so this is a THIRD reader of one definition rather than a fourth definition.
+    col = _content_column(rest)
+    body = rest[col:] if col is not None else rest
+    if _NO_PARAGRAPH_RE.match(body) or _HTML_BLOCK_START_RE.match(body):
         return True
-    return rest_indent > _MAX_FENCE_INDENT and (
-        container is None or rest_indent > container.rest_col + _MAX_FENCE_INDENT)
+    if _SETEXT_UNDERLINE_RE.match(body):
+        return prev_prose
+    # §4.4: an indented code block CANNOT INTERRUPT A PARAGRAPH. With one open, a 4+-column line is
+    # that paragraph's lazy continuation, not a code block — so it does not end anything. Reading it
+    # as an ender blanked real closes (`Notes` + `    cont` + `2.     Closes #100` is one paragraph in
+    # the renderer and `origin/main` credits it): a REGRESSION, measured at 228 lenient / 72 strict.
+    if rest_indent > _MAX_FENCE_INDENT and (
+            container is None or rest_indent > container.rest_col + _MAX_FENCE_INDENT):
+        return not prev_prose
+    return False
 
 
 def _fence_candidate(prefix: str, rest: str,
@@ -1270,8 +1304,20 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # true across the three blanks above: a fence line and a blanked code line both append `""`,
         # a blank body line emits its own blank text, and a paragraph line emits `raw` — so a code
         # line or a blank line can never pose as an open paragraph.
+        # ⛔ TWO WAYS A MARKER LINE FAILS TO OPEN AN ITEM, AND ONLY ONE WAS KNOWN (round 36 review,
+        # P2). §5.2's consumer rule is the first (`an ordered marker ≥ 2 cannot interrupt`). The
+        # second is §4.4's: an INDENTED CODE BLOCK cannot interrupt a paragraph either — so a marker
+        # line indented past the fence allowance under an open paragraph is a lazy continuation too,
+        # whatever its marker is. Missing that kept blanking a real close (`Notes` + `    -     Closes
+        # #100` renders as PROSE and `origin/main` credits it, so it was a REGRESSION, not parity).
+        # ⚠️ The INDENT arm of that is bounded to `container is None`, and the bound is measured:
+        # inside an open item a marker indented 4 columns is a NESTED item (its content is code), not
+        # a code-block continuation — `- Notes` + `    -     Closes #100` renders `<pre><code>`, so
+        # excusing it there credited a quotation.
+        marker_cannot_interrupt = (_ordered_marker_at_least_two(rest)
+                                   or (rest_indent > _MAX_FENCE_INDENT and container is None))
         ordered_continuation = (prev_prose
-                                and _ordered_marker_at_least_two(rest)
+                                and marker_cannot_interrupt
                                 and _quote_depth(prefix) == prev_quote_depth
                                 and container is prev_container
                                 and (container is None or rest_indent >= container.rest_col))
@@ -1307,7 +1353,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # the paragraph, so the next line cannot lazily continue it (`_leaves_no_paragraph`). Four
         # families of credited quotations came from reading only `raw.strip()` here.
         prev_prose = bool(raw.strip()) and not _leaves_no_paragraph(
-            rest, rest_indent, container)
+            rest, rest_indent, container, prev_prose)
         prev_quote_depth = _quote_depth(prefix)
         # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
         # text inside the `<li>`), not in the item it sat in before.

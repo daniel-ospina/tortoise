@@ -76,8 +76,11 @@ IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>
   `refs/claims/*`, read by `tools/who_is_on.py` (§1). So treat a missing `p01-status` comment as "no
   note was left", never as "nobody is on this": the claim surface is `who_is_on.py`.
   For the same reason `tools/issue_process_lint.py`'s WIP arm reads only the textual `IN FLIGHT:`
-  marker and **prints how many subjects carried none**, because `0 markers read` and `0 issues with
-  WIP` are different claims. ⚠️ **Spell the marker as the block does: PLAIN TEXT, on its own line.**
+  marker and, **in the modes that actually read markers, prints how many subjects carried none** —
+  because `0 markers read` and `0 issues with WIP` are different claims. ⚠️ With `--wip` /
+  `--no-wip` the verdict is INJECTED from the branches/worktrees/ref-claims population, no marker is
+  read, and the run says exactly that instead of printing a count: a `0 of 0` line there would claim
+  a reading that never happened. ⚠️ **Spell the marker as the block does: PLAIN TEXT, on its own line.**
   A marker inside an inline code span is blanked before the scan (the quote-is-not-a-claim rule, the
   same one that makes `` `gh pr view #1234` `` a quotation), and a marker behind prose
   (`### Claim: IN FLIGHT: …`) is not anchored at line start — either spelling produces **no marker

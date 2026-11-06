@@ -1872,6 +1872,73 @@ def test_a_line_that_IS_prose_but_ENDS_the_paragraph_does_not_open_one():
     assert cl.parse_closing_refs("<div>\n- Closes #100\n") == [100], "residual, not a regression"
 
 
+def test_the_paragraph_ender_is_NOT_over_applied_in_either_direction():
+    """Round 36 review — the two halves `_leaves_no_paragraph` got wrong, pinned together.
+
+    A predicate that decides "did this line leave a paragraph open?" while holding none of the state
+    that decision needs fails in BOTH directions, and the two halves are one test because fixing one
+    is how the other gets re-opened:
+
+    **A LEAF BLOCK ON A MARKER LINE ends the paragraph too** (false PASS, both arms). `rest` starts
+    with `-`, so testing only `rest` read `- # H` as prose-that-leaves-a-paragraph-open and credited
+    a quoted close below it; the line's own content starts at its CONTENT COLUMN:
+
+        `- # H` + `  2.     Closes #100`   renderer `<li><h1>H</h1><ol start="2"><li><pre><code>`
+
+    **Three ordinary paragraphs were being treated as paragraph ENDERS** (lost closes, a REGRESSION
+    against `origin/main`): a bare `=` is a paragraph rather than a setext underline (there is no
+    paragraph above it to underline), `<3 items` and `<https://e.com>` are paragraphs rather than
+    HTML blocks (a start condition needs a tag NAME), and §4.4 says an indented code block cannot
+    INTERRUPT a paragraph — so a 4-column line under an open paragraph is its continuation, not code.
+    Measured on `origin/main`: 228 lenient and 72 strict closes were lost before this was fixed.
+
+    The controls that must NOT move: a genuine `<div>` still ends the paragraph (raw HTML is not
+    markdown, so a close inside it is a quotation — GitHub does not act on it), and a wide-gap bullet
+    that opens a real item is still code.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    # (A) A leaf block sitting ON the marker line — the false PASS.
+    for leaf in ("- # H", "- ***", "1. # H"):
+        body = leaf + "\n  " + "2.     Closes #100\n"
+        assert token_type(body) == "code_block", (leaf, body)
+        assert cl.parse_closing_refs(body) == [], (leaf, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [], (leaf, body)
+    # (B) The shapes that are ordinary PARAGRAPHS, so the close below them is real. Lenient only for
+    # the indented pair: `strict` blanks every indented line by its own documented contract.
+    for body, why in (("=\n2.     Closes #100\n", "a bare `=` is a paragraph, not an underline"),
+                      ("==\n2.     Closes #100\n", "…and `==` with nothing to underline either"),
+                      ("<3 items\n2.     Closes #100\n", "`<3` is not an HTML block start"),
+                      ("<https://e.com>\n2.     Closes #100\n", "an autolink is a paragraph"),
+                      ("**bold**\n2.     Closes #100\n", "bold text is a paragraph")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], (why, body)
+    for body, why in (("Notes\n    cont\n2.     Closes #100\n",
+                       "§4.4: an indented code block cannot INTERRUPT a paragraph"),
+                      ("Notes\n    -     Closes #100\n",
+                       "…so a 4-column BULLET line under one is a continuation, not code")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+    # (C) The controls, which must NOT move. A genuine HTML block still ends the paragraph (raw HTML
+    # is not markdown); a wide-gap bullet that opens a real item is still code; and the `- item` +
+    # `  2.` lazy continuation is still prose.
+    # (the TEXT lands in the `html_block` token, not a `code_block` — raw HTML is passed through,
+    # which is exactly why GitHub does not act on a keyword inside it)
+    assert token_type("<div>\n2.     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n") == []
+    assert cl.parse_closing_refs("Notes\n-     Closes #100\n") == []
+    assert cl.parse_closing_refs("Notes\n\n-     Closes #100\n") == []
+    assert token_type("- item\n  2.     Closes #100\n") == "inline"
+    assert cl.parse_closing_refs("- item\n  2.     Closes #100\n") == [100]
+
+
 # ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──
 
 @pytest.mark.parametrize("body,expected,why", [
