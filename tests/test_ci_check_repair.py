@@ -1862,7 +1862,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:309`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 405-407 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"; no line span quoted here on purpose — §6's offset moves
     with any insert above it, and the mechanical pin below reads the ONE span out of
@@ -1883,11 +1883,16 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
 
     Commit `a7436214f` ("cite the floor's calibration as it is written") ships three
     coordinates for the 5400 s floor — and two of them had already drifted by this
-    head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
-    one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6's line-span citation
-    opened four lines too wide — `326-332`, where `330-332` is the quoted derivation and
-    `326` is §6's OWN opening bullet ("It does not bound queue wait") — a shape the pin
-    could not see, because a span that CONTAINS the sentence passes. The
+    head: `tools/ci_queue_health.py:304` was given as "the trailing COMMENT (the
+    assignment is one line below, at `:305`)", but `:304` and `:305` are BOTH
+    comment lines of the `#:` block, and the assignment
+    (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`) is at `:309` — which is what
+    `tools/ci_check_repair.py` cites; and `docs/ops/ci-wall-clock.md` §6
+    "lines 326-332" was the span that block originally carried, which at
+    `a7436214f` (a 341-line doc) STARTED at §6's own opening bullet ("It does not
+    bound queue wait") and ENDED inside the quoted derivation at `330-332` — the
+    shape the pin could not see, because a span that CONTAINS the sentence passes.
+    The derivation is at `405-407` at this head: re-measure, never re-copy. The
     docstring names the reader who will follow these numbers and warns that whoever
     mis-locates the derivation "discards the one section that supports this floor" —
     so a stale coordinate sends the next lane to exactly the misreading the paragraph

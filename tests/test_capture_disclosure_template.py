@@ -67,13 +67,38 @@ def _shadows_the_stdlib(directory: str) -> bool:
 
     A verbatim `sys.path` pass-through is not safe, because at test time `sys.path` also
     carries roots pytest inserted for COLLECTION rather than for import: a directory that
-    holds test modules but no `__init__.py` (here `tests/eval`, which carries `types.py`)
+    holds test modules but no `__init__.py` (that is `tests/eval`, which CARRIED `types.py`
+    until #10060 renamed it to `eval_types.py`; the shape is stated in the past tense
+    because the file is gone, while the predicate itself stays general — any stdlib-named
+    file at any root is still excluded)
     is put on `sys.path` verbatim. THIS process cannot see the damage — `types` is already
     in `sys.modules`, so nothing re-resolves it — but a fresh interpreter can, and it
-    resolves the shadow *during `site` init* (`site` -> `importlib.util` -> `types`). The
-    child then dies with `ImportError: cannot import name 'MappingProxyType' from
-    partially initialized module 'types'` before running a line of its own code, which is
-    why the failure looks total rather than import-specific.
+    fails: at STARTUP in the interpreter CI uses (`pip install -e .` puts setuptools'
+    editable finder in site-packages, so `site.addpackage` imports and reaches `types`
+    before any user code runs), or, in a bare interpreter, on the first import chain
+    that reaches `types` (`import yaml` -> ... -> `_weakrefset` ->
+    `from types import GenericAlias`). Because several chains converge on `types`, the
+    failure looks total rather than import-specific. Both shapes are measured below.
+
+    ⚠️ WHICH mechanism fires depends on the child interpreter, and the ORIGINAL
+    attribution here (`site` -> `importlib.util` -> `types` "before running a line
+    of its own code") was RIGHT for CI; a later correction said the opposite
+    outright and that correction was the error. MEASURED on CPython 3.12 with the
+    real former shadow file restored as `types.py`:
+
+    * an interpreter with setuptools' import-based editable install — what
+      `pip install -e .` writes, this repo's layout forces, and every `python-ci`
+      job that installs the package carries — dies at startup:
+      `init_import_site: Failed to import the site
+      module` -> `ImportError: cannot import name 'MappingProxyType' from
+      partially initialized module 'types'`, exit 1;
+    * a BARE interpreter exits 0 for `-c "pass"` and dies later, on the first
+      import chain that reaches `types` (`import yaml`, via `_weakrefset`), with
+      `GenericAlias` missing.
+
+    The 2026-10-26 CI failure below is the STARTUP shape (`MappingProxyType`), not
+    the import-chain one; the chain quoted above is what a bare child would hit.
+    The remedy — rename — is the same either way.
 
     Measured 2026-10-26, CI `test (g)`: both `TestCliRender` pins went red on that line,
     while a single-file run of this module passes — collection of `tests/eval` is what puts
@@ -558,11 +583,19 @@ class TestCliRender:
         """The other half of `_child_env`: the roots it must NOT hand over (#10012).
 
         Mutation this pins: export `sys.path` verbatim (the pre-fix `_child_env`). A child
-        given a root carrying `types.py` dies during `site` init — `site` imports
-        `importlib.util`, which imports `types`, and the shadow wins — so it fails before
-        running any of its own code. That is exactly what CI `test (g)` measured: pytest
-        puts `tests/eval` on `sys.path` for collection, `tests/eval/types.py` shadows the
-        stdlib, and both `TestCliRender` pins red only in a full-suite run.
+        given a root carrying `types.py` cannot use the stdlib `types`, and which failure it
+        reports depends on the child: the editable-install interpreter this test spawns (the
+        shape a `python-ci` job that installs the package editable has) dies AT STARTUP
+        (`init_import_site: Failed to import the
+        site module`, `ImportError: cannot import name 'MappingProxyType' from partially
+        initialized module 'types'`), while a bare interpreter exits 0 from `-c "pass"` and
+        dies later on the first import chain that reaches `types` (`import yaml` -> ... ->
+        `_weakrefset` -> `from types import GenericAlias`). The assertion below is on the exit
+        code, so it holds for both. That is the shape CI `test (g)` measured: pytest
+        put `tests/eval` on `sys.path` for collection, `tests/eval/types.py` shadowed the
+        stdlib, and both `TestCliRender` pins red only in a full-suite run. That file was
+        renamed to `eval_types.py` by #10060; this test builds its own `types.py` under
+        `tmp_path` rather than depending on it, which is why it still pins the predicate.
 
         The second assertion is the one that keeps the remedy honest: a harmless sibling
         root must STILL be exported, so this is a filter and not a silent emptying of
@@ -579,8 +612,10 @@ class TestCliRender:
         env = _child_env(HOME=str(tmp_path))
         exported = env["PYTHONPATH"].split(os.pathsep)
         assert str(shadowing) not in exported, (
-            "a stdlib-shadowing root reached the child: it dies in `site` init before "
-            "running a line of its own code, which reads as a product failure"
+            "a stdlib-shadowing root reached the child: it cannot use the stdlib `types` "
+            "— it dies AT STARTUP in an editable-install interpreter and on the first "
+            "import that reaches `types` in a bare one (both measured in the docstring "
+            "above) — which reads as a product failure"
         )
         assert str(harmless) in exported, (
             "only roots a child cannot survive may be dropped — this one is importable"

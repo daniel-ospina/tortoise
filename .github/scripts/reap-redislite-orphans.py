@@ -148,9 +148,9 @@ _SOCKET_FLAG = "unixsocket"
 # At the time of writing the widest is `test` at 90 (`python-ci.yml`);
 # `evals-on-demand.yml::evals` 90, `test-slow` 60,
 # `post-merge-validation.yml::validate` 60, `perf-lane` 45, `test-d14-hosted-api`
-# 40, `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
+# 50 (`#11032` moved it 40 -> 50), `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
 # it was UNCAPPED at 360 and invisible to an earlier, narrower population),
-# `test-record-postgres`/`legal-e2e`/`blog-write-e2e` 20, and the rest 15.
+# `test-record-postgres` 30, `legal-e2e`/`blog-write-e2e` 20, and the rest 15.
 #
 # A server YOUNGER than the widest outer cancel bound can still belong to a live
 # leg, so reaping on age is only a proof ABOVE it. The invariant is
@@ -160,8 +160,11 @@ _SOCKET_FLAG = "unixsocket"
 # and both halves are pinned against their live sources by
 # `tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_every_embedded_lane_job_outer_timeout`
 # and `::test_the_age_arm_clears_the_widest_permitted_leg_watchdog`. Raising the
-# ceiling, or a job's outer cap, reds this file's own suite — instead of
-# silently turning the proof back into a live-peer kill (the #3653 defect).
+# ceiling, or the WIDEST job's outer cap, reds this file's own suite — instead of
+# silently turning the proof back into a live-peer kill (the #3653 defect). A
+# NON-widest raise does not red it (measured: `test-record-postgres` 20 -> 30 in
+# #11029 left that suite green, 31 passed), so the ladder above is a
+# hand-maintained record and must be carried when a non-widest cap moves.
 #
 # NOT the same question as the 30-minute dir-litter floor the same step gives
 # `find`, and NOT a safe floor to borrow: that arm deletes by mtime ALONE, with

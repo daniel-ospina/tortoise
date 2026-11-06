@@ -3764,10 +3764,10 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: ⚠ Named by ROW, not by section: all four sit in §2 today, and a §-number would re-stale on the
 #: next section this doc gains — the same failure mode as the citations themselves.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4532", ("pip install -e '.[test,postgres]'",)),
-    ("python-ci.yml:2932-2937", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4524-4526", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
-    ("python-ci.yml:3213", ("cache: pip",)),
+    ("python-ci.yml:4611", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2945-2950", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4603-4605", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3226", ("cache: pip",)),
 )
 
 #: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
@@ -3872,24 +3872,47 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         f"(pending-not-answered instead of a false red): {span!r}"
     )
 
-    # The fourth ref, and the one that had NO pin: "Absence from the required aggregate's
-    # `needs:`". It cited `:4441` — a comment three jobs above the list — so every commit above the
-    # list silently moved it further away while the citation still passed the only check it had
-    # (`1 <= n <= EOF`). Measured at the head that re-anchored it: #6744's `max-parallel` comments
-    # shifted the list to `:4578`, i.e. 137 lines past the citation, and nothing red.
-    #
-    # Pinned by SHAPE, not by contents: the assertion requires the citation to land on the
-    # aggregate's own `needs:` LIST, so extending or reordering that list (a workflow change, not a
-    # doc change) does not red this — while an offset-shifted number does, which is the whole point.
-    m = re.search(r"required aggregate's `needs:` \(`python-ci\.yml:(\d+)`\)", runbook)
+    # The required aggregate whose `needs:` the runbook argues `repo-harnesses` is ABSENT from.
+    # It USED to be cited by line — `python-ci.yml:4702`, which was CORRECT at this branch's
+    # birth commit `fe82c64ad6` and is moved by this branch's own insertions ahead of the list — and
+    # a stale number stays green against the only check the arms above make (`1 <= n <= EOF`). It is cited by JOB NAME now,
+    # and a name is only better than a number if something RESOLVES it — otherwise the next rename
+    # leaves the sentence pointing at nothing, which is the same silent drift one shape over. So the
+    # name is resolved here, AND the absence the sentence asserts is asserted rather than assumed
+    # (`repo-harnesses` really is not in that list; the day it is, the sentence's landing-cost
+    # argument is false and this reds instead of quietly misleading the next lane).
+    m = re.search(
+        r"Absence from the required aggregate's `needs:` \(`([a-z0-9-]+)`'s own `needs:` list",
+        runbook)
     assert m is not None, (
-        "the runbook no longer cites the required aggregate's `needs:` by line — re-anchor this pin "
-        "rather than deleting it"
+        "the runbook no longer cites the required aggregate's `needs:` BY JOB NAME — re-anchor "
+        "this pin rather than reverting it to a line number, which is the form that rotted"
     )
-    n = int(m.group(1))
-    assert at(".github/workflows/python-ci.yml", n).lstrip().startswith("needs: ["), (
-        f"the runbook cites python-ci.yml:{n} as the required aggregate's `needs:`, but that line "
-        f"is {at('.github/workflows/python-ci.yml', n)!r}"
+    jobs_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    starts = [i for i, line in enumerate(jobs_lines) if line == f"  {m.group(1)}:"]
+    assert len(starts) == 1, (
+        f"the runbook names `{m.group(1)}` as the required aggregate, but python-ci.yml declares it "
+        f"{len(starts)} times — re-anchor this arm"
+    )
+    end = next(
+        (i for i in range(starts[0] + 1, len(jobs_lines))
+         if re.match(r"^  [a-z0-9][a-z0-9-]*:$", jobs_lines[i])),
+        len(jobs_lines),
+    )
+    needs_line = next(
+        (line for line in jobs_lines[starts[0]:end] if re.match(r"^    needs: \[", line)), None)
+    assert needs_line is not None, (
+        f"`{m.group(1)}` in python-ci.yml no longer declares the aggregate `needs:` list the "
+        "runbook points at — re-anchor this arm against whatever replaced it"
+    )
+    needs = [dep.strip() for dep in needs_line.split("[", 1)[1].rstrip("]").split(",")]
+    assert "test-carve-out" in needs and "test-record-postgres" in needs, (
+        f"`{m.group(1)}`'s `needs:` is not the aggregate list the runbook means — got {needs}"
+    )
+    assert "repo-harnesses" not in needs, (
+        "the runbook's claim — `repo-harnesses` is ABSENT from the required aggregate's `needs:`, "
+        f"which is why a red on it still costs a re-run — is now FALSE: {needs}. Rewrite the "
+        "sentence (the landing cost it records has changed) rather than deleting this arm"
     )
 
     # The provisioner invocation — a ref into a file THIS PR edits, and one the first pass missed.
