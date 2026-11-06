@@ -143,6 +143,9 @@ DESTINATION = {
     "tortoise_list_graphs": "tenancy:list_memory_graphs",
     "tortoise_taxonomy": "graph_overview",
     "tortoise_overview": "graph_overview",
+    # #4282 — the container itself. It is a REGISTRY tool, so the map owes it a
+    # row; its destination is its own target name.
+    "tortoise_graph_overview": "graph_overview",
     "tortoise_status": "graph_overview",
     "tortoise_health": "graph_overview",
     "tortoise_stale": "graph_overview",

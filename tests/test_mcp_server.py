@@ -1183,7 +1183,10 @@ class TestStdioEntrypointToolRegistration:
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.
-            assert "tortoise_overview" in names
+            # #4282: the orientation container is `tortoise_graph_overview`;
+            # `tortoise_overview` retired into it and `tortoise_health` into that.
+            assert "tortoise_graph_overview" in names
+            assert "tortoise_overview" not in names
             assert "tortoise_health" not in names
             # #3540: the two retired switches are no longer advertised; the
             # consolidated replacement is steady-state and stays listed.

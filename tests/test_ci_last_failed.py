@@ -46,6 +46,10 @@ NARROWING = (
 # `"$PYTEST_JUNIT"` does not appear inside `"$PYTEST_JUNIT_LF"`.
 FULL_JUNIT = '--junitxml="$PYTEST_JUNIT"'
 PRE_JUNIT = '--junitxml="$PYTEST_JUNIT_LF"'
+#: `NAME=value` and NOTHING else: the single form allowed between the last-failed
+#: pre-phase and the gating run (see `test_full_run_is_outside_the_guard_and_unconditional`).
+#: No operator, no `$( )`, no command — so it cannot branch, exit, or short-circuit.
+BARE_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[^\s;|&()`]*$")
 
 
 def _test_job_steps():
@@ -301,7 +305,18 @@ def test_full_run_is_outside_the_guard_and_unconditional():
     # NOTHING executable may sit between the pre-phase's closing fi and the
     # full run: a first-token check would miss `false || exit 1`,
     # `[ -n "$X" ] && exit 1` or an `if …; then exit; fi` short-circuit.
-    assert not between, between
+    #
+    # ⛔ ONE exception, and it is not executable in that sense: a BARE variable
+    # assignment (`NAME=value`, no operator, no command substitution). It has no
+    # exit status to branch on, so it cannot skip the line below it — which is why
+    # `PYTEST_T0=$SECONDS` is allowed to sit here. The stamp MUST sit immediately
+    # before the gating invocation: taken at step start it would count the
+    # last-failed pre-phase's own 10m watchdog as pytest time, and the kill
+    # attribution (#3719) would then report a leg that died early as having
+    # reached its budget — the exact false sentence it exists to remove. Every
+    # regression named above still fails, because each of them carries an operator.
+    offenders = [ln for ln in between if not BARE_ASSIGNMENT_RE.match(ln)]
+    assert not offenders, offenders
     # the ONLY exit inside [guard, full) is the pinned red branch — an `exit 0`
     # added INSIDE the pre-phase block (bare, `|| exit 0`, or a `trap … EXIT`)
     # would let a PASSING pre-phase skip the full half GREEN, and `between`

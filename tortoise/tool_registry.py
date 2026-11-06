@@ -1441,6 +1441,21 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ),
     # ── Orient / Direct consolidation (epic #888 W3) ────────────────
     ToolDefinition(
+        name="tortoise_graph_overview",
+        id="surface.graph_overview",
+        description="What is in this memory graph and how it is shaped — ONE orientation "
+                    "call (#4282 row 6). section: taxonomy|structure|structure_check|"
+                    "pointkinds|tags|sources|namespaces|graphs|topics|health|status|"
+                    "stale (the consolidated list_*/status/health zoo); validate_domain "
+                    "(requires domain); audit (optional point_kinds); dream_health. "
+                    "Omit section → a compact combined summary in the same envelope "
+                    "this family has always returned. topics requires entity_id; "
+                    "stale takes days (default 30) and limit (default 50).",
+        risk="read",
+        http_policy=True,
+        sdk_method="",  # custom handler in mcp_server.py (dispatches per section)
+    ),
+    ToolDefinition(
         name="tortoise_overview",
         id="surface.overview",
         description="Graph orientation in one call — consolidates the list_*/status/health/"
@@ -1984,6 +1999,7 @@ GROUP_BY_NAME: dict[str, str] = {
     # reasoning
     "tortoise_check_structure": "reasoning", "tortoise_validate_domain": "reasoning",
     "tortoise_summarize_structure": "reasoning",
+    "tortoise_graph_overview": "reasoning",
     "tortoise_overview": "reasoning",
     "tortoise_traverse": "reasoning", "tortoise_entity_profile": "reasoning",
     "tortoise_analyze": "reasoning", "tortoise_taxonomy": "reasoning",
@@ -2068,14 +2084,44 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_get_events": 'tortoise_get_entity(None, type="events")',
     "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
     "tortoise_get_governance": 'tortoise_get_entity(id, type="governance")',
-    # Tier 1 — tortoise_overview() already calls the handler; the name is redundant.
-    "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
-    "tortoise_list_tags": 'tortoise_overview(section="tags")',
-    "tortoise_list_sources": 'tortoise_overview(section="sources")',
-    "tortoise_taxonomy": 'tortoise_overview(section="taxonomy")',
-    "tortoise_health": 'tortoise_overview(section="health")',
-    "tortoise_status": 'tortoise_overview(section="status")',
-    "tortoise_stale": 'tortoise_overview(section="stale")',
+    # Tier 1 — `tortoise_graph_overview` is the approved container for the whole
+    # orientation family (#4282 row 6, `docs/product/canonical-mcp-tools.md`).
+    # `tortoise_overview` retires INTO it and the seven pointers that used to name
+    # `tortoise_overview(section=...)` name the container directly: a replacement
+    # must RESOLVE in one hop. GitHub's own `DeprecatedToolAliases` states the same
+    # limit (aliases are not transitive), and a chain here would send a caller of
+    # `tortoise_health` to a name that is itself retired.
+    "tortoise_overview": 'tortoise_graph_overview(section=...)',
+    "tortoise_list_pointkinds": 'tortoise_graph_overview(section="pointkinds")',
+    "tortoise_list_tags": 'tortoise_graph_overview(section="tags")',
+    "tortoise_list_sources": 'tortoise_graph_overview(section="sources")',
+    "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
+    "tortoise_health": 'tortoise_graph_overview(section="health")',
+    "tortoise_status": 'tortoise_graph_overview(section="status")',
+    # `days`/`limit` are shown for the same reason `point_kinds` is: the door took them
+    # (`tortoise_stale(days=30, limit=50)`), so a migrating caller that omits them silently
+    # narrows its window and row cap.
+    "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
+    # #4282 row 6 — the remaining four members the approved container absorbs. Each
+    # was reachable only as its own tool; the section names above are the container's
+    # own dispatch values, so every pointer names a call that resolves.
+    #
+    # The destinations come from `tools/bridge_table.py`'s authored Phase-0.1 map, which
+    # is the finer-grained record where the two disagree: `tortoise_issue_insight` goes to
+    # `search_knowledge`, and `tortoise_list_graphs` / `_namespaces` / `_topics` go to the
+    # tenancy block and to `list_knowledge` respectively — so those four are NOT retired
+    # here. `tortoise_check_structure` is not retired either, and for a different reason:
+    # it is the one member with a WRAP envelope, so it carries the #8482 failure repair
+    # that a `-> Any` container cannot (see `tortoise_graph_overview`'s docstring). `docs/product/canonical-mcp-tools.md` describes them as absorbed transitively
+    # through `overview`; the authored map names where each capability actually lands, and
+    # that is the one `tools/mcp_rename_table.py` cross-checks against.
+    "tortoise_summarize_structure": 'tortoise_graph_overview(section="structure")',
+    "tortoise_validate_domain": 'tortoise_graph_overview(section="validate_domain", domain=...)',
+    # `point_kinds` is shown, not dropped: a caller migrating an `audit(point_kinds=[...])`
+    # call must keep its scope, and calling the container without it audits the whole
+    # graph (different per-check counts, different `exit_code`).
+    "tortoise_audit": 'tortoise_graph_overview(section="audit", point_kinds=...)',
+    "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
     # Tier 2 — the entry's own description already named its replacement.
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
     # #11057 review F3: the walk, not the bare read. `tortoise_query(tag=...)`

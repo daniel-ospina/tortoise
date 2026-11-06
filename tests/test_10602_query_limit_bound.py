@@ -495,9 +495,12 @@ def test_the_retirement_pointer_names_the_walk_it_recommends():
 
     doc = (Path(__file__).resolve().parent.parent / "docs" / "product"
            / "mcp-rename-table.md").read_text(encoding="utf-8")
+    # Matched by NAME, never by the migration table's row NUMBER: that index is GENERATED
+    # (it is the retired list's position), so hard-coding it — this line said `| 74 |` — reds
+    # on any change to the retired set instead of on a change to the pointer. #10914 moved it
+    # to 75 and this pin failed for a reason unrelated to what it guards.
     rows = [ln for ln in doc.splitlines()
-            if ln.startswith("| 74 | `tortoise_query_points_by_tag`")
-            or (ln.startswith("| `tortoise_query_points_by_tag`") and "| AGREE |" in ln)]
+            if ln.startswith("|") and "`tortoise_query_points_by_tag`" in ln]
     assert len(rows) == 2, (
         f"expected the generated table's two `tortoise_query_points_by_tag` rows "
         f"(the migration table and the redirect-agreement table), found {rows!r}")
