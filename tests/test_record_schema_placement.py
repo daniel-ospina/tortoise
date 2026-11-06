@@ -1671,7 +1671,7 @@ def test_relation_is_never_a_bare_id():
     # `MIGRATIONS` list: that list is hand-maintained, so a future FORWARD
     # migration that re-declares a pin would re-create exactly the same defect
     # (the list is pinned by nothing — `RECORD_MIGRATIONS`' completeness has its
-    # own guard in `test_9231`, this one does not). Measured: over all 73 files
+    # own guard in `test_9231`, this one does not). Measured: over all 79 files
     # the pin set is identical to the 6-file list's (`source 1 · event 1 ·
     # session 1 · object 2 · subject 2 · point 1`), so reading the directory is
     # free and closes the recurrence instead of patching this round of it.

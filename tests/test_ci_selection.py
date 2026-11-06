@@ -253,7 +253,7 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       the same on `main`, so the pool does not move with these registrations —
       and it moves for a third reason again, `len(fast_pool(manifest))`:
       re-derive it rather than reading this sentence.
-      The `60` this sentence carried was that same `tier1` set **13 rows ago**
+      The `60` this sentence carried was that same `tier1` set **18 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
       and 78 here), i.e. the very "a past state quoted as a current one"
       defect the line below warns about.
@@ -3217,7 +3217,7 @@ def test_gh_read_cache_tool_change_selects_core_not_tier1():
     (`"core" in r["surfaces"]` and `"test_gh_read_cache.py" in r["test_files"]`);
     only the third (`r["full"] is False`) survives, unexercised. MEASURED both ways:
     with the entry `surfaces=['core']`, `full=False`, file present; without it
-    `surfaces=[]`, `full=False`, 73 tier-1 files and the pin ABSENT. Stated as two
+    `surfaces=[]`, `full=False`, 78 tier-1 files and the pin ABSENT. Stated as two
     because the tier-1 fallback genuinely does not carry this file — the very premise
     three lines above — so an earlier cut of this docstring that claimed only the
     FIRST assert fails understated the pin and mis-described its own failure mode.
