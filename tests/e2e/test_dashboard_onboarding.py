@@ -62,6 +62,9 @@ from playwright.sync_api import Page, expect
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
+# #11057: the browser-free half of "which tile did that dialog open" — importable
+# and testable without this module's opt-in (see the module's own docstring).
+from tests.e2e.dialog_tile_key import tile_key_for_dialog_name
 from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
@@ -73,9 +76,6 @@ from tests.e2e.test_session_login_flow import (
     _proxy_body,
     _seed_local_session_cookie,
 )
-# #11057: the browser-free half of "which tile did that dialog open" — importable
-# and testable without this module's opt-in (see the module's own docstring).
-from tests.e2e.dialog_tile_key import tile_key_for_dialog_name
 
 
 @pytest.fixture(scope="module", autouse=True)
