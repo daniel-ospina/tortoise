@@ -4549,6 +4549,43 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         re.I,
     )
 
+    def _predicates_false_tree(text: str) -> bool:
+        """True when `text` makes the FALSE tree a COPULA COMPLEMENT, not a comparison.
+
+        The distinction is the one r12 F4 measured: "is 12 commits ahead of `ff6379eb2`"
+        states a measured relation (the true tree is 12 commits AHEAD of it), while "is
+        actually `ff6379eb2`" states the equivalence the pin exists to stop. A comparative
+        inside the copula-to-sha span is what separates them; a PR reference
+        ("is the #9601 merge") names a different subject and is not this predicate either.
+        """
+        for _hit in re.finditer(
+            r"\b(?:is|was|are|were|means|denotes|becomes?|became|stays?|remains?)\b"
+            r"([^.;\u2014\u2013]{0,60}?)\b" + re.escape(_FALSE_TREE),
+            text,
+            re.I,
+        ):
+            if re.search(
+                r"\b(?:ahead\s+of|behind|after|before|than|apart|older|newer|younger)\b"
+                r"|#\d+",
+                _hit.group(1),
+                re.I,
+            ):
+                continue
+            return True
+        # …and the same in the SUBJECT direction: "`ff6379eb2` IS what the note said"
+        # asserts the attribution with the false tree as its subject, not as a
+        # comparison (the control that reds here is the r8 "and `ff6379eb2` is what the
+        # note said" splice, which the blanket membership test used to catch and this
+        # predicate must keep catching).
+        return (
+            re.search(
+                re.escape(_FALSE_TREE) + r"\s*,?\s*(?:is|was|means|denotes)\b",
+                text,
+                re.I,
+            )
+            is not None
+        )
+
     def _states_a_figure(text: str) -> bool:
         """True when `text` STATES a figure (a reading dated to the phrase).
 
@@ -4603,19 +4640,39 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: exemption additionally requires the TRUE tree in the SAME CLAUSE — so a bare
     #: "`ff6379eb2` is an ancestor of the tree before #9548" with no referent stated is
     #: still refused, and the relation cannot become an alibi for the equivalence.
+    #: ⛔ AND THE RELATION MUST **GOVERN THIS PHRASE** — it is ANCHORED TO THE PHRASE'S
+    #: START, not searched anywhere in the clause (#11191 review r12 F1, P1 — MEASURED
+    #: FAIL-OPEN, and the §A8 pin stayed GREEN on the real cell with the claim restored).
+    #: A clause-wide search matched the ancestry phrase at the SECOND "the tree", so an
+    #: appositive appended to the defect bought the exemption and the COPULA went unread:
+    #:   "`ff6379eb2` is the tree immediately before #9548, an ancestor of the tree
+    #:    `047c91f7a`."                                            -> ACCEPTED (must red)
+    #: anchored, the text before the phrase is "…is the tree " and no kinship relation ends
+    #: there, so the referent rule refuses it — while the two truthful spellings keep the
+    #: relation immediately before the phrase.
+    #: ⛔ …AND THE VOCABULARY IS A GRAMMAR, NOT A LIST THAT RUNS OUT (r12 F3, P1 — the
+    #: mirror direction, MEASURED): `behind`, `precedes`, `comes N commits before` and
+    #: `predates` state the SAME measured fact (`git rev-list --count ff6379eb2..047c91f7a`
+    #: = 12, `git merge-base --is-ancestor` = 0) and `origin/main` accepts all of them, so a
+    #: closed list that stopped at `is N commits before` refused truths.
     _ANCESTRY_OF_TREE = re.compile(
-        r"\b(?:is|was)\s+(?:\d+\s+commits?\s+before"
-        r"|(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)"
-        r"|the\s+parent\s+of)\s+the\s+tree"
-        r"|\b(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)\s+the\s+tree"
-        # ⛔ …AND THE COMPACT SPELLING, which names the true tree DIRECTLY instead of
-        # saying "the tree" and hoping the sha follows (#11191 review r11, P1 — MEASURED
-        # false RED and a regression against `origin/main`). Requiring the literal words
-        # "the tree" accepted the long form and refused its twin one word shorter:
-        #   "`ff6379eb2` is the #9601 merge, an ancestor of `047c91f7a`, the tree
-        #    immediately before #9548."                              -> REFUSED (must pass)
-        # Same relation, same referent; a reword must not flip the verdict.
-        r"|\b(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)\s+`?" + _TRUE_TREE
+        r"(?:"
+        r"(?:an?\s+|the\s+)?(?:ancestor|predecessor)\s+(?:of|to)\s+the\s+tree"
+        r"|\b(?:is|was)\s+(?:\d+\s+commits?\s+)?(?:before|behind|earlier\s+than)\s+the\s+tree"
+        r"|\b(?:precedes|predates|comes\s+(?:\d+\s+commits?\s+)?before)\s+the\s+tree"
+        r"|\bis\s+the\s+parent\s+(?:commit\s+)?of\s+the\s+tree"
+        r")(?:\s+immediately)?\s*$",
+        re.I,
+    )
+    #: ⛔ …AND THE COMPACT SPELLINGS, which name the true tree DIRECTLY instead of saying
+    #: "the tree" and hoping the sha follows (#11191 review r11, P1 — MEASURED false RED
+    #: and a regression against `origin/main`): requiring the literal words "the tree"
+    #: accepted the long form and refused its twin one word shorter. These are safe to
+    #: leave unanchored because they SPELL the true tree, so they cannot be the alibi the
+    #: anchored set above exists to exclude — the alibi names the second "the tree" and
+    #: never the true sha.
+    _ANCESTRY_COMPACT = re.compile(
+        r"\b(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)\s+`?" + _TRUE_TREE
         + r"|\b(?:is|was)\s+\d+\s+commits?\s+before\s+`?" + _TRUE_TREE,
         re.I,
     )
@@ -4634,7 +4691,10 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # …and the SPACED HYPHEN-MINUS is the ASCII rendering of the same aside (#11191
         # review r5, P2 — measured): `_CLAUSE_DELIM` does not split on it, so without this
         # the clause tier sees the aside's sha as the nearest referent.
-        r"|\s-\s[^-]{1,200}?\s-\s"
+        # ⛔ …AND THE DOUBLE HYPHEN (`-- … --`) IS A THIRD SPELLING OF THE SAME DASH
+        # (#11191 review r12 F2, P1 — MEASURED): a bare `\s-\s` does not match `--`, so the
+        # aside stayed in the predication region and the object match failed on it.
+        r"|\s-{1,2}\s[^-]{1,200}?\s-{1,2}\s"
         r"|, [^,;.]{1,200}, ",
         re.I,
     )
@@ -5031,6 +5091,46 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         r"[^;:.!?\u2014\u2013]{0,80}?#(\d+)\b",
         re.I,
     )
+    #: ⛔ A TREE-SHAPED SUBJECT PREDICATED OF THE PHRASE, FROM THE LEFT (r12 — MEASURED):
+    #: `_PREDICATED_OBJECT` reads only the text AFTER the phrase, so the A1 defect spelled
+    #: without a sha and without a figure walked to step 5's digit test and passed:
+    #:   "The arming commit must be the tree immediately before #9548."   -> ACCEPTED
+    #: Anchored to the phrase's start, so it reads the phrase's own subject and nothing
+    #: else; the modal spellings are named because "must be" is the shape a fixer writes.
+    _PREPOSED_PREDICATION = re.compile(
+        r"\b(?:the\s+|a\s+|an\s+)?(?:(?:arming|merge|revert|fix|feature|squash|base|parent)\s+)?"
+        r"(?:commit|merge|tree|branch|sha|tip|subject|revision)\b"
+        r"[^.;\u2014\u2013]{0,60}?\b(?:is|was|are|were|must\s+be|should\s+be|remains?|stays?|becomes?)\b"
+        r"\s+(?:the\s+|a\s+|an\s+)?(?:tree|commit|sha|merge)\b"
+        r"(?:\s+immediately)?\s*$",
+        re.I,
+    )
+    #: ⛔ A CO-REREFERENTIAL CLAUSE THAT ASSERTS THE FALSE TREE IS THE DEFECT (#11191 review
+    #: r12 F5, P2 — MEASURED FAIL-OPEN). The per-occurrence design evaluates the clauses
+    #: that CARRY a phrase, so a correction in the phrase's own clause exempted an
+    #: uncorrected assertion beside it:
+    #:   "…is the arming commit's parent, `047c91f7a`; the tree is `ff6379eb2`." -> ACCEPTED
+    #: The subject set is CLOSED and co-referential on purpose — "the tree", "the parent",
+    #: "it", "that", "this" all point at the phrase's object, so their complement being the
+    #: false tree IS the equivalence. A clause with its own named subject ("the #9601 merge
+    #: is `ff6379eb2`") is a different tree and is admitted by `_admits`.
+    #: The negator guard keeps the truthful denial green: "the tree before #9548 is not
+    #: `ff6379eb2`" corrects, it does not assert.
+    _COREF_ASSERTS_FALSE = re.compile(
+        r"\b(?:the\s+(?:tree|parent|commit|sha|branch|merge)|it|that|this)\b"
+        r"(?:\s+[^.;\u2014\u2013]{0,25}?)?\s+(?:is|was|means|denotes)\s+(?!not\b)`?"
+        + re.escape(_FALSE_TREE),
+        re.I,
+    )
+    #: ⛔ …EXCEPT WHERE THE SENTENCE IS QUOTING AND CORRECTING IT (#11191 review r12 —
+    #: MEASURED FALSE RED): the file's own remedy wording quotes the defect and then
+    #: retires it, and the veto above would refuse the fix. A correction cue anywhere in
+    #: the sentence means the assertion is reported, not made.
+    _CORRECTION_CUE = re.compile(
+        r"\b(?:(?:is|was|now)\s+)?(?:corrected|retired|refuted|retracted|superseded)"
+        r"\b|\bno\s+longer\b|\bis\s+(?:false|wrong|untrue)\b",
+        re.I,
+    )
     #: A correction that RETIRES the attribution — "§A8 no longer calls `ff6379eb2` the
     #: tree before #9548", "… does not call it …". Closed on purpose: the verb set is
     #: attributive, so "It is not disputed that `ff6379eb2` is the tree before #9548"
@@ -5263,29 +5363,21 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
 
         def _is_corrected(norm: str, phrase: re.Match[str]) -> bool:
             """True when THIS phrase occurrence's claim is corrected, denied or refuted."""
+            # 0. A CO-REFERENTIAL CLAUSE THAT ASSERTS THE FALSE TREE IS THE DEFECT, even when
+            #    the phrase's own clause is corrected (#11191 review r12 F5, P2 —
+            #    MEASURED FAIL-OPEN). The per-occurrence design evaluates only clauses that
+            #    carry a phrase, so a correction in clause 1 exempted an uncorrected
+            #    assertion in clause 2 that has no phrase of its own:
+            #      "…is the arming commit's parent, `047c91f7a`; the tree is `ff6379eb2`."
+            #                                                    -> ACCEPTED (must red)
+            #    The subject there is CO-REFERENTIAL with the phrase's object ("the tree",
+            #    "it", "that", "this"), so the clause is about the same tree and its
+            #    complement is the equivalence. A clause with its OWN named subject is not
+            #    ("the #9601 merge is `ff6379eb2`"), which is why the subject set is closed.
+            if _COREF_ASSERTS_FALSE.search(norm) and not _CORRECTION_CUE.search(norm):
+                return False
             clause, clause_end = _clause_containing(norm, phrase.start())
             own = _occurrence_span(norm, phrase, clause, clause_end)
-
-            def _asserts_false_tree(_text: str) -> bool:
-                """True when `_FALSE_TREE` is ASSERTED in `_text`, not merely REFUTED in it.
-
-                A correction names the false tree in order to reject it — "…reads 10
-                lines, not the 5 stated at `ff6379eb2`" — and that sentence is the one
-                this pin's own failure message recommends, so refusing it is the
-                false-RED class this file exists to avoid (#11191 review r11, P1). A
-                mention with no refutation in front of it is still the claim.
-                """
-                for _m in re.finditer(re.escape(_FALSE_TREE), _text, re.I):
-                    _lead = _text[max(0, _m.start() - 44) : _m.start()].lower()
-                    if re.search(
-                        r"\b(?:not|never|rather\s+than|instead\s+of|unlike"
-                        r"|as\s+opposed\s+to|was\s+wrong\s+about)\b"
-                        r"[^.;\u2014\u2013]{0,34}$",
-                        _lead,
-                    ):
-                        continue
-                    return True
-                return False
 
             def _copulated_to_phrase(_clause: str) -> bool:
                 """True when a NON-true sha-shaped token in `_clause` is copulated to the phrase.
@@ -5301,12 +5393,22 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                     _tok = _m.group(0).lower()
                     if _TRUE_TREE.startswith(_tok) or _tok.startswith(_TRUE_TREE):
                         continue
-                    if re.match(
-                        r"`?\s*(?:,?\s*[^.;\u2014\u2013]{0,20}?)?\s*"
+                    _after_sha = re.match(
+                        r"`?\s*(?:,?\s*([^.;\u2014\u2013]{0,20}?))?\s*"
                         r"(?:is|was|means|denotes|refers?\s+to)\b"
                         r"\s+(?:the\s+|a\s+|an\s+)?(?:tree|commit|merge|branch|sha|tip)\b"
                         r"[^.;\u2014\u2013]{0,40}?\bbefore\s+#9548",
                         _clause[_m.end() :],
+                        re.I,
+                    )
+                    # ⛔ A COMPARATIVE IS NOT A COPULA (r12 — MEASURED FALSE RED):
+                    # "`ff6379eb2` is 12 commits BEHIND the tree immediately before #9548"
+                    # states the measured relation and `origin/main` accepts it, but the
+                    # span between the copula and the tree noun was unconstrained, so it
+                    # read as the equivalence and withheld the ancestry exemption.
+                    if _after_sha and not re.search(
+                        r"\b(?:ahead\s+of|behind|after|before|than|apart|older|newer)\b",
+                        _after_sha.group(1) or "",
                         re.I,
                     ):
                         return True
@@ -5491,28 +5593,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
             # before #9548 IS "the arming commit's parent", and the exemption is keyed on
             # the PARENT relation, so "… itself" / "…'s son" / "… the merge tip" are
             # refused while "…'s parent" and "the parent commit of `785bb2b59`" pass.
-            # ⛔ …AND THE SAME CLAIM WRITTEN THE OTHER WAY ROUND (#11191 review r11, P1 —
-            # MEASURED): the object arm reads only AFTER the phrase, so
-            #   "The arming commit is the tree immediately before #9548."
-            #   "The arming commit itself is the tree immediately before #9548."
-            #   "The arming commit's son is the tree before #9548."
-            # named no tree, dated no figure, and fell through to step 5's digit test —
-            # ACCEPTED. The subject is read from the phrase's OWN CLAUSE with asides
-            # blanked (an aside names a different proposition), and the exemptions are the
-            # object arm's: the PARENT relation is the true tree, and a sha subject is the
-            # referent rule's business.
-            _subject_span = _INCISE.sub(
-                lambda _m: " " * len(_m.group(0)),
-                _clause_before_phrase(norm, phrase.start()),
+            # ⛔ AND AN ASIDE BETWEEN THE COPULA AND THE OBJECT MAY NOT DEFEAT IT (r12 F2,
+            # P1 — MEASURED FAIL-OPEN, and strictly weaker than `origin/main`).
+            # `_clause_containing` cuts at the dash, so the object match saw only " is " and
+            # the sentence fell to step 5, which asks about FIGURES:
+            #   "…is — as the note says — the arming commit itself"      -> ACCEPTED
+            #   "…is (as the note says) the arming commit itself"        -> ACCEPTED
+            #   "…is -- as the note says -- the arming commit's son"     -> ACCEPTED
+            # all of which `origin/main` REFUSES, while the comma spelling reddened — the
+            # verdict keyed on punctuation, which is the defect every round here fixes.
+            # Blanking the asides is length-preserving, so `_predicated.end()` still
+            # addresses `norm` and the tail below is still read from the author's text.
+            # ⛔ AND THE REGION IS THE SENTENCE, NOT THE CLAUSE: `_clause_containing` cuts
+            # at the dash, so a clause-bounded region stops BEFORE an aside that precedes
+            # the object and the match sees only `" is "`. `match` is anchored, so reading
+            # further can never pick up a later clause's predication.
+            _pred_region = _INCISE.sub(
+                lambda _m: " " * len(_m.group(0)), norm[phrase.end() :]
             )
-            if (
-                _PREDICATED_SUBJECT.search(_subject_span)
-                and "parent" not in _subject_span.lower()
-                and _TRUE_TREE not in _subject_span.lower()
-                and not _SHA_LIKE_RE.search(_subject_span)
-            ):
-                return False
-            _predicated = _PREDICATED_OBJECT.match(norm[phrase.end() : clause_end])
+            _predicated = _PREDICATED_OBJECT.match(_pred_region)
             if _predicated:
                 # ⛔ THE RELATION MUST BE THE PARENT ONE, AND NOTHING ELSE MAY BE NAMED BESIDE
                 # IT (#11191 review r8, P1/P2 — MEASURED). The first cut of this exemption
@@ -5729,7 +5828,13 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                     # #9548" with no referent stated is still refused, and so is the same
                     # clause that re-asserts the false sha as the tree.
                     or (
-                        _ANCESTRY_OF_TREE.search(clause) is not None
+                        # ⛔ ANCHORED TO THE PHRASE (r12 F1, P1): the relation must end
+                        # exactly where "before #9548" begins, so an appositive appended to
+                        # the defect cannot buy the exemption.
+                        (
+                            _ANCESTRY_OF_TREE.search(norm[: phrase.start()]) is not None
+                            or _ANCESTRY_COMPACT.search(clause) is not None
+                        )
                         and _TRUE_TREE in clause.lower()
                         and _FALSE_TREE not in clause.lower().replace(_ref, "", 1)
                         # ⛔ …AND IT MAY NOT SHELTER A COPULA (#11191 review r11, P2 —
@@ -5781,8 +5886,17 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 # ⛔ …and a DENIED figure is not a reading here either (r10, P2): the
                 # denial spelling is asked through the same helper as the no-referent
                 # arm so the two cannot disagree about what a figure IS.
+                # ⛔ AND THE FALSE TREE IS VETOED ONLY WHERE IT IS THE **PREDICATE** (r12
+                # F4, P2 — MEASURED FALSE RED). A blanket `_FALSE_TREE in _tail` refused a
+                # truthful COMPARISON, which `origin/main` accepts:
+                #   "The tree immediately before #9548 (`047c91f7a`) is 12 commits ahead of
+                #    `ff6379eb2`."                                          -> REFUSED
+                # while the twin that puts the true tree as the copula complement passed —
+                # same proposition, verdict keyed on word order. A copula-to-false-sha span
+                # that carries a COMPARATIVE is a different claim; one that carries nothing
+                # is the equivalence ("…is actually `ff6379eb2`").
                 return not (
-                    _states_a_figure(_between) or _asserts_false_tree(_tail)
+                    _states_a_figure(_between) or _predicates_false_tree(_tail)
                 )
             # 4b. A PROSE SUBJECT PREDICATED OF THE PHRASE — the pre-posed mirror of
             #     `_PREDICATED_OBJECT` (#11191 review, P1 — MEASURED). Keyed on the
@@ -5802,6 +5916,16 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
             #    NOTHING to the phrase — no figure and no tree anywhere in it — is not
             #    this defect, and reding it would be the false-RED class this file names.
             attribution = re.sub(_PHRASE_RE, " ", norm, flags=re.I)
+            # ⛔ …AND A TREE-SHAPED SUBJECT ON THE LEFT IS A PREDICATION TOO (r12 — see
+            # `_PREPOSED_PREDICATION`): "The arming commit must be the tree immediately
+            # before #9548" attributes the phrase to a named tree without a sha and without
+            # a figure, so every arm below reads "attributes nothing". ⛔ EXCEPT THE PARENT
+            # RELATION, which is the truth this pin's own remedy names ("The arming commit's
+            # parent is the tree immediately before #9548" was REFUSED by the first cut of
+            # this arm and `origin/main` accepts it — the false-RED class, measured).
+            _preposed = _PREPOSED_PREDICATION.search(norm[: phrase.start()])
+            if _preposed and "parent" not in _preposed.group(0).lower():
+                return False
             # ⛔ A `#…` PR/issue reference is a SUBJECT, not noise (#11191 review
             # round 2, P1 — measured): stripping `#\d+` made "The #9601 merge is the
             # tree immediately before #9548" read as attributing NOTHING and pass.
@@ -6836,6 +6960,17 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     _same_clause_injected = row.replace(
         "the arming commit's parent)",
         "the arming commit's parent) and `ff6379eb2` is the tree before #9548",
+        # ⛔ `1` — THE ANCHOR OCCURS TWICE IN THE ROW (#11191 review r12 F7, P3 —
+        # MEASURED). Without a count the splice lands at BOTH sites, so the assertion
+        # below is satisfied twice and cannot attribute its own pass to the in-clause
+        # case its message names: applied at either site ALONE it is still green.
+        1,
+    )
+    _same_clause_injected_once = row.count("the arming commit's parent)") == 2
+    assert _same_clause_injected_once, (
+        "§A8's evidence cell no longer carries the anchor twice, so this control's `1` is "
+        "no longer the FIRST site and the injection it claims to measure has moved "
+        "(#11191 review r12, F7)"
     )
     assert _same_clause_injected != row, (
         "the A2 in-clause control no longer injects beside §A8's own denial, so it "
@@ -7023,7 +7158,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         "unrelated."
     ), (
         "the refutation test becomes an ALIBI in the other direction: a genuinely ASSERTED "
-        "false tree must still be refused once `_asserts_false_tree` replaces the bare "
+        "false tree must still be refused once `_predicates_false_tree` replaces the bare "
         "substring test — the exemption is for a REFUTATION in front of the token, not for "
         "any sentence that mentions it (#11191 review r11, P1)"
     )
@@ -7710,6 +7845,97 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         "a MODAL spelling of the copula defeats the predication arm — `has to be` / "
         "`must be` / `would be` were outside the verb alternation, so the same claim was "
         "refused with `is` and accepted with `has to be` (#11191 review r11, P1)"
+    )
+    # ⛔⛔ THE r12 FINDINGS — seven, measured on `4e069ee2c` before they were fixed. F1 and
+    # F2 are FAIL-OPENS (and F1 left the pin GREEN on the real §A8 cell with the claim
+    # restored); F3 and F4 are FALSE REDs `origin/main` accepts; F5 is the alibi class in a
+    # clause that carries no phrase; F6/F7 pin rules whose controls were missing.
+    _r12_findings = (
+        # F1 — the ancestry relation is ANCHORED to the phrase now: an appositive appended
+        # to the defect used to match the kinship phrase at the SECOND "the tree".
+        (
+            "`ff6379eb2` is the tree immediately before #9548, an ancestor of the tree "
+            "`047c91f7a`.",
+            True,
+        ),
+        (
+            "`ff6379eb2` is the tree immediately before #9548, a predecessor of the tree "
+            "`047c91f7a`.",
+            True,
+        ),
+        (
+            "`ff6379eb2` is an ancestor of the tree before #9548, `047c91f7a`.",
+            False,
+        ),
+        # F2 — an aside between the copula and the object may not defeat the arm, or the
+        # verdict is keyed on punctuation (`origin/main` refuses all three).
+        (
+            "The tree immediately before #9548 is — as the note says — the arming "
+            "commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is (as the note says) the arming "
+            "commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is -- as the note says -- the arming "
+            "commit's son.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is — as the note says — the arming "
+            "commit's parent.",
+            False,
+        ),
+        # F3 — the kinship vocabulary is a grammar, not a list that stops at
+        # `is N commits before`; all three state the MEASURED relation (12 commits).
+        (
+            "`ff6379eb2` is 12 commits behind the tree immediately before #9548, "
+            "`047c91f7a`.",
+            False,
+        ),
+        (
+            "`ff6379eb2` precedes the tree immediately before #9548, `047c91f7a`.",
+            False,
+        ),
+        # F4 — a truthful COMPARISON is not the copula; the blanket membership test
+        # refused it while the same proposition in the other word order passed.
+        (
+            "The tree immediately before #9548 (`047c91f7a`) is 12 commits ahead of "
+            "`ff6379eb2`.",
+            False,
+        ),
+        # F5 — a CO-REFERENTIAL clause that asserts the equivalence, beside a corrected
+        # clause that carries the only phrase occurrence.
+        (
+            "The tree immediately before #9548 is the arming commit's parent, "
+            "`047c91f7a`; the tree is `ff6379eb2`.",
+            True,
+        ),
+        # F6 — the phrase's OWN `#9548` is not a "different named subject".
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "`ff6379eb2` is the #9548 merge.",
+            True,
+        ),
+    )
+    _r12_wrong = [
+        (s, want, _refuses_before_9548(s))
+        for s, want in _r12_findings
+        if _refuses_before_9548(s) is not want
+    ]
+    assert not _r12_wrong, (
+        "the r12 findings are open: the ancestry relation is re-admitted as an alibi "
+        "(F1), an aside before the predicated object defeats the arm (F2), the kinship "
+        "vocabulary runs out at the mirror spelling (F3), a truthful comparison is read "
+        "as the copula (F4), a co-referential clause asserts the equivalence beside a "
+        "corrected one (F5), or the phrase's own `#9548` buys the named-subject admission "
+        "(F6). Each was measured on `4e069ee2c` before it was fixed (#11191 review r12):\n  "
+        + "\n  ".join(
+            f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _r12_wrong
+        )
     )
 
 
