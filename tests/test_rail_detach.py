@@ -966,12 +966,25 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
     while a third launch with the SAME spelling was correctly refused (the case
     above).
 
-    Non-vacuity: the guard runs through TWO canonicalisation sites — `launch`'s
-    `repo = _repo_key(...)` and `_slug`'s `return _repo_key(repo).replace("/", "-")`
-    (both in `tools/rail_detach.py`; cited by SYMBOL, not line — this docstring
-    carried pre-merge line numbers and the forward-merge shifted them) — so
-    reverting EITHER alone leaves this case green (measured). Revert BOTH and the
-    second launch spawns a second rail and RETURNS a `Launch` instead of raising.
+    Non-vacuity, and ⛔ THE CARRIER IS NOT THE ONE THIS DOCSTRING USED TO NAME (#10963
+    review, measured). The identity is enforced at THREE sites, and THIS case's
+    spelling-insensitivity is carried by the RECORD side, not the write side:
+    `_waiting_record` → `_candidate_records` (`tools/rail_detach.py`) globs
+    `rail-*-{pr}.md` and canonicalises each record's OWN `REPO=` line, so a record
+    written under a different spelling is found by its CONTENT.
+    * Reverting BOTH write-side canonicalisers — `launch`'s `repo = _repo_key(...)`
+      and `_slug`'s `return _repo_key(repo).replace("/", "-")` — leaves this case
+      GREEN (measured): the content scan still refuses the second spelling. The
+      earlier text here claimed the opposite and its recipe, followed, would have
+      removed the real carrier on the belief that the two named sites were it.
+    * Reverting `launch`'s site ALONE reds this case (the record is written under the
+      raw spelling, so the shared-path refusal fires first and `ALREADY LIVE` is
+      absent) — the write-side sites are pinned by their own cases too.
+    * The content scan is pinned by THREE sibling cases —
+      `test_a_record_written_under_an_older_spelling_still_blocks`,
+      `test_a_torn_record_cannot_certify_or_shadow_a_live_rail` and
+      `test_the_duplicate_rail_guard_asks_a_liveness_question` — which all RED when
+      it is removed, while this one stays green (measured).
 
     ⛔ EVERY SPELLING A CLONE URL CAN PRODUCE, because each one is a paste: `.git` is
     the suffix a clone URL always ends in and the SCP form glues the host to the owner
