@@ -326,6 +326,10 @@ class TestADrainedRefResolvesToWhatTheRunEmitted:
             "the restored edge wired the drain's duplicate instead of the Event")
         assert [e["point_id"] for e in second["held_drained"]] == [event_id]
         assert second["held_drained"][0]["committed"] is True, second["held_drained"]
+        assert not any("minted as" in w for w in second["warnings"]
+                       if "#10997" in w), (
+            "the COMMITTED arm reported a MINT for an identity this run minted "
+            f"nothing for (it bound the run's own Event): {second['warnings']}")
         assert store.get(second["held_drained"][0]["key"])["minted_id"] == event_id, (
             "the store bound the key to an id no node in this payload carries")
         assert store.pending() == [], store.summary()
@@ -396,10 +400,10 @@ class TestADrainedRefResolvesToWhatTheRunEmitted:
         assert second["payload"]["operators"] == [], second["payload"]["operators"]
         assert second["held_drained"][0]["committed"] is False
         assert len(store.pending()) == 1, store.summary()
-        assert not any("pruned" in w for w in second["warnings"]
-                       if "#10997" in w), (
-            "the run reported a PRUNED Point for an Event that is in the payload: "
-            f"{[w for w in second['warnings'] if 'pruned' in w]}")
+        assert not any("pruned" in w or "endpoint keeps" in w
+                       for w in second["warnings"] if "#10997" in w), (
+            "the run asserted a fate for the ENDPOINT (pruned / kept) that this "
+            f"arm cannot know: {[w for w in second['warnings'] if '#10997' in w]}")
         assert any("EDGE did not survive" in w for w in second["warnings"]), (
             "the not-committed arm must name the loss it actually suffered — the "
             f"restored EDGE, never the endpoint: {second['warnings']}")

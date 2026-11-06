@@ -10186,8 +10186,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     f"earlier run is now RESOLVED as {_pid} "
                     "(exactly once — a resolved key is never re-held or re-minted)")
                 continue
-            # ⛔ Its EDGE did not survive: the item goes BACK to the hold rather
-            # than being confirmed into a resolution the payload does not wire.
+            # ⛔ Its EDGE did not survive — the ENDPOINT may not have either, so this
+            # message claims nothing about it; the item goes BACK to the hold.
             with contextlib.suppress(Exception):
                 hold_store.release(_key)
             if _entry is not None:
@@ -10196,7 +10196,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"held endpoint NOT committed (#10997 drain): {_where} resolved "
                 f"as {_pid}, but no surviving operator references it — the "
                 "restored EDGE did not survive, so the item is HELD again for a "
-                "later run (the endpoint keeps whatever the payload carries)")
+                "later run")
 
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
