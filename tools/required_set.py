@@ -140,6 +140,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import dataclasses
 import json
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -207,6 +209,19 @@ class RequiredSet:
     #: like). Without this map the only reachable answer is "DEFERRED", which is a PASS
     #: arm over evidence nobody read.
     emit_files: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: The WORKFLOW FILES that exist in the tree this set was read from
+    #: (``.github/workflows/*.yml`` basenames), or ``None`` when that listing could not be
+    #: read. ⛔ THE PROJECTION ABOVE IS ONLY AS GOOD AS THIS LIST: `emitters` is written by
+    #: `mergify_config_guard --recut` and nothing re-derives it between recuts, so a workflow
+    #: RENAME leaves the record naming a file that no longer exists — and a consumer that
+    #: compares a renamed-away spelling against a head's runs matches nothing and reads
+    #: "the emitter did not run here", i.e. DEFERRED (a PASS). With this list the consumer
+    #: can tell "exists and did not run" from "does not exist any more" (see
+    #: `ready_for_owner._merge_time_absence`, #11175).
+    #:
+    #: ``()` is a MEASUREMENT (the tree was read and carries no workflow files); ``None`` is
+    #: "not read" and must fail closed at every consumer, never be read as the empty answer.
+    workflow_files: tuple[str, ...] | None = None
     snapshot_agrees: bool | None = None
     # `branch_protection_injection_mode` — LOAD-BEARING, never assumed. Under
     # `merge` (set here) the required contexts are injected for the MERGE only, so
@@ -234,6 +249,38 @@ class RequiredSet:
             if recorded == name:
                 return files
         return ()
+
+
+#: Where GitHub reads workflow files from — the only directory whose `*.yml` can emit a
+#: check-run, and therefore the only tree `emitters` can legitimately name.
+WORKFLOWS_REL = ".github/workflows"
+
+
+def _workflow_files(root: Path) -> tuple[str, ...] | None:
+    """The workflow FILE basenames under ``root/.github/workflows`` — ``None`` if unreadable.
+
+    ⛔ ``()` AND ``None`` ARE DIFFERENT ANSWERS, and conflating them is the fail-open this
+    exists to close: a tree that genuinely carries no workflow files means no check-run can
+    ever be emitted there (so a recorded emitter is stale), while an unreadable directory is
+    a read failure that must not be graded as a measurement of emptiness. Only entries
+    GitHub would actually load are counted — files directly in the directory with a YAML
+    suffix; subdirectories are not workflows.
+    """
+    directory = root / WORKFLOWS_REL
+    try:
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        return ()
+    except OSError:
+        return None
+    names: list[str] = []
+    try:
+        for entry in entries:
+            if entry.is_file() and entry.suffix in (".yml", ".yaml"):
+                names.append(entry.name)
+    except OSError:
+        return None
+    return tuple(sorted(names))
 
 
 def _read_record(root: Path) -> dict[str, Any] | None:
@@ -418,11 +465,15 @@ def _live_attestation(doc: dict[str, Any] | None, names: tuple[str, ...] | None)
     )
 
 
-def derive_from_config(root: Path) -> RequiredSet:
+def derive_from_config(root: Path, *, workflow_files: tuple[str, ...] | None = None) -> RequiredSet:
     """The required set as `.mergify.yml` declares it — the PRIMARY source.
 
     Derives the union across EVERY queue rule (not just the first): a repository
     with two rules would otherwise silently drop the second rule's checks.
+
+    ``workflow_files`` overrides the listing of ``root/.github/workflows`` — used by
+    `derive_from_ref`, whose temp root holds only the two materialised files and must
+    therefore be told what workflows exist at the ref it read. ``None`` means "list *root*".
     """
     doc = _load_mergify(root)  # raises GuardUnreadable
     rules = doc["queue_rules"]
@@ -599,9 +650,58 @@ def derive_from_config(root: Path) -> RequiredSet:
         queue_names=q,
         merge_names=m,
         emit_files=_snapshot_emitters(record),
+        # The tree the CONFIG was read from, so the projection is validated against the same
+        # bytes that produced the set. `derive_from_ref` PASSES the protected ref's listing
+        # instead: its temp root carries only the two files it materialises, so listing there
+        # would answer "no workflows exist" for every repo. `None` (the default) means "list
+        # root"; an explicit `()` is a MEASUREMENT and is kept as one.
+        workflow_files=(_workflow_files(root) if workflow_files is None else workflow_files),
         snapshot_agrees=agrees,
         mode=mode,
     )
+
+
+def _workflow_files_at(cwd: Path, sha: str, ref: str, timeout: int) -> tuple[str, ...]:
+    """The workflow FILE basenames in ``sha``'s tree — read from the COMMIT, or refuse.
+
+    ⛔ PINNED TO ``sha``, NOT ``ref``: the same reason the two blob reads are (`refs/remotes/
+    origin/main` is shared with every lane in this fleet and a fetch can land mid-read) —
+    the listing must describe the SAME tree whose `.mergify.yml` produced the set.
+
+    A failure here is a REFUSAL, not ``()``: "I could not list the ref's workflows" must not
+    be read as "that ref has no workflows", which would mark every recorded emitter stale
+    and turn a transient git failure into a fleet-wide NOT-READY.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", sha, "--", WORKFLOWS_REL],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise RequiredSetUnreadable(
+            f"listing {WORKFLOWS_REL} at {ref} ({sha[:12]}): {exc}"
+        ) from None
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise RequiredSetUnreadable(
+            f"listing {WORKFLOWS_REL} at {ref} ({sha[:12]}) failed: "
+            f"{detail[0] if detail else f'exit {proc.returncode}'} — the emitter projection "
+            "is validated against the protected ref's own workflow files, so this is a "
+            "refusal rather than an empty listing"
+        )
+    prefix = f"{WORKFLOWS_REL}/"
+    names = [
+        line[len(prefix) :]
+        for line in proc.stdout.splitlines()
+        if line.startswith(prefix)
+        and "/" not in line[len(prefix) :]
+        and line.endswith((".yml", ".yaml"))
+    ]
+    return tuple(sorted(names))
 
 
 def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -> RequiredSet:
@@ -634,8 +734,6 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
     that needs a fresh ref must fetch it: `ready_for_owner.collect_probe` does, via
     `_read_tree`, which is why that read is ordered FIRST there.
     """
-    import subprocess
-    import tempfile
 
     def _rev_parse() -> str:
         """The COMMIT `ref` resolves to HERE — so the caller can see what was read.
@@ -704,7 +802,15 @@ def derive_from_ref(cwd: Path, ref: str = "origin/main", *, timeout: int = 60) -
             target.write_text(proc.stdout, encoding="utf-8")
         # The committed-config parser is the SAME one, so the ref path cannot drift
         # from the workdir path: only the bytes differ.
-        derived = derive_from_config(root)
+        # ⛔ THE WORKFLOW LISTING IS READ FROM THE PROTECTED REF TOO, and it has to be
+        # passed in rather than listed off `root`: the temp root deliberately carries ONLY
+        # `.mergify.yml` and the record (a gate is not allowed to read the tree it judges),
+        # so `_workflow_files(root)` there answers `()` — "this repo has no workflow files" —
+        # for every real repository, which would make every recorded emitter look stale and
+        # refuse the whole fleet (#11175).
+        derived = derive_from_config(
+            root, workflow_files=_workflow_files_at(cwd, sha, ref, timeout)
+        )
     # Disclose WHAT WAS READ, not what was hoped for: `git show` does not fetch, so the sha
     # is the only honest statement about freshness.
     return dataclasses.replace(derived, source=f"{derived.source} at {ref} ({sha[:12]})")

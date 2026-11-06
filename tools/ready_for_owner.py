@@ -1258,6 +1258,18 @@ class Probe:
     #: required name means the emission is UNATTRIBUTABLE, which fails the gate rather than
     #: falling through to DEFERRED.
     merge_emit_files: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: The workflow FILE names that EXIST in the tree the required set was derived from
+    #: (`.github/workflows/*.yml` at the protected ref, via
+    #: `tools.required_set.RequiredSet.workflow_files`). ``None`` = not read.
+    #:
+    #: ⛔ WHY THE PROJECTION ABOVE IS NOT ENOUGH ON ITS OWN (#11175): `emit_files` is a
+    #: COMMITTED projection, rewritten only by `mergify_config_guard --recut` (a weekly
+    #: cron) and by `--live`. Rename or delete the emitting workflow and land it on `main`
+    #: without a recut, and the record still names the OLD file — which matches no run on
+    #: any head, so "the emitter did not run here" (DEFERRED, a PASS) becomes
+    #: indistinguishable from "the recorded spelling is stale" (#11175's false READY).
+    #: Comparing the projection against the files that actually exist separates them.
+    base_workflow_files: tuple[str, ...] | None = None
     required_raw: str = ""
     #: ``record-review.sh --check-carry`` verdict token and exit code.
     review_token: str | None = None
@@ -1389,6 +1401,27 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
     DEFERRED arm would be a PASS built on no evidence. The remedy is the one the guard
     already documents for this projection: `tools/mergify_config_guard.py --recut`
     rewrites `emitters`.
+
+    ⛔ AND THE PROJECTION ITSELF IS VALIDATED AGAINST THE PROTECTED REF (#11175). A
+    recorded emitter that names NO workflow file present at the ref is a STALE SPELLING —
+    a workflow was renamed/removed and landed without a re-cut — and "no run of that file
+    exists on this head" is then true of EVERY head for a reason that says nothing about
+    the aggregate. Matched against runs alone, that reads DEFERRED (a PASS) while the
+    required heavy suite never ran: measured on the #11175 reproduction, the SAME head
+    evidence (one `pull_request` run of `python-suite.yml`) reads PASS with the stale
+    spelling `python-ci.yml` and FAIL `missing` with the real one. So the spelling is
+    checked first, and a stale one is UNATTRIBUTABLE.
+
+    ⛔ THE OVER-BLOCK DIRECTION IS DECIDED HERE, NOT DISCOVERED LATER (#11175 DoD). After
+    such a rename this arm reports `NOT-READY(unattributable)` for EVERY PR, not just the
+    ones touching the emitter, until a human re-cuts the record — that is a FLEET-WIDE
+    refusal, and it is the safe direction deliberately: the alternative (deferring on a
+    spelling that matches nothing) is a false READY, which this module may never produce.
+    The state it reports is also TRUE rather than pessimistic — with the emitting workflow
+    gone, the required aggregate can never be produced, so branch protection deadlocks
+    every merge anyway (`mergify_config_guard --static` already reports `DIGEST-DIVERGED`
+    in that state). The remedy is `tools/mergify_config_guard.py --recut`, whose whole job
+    is rewriting this projection.
     """
     # ⛔ THE FIELD ITSELF AND THEN THE MATERIALISATION, because a shape rule that is not a
     # TOTAL function of the input is not a shape rule. `Probe.merge_emit_files` is an
@@ -1464,6 +1497,49 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
             f"{context}=UNATTRIBUTABLE(the recorded emitter projection carries an entry "
             "that is not a workflow FILE name, so its absence cannot be attributed; "
             "re-cut with `tools/mergify_config_guard.py --recut`)"
+        )
+    # ⛔ THE SPELLING IS VALIDATED AGAINST THE PROTECTED REF'S OWN WORKFLOW FILES (#11175),
+    # BEFORE any run is matched — see the docstring's third paragraph. Same discipline as
+    # the shape guards above: "not read" and "read, and it is empty" are different answers,
+    # and neither may fall through to the DEFERRED (PASS) arm.
+    if probe.base_workflow_files is None:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the workflow files at the protected ref were not "
+            "read, so a recorded emitter that matches no run cannot be told apart from a "
+            "stale projection)"
+        )
+    if isinstance(probe.base_workflow_files, (str, bytes, Mapping)):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the protected ref's workflow listing is a "
+            f"{type(probe.base_workflow_files).__name__}, not a sequence of file names, so "
+            "'the recorded emitter still exists' is not a measurement)"
+        )
+    try:
+        present_files = tuple(probe.base_workflow_files)
+    except TypeError:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the protected ref's workflow listing is a "
+            f"{type(probe.base_workflow_files).__name__} and cannot be enumerated, so "
+            "'the recorded emitter still exists' is not a measurement)"
+        )
+    if not all(isinstance(f, str) and f for f in present_files):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the protected ref's workflow listing carries an "
+            "entry that is not a file name, so 'the recorded emitter still exists' is not "
+            "a measurement)"
+        )
+    # Basenames on BOTH sides: the record may carry `python-ci.yml` or
+    # `.github/workflows/python-ci.yml` (both spellings are in the wild, and `_run_emits`
+    # reduces the same way), so the comparison must not depend on which one this record uses.
+    present = {f.rsplit("/", 1)[-1] for f in present_files}
+    stale = sorted({f.rsplit("/", 1)[-1] for f in files} - present)
+    if stale:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the record's `emitters` project onto "
+            f"{', '.join(stale)} — no such workflow file exists at the protected ref "
+            f"({len(present)} workflow file(s) known), so the projection is STALE and 'no "
+            "run of the emitter on this head' is not evidence of deferral; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
         )
     if probe.head_runs is None:
         return "unattributable", (
@@ -3004,6 +3080,10 @@ def collect_probe(
         probe.merge_emit_files = {
             name: required.emit_workflows(name) for name in required.merge_names
         }
+        # ⛔ THE PROJECTION IS ONLY READABLE AGAINST THE FILES THAT EXIST (#11175). Carried
+        # from the SAME derivation, so the spelling and the files it is validated against
+        # come from one read of one commit.
+        probe.base_workflow_files = required.workflow_files
     try:
         probe.groups, probe.head_runs, probe.groups_raw = _read_check_groups(gh, head, repo)
     except RateLimited:
@@ -3345,6 +3425,29 @@ def _fixture_merge_emit_files(data: Mapping[str, Any]) -> Mapping[str, tuple[str
     return out
 
 
+def _fixture_workflow_files(data: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """A fixture's protected-ref workflow listing, or ``None`` when it did not state one.
+
+    ⛔ SAME DOCTRINE AS `_fixture_head_runs` (#11175): the listing decides whether a
+    recorded `emitters` spelling still exists, and a spelling that matches no workflow file
+    is UNATTRIBUTABLE (FAIL) — while ``()` would ASSERT "read it, the ref has no workflow
+    files", a measurement a fixture that never spoke about it did not make. So an omitted
+    key lands on the fail-closed ``None``, and a legitimate empty ref lists
+    ``"base_workflow_files": []`` explicitly.
+
+    Shape is validated, not just presence: a bare string would become a tuple of
+    CHARACTERS, which matches no file name and would make every emitter look stale.
+    """
+    if "base_workflow_files" not in data or data["base_workflow_files"] is None:
+        return None
+    raw = data["base_workflow_files"]
+    if isinstance(raw, (str, bytes, Mapping)) or not isinstance(raw, (list, tuple)):
+        return None
+    if not all(isinstance(f, str) and f for f in raw):
+        return None
+    return tuple(raw)
+
+
 def probe_from_dict(data: Mapping[str, Any]) -> Probe:
     """Build a Probe from a fixture dict (used by tests and ``--fixture``)."""
     groups = data.get("groups")
@@ -3398,6 +3501,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         groups_raw=str(data.get("groups_raw", "")),
         head_runs=_fixture_head_runs(data),
         merge_emit_files=_fixture_merge_emit_files(data),
+        base_workflow_files=_fixture_workflow_files(data),
         required=None if data.get("required") is None else tuple(data["required"]),
         # Same absent-vs-null idiom as `labels` above: a fixture that OMITS the key is a
         # pre-split fixture whose flat set was all entry checks (so `()` is faithful),

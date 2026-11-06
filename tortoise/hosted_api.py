@@ -45456,9 +45456,12 @@ async def oauth_authorize(request: Request):
         on the way back.
 
     An attempt key is not a credential, and its PRESENCE proves nothing about
-    who wrote this URL: the AS only tests that the parameter is non-empty, so a
-    guessed one renders the page exactly like a real one. Presence selects the
-    BRANCH — page vs. sign-in bounce — and nothing else. The ownership proof
+    who wrote this URL: the AS only tests that the parameter is non-BLANK (the
+    first value, stripped — this is the BRANCH predicate; the emission in `consent_bounce_url`
+    judges ABSENT-vs-PRESENT on the same stripped form but emits the adopted value's OWN bytes,
+    because no reader on this hop strips),
+    so a guessed one renders the page exactly like a real one. Presence selects
+    the BRANCH — page vs. sign-in bounce — and nothing else. The ownership proof
     happens at the mint, on the session origin, which compares
     `attempt_key_hash` against the recorded attempt row and answers
     `403 no_authorize_attempt` on a mismatch (`api/consent/token.ts`), a typed
@@ -45471,12 +45474,12 @@ async def oauth_authorize(request: Request):
     of being forwarded to the app to fail there.
     """
     from tortoise.oauth import (
-        CONSENT_ATTEMPT_KEY_PARAM,
         OAuthError,
         canonical_redirect_target,
         consent_app_origin,
         consent_bounce_url,
         consent_page_html,
+        presented_consent_attempt_key,
         resolve_authorize_scope,
         validate_authorize_params,
     )
@@ -45591,7 +45594,17 @@ async def oauth_authorize(request: Request):
     # the app writes onto this URL (`ATTEMPT_KEY_PARAM`, start.ts). Absent ⇒ the
     # app never advanced this flow ⇒ hand the COMPLETE request to the app's
     # sign-in leg and let the one origin that holds the session decide.
-    if not request.query_params.get(CONSENT_ATTEMPT_KEY_PARAM):
+    # ⛔ The predicate is the READERS' one — `presented_consent_attempt_key`, FIRST
+    # value, STRIPPED — not `query_params.get`, which answers the raw value
+    # UNSTRIPPED (and, on a duplicate pair, the LAST one — Starlette's
+    # `ImmutableMultiDict` stores `values[-1]`, so it is not a first-value reader
+    # and must not be described as one) and so made blank and whitespace-only
+    # DIFFERENT states here while `consent_bounce_url` already judged both absent
+    # (#10487 review): a blank value bounced correctly but the bounce then emitted
+    # `<blank>&attempt_key=<minted>`, and a `%20` value did not bounce at all — the
+    # page rendered and `start.ts` bound the row to the guessable one-character key
+    # `" "`.
+    if not presented_consent_attempt_key(request.url.query):
         return RedirectResponse(
             consent_bounce_url(app_origin, request.url.query), status_code=302)
     from tortoise.consent_token import consent_token_secret_problem

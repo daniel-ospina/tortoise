@@ -67,7 +67,19 @@
 # constraint claim; its SCAN scope is bounded in its note); `span_link` (1 of 4 gates),
 # `failure_policy` (1 of 3 declared parts) and `sufficiency_router` (the caller)
 # narrow theirs, and each NOTE names the part — so no row's `pins:` line can be
-# read as wider than its note. #10636 is the
+# read as wider than its note.
+#
+# ⛔ WHAT A PIN PROVES, stated so this contract is not read as COVERAGE
+# either (#5064 review P1): the gate checks that the pin EXISTS, that its
+# node is COLLECTABLE, and that the node is not opted out — nothing more.
+# It does NOT check that the pin observes every part a row declares, and
+# it cannot: a valid-but-unrelated node resolves exactly as well as a
+# targeted one. The "narrowed to a named part" allowance above is
+# therefore a DOCUMENTED concession, not an enforcement — the row's own
+# `note` is the only thing bounding a narrowed pin, and no verdict reds if
+# that note understates the part. Read a green gate as "the absence is
+# CITED", never as "the absence is COVERED".
+# #10636 is the
 # measured case: `span_link`'s row asserted an every-point requirement whose real
 # coverage was 1 of 4 gates, with the other three named only in the note's prose
 # ("pinned ELSEWHERE, not by it"). Every `not-implemented` row therefore names
@@ -565,7 +577,8 @@ mechanisms:
       as wider than it is: the pin observes the READ-PATH CALLER only — an AST
       scan for a production module that reaches this one. The tier walk and the
       Tier-1 store stay THIS note's claim (a tier walk added inside
-      `tortoise/sufficiency_router.py` reds nothing). §12.3's tier count is also OPEN (a design fold, not an owner
+      `tortoise/sufficiency_router.py` reds nothing). §12.3's tier count is
+      also OPEN (a design fold, not an owner
       ruling). A row marked `implemented` here would recreate the exact
       declared-implies-present defect this registry exists to catch.
 

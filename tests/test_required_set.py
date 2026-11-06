@@ -743,6 +743,56 @@ def test_emit_files_are_read_from_the_protected_ref(tmp_path: Path) -> None:
     assert derive_from_ref(tmp_path, "HEAD").emit_workflows(HEAVY) == ("python-ci.yml",)
 
 
+def test_the_protected_refs_workflow_listing_travels_with_the_set(tmp_path: Path) -> None:
+    """⛔ THE `emitters` PROJECTION IS ONLY READABLE AGAINST THE FILES THAT EXIST (#11175).
+
+    A consumer decides a merge-time context's ABSENCE by matching the record's recorded
+    workflow FILE against the runs on a head. A workflow RENAME leaves the record naming a
+    file that no longer exists — and a spelling that matches no run reads as "the emitter did
+    not run here", i.e. DEFERRED (a PASS). So the set carries the workflow listing of the
+    tree it was read from, and the consumer separates *exists-and-did-not-run* from
+    *does-not-exist-any-more*.
+
+    ⛔ THE LISTING MUST COME FROM THE PROTECTED REF, not from the temp root the derivation
+    materialises: that root carries only `.mergify.yml` and the record, so listing it answers
+    `()` — "this repo has no workflow files" — for EVERY repository, which would make every
+    recorded emitter look stale and refuse the whole fleet. Revert
+    `derive_from_ref(..., workflow_files=_workflow_files_at(...))` and the first assertion
+    below reads `()`.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "python-ci.yml").write_text("name: ci\n", encoding="utf-8")
+    _tree(tmp_path, emitters={HEAVY: [["python-ci.yml", HEAVY]]})
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "config")
+
+    # The "PR": the emitting workflow is RENAMED in the workdir, uncommitted.
+    (workflows / "python-ci.yml").rename(workflows / "python-suite.yml")
+
+    committed = derive_from_ref(tmp_path, "HEAD")
+    assert committed.workflow_files == ("python-ci.yml",)  # the ref's tree, not the workdir's
+    assert committed.emit_workflows(HEAVY) == ("python-ci.yml",)  # the projection still resolves
+    # …while the same derivation on the WORKDIR sees the rename, which is what makes the two
+    # comparable: the consumer's question is "does this spelling exist at the ref I read?".
+    assert derive_from_config(tmp_path).workflow_files == ("python-suite.yml",)
+
+
+def test_a_tree_without_workflows_is_an_EMPTY_measurement_not_an_unreadable_one(
+    tmp_path: Path,
+) -> None:
+    """⛔ `()` AND `None` ARE DIFFERENT ANSWERS. A tree that carries no workflow files cannot
+    emit any check-run, so a recorded emitter there is stale — a MEASUREMENT. An unreadable
+    directory is a read failure and must not be graded as that measurement.
+
+    (The `None` arm is exercised by the consumer pins in `tests/test_ready_for_owner.py`,
+    which assert a `None` listing is UNATTRIBUTABLE rather than a deferral.)
+    """
+    _tree(tmp_path)
+    assert derive_from_config(tmp_path).workflow_files == ()
+
+
 # ── the SECOND derivation in this repo, and the pin between them ────────────
 #
 # `.github/scripts/check-required-set.py` (#6144) already parses `.mergify.yml` for the

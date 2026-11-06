@@ -223,6 +223,84 @@ def test_a_pure_dedup_hit_on_a_terminal_point_stays_silent(sdk):
     assert "terminal_fold_refused" not in _advisory_codes(again), again
 
 
+def _count_terminal_reads(sdk, monkeypatch) -> list[str]:
+    """Record every `_lifecycle_terminal_marker` call the SDK makes.
+
+    The verdict is the fold's only fan-out read (`LIFECYCLE_FANOUT_QUERY`,
+    one statement over the id's whole fan-out, #7822), so counting the call is
+    the cheapest faithful proxy for "this dedup hit paid an extra query".
+    Wrapped rather than stubbed: the real verdict still runs, so a case that
+    faults or refuses behaves exactly as in production.
+    """
+    calls: list[str] = []
+    original = type(sdk)._lifecycle_terminal_marker
+
+    def counting(self, point_id, *args, **kwargs):
+        calls.append(point_id)
+        return original(self, point_id, *args, **kwargs)
+
+    monkeypatch.setattr(type(sdk), "_lifecycle_terminal_marker", counting)
+    return calls
+
+
+def test_a_bare_dedup_hit_costs_no_terminal_read(sdk, monkeypatch):
+    """The fold's read gate is what the call could WRITE, not `props` itself.
+
+    `content_hash` is put into `props` unconditionally at the top of
+    `create_point` and only popped after the #7704 provenance retrofit, so a
+    gate written as `if props` was ALWAYS true: the "a bare dedup hit costs no
+    extra query" arm was unreachable and every dedup hit — the NORMAL path for
+    the self-host surface, which dedups by default — paid a fan-out read.
+    Measured pre-fix: this test's `calls` is `[pid]`; post-fix it is `[]`.
+
+    Both nothing-at-all and provenance-only are pinned, because
+    `extractedFrom` is the #7704 fold (left applying) and is not a reason to
+    read a verdict either.
+    """
+    content = _fresh_content("read-cost")
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+
+    calls = _count_terminal_reads(sdk, monkeypatch)
+
+    # (a) a bare hit: no props, no authored word.
+    again = sdk.create_point("statement", content, dedup=True)
+    assert again["id"] == pid
+    assert calls == [], (
+        "a bare dedup hit asked the lifecycle fan-out for a verdict it cannot "
+        f"refuse anything on — {len(calls)} extra read(s): {calls}")
+
+    # (b) an evidence-only hit: `extractedFrom` is the #7704 provenance fold,
+    # deliberately NOT refused, so there is still nothing to decide.
+    ref = f"https://example.com/10368/{uuid.uuid4().hex[:8]}"
+    sdk.create_point("statement", content, dedup=True, extractedFrom=ref)
+    assert calls == [], (
+        "an evidence-only fold read the terminal verdict although #7704's "
+        f"provenance retrofit is never refused — extra reads: {calls}")
+
+
+def test_a_prop_bearing_dedup_hit_DOES_read_the_verdict_once(sdk, monkeypatch):
+    """Positive control for the gate above — the read must not be dropped.
+
+    A caller prop IS something the #10368 refusal can decide, so the verdict
+    must be read, exactly once (ONE read serving every leg of the fold). If a
+    later change over-narrows the gate, this reds — and the sibling
+    `…_does_not_mutate_a_terminal_point` cases would then stop refusing.
+    """
+    content = _fresh_content("read-cost-positive")
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+
+    calls = _count_terminal_reads(sdk, monkeypatch)
+
+    again = sdk.create_point("statement", content, dedup=True,
+                             custom_probe="x")
+    assert calls == [pid], (
+        "a caller prop must be adjudicated by the terminal verdict, exactly "
+        f"once — reads: {calls}")
+    assert "terminal_fold_refused" in _advisory_codes(again), again
+
+
 def test_a_bare_dedup_hit_spends_no_terminal_read(sdk, monkeypatch):
     """#10841 review (P3) — the read is skipped for the hit the comment names.
 

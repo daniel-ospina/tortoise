@@ -3671,6 +3671,12 @@ def _fixture_with_head_runs(extra: dict[str, object]) -> dict[str, object]:
         "required": list(ENTRY_REQUIRED),
         "required_deferred": list(MERGE_TIME_REQUIRED),
         "merge_emit_files": {MERGE_TIME_REQUIRED[0]: ["python-ci.yml"]},
+        # ⛔ THE REF'S WORKFLOW LISTING (#11175). A recorded emitter is UNATTRIBUTABLE when it
+        # names a file the protected ref does not carry, so a fixture exercising the
+        # MISSING/DEFERRED arms must state that the emitter still EXISTS — omission is the
+        # fail-closed "not read" arm. `python-ci.yml` is the real emitter here and the real
+        # `.github/workflows/python-ci.yml` exists at this repo's `origin/main`.
+        "base_workflow_files": ["python-ci.yml"],
         "groups": [
             {
                 "job": job,
@@ -3999,6 +4005,8 @@ def _two_merge_time_fixture(*, aggregate_reports: bool) -> dict[str, Any]:
             "aggregate": ["python-ci.yml"],
             "nightly": ["nightly.yml"],
         },
+        # Both spellings must exist at the ref, or the absence is UNATTRIBUTABLE (#11175).
+        "base_workflow_files": ["python-ci.yml", "nightly.yml"],
         "head_runs": [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}],
         "groups": groups,
     }
@@ -4156,6 +4164,182 @@ def test_a_run_entry_without_a_path_is_unattributable_not_a_deferral() -> None:
         gates = next(c for c in rfo.evaluate(hand_built).checks if c.name == "gates")
         assert gates.passed is False, (shape, gates.raw)
         assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+# ── #11175: a STALE `emitters` PROJECTION IS NOT AN ABSENT RUN ─────────────
+#
+# The record's `emitters` map is rewritten only by `mergify_config_guard --recut` (a weekly
+# cron). Rename or delete the emitting workflow, land it on `main` without a re-cut, and the
+# record still names the OLD file — which matches no run on any head, so `_run_emits` finds
+# nothing, `matched` is empty, and the arm answers DEFERRED … a PASS while the required
+# heavy suite never ran. Measured on the reproduction below (one `pull_request` run of
+# `python-suite.yml` on the head, the entry checks green):
+#
+#   record emitter     verdict (PRE-FIX)          verdict (now)
+#   python-ci.yml      PASS, deferred=1            FAIL unattributable:python-ci-gate
+#   python-suite.yml   FAIL missing:python-ci-gate FAIL missing:python-ci-gate
+#
+# The two spellings are the SAME head evidence, so only the record can distinguish them —
+# which is exactly why the ref's own workflow listing has to be part of the probe.
+
+#: A minimal `.mergify.yml` with the live ENTRY/MERGE split: two cheap entry checks and the
+#: heavy aggregate in `merge_conditions`, which is the shape whose absence is attributed.
+_STALE_EMITTER_MERGIFY = """\
+queue_rules:
+- name: main
+  queue_conditions:
+  - base=main
+  - -draft
+  - check-success=docs
+  - check-success=test-isolation
+  merge_conditions:
+  - check-success=python-ci-gate
+  branch_protection_injection_mode: merge
+merge_protections_settings: {}
+"""
+
+#: A workflow file GitHub would load. Its CONTENT is irrelevant — every assertion below is
+#: about whether the recorded spelling names a file that EXISTS at the ref.
+_TRIVIAL_WORKFLOW = """\
+name: suite
+on: pull_request
+jobs:
+  python-ci-gate:
+    runs-on: ubuntu-latest
+    steps:
+    - run: 'true'
+"""
+
+
+def _stale_emitter_repo(tmp_path: Path, *, recorded_emitter: str) -> Path:
+    """A tree whose record names `recorded_emitter`, while `python-suite.yml` is what exists.
+
+    Models the landed rename: the emitting workflow is `python-suite.yml` at the protected
+    ref, and the committed record still carries whatever `--recut` last wrote.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "python-suite.yml").write_text(_TRIVIAL_WORKFLOW, encoding="utf-8")
+    (tmp_path / ".mergify.yml").write_text(_STALE_EMITTER_MERGIFY, encoding="utf-8")
+    record = tmp_path / "docs" / "ci" / "required-contexts.json"
+    record.parent.mkdir(parents=True)
+    required = ["docs", "python-ci-gate", "test-isolation"]
+    record.write_text(
+        json.dumps(
+            {
+                "required_contexts": required,
+                "emitters": {"python-ci-gate": [[recorded_emitter, "python-ci-gate"]]},
+                "live_result": "SATISFIED",
+                "live_observed_contexts": required,
+                "live_verified_at": "2026-11-03T02:35:26Z",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def _stale_emitter_gates(
+    monkeypatch: pytest.MonkeyPatch, *, recorded_emitter: str, runs: list[dict[str, Any]]
+) -> Any:
+    """Drive the WHOLE path — `collect_probe` → derivation → record → emitter → run listing.
+
+    ⛔ `collect_probe`, not a hand-built `Probe` (#11175's DoD): the defect is that the
+    record's spelling is compared against the head's runs, so a fixture that sets
+    `merge_emit_files` directly would assume away the very link that is wrong.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="stale-emitter-") as tmp:
+        repo = _stale_emitter_repo(Path(tmp), recorded_emitter=recorded_emitter)
+        probe = _collect(
+            monkeypatch,
+            _gh_payloads(check_runs=_check_runs_for(["docs", "test-isolation"]), runs=runs),
+            derive=lambda cwd, ref=None, **kw: rfo_required.derive_from_config(repo),
+        )[0]
+        assert probe.required_deferred == ("python-ci-gate",), probe.required_raw
+        assert probe.required == ("docs", "test-isolation"), probe.required_raw
+        # The listing the live path carries from the SAME derivation, asserted so a revert to
+        # "list the temp root" (which answers `()` for every repo) cannot pass silently.
+        assert probe.base_workflow_files == ("python-suite.yml",), probe.base_workflow_files
+        return next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+
+
+def test_a_stale_emitter_spelling_is_unattributable_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ ISSUE #11175 (P2 fail-open): a STALE projection must not buy a DEFERRED (PASS).
+
+    The control below uses the SAME head evidence and only changes the record's spelling, so
+    this pair is the defect stated as a table: `python-suite.yml` (the file that exists)
+    reads `FAIL missing` because it ran here, while the renamed-away `python-ci.yml` read
+    PASS before this arm existed. Revert the arm and this reds on `gates.passed is False`.
+
+    The refusal is deliberately FLEET-WIDE (stated in `_merge_time_absence`'s docstring, per
+    the issue's DoD): until a human re-cuts the record, EVERY PR reads
+    `NOT-READY(unattributable)`. That is the safe direction — the alternative is a false
+    READY — and it is also the true state, because with the emitting workflow gone the
+    required aggregate can never be produced and branch protection deadlocks merges anyway.
+    """
+    gates = _stale_emitter_gates(
+        monkeypatch,
+        recorded_emitter="python-ci.yml",
+        runs=[_workflow_run("python-suite.yml")],
+    )
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason, gates.reason
+    assert "python-ci.yml" in gates.raw and "STALE" in gates.raw, gates.raw
+    assert "--recut" in gates.raw, gates.raw  # the remedy is NAMED, not implied
+
+
+def test_the_recorded_emitter_that_DOES_exist_still_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart — and the #11175 table's second row, on the SAME head evidence.
+
+    Without this, the pin above could be satisfied by refusing every projection, which would
+    trade the fail-open for a permanent FAIL on every merge-time context (and `--recut`
+    could never clear it).
+    """
+    gates = _stale_emitter_gates(
+        monkeypatch,
+        recorded_emitter="python-suite.yml",
+        runs=[_workflow_run("python-suite.yml")],
+    )
+    assert gates.passed is False, gates.raw
+    assert "missing:python-ci-gate" in gates.reason, gates.reason
+    assert "unattributable" not in gates.reason, gates.reason
+
+
+def test_a_stale_emitter_on_a_head_with_no_run_at_all_is_still_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stale spelling is UNATTRIBUTABLE even when NOTHING ran on the head.
+
+    This is the half a run-matching heuristic cannot reach: with no runs at all there is no
+    "absent because pending" signal to trip, so the DEFERRED arm is the only place a stale
+    spelling can land — and it lands there as a PASS. Attribution must be decided by the
+    projection's own validity first, or the verdict depends on what GitHub happened to
+    schedule.
+    """
+    gates = _stale_emitter_gates(monkeypatch, recorded_emitter="python-ci.yml", runs=[])
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason, gates.reason
+
+
+def test_the_deferral_arm_survives_a_valid_projection_with_no_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ AND THE PASS ARM MUST STILL BE REACHABLE — or the fix is a permanent refusal.
+
+    A correctly-spelled emitter that simply did not run on this head IS the queue working as
+    designed (Mergify settles `merge_conditions` on `mergify/merge-queue/<sha>`), so this
+    case must stay READY.
+    """
+    gates = _stale_emitter_gates(monkeypatch, recorded_emitter="python-suite.yml", runs=[])
+    assert gates.passed is True, gates.raw
+    assert "python-ci-gate=DEFERRED" in gates.raw, gates.raw
 
 
 def test_a_run_entry_that_carries_its_path_still_attributes() -> None:

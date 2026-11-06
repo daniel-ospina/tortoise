@@ -2045,8 +2045,20 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     f"{sources['extractor_v2'][entry_line - 1].strip()!r}")
 
     # (b) The eight-row step table: `` `symbol` `:NNNN` `` into the same file.
+    #
+    # #10833 review (P1): the population is EXACT, not a floor. It read
+    # `>= 8`, so the loop below could pass while a re-chunk of the table hid a
+    # row from the regex — the same shape rule (c) already refuses on the
+    # probe (`== 9`), applied to the document that went stale in this PR: the
+    # fold's own `+33` moved every one of these eight numbers and this
+    # assertion was the thing that should have said so. A row added or removed
+    # on purpose updates this number deliberately; a row that stops matching
+    # reds instead of quietly shrinking the sweep.
     pairs = re.findall(r"`([A-Za-z_][\w.]*)`\s*`:(\d+)`", readme)
-    assert len(pairs) >= 8, f"the step table's cites are gone: {pairs}"
+    assert len(pairs) == 8, (
+        f"the step table is eight rows (one per step; S6 COMMIT prints no "
+        f"number) — {len(pairs)} cites matched, so a row was added, removed or "
+        f"reformatted and the sweep below is not reading it: {pairs}")
     for symbol, lineno in pairs:
         text = sources["extractor_v2"][int(lineno) - 1]
         assert symbol.split(".")[-1] in text, (
