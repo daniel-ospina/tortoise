@@ -1317,14 +1317,22 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
     r"\bvalue class\b|\bnumeric side\b|\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
     + _UNIT_TOKEN.pattern, re.I)
 
-#: The anchors that mark a claim about the CLOSED gap. `_is_honest_spelling` reads
-#: this narrower set instead of `_RESIDUAL_CLASS_ANCHOR`: the carve-out is the
-#: mechanism's own name and the spelling gap is open inside it, so naming it must
-#: not cost a disclosure its waiver (#11258 review round 2 `P2`, measured).
-_RESIDUAL_CLOSED_CLASS_ANCHOR = re.compile(
-    r"adjacency|\btime[- ]unit\b|\bthe guarantee\b|\bretention\b|"
-    r"\bvalue class\b|\bnumeric side\b|\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
-    + _UNIT_TOKEN.pattern, re.I)
+#: The anchors that mark a claim about the CLOSED gap, and — because the
+#: honest-SPELLING waiver reads THIS set — the words that withhold that waiver.
+#: ⛔ `carve-out` IS IN IT, and that is a deliberate OVER-BLOCK: prefixing a
+#: reopening with `the SPELLING ` used to waive it whole, so
+#: `the SPELLING carve-out is open again` / `… stays open` / `… is not closed` all
+#: went GREEN while the same sentences without the word `spelling` red — one word
+#: defeated the gate (#11258 review round 3 `P1`, measured, and the pre-#11258
+#: revision on `main` has the same hole). The cost of closing it is that an honest
+#: clause naming BOTH `spelling` and the carve-out is refused; over-block is the
+#: safe direction here, and it is stated rather than left to be discovered.
+#: ⛔ ONE DEFINITION, ABOVE — this note deliberately does NOT re-declare the regex.
+#: It did for one revision, without `carve-out`, and the second binding silently
+#: shadowed the first: four mutations (`the carve-out is still open`, `… reopens`,
+#: `… fails open`, and the two-clause spelling form) went GREEN because the
+#: anchored arm stopped applying to any carve-out clause at all (#11258 review
+#: round 3, measured). A note binds nothing; only the literal above does.
 
 #: The affirmations that something IS open / STOPPED being closed. TWO ARMS,
 #: and the split is the whole design — each arm was measured into place.
@@ -1377,6 +1385,8 @@ _RESIDUAL_OPENNESS = (
     # and left `has not been open again`, `has never been open again` and
     # `hasn't been open again` as FALSE BLOCKS (#11258 review round 2 `P2`).
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
+    r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
     r"(?<![n']t\s)(?<![n']t\sbeen\s)\bopen\s+again\b",
 )
 
@@ -1393,16 +1403,23 @@ _RESIDUAL_OPEN_VERBS = (
 #: verb so it can only ever speak about THIS predicate — `is unjudged and never
 #: closed` is still read by the `not … closed` arm, where the negation asserts the
 #: gap is open (#11258 review `P2`, measured: seven honest denials red before it).
-#: ⛔ IT VETOES ONLY THE PREDICATE'S OWN NEGATOR. A wider `(?!…not…)` swallowed the
-#: EMPHATIC negations, which ASSERT the gap is open — `is not only open`, `is not
-#: merely open`, `is not just open, it is unjudged`, `is never far from open` all
-#: went GREEN, a coverage REGRESSION against the head the previous review approved
-#: (#11258 review round 2 `P1`, measured). So the negation must be followed by
-#: `open` ITSELF (or a bare adverb that does not change the polarity), which is
-#: what `(?:yet|fully|really|still)\s+` admits and nothing else.
+#: ⛔ IT VETOES ONLY THE PREDICATE'S OWN NEGATOR, and it admits an adverb on BOTH
+#: sides of it. Too tight, and honest denials are refused — `is not entirely open`,
+#: `is clearly not open` were FALSE BLOCKS (#11258 review round 3 `P2`, measured).
+#: Too wide (a bare `(?!…not…)`), and the EMPHATIC negations, which ASSERT the gap
+#: is open, go green — `is not only open`, `is not merely open`, `is not just open,
+#: it is unjudged`, `is never far from open` were a coverage REGRESSION against the
+#: head the previous review approved (#11258 review round 2 `P1`, measured). The
+#: adverb that makes the difference is the one AFTER `not`, so that slot is an
+#: explicit allowlist — `only`/`merely`/`just`/`simply`/`far` flip the polarity and
+#: are deliberately absent, while the ones here do not.
 _RESIDUAL_NEGATED_OPEN = (
-    r"(?!\s*(?:not|never)\s+(?:(?:yet|fully|really|still)\s+)?(?:fail-)?open\b)"
-    r"(?!\s*n't\s+(?:(?:yet|fully|really|still)\s+)?(?:fail-)?open\b)")
+    r"(?!\s*(?:\w+\s+)?(?:not|never)\s+"
+    r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
+    r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)"
+    r"(?!\s*(?:\w+\s+)?n't\s+"
+    r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
+    r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)")
 
 #: `fails open` (no hyphen) is the row's OWN vocabulary for the same thing, and it
 #: is read CLAUSE-anchored rather than by adding `fails?` to the verb list above:
@@ -1440,11 +1457,15 @@ _RESIDUAL_ANCHORED_OPENNESS = (
     # SIX fixed-width forms rather than two because a one-token window read only
     # `not reopen` / `never reopen` and refused every honest denial that puts a
     # word between them — `has not been re-opened`, `has never been reopened`,
-    # `doesn't reopen` all red (#11258 review `P2`, measured). A variable-width
-    # window is unavailable (a Python lookbehind must be fixed-width) and the flat
-    # text has already been whitespace-collapsed to single spaces, so enumerating
-    # the forms is exact rather than approximate.
+    # `doesn't reopen` all red (#11258 review `P2`, measured). ⚠️ The enumeration is
+    # BOUNDED, not exact: an ADVERB inside the forms (`has not YET been re-opened`,
+    # `has never BEFORE been reopened`) is still refused, so those two are carried
+    # as extra forms below. A Python lookbehind must be fixed-width, so a different
+    # adverb means another form — do NOT read this list as exhaustive
+    # (#11258 review round 3 `P2`, measured on the word "exact").
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
+    r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
     r"(?<![n']t\s)(?<![n']t\sbeen\s)\bre-?open",
 )
 
@@ -1459,8 +1480,16 @@ _RESIDUAL_ANCHORED_OPENNESS = (
 _SPELLING_FLOOR = (
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
+    # ⛔ THE WAIVED SENTENCE IS STILL READ FOR `open again`, which is why it is here
+    # and not only in `_RESIDUAL_OPENNESS`: the honest path runs ONLY this tuple, so
+    # `the SPELLING gap is open again` was GREEN while the same phrase without the
+    # word `spelling` red — the waiver was skipping the whole openness arm
+    # (#11258 review round 3 `P1`, measured). The six negation forms match the
+    # opening verb's window, so an honest denial still passes.
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
-    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bre-?open",
+    r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
+    r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
+    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bopen\s+again\b",
 )
 
 #: The row that FOLLOWS the residual list. The proof test anchors its append point
@@ -1565,23 +1594,22 @@ def _is_honest_spelling(text: str) -> bool:
     """Does this TEXT disclose the still-open SPELLING class and nothing else?
 
     That gap IS open, so saying so is the row's own honest disclosure — but the
-    waiver is only ever granted to a span that names no CLOSED class (a unit
-    token, `adjacency`, the guarantee), so it can never travel to a claim about
-    the adjacency gap.
+    waiver is only ever granted to a span that names NO class anchor, so it can
+    never travel to a claim about the gap this row closed.
 
-    ⛔ `carve-out` IS NOT A CLOSED CLASS, so it does not withhold the waiver. It
-    is this mechanism's own NAME (`state_value_carve_out`), and the spelling gap
-    is open *inside* it — refusing the waiver on that word turned four honest
-    disclosures red (`the SPELLING carve-out is still open by design`, `the
-    SPELLING gap stays open inside the carve-out`, …), which is a FALSE BLOCK in
-    the artifact's other direction (#11258 review round 2 `P2`, measured). The
-    waiver still cannot travel to `adjacency` or a unit token, which is the arm
-    that matters: that is what stops a reopening hiding behind the word
-    `spelling`.
+    ⛔ The withholding set is `_RESIDUAL_CLASS_ANCHOR` in full — `adjacency`, a
+    unit token or its abbreviation, `time-unit`, the carve-out, the retention
+    guarantee, the value class, the numeric side. It is that WHOLE set and not a
+    hand-picked subset because a subset is what let one word defeat the gate: with
+    `carve-out` dropped, `the SPELLING carve-out is open again` was waived and the
+    same sentence without `spelling` red (#11258 review round 3 `P1`, measured).
+
+    ⛔ The cost, named rather than implied: a clause naming BOTH `spelling` and the
+    carve-out gets no waiver, so honest prose of that shape is refused. That is an
+    over-block, which this artifact prefers to the fail-open it replaces.
     """
     return ("spelling" in text
-            and not _UNIT_TOKEN.search(text)
-            and not _RESIDUAL_CLOSED_CLASS_ANCHOR.search(text))
+            and not _RESIDUAL_CLASS_ANCHOR.search(text))
 
 
 def test_the_registry_row_names_the_residual_that_still_stands():
@@ -1636,9 +1664,9 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # statement about some OTHER subject from tripping it, and the closed-claim
     # rule stays scoped to `(d)` where that claim lives.
     # The block's own structural half is asserted here; the reopening half lives
-    # in `_residual_reopening_claims`, whose proof list (43 reopenings that must
-    # RED, 16 truthful statements that must stay GREEN — `len()` of the two tuples
-    # below, so re-derive rather than trust these numbers) is
+    # in `_residual_reopening_claims`, whose proof list is `len()` of the two
+    # tuples below (`_RESIDUAL_REOPENING_MUTATIONS` must all RED,
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` must all stay GREEN) and is
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` below — that test
     # is what makes the list above a checked claim rather than a docstring.
     # — plus the structural rule that the still-open SPELLING disclosure must be
@@ -1761,6 +1789,14 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is not merely open.",
     "the ADJACENCY half is not just open, it is unjudged.",
     "the ADJACENCY half is never far from open.",
+    # round 6 (#11258 review round 3 `P1`): THE WAIVER IS NOT A PREFIX. Each of
+    # these was GREEN while its counterpart without the word `spelling` RED — the
+    # waiver skipped `_RESIDUAL_OPENNESS` whole, so one word defeated the gate.
+    "the SPELLING gap is open again.",
+    "the SPELLING carve-out is open again.",
+    "the SPELLING carve-out stays open.",
+    "the SPELLING carve-out is not closed.",
+    "the SPELLING carve-out fails open.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -1787,17 +1823,23 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the carve-out has never been reopened.",
     "the ADJACENCY half has not been re-opened.",
     "it doesn't reopen (d)'s ADJACENCY result.",
-    # ⛔ ... AND THE SAME DENIALS ONE VERB OVER (`open again`), plus the SPELLING
-    # disclosures that name the mechanism's own `carve-out`. Both were FALSE BLOCKS
-    # at the previous head: the `open again` arm had two negation forms where the
-    # opening verb had six, and the waiver withheld itself on the word `carve-out`
-    # (#11258 review round 2 `P2`, measured).
+    # ⛔ ... AND THE SAME DENIALS ONE VERB OVER (`open again`). They were FALSE
+    # BLOCKS at the previous head: the `open again` arm had two negation forms
+    # where the opening verb had six (#11258 review round 2 `P2`, measured).
     "the ADJACENCY gap has not been open again since the tables landed.",
     "the ADJACENCY gap has never been open again.",
     "the ADJACENCY gap hasn't been open again.",
-    "the SPELLING carve-out is still open by design.",
-    "the SPELLING gap stays open inside the carve-out.",
-    "the carve-out is open only for SPELLING.",
+    "the ADJACENCY half is not entirely open.",
+    "the ADJACENCY half is clearly not open.",
+    "the ADJACENCY half has not yet been re-opened.",
+    # ⛔ ⚠️ AN HONEST CLAUSE THAT NAMES BOTH `spelling` AND THE CARVE-OUT IS NOT
+    # HERE, because it is deliberately REFUSED: waiving it is what let one word
+    # (`the SPELLING `) turn every reopening on the carve-out GREEN, so the two
+    # sentences `the SPELLING carve-out is still open` / `the carve-out is still
+    # open` disagreed with each other about a fact. Over-block is the direction
+    # this artifact chooses — the shape is documented on `_RESIDUAL_CLASS_ANCHOR`
+    # and in `_is_honest_spelling`, NOT asserted as passing here (#11258 review
+    # round 3 `P1`, measured).
     "splitting it would re-open that false refusal on every two-group decimal.",
     "that needs the owner's decision reopened there, not a rung bolted on here.",
 )
@@ -1820,7 +1862,13 @@ def _with_appended(text: str, sentence: str) -> str:
 
 
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
-    """#11223: the pin's own proof list, executable — 47 REDs and 22 passes.
+    """#11223: the pin's own proof list, executable — every mutation must RED.
+
+    ⛔ NO COUNTS IN THIS DOCSTRING ON PURPOSE. Three revisions carried a count here
+    and every one of them drifted the moment the next fix added a case (39/10 →
+    43/16 → "fixed" → 47/22 in the very commit that re-created the drift,
+    #11258 review round 3 `P2`). The two tuples ARE the count — the assertions
+    below iterate them, so a stale number here could only ever mislead a reader.
 
     The pin above asserted a scan whose bounds were the `(d)` block; measured on
     the row at `af864a42a` that block is 10,019 chars and does NOT contain the
