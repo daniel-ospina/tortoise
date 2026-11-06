@@ -1198,3 +1198,121 @@ def test_the_mention_record_is_payload_only_and_says_so():
     assert "11239" in (Mention.__doc__ or ""), (
         "Mention's docstring no longer names the slice that owns persistence, so "
         "the model reads as graph state")
+
+
+# ── the channel-only response must reach the LAST BUILDER, not just the door ──
+# The `rule_id` clamp lives in `_mentions_for_claim` and runs on every record, so
+# it kept the row above green even when `route_mentions` still returned early —
+# which meant the OTHER half (`_mention_record`: span verification, dedupe, the
+# quote clamp) was pinned by nothing. These two rows pin that half: they red only
+# when a channel-only response bypasses the builder.
+
+def test_a_mention_only_response_is_verified_by_the_last_builder():
+    """⛔ The security half of the channel-only fix is `_mentions_for_claim`'s
+    `rule_id` re-verification, which is the LAST DOOR every record passes. The
+    other half — `route_mentions` processing the channel through `_mention_record`
+    — is what VERIFIES a declared span against the haystack. Without it a
+    mention-only response ships `span_source: "quote"` on offsets nothing supports:
+    the exact provenance forgery `de036f2e` closed for the `entities[]` path.
+
+    Measured before this row existed: reverting ONLY the `route_mentions` half left
+    the suite green (81 passed) while shipping
+    `span_source='quote' span_start=0 span_end=5` for a quote that does not contain
+    the surface."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{
+        "surface": "the admin-merge rail",
+        "claim_ref": el["points"][0]["content"],
+        "quote": "a totally unrelated sentence with no rail in it",
+        "span_source": "quote",          # a claim that must be CHECKED
+        "span_start": 0,
+        "span_end": 5,
+        "rule_id": ref.RULE_CHANNEL,
+    }]
+    del el["entities"]
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        "the channel-only response dropped the record it was asked for")
+    assert records[0]["span_source"] == "model", (
+        "a `quote`-declared span shipped UNVERIFIED on a channel-only response — "
+        f"`route_mentions` handed the model's raw entry to the payload instead of "
+        f"running `_mention_record`: {records[0]!r}")
+
+
+def test_a_mention_only_response_is_deduped_like_any_other():
+    """The second thing only `_mention_record`/`_dedupe_mentions` do. A duplicated
+    channel entry would otherwise be stored twice — one hold, two records, and a
+    `mentions_recorded` count that double-counts the evidence plan R1's arming gate
+    reads."""
+    el = _embed_list("config/ci-surfaces.yml")
+    entry = {
+        "surface": "the admin-merge rail",
+        "claim_ref": el["points"][0]["content"],
+        "quote": "the admin-merge rail",
+        "rule_id": ref.RULE_CHANNEL,
+    }
+    el["mentions"] = [dict(entry), dict(entry)]
+    del el["entities"]
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        f"a duplicated channel entry was stored twice: {records!r}")
+
+
+def test_a_response_that_omits_entities_cannot_resurrect_a_carried_hold():
+    """The OTHER reachable shape of an omitted `entities[]`: a re-emitted response
+    that carries `mention_held` and no entities. Returning early there discarded
+    the decision, so a surface pass 1 held came back as a MINT on the next render —
+    the phantom `#11021` exists to delete, reached without the model doing anything
+    wrong (`_validate_output_shape` accepts a section the parsed output omits).
+
+    An earlier `entities[]` that is not a list is a legitimate state; a *lost
+    decision* is not, which is why the early return is now conditional on there
+    being nothing at all to process."""
+    el = _embed_list("it")
+    el["mention_held"] = [{"surface": "it", "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    payload, _ = _mint(el)
+    assert held["points"][0]["about_entities"] == [], (
+        "a carried hold was dropped because the response omitted `entities[]`, "
+        "so the held surface is still named by the claim and will MINT")
+    assert _entity_names(payload) == set(), (
+        f"the carried hold was resurrected as an entity: {_entity_names(payload)!r}")
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"], (
+        f"the hold lost its record: {_mentions_of(payload)!r}")
+
+
+def test_the_last_door_clamps_a_rule_when_the_selection_FAILED_OPEN(monkeypatch):
+    """⛔ `_mentions_for_claim` is the last door, and the fail-open path is the one
+    place it stands alone: `execute_embed` catches ANY `route_mentions` exception
+    and keeps the model's RAW `mentions[]` (`vet_warnings: "candidates kept
+    (fail-open)"`). Nothing has verified those entries — so the attach step must
+    re-derive `rule_id` itself, or a crashed selection ships the model's cue
+    attribution verbatim on the evidence surface plan R1's arming gate reads.
+
+    Measured before this row existed: removing the `rule_id` branch from
+    `_mentions_for_claim` left the suite GREEN (84 passed), because every other
+    row's record is sanitised earlier by `_mention_record`. The defence in depth
+    was therefore a claim, not a behaviour."""
+    import tortoise.extractor_v2 as ex
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("selection exploded — the fail-open path")
+
+    monkeypatch.setattr(ex, "route_mentions", _boom)
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{
+        "surface": "the admin-merge rail",       # judge() calls this a REFERENT
+        "claim_ref": el["points"][0]["content"],
+        "quote": "the admin-merge rail",
+        "rule_id": ref.RULE_PRONOUN,             # a rule that never ran on it
+    }]
+    payload = ex.execute_embed(copy.deepcopy(el), {}, session_id="fail-open-last-door")["payload"]
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        "the fail-open path dropped the record")
+    assert records[0]["rule_id"] == ref.RULE_CHANNEL, (
+        "the fail-open path shipped the model's unverified cue rule as evidence: "
+        f"{records[0]!r}")
