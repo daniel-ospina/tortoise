@@ -4360,7 +4360,7 @@ def test_a_run_entry_that_carries_its_path_still_attributes() -> None:
 
 
 def test_the_required_sets_raw_discloses_which_repo_it_was_derived_from(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """★ `--repo` parameterises the GitHub reads, NOT the required-set derivation.
 
@@ -4370,15 +4370,42 @@ def test_the_required_sets_raw_discloses_which_repo_it_was_derived_from(
     `refs/pull/<n>/head` from the local `origin` and refuses when the fetched sha ≠ the live
     head of the named repo — but a residual that lives only in prose is one nobody reads,
     and the required set's provenance is supposed to be on every arm. So the raw names it.
+
+    ⛔ HERMETIC — review round 7, P3 note 1. This case used to read the AMBIENT `origin` of
+    `REPO_ROOT`: in a `.git`-less extraction, or any checkout whose remote is named
+    `upstream` (or a source-tarball build), it failed with
+    `repo-scope=UNDETERMINED(required set read from …'s origin/main)` for a reason that has
+    nothing to do with the change — while the other 360 cases passed. It is green under
+    `actions/checkout` only because that action creates `origin`. The workdir is now a
+    throwaway repo whose remote is set HERE, the shape
+    `test_the_origin_slug_is_normalised_however_the_remote_url_is_spelled` already uses.
     """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    workdir = tmp_path / "checkout"
+    subprocess.run(["git", "init", "-q", str(workdir)], check=True, env=env)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(workdir),
+            "remote",
+            "add",
+            "origin",
+            f"https://github.com/{REPO}.git",
+        ],
+        check=True,
+        env=env,
+    )
     monkeypatch.setattr(
         rfo,
         "derive_from_ref",
         lambda cwd, ref=None, **kw: rfo_required.derive_from_config(REPO_ROOT),
     )
-    _, same = rfo._read_required_contexts(REPO_ROOT, REPO)
+    _, same = rfo._read_required_contexts(workdir, REPO)
     assert "repo-scope=origin(" in same, same
-    _, foreign = rfo._read_required_contexts(REPO_ROOT, "someone-else/another-repo")
+    _, foreign = rfo._read_required_contexts(workdir, "someone-else/another-repo")
     assert "repo-scope=MISMATCH" in foreign, foreign
     assert "someone-else/another-repo" in foreign, foreign
 
