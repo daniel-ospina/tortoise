@@ -769,9 +769,16 @@ def _item_dedented(line: str, item: _ListItem) -> bool:
     block as prose. `lands` on a body GitHub renders into `<pre><code>` (#10634
     review P1, fail-open).
     """
-    consumed, residual, _ = _fence_line_column(line, item.depth)
-    if consumed < item.depth:
-        return True                      # the item's own quote closed
+    _, residual, _ = _fence_line_column(line, item.depth)
+    # ⛔ FEWER MARKERS IS NOT BY ITSELF A DEDENT (round 40 review, P2 — class A, both arms).
+    # `consumed < item.depth` also matches a LAZY line, which drops its `>` and continues the
+    # paragraph inside the item anyway; popping there measured the next line against no container
+    # and blanked a real close (`Notes` + `> 2. x` + `    3.     Closes #100`, renderer ONE `<p>`).
+    # The dedent is the COLUMN test, which is in the item's own space, and it covers the shapes the
+    # marker count was there for: a line that left the item's quote entirely is at or before the
+    # item's content column (`> text` against a depth-1 item's 2-column content comes out at 0),
+    # while a lazy line that dropped the same marker and stayed indented into the item comes out
+    # past it. A line that dedented BELOW the item still pops, which is the round-38/39 behaviour.
     return residual < item.rest_col
 
 
@@ -906,7 +913,9 @@ _HTML_BLOCK_INTERRUPT_RE = re.compile(
 
 
 def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
-                    prev_quote_depth: int) -> bool:
+                    prev_quote_depth: int, container: _ListItem | None,
+                    prev_container: _ListItem | None,
+                    line_col: int, rest_indent: int, raw_indent: int) -> bool:
     """Is this ordered marker ≥ 2 a LAZY CONTINUATION of the open paragraph?
 
     ⛔ §5.2's "an ordered marker ≥ 2 cannot interrupt a paragraph" IS CONDITIONAL ON THERE BEING A
@@ -918,13 +927,82 @@ def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
             whose wide-gap content is `<pre><code>`; applying the rule anyway left the item unpushed
             and CREDITED the quotation in both arms.
 
-    The depth comparison is the only term added. Both callers — the item push and the leaf-block
-    question — now ask THIS function, because two answers to one question is how round 37's fix
-    re-opened round 36's hole.
+    Both callers — the item push and the leaf-block question — ask THIS function, because two
+    answers to one question is how round 37's fix re-opened round 36's hole.
+
+    ⛔ AND THE QUESTION HAS THREE ANSWERS, NOT TWO (round 40 review, P2 — class A, both arms).
+    Answering "the line's prefix depth is shallower than the paragraph's" with a single `<=` read a
+    line that DROPPED its `>` as a continuation even when the `>` it dropped belonged to a quote
+    nested INSIDE the item (`- > q` + `  2.     Closes #100`: the nested quote ended, the marker
+    opens its own item, renderer `code_block`). Answering it with `==` did the opposite and lost the
+    real close on a line that dropped the ITEM'S OWN `>` while staying inside the item
+    (`> 2. x` then `    3.     Closes #100`: renderer keeps one paragraph). So "the line dropped
+    its `>`" and "the line dedented out of its item" are TWO facts:
+
+    * depth == the paragraph's — the same container, a continuation (§5.2 in both directions);
+    * depth >  the paragraph's — a new container, which interrupts (§5.1);
+    * depth <  the paragraph's — the line dropped a `>`. That is a continuation ONLY when the
+      dropped markers were the ITEM's own (`prev_quote_depth == container.depth`) and the line is
+      still inside that item (`rest_indent > container.rest_col`); a nested quote's markers
+      dropped, or no item left to hold the paragraph, means the paragraph's container ENDED.
+
+    `line_col` is the RAW content column and `container.rest_col` its `rest`-space twin, which is
+    the same pair round 39 established for the `>=` term below.
     """
-    return (prev_prose
+    if not (prev_prose
             and _ordered_marker_at_least_two(rest)
-            and _quote_depth(prefix) <= prev_quote_depth)
+            and container is prev_container):
+        return False
+    depth = _quote_depth(prefix)
+    if depth > prev_quote_depth:
+        return False                     # a DEEPER container interrupts the paragraph
+    if depth == prev_quote_depth:
+        return container is None or line_col >= container.rest_col
+    # depth < prev_quote_depth: the line dropped a `>` — see the docstring's third bullet.
+    return _dropped_quote_is_lazy(prefix, prev_quote_depth, container, prev_container,
+                                 rest_indent, raw_indent)
+
+
+def _dropped_quote_is_lazy(prefix: str, prev_quote_depth: int,
+                          container: _ListItem | None, prev_container: _ListItem | None,
+                          rest_indent: int, raw_indent: int) -> bool:
+    """Did this line drop a `>` and remain a LAZY continuation of the paragraph inside the item?
+
+    ⛔ "FEWER MARKERS" IS NOT "THE ITEM ENDED" (round 40 review, P2 — class A, both arms). A lazy
+    line drops its blockquote marker and continues the open paragraph anyway, because it is still
+    indented into the item that holds that paragraph:
+
+        `Notes` + `> 2. x` + `    3.     Closes #100`     renderer ONE `<p>` — the close is REAL
+        `Notes` + `> 2. x` + `    -     Closes #100`      renderer ONE `<p>` as well
+
+    The pop and the wide-gap rule both read the missing `>` as a dedent, so the item ended for the
+    tool and the line was blanked as code (`[]` at HEAD, `[100]` on `origin/main`). THREE facts say
+    otherwise, and each is needed (round 40 measured the pair):
+
+    * the markers were the ITEM's own (`prev_quote_depth == container.depth`) — a quote nested
+      INSIDE the item ends when its markers go, and `- > q` + `  2.     Closes #100` must stay CODE;
+    * the line is still INSIDE the item (`rest_indent > container.rest_col`) — at the item's content
+      column or before it the renderer opens a new block, so `> - item` + `lazy` + `  2.     Closes
+      #100` stays CODE as well;
+    * the container is unchanged, so there is still an item to hold the paragraph (`> Notes` +
+      `lazy` + `2.     Closes #100` has none, and stays CODE).
+
+    A line that answers this is PROSE whatever its marker is: the marker cannot open an item out of
+    a lazy paragraph continuation (§5.2's consumer rule), so a wide gap after it is text, not code.
+    """
+    return (container is not None
+            and container is prev_container
+            and _quote_depth(prefix) < prev_quote_depth
+            and prev_quote_depth == container.depth
+            and rest_indent > container.rest_col
+            # …and the line cannot START A NEW BLOCK once that container is gone (round 40).
+            # This is why `> - item` + `   2.     Closes #100` (marker at raw column 3) is CODE while
+            # `> 2. x` + `    3.     Closes #100` (raw column 4) is prose: a marker at column <= 3
+            # opens a top-level list, which DOES interrupt a paragraph, so nothing is lazy there;
+            # at column 4+ it would be an indented code block, which cannot interrupt one.
+            # The raw column is the indent the line has left once its dropped markers are gone, and
+            # it is the `indent` the caller measured before splitting the prefix.
+            and raw_indent > _MAX_FENCE_INDENT)
 
 
 def _leaves_no_paragraph(rest: str, rest_indent: int,
@@ -976,16 +1054,25 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # matched" as "a paragraph is open", which is right for text and wrong for nothing-at-all:
     #     `- ` + `  2.      Closes #100`   renderer `<li><ol start="2"><li><pre><code>`   CODE
     # …and the same for `* `, `> - `, and for a quote line whose content is only `>`.
+    # ⛔ THE LAZY ANSWER COMES FIRST, BEFORE THE EMPTY-CONTENT ANSWER (round 40 review, P2 — class A,
+    # both arms, and the caller had ALREADY answered it). Forgetting the order re-opened it the other
+    # way round: `2. ` (an ordered marker ≥ 2 with EMPTY content) is a lazy continuation of the open
+    # paragraph, so the paragraph STAYS open and the next line continues it:
+    #     `Notes` + `2. ` + `2.     Closes #100`   renderer ONE `<p>`, `[100]` on `origin/main`
+    # The empty-content test fired first and reported "no paragraph open", so the wide-gap marker
+    # below opened its own list and the real close was blanked. The round-39 empty-content rule still
+    # holds for a BULLET (`- ` + `  2.      Closes #100`), which `_lazy_push` never answers true for.
+    if lazy_marker:
+        return False
     if not body.strip():
         return True
     # ⛔ A MARKER LINE THAT OPENS NO ITEM HAS NO CONTENT COLUMN TO INSPECT (round 37 review, P2). An
     # ordered marker ≥ 2 that CONTINUES an open paragraph is a lazy continuation, so its `# H` / `***`
     # is INLINE TEXT, not a leaf block — reading it as one ended the paragraph and blanked the real
     # close below (`Notes` + `2. # H` + `3.     Closes #100` renders as ONE `<p>`; `origin/main`
-    # credits it). The answer is the CALLER's now (`lazy_marker`), because it is the same question the
+    # credits it). The answer is the CALLER's (`lazy_marker`), because it is the same question the
     # item push asks — and asking it in two places is how the two answers drifted apart (round 39).
-    if lazy_marker:
-        return False
+    # It is asked ABOVE, before the empty-content test, for the reason stated there.
     if _NO_PARAGRAPH_RE.match(body) or _HTML_BLOCK_INTERRUPT_RE.match(body):
         return True
     # §4.6 type 7 (a complete tag alone on a line) NEVER ends a paragraph, in either direction:
@@ -1292,7 +1379,16 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             # against a content column the renderer never created, which blanked a real close even
             # once the leaf predicate was fixed: `Notes` + `2. # H` + `3.     Closes #100` needs both
             # changes, and the reviewer measured the pair (predicate only: `[]`; both: `[100]`).
-            _lazy_push = _is_lazy_marker(rest, prefix, prev_prose, prev_quote_depth)
+            # The RAW column, for `container.rest_col`'s `>=` term (round 39); the RESIDUAL one is
+            # the `rest`-space twin §4.4's distance is measured in (round 41).
+            _, _, line_col_raw = (
+                _fence_line_column(line, container.depth) if container is not None
+                else (0, rest_indent, rest_indent))
+            _lazy_push = (_is_lazy_marker(rest, prefix, prev_prose, prev_quote_depth,
+                                          container, prev_container, line_col_raw, rest_indent,
+                                          indent)
+                          or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
+                                                    prev_container, rest_indent, indent))
             pushed = rest_col is not None and not _lazy_push
             own_gap = _marker_gap(rest)
             if pushed:
@@ -1431,13 +1527,20 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         _indent_base = container.rest_col if container is not None else 0
         _lazy_indent = (prev_prose
                         and _line_residual > _indent_base + _MAX_FENCE_INDENT
-                        and container is prev_container)
-        _lazy_marker = (prev_prose
-                        and _ordered_marker_at_least_two(rest)
-                        and _quote_depth(prefix) == prev_quote_depth
                         and container is prev_container
-                        and (container is None or _line_col >= container.rest_col))
-        ordered_continuation = _lazy_indent or _lazy_marker
+                        # ⛔ A DEEPER CONTAINER IS NOT A LAZY INDENT CONTINUATION (round 40). A lazy
+                        # indent line may DROP its `>`; one that ADDS a marker starts a new block
+                        # (§5.1), and reading it as a continuation credited a keyword the renderer
+                        # puts in `<pre><code>` (`Notes` + `2. ` + `>     -     Closes #100`).
+                        and _quote_depth(prefix) <= prev_quote_depth)
+        # ONE OWNER FOR THE MARKER QUESTION (round 40 review, P3 — the docstring claimed a single
+        # owner while this line computed a second, differently-shaped answer; that second copy is
+        # what hid round 40's finding: it diverged from the push on a dropped-`>` lazy line).
+        _lazy_marker = _is_lazy_marker(rest, prefix, prev_prose, prev_quote_depth,
+                                       container, prev_container, _line_col, rest_indent, indent)
+        ordered_continuation = (_lazy_indent or _lazy_marker
+                                or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
+                                                          prev_container, rest_indent, indent))
         own_code = own_gap > 4 and not ordered_continuation
         indent_code = rest_indent > _MAX_FENCE_INDENT and (
             strict or (indented_code

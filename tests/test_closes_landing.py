@@ -3665,23 +3665,22 @@ def test_a_NEW_CONTAINER_can_interrupt_a_paragraph_and_an_EMPTY_content_opens_no
     # …and a bullet CAN interrupt (§5.2), so `- ` opening an item leaves no paragraph open either way.
     assert cl.parse_closing_refs("- Closes #100\n") == [100]
 
-def test_the_two_nested_container_SHAPES_that_remain_are_DECLARED():
-    """Round 39 review — the two families the round-38/39 fixes do NOT close, pinned as residuals.
+def test_the_two_nested_container_SHAPES_that_WERE_declared_are_now_CLOSED():
+    """Round 40 review — both round-39 residuals are CLOSED, so neither is declared any more.
 
-    Both are nested-container shapes where a marker line's container is one level away from what the
-    line's own prefix shows, and both need the INNER quote's content column rather than the outer
-    container's. They are pinned rather than left silent because each is a REGRESSION against
-    `origin/main` in one direction, and a declared residual that a test asserts is the difference
-    between a decision and drift:
+    Round 39 declared two nested-container families as residuals because each needed the INNER
+    quote's content column rather than the outer container's, and fixing either meant deciding a new
+    item's paragraph state. Round 40 decided it: a line that DROPS a `>` is a lazy continuation only
+    when the dropped markers were the ITEM's own and the line stays indented into that item
+    (`_dropped_quote_is_lazy`). Both shapes then answer what the renderer answers:
 
-    * `> q` + `2. x` + `2.     Closes #100` — `origin/main` and this head both CREDIT a keyword the
-      renderer puts in `<pre><code>` (measured: 140 vs 60 such bodies in the family; 0 are new here).
-      Declared as PARITY, which is the honest status — it is not a regression, and fixing it means
-      deciding a new item's paragraph state, a change of its own.
-    * `> - q` + (indent >= 4) + a wide-gap marker — the renderer keeps the line as prose inside the
-      item while this head blanks it. `origin/main` credits all 120 such bodies, so this IS a
-      regression in the WARN direction (a lost close, never a false pass — the module ranks that
-      second-worst, and it is the direction that costs a warning rather than a wrong `lands`).
+    * `> q` + `2. x` + `2.     Closes #100` — renderer `<pre><code>`. Was `[100]` (declared as
+      PARITY with `origin/main`, i.e. a false PASS this head merely inherited); now `[]`.
+    * `> - q` + `    -     Closes #100` — renderer keeps ONE `<p>` inside the item. Was `[]`
+      (declared as a regression against `origin/main`, warn direction); now `[100]`.
+
+    The controls below are the half that must NOT move: the same rules at the item's own content
+    column, and with a quote nested inside the item, still put the keyword in code.
     """
     md = MarkdownIt("commonmark")
 
@@ -3691,13 +3690,94 @@ def test_the_two_nested_container_SHAPES_that_remain_are_DECLARED():
                 return token.type
         return None
 
+    # The two families round 39 declared — now the renderer's answer, in both directions.
     parity = "> q\n2. x\n2.     Closes #100\n"
     assert token_type(parity) == "code_block", parity
-    assert cl.parse_closing_refs(parity) == [100], "parity with origin/main, declared"
+    assert cl.parse_closing_refs(parity) == [], parity
     lost = "> - q\n    -     Closes #100\n"
     assert token_type(lost) == "inline", lost
-    assert cl.parse_closing_refs(lost) == [], "regression vs origin/main, declared, warn direction"
+    assert cl.parse_closing_refs(lost) == [100], lost
     # …and the shapes the SAME mechanism must keep right, so the declaration cannot widen:
     assert cl.parse_closing_refs("- > q\n  > 2.     Closes #100\n") == [100]
     assert cl.parse_closing_refs("- > q\n  2.     Closes #100\n") == []
     assert cl.parse_closing_refs("> q\n2. x\n   2.     Closes #100\n") == [100]
+
+
+def test_a_LAZY_marker_line_with_EMPTY_content_keeps_the_paragraph_OPEN():
+    """Round 40 review, P2 — class A, both arms: the empty-content test was asked FIRST.
+
+    `2. ` is an ordered marker ≥ 2 with nothing after it. With a paragraph open it does not open an
+    item either (§5.2's consumer rule does not care whether the content is empty), so the paragraph
+    is STILL open and the next line continues it — the renderer produces ONE `<p>`:
+
+        `Notes` + `2. ` + `2.     Closes #100`     renderer `<p>Notes\n2. \n2.     Closes #100</p>`
+
+    `_leaves_no_paragraph` answered "this marker has empty content, so no paragraph is open" before
+    it read the caller's lazy answer, which reported the paragraph CLOSED; the wide-gap marker below
+    then opened its own list and the real close was blanked (`[]`, a lost close in both arms). The
+    round-39 empty-content rule is about `- ` / `* ` / `> - `, which `_lazy_push` never answers true
+    for, so it is untouched — the control below is one of its pinned shapes.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    body = "Notes\n2. \n2.     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+    # Controls: the round-39 empty-content rule, and its bullet sibling, are unchanged.
+    for control in ("- \n  2.      Closes #100\n", "* \n  2.      Closes #100\n",
+                    "> - \n  2.      Closes #100\n"):
+        assert cl.parse_closing_refs(control) == [], control
+
+
+def test_a_line_that_DROPS_its_quote_is_lazy_only_when_the_ITEM_owns_the_markers():
+    """Round 40 review, P2 — class A, both arms: "fewer markers" is not "the item ended".
+
+    A lazy line drops its blockquote marker and continues the paragraph anyway, because it is still
+    indented into the item that holds that paragraph — and a marker there cannot open an item out of
+    a paragraph continuation, so its wide-gap content is TEXT, not code:
+
+        `Notes` + `> 2. x` + `    3.     Closes #100`   renderer ONE `<p>`   was `[]`
+        `Notes` + `> 2. x` + `    -     Closes #100`    renderer ONE `<p>`   was `[]`
+
+    Both were `[100]` on `origin/main`, so this was a lost close. THREE facts decide it, and the
+    controls below are the ones that must not move: whose markers went (a quote nested INSIDE the
+    item ends when its own go — `- > q`), how far in the line still is (at the item's own content
+    column the renderer opens a new block), and whether anything would start a new block once the
+    container is gone (a marker at raw column ≤ 3 starts a top-level list, which CAN interrupt a
+    paragraph, so nothing is lazy there).
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body, why in (("Notes\n> 2. x\n    3.     Closes #100\n", "an ordered marker ≥ 2"),
+                      ("Notes\n> 2. x\n    -     Closes #100\n", "a bullet, wide gap")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+
+    # Controls — every one of these is `[]` on `origin/main` too, and every one stays CODE:
+    for body, why in (
+        # the dropped markers were a quote nested INSIDE the item, not the item's own
+        ("- > q\n  2.     Closes #100\n", "the nested quote ended"),
+        # the line sits at the item's content column, where the renderer opens a new block
+        ("> - item\nlazy\n  2.     Closes #100\n", "not indented into the item"),
+        # nothing is left to hold the paragraph
+        ("> Notes\nlazy\n2.     Closes #100\n", "no item at all"),
+        # a marker at raw column ≤ 3 starts a top-level list once the quote is gone
+        ("> - item\n   2.     Closes #100\n", "the marker itself starts a new list"),
+        ("> - item\n   -     Closes #100\n", "same, bullet"),
+        # a marker that ADDS a `>` starts a new container (§5.1) — not a lazy indent continuation
+        ("Notes\n2. \n>     -     Closes #100\n", "a deeper container interrupts"),
+    ):
+        assert token_type(body) in ("code_block", "inline"), (why, body)
+        assert cl.parse_closing_refs(body) == [], (why, body)
