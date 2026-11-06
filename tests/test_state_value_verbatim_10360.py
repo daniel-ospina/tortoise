@@ -2654,11 +2654,12 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
     a lane editing a clause finds its verdict beside its siblings.
 
     ⛔ EVERY VERDICT BELOW WAS MEASURED AT `origin/main` `277a559b1`, this file's
-    own head, and each assert that holds a row clause names it. SEVEN of them are
+    own head, and each assert that holds a row clause names it. EIGHT of them are
     REFUSALS (`:MM` with a fused unit, its pre-existing `27:12` spelling, an
-    identifier against a QUANTITY, a different identifier, an identifier with a
-    PLAIN unit tail against another quantity, and the two range comparisons) and
-    the rest are TOLERANCES — a tolerance is not a bug, but an UNDISCLOSED or
+    identifier against a quantity, a different identifier, an identifier with a
+    PLAIN unit tail against two different quantities — `x4 ms`/`5000 ms` and
+    `arr4 ms`/`9000 ms` — and the two range comparisons) and the ELEVEN others
+    are TOLERANCES — a tolerance is not a bug, but an UNDISCLOSED or
     UNPINNED tolerance is how a future narrowing ("why does this pair fail
     open?") quietly reverses a measured decision.
     """
