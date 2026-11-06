@@ -130,7 +130,7 @@ claim and not an assertion:
   `document`+`source` (`S3-VECTOR-CENSUS.md` §4.1/§7). `Source`/`Subject` carry no vector **INDEX** — an index
   fact, not a claim about the property: both labels' writers DO store `embedding`, and the 2026-09-24 inventory
   reports no per-label vector count for them at all, so what they hold is what `--census` measures, never
-  something inferred from the inventory (§5). Removing the vectors removes that answer —
+  something inferred from the inventory (`S3-VECTOR-CENSUS.md` §5). Removing the vectors removes that answer —
   an MCP/SDK surface change, which `AGENTS.md` requires **Daniel's approval for before implementation**.
   The census is the evidence for that request; acting on it is not a lane's.
 - ⚠️ **Contradiction test, recorded:** **no recorded decision authorises** this removal. The 2026-09-24
