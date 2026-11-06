@@ -699,11 +699,22 @@ def evict(
             break
         passes += 1
         # ⛔ MULTIPLICATIVE, not additive. Growing by `batch` per pass means the
-        # examined prefix after P passes is only `P x batch`, so a cold head of
-        # unservable nodes longer than `max_passes x batch` is NEVER passed — in this
-        # call or any later one, because no held-node state survives a call — and the
-        # cache stays over budget forever with evictable nodes just beyond the head.
-        # Doubling reaches any head within `log2(nodes)` passes.
+        # examined prefix after P passes is only `P x batch`; doubling makes the widest
+        # prefix ONE CALL can ever examine `batch_size x 2^(max_passes-1)`.
+        #
+        # ⛔ THE REAL BOUND, stated because an earlier version of this comment claimed
+        # "doubling reaches any head within `log2(nodes)` passes" and that is FALSE:
+        # `window` starts at `budget` on EVERY call (nothing survives a call), so at the
+        # defaults (batch 500 x 10 passes) the widest prefix is 500 x 2^9 = 256,000
+        # nodes. A 1M-node graph would need 12 passes, not 10, and an unservable cold
+        # head longer than 256,000 nodes is never passed — by this call OR any later one.
+        # Measured on the real `evict()`: 400,000 resident nodes, a 300,000-node
+        # unservable cold head, `max_nodes=133,333` -> `PARTIAL`, `deleted=0`,
+        # `passes=10`, `held=256,000`, and a reason that says "re-run to continue" — an
+        # instruction that cannot succeed. It fails CLOSED (nothing unproven is deleted),
+        # which is why this is a reporting defect and not a safety one; the stop reason
+        # below now says which of the two it is. Carrying the window across calls is the
+        # fix if the starvation is to be closed outright, and is not done here.
         window = min(
             after_nodes,
             max(
@@ -992,10 +1003,28 @@ def evict(
         # a still-over-budget cache as done.
         verdict = "PARTIAL"
         if budget_exhausted:
-            reason += (
-                f"; still {over_after} node(s) over the budget after the full "
-                f"{resolved.max_passes}-pass budget — re-run to continue"
-            )
+            # ⛔ "RE-RUN TO CONTINUE" IS ONLY TRUE WHEN THE HEAD IS SHORTER THAN ONE
+            # CALL CAN EXAMINE. The widest prefix a single call reaches is
+            # `batch_size x 2^(max_passes-1)`, and the window does NOT survive the call,
+            # so a held-back head at or beyond that bound is never passed — telling the
+            # operator to re-run would send them into a loop that cannot converge.
+            reach = resolved.batch_size * (2 ** (resolved.max_passes - 1))
+            if len(held_record) >= reach or len(held_leased) >= reach:
+                reason += (
+                    f"; still {over_after} node(s) over the budget — the held-back head "
+                    f"({len(held_record)} unservable, {len(held_leased)} leased) has "
+                    f"reached the widest prefix ONE call can examine "
+                    f"({reach} = batch {resolved.batch_size} x "
+                    f"2^(max_passes-1 {resolved.max_passes - 1})); re-running will not "
+                    f"converge — raise the batch or the pass budget, or widen the "
+                    f"proven population"
+                )
+            else:
+                reason += (
+                    f"; still {over_after} node(s) over the budget after the full "
+                    f"{resolved.max_passes}-pass budget — re-run to continue (a single "
+                    f"call examines at most {reach} node(s) ahead of the selection)"
+                )
         elif stop_reason == "licence":
             reason += (
                 f"; still {over_after} node(s) over the budget — the census proved "

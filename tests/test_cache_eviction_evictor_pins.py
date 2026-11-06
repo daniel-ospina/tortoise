@@ -516,7 +516,39 @@ def test_a_long_unservable_head_is_reached_and_the_budget_state_is_named():
         policy=EvictionPolicy(max_nodes=40, batch_size=2, max_passes=1),
     )
     assert tight.metric()["pass_budget_exhausted"] is True
-    assert "re-run to continue" in tight.reason
+    # ⛔ AND IT MUST NOT PROMISE A RE-RUN THAT CANNOT CONVERGE. This case is
+    # `batch_size=2, max_passes=1`, so one call examines at most `2 x 2^0 = 2` nodes
+    # ahead of the selection — and the held-back head IS 2. The window does not survive
+    # a call, so "re-run to continue" here would be an instruction that loops forever.
+    # (The comment in `cache_evict` used to claim doubling reached any head within
+    # `log2(nodes)` passes; that was false, and this pin is what makes the correction
+    # stick.)
+    assert "re-running will not converge" in tight.reason, tight.reason
+    assert "did not hold enough evictable nodes" not in tight.reason, (
+        "the population was not the binding constraint")
+
+
+def test_a_head_SHORTER_than_one_calls_reach_still_promises_the_re_run():
+    """The other half: when the head is inside one call's reach, re-running DOES help."""
+    offered = _candidates(60)
+
+    def probe(candidate) -> bool:
+        return candidate.node_id >= 2          # the 2-node head can never be served
+
+    report = evict(
+        _assessment(evictable=[
+            {"population": POPULATION, "nodes": 60, "instrument": "i"}
+        ]),
+        _FakeClient(), _FakeGraph(nodes=60),
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=probe, dry_run=False,
+        # reach = 5 x 2^4 = 80 > the 2-node head, so a re-run can make progress.
+        policy=EvictionPolicy(max_nodes=40, batch_size=5, max_passes=5),
+    )
+
+    if report.metric()["pass_budget_exhausted"]:
+        assert "re-run to continue" in report.reason, report.reason
+        assert "will not converge" not in report.reason, report.reason
 
 
 def test_a_population_proven_dry_is_not_blamed_on_the_pass_budget():
