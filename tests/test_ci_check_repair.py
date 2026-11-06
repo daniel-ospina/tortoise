@@ -1885,8 +1885,9 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     coordinates for the 5400 s floor — and two of them had already drifted by this
     head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
     one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6's line-span citation
-    then pointed at §5's `timeout-minutes` kill table instead of the derivation (which
-    sits further down §6). The
+    opened four lines too wide — `326-332`, where `330-332` is the quoted derivation and
+    `326` is §6's OWN opening bullet ("It does not bound queue wait") — a shape the pin
+    could not see, because a span that CONTAINS the sentence passes. The
     docstring names the reader who will follow these numbers and warns that whoever
     mis-locates the derivation "discards the one section that supports this floor" —
     so a stale coordinate sends the next lane to exactly the misreading the paragraph
@@ -1898,9 +1899,9 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     the defect. Discriminating: restore `:304` or a span that does not contain the
     quoted derivation and it reddens. ⚠ Only the coordinate in `tools/ci_check_repair.py`
     is re-anchored on a red — never this docstring's prose: restating a live line number
-    here is how the coordinate drifts unnoticed (done once already, by #6744's §7 insert —
-    it moved §6 down and the span with it, and the numbers in the paragraph above are the
-    PRE-#6744 ones by design).
+    here is how the coordinate drifts unnoticed (done once already, when commits on this
+    branch that expand a section ABOVE §6 moved §6, and the span with it — the numbers in
+    the paragraph above are the PRE-#6744 ones by design).
 
     Arm (3) derives the span from the doc's own text, so the next red NAMES the number to
     write instead of only reporting that the citation is stale: arms (1) and (2) accept any
@@ -1936,10 +1937,9 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
 
     # 3. The cited span must be the span the QUOTED SENTENCE actually occupies, derived
     #    from the doc's own text — so a shift reds with the number to write instead of
-    #    leaving the next lane to re-derive it. The span has moved before (`326-332`, which the
-    #    first version cited and which pointed at §5 — corrected to `342-344`; `342-344`, which
-    #    was right on `main`; now `369-371`), and arms (1)-(2) cannot tell a wide-enough span
-    #    from the right one.
+    #    leaving the next lane to re-derive it. Arms (1)-(2) cannot tell a wide-enough span
+    #    from the right one — the first version of this citation was four lines wide and
+    #    passed them — and this is a span that any insert above §6 moves.
     opens = [i + 1 for i, line in enumerate(doc)
              if "The budget's default is derived from this" in line]
     closes = [i + 1 for i, line in enumerate(doc)
