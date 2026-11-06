@@ -1688,7 +1688,10 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
       RECORDED when the window is EMPTY. Refusing it (with a Retry-After) would
       tell a client to retry a request that can never fit — an unbreakable loop
       that only appears if an operator sets
-      ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` below the route's 8 MiB body cap.
+      ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` below the route's body cap — and
+      on the CAPTURE lane that cap (16 MiB, ``body_limits.py``) is ALREADY above
+      the 10 MiB default, so this one-admission branch is reachable there at
+      DEFAULT configuration, not only under a retuned operator value.
       Admitting it once spends the window, so the NEXT request is throttled: at
       most one over-sized request per window, never an unlimited stream of
       them (which is why the ``used == 0`` condition is load-bearing, not a

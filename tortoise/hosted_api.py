@@ -17092,8 +17092,10 @@ class SessionRequest(BaseModel):
 # THE UNIT IS THE ONE ALREADY RULED: bytes (#4495 "the node cap is replaced,
 # not extended"; #5331 "any node count × a per-node constant is not the
 # model"), with the node-count FLOOR #4051 records in its own ``OVERRIDES:``
-# comment — a ~500-byte one-turn capture still leaves ~4 KB of nodes behind, so
-# a byte-only charge would make the cheapest iteration of the loop nearly free.
+# comment — a ~500-byte one-turn capture still leaves ~5 KB of nodes behind
+# (the fixed ``:Session``/``sessionCaptured``/``:Source`` chain, 3 nodes, plus
+# ``_CAPTURE_TURN_NODES`` = 2 for the one turn), so a byte-only charge would
+# make the cheapest iteration of the loop nearly free.
 # ``COMMIT_INGEST_BYTES_PER_NODE`` is that floor's per-node figure and is tied
 # to ``product/pricing.json`` → ``billing.cost_basis.bytes_per_node`` by a test,
 # so an owner retune cannot leave this rate charging a stale number.
