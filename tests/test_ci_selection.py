@@ -7904,13 +7904,26 @@ def test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row(tmp_path):
 
     ⛔ AND THE COUNT IS NOT SILENTLY DEDUPLICATED: two stale cites of DIFFERENT
     values are two offenders, because each is a separate sentence a maintainer has
-    to delete. Two cites of the SAME stale value collapse to one only because the
-    same `(key, stated, actual)` tuple is the same repair.
+    to delete. Two cites of the SAME stale value are reported TWICE as well — one
+    entry per offending SENTENCE, never per distinct repair: the read appends on
+    every match and nothing deduplicates it, so the list describes what the row
+    still carries. Both shapes are MEASURED below rather than asserted, because an
+    earlier revision of this docstring claimed a dedupe the code never had.
     """
     (tmp_path / "test_two.py").write_text(
         "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
     assert _durations_rows_with_a_stale_case_count(
         _ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM, tmp_path) == [("test_two.py", 190, 2)]
+
+    # The SAME stale value cited twice is two offenders, not one: nothing dedupes.
+    twice = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 190) and\n"
+        "  # again (`grep -c '^def test_'` = 190).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(twice, tmp_path) == [
+        ("test_two.py", 190, 2), ("test_two.py", 190, 2)], (
+        "one offender per offending SENTENCE — the guard does not deduplicate")
 
     # A row whose ONLY claim is correct stays quiet — the widened read must not
     # turn a single good cite into an offender.
