@@ -7642,8 +7642,9 @@ tier1:
 # class this section exists for). Measured before these entries:
 # `select(['docs/infra-runbook.md'])` returned both as UNSELECTED.
 #   * `test_record_backup.py` pins §9's exit-1 row FAILURE CLASS — the row must keep
-#     `RecordRestoreFailed` and the 'nothing was published' sentence — and reads the
-#     same doc twice more (`:2206`, `:2262`). Edit that row and it merged green;
+#     `RecordRestoreFailed` and the 'nothing was published' sentence — and builds the
+#     same path twice more (`runbook = … read_text().split()`). Edit that row and it
+#     merged green;
 #   * `test_session_extraction_modes.py` pins §4.6's `VENICE_API_KEY` row — the table
 #     an operator reads BEFORE setting the key on the hosted deployment. Delete the
 #     row and it merged green.

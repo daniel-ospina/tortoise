@@ -240,22 +240,22 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured at this head: 153 files for the STORAGE diff, 76 for the EXTRACTOR
+    Measured at this head: 155 files for the STORAGE diff, 78 for the EXTRACTOR
     diff (empty surfaces, the early return); the gate is in the selected set in
     both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
     measurements, not constants, and they move for DIFFERENT reasons:
 
-    * the **153** is `onboarding` ∪ `tier1` **minus 14** — the union is 167 at
-      this head (97 + 76 − 6 shared) and `select()` drops 3 `carve_out` and 11
+    * the **155** is `onboarding` ∪ `tier1` **minus 14** — the union is 169 at
+      this head (97 + 78 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
-    * the **76** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1109 at
-      this head (1094 on `main` before this fold's three new test files and
-      #11064's runbook pins), and it
-      moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
+    * the **78** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool", which is 1109 —
+      the same on `main`, so the pool does not move with these registrations —
+      and it moves for a third reason again, `len(fast_pool(manifest))`:
+      re-derive it rather than reading this sentence.
       The `60` this sentence carried was that same `tier1` set **13 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
-      and 76 here), i.e. the very "a past state quoted as a current one"
+      and 78 here), i.e. the very "a past state quoted as a current one"
       defect the line below warns about.
 
     Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
@@ -537,10 +537,14 @@ def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
     # exit-1 row's failure class), `test_session_extraction_modes.py` (§4.6's
     # `VENICE_API_KEY` row), `test_durability_posture.py` (the runbook in its
     # `SCAN_FILES`) and `test_retention_promise.py` (it in `LINKED_FILES`) all READ
-    # the doc and NONE was selected on a runbook-only diff, so editing a row they
-    # pin merged green with the pin never run — the #4309 silent-drop class the
-    # registration exists to close. A census that is not one is not: the fix was to
-    # register them AND to make the list derive itself.
+    # the doc. TWO of them were asleep on a runbook-only diff —
+    # `test_record_backup.py` and `test_session_extraction_modes.py`, measured
+    # UNSELECTED at `origin/main` — so editing a row they pin merged green with the
+    # pin never run; the other two were already reachable through their own `tier1`
+    # arms, which is exactly why a list of "the runbook-specific owners" could not
+    # see the whole set (the #4309 silent-drop class the registration exists to
+    # close). A census that is not one is not: the fix was to register the two AND
+    # to make the list derive itself.
     #
     # The signal is a string literal that IS the doc's path — `"infra-runbook.md"`
     # or `"docs/infra-runbook.md"`, the shape a path is built from
@@ -5302,7 +5306,7 @@ def test_ready_for_owner_tool_change_fails_closed_to_full():
     # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
     # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
     #
-    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 76 at the
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 78 at the
     # #11064 head, so re-derive it rather than reading this as a current count):
     #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
     #       -> surfaces: []  full: False  tier-1 `test_files`,
