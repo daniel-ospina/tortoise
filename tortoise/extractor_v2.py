@@ -10770,9 +10770,11 @@ def _carried_holds(rows: object) -> dict[str, str]:
 
 
 #: The participant-slot roles Layer-1 resolves against the EMITTED entities
-#: (``_resolve_slot_refs``). ``slots.event`` is deliberately absent: it is
-#: event-as-content (#1417 B2), resolved by the write path against events, so a
-#: held SURFACE name in it is not a reference to an entity (#11021).
+#: (``_resolve_slot_refs``). ``slots.event`` is deliberately absent: it binds
+#: event-as-content (#1417 B2) and NOTHING resolves it against the emitted
+#: entities — its binding belongs to the #1417 ``aboutEvent`` work, which
+#: ``subject_binding._ROLE_TARGET`` deliberately excludes — so a held SURFACE
+#: name in it is not a reference to an entity (#11021).
 _SLOT_ENTITY_ROLES = ("subject", "object")
 
 
