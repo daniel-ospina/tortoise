@@ -284,9 +284,15 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
         "controls": controls,
         "predicate_alive": alive,
         "object_names": names,
-        "candidates_total": sum(b["candidates"] for b in per_section.values()),
-        "drops_across_sections": sum((b["drops_total"] or 0)
-                                     for b in per_section.values()),
+        "candidates_total": (sum(b["candidates"] for b in per_section.values())
+                             + (0 if "objects" in per_section else len(names))),
+        # The objects census is measured UNCONDITIONALLY, so it is part of the
+        # aggregate even when it was not requested — otherwise the record says
+        # `coverage_complete: true` beside a `drops_across_sections` smaller than
+        # the `drops_total` on the same line.
+        "drops_across_sections": (sum((b["drops_total"] or 0)
+                                      for b in per_section.values())
+                                  + (0 if "objects" in per_section else len(drops))),
     }
 
 
@@ -294,8 +300,9 @@ def _sections_line(record: dict) -> str:
     parts = []
     for section, block in record["sections"].items():
         if not block["measured"]:
-            # No count at all: a `drops=0` beside `UNMEASURED` is still a zero a
-            # reader can pick up, and stopping that is this instrument's job.
+            # NO DROP COUNT: the `0` printed is the measured CANDIDATE count, and
+            # a `drops=0` beside `UNMEASURED` would be a zero a reader can pick
+            # up — stopping that is this instrument's job.
             parts.append(f"{section}=0/UNMEASURED")
             continue
         parts.append(f"{section}={block['candidates']}"

@@ -165,6 +165,11 @@ def test_e1_gate_drops_coverage_is_judged_over_the_pass_not_the_request(
     assert record["coverage_complete"] is False
     assert record["unmeasured_sections"] == ["events", "points"]
     assert record["sections_not_requested"] == ["events", "points"]
+    # The objects census is measured unconditionally, so the aggregates must
+    # include it even when it was not requested — a `drops_across_sections`
+    # smaller than the `drops_total` on the same line is a pickable wrong number.
+    assert record["drops_across_sections"] >= record["drops_total"]
+    assert record["candidates_total"] >= record["objects"]
     assert record["sections"] == {"objects": record["sections"]["objects"]}, (
         "only the requested section is measured — the rest are disclosed, not invented")
     assert "TORTOISE_VALUE_GATE=0" in record["arm_precondition"], (
@@ -276,6 +281,11 @@ def test_e1_gate_drops_discloses_an_empty_section_instead_of_zero(monkeypatch, t
     assert exit_code == 0
     record = json.loads((tmp_path / "o.json").read_text())
     assert record["sections"]["events"]["measured"] is False
+    assert record["sections"]["events"]["drops"] is None, (
+        "an unmeasured section must carry NO drop dict — a `{}` is a zero result")
+    assert record["sections"]["events"]["drops_total"] is None, (
+        "an unmeasured section must carry NO drop count, in the artifact as "
+        "well as on the console")
     assert record["coverage_complete"] is False
     assert record["unmeasured_sections"] == ["events"]
     out = capsys.readouterr().out
@@ -373,11 +383,12 @@ def test_the_points_census_excludes_the_classes_the_pass_never_saw():
     — a completeness claim over a section the pass never populated. Pinned at the
     query, because that is where the composition decision lives.
     """
-    point_cypher = e1_gate_drops.CANDIDATE_CYPHER["Point"]
+    point_cypher = " ".join(e1_gate_drops.CANDIDATE_CYPHER["Point"].split())
 
-    assert "is_episodic" in point_cypher
-    assert "is_operator" in point_cypher
-    assert "NOT" in point_cypher
+    assert ("WHERE NOT coalesce(n.is_episodic, false) "
+            "AND NOT coalesce(n.is_operator, false)") in point_cypher, (
+        "the conjunction is the pin: an `OR` re-admits every turn row, and a "
+        "token-presence assertion cannot tell the filter from its negation")
 
 
 def test_the_probe_reads_the_candidate_text_per_node_class():

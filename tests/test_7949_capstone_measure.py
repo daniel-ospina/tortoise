@@ -9846,7 +9846,7 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
     `_count(..., ceiling=gate_objects)` refuses a total above the 61-Object
     population, which is necessary and not sufficient: the SAME record carries the
     drop census itself (`e1_gate_drops.py`'s `measure` writes `value_gate_drops` as a
-    name-keyed dict, `:84` writes `len(drops)` beside it) and nothing read it — so
+    name-keyed dict and `drops_total` as `len(drops)` beside it) and nothing read it — so
     the field was a trusted integer anywhere inside `[0, objects]`.
 
     Measured at the pre-fix head, on a copied bundle whose shipped pair is

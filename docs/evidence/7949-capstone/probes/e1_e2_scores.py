@@ -2047,8 +2047,8 @@ def score(repo: Path = _ROOT) -> dict:
     # `capstone_measure.py` reads it into `gate_drops_total` and renders it into the
     # scored E1 note as `reports value_gate drops <N> of <M> Objects with its positive
     # controls alive`, so an unvalidated value publishes a mechanism claim nothing
-    # measured. The ceiling is this same run's `objects` (`e1_gate_drops.py:84`
-    # writes `len(drops)`, and `drops` is keyed by object name), and the head loop has
+    # measured. The ceiling is this same run's `objects` (`e1_gate_drops.py`'s `measure`
+    # writes `drops_total` as `len(drops)`, and `drops` is keyed by object name), and the head loop has
     # already refused a record whose `objects` disagrees with the ON arm's census.
     # ⛔ The gate-drops record is REUSED, not re-read (#10610 review at
     # `1c2130dd9`, P3): `gates_record` above is the read whose graph and census were
@@ -2060,9 +2060,9 @@ def score(repo: Path = _ROOT) -> dict:
     # ⛔ THE CEILING WAS A BOUND, NOT A RECONCILIATION (#10610 review at
     # `6e28a20e1f`, P2). `_count(..., ceiling=gate_objects)` refuses a value
     # above the Object population, which is necessary and not sufficient: the
-    # SAME record carries the drop census itself (`e1_gate_drops.py:83` writes
-    # `value_gate_drops` as a name-keyed dict, `:84` writes `len(drops)` beside
-    # it), and nothing in this file had ever read it. So any value in
+    # SAME record carries the drop census itself (the probe's `measure`
+    # writes `value_gate_drops` as a name-keyed dict and `drops_total` as
+    # `len(drops)` beside it), and nothing in this file had ever read it. So any value in
     # `[0, objects]` scored — measured at the pre-fix head, `drops_total: 61`
     # (equal to the 61-Object ceiling) beside a shipped `value_gate_drops: {}`
     # exited 0 and the record emitted `drops_total: 61`, where 62 was refused.
@@ -2092,9 +2092,9 @@ def score(repo: Path = _ROOT) -> dict:
     #   2. every key IS one of this run's `object_names` (a drop of something the run
     #      never wrote is not a drop);
     #   3. every value is a STRING — the producer writes
-    #      `value_gate.mechanical_verdict(name)["rule_id"]` (`e1_gate_drops.py:73`);
+    #      `value_gate.mechanical_verdict(name)["rule_id"]` (the probe's `measure`);
     #   4. `drops_among_bare_definite` — the record's SECOND statement of the same
-    #      drops, written unconditionally at `e1_gate_drops.py:85` as
+    #      drops, written unconditionally by the probe's `measure` as
     #      `[n for n in bare if n in drops]` and read by NOTHING until now — is
     #      reconciled against the census and the names, so an internally
     #      contradictory record (a bare-definite name dropped, with an empty

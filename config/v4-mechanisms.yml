@@ -269,7 +269,9 @@ mechanisms:
       bare-definite, positive controls firing) — the residual is the point/event
       rate, which that artifact does not cover (`#10996` V8). The INSTRUMENT now
       can cover it: `e1_gate_drops.py --sections` censuses exactly the sections
-      this pass judges (`entities`/`events`/`points`), defaults to all three, and
+      this pass judges (`entities`/`events`/`points` — the instrument spells them
+      `objects`/`events`/`points`, and `PASS_SECTION_OF` maps `objects`→`entities`),
+      defaults to all three, and
       refuses to print a drop count over a section that yielded no candidates
       (`measured: false`, `coverage_complete: false`) — but **the points+events
       number is still NOT taken**: the ON-arm graph is ephemeral, so Step 4's
