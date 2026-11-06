@@ -158,20 +158,50 @@ PROPERTY_AS_COLUMN_SHAPES = (
     "`subjectKind`/`objectKind`/`title` are all in `projected_columns`",
 )
 
-#: The same three fields in the space the claim has to live in — MEASURED against
-#: the projector rather than restated, so a column that stops projecting reds the
-#: sentence that cites it instead of rotting into a citation.
-FOLD_COLUMNS = (
-    ("subject", "subject_kind"),
-    ("object", "object_kind"),
-    ("object", "title"),
-)
+def _snake(prop: str) -> str:
+    """`subjectKind` → `subject_kind`: the record's spelling of a property name.
 
-#: The fold label that owns each table, so a key can be checked against the table it
-#: actually lands on rather than "somewhere in column space" (the first cut accepted
-#: the snake spelling in ANY table — harmless while the columns live where they do,
-#: but laxer than the doc's own "their own table's" wording).
+    The two namespaces the `#10394` review P3 conflated: `FOLD_ON_CREATE_DEFAULTS`
+    is keyed in PROPERTY space (what the node carries) and `projected_columns`
+    answers in COLUMN space (what the row carries). A single-word key spells the
+    same in both, which is why one of the three members was true as written and
+    the two camel-case ones were not.
+    """
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", prop).lower()
+
+
+#: The fold's OWN table, derived from the label it is keyed by — never a hand
+#: restated list. The first cut hardcoded the three members, which is the same
+#: restated-enumeration cost the commit message claims to avoid one level up: a new
+#: fold default would have left both the doc's "all three" and this pin's member
+#: list silently short.
 FOLD_LABEL_TABLES = (("Subject", "subject"), ("Object", "object"))
+
+
+def _fold_columns() -> tuple[tuple[str, str], ...]:
+    """`(table, column)` for every declared fold default, DERIVED not restated."""
+    owned = dict(FOLD_LABEL_TABLES)
+    return tuple(
+        sorted((owned[label], _snake(prop))
+               for label, defaults in cache_projection.FOLD_ON_CREATE_DEFAULTS.items()
+               if label in owned
+               for prop in defaults))
+
+
+#: The same fields in the space the claim has to live in — derived from the fold and
+#: MEASURED against the projector, so a column that stops projecting (or a new fold
+#: default) reds the sentence that cites the class instead of rotting quietly.
+FOLD_COLUMNS = _fold_columns()
+
+#: The section that makes the non-widening claim. The presence arm is SCOPED to it:
+#: an unscoped `column in whole` check is vacuous at this very head — `### 0.6
+#: Verification` names the same three columns in another bullet (measured, and the
+#: reason a review found the first cut GREEN on the deletion it exists to catch).
+FOLD_PROOF_HEADING_PREFIX = "## §9.1/D1 at the projection door"
+FOLD_PROOF_PREFIX_LABEL = "§9.1/D1 at the projection door"
+
+#: The column space the proof must be stated IN, within that section.
+PROOF_CITATION = "projected_columns"
 
 #: How much text around a `projected_columns` mention counts as "cited beside it".
 #: A mixed-space paraphrase (`subject_kind`/`objectKind` "are all in
@@ -207,16 +237,24 @@ PIN_MODULES = (
 )
 
 
-def _snake(prop: str) -> str:
-    """`subjectKind` → `subject_kind`: the record's spelling of a property name.
+def _section_by_prefix(prefix: str) -> str:
+    """The body of the ONE heading starting with ``prefix``, verbatim.
 
-    The two namespaces the `#10394` review P3 conflated: `FOLD_ON_CREATE_DEFAULTS`
-    is keyed in PROPERTY space (what the node carries) and `projected_columns`
-    answers in COLUMN space (what the row carries). A single-word key spells the
-    same in both, which is why one of the three members was true as written and
-    the two camel-case ones were not.
+    Prefix-anchored rather than exact (unlike :func:`_section`) because this heading
+    carries a long tail that lanes legitimately extend; the EXACTLY-ONCE assertion is
+    kept, because a prefix that matches twice would inspect the wrong prose and read
+    as coverage.
     """
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", prop).lower()
+    lines = DOC.read_text(encoding="utf-8").splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith(prefix)]
+    assert len(starts) == 1, (
+        f"`{DOC.name}` must carry exactly ONE heading starting `{prefix}`; found "
+        f"{len(starts)} at lines {starts}. Re-point this guard at the section rather "
+        "than deleting it — it is what ties the doc's claim to the code's")
+    start = starts[0] + 1
+    end = next((i for i in range(start, len(lines))
+                if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[start:end])
 
 
 def _doc_text() -> str:
@@ -414,15 +452,25 @@ def test_the_value_filling_class_is_proved_in_COLUMN_space_and_the_proof_is_meas
     # The corrected sentence must be PRESENT, not merely un-replaced: the file's
     # own convention is that "fixing" a false claim by deleting it does not pass
     # (`test_the_doc_states_the_mechanism_and_the_routes_that_do_clear_the_pair`
-    # exists for the same reason). Without this arm, deleting the parenthetical
-    # left the guard green — measured, `/tmp` deletion probe against the first cut.
+    # exists for the same reason).
+    # ⛔ SCOPED TO THE SECTION, and that scoping is the whole arm: an unscoped
+    # `column in whole` check was GREEN on the deletion it names, because
+    # `### 0.6 Verification` names the same three columns in a different bullet
+    # (found by review at `f9adf39da5`, P2 — a guard reporting OK on the exact
+    # mutation it exists to catch is the false-PASS class, not a wording nit).
+    proof = _section_by_prefix(FOLD_PROOF_HEADING_PREFIX)
+    assert PROOF_CITATION in proof, (
+        f"`{DOC.name}`'s `{FOLD_PROOF_PREFIX_LABEL}` section no longer mentions "
+        f"`{PROOF_CITATION}`. The value-filling class is settled there by citing "
+        "the COLUMNS the fold fills; without that citation the paragraph's claim "
+        "is unbacked and a reader concludes the fold widens the field set.")
     for _table, column in FOLD_COLUMNS:
-        assert column in whole, (
-            f"`{DOC.name}` no longer names `{column}` anywhere. The value-filling "
-            "class is proved by citing the COLUMNS the fold fills, so deleting the "
-            "proof is not a repair — it leaves the paragraph's claim unbacked, "
-            "which is how a reader concludes the fold widens the field set. "
-            "Restore the proof (in column space) rather than removing it.")
+        assert column in proof, (
+            f"`{DOC.name}`'s `{FOLD_PROOF_PREFIX_LABEL}` section no longer names "
+            f"`{column}`. Deleting the proof is not a repair — the class has to be "
+            "proved in the row's own spelling, in that section (naming it in "
+            "`### 0.6 Verification` instead leaves the §9.1/D1 paragraph — the one "
+            "a reader consults for this door — without its proof).")
 
     for table, column in FOLD_COLUMNS:
         assert column in cache_projection.projected_columns(table), (
