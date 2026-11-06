@@ -267,7 +267,7 @@ DECLINE_RE = re.compile(
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
     rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})(?P<obj_a>{_EMPH}{_DET}{_REF_LIST})?"
-    rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}))"
+    rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
     rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?{_DECLINE_TAIL}$",
