@@ -3480,8 +3480,8 @@ jobs:
         # UNBOUNDED term — the save has no timeout of its own.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`), and it is written on EVERY run by
-        # `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`.
+        # (`pip-<os>-<hash uv.lock>`), and on EVERY run by `test-d14-hosted-api`
+        # (unconditional, PR + push) and by `test-slow` only under `slow_run`.
         # This job only ever READ it.
         #
         # `continue-on-error`: a cache-SERVICE error (transport/503) must never

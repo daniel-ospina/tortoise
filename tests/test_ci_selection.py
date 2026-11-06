@@ -12869,8 +12869,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     check on a diff that never touched this job.
 
     Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`) and is still written on EVERY run by
-    `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`, so this
+    (`pip-<os>-<hash uv.lock>`) and on EVERY run by `test-d14-hosted-api`
+    (unconditional, PR + push) and by `test-slow` only under `slow_run`, so this
     job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
@@ -13466,12 +13466,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"own run: {[(jid, _gate_of(jid)) for jid in pip_writers_elsewhere]} vs "
         f"this job's `{test_gate}`. A writer that needs `slow_run`/`carve_out_run` "
         "to be true does not populate the key on a run that still executes `test`, "
-        "so this job reads an entry nothing wrote. The unconditional writers are "
-        "`test-d14-hosted-api` and `test-record-postgres` (`always() && "
-        "needs.changes.result == 'success'`), and `test-concurrency-falkor` shares "
-        "this job's own gate; `test-slow` (`slow_run`) is the only diff-gated pip "
-        "writer, and `test-carve-out` is NOT a writer — its pip step is "
-        "restore-only by its own pin.")
+        "so this job reads an entry nothing wrote. The unconditional writer is "
+        "`test-d14-hosted-api` (`always() && needs.changes.result == 'success'`); "
+        "`test-slow` (`slow_run`) is the only diff-gated pip writer, and "
+        "`test-carve-out`, `test-record-postgres` and `test-concurrency-falkor` are NOT "
+        "writers — their pip steps are restore-only (`_PIP_CACHE_READER_JOBS`).")
 
 
     # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
