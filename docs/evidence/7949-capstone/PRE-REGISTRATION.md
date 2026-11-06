@@ -237,10 +237,16 @@ unset; and the three measurement switches an inherited shell must not supply —
 `TORTOISE_SESSION_LLM_MOCK` (the offline model seam, which swaps the model for `_V2SessionMock`
 **and** short-circuits the provider-key check, so an ambient `=1` would score canned output under a
 real key), `TORTOISE_EXTRACTOR_PROMPT` (a third render switch, not byte-identical to the default
-since `#9733`) and `TORTOISE_EXTRACT_MODEL` (selects the model and the legacy 4000-token bound) —
-all pinned **unset**. Every one is written in-process, **read back**, and a run whose read-back
-disagrees is **refused** (`probes/capstone_measure.py`); the three measurement switches were
-unpinned until the `#10983` review, which is the same declaration-versus-control gap one layer below
+since `#9733`), `TORTOISE_EXTRACT_MODEL` (selects the model — NOT the output bound: every stage
+passes its own `max_tokens=_stage_cap(…)` per call, which beats the adapter default), and the
+truncation budgets `TORTOISE_EXTRACTOR_MAX_TOKENS` (`_stage_cap`, read at call time: unset ⇒ the
+shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (the
+length-truncation retry budget), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split) — all pinned **unset**. The set
+is CLOSED over what the path reads, and `tests/test_7949_c2_door.py` derives that closure from
+`extractor_v2.py` rather than asserting the prose. Every one is written in-process, **read back**, and a run whose read-back
+disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
+unpinned until the `#10983` reviews (rounds 1 and 2), which is the same declaration-versus-control gap one layer below
 the lane. The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
 default-ON predicate the arm would otherwise measure the predicate's population while declaring an
 arm that does not include it.

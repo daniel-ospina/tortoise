@@ -342,26 +342,39 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
 # rerouted all seven acceptance captures to the OTHER extractor while the log
 # still printed an ``arm:`` line that said nothing about it — the silent seam
-# #10983 exists to close. The lane, and EVERY switch on this path that changes
-# what the run MEASURES (the render/diagnostic switches, the model selector and
-# the offline model mock), are pinned here and READ BACK like every other switch
-# (the ``arm:`` rule, applied to the door).
+# #10983 exists to close. The lane, plus every switch on this path that changes
+# what the run MEASURES through it, is pinned here and READ BACK like every other
+# switch (the ``arm:`` rule, applied to the door).
 #
-# ⚠️ The set below is what the #10983 review widened. The first revision pinned
-# the lane and the two render switches and called that "the seam set"; three
-# more switches on the same ``capture_session`` → ``_extract_session_v2`` path
-# were unpinned and unread, of which ``TORTOISE_SESSION_LLM_MOCK`` is decisive: it
-# swaps the model for ``_V2SessionMock`` (``sdk._session_llm_mock_enabled``) and
-# SHORT-CIRCUITS the provider-key check, so ``backend_ready()`` still passes on a
-# real key and a fully mocked run is byte-indistinguishable in the log from a
-# real one. A pin set that stops at "the pipeline" and leaves "what the pipeline
-# reads" ambient is the same declaration-versus-control defect, one layer down.
+# ⛔ The set below is CLOSED, and that claim is checkable rather than rhetorical:
+# ``extractor_v2.py`` reads exactly ten environment variables, and every one is
+# accounted for — three are arm seams in ``SEAM_LEDGER`` (``TORTOISE_VET``,
+# ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), six are pinned here, and
+# the last two are INPUTS rather than settings (``TORTOISE_DB_URI`` the graph it
+# writes, ``TORTOISE_API_URL`` a backend label), which the acceptance requires
+# before it writes anything. ``sdk.capture_session``'s path adds the lane, the
+# commit dispatch, the model selector and the offline mock, all pinned here.
+# ``grep -o 'os\.environ\.get("[A-Z_0-9]*"' tortoise/extractor_v2.py`` re-derives
+# the list if the module grows one.
+#
+# ⚠️ The set below is what the #10983 reviews widened, in TWO rounds. The first
+# revision pinned the lane and the two render switches and called that "the seam
+# set"; round 1 found ``TORTOISE_SESSION_LLM_MOCK`` (decisive: it swaps the model
+# for ``_V2SessionMock`` — ``sdk._session_llm_mock_enabled`` — AND short-circuits
+# the provider-key check, so ``backend_ready()`` still passes on a real key and a
+# fully mocked run is byte-indistinguishable in the log from a real one), the
+# prompt render and the model selector; round 2 found the two TRUNCATION BUDGETS
+# (``_stage_cap`` / ``_extractor_escalation_tokens``, both read at call time),
+# which decide how much of each stage's output survives. A pin set that stops at
+# "the pipeline" and leaves "what the pipeline reads" ambient is the same
+# declaration-versus-control defect, one layer down.
 #
 # The provider ROUTE is deliberately NOT pinned: ``TORTOISE_EXTRACTOR_PROVIDER``
-# only chooses among routes the box already has a key for, and the receipt
-# reports the route it took (``extraction_provider``), which the run records —
-# so it is OBSERVED rather than forced. Named here so the set below is not read
-# as an exhaustive list of every ``TORTOISE_`` variable in the process.
+# only chooses among routes the box already has a key for, and the route is
+# OBSERVED rather than forced — the receipt reports it as ``extraction_mode``
+# (``llm:<route>``, ``sdk.py``), which ``run_corpus`` records and ``render_log``
+# prints per session. Named here so the set below is not read as an exhaustive
+# list of every ``TORTOISE_`` variable in the process.
 
 #: The env var that selects the extraction lane.
 DOOR_LANE_ENV = "TORTOISE_SESSION_EXTRACTOR"
@@ -396,12 +409,30 @@ DOOR_LANE = "v2"
 #:   ``TORTOISE_LABEL_ORDER`` (``extractor_v2.py`` renders a different master
 #:   under it, and that render is explicitly NOT byte-identical to the default
 #:   since #9733), so it changes what the run measures without changing the arm.
-#: * ``TORTOISE_EXTRACT_MODEL`` — selects the extractor's model AND drops the
-#:   output bound to the legacy 4000-token default, i.e. it changes both the
-#:   producer and its truncation contract.
+#: * ``TORTOISE_EXTRACT_MODEL`` — selects the extractor's MODEL (the producer the
+#:   acceptance's numbers come from). It does NOT by itself move the output bound:
+#:   every stage passes ``max_tokens=_stage_cap(...)`` per call, which beats the
+#:   adapter's constructor default — measured at this head, an explicit model id
+#:   with ``TORTOISE_EXTRACTOR_MAX_TOKENS`` unset still caps S2/S4 at 16000. The
+#:   bound has its own switch, pinned below (#10983 review round 2 corrected this
+#:   bullet, which had credited the model selector with the bound).
+#: * ``TORTOISE_EXTRACTOR_MAX_TOKENS`` — the stage output cap (``_stage_cap``, read
+#:   at CALL time): pinned unset ⇒ the shipped 1500/16000 stage defaults. An
+#:   ambient value (the documented lever an operator raises after a timeout
+#:   spike) shrinks how much of each stage survives truncation, i.e. it changes
+#:   the population being measured, under a header that would still claim the
+#:   door held (#10983 review round 2).
+#: * ``TORTOISE_EXTRACTOR_ESCALATION_TOKENS`` — the length-truncation RETRY budget
+#:   (``_extractor_escalation_tokens``): the same class, pinned unset.
+#: * ``TORTOISE_LABEL_ORDER_SEED`` — inert while ``TORTOISE_LABEL_ORDER`` is off,
+#:   and pinned anyway so the pair cannot be split: setting the seed without the
+#:   render switch is a no-op today, and a future edit that reads the seed
+#:   independently must not inherit one from the operator's shell.
 DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
-                   "TORTOISE_LABEL_ORDER", "TORTOISE_SESSION_LLM_MOCK",
-                   "TORTOISE_EXTRACTOR_PROMPT", "TORTOISE_EXTRACT_MODEL")
+                   "TORTOISE_LABEL_ORDER", "TORTOISE_LABEL_ORDER_SEED",
+                   "TORTOISE_SESSION_LLM_MOCK", "TORTOISE_EXTRACTOR_PROMPT",
+                   "TORTOISE_EXTRACT_MODEL", "TORTOISE_EXTRACTOR_MAX_TOKENS",
+                   "TORTOISE_EXTRACTOR_ESCALATION_TOKENS")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
