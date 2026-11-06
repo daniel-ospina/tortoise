@@ -86,14 +86,11 @@ def test_the_carrier_ships_inside_the_package():
         f"the packaged placement table is missing at "
         f"{cp.PACKAGED_PLACEMENT_TABLE} — regenerate it with "
         f"`uv run python tools/gen_placement_table.py`")
-    assert (REPO_ROOT / "tortoise") in carrier.parents, (
-        f"{carrier} is not inside `tortoise/` — only `tortoise/` is COPY'd into "
-        f"the images, so a carrier anywhere else is unreadable in production "
-        f"while every source checkout stays green (#10663)")
-    assert carrier.parent != REPO_ROOT, (
-        f"{carrier} sits BESIDE the package, not in it — the image COPYs the "
-        f"package directory only, which is the #10663 defect")
-    assert carrier.name == cp.PACKAGED_PLACEMENT_TABLE.name
+    assert carrier.parent == REPO_ROOT / "tortoise", (
+        f"{carrier} is not directly in `tortoise/` — that directory is what the "
+        f"images COPY and what pyproject's `package-data` patterns are relative "
+        f"to, so a carrier anywhere else is unreadable in production while "
+        f"every source checkout stays green (#10663)")
 
 
 def test_the_carrier_declares_exactly_what_the_doc_declares():

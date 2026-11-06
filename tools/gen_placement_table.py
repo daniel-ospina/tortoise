@@ -22,7 +22,9 @@ USAGE
 
 WHAT the file holds: the parsed `(table, property)` rows and provenance (the
 source path, its sha256, the row COUNT, and the generator version it came
-through — the last two are ENFORCED by the reader, not decorative). No
+through — the last two are ENFORCED by the reader, not decorative; the sha256
+is NOT, because an image has no doc to compare it against, and saying so keeps
+the next reader from assuming the carrier is more validated than it is). No
 `ADDITIONAL_PRIMARY_COLUMNS` — those are schema-spelled decisions appended by
 `cache_projection`, and a carrier that invented them would be a second
 declaration of the schema.
