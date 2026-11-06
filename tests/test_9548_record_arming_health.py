@@ -682,10 +682,11 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     # "SAME names" inverted to "DIFFERENT names" matched nothing. So the pair's
     # bullet and the SAME-names sentence are both pinned, on a whitespace-normalised
     # copy so a reflow cannot red them (#9548 review P2).
-    # ⚠️ The SAME-names pin is the WHOLE sentence on purpose: that sentence is about
-    # "the record counters" collectively, so a substring pin (or pinning only the
-    # trailing clause) stays green on a docstring that NARROWS the claim to exclude
-    # the pair — measured green on exactly that edit (#9548 review P2).
+    # ⚠️ The SAME-names pin runs to the END of its sentence (`(#9188/#9231/#9307)`),
+    # not to `publishes`: that sentence is about "the record counters" collectively,
+    # and a pin that stopped at `publishes` was measured GREEN on an edit that kept
+    # the clause and appended `— EXCEPT the positive pair below …` to it, i.e. a
+    # docstring narrowing the claim to exclude the pair (#9548 review P3, twice).
     # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
     # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
     # here: a runbook-only diff selects no surface and runs `tier1` only, and this
@@ -701,7 +702,8 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         "which is the paper-only claim inverted"
     )
     assert (
-        "the record counters, under the SAME names ``metrics()`` publishes" in doc
+        "the record counters, under the SAME names ``metrics()`` publishes "
+        "(#9188/#9231/#9307)" in doc
     ), (
         "`_record_health`'s docstring no longer claims the record counters are "
         "published under `metrics()`'s own names (or has narrowed that claim so it "

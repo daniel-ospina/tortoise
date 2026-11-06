@@ -2501,18 +2501,23 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # witness this bar exists to add (#9548's `record_writes_applied`) was one it
     # omitted, leaving the delta it demands uncomputable from the reading it
     # prescribed (#9548 review P2).
-    # ⛔ The WHOLE clause is pinned — lead-in, imperative and the sentence that
-    # says what the two readings are FOR — and that is deliberate. Two earlier
-    # forms failed here, both measured: a bare fragment matched inside a sentence
-    # that FORBADE the baseline ("So ⛔ Do not **read every record counter …**"
-    # stayed green), and a negation-vocabulary guard bolted onto the fragment then
-    # false-blocked accurate wording ("So never skip the baseline: **read every…**"
-    # red). Pinning the clause needs no vocabulary: any negation inserted before
-    # the imperative breaks the match, and a rewording reds, which is the trade the
-    # sibling clauses in this test make too. `flat` still tolerates a reflow.
+    # ⛔ The clause is pinned from its lead-in through the RULE it states — `… the
+    # \*difference\* between the two reads, never an absolute count` — and that end
+    # point is deliberate: a pattern stopping at "between the two reads" was
+    # measured GREEN on the runbook dropping the very rule this assertion's message
+    # defends ("an absolute count left from earlier in the process's life then reads
+    # as this capture's growth"). Two earlier forms also failed, both measured: a
+    # bare fragment matched inside a sentence that FORBADE the baseline ("So ⛔ Do
+    # not **read every record counter …**" stayed green), and a negation-vocabulary
+    # guard bolted onto the fragment false-blocked accurate wording ("So never skip
+    # the baseline: **read every…**" red). Pinning the clause needs no vocabulary:
+    # any negation inserted before the imperative breaks the match, and a rewording
+    # reds — the trade the sibling clauses in this test make too. `flat` still
+    # tolerates a reflow.
     assert re.search(
         r"So \*\*read every record counter BEFORE\s+the capture and again after\*\*:"
-        r"\s+presence and growth are the \*difference\* between the two reads",
+        r"\s+presence and growth are the \*difference\* between the two reads,"
+        r" never an absolute count",
         flat,
     ), (
         "the bar says 'growth' but never tells the operator to take a reading "
