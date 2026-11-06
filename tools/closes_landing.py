@@ -1327,17 +1327,6 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     #         renderer: `<li></li>`, then the nested empty item, then `<ol start="2">` whose
     #         wide-gap content is `<pre><code>` -> CODE, in BOTH arms
     #         `origin/main` `[]` in both arms, the round-50 head `[100]` in both
-    # The SAME ladder `_leaves_no_paragraph` already follows, applied to the content instead of to
-    # the whole line: strip one marker, and answer on what is left — including the bare-marker
-    # spelling this loop can reach, because `_content_column` answers it (`- -` -> `-` -> nothing).
-    _inner = body
-    while True:
-        _inner_col = _content_column(_inner)
-        if _inner_col is None:
-            break
-        _inner = _inner[_inner_col:]
-        if not _inner.strip():
-            return True
     # ⛔ AN EMPTY CONTENT OPENS NO PARAGRAPH (round 39 review, P2 — class B, both arms). `- ` on its
     # own renders `<ul><li></li></ul>`: there is no paragraph to continue, so the next wide-gap
     # marker opens its own list and its content is CODE. Every leaf test below reads "no ender
@@ -1370,6 +1359,31 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
         return not prev_prose
     if not body.strip():
         return True
+    # ⛔ …AND THE SAME LADDER APPLIED TO THE CONTENT, for an item whose own content is ITSELF a bare
+    # marker (round-51 review, P0). It sits HERE, AFTER `lazy_marker` and AFTER §4.4, because both of
+    # those guards answer about the LINE and this one about what the item holds: the answer was
+    # `return True` at the top of the function, where it pre-empted the round-40 ordering ("THE LAZY
+    # ANSWER COMES FIRST") and §4.4, and blanked real closes in both arms (round-52 review, P1):
+    #     `Notes` + `2. -` + `2.     Closes #100`   renderer ONE `<p>` -> PROSE, `[100]` both arms
+    # Also why the ROUND-51 STATE FIX cannot simply be un-gated: this answer clears `prev_prose`, so
+    # the indent-pop below must record the dropped item from the POP rather than from `prev_prose`.
+    # ⚠️ GATED ON `prev_prose` BEING CLOSED ALREADY (round-52 review, P1 — the collateral of the
+    # un-gated version). The ladder answers a fact about the ITEM, but it is read as "the marker line
+    # below is code", and where a paragraph IS open above this line the renderer's answer for that
+    # line comes from the block that is already swallowing it — `- Text` + `> <br />` + `> <span>` +
+    # `> - *` + `>   2.     Closes #100` is ONE `html_block` whose raw text is the marker line
+    # (PROSE, `[100]` on `origin/main`), and the un-gated ladder blanked it in both arms. With a
+    # paragraph already closed there is nothing to swallow the line, and the ladder's answer is the
+    # one that decides it — which is exactly the `- -` family it was written for.
+    if not prev_prose:
+        _inner = body
+        while True:
+            _inner_col = _content_column(_inner)
+            if _inner_col is None:
+                break
+            _inner = _inner[_inner_col:]
+            if not _inner.strip():
+                return True
     # ⛔ A BARE MARKER OPENS AN EMPTY ITEM (round 49 review, P1). §5.2 lets a list marker be followed
     # by the END OF THE LINE, and such an item has no content, so it has no paragraph — the same
     # answer the test above gives the `- ` spelling. `_content_column` returns the marker's width + 1
@@ -1860,6 +1874,13 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #         (pinned by `test_a_PHANTOM_item_needs_FOUR_columns_and_the_SETEXT…`)
                 # `prev_prose` is what makes that safe: the record only claims a paragraph was open
                 # above this line, which is the condition the record is read under anyway.
+                # ⛔ NOT GATED ON `prev_prose` (round-52 review, P0). The fact is about the ITEM --
+                # "the item that held the paragraph is gone" -- and `prev_prose` describes the
+                # paragraph ABOVE this line, which a marker whose own content is a bare marker
+                # (`- 2.`) has already ended. Gating on it lost the record and `_is_lazy_marker` then
+                # read the next wide-gap marker as a lazy continuation of nothing:
+                #     `- 2.` + `    - x` + `x` + `2.     Closes #100`
+                #         renderer `<pre><code>` -> CODE; `issue_process_lint.claims()` `[] -> [100]`
                 if prev_prose and prev_container is _popped and _popped.real:
                     dropped_paragraph_item = _popped
             # An item that was empty on its marker line gains CONTENT from the first line that stays
@@ -2385,8 +2406,18 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #         -> CODE; `origin/main` `[]`, the round-50 head `[100]` in `strict=True`
                 # The `real and prev_prose` terms keep the fact to its own case: a 4+-column marker
                 # with NOTHING open is an indented block, and its pop moves no paragraph.
+                # ⛔ FROM THE POP, NOT FROM `prev_prose` (round-52 review, P0 — and this is why
+                # widening it was not enough on its own). The question the record answers is "which
+                # item holds the paragraph below this line", and `prev_prose` is about the paragraph
+                # ABOVE it: a marker whose own content is a bare marker (`- 2.`) answers
+                # "no paragraph" here, so gating on `prev_prose` skipped the record and
+                # `_is_lazy_marker` fell back to its vacuous `container is None` arm:
+                #     `- 2.` + `    - x` + `x` + `2.     Closes #100`
+                #         renderer `<pre><code>` -> CODE, and `issue_process_lint.claims()` went
+                #         `[] -> [100]` — a false PASS in the arm-1 gate
                 if _popped_by_indent.real and prev_prose:
                     prev_container = _popped_by_indent
+                    dropped_paragraph_item = _popped_by_indent
                     # …and the NEXT line's paragraph may still be lazily inside it, one line after
                     # the blanked marker (`Summary.` continues the abandoned `<li>`), so the pop
                     # records the item the same way the dedent pop does:

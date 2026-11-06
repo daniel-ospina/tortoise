@@ -5464,3 +5464,30 @@ def test_an_item_whose_CONTENT_is_a_bare_marker_leaves_NO_paragraph():
     assert keyword_types(leaf) == {"html_block"}, leaf
     assert cl.parse_closing_refs(leaf) == [100], leaf
     assert cl.parse_closing_refs(leaf, None, strict=True) == [100], leaf
+
+
+def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
+    """Round-52, P1 — a LOST CLOSE in both arms, from the ORDER the round-51 content ladder was put
+    in. It answers a fact about the ITEM (its own content is a bare marker), but it was evaluated at
+    the TOP of `_leaves_no_paragraph`, where it pre-empted the two guards this file documents as
+    load-bearing: round 40's "THE LAZY ANSWER COMES FIRST" and round 50's "§4.4 COMES BEFORE THE LEAF
+    TESTS". Both shapes below are prose in the renderer and were blanked:
+
+        `Notes` + `2. -` + `2.     Closes #100`      renderer ONE `<p>` -> PROSE
+        `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`
+            renderer ONE `html_block` whose raw text is the marker line -> PROSE
+
+    It now runs after `not body.strip()` and is gated on the paragraph above it ALREADY being closed:
+    where one is open, the renderer's answer for the next line comes from the block that is already
+    swallowing it, not from this ladder.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for body in ("Notes\n2. -\n2.     Closes #100\n",
+                 "- Text\n> <br />\n> <span>\n> - *\n>   2.     Closes #100\n"):
+        assert keyword_types(body) <= {"inline", "html_block"}, body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
