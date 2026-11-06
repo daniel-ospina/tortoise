@@ -272,16 +272,24 @@ def main() -> int:
     # unproven-scope refusal is on that same list — a `--json` run must not be
     # able to report success over a refusal.
     #
-    # ⛔ UNPROVEN SCOPE, derived from the report's own buckets: the record was
-    # OPENED (so a scope was supplied and `--clear-without-record` was not), at
-    # least one session was asked, and it answered for NONE of them. Zero rows
-    # for every session is what a WRONG or unreachable scope looks like through
+    # ⛔ UNPROVEN SCOPE, derived from the report's own buckets: at least one
+    # session was asked, and the record answered for NONE of them. Zero rows for
+    # every session is what a WRONG or unreachable scope looks like through
     # row-level security — never an error — so this is a scope failure, not a
     # population, and it must not be reported as "the census did not reach 0".
+    #
+    # ⛔ THIS MUST NOT FIRE ON THE BY-NAME CLEAR ARM. With `--clear-without-
+    # record` the operator has already said the record is not to be relied on,
+    # and (since an EXPLICIT `--record-dsn` now survives that flag) the record can
+    # still be opened and answer for nobody — at which point `no_record` means
+    # "CLEARED", not "left alone". Refusing there printed "nothing was destroyed"
+    # over a run that HAD cleared the population, and advised passing the very
+    # flag the operator had already passed (#11152 review round 3, P2).
     asked = (len(report["repaired"]) + len(report.get("empty_sessions") or [])
              + len(report["no_record"]))
     scope_unproven = (read_transcript is not None and asked > 0
-                      and len(report["no_record"]) == asked)
+                      and len(report["no_record"]) == asked
+                      and not args.clear_without_record)
     if not args.repair:
         scope_unproven = False
     report["scope_unproven"] = scope_unproven

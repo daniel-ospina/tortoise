@@ -153,12 +153,12 @@ CACHE_READ_TIMEOUT_MS = 60_000
 _TIMEOUT_CAP_ERR = "TIMEOUT parameter value cannot exceed"
 
 #: A cut of ``record_read.session_turns``'s PARTIAL reason that names the TAIL
-#: witness. Used only to word the operator note (see :func:`reconcile_session_
-#: source_prose`): when a ``:Session.turn_max_index`` read off the CACHE is ahead
-#: of the record, a fully-answered session is refused as PARTIAL — and this
-#: module exists precisely because the cache diverges from the record, so the
-#: mark is the one datum here that may be the LIE rather than the witness.
-_TAIL_WITNESS_HINT = "turn_max_index"
+#: witness — kept ONLY as a human-readable fallback for an answer object that
+#: carries no ``Turn.index``. The REAL test is structural (:func:`record_turn_
+#: reader` recomputes ``max(held) < turn_max_index``), because no production
+#: reason string contains this name and matching on wording is how a diagnostic
+#: becomes dead code while its test still passes (#11152 review round 3, P2).
+_TAIL_WITNESS_HINT = "the tail is missing"
 
 #: The property names this repair reads. ⛔ It WRITES only the pair — see
 #: :data:`_REPAIR_PAIR`.
@@ -469,16 +469,29 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
         # ⛔ The REASON travels with the answer. A bare ``None`` forces the caller
         # to guess WHY, and the guesses are not interchangeable: a PARTIAL caused
         # by the CACHE's ``turn_max_index`` being ahead of the record is not a
-        # missing or mis-scoped record at all (see the module note on
-        # ``_TAIL_WITNESS_HINT``). Recorded on the closure so the caller can name
-        # it without changing the ``str | None`` contract.
+        # missing or mis-scoped record at all (see :func:`_no_record_note`).
+        # Recorded on the closure so the caller can name it without changing the
+        # ``str | None`` contract.
         #
         # ``getattr``, not attribute access: this module needs only ``answered``
         # and ``turns`` from the answer, and a seam (a test double, an older
         # ``TurnAnswer``) that omits the diagnostic fields must not turn a
         # correct read into an AttributeError.
+        #
+        # ⛔ THE TAIL SUSPECT IS COMPUTED STRUCTURALLY, NOT MATCHED FROM THE
+        # WORDING. An earlier version tested the reason string for
+        # ``"turn_max_index"``, which NO production reason contains (the message
+        # interpolates the VALUE, never the name) — so the whole diagnostic was
+        # dead code that a hand-written test could not distinguish from live code
+        # (#11152 review round 3, P2). ``Turn.index`` is on the answer already, so
+        # the exact condition `_shortfall` refuses on is recomputed here.
+        turns = getattr(answer, "turns", ()) or ()
+        held = [t.index for t in turns if isinstance(getattr(t, "index", None), int)]
+        tail_suspect = bool(
+            not getattr(answer, "answered", False) and turn_max_index is not None
+            and held and max(held) < int(turn_max_index))
         read.reasons[session_id] = (getattr(answer, "kind", ""),  # type: ignore[attr-defined]
-                                    getattr(answer, "reason", ""))
+                                    getattr(answer, "reason", ""), tail_suspect)
         if not answer.answered:
             # NO_ACCOUNT, CONTRADICTION, or a PARTIAL set — the record did not
             # answer for the WHOLE session, and a lexicon built from half a
@@ -514,14 +527,15 @@ def _no_record_note(read_transcript, session_id: str | None) -> str:
     record's live end before concluding the record is missing data.
     """
     reasons = getattr(read_transcript, "reasons", None)
-    kind, reason = ("", "")
+    kind, reason, tail_suspect = ("", "", False)
     if isinstance(reasons, dict):
-        kind, reason = reasons.get(session_id, ("", ""))
+        entry = reasons.get(session_id) or ("", "", False)
+        kind, reason, tail_suspect = (*tuple(entry), "", "", False)[:3]
     note = ("the record did not ANSWER for this session, so no lexicon is "
             "invented")
     if reason:
         note += f" ({kind}: {reason})"
-    if _TAIL_WITNESS_HINT in str(reason or ""):
+    if tail_suspect or _TAIL_WITNESS_HINT in str(reason or ""):
         note += (". ⚠️ THIS MAY BE THE CACHE'S FAULT, NOT THE RECORD'S: the tail "
                  "witness handed to the record read is the CACHE's "
                  "`:Session.turn_max_index`, and a mark AHEAD of the record's "

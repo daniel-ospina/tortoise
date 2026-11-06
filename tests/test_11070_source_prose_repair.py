@@ -795,25 +795,46 @@ def test_a_PARTIAL_answer_caused_by_the_CACHE_mark_is_named_as_such():
     note must name the suspect instead of blaming the record (#11152 review
     round 2, P2).
     """
+    from tortoise import record_read
     from tortoise import session_source_prose_migration as m
 
-    def read(session_id, turn_max_index=None):
-        # The production reader (`record_turn_reader`) records WHY it refused; a
-        # bare None would force the caller to guess, and the guesses differ.
-        read.reasons[session_id] = (
-            "PARTIAL", "the record stops below the session's turn_max_index=99")
-        return None
+    # ⛔ THE REAL READER, THE REAL REASON. An earlier version of this test
+    # hand-wrote the reason string it fed the reader — a string no production path
+    # produces — so the diagnostic branch it was supposed to pin was never
+    # exercised and the assertion passed over dead code (#11152 review round 3).
+    turns = (record_read.Turn(turn_id="t1", index=0, content="[user] hi"),
+             record_read.Turn(turn_id="t2", index=1, content="[user] plan"))
+    answer = record_read.TurnAnswer(
+        answered=False, turns=turns, turn_count=2,
+        reason=record_read._shortfall(turns, 2, 99),
+        kind=record_read.TurnAnswer.PARTIAL)
 
-    read.reasons = {}
+    def fake_session_turns(conn, *, org_id, graph_id, session_id,
+                           turn_max_index=None):
+        return answer
+
+    reader = m.record_turn_reader(object(), org_id="o", graph_id="g")
+
+    class _Patch:
+        def __enter__(self_inner):
+            self_inner._real = record_read.session_turns
+            record_read.session_turns = fake_session_turns
+
+        def __exit__(self_inner, *exc):
+            record_read.session_turns = self_inner._real
+
     graph = _RecordingGraph([(_session_node(turn_max_index=99),)])
-    report = m.reconcile_session_source_prose(graph, read_transcript=read)
+    with _Patch():
+        assert reader("s-11070", 99) is None
+        report = m.reconcile_session_source_prose(
+            graph, read_transcript=reader, dry_run=True)
 
     note = report["notes"]["session:s-11070"]
     assert "record did not ANSWER" in note
     assert "MAY BE THE CACHE'S FAULT" in note, (
         "a bare `no_record` tells the operator to hunt a record problem that may "
         "not exist")
-    assert "turn_max_index=99" in note, "the record's own reason must survive"
+    assert "tail is missing" in note, "the record's own reason must survive"
 # ══════════════════════════════════════════════════════════════════════════
 # The operator CLI's SCOPE contract (#11152 review: presence is not proof, and
 # the requirement belongs on the arm that can destroy something)
@@ -1025,3 +1046,72 @@ def test_the_clear_without_record_arm_is_never_second_guessed(monkeypatch,
     err = capsys.readouterr().err
     assert "UNPROVEN" not in err
     assert "NOT written" not in err
+
+
+def test_an_EXPLICIT_record_dsn_survives_the_by_name_clear_flag(monkeypatch,
+                                                                capsys):
+    """⛔ The safe combination must be reachable FROM THE CLI (#11152 r3, P2).
+
+    `--clear-without-record` exists so the clear arm is reachable on a box that
+    EXPORTS a `TORTOISE_RECORD_DSN` the operator did not mean to use. It must
+    never discard a `--record-dsn` the operator TYPED — doing so made
+    "re-derive where the record answers, clear where it does not" inexpressible,
+    and cleared nodes the record could have healed.
+
+    ⛔ This test exists because the fix had NO test: reverting the guard to
+    `if args.clear_without_record: record_dsn = ""` left every test green while
+    turning the same argv from "re-derive" into "destroy" (review round 3).
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(),)])
+
+    def answers(conn, *, org_id, graph_id, session_id, turn_max_index=None):
+        return _OneTurn()
+
+    _install_cli(monkeypatch, graph, [
+        "--repair", "--record-dsn", "postgresql://u@h/db",
+        "--org-id", "org_x", "--graph-id", "gx",
+        "--clear-without-record"])
+    monkeypatch.setattr("tortoise.record_read.session_turns", answers)
+
+    code = _cli.main()
+    err = capsys.readouterr().err
+    # ⚠️ This harness's graph does not replay its own writes, so `census_after`
+    # stays above 0 and the run legitimately exits 1 ("did not reach 0"). The
+    # subject here is WHICH arm ran, and exit 3 would mean the scope refusal fired.
+    assert code != 3, err
+    assert "UNPROVEN" not in err
+    assert len(graph.writes) == 1
+    written = graph.writes[0][1]
+    assert written["sum"].startswith(SESSION_SOURCE_SUMMARY_PREFIX), (
+        "the explicitly supplied record was ignored and the pair was CLEARED "
+        "instead of re-derived")
+    assert written["st"], "the indexed column was cleared instead of re-derived"
+
+
+def test_an_unproven_scope_is_not_reported_over_the_by_name_clear_arm(
+        monkeypatch, capsys):
+    """The refusal must never claim "nothing was destroyed" after destroying.
+
+    `--record-dsn` + `--clear-without-record` with a record that answers for
+    nobody is a DELIBERATE clear: the operator already passed the flag the old
+    message advised, and `no_record` there means CLEARED. Firing the refusal
+    printed "nothing was destroyed (0 candidates left alone) … pass
+    --clear-without-record" over a run that had cleared the population
+    (#11152 review round 3, P2).
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(),)])
+    _install_cli(monkeypatch, graph, [
+        "--repair", "--record-dsn", "postgresql://u@h/db",
+        "--org-id", "org_x", "--graph-id", "gx",
+        "--clear-without-record"])
+
+    code = _cli.main()
+    err = capsys.readouterr().err
+    assert "UNPROVEN" not in err
+    assert "nothing was destroyed" not in err, (
+        "the refusal claimed nothing was destroyed over a run that cleared")
+    assert code != 3, err
+    assert len(graph.writes) == 1
+    assert graph.writes[0][1]["sum"] == "", "the by-name arm did not clear"
