@@ -764,6 +764,24 @@ def test_a_delete_statement_that_fails_still_returns_a_report():
     # Nothing is claimed as removed: the count is unknowable.
     assert report.deleted == ()
     assert report.metric()["nodes_evicted"] == 0
+    # ⛔ THE AFTER-STATE IS UNMEASURED, not the pre-delete reading. This arm did not
+    # measure after the statement failed, so `nodes_after`/`bytes_after` must be None —
+    # reporting `nodes_after=10` beside a graph that now holds 6 is the
+    # fabricated-metric class, reached on this arm alone. Pinned here (PR #11169
+    # review, P2): the assertions above were the whole test, so DELETING the
+    # `after_measured = False` on this arm left this suite green.
+    assert graph.nodes == 6, (
+        "the fake must actually have removed 4 nodes, or the pre-delete reading this "
+        "asserts against is the truth and the pin is vacuous")
+    assert report.nodes_after is None, (
+        f"reported nodes_after={report.nodes_after} over a graph holding "
+        f"{graph.nodes} — the delete failed without a re-measure")
+    assert report.metric()["nodes_after"] is None
+    assert report.bytes_after is None, (
+        "reported an after-bytes reading this arm never took")
+    assert report.metric()["bytes_reclaimed"] is None, (
+        f"claimed {report.metric()['bytes_reclaimed']} bytes reclaimed from an "
+        f"unmeasured state")
 
 
 # --------------------------------------------------------------------------------------
@@ -867,3 +885,55 @@ def test_a_lease_taken_during_the_probe_stops_the_pass_as_leased():
     assert len(report.skipped_leased) == 4
     assert "read lease" in report.reason, report.reason
     assert "did not hold enough evictable nodes" not in report.reason
+
+
+def test_a_dry_run_cut_by_a_lease_names_the_lease_not_the_pass_budget():
+    """A TRUNCATED plan has to say WHICH stop truncated it — on the dry-run arm too.
+
+    PR #11169 review (P2): the `leased` cause on the truncation path was unpinned, so
+    replacing `stop_reason == "leased"` with a never-true sentinel left this whole suite
+    green. The neighbouring dry-run lease test
+    (`test_a_leased_node_is_excluded_from_a_DRY_RUN_plan`) is one leased node among
+    ten, so its plan still fills and it never truncates; the `budget_exhausted` /
+    `passes spent` tests truncate but stop on the PASS BUDGET. Neither reaches the arm.
+
+    Here every node the selector can offer is leased, so the plan stays EMPTY while the
+    graph is over budget: the pass widens the window (4 -> 8 -> 10) until the whole
+    graph has been examined, then stops at the plan-time lease check — the `if not
+    local` stop, not the pre-delete re-check. `truncated` is True and `stop_reason` is
+    `leased`, which is the only way this arm is reached at all.
+
+    A wrong answer here is not cosmetic: "this pass budget could plan no more" tells the
+    caller to re-run with a bigger budget, when the actual answer is that readers hold
+    every node and no budget will help.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    leases = ReadLeases()
+    for node_id in range(10):
+        leases.acquire(node_id)
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, leases=leases, dry_run=True,
+        # batch_size=100 against a need of 4, and 5 passes: the window doubles past
+        # `after_nodes` so the plan-time stop is reached instead of exhausting passes.
+        policy=EvictionPolicy(max_nodes=6, batch_size=100, max_passes=5),
+    )
+    assert report.verdict == "DRY_RUN"
+    assert report.planned == ()
+    assert report.truncated is True, (
+        "an empty plan over an over-budget cache is TRUNCATED, not complete")
+    assert report.metric()["plan_truncated"] is True
+    assert report.metric()["held_leased"] == 10
+    assert "read lease" in report.reason, report.reason
+    assert "budget could plan no more" not in report.reason, (
+        "a plan cut by a live read lease was blamed on the pass budget — the reader is "
+        "sent to re-run with a bigger budget that cannot help")
+    # ⛔ The SAME misattribution, read through the field a monitor keys on: a leased
+    # stop is not a spent pass budget.
+    assert report.budget_exhausted is False, (
+        "a lease-held plan reported the PASS BUDGET as the binding constraint")
+    assert graph.mutating == [], "a dry run issued a mutating statement"
