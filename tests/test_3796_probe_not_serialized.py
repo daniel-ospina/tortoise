@@ -218,14 +218,18 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
         # with the hook, or this test would leak a process per run.
         start_new_session=True)
     try:
-        deadline = time.monotonic() + 5.0
-        calls = ""
         # TWO flags, deliberately (#11149 review P2): `beacon_sampled` is the
         # one-shot latch that bounds the wait, and `beacon_seen_alive` is the
         # observation it carries.  Conflating them (guarding the re-arm on
         # `not beacon_seen_alive`) made a hook that EXITS between the dispatch
         # and the digest push the deadline forward on every poll — an UNBOUNDED
         # loop, i.e. a killed test with no diagnostic instead of a 5 s RED.
+        # An ABSOLUTE cap rides along (review P3): the latch already bounds this
+        # loop, but a future edit that resets it would silently reintroduce an
+        # unbounded wait, and a required check that HANGS reports nothing.
+        hard_stop = time.monotonic() + 12.0
+        deadline = min(time.monotonic() + 5.0, hard_stop)
+        calls = ""
         beacon_sampled = False
         beacon_seen_alive = False
         while time.monotonic() < deadline:
@@ -239,9 +243,8 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
                     beacon_seen_alive = proc.poll() is None
                     # …and the digest gets its OWN budget from this instant: a
                     # shared deadline would hand it only the remainder of the
-                    # beacon's 5 s (review P3).  This only ever EXTENDS: we are
-                    # inside the loop, so `now >= start` ⇒ `now + 5 >= deadline`.
-                    deadline = time.monotonic() + 5.0
+                    # beacon's 5 s (review P3), never past the absolute cap.
+                    deadline = min(time.monotonic() + 5.0, hard_stop)
                 # BOTH markers, not just the beacon (#11149): breaking on the
                 # beacon alone asserts on a log that is still being appended to.
                 if PROBE_CALL in calls and "context" in calls:
@@ -261,17 +264,27 @@ def test_probe_is_dispatched_while_the_digest_is_still_running(tmp_path):
             "still running (#3796): after 5 s the mock had been invoked with "
             f"{calls!r} — with a 30 s digest that means the beacon is still "
             "QUEUED BEHIND it, which is the defect")
-        assert "context" in calls, (
-            "the digest should also have been dispatched: "
-            f"{calls!r} — waited a full 5 s for it after the beacon was seen, "
-            "so this is absence, not a snapshot taken mid-write (#11149)")
+        # Liveness BEFORE digest-presence (review P3): at this file's own 30 s
+        # constants, a hook that died between the dispatch and the digest can
+        # only reach the digest assertion, which would then report a dead hook as
+        # a dispatch-order defect. Checked first, it names the real cause; on a
+        # live hook it is belt-and-braces (the 30 s digest keeps the hook alive).
         assert beacon_seen_alive, (
             "the hook had already exited when the beacon line appeared, so "
             "this observed SEQUENCE, not concurrency — the assertion proves "
             "nothing about starvation")
+        assert "context" in calls, (
+            "the digest should also have been dispatched: "
+            f"{calls!r} — waited a full 5 s for it after the beacon was seen, "
+            "so this is absence, not a snapshot taken mid-write (#11149)")
     finally:
+        # `start_new_session=True` makes the hook's pid its GROUP id, so the group
+        # is addressed directly. `os.getpgid(proc.pid)` raises ProcessLookupError
+        # once `proc.poll()` has reaped the child — and the dead-hook paths poll
+        # before this runs — so the suppress below would swallow it and leave the
+        # backgrounded probe/sleep grandchild alive (review P3).
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
         proc.wait(timeout=30)
 
 
@@ -307,7 +320,10 @@ def test_the_digest_is_not_serialized_behind_a_slow_probe(tmp_path):
         # Own process group: the 30 s probe must be killable with the hook.
         start_new_session=True)
     try:
-        deadline = time.monotonic() + 5.0
+        # Absolute cap as in the acceptance test (review P3): bounded even if the
+        # one-shot latch below were ever reset by a future edit.
+        hard_stop = time.monotonic() + 12.0
+        deadline = min(time.monotonic() + 5.0, hard_stop)
         calls = ""
         # One-shot latch + observation, as in the acceptance test: the latch
         # bounds the wait, the flag carries what it saw.
@@ -321,7 +337,7 @@ def test_the_digest_is_not_serialized_behind_a_slow_probe(tmp_path):
                     digest_seen_alive = proc.poll() is None
                     # The BEACON gets its own budget from this instant, so the
                     # ordering of the two appends cannot eat its window.
-                    deadline = time.monotonic() + 5.0
+                    deadline = min(time.monotonic() + 5.0, hard_stop)
                 # BOTH markers (#11149): the assertions below name both, so the
                 # wait must include both or it is TOCTOU on a live file.
                 if "context" in calls and PROBE_CALL in calls:
@@ -337,18 +353,22 @@ def test_the_digest_is_not_serialized_behind_a_slow_probe(tmp_path):
             f"5 s the mock had been invoked with {calls!r} — the beacon was "
             "AWAITED instead of overlapped, so an unbounded POST now starves "
             "the injection channel (#3796's mirror)")
+        # Liveness BEFORE the presence check (review P3), for the same diagnostic
+        # reason as the acceptance test.
+        assert digest_seen_alive, (
+            "the hook had already exited when the digest line appeared, so the "
+            "digest was not running CONCURRENTLY with the probe")
         # PRESENCE, not order: the ordering claim belongs to the acceptance
         # test above (which REDs on the pre-#3796 order); this one is green on
         # that order by construction, so it must not claim otherwise.
         assert PROBE_CALL in calls, (
             "the beacon must still have been dispatched at all (presence, not "
             f"order — the acceptance test owns ordering): {calls!r}")
-        assert digest_seen_alive, (
-            "the hook had already exited when the digest line appeared, so the "
-            "digest was not running CONCURRENTLY with the probe")
     finally:
+        # Group id == `proc.pid` under `start_new_session=True`; see the
+        # acceptance test's `finally` for why `os.getpgid` is not used (review P3).
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
         proc.wait(timeout=30)
 
 
