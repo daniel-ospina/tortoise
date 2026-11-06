@@ -123,6 +123,24 @@ def _rearm_stranded_probe(selfhost_mod) -> None:
 #: healthy still fails — it just fails after a budget a loaded box can meet.
 _HEALTH_VERDICT_WAIT_S = 90.0
 
+#: The budget a STRAND test may spend, and the slot hold that must outlive it.
+#:
+#: A strand test's discrimination IS the relation ``hold > wait``: the slot it
+#: wedges is released by the test's own ``finally``, so the ONLY way the wait can
+#: ever return is the re-arm. Both halves therefore derive from the file's ONE
+#: measured cold-start tolerance (``_HEALTH_VERDICT_WAIT_S``) instead of private
+#: literals — a private 25 s budget is what reddened ``test (c)`` of run
+#: 42206007538 (job 127874066116) 4327 tests into the shard's run: the re-arm
+#: worked (`strand re-arms used 2/2`), and the cold start it handed the next
+#: probe outran a number 3.6x below the tolerance this same file derives for a
+#: cold embedded FalkorDB.
+#:
+#: ``_STRAND_HOLD_S`` is derived, not fixed, so WIDENING the budget can never
+#: silently leave the hold behind and turn the test vacuous. Pinned by
+#: ``test_the_strand_budgets_cover_a_cold_start_and_still_outlive_it``.
+_STRAND_WAIT_S = _HEALTH_VERDICT_WAIT_S
+_STRAND_HOLD_S = _STRAND_WAIT_S + 30.0
+
 
 def _wait_for_ready(tc, timeout: float = _HEALTH_VERDICT_WAIT_S):
     """Block until ``/health/ready`` answers 200, or fail naming its own 503.
@@ -576,7 +594,7 @@ class TestHealth:
 
         def _block():
             started.set()
-            release.wait(60)
+            release.wait(_STRAND_HOLD_S)
 
         occupied = mon._probe_worker()
         occupied.submit(_block)
@@ -619,16 +637,19 @@ class TestHealth:
 
         def _block():
             started.set()
-            release.wait(60)
+            release.wait(_STRAND_HOLD_S)
 
         occupied = mon._probe_worker()
         occupied.submit(_block)
         assert started.wait(30), "the shared probe worker never ran the blocker"
         try:
             with tc:
-                # 15 s: pre-fix this exhausts (strand never clears) and FAILS;
-                # with the re-arm the verdict lands in ~2-4 s.
-                _wait_for_probe(selfhost, timeout=15.0)
+                # Pre-fix this exhausts (the strand never clears) and FAILS;
+                # with the re-arm the verdict lands once the NEXT probe's cold
+                # start completes (3.3 s measured on a 16-CPU box at load 0.69,
+                # and >40 s on the loaded runner that set the tolerance), so the
+                # budget is the file's tolerance — never a private number.
+                _wait_for_probe(selfhost, timeout=_STRAND_WAIT_S)
                 body = tc.get("/health").json()
                 assert body["status"] == "ok"
                 assert body["db"]["ok"] is True
@@ -698,7 +719,10 @@ class TestHealth:
             assert first.status_code == 503, (
                 "the transient fault did not take effect — this test cannot "
                 f"prove the wait retries: {first.status_code} {first.text!r}")
-            r = _wait_for_ready(tc, timeout=15.0)
+            # The retry is immediate; what the budget pays for is the cold DB
+            # behind it, so it is the file's tolerance — not a 15 s literal a
+            # cold start can outrun on a loaded runner.
+            r = _wait_for_ready(tc)
             assert r.status_code == 200
             assert r.json()["status"] == "ready"
 
@@ -967,8 +991,12 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
     could only ever raise while the daemon was healthy throughout.
 
     The slot is held here exactly as a wedged/overrunning probe holds it, and
-    the ONE refresh period is shortened so the recovery is a couple of seconds
-    rather than the shipped 15 s cadence.
+    the ONE refresh period is shortened so the revisit is quick — but what the
+    wait budget must cover is the cold start the RE-ARMED probe then pays, so it
+    is ``_STRAND_WAIT_S`` (this file's cold-start tolerance) and the hold is
+    derived to outlive it. ``test (c)`` of run 42206007538 (job 127874066116)
+    reddened this test at a private 25 s budget with the re-arm working exactly
+    as designed: `strand re-arms used 2/2` and no verdict yet.
     """
     import threading
 
@@ -980,7 +1008,9 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
 
     def _hold_the_one_shared_slot():
         held.set()
-        release.wait(30.0)  # abandoned, never joined: the wait must not block on it
+        # Outlives the wait by construction (``_STRAND_HOLD_S > _STRAND_WAIT_S``):
+        # abandoned, never joined — the wait must not block on it.
+        release.wait(_STRAND_HOLD_S)
 
     tc = _client_for_env(monkeypatch, tmp_path)
     from tortoise import selfhost
@@ -989,10 +1019,31 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
     assert held.wait(5.0), "the slot holder never started"
     try:
         with tc:
-            _wait_for_probe(selfhost, timeout=25.0)
+            _wait_for_probe(selfhost, timeout=_STRAND_WAIT_S)
     finally:
         release.set()
     assert selfhost._HEALTH_PROBE.snapshot()["ok"] is True
+
+
+def test_the_strand_budgets_cover_a_cold_start_and_still_outlive_it():
+    """No strand test may carry a private budget shorter than a cold start.
+
+    ``test (c)`` of run 42206007538 reddened this suite on a HEALTHY daemon: the
+    hold was 30 s and the wait 25 s (so the hold DID outlive it), yet the cold
+    start after the re-arm outran a budget 3.6x below the tolerance THIS FILE
+    derives for the very same quantity. Fixing the instance alone would leave
+    the next budget bump free to re-open it, so the two halves are pinned as a
+    RELATION, not as numbers: the budget cannot fall below the file's tolerance,
+    and the hold cannot fall behind the budget — which is what would make every
+    strand test pass WITHOUT the re-arm it exists to prove.
+    """
+    assert _STRAND_WAIT_S >= _HEALTH_VERDICT_WAIT_S, (
+        f"a strand wait budget of {_STRAND_WAIT_S}s is below this file's own "
+        f"cold-start tolerance ({_HEALTH_VERDICT_WAIT_S}s) — a healthy daemon "
+        "reds on a loaded box")
+    assert _STRAND_HOLD_S > _STRAND_WAIT_S, (
+        f"the slot hold ({_STRAND_HOLD_S}s) does not outlive the wait budget "
+        f"({_STRAND_WAIT_S}s): the strand test would pass WITHOUT the re-arm")
 
 
 class TestHealthTruthMCP:
