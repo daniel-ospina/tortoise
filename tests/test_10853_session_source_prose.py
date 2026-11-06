@@ -1306,11 +1306,23 @@ def test_the_identity_view_NEVER_aliases_the_record_row():
 
 
 def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
-    """The quote the whole `#10852` obligation rests on must be VERBATIM.
+    """The quote the `#10852` narrowing rests on must be VERBATIM.
 
-    The obligation is the only thing keeping this narrowing from outliving the
-    capture change it was written for, and its authority is a quoted ruling in
-    `docs/architecture/STORAGE-ARCHITECTURE.md:527`. That line was REWRITTEN
+    ⚠️ WHAT THIS GUARDS CHANGED, and the change is recorded here rather than
+    left in the pin's old name. It was written for an OBLIGATION — `#10852` was
+    expected to DELETE this narrowing, and the quotation was the authority that
+    obligation rested on. `#10852` landed on `main` (`ba87797c4`) and did NOT
+    delete it: it made the decision PROVENANCE-correct instead (the lexicon
+    `_searchText` is projected on a post-#10000 row, `summary` stays declined),
+    so the obligation is moot and the forward-merge dropped it. The CITATION is
+    not moot and must not go with it: `STORAGE-ARCHITECTURE.md:527` — "§4.6
+    metadata, not the S1 narrative" — is precisely why a §4.6-metadata value is
+    projected while the narrative is not, i.e. why this door's test is on the
+    row's PROVENANCE rather than on the column's NAME. So the same three
+    properties are held, now for the narrowing that actually shipped.
+
+    The authority is a quoted ruling in `docs/architecture/STORAGE-ARCHITECTURE.md:527`.
+    That line was REWRITTEN
     under us: `#10978` (`b748df7d`) changed it from "§4.4 metadata, not the
     prose" to "§4.6 metadata, not the S1 narrative", so the merge landed four
     citations asserting a sentence the document no longer contains — including

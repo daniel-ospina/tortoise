@@ -53,7 +53,13 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    COLUMNS in :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`;
    graph property `_searchText`) onto its node **when the row holds the
    pre-#10000 derivation**, because §9.1/D1 places captured turn text in the
-   record and never on a graph node. The decision is per ROW, from the row's own
+   record and never on a graph node. The authority for the pair is
+   `STORAGE-ARCHITECTURE.md:527`: *"`summary`/`title` stay on the node — they
+   are §4.6 metadata, not the S1 narrative"* — which is exactly why a
+   post-#10000 row's lexicon `_searchText` IS projected (it is that §4.6
+   metadata, not the narrative) while `summary` stays declined as a named
+   CHOICE, and why the test is on the row's PROVENANCE rather than its name.
+   The decision is per ROW, from the row's own
    values (#10000's rows carry the topic lexicon there — token-shaped, not a copy of the row's prose, though a space-less CJK run arrives whole and a Thai one fragments) — see that
    table for the rule, its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
@@ -1730,11 +1736,19 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             f"silently"
         )
     # §9.1/D1 (#10853): resolved ONCE per row, from the row's identity AS THE
-    # NODE WILL CARRY IT — the columns AND the `props` tail.
+    # NODE WILL CARRY IT — the columns AND the `props` tail — and from the tail
+    # already decoded above, never a second decode.
+    # ⛔ ONE assignment. The #10852 forward-merge left main's pre-#10867 form
+    # (`_is_episodic_source_row(row)`, which re-decoded `props` itself) beside
+    # this branch's tail-aware one, so the second statement silently replaced the
+    # first and the pair of comments contradicted each other about what the read
+    # is FROM. The two were measured to agree on every tail shape — a Mapping
+    # tail reaches both paths identically and `_decoded_tail` falls back to `{}`
+    # only for shapes already refused above — so the duplicate was dead, not
+    # wrong; it is removed because a reader deciding what the predicate reads
+    # must not have two answers.
     episodic_source = (table == "source"
                        and _is_episodic_source_row(row, tail))
-    # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
-    episodic_source = table == "source" and _is_episodic_source_row(row)
     # ⛔ PROVENANCE, PER ROW (#10965) — never the column's NAME. On a post-#10000 row `_search_text` is the topic
     # lexicon (exactly `", ".join(topics)`) — not a CHOSEN utterance, though a space-less CJK run arrives whole (the
     # residual in `sdk._session_source_metadata`) — and it is the ONLY field the Source FTS index is declared on, so
