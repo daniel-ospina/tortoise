@@ -9513,8 +9513,9 @@ def _ingest_rate_limited(admission, *, resource: str) -> HTTPException:
 
     ``resource`` names THIS request's charge (``commit_ingest_bytes`` /
     ``capture_ingest_bytes``) — the lane that refused you, NOT the lane that
-    spent the window. The spender is only inferable from ``used``, which is the
-    org's whole spend across BOTH lanes (``test_the_window_is_shared_with_the_
+    spent the window. The spender is NOT named: ``used`` is the org's whole spend
+    across BOTH lanes, so which lane spent it is only recoverable by subtraction
+    against what this lane charged (``test_the_window_is_shared_with_the_
     commit_lane`` is the leg that shows a capture-spent window reporting
     ``resource="commit_ingest_bytes"`` on the commit refusal). It must not be
     read as "which allowance": there is ONE window per org, which is why
@@ -17550,11 +17551,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
          ``POST /v1/sessions/commit`` (#4051 §3.1). It sits AFTER the 402 on
          purpose: an org at ``max_points`` gets its permanent refusal, never
          "retry shortly" for a request that can never fit. That ordering is
-         pinned on the COMMIT lane
-         (``TestCommitPointsGate::
-         test_the_points_cap_refuses_before_the_ingest_window``),
-         because this lane's 402 is skipped on the store-only paths (#3892,
-         #4258) — where no capture can be refused by it at all.
+         pinned on BOTH lanes: this one by
+         ``tests/test_hosted_api.py::TestSessionFloodGate::
+         test_the_ingest_window_does_not_run_ahead_of_the_points_cap`` — an org
+         at ``max_points`` is 402'd TWICE in a row on a window armed at exactly
+         one capture's charge, so a charge taken before the gate would spend the
+         window and turn the retry into a 429 — and the commit lane by
+         ``TestCommitPointsGate::test_the_points_cap_refuses_before_the_ingest_window``.
+         ⚠️ This lane's gate is SKIPPED on the store-only paths (#3892, #4258),
+         which is why ``TestCaptureOrgIngestBound``'s legs (all
+         ``no_provider_keys``) cannot pin it.
          It also sits BEFORE the first write, so a refused capture leaves no
          ``:Session``, ``:Event`` or transcript ``:Source`` and the documented
          ``Retry-After`` retry is a clean first attempt. Not the 429
