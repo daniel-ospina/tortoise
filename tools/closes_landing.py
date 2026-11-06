@@ -1060,7 +1060,7 @@ _HTML_TYPE7_RE = re.compile(r" {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>[ \t
 
 
 def _html_block_leaf(rest: str, prev_prose: bool) -> frozenset[str] | None:
-    """Type 7 — a COMPLETE tag alone on a line — as a block whose text is prose (`""` closer).
+    """Type 7 — a COMPLETE tag alone on a line — as a block whose text is prose (an EMPTY end set).
 
     ⛔ TYPE 7 IS NOT AN ENDER, BUT IT IS STILL A BLOCK (round 45 review, P2 — 1,680 lost closes
     against `origin/main`). §4.6 type 7 cannot INTERRUPT a paragraph, which is why the ender
