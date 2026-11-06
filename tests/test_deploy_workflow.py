@@ -4624,7 +4624,22 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: The comma is optional because writers omit it; the referent rule reads the whole
     #: sentence, so cutting here cannot detach a phrase from the tree it attributes to.
     _CLAUSE_DELIM = re.compile(
-        r"[.;\u2014\u2013]|,?\s*\b(?:and|but|while|whereas|yet)\b", re.I
+        # ⛔ A DENIAL DOES NOT CROSS A SUBORDINATOR (#11191 review r12, P1 — MEASURED).
+        # The set ended at the coordinating conjunctions, so a correction of a DIFFERENT
+        # proposition in the same sentence exempted the equivalence — ACCEPTED at
+        # `bc67c4661`, and `origin/main` REFUSES all three:
+        #   "`ff6379eb2` is the tree before #9548, BECAUSE the note no longer calls
+        #    `ff6379eb2` the #9601 merge."
+        #   "The tree immediately before #9548 is `ff6379eb2`, SINCE `047c91f7a` is not
+        #    `ff6379eb2`."
+        #   "…is `ff6379eb2`, THOUGH the figure was corrected at `047c91f7a`."
+        # `_INFERENCE_DENIAL` was made subject-bound for exactly this reason ("this one was
+        # a blank cheque") without the reasoning reaching its three siblings; the clause
+        # boundary is the same rule one level down, and it is the TERMINATION-TERM set
+        # ConText/NegEx scope negation with (`but` ends scope; the subordinators do too).
+        r"[.;\u2014\u2013]|,?\s*\b(?:and|but|while|whereas|yet|since|because|though|"
+        r"although|which|who)\b",
+        re.I,
     )
     #: ⛔ AN ANCESTRY RELATION IS NOT THE EQUIVALENCE (#11191 review r11, P1 — MEASURED
     #: false RED, and a REGRESSION against `origin/main`). The defect is the COPULA —
@@ -5883,21 +5898,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 or _appositive.group(0).lower().startswith(_TRUE_TREE)
             ):
                 _between = re.sub(r"#\d+", " ", _tail[: _appositive.start()])
-                # ⛔ …and a DENIED figure is not a reading here either (r10, P2): the
-                # denial spelling is asked through the same helper as the no-referent
-                # arm so the two cannot disagree about what a figure IS.
-                # ⛔ AND THE FALSE TREE IS VETOED ONLY WHERE IT IS THE **PREDICATE** (r12
-                # F4, P2 — MEASURED FALSE RED). A blanket `_FALSE_TREE in _tail` refused a
-                # truthful COMPARISON, which `origin/main` accepts:
-                #   "The tree immediately before #9548 (`047c91f7a`) is 12 commits ahead of
-                #    `ff6379eb2`."                                          -> REFUSED
-                # while the twin that puts the true tree as the copula complement passed —
-                # same proposition, verdict keyed on word order. A copula-to-false-sha span
-                # that carries a COMPARATIVE is a different claim; one that carries nothing
-                # is the equivalence ("…is actually `ff6379eb2`").
-                return not (
-                    _states_a_figure(_between) or _predicates_false_tree(_tail)
-                )
+                # ⛔ A FIGURE BOUND TO THE APPOSITIVE IS THE READING *AT* THAT TREE (#11191
+                # review r12, P1 — MEASURED false RED, a REGRESSION against `origin/main`).
+                # Refusing any figure in `_between` read the binding backwards: the
+                # appositive is what says WHICH TREE the figure belongs to, so "returns 10
+                # at `047c91f7a`" is the statement the §A8 cell must be able to make. All of
+                # these were REFUSED at `bc67c4661` and are ACCEPTED by `origin/main`:
+                #   "The census immediately before #9548 returns 10 at `047c91f7a`."
+                #   "Measured immediately before #9548: 10 lines, at `047c91f7a`."
+                #   "Immediately before #9548 the census returns 10, at `047c91f7a`."
+                #   "The census immediately before #9548 returns 10 lines, measured at
+                #    `047c91f7a`."
+                #   "The path set immediately before #9548 yields 10 hits (`047c91f7a`)."
+                # The FIGURE channel is not weakened by dropping that term: a figure dated
+                # to the phrase with NO referent is still refused by step 5 below, and a
+                # figure stated AT the true tree is checked against the EXECUTED census by
+                # `_figure_gate` — a measurement, strictly stronger than a character window.
+                # The FALSE-TREE channel is the sibling lane's `_predicates_false_tree`,
+                # kept as-is.
+                return not _predicates_false_tree(_tail)
             # 4b. A PROSE SUBJECT PREDICATED OF THE PHRASE — the pre-posed mirror of
             #     `_PREDICATED_OBJECT` (#11191 review, P1 — MEASURED). Keyed on the
             #     subject of the phrase's OWN clause (the A2 doctrine every other arm
@@ -6022,8 +6041,17 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     #: may not continue into a date tail (`-10-23`) nor into a hex tail (`c91f7a`).
     _FIGURE_NEAR_TRUE_TREE = re.compile(
         rf"(?<![\w#])(\d{{1,5}})(?!\d)(?!-\d{{2}}-\d{{2}})(?![0-9a-f]{{2,}}\b)"
-        rf"\D{{0,12}}`?{_TRUE_TREE}`?"
-        rf"|`?{_TRUE_TREE}`?\D{{0,12}}(?<![\w#])(\d{{1,5}})(?!\d)"
+        # ⛔ THE WINDOW WAS A CHARACTER COUNT AND RAN OUT ONE WORD PAST IT (#11191 review
+        # r12, P2 — MEASURED fail-open). `\D{{0,12}}` missed the SECOND figure at the true
+        # tree as soon as ordinary prose intervened, so the A4 defect (the cell stating two
+        # different figures at the SAME tree) merged green:
+        #   "…**not empty, and not one: 7** lines, read at `{TRUE}`"   -> ACCEPTED
+        # — an 18-character gap; the same edit at a 12-character gap IS caught, so this was
+        # the window's boundary, not a broken regex. 40 covers a clause's worth of prose
+        # while staying far below a sentence, and this arm is applied to the §A8 ROW only,
+        # so a wider window cannot red an unrelated document.
+        rf"\D{{0,40}}`?{_TRUE_TREE}`?"
+        rf"|`?{_TRUE_TREE}`?\D{{0,40}}(?<![\w#])(\d{{1,5}})(?!\d)"
         rf"(?!-\d{{2}}-\d{{2}})(?![0-9a-f]{{2,}}\b)",
         re.I,
     )
@@ -7936,6 +7964,86 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         + "\n  ".join(
             f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _r12_wrong
         )
+    )
+    # ⛔⛔ CONTROLS FOR THE r12 FINDINGS (#11191 review r12 — each shape was measured on
+    # `bc67c4661`, this branch's own pre-fix head, and produced the verdict named there).
+    # Two of them are REGRESSIONS against `origin/main`, which is why they are pinned in
+    # BOTH directions: closing a fail-open by reding a truth is how this pin gets deleted.
+    #
+    # (1) A CORRECTION OF A DIFFERENT PROPOSITION IS NOT A CORRECTION OF THIS ONE. The
+    # clause boundary stopped at the coordinating conjunctions, so a subordinator carried
+    # a denial from one proposition into the next — ACCEPTED pre-fix, and `origin/main`
+    # REFUSES all three. The subordinators now end the clause, which is the same
+    # termination-term rule ConText/NegEx scope negation with.
+    _subordinate_alibi = (
+        "`ff6379eb2` is the tree before #9548, because the note no longer calls "
+        "`ff6379eb2` the #9601 merge.",
+        "The tree immediately before #9548 is `ff6379eb2`, since `047c91f7a` is not "
+        "`ff6379eb2`.",
+        "The tree immediately before #9548 is `ff6379eb2`, though the figure was corrected "
+        "at `047c91f7a`.",
+    )
+    _subordinate_passed = [
+        s for s in _subordinate_alibi if not _refuses_before_9548(s)
+    ]
+    assert not _subordinate_passed, (
+        "a denial or correction of a DIFFERENT proposition exempts the equivalence — the "
+        "clause boundary does not end at `since` / `because` / `though` / `although` / "
+        "`which` / `who`, so the sentence carries the alibi into the claim next door "
+        "(#11191 review r12, P1):\n  " + "\n  ".join(_subordinate_passed)
+    )
+    # …and the truthful twin, which subordinates a denial of the FALSE tree, stays GREEN:
+    # the boundary must not turn every subordinator into a refusal.
+    assert not _refuses_before_9548(
+        "The tree immediately before #9548 is `047c91f7a`, since `ff6379eb2` is not "
+        "`047c91f7a`."
+    ), (
+        "the subordinator boundary refuses a TRUTHFUL sentence — a false RED in the arm "
+        "that closes the alibi (#11191 review r12, P1)"
+    )
+    #
+    # (2) A FIGURE BOUND TO THE APPOSITIVE IS THE READING AT THAT TREE. Refusing any
+    # figure between the phrase and a true-sha appositive read the binding backwards and
+    # was a REGRESSION against `origin/main` on all five. Pre-fix all five were REFUSED.
+    _figure_at_true_tree = (
+        "The census immediately before #9548 returns 10 at `047c91f7a`.",
+        "Measured immediately before #9548: 10 lines, at `047c91f7a`.",
+        "Immediately before #9548 the census returns 10, at `047c91f7a`.",
+        "The census immediately before #9548 returns 10 lines, measured at `047c91f7a`.",
+        "The path set immediately before #9548 yields 10 hits (`047c91f7a`).",
+        "The census immediately before #9548 reads 10 at `047c91f7a`, not 5 at "
+        "`ff6379eb2`.",
+    )
+    _figure_reds = [
+        s for s in _figure_at_true_tree if _refuses_before_9548(s)
+    ]
+    assert not _figure_reds, (
+        "a figure BOUND to the true-tree appositive is refused — the figure channel now "
+        "checks it against the EXECUTED census (`_figure_gate`) instead of a character "
+        "window, so the arm must not also refuse it by spelling (#11191 review r12, P1):\n  "
+        + "\n  ".join(_figure_reds)
+    )
+    # …and the figure channel is not weakened by that: a figure dated to the phrase with NO
+    # referent is still refused, and the near-true-tree window no longer runs out one word
+    # past a character count (the A4 defect: the cell stating TWO figures at one tree).
+    assert _refuses_before_9548(
+        "The census immediately before #9548 returns 10 lines."
+    ), (
+        "a figure dated to the phrase with no referent passes — dropping the `_between` "
+        "term must not reach the no-referent arm (#11191 review r12, P1)"
+    )
+    _widened_row = row.replace(
+        "not empty, and not one: 10**", "not empty, and not one: 7** lines, read at"
+    )
+    assert _widened_row != row, (
+        "the A4 window control no longer edits §A8's figure, so it proves nothing "
+        "(#11191 review r12, P2)"
+    )
+    assert not _figure_gate(_widened_row), (
+        "a SECOND figure stated at the true tree across ordinary prose passes — "
+        "`_FIGURE_NEAR_TRUE_TREE`'s gap was a 12-character count, and the spelling "
+        "'7** lines, read at' puts the second figure 18 characters away, so the A4 defect "
+        "(the cell stating 7 AND 10 at one tree) merges green (#11191 review r12, P2)"
     )
 
 
