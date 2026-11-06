@@ -1543,7 +1543,7 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
     review). The fixture used `capstone_on_54922a800_other`, whose HEAD TOKEN is
     still the right one — but `_names_head` requires the last segment to be a
     numeric epoch, so `other` fails the shape test and `score()`'s
-    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1322`) refused it
+    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1769`) refused it
     FIRST. With `pass` in place of that guard the earlier mutation runs showed
     it, and with the guard live the assertion below was satisfied by ITS message
     — which also contains the graph string. So this pin was measuring the wrong
