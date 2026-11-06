@@ -3911,14 +3911,14 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     )
 
     # ── The SECOND runbook, which this pin never read (#6744) ───────────────────────────────────
-    # `docs/ops/batch-integration.md` cites `python-ci.yml` by line twice, and BOTH were exactly
-    # right on `main` (`:1844`, `:1911`). #6744 inserts 70 lines into the `test` job's `strategy`
-    # block (`python-ci.yml:748`) and 15/12 further down, so both numbers now land on unrelated
-    # comments (`:1844` on a host-wide `ps`-count note, `:1911` on the presence-form header) — and
-    # NOTHING red, because the only cross-file-ref gate in the repo read `ci-runner-x64.md` alone.
-    # ⚠ No coordinate from any head is restated here: every pair this note has carried went stale on
-    # the next merge, which is the whole point. The pin reads the citation from the FILE and resolves
-    # it against the workflow, so a fixer re-anchoring should trust the red, not this note.
+    # `docs/ops/batch-integration.md` cites `python-ci.yml` by line twice, for the two sentences
+    # below. The pair was ALREADY offset-shifted by ~6 lines on the `main` it was written against,
+    # and #6744's insert into the `test` job's `strategy` block (plus two smaller ones further down)
+    # moved both anchors again — so the two numbers then landed on unrelated comments, and NOTHING
+    # red, because the only cross-file-ref gate in the repo read `ci-runner-x64.md` alone.
+    # ⚠ No line number is restated in this note: every pair it has carried went stale on the next
+    # merge, which is the whole point. The pin reads the citation from the FILE and resolves it
+    # against the workflow, so a fixer re-anchoring should trust the red, not this note.
     # Both sentences are load-bearing there: the first carries the "ARM64 VMs resolve
     # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at 32m12s
     # of a 30m budget" measurement the section argues a fold-routing decision on.
@@ -4016,8 +4016,10 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
                 f"python-ci.yml:{lo}-{hi or lo} (which reads {span[0].strip()!r} …)"
             )
     # Non-vacuity, executable: the checker must reject the three citations this round corrected, so
-    # a pass on the real file cannot be it matching nothing (each of those numbers is what the doc
-    # carried before, measured — `:3635` is a `ps`-residue comment, not a pip install).
+    # a pass on the real file cannot be it matching nothing — each of those numbers is what the doc
+    # carried before. ⛔ The property the control needs is only that a stale number does NOT land on
+    # any of the four anchored lines; do not restate what it DOES land on, because that changes with
+    # every insert above the step.
     for stale in _WALL_CLOCK_STALE_CITATIONS:
         lo, _, hi = stale.split(":", 1)[1].partition("-")
         assert not any(
