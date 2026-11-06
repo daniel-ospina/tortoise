@@ -287,6 +287,9 @@ def _run_body(step: dict) -> str:
 _REPAIR_REMEDY = re.compile(r"supabase\s+migration\s+repair[^\"\n]*--status\s+applied[^\"\n]*")
 _DB_PUSH_REMEDY = re.compile(r"supabase\s+db\s+push\s+--linked[^\"\n]*--include-all[^\"\n]*")
 _SECRETS_SET_REMEDY = re.compile(r"supabase\s+secrets\s+set[^\"\n]*--project-ref[^\"\n]*")
+# The banner remedy omits the `supabase` prefix (it is printed as `'migration repair …'`), so it needs
+# its own anchor rather than `_REPAIR_REMEDY`.
+_BANNER_REPAIR = re.compile(r"migration\s+repair")
 
 
 def _printed_remedies(text: str, pattern: str) -> list[str]:
@@ -376,6 +379,62 @@ def _argv(command: str) -> tuple[str, ...]:
         return tuple(_strip_shell_comment(command).split())
 
 
+_CONSENT_TRUE = frozenset({"true", "yes", "on", "1", "y"})
+
+
+def _carries_consent(argv: tuple[str, ...]) -> bool:
+    """Whether this argv conveys CONSENT — `--yes` present and NOT inverted.
+
+    ONE predicate for every `--yes` assertion in this file, for the same reason
+    `_strip_shell_comment` has one owner: a second spelling of "the flag is there" is how two
+    answers to one question diverge.
+
+    ⛔ There are TWO failure directions here, both measured, and the predicate must reject only
+    the second:
+
+    * `--yes=false` is NOT consent — the CLI PARSES the value and treats it as no, so a substring
+      check that counts it is a false PASS over a dead applier (the defect this file exists for);
+    * `--yes=true` / `--yes=1` / `--yes=yes` ARE consent — `--yes` accepts
+      true|yes|on|1|y|false|no|off|0|n (measured against 2.110.0). A check that accepts only the
+      bare token false-REDs a future CORRECT edit, i.e. a false block on a green applier. That
+      was a real review finding against the bare-token form, not a hypothetical.
+
+    An UNRECOGNISED value is not consent: for a consent flag, "not proven" must never read as
+    "yes". `--memo "--yes"` stays one argv word that is not `--yes`, so it is not consent either.
+    """
+    consent = False
+    for word in argv:
+        token = word.strip("'\"")
+        if token == "--yes":
+            return True
+        if token.startswith("--yes="):
+            consent = consent or token.partition("=")[2].strip("'\"").lower() in _CONSENT_TRUE
+    return consent
+
+
+def _remedy_command(banner: str, anchor: re.Pattern[str]) -> str:
+    """The COMMAND a banner prints, sliced out of its quotes — never the whole banner.
+
+    A whole-banner match is defeated by PROSE, measured GREEN: delete `--yes` from the copy-paste
+    command and mention it in a sentence of the SAME banner, and a `--yes` search still matches
+    while the operator's paste repairs nothing. A printed remedy is a delimited span
+    (quoted/backticked) in every banner this repo prints, so slice to the delimiter and assert on
+    the command's OWN argv. A banner that does not delimit its command falls back to
+    anchor-to-end, which is the strictest reading available without quotes.
+    """
+    match = anchor.search(banner)
+    if match is None:
+        return banner
+    start = match.start()
+    opened = max(banner.rfind(quote, 0, start) for quote in "'`\"")
+    if opened == -1:
+        return banner[start:]
+    closes = [banner.find(quote, start) for quote in "'`\""]
+    closed = min((idx for idx in closes if idx != -1), default=len(banner))
+    delimited = banner[opened + 1 : closed]
+    return delimited if anchor.search(delimited) else banner[start:]
+
+
 def _applier_commands() -> list[str]:
     """The Supabase CLI commands the workflow actually RUNS, one string per invocation.
 
@@ -450,7 +509,7 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # GREEN over a broken applier (cycle 11). A flag is a WORD.
         argv = _argv(cmd)
         assert "--include-all" in argv, "the apply step must keep `--include-all` (#10896)"
-        assert "--yes" in argv, (
+        assert _carries_consent(argv), (
             "`supabase db push` on a hosted target is consent-gated in CLI v3 and cannot prompt "
             "in CI: without `--yes` it applies ZERO migrations (#10896)"
         )
@@ -607,8 +666,9 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # (`--yes` accepts true|yes|on|1|y|false|no|off|0|n — measured against 2.110.0). Then the
         # three function deploys fail consent while the schema applies and `Dispatch deploy-hosted`
         # is skipped by its implicit `success()` — the mismatched pair #3627 exists to prevent —
-        # with this suite GREEN. `_argv` keeps only the bare token, so an inverted value cannot pass.
-        assert "--yes" in _argv(cmd), (
+        # with this suite GREEN. `_carries_consent` accepts an honoured value (`--yes=true`) and
+        # refuses an inverted one (`--yes=false`) — rejecting only the second is the whole point.
+        assert _carries_consent(_argv(cmd)), (
             "`supabase functions deploy` is consent-gated in CLI v3; without `--yes` the schema "
             "applies and the app half never flips — the mismatched pair #3627 exists to prevent"
         )
@@ -748,7 +808,7 @@ def test_printed_remediations_pass_yes_too() -> None:
         )
         # PARSED argv, never a substring: `--yes=false` parses as NO consent in the CLI, so a
         # substring assertion would bless a printed remedy that repairs nothing.
-        lacking_repair = [site for site in sites if "--yes" not in _argv(site)]
+        lacking_repair = [site for site in sites if not _carries_consent(_argv(site))]
         assert not lacking_repair, (
             f"{name}: {len(lacking_repair)} of {len(sites)} printed `--status applied <version>` "
             f"remedies still lack `--yes` ({lacking_repair}) — CLI v3 consent-gates `migration "
@@ -769,7 +829,7 @@ def test_printed_remediations_pass_yes_too() -> None:
         "operator resolving drift needs a command to run (#1095), and its disappearance must not "
         "pass vacuously"
     )
-    lacking = [cmd for cmd in pushes if "--yes" not in _argv(cmd)]
+    lacking = [cmd for cmd in pushes if not _carries_consent(_argv(cmd))]
     assert not lacking, (
         f"{len(lacking)} of {len(pushes)} printed `supabase db push --linked` remedies lack `--yes` "
         f"({lacking}): CLI v3 consent-gates `db push` and cannot prompt, so the copy-paste apply an "
@@ -803,7 +863,7 @@ def test_printed_remediations_pass_yes_too() -> None:
     # as it scans, so it answers for every comment shape; keeping both was two owners of one predicate,
     # and that is how they diverged.
     unconsented = [
-        remedy for remedy in readme_remedies if "--yes" not in _argv(remedy)
+        remedy for remedy in readme_remedies if not _carries_consent(_argv(remedy))
     ]  # `_argv` strips the comment itself, so the two cannot disagree
     assert not unconsented, (
         f"supabase/README.md prints {len(unconsented)} manual-fallback command(s) without `--yes` "
@@ -828,7 +888,7 @@ def test_printed_secrets_set_remedy_passes_yes_too() -> None:
         "instruction an operator gets when a required secret is missing (#1121), and its "
         "disappearance must not pass vacuously"
     )
-    lacking = [cmd for cmd in printed if "--yes" not in _argv(cmd)]
+    lacking = [cmd for cmd in printed if not _carries_consent(_argv(cmd))]
     assert not lacking, (
         f"{len(lacking)} of {len(printed)} printed `supabase secrets set` remedies lack `--yes` "
         f"({lacking}): CLI v3 consent-gates `secrets set` and cannot prompt, so the instruction an "
@@ -871,16 +931,72 @@ def test_the_drift_banner_remedy_passes_yes_too() -> None:
         "operator shown OUT OF ORDER versions needs a command to run (#1095)"
     )
     for banner in remedies:
-        # A BARE `--yes`, not a substring (found by the verifier on 2026-11-06): `--yes=false`
-        # parses as NO consent in the CLI and it satisfied `"--yes" in banner` — measured GREEN over
-        # a banner whose copy-paste repairs nothing. `_argv` is NOT usable here and was measured to
-        # false-RED the correct banner: the remedy sits inside prose (…`--yes') and rename …), so
-        # shlex meets an unbalanced apostrophe, falls back to a whitespace split, and the token is
-        # `--yes')` rather than `--yes`. So this is the one site that matches a WORD BOUNDARY: the
-        # flag must not be followed by `=` (an inverted value) or by more word characters.
-        assert re.search(r"--yes(?![=\w-])", banner), (
+        # The COMMAND, not the banner (found by a fresh-context review of this file, 2026-11-06).
+        # Two earlier forms were each measured GREEN over a broken remedy:
+        #   1. a substring — `--yes=false` parses as NO consent and satisfied it;
+        #   2. a word-boundary regex over the WHOLE banner — defeated by prose: delete `--yes` from
+        #      the quoted command and add `--yes is required on CLI v3` to the same banner, and it
+        #      still matched while the operator's paste repaired nothing.
+        # `_argv` straight on the banner was ALSO measured to false-RED the correct banner (the
+        # remedy sits inside prose, so shlex meets an unbalanced apostrophe). So: slice the quoted
+        # command out of the banner, then parse THAT — prose is not code, and a mention is not a
+        # remedy (the same doctrine `_printed_remedies` applies to the governed files).
+        command = _remedy_command(banner, _BANNER_REPAIR)
+        assert re.search(r"--status\s+applied", command), (
+            "the drift banner must still print the `migration repair --status applied` command, not "
+            "merely mention it: an operator shown OUT OF ORDER versions needs a command to run (#1095)"
+        )
+        assert _carries_consent(_argv(command)), (
             "the drift banner's printed remedy must carry `--yes`: `migration repair` against a "
             "hosted project is consent-gated in CLI v3 (docs → 'Migrating to Supabase CLI v3') "
             "and fails unattended without it, so the operator's copy-paste repairs nothing and "
             "says nothing (#10896)"
         )
+
+
+def test_the_consent_predicate_refuses_inverted_yes_and_accepts_an_honoured_value() -> None:
+    """The predicate itself, not only its call sites — both failure directions, both measured.
+
+    A bare-token check (`"--yes" in argv`) rejects `--yes=true`, `--yes=1`, `--yes=yes`: spellings
+    the CLI HONOURS (`--yes` accepts true|yes|on|1|y|false|no|off|0|n — measured against 2.110.0),
+    so a future CORRECT edit to a value-bearing form would go RED — a false block on a green
+    applier, which is a defect in its own right (found by a fresh-context review of this file).
+    A substring check accepts `--yes=false`, which the CLI parses as NO. The predicate must refuse
+    exactly the second and nothing else, and must never read "not proven" as "yes": an unrecognised
+    value (`--yes=maybe`, `--yes=`) is not consent.
+    """
+    base = "supabase functions deploy deck-view --linked --project-ref x"
+    for honoured in ("--yes", "--yes=true", "--yes=1", "--yes=yes", "--yes=on", "--yes=TRUE"):
+        assert _carries_consent(_argv(f"{base} {honoured}")), honoured
+    for inverted in ("--yes=false", "--yes=no", "--yes=off", "--yes=0", "--yes=", "--yes=maybe"):
+        assert not _carries_consent(_argv(f"{base} {inverted}")), inverted
+    assert not _carries_consent(_argv(base)), "no flag at all must never read as consent"
+    # ⚠️ RESIDUAL, recorded rather than papered over: an argv token that IS the string `--yes`
+    # because it is the VALUE of another flag (`--memo "--yes"`) is indistinguishable from the flag
+    # once shlex has stripped the quotes — separating them needs per-flag arity knowledge, and it is
+    # unreachable with the flag sets this file governs (`db push`, `functions deploy`,
+    # `migration repair`, `secrets set` take no value-bearing flag that accepts `--yes`). Pinned as a
+    # known limit so it is not re-discovered as a defect.
+    assert _carries_consent(_argv(f'{base} --memo "--yes"')), "documented residual, not consent logic"
+
+
+def test_the_drift_banner_remedy_is_the_COMMAND_not_prose_that_mentions_the_flag() -> None:
+    """The banner site, attacked the way the review attacked it: flag moved from command to prose.
+
+    Measured GREEN before this test existed: deleting `--yes` from the quoted remedy and adding the
+    sentence "note that --yes is required on CLI v3" to the SAME banner left the suite green,
+    because the assertion matched the whole banner. A printed remedy is the delimited COMMAND; a
+    mention is not a remedy — the doctrine `_printed_remedies` already applies to the governed files,
+    applied here to the one banner that carries its command inside prose.
+    """
+    banner = (
+        "Migrations pending — resolve OUT OF ORDER versions first (forward migration, or "
+        "'migration repair --linked --status applied <version>') and note that --yes is required "
+        "on CLI v3 before the next app deploy."
+    )
+    command = _remedy_command(banner, _BANNER_REPAIR)
+    assert re.search(r"--status\s+applied", command), "the slice must still be the repair command"
+    assert not _carries_consent(_argv(command)), (
+        "the flag lives only in prose here; a whole-banner match would bless a remedy that repairs "
+        "nothing (#10896)"
+    )
