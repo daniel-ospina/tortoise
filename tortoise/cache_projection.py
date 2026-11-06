@@ -1193,6 +1193,13 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
     * **EMPTY** — zero rows. An empty namespace is never legitimate;
     * **truncated** — fewer rows than its own `_row_count` declares.
 
+    `_source_sha256` is deliberately NOT enforced here: it can only be checked
+    against the doc, and the deployed image ships no `docs/` tree — the whole
+    reason this carrier exists. It is for the parity pin (which HAS the doc) and
+    for a human reading a bad carrier, and saying so is the point: a provenance
+    field that looks enforced but is not is how the next reader concludes the
+    carrier is validated when only its syntax is.
+
     The two RELATIVE pins in `tests/test_10663_placement_table_packaged.py`
     (carrier vs the same parser over the doc, generator vs the committed bytes)
     cannot see any of these: an artefact that agrees with itself keeps them —
