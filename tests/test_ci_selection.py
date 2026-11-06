@@ -10209,6 +10209,26 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "empty it and re-download the embedder from huggingface.co every run. "
         "Re-derive this remedy rather than leaving a stale premise.")
 
+    # ⛔ THE SAME LOAD-BEARING ARM THE PIP HALF CARRIES, applied to HF (review finding,
+    # 2026-11-06). A writer that runs LESS OFTEN than this job empties the key this job reads,
+    # and a COUNT of writers cannot tell that apart: `test-slow` (`slow_run`) and
+    # `test-carve-out` (`carve_out_run`) are both diff-gated, so `hf_writers` can be non-empty
+    # while every writer that fires on a run reaching this job has been gated away. Measured by
+    # the reviewer on this head: converting `test-concurrency-falkor`'s HF step — the one writer
+    # that shares this job's `python == 'true'` gate — to the same restore-only shape this PR
+    # prescribes left the pin GREEN (`1 passed`), i.e. it certified the remedy after its premise
+    # was gone. EXACT gate strings, never a prefix (the pip arm's own lesson: a `startswith("always()")`
+    # test accepts the diff-gated `always() && … carve_out_run == 'true'`).
+    hf_broader = {test_gate, "always() && needs.changes.result == 'success'"}
+    hf_load_bearing = [jid for jid in hf_writers if _gate_of(jid) in hf_broader]
+    assert hf_load_bearing, (
+        f"every job writing the shared HF key is diff-gated away from this job's own run: "
+        f"{[(jid, _gate_of(jid)) for jid in hf_writers]} vs this job's `{test_gate}`. A writer "
+        "that needs `slow_run`/`carve_out_run` does not populate the key on a run that still "
+        "executes `test`, so this job becomes a permanent restore-only reader and every shard "
+        "re-downloads the embedder from huggingface.co (#4387, #2573). `test-concurrency-falkor` "
+        "is the writer that shares this job's gate.")
+
     # Arm 2 of `docs/ops/ci-wall-clock.md` §2: the cap must clear SUM x 1.5.
     # Terms the FILE can state are PARSED out of it; the rest are MEASUREMENTS from
     # the run that filed #11063, named, dated and sized as such — not dressed as

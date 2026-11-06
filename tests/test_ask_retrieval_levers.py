@@ -108,7 +108,16 @@ def _bench_opted_in() -> bool:
     only way to arm it is a spelling that asks for it.
     """
     flag = (os.environ.get(_BENCH_OPT_IN_ENV) or "").strip()
-    if flag == "0":
+    # ⛔ EVERY ORDINARY "OFF" SPELLING IS AN OFF, not just the literal "0" (review finding,
+    # 2026-11-06). `false` is the commonest CI spelling of "off", and it used to fall through
+    # to the dataset arm: with `TORTOISE_LME_DATASET` exported (the ordinary way someone points
+    # the bench at a dataset) `TORTOISE_LME_BENCH=false` ARMED the measured 1,252 s inline bench
+    # in the fast gating shard — the withheld-required-check failure #11056 exists to remove,
+    # reached from a spelling that reads as a refusal. The sibling gate this mirrors
+    # (`tests/test_ask_regression_llm.py:62`) arms on `== "1"` only, so every other spelling is
+    # off there; this predicate keeps the explicit path as an opt-in, so it must enumerate the
+    # OFF spellings instead. Armed ONLY by a spelling that asks for it.
+    if flag.lower() in {"0", "false", "no", "off"}:
         return False
     return flag == "1" or bool(os.environ.get("TORTOISE_LME_DATASET"))
 
@@ -299,6 +308,21 @@ def test_the_bench_is_armed_explicitly_never_by_an_ambient_home_cache(
     assert _recorded_questions() == {}
     with pytest.raises(pytest.skip.Exception):
         _bench_questions()
+
+    # ARM 5 — every ORDINARY "off" spelling is an off, not just the literal "0" (review
+    # finding, 2026-11-06). `false` is the commonest CI spelling of "off" and it used to ARM
+    # the bench when a dataset path was exported — a refusal that reads as a refusal and does
+    # the opposite. Each spelling is asserted separately so a fix that only widened to one of
+    # them cannot pass.
+    for off_spelling in ("false", "False", "FALSE", "no", "off", "OFF"):
+        monkeypatch.setenv(_BENCH_OPT_IN_ENV, off_spelling)
+        assert dataset.exists(), f"arm 5 must bite on a PRESENT dataset path ({off_spelling})"
+        assert _bench_opted_in() is False, (
+            f"TORTOISE_LME_BENCH={off_spelling!r} ARMED the ~20-minute bench while "
+            f"TORTOISE_LME_DATASET is exported — a spelling that reads as a refusal must be "
+            f"one (#11056)"
+        )
+        assert _recorded_questions() == {}, f"{off_spelling!r} must not reach the dataset"
 
 
 # ── Indicator 1 / Target 0: 4 gold-turn-in-context fixtures ────────────────
