@@ -20,7 +20,11 @@ _log = logging.getLogger("tortoise.sentry")
 _enabled = False
 _service = "tortoise-hosted-api"
 
-# Exceptions that are NOT application errors and must never become Sentry events.
+# Exceptions the PROCESS-WIDE filter treats as "not an application error": no
+# event is built for them from ANY path, because this is the set `init()` derives
+# `ignore_errors` from. ⚠️ The request layer is a SEPARATE and broader set, and a
+# reset admitted there still delivers one event — see
+# `REQUEST_LAYER_DISCONNECT_NAMES`; do not read this header as covering it.
 # #11092: a peer hanging up is routine (a health probe timing out, a browser tab
 # closed, a dropped fetch). Routing it through the unhandled-exception handler
 # built a full event — including the per-frame source read that
@@ -216,9 +220,11 @@ def is_benign_exception(exc: BaseException, *, inbound_request: bool = False) ->
       which deliberately does NOT walk the MRO.
 
     `inbound_request` selects WHICH name set (review round 4, P2). The default is
-    the direction-UNAMBIGUOUS set (`BENIGN_EXCEPTION_NAMES`), because that is
-    what `capture_exception` and the client-global `ignore_errors` filter can
-    safely use for the whole process. Only a caller that KNOWS the request is
+    the PROCESS-WIDE set (`BENIGN_EXCEPTION_NAMES`), because that is what
+    `capture_exception` and the client-global `ignore_errors` filter can use for
+    the whole process — it is not a "direction-unambiguous" set: see the note on
+    `BrokenResourceError` in `init()`, whose direction is not self-evident. Only
+    a caller that KNOWS the request is
     inbound — `hosted_api._unhandled_exception_handler` — passes
     `inbound_request=True`, which admits `ConnectionResetError` and
     `BrokenPipeError` as well. ⚠️ The LAYER says where the exception SURFACED,

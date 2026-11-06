@@ -94,9 +94,13 @@ def test_init_turns_source_context_off(enabled_sentry: dict[str, list]) -> None:
         "init()'s ignore_errors and BENIGN_EXCEPTION_NAMES must be the SAME set — "
         "init derives it, so a difference means one of them was re-typed by hand"
     )
-    # REVIEW ROUND 4 (P2): it must be the DIRECTION-UNAMBIGUOUS set. A global
-    # `ignore_errors` entry is applied to every event from every path, so adding
-    # `ConnectionResetError` here would silence a real upstream reset process-wide.
+    # REVIEW ROUND 4 (P2): it must be the PROCESS-WIDE set, not a
+    # direction-scoped one. A global `ignore_errors` entry is applied to every
+    # event from every path, so adding `ConnectionResetError` here would silence a
+    # real upstream reset process-wide. (`BrokenResourceError` IS in that set and
+    # its direction is not self-evident — `tortoise/sentry.py` carries the
+    # measurement for why it is still admitted, which is why "direction-"
+    # something is the wrong label for the set as a whole.)
     assert "ConnectionResetError" not in (kwargs.get("ignore_errors") or ()), (
         "ignore_errors is CLIENT-GLOBAL — a direction-ambiguous name here blinds "
         "the process to upstream resets; scope it to the request layer instead"
@@ -375,8 +379,10 @@ def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
     ), (
         "an exact-named reset at the request layer must log below ERROR and "
         "not be captured BY THIS HANDLER — it is not in `ignore_errors` though, "
-        "so the re-raise still delivers one event; this record is the "
-        "attribution signal that survives, not a guarantee of silence"
+        "so the re-raise still delivers one event. This record is the "
+        "TEST-VISIBLE signal only: in the hosted deployment the DEBUG write is "
+        "dropped, and the production attribution is uvicorn's own ERROR record "
+        "plus the delivered event's `request` interface"
     )
     assert response.status_code == 500
 
