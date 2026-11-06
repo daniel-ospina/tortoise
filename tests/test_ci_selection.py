@@ -274,6 +274,29 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
         "(#10980 review P2, the #4309 silent-drop class)"
     )
 
+    # PR #11023 review (P1, MEASURED FALSE — pinned here so it is not
+    # re-derived): the claim was that the CHANGELOG half of the pin "cannot run
+    # on the only change class that breaks it", because the module is allegedly
+    # not in `tier1`. It IS — `tier1:` is at `config/ci-surfaces.yml:7536` (75
+    # rows at this head), and the reviewer read the range `:6387-:6717`, which
+    # is inside `surfaces:`, where no `tier1` key exists at all. Selected now:
+    # `surfaces=[]` (the docs-only early return) with the module in
+    # `test_files`. The coverage is ALSO already pinned transitively: the
+    # STORAGE assertion directly above passes only through the SAME `tier1`
+    # row, since `onboarding` does not carry the module and `api`/`core` need a
+    # Python path — so removing that row reds this test rather than silently
+    # un-covering the CHANGELOG. Asserted explicitly below so the second file
+    # is a measurement of its own, not an inference from the first.
+    changelog = _sel(["docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md"])
+    assert changelog["surfaces"] == [], changelog["surfaces"]
+    assert changelog["full"] is False
+    assert "test_9555_narrative_carrier.py" in changelog["test_files"], (
+        "a `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`-only diff no "
+        "longer selects `test_9555_narrative_carrier.py` — then the "
+        "`#10852`-landed CHANGELOG leg is asleep on exactly the diff class "
+        "that can re-introduce the retracted sentence it pins (#11023 review)"
+    )
+
 
 def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
     """#10108 review (P1): pin the SELECTION, not just the manifest string.
