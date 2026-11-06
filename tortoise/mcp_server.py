@@ -507,6 +507,37 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
     # import. Sanitized on the loop (pure and cheap), so the off-loop closure
     # carries only the safe value.
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10602: count the breach on THIS thread, before the emit is submitted.
+    # ``submit`` returns a PRE-FAILED future when the telemetry pool's bounded
+    # backlog is full — the saturation that also causes breaches — so a counter
+    # incremented inside ``_emit`` would under-count precisely when it matters.
+    #
+    # EXACTLY-ONCE across the whole `/mcp` surface: this helper is the seam's
+    # only counting site, and the seam reaches it from exactly one place — the
+    # ``else`` of ``if _wait_bound_refused():``. The two ``dispatched=False``
+    # returns deliberately emit nothing (the transport already answered and
+    # already counted, as ``mcp``), so one refused MCP request is one count no
+    # matter which detector saw it. `test_the_mcp_module_has_exactly_one
+    # _breach_counting_site` pins that a second site is not added.
+    #
+    # ⛔ THE COUNT IS CLAIMED, not merely performed. `_wait_bound_refused()` is
+    # one-directional (it suppresses THIS seam when the middleware went first),
+    # so in the reverse order — the seam refusing first, the middleware's own
+    # bound expiring later in the same request — the middleware would count a
+    # second time for one refusal. `_claim_wait_bound_count()` makes whichever
+    # detector fires FIRST the only counter, in both orders.
+    #
+    # ⛔ WRAPPED, the same rule the emit below carries: telemetry must never
+    # turn a refusal into a generic error. This call sits on the refusal path
+    # BEFORE `_wait_bound_refusal_result` builds its `-32009` body, so a raise
+    # here would replace that legible refusal with a bare tool error — the
+    # observation destroying the thing it observes (#3834/#10602).
+    if _claim_wait_bound_count():
+        try:
+            monitoring.record_wait_bound_breach(
+                monitoring.WAIT_BOUND_SURFACE_MCP)
+        except Exception:  # measurement must never break a refusal
+            _log.debug("mcp wait-bound count failed", exc_info=True)
 
     def _emit() -> None:
         try:
@@ -550,6 +581,15 @@ _WAIT_BOUND_ARRIVAL_KEY = "_wait_bound_t0"
 #: answered the caller (#3834 F-2). The seam reads it so one request records
 #: exactly one ``transport_wait_bound_exceeded``.
 _WAIT_BOUND_REFUSED_KEY = "_wait_bound_refused"
+
+#: The key claiming the #10602 breach COUNT for this request. ``_WAIT_BOUND_REFUSED_KEY``
+#: is one-directional — it suppresses this seam when the middleware went first,
+#: never the other way — so a request whose seam refused first would be counted a
+#: second time when the middleware's own bound expires later in the same request
+#: (fastmcp's ``json_response`` mode: no response starts before dispatch, so the
+#: seam's deadline has not collapsed and it can win the race).
+#: Same literal as ``hosted_api._WAIT_BOUND_COUNTED_STATE``.
+_WAIT_BOUND_COUNTED_KEY = "_wait_bound_counted"
 
 
 def _wait_bound_state() -> dict | None:
@@ -624,6 +664,29 @@ def _wait_bound_refused() -> bool:
     """
     state = _wait_bound_state()
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
+
+
+def _claim_wait_bound_count() -> bool:
+    """Claim the breach count for this request; True when THIS detector owns it.
+
+    #10602: the counter drives a capacity decision, so one refused request must
+    move it by exactly one across the WHOLE ``/mcp`` surface — not once per
+    detector that noticed. ``hosted_api.WaitBoundMiddleware`` and this seam can
+    both observe the same refusal, and their order is not fixed (see
+    ``_WAIT_BOUND_COUNTED_KEY``), so the claim is a checked write on the shared
+    ``scope["state"]``: the first detector to reach it counts, every later one
+    is a no-op.
+
+    Off-HTTP there is no shared dict, so every call owns its own count — that is
+    not a double count, it is two unrelated callers.
+    """
+    state = _wait_bound_state()
+    if state is None:
+        return True
+    if state.get(_WAIT_BOUND_COUNTED_KEY):
+        return False
+    state[_WAIT_BOUND_COUNTED_KEY] = True
+    return True
 
 
 #: The four retry rules shipped WITH a breached write's refusal. Exactly ONE is
