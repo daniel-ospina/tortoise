@@ -138,7 +138,8 @@ lands on two of the sites this paragraph names.** `#10864`'s §2 rewrites `docs/
 file's **only** occurrence, the `degraded` / `degraded_reasons` / `refusing` row — and the comment near
 `tortoise/hosted_api.py:6503`, *"⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW
 (#10185/#10620)"*, one of that file's **4** occurrences; the numbers #10864 quotes for it are its own head's
-(`:6400`, and `:6435` at the head the sentence was written on — both shifted by main), so the durable handle is
+(`:6400`, and `:6435` at `443498e66` — both shifted by main, `:6435` → `:6503` by the time the sentence itself
+landed in `5dc22c19a`, which is why it was stale at the head it shipped on), so the durable handle is
 the symbol, not the number; its fix reads *"add the second clause (and the same
 one-clause note at `hosted_api.py:6400`)"*. Both edits add the missing `refusing`-absence clause and neither
 touches the number, so the residual is still uncarried — but a lane that reads a blanket *"proposes no
@@ -152,7 +153,7 @@ The sites this paragraph names are **eleven**, not five — the five code files 
 `docs/infra-runbook.md`, whose single occurrence sits **on the very row `#10864` rewrites** — the `degraded` /
 `degraded_reasons` / `refusing` field row it cites by line — so the one lane already holding that file is exactly
 the lane that must be told these occurrences are in scope, **and the same holds for `tortoise/hosted_api.py`,
-whose `:6435` comment `#10864` rewords too** — the holding lane is one lane, and before this round only the
+whose `:6503` comment `#10864` rewords too** — the holding lane is one lane, and before this round only the
 runbook was named to it; and `08-hosted-prerequisites.md`, which is not "the
 one" uncovered site but simply the one this epic owns — **plus two more the paragraph names and an earlier
 version of this sentence dropped**: `tests/test_record_searchkeys_10620.py`, the pin whose **name** is where the
