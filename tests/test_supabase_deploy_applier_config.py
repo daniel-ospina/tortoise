@@ -118,30 +118,50 @@ def _all_steps() -> list[dict]:
     ]
 
 
+_REMOTE_TARGET = re.compile(r"--(?:linked|remote)\b|--project-ref\b")
+_LOCAL_TARGET = re.compile(r"--local\b")
+
+
+def _mutates_hosted(step: dict) -> bool:
+    """True when the step RUNS a hosted-mutating command against a REMOTE target."""
+    for command in _commands_in(step):
+        if not command.startswith(_MUTATING_ROOTS):
+            continue
+        if _LOCAL_TARGET.search(command) or not _REMOTE_TARGET.search(command):
+            continue
+        return True
+    return False
+
+
 def _applier_jobs() -> list[tuple[str, dict]]:
-    """The job(s) that INSTALL the CLI — the only door that applies production DDL."""
+    """The job(s) that MUTATE the hosted project — the only door that applies production DDL.
+
+    Selected by what the job MUTATES, not by what it INSTALLS (review cycle 7). Keying on
+    `supabase/setup-cli` only MOVED the false RED: a legitimate job that installs the CLI to drive
+    the local stack — exactly the `supabase start` / `db reset` run #11100 defers the v3 bump to —
+    red the "exactly one installer" assertion, while a production-mutating job that reached the CLI
+    another way (`npx supabase@…`) was silently unguarded. Selecting on the mutation closes both:
+    such a job IS the applier, so the pin assertion below then requires it to install a pinned CLI.
+
+    Resident gap, stated rather than implied: a mutating command that does not begin with
+    `supabase ` (wrapped in `bash -c '…'`, or reached through a script) is not detected, so it would
+    not make its job the applier. `assert mutating` in the apply test is what keeps that from
+    passing vacuously when the real applier shape changes.
+    """
     return [
         (name, job)
         for name, job in (_workflow_doc().get("jobs") or {}).items()
-        if any(
-            "supabase/setup-cli" in str(step.get("uses", ""))
-            for step in (job.get("steps") or [])
-        )
+        if any(_mutates_hosted(step) for step in (job.get("steps") or []))
     ]
 
 
 def _applier_steps() -> list[dict]:
-    """The steps of the APPLIER JOB (the one that installs `supabase/setup-cli`).
-
-    Scoped to that job deliberately. Walking EVERY job made an ordinary local-stack smoke step
-    (`supabase db push --local --yes` added to a new job) a false RED against the remote-target
-    assertion below — but that assertion is about the PRODUCTION apply, and a second job doing local
-    work is not it. Reddening a correct file is a defect in a guard: measured, review cycle 6.
-    """
+    """The steps of the applier job (the one that mutates the hosted project)."""
     jobs = _applier_jobs()
     assert len(jobs) == 1, (
-        f"expected exactly one job installing supabase/setup-cli, found {[n for n, _ in jobs]} — "
-        f"the applier's guards would otherwise silently apply to the wrong job(s)"
+        f"expected exactly one job that mutates the hosted project, found "
+        f"{[n for n, _ in jobs]} — with more than one, the applier's guards silently check only "
+        f"the first, and the others apply production DDL unguarded (#10896)"
     )
     return list(jobs[0][1].get("steps") or [])
 
@@ -149,15 +169,20 @@ def _applier_steps() -> list[dict]:
 #: The command roots that mutate the HOSTED project.
 _MUTATING_ROOTS = ("supabase db push", "supabase functions deploy", "supabase migration repair")
 
-#: Ways a shell `run:` body can turn a failing apply into a green one. `continue-on-error` is the
-#: YAML form; these are the shell forms, and a guard asserting only the YAML form is defeatable by
-#: two tokens — measured GREEN before this was added (review cycle 6).
-_FAILURE_SWALLOWERS = (
-    re.compile(r"\|\|\s*(?:true|:)\b"),
-    re.compile(r"(?m)^\s*set\s+\+e\b"),
-    re.compile(r"(?m)^\s*set\s+\+o\s+errexit\b"),
-    re.compile(r"(?m);\s*true\s*$"),
-)
+#: A shell `run:` body can turn a failing apply into a green one. Enumerating the swallow tokens is
+#: unbounded and was measured defeated by `|| exit 0`, `|| echo …`, `|| { …; exit 0; }`, `| tee p`
+#: and a bare trailing `&` (review cycle 7) — the blacklist that closed `|| true` was still a
+#: token list. So the rule is STRUCTURAL: a mutating step's body IS its invocation, and composing it
+#: with a control operator is refused outright. Redirections (`2>/dev/null`) are harmless and allowed;
+#: `set -e`/`set -euo pipefail` are allowed (and are what makes a bare command fail).
+#:
+#: The set is exactly the spellings that can substitute a NON-ZERO exit for a zero one:
+#: `|| …`, `| tee …`, `&& …`, `; …`, a trailing `&` (the step returns 0 immediately, `--yes` or not),
+#: and command substitution, which can hide any of them behind `$( )` or backticks.
+_CONTROL_OPERATOR = re.compile(r"[|&;]|\$\(|`")
+
+#: `set +e` / `set +o errexit` re-enable "keep going after a failure" — the errexit axis.
+_ERRETIT_DISABLED = re.compile(r"(?m)^\s*set\s+\+[eo]\b")
 
 
 def _run_body(step: dict) -> str:
@@ -315,12 +340,19 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"still intact (#10896)"
         )
         body = _run_body(step)
-        for swallow in _FAILURE_SWALLOWERS:
-            assert not swallow.search(body), (
-                f"{where} silences its own failure (matched {swallow.pattern!r}): the apply becomes "
-                f"a no-op that reads as success, and the co-move dispatch fires over an unapplied "
-                f"schema. Assert the exit status — never swallow it (#10896, #3627)"
-            )
+        assert not _ERRETIT_DISABLED.search(body), (
+            f"{where} disables errexit (`set +e` / `set +o errexit`): the apply can then fail and "
+            f"the step still exits 0, so the co-move dispatch fires over an unapplied schema "
+            f"(#10896, #3627)"
+        )
+        operator = _CONTROL_OPERATOR.search(body)
+        assert operator is None, (
+            f"{where} composes its apply with the shell control operator {operator.group(0)!r}: "
+            f"that is how a failed apply is turned into a green one — `|| true`, `|| exit 0`, "
+            f"`|| {{ …; exit 0; }}`, `| tee`, `&&`, `;`, a trailing `&`, or a `$( )` that hides any "
+            f"of them. The step must BE its invocation and fail on its own exit status; if you "
+            f"genuinely need an `echo` around it, put it in a previous step (#10896, #3627)"
+        )
 
 
 def test_printed_remediations_pass_yes_too() -> None:
@@ -361,12 +393,18 @@ def test_printed_remediations_pass_yes_too() -> None:
         )
     # The printed manual fallback for the apply itself (drift gate, remediation (a)).
     drift = governed[".github/scripts/check-migration-drift"].read_text(encoding="utf-8")
-    # PER OCCURRENCE on the RUNNABLE form (`--linked`), not as a whole-file substring. The old
+    # PER OCCURRENCE on the RUNNABLE form (`--linked`), not as a whole-file substring: the old
     # substring form was measured GREEN when a SECOND printed `--linked` remedy without `--yes` was
-    # added beside the fixed one. The anchor is `--linked` because the file ALSO says
-    # `supabase db push --include-all` in PROSE describing what the deploy runs — documentation, not
-    # a remedy to copy — and asserting on that would false-RED a correct gate.
-    pushes = re.findall(r"supabase db push --linked[^\"\n]*", drift)
+    # added beside the fixed one. And only on `echo` lines — a printed REMEDY, which is what an
+    # operator copies — because the gate also describes `db push` in prose (comments at :38, :156 and
+    # the echo at :336/:411), and matching those false-RED a correct gate when a comment mentioned
+    # `--linked` (measured, review cycle 7).
+    pushes = [
+        match.group(0)
+        for line in drift.splitlines()
+        if line.lstrip().startswith("echo")
+        for match in re.finditer(r"supabase db push --linked[^\"\n]*", line)
+    ]
     assert pushes, (
         "the drift gate must still print a runnable `supabase db push --linked` apply remedy: an "
         "operator resolving drift needs a command to run (#1095), and its disappearance must not "
