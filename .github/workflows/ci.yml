@@ -847,10 +847,11 @@ jobs:
         # is stdlib only, reads one file, touches no DB and no network.
         # BOTH arms run. `--self-test` is the arm that proves the checker still
         # catches the mutations the map's "not trusted" claim rests on: a rule
-        # quietly weakened (a lowered word floor, a broken mutation primitive)
-        # reds it instead of passing silently, and an arm nothing runs is not a
-        # guard. Both lines sit INSIDE the exact list the two `docs`-job pins
-        # assert, so neither can be appended around them.
+        # quietly weakened in a way a document mutation can reach (a lowered word
+        # floor, a reverted width or parity rule, a removed population pin) reds it
+        # instead of passing silently, and an arm nothing runs is not a guard.
+        # Both lines sit INSIDE the exact list the two `docs`-job pins assert, so
+        # neither can be appended around them.
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check

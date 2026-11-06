@@ -195,40 +195,50 @@ test-design-map-check: CLEAN — every rule holds
   ok   delete the SF13 row AND every mention of it (a consistent shrink) → violation (R1 SF13: pinned surface is missing from the surface table)
   ok   retype a crosswalk surface as one that has no row → violation (R5 §6.4: names SF99, which has no surface row)
   ok   splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
+  ok   splice a `\\|` into SF2's contract cell (escaped backslash + REAL delimiter) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   delete the child table's section heading → refusal (section `## 4.` is missing — cannot check the map)
-self-test: 11/11 mutation(s) refused — the checker is not a rubber stamp
+self-test: 12/12 mutation(s) refused — the checker is not a rubber stamp
 ```
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
-it applies the eleven mutations an editor actually makes (remove a row, **remove a row and every mention
+it applies the twelve mutations an editor actually makes (remove a row, **remove a row and every mention
 of it**, blank a cell, restate a failure as a mechanism, retype a layer as a mechanism, retype a
-crosswalk surface as one that has no row, **splice a raw `|` into a cell**, drop a child, drop a
-capability, forget a seam, destroy the section structure) to an in-memory
+crosswalk surface as one that has no row, **splice a raw `|` into a cell**, **splice a `\\|` into a
+cell**, drop a child, drop a capability, forget a seam, destroy the section structure) to an in-memory
 copy and **requires each to be caught**. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
 never built the consistent shrink its own label claimed.
 
-**The width case is load-bearing, and that is measured, not asserted.** The arm that matters most is
-the one covering the rule added *last*. Three edits reproduce the hole this case closes: **delete this
-case**, `parse_surface_rows` monkeypatched back to the previous `< 7` floor — the exact false PASS the
-exact-7 rule closes — and `MIN_SELF_TEST_MUTATIONS` lowered to match the ten that remain. Then
-`--self-test` reports **10/10 refused, exit 0** (ten, not eleven: the case is the one removed), so a
-quietly relaxed width rule would have kept the REQUIRED `docs` job green. With the case present, the same relaxation exits **1**. ⚠️ The floor is why the reproduction now
-costs TWO edits: at the shipped floor, simply deleting the case is red on its own
-(`self-test: 10 mutation(s) registered, at least 11 required`, exit 1), so the false PASS cannot be
-re-opened by removing the case alone. ⚠️ And state the mechanism rather than overclaiming it: on this
-input the relaxed rule is caught because the shifted row parks a one-word value in the failure column
-and **R3** fires, so what the case proves is that a relaxed width rule **reds the arm** — not that the
-exact-7 refusal is the only rule that could notice. `cells()` is escape-*parity* aware (a pipe
-delimits only after an **even** run of backslashes, matching CommonMark), so an escaped `\|` stays
-inside its cell and R2/R3 read the column they name, while a raw extra `|` — or an escaped backslash
-before a real `|` — is refused as an unreadable row.
+**The width case and its parity sibling are load-bearing, and that is measured, not asserted.** The
+arm that matters most is the one covering the rules added *last*. With `parse_surface_rows`
+monkeypatched back to the previous `< 7` floor — the exact false PASS the exact-7 rule closes — the arm
+exits **1**: the shifted row parks a one-word value in the failure column, **R3** fires, and both
+refusal cases report it. ⚠️ State the mechanism rather than overclaiming it: what the cases prove is
+that a `|`-splitting relaxation **reds the arm**, not that the exact-7 refusal is the only rule that
+could notice. ⚠️ The floor is why re-opening the false PASS is no longer a one-place edit: at the
+shipped floor, deleting the width case alone exits 1
+(`self-test: 11 mutation(s) registered, at least 12 required`), and deleting it *and* lowering the
+floor to 11 still exits 1, because the parity case beside it catches the same relaxation.
+
+**The parity case is the one this review added, because the rule that had no case was the parity
+rule.** `cells()` splits on backslash **parity** — a pipe delimits only after an **even** run of
+backslashes, which is CommonMark's rule — so a single-escaped `\|` stays inside its cell, while `\\|`
+is an escaped backslash followed by a **real delimiter** and splits. Reverted to the pre-parity
+`(?<!\\)\|` test, the arm exits **1** on the spliced `\\|` row (`expected refusal, got clean`) — and
+that is the direction that matters: pre-parity, that row parsed as 7 cells and scored CLEAN (the false
+PASS), and a correct 7-cell row whose cell *ends* with `\\` immediately before the delimiter was refused
+as 6 columns (the false RED). Removing the parity case alone tripped the same floor, so undoing the
+rule costs two edits as well. What neither case closes is an **additive** widening: a token appended to
+`ALLOWED_LAYERS` keeps both arms green (measured — adding `mechanism` and grading a row with it
+passed), because the arm mutates the *document* and cannot see the allow-list. That one is review's
+job, and it is a one-line diff a reviewer can see.
 
 **It runs on every edit, not only when someone remembers.** Both arms are wired into CI's `docs` job
 (`.github/workflows/ci.yml`, beside `tools/substrate_map_check.py`): the check, **and** `--self-test` —
-a rule that is quietly weakened (a lowered word floor, a broken mutation primitive) reds the self-test
-rather than passing silently, because the arm nothing runs is not a guard. That job is the **REQUIRED,
+a rule that is quietly weakened in a way a *document* mutation can reach (a lowered word floor, a
+reverted width or parity rule, a removed population pin) reds the self-test rather than passing
+silently, because the arm nothing runs is not a guard. That job is the **REQUIRED,
 path-filter-free** context, and it is the only one that can see a docs-only edit, because such an edit
 selects no test surface. So a lane that deletes a row here gets a red `docs` check rather than a green
 one and a smaller checklist. `.github/workflows/*` is a surface worth naming explicitly: the change that
@@ -241,21 +251,22 @@ so it cannot see a pin edit at all. The two therefore cover different surfaces, 
   alone** — delete a surface row, **every mention of it** (R1/R4/R5 all referentially check what they
   read, so a row cannot go alone) *and* drop it from `SURFACES` — stays **green on both arms**
   (measured on SF5 and on SF12: `14 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 9/9 plan seam(s)
-  crosswalked · layers=…` then `CLEAN — every rule holds`, exit 0, *and* `11/11 mutation(s) refused`,
+  crosswalked · layers=…` then `CLEAN — every rule holds`, exit 0, *and* `12/12 mutation(s) refused`,
   exit 0). **Eleven** of the fifteen surfaces are in this class, and it is the case the paragraph above
   measures: deleting the row *without* its mentions is already a violation, so the **pin is the one
   edit the arm cannot see**.
 - **For SF2, SF10 or SF13 — the three surfaces a mutation targets — the arm reds one step EARLIER**, on
   the self-test arm. Delete the row those cases target and the cases become `UNTESTABLE` rather than
-  "not caught" (measured: SF13 `self-test: 2/11 mutation(s) NOT caught — the checker is a rubber
-  stamp`, SF2 `3/11`, SF10 `1/11` — each exit 1), before any case is deleted.
+  "not caught" (measured: SF13 `6/12 case(s) UNTESTABLE`, SF2 `4/12`, SF10 `1/12` — each exit 1, and
+  the summary line names a moved mutation target instead of accusing the checker), before any case is
+  deleted.
 - **SF15 reds one step earlier too, on the CHECK arm** — it is the one surface a child names and
   nothing else (`| **C1** | **#11084** | **SF15** |`). Deleting SF15's row and every mention of it
   leaves C1 touching no surface, so `R4 #11084: touches no surface` fires (exit 1) before the pin or
   any case is involved — which is why the silent class is eleven, not twelve.
 - **The floor is what stops the green being bought back.** Also deleting the cases that name the surface
-  (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `8 mutation(s)
-  registered, at least 11 required`, exit 1 — so a shrink is red once it touches a named surface, but
+  (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `9 mutation(s)
+  registered, at least 12 required`, exit 1 — so a shrink is red once it touches a named surface, but
   `MIN_SELF_TEST_MUTATIONS` is not the first thing to fire, and it reds a shrunk population instead of
   printing a reassuring `self-test: 0/0 … not a rubber stamp`.
 

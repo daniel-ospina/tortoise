@@ -31,9 +31,10 @@ Rules (the map's own §8 states them; this file is the enforcement):
   every surface a crosswalk row names has a row in the surface table.
 
 A surface row is refused (exit 2) unless it has exactly 7 cells. A cell delimiter
-is a pipe carrying an EVEN run of preceding backslashes (CommonMark parity), so an
-escaped `\\|` stays inside its cell while a raw `|` splits it; a width the parser
-cannot interpret is an unreadable map, not a map that happens to be tidy, because
+is a pipe carrying an EVEN run of preceding backslashes (CommonMark parity), so a
+single-escaped `\\|` stays inside its cell while `\\\\|` is an escaped backslash
+followed by a REAL delimiter and a raw `|` splits; a width the parser cannot
+interpret is an unreadable map, not a map that happens to be tidy, because
 `row[4]`/`row[6]` would then grade the wrong column and report clean.
 
 **Exit codes:** `0` clean · `1` violations (printed, one per line) · `2` the map
@@ -421,6 +422,25 @@ def _drop_line(text: str, prefix: str) -> str:
     return "".join(kept)
 
 
+def _drop_section_heading(text: str) -> str:
+    """Replace §4's heading marker, whatever its title currently says.
+
+    Anchored on the section NUMBER, not on a title. A bare
+    `t.replace("## 4. Every surface", …)` is a silent NO-OP the moment the heading
+    is reworded — and `check()` still grades that map CLEAN, because sections are
+    keyed by number only — so the no-op used to red the REQUIRED `docs` job with
+    "the checker is a rubber stamp": a false diagnosis of a correct document
+    (measured). Raising here makes `self_test` report UNTESTABLE instead, which is
+    a different and honest statement, and this anchor cannot no-op silently.
+    """
+    mutated, count = re.subn(r"(?m)^## 4\.\s+.*$", "### surface-to-child map", text)
+    if not count:
+        raise AssertionError(
+            "self-test mutation target '## 4.' not found — the mutation would be a no-op"
+        )
+    return mutated
+
+
 #: Each entry is `(name, mutator, expected)`, where `expected` is `"violation"`
 #: (a rule fires, exit 1) or `"refusal"` (the map no longer parses, exit 2).
 #: These are the deletions an editor actually makes — remove a row, blank a cell,
@@ -482,16 +502,36 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         # `< 7` floor left --self-test green at 10/10 — the false PASS this rule
         # closes, re-opened with the REQUIRED `docs` job fully green. Since
         # MIN_SELF_TEST_MUTATIONS exists, re-opening it costs TWO edits: at the
-        # shipped floor, deleting this case alone is red ("10 mutation(s)
-        # registered, at least 11 required", exit 1) before the relaxed rule is
+        # shipped floor, deleting this case alone is red ("11 mutation(s)
+        # registered, at least 12 required", exit 1) before the relaxed rule is
         # ever exercised.
         "splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns)",
         lambda t: _rewrite_row(t, "SF2", 5, "live-docker | unit"),
         "refusal",
     ),
     (
+        # The PARITY rule must be covered by the same arm, for the same reason.
+        # Without this case, reverting `_is_escaped` to the pre-parity `(?<!\\)\|`
+        # test left --self-test green at 11/11 (measured) while the rule's own
+        # headline direction came back: on the pre-parity rule a `\\|`-spliced row
+        # parsed as 7 cells and scored CLEAN (a swallowed real delimiter), and a
+        # valid 7-cell row ending in `\\` parsed as 6 and was refused. The value
+        # below is `\\|` — an escaped backslash followed by a REAL delimiter.
+        "splice a `\\\\|` into SF2's contract cell (escaped backslash + REAL delimiter)",
+        lambda t: _rewrite_row(t, "SF2", 5, "\\\\| unit"),
+        "refusal",
+    ),
+    (
+        # Anchored on the section NUMBER and asserted to have moved. A bare
+        # `t.replace("## 4. Every surface", …)` is a silent NO-OP once the heading
+        # is reworded — and `check()` still grades such a map CLEAN, because
+        # sections are keyed by number — so the no-op used to red the REQUIRED
+        # `docs` job with "the checker is a rubber stamp": a false diagnosis of a
+        # correct document (measured). `_drop_section_heading` raises instead, and
+        # `self_test` reports UNTESTABLE separately from a mutation that was
+        # applied and not caught.
         "delete the child table's section heading",
-        lambda t: t.replace("## 4. Every surface", "### Every surface"),
+        _drop_section_heading,
         "refusal",
     ),
 )
@@ -503,7 +543,7 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 11
+MIN_SELF_TEST_MUTATIONS = 12
 
 
 def self_test(text: str) -> int:
@@ -516,12 +556,17 @@ def self_test(text: str) -> int:
         )
         return 1
     failures = 0
+    untestable = 0
     for name, mutate, expected in SELF_TEST_MUTATIONS:
         try:
             mutated = mutate(text)  # type: ignore[operator]
         except AssertionError as exc:
+            # A mutation that could not be APPLIED is not the same finding as one
+            # that was applied and not caught: reporting it as "the checker is a
+            # rubber stamp" misdiagnoses a correct document whose row was merely
+            # reformatted (measured — a reworded §4 heading did exactly that).
             print(f"  UNTESTABLE {name}: {exc}", file=sys.stderr)
-            failures += 1
+            untestable += 1
             continue
         try:
             violations, _stats = check(mutated)
@@ -540,6 +585,13 @@ def self_test(text: str) -> int:
     total = len(SELF_TEST_MUTATIONS)
     if failures:
         print(f"self-test: {failures}/{total} mutation(s) NOT caught — the checker is a rubber stamp", file=sys.stderr)
+    if untestable:
+        print(
+            f"self-test: {untestable}/{total} case(s) UNTESTABLE — a mutation target "
+            "moved, so those rules were NOT exercised by this run",
+            file=sys.stderr,
+        )
+    if failures or untestable:
         return 1
     print(f"self-test: {total}/{total} mutation(s) refused — the checker is not a rubber stamp")
     return 0
