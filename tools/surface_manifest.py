@@ -488,8 +488,23 @@ def _is_object_id(sha: str) -> bool:
     `cmd_render` publishes `Cut against main` to `docs/product/mcp-sdk-surface.md`. It is
     reachable honestly — `cmd_cut` writes `--commit` verbatim. So the field is refused unless it
     is a hex OID: that is the one shape whose answer cannot move under the record.
+
+    ⛔ #11057 review P2 — the FULL id, never a 7-39 char PREFIX, and ONE predicate everywhere.
+    This used to accept 7-40 while the RESOLUTION probe (`cut_commit_verdict`) required exactly
+    40, so the two disagreed about the same string in three artifacts: `cut --commit af36e92`
+    passed this gate, `build_doc` wrote it verbatim, and the required
+    `surface_manifest.py check --provenance-strict` then refused the baseline as naming a commit
+    that "does not exist" — about a commit that resolves and is an ancestor of `main`. An
+    abbreviation is not the narrow shape: `gitrevisions(7)` resolves a prefix only while it is
+    UNIQUE, so the same 7 hex can name a different object after the repository grows — the
+    record's answer would move underneath it, which is what "a commit, not a revision" exists to
+    forbid. The full object id has no defender of the abbreviated form: `cut` records
+    `git rev-parse HEAD`, which is always 40.
+
+    The SIBLING COPY in `tools/surface-guard.py` must stay this same predicate (it is pinned
+    from the base ref, so it cannot import this one).
     """
-    return 7 <= len(sha) <= 40 and all(c in _HEX for c in sha)
+    return len(sha) == 40 and all(c in _HEX for c in sha)
 
 
 def _unprovable(sha: str, question: str) -> str:
@@ -561,16 +576,18 @@ def provenance_report(
         # the presence half of its own rule to the un-pinned copy enforces nothing.
         return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
     if not _is_object_id(sha):
-        # #11057 review P1: a REF NAME is a valid revision, so both probes answer "yes" for
-        # it and this function would verify a record that names no commit. Clone-shape
-        # independent, so it is a PROVEN defect in both arms (never an "unprovable").
+        # #11057 reviews P1 + P2: a REF NAME is a valid revision, so both probes answer "yes"
+        # for it and this function would verify a record that names no commit; and an
+        # ABBREVIATION passes every probe while the resolution arm below calls it fabricated,
+        # which is how the answered questions disagreed. Both are clone-shape independent, so
+        # both are PROVEN defects in both arms (never an "unprovable").
         return [
-            f"`cut_at_commit` {sha!r} is not an OBJECT ID (a 7-40 char hex commit sha) but a "
-            "valid git revision, so every probe below answers `yes` for it — a ref never "
-            "resolves to the commit this baseline was cut against, and a branch is an "
-            "ancestor of itself, so the record would read as verified while naming no "
-            "commit at all. Record the commit id: `cut --commit <sha-in-main>` (or "
-            "`git rev-parse HEAD`), never a ref name"
+            f"`cut_at_commit` {sha!r} is not an OBJECT ID (a full 40-char lowercase hex "
+            "commit sha). Any other shape names no commit this record can be verified "
+            "against: a ref resolves and is its own ancestor, and an abbreviation's meaning "
+            "moves as the repository grows (git resolves a prefix only while it is unique). "
+            "Record the full commit id: `cut --commit <full-sha-in-main>`, never a ref name "
+            "or a short prefix"
         ], None
     # ⛔ ONE resolution implementation (`cut_commit_verdict`), not a second ad-hoc probe:
     # two probes that disagree about what "cannot answer" means is one gate with a gap.
@@ -609,10 +626,6 @@ def provenance_report(
         ], None
     return [], None
 
-
-#: A full object name. `cut` records `git rev-parse HEAD`, so an abbreviated,
-#: upper-cased or otherwise invented value never came from the generator.
-_FULL_SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 
 #: `cut_commit_verdict`'s answers. `UNPROVABLE` is NOT a pass — the reader that gets it
 #: says so out loud (`cmd_check` prints it); it is the arm for a clone that cannot answer.
@@ -669,10 +682,16 @@ def cut_commit_verdict(sha: str) -> tuple[str, str]:
     * `unprovable` — git is unavailable, or this clone is shallow and no remote answered.
       NOT a pass, and never silent: `cmd_check` prints the arm it took.
     """
-    if not _FULL_SHA_RE.match(sha):
+    # ⛔ ONE shape predicate, not two (#11057 review P2): this arm has its own history — an
+    # inline 40-char regex — while `cmd_cut`'s write gate and `provenance_report`'s arm used
+    # `_is_object_id`'s 7-40. `cut` records `git rev-parse HEAD`, so an abbreviated,
+    # upper-cased or invented value never came from the generator, and a prefix is refused by
+    # both halves now: the write gate will not write one and this will not grade one.
+    if not _is_object_id(sha):
         return CUT_FABRICATED, (
             f"{sha!r} is not a full 40-character lowercase commit sha — `cut` records "
-            "`git rev-parse HEAD`, which always is one"
+            "`git rev-parse HEAD`, which always is one, and an abbreviation only resolves "
+            "while it stays unique in this repository"
         )
     rc, _, stderr = _git("cat-file", "-e", f"{sha}^{{commit}}")
     if rc == 0:
@@ -778,7 +797,8 @@ def _read_manifest(path: Path | None = None, *, check_provenance: bool = True) -
         if verdict == CUT_FABRICATED:
             raise SurfaceEvidenceUnreadable(
                 f"{path} records `cut_at_commit: {doc['cut_at_commit']}`, which is NOT a commit "
-                f"({why}). The field is PROVENANCE and is excluded from the drift comparison, "
+                f"this record can be verified against ({why}). The field is PROVENANCE and is "
+                "excluded from the drift comparison, "
                 "so this check is the only gate on it — and a value naming no object is a "
                 "fabricated provenance, not a stale one: restore the commit the baseline was "
                 "actually cut at, or re-cut the baseline."
@@ -2104,9 +2124,11 @@ def cmd_cut(args: argparse.Namespace) -> int:
     if recorded and not _is_object_id(recorded):
         print(f"::error::--commit {recorded!r} is not an object id")
         print(
-            f"REFUSED `--commit` must be a commit sha (7-40 hex), not a revision: {recorded!r} "
-            "resolves, but recording it would name no commit and the baseline would publish "
-            "it as its cut point. Use `--commit $(git rev-parse <rev>)`."
+            f"REFUSED `--commit` must be a full object id (40 lowercase hex), not a revision "
+            f"or a prefix: {recorded!r} may well resolve, but the baseline records this value "
+            "as its cut point and the read path refuses anything shorter — an abbreviation "
+            "also means something different once the repository grows. Use "
+            "`--commit $(git rev-parse <rev>)`."
         )
         return 1
     try:
@@ -3161,7 +3183,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_cut = sub.add_parser("cut", help="declare->manifest, once, by a human")
-    p_cut.add_argument("--commit", help="the commit sha (7-40 hex) to cut the baseline at")
+    p_cut.add_argument(
+        "--commit",
+        help="the full commit sha (40 lowercase hex) to cut the baseline at — the same shape "
+             "`check` will verify, so `$(git rev-parse <rev>)`, never a prefix",
+    )
     p_cut.add_argument(
         "--allow-approval-reset",
         action="store_true",

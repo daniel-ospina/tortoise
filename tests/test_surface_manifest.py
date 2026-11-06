@@ -32,6 +32,13 @@ RENDERED = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 CANONICAL = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
 VISION = ROOT / "docs" / "product" / "vision-mcp-sdk-surface.md"
 
+#: A well-formed `--commit` for the `cut` tests: 40 lowercase hex, the ONE shape the write
+#: gate, the read gate and `tools/surface-guard.py` all grade (#11057 review P2). It need not
+#: RESOLVE — the write gate grades the shape (so a human never records a value the read path
+#: calls fabricated), while resolution is `check --provenance-strict`'s question, which these
+#: tests stub or do not ask.
+CUT_SHA = "deadbeef" * 5
+
 
 def _public_sdk_methods() -> set[str]:
     from tortoise.sdk import TortoiseSDK
@@ -1103,7 +1110,7 @@ def test_approval_status_is_the_TARGET_approval_not_a_baseline_stamp(
     grown = copy.deepcopy(derived_baseline)
     grown["rows"].append({"name": "tortoise_brand_new", "approval": None})
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(grown))
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True)) == 0
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert written["approval_status"] == "approved"  # the TARGET's approval, not the baseline's
     new_row = next(r for r in written["rows"] if r["name"] == "tortoise_brand_new")
@@ -1252,7 +1259,7 @@ def test_a_re_cut_CARRIES_the_high_water_pin_forward(monkeypatch, tmp_path):
     prior["high_water_counts"] = {"tools": 7, "sdk_public_methods": 9}
     path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True)) == 0
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert written["high_water_counts"] == {"tools": 7, "sdk_public_methods": 9}, (
         "a re-cut recomputed the growth pin from the live counts — the growth is now "
@@ -1272,7 +1279,7 @@ def test_a_re_cut_REFUSES_a_manifest_that_lost_the_high_water_pin(monkeypatch, t
     prior.pop("high_water_counts")
     path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 1
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True)) == 1
     out = capsys.readouterr().out
     assert "::error::" in out and "high_water_counts" in out, out
     # And the refusal wrote NOTHING: the pin-less manifest is exactly as it was.
@@ -2461,7 +2468,7 @@ def test_cut_resets_approvals_at_the_WRITE_SITE(monkeypatch, tmp_path, derived_b
 
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
-    ns = argparse.Namespace(commit="deadbeef", allow_approval_reset=True)
+    ns = argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True)
     assert sm.cmd_cut(ns) == 0
 
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -2495,7 +2502,7 @@ def test_a_re_cut_re_emits_the_OVERRIDES_header(monkeypatch, tmp_path, derived_b
     path.write_text(yaml.safe_dump(prior, sort_keys=False, allow_unicode=True, width=110))
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True)) == 0
     written = path.read_text(encoding="utf-8")
     assert written.startswith(sm.MANIFEST_HEADER)
     assert "OVERRIDES: the frozen-snapshot-as-approval-baseline practice" in written
@@ -2763,14 +2770,14 @@ def test_cut_REFUSES_to_blank_recorded_approvals(monkeypatch, tmp_path, capsys, 
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
 
     # No flag -> refuse, and the artifact is left EXACTLY as it was found.
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA)) == 1
     out = capsys.readouterr().out
     assert approved_row in out, f"the row it would drop is not named: {out}"
     assert "#4173 @daniel-ospina" in out, f"the approval value is not shown: {out}"
     assert path.read_text(encoding="utf-8") == before, "the refusal WROTE the manifest"
 
     # With the flag -> it proceeds, and STILL names every row it drops.
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef", allow_approval_reset=True)) == 0
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA, allow_approval_reset=True)) == 0
     out = capsys.readouterr().out
     assert "DROPPED" in out and approved_row in out, out
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -2797,7 +2804,7 @@ def test_the_guard_REFUSES_an_UNREADABLE_baseline_rather_than_overwriting_it(
 
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA)) == 1
     assert path.read_text(encoding="utf-8") == broken, "the refusal WROTE the manifest"
 
 
@@ -2814,7 +2821,7 @@ def test_a_MISSING_baseline_still_cuts(monkeypatch, tmp_path, derived_baseline):
 
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 0
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA)) == 0
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["counts"]["tools"] >= 1
 
 
@@ -2841,7 +2848,7 @@ def test_the_guard_sees_a_RETIRED_row_approval(monkeypatch, tmp_path, capsys, de
     monkeypatch.setattr(sm, "MANIFEST_FILE", path)
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
 
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1, (
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA)) == 1, (
         "a recorded approval on a RETIRED row did not stop the re-cut — the guard is "
         "reading `rows:` only"
     )
@@ -2861,7 +2868,7 @@ def test_cut_refuses_when_the_declaration_cannot_be_IMPORTED(monkeypatch, capsys
     target = tmp_path / "surface-manifest.yml"
     monkeypatch.setattr(sm, "MANIFEST_FILE", target)
     monkeypatch.setitem(sys.modules, "tortoise.tool_registry", None)
-    assert sm.cmd_cut(argparse.Namespace(commit="deadbeef")) == 1
+    assert sm.cmd_cut(argparse.Namespace(commit=CUT_SHA)) == 1
     out = capsys.readouterr().out
     assert "::error::" in out and "could not import the surface declaration" in out, out
     assert not target.exists(), "a refused cut wrote the baseline anyway"
@@ -3447,8 +3454,11 @@ def test_a_ref_name_is_not_a_cut_commit_even_when_every_probe_says_yes(checker, 
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 1, "a `cut_at_commit` naming a REF, not a commit, did not red the check"
     # The READER refuses first now (`_read_manifest` → `cut_commit_verdict`), because a ref
-    # is not a full object id; the object-id arm below still runs for a 7-39 char sha, which
-    # the reader also refuses — so it is pinned directly rather than through the CLI.
+    # is not a full object id; the object-id arm below is reached only by a CALLER that did
+    # not come through the reader (`provenance_report` is importable on its own) — so it is
+    # pinned directly rather than through the CLI. Both grade the same predicate since
+    # #11057 review P2, which is what `test_every_copy_grades_the_same_object_id_shapes`
+    # holds.
     assert "not a full 40-character" in out and "'main'" in out, out
     problems, _unprovable = checker.provenance_report(
         doc, resolve=lambda sha: True, reachable=lambda sha: True)
@@ -3475,6 +3485,103 @@ def test_the_cut_refuses_to_record_a_ref_name(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "REFUSED" in out and "not an object id" in out, out
     assert not target.exists(), "the refused cut still wrote a baseline"
+
+
+@pytest.mark.parametrize(
+    "shape, value",
+    [
+        pytest.param("full-40", "af36e9240f30cf7f3ec37f1d82a18a91d45c08e0", id="full-40"),
+        pytest.param("abbrev-7", "af36e92", id="abbrev-7"),
+        pytest.param("abbrev-12", "af36e9240f30", id="abbrev-12"),
+        pytest.param("abbrev-39", "af36e9240f30cf7f3ec37f1d82a18a91d45c08e", id="abbrev-39"),
+        pytest.param(
+            "over-40", "af36e9240f30cf7f3ec37f1d82a18a91d45c08e0ff", id="over-40"),
+        pytest.param(
+            "upper-40", "AF36E9240F30CF7F3EC37F1D82A18A91D45C08E0", id="upper-40"),
+        pytest.param("ref", "main", id="ref"),
+        pytest.param("rev-expr", "HEAD~1", id="rev-expr"),
+        pytest.param("empty", "", id="empty"),
+    ],
+)
+def test_every_copy_grades_the_same_object_id_shapes(monkeypatch, shape, value):
+    """#11057 review P2 — ONE predicate for "is this a valid `cut_at_commit`", in all copies.
+
+    Measured at `28e6a62f63`: `cut --commit af36e92` passed the write gate (`_is_object_id`
+    accepted 7-40) and `build_doc` wrote that value verbatim, while the READ path
+    (`cut_commit_verdict`, a 40-char regex) called the same string `fabricated` — so the
+    required `check --provenance-strict` reded a baseline whose record RESOLVES and is an
+    ancestor of `main`, saying the commit does not exist. `tools/surface-guard.py` — the copy
+    a PR cannot edit — stayed green on that same record, so the two answered one question two
+    ways. Pre-fix this case fails for every abbreviation: the write copy said `True` while the
+    read copy said `fabricated`.
+    """
+    sm = _load_manifest_tool()
+    guard = _load_guard()
+    accepted = len(value) == 40 and all(c in "0123456789abcdef" for c in value)
+    assert sm._is_object_id(value) is accepted, (shape, value)
+    assert guard._is_object_id(value) is accepted, (
+        f"the pinned copy grades {shape!r} differently from the generator's copy — one gate, "
+        "two answers")
+    # …and the SHAPE gate and the RESOLUTION probe now agree: a value the shape gate refuses
+    # is refused without asking git, and a value it accepts is actually probed.
+    calls = _stub_git(monkeypatch, sm, rc=0, stderr="", shallow="false")
+    verdict, _why = sm.cut_commit_verdict(value)
+    if accepted:
+        assert verdict == sm.CUT_RESOLVED, (shape, verdict)
+        assert calls, "a full object id must actually be probed"
+    else:
+        assert verdict == sm.CUT_FABRICATED, (shape, verdict)
+        assert calls == [], f"a refused shape shelled out to git anyway: {calls}"
+
+
+def test_cut_REFUSES_an_abbreviated_commit_the_read_path_calls_fabricated(
+    tmp_path, monkeypatch, capsys, derived_baseline
+):
+    """The WRITE half of #11057 review P2 — and the abbreviation used here RESOLVES.
+
+    `git cat-file -e 'af36e92^{commit}'` exits 0 in this repository and the commit is an
+    ancestor of `main`, which is exactly why the old 7-40 write gate let it through: `cut`
+    exited 0, wrote the baseline, and the required check then refused that baseline as naming
+    a commit that does not exist. Pre-fix this fails twice over — rc is 0 and the file is
+    written.
+    """
+    sm = _load_manifest_tool()
+    target = tmp_path / "surface-manifest.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", target)
+    monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(derived_baseline))
+    rc = sm.cmd_cut(argparse.Namespace(commit="af36e92", allow_approval_reset=False))
+    assert rc == 1, "an abbreviated `--commit` was accepted and would be recorded verbatim"
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "full object id" in out, out
+    assert not target.exists(), "the refused cut still wrote a baseline"
+    # The FULL id of the same commit is accepted, so the refusal is about the SHAPE and not
+    # about which commit was named.
+    assert sm.cmd_cut(argparse.Namespace(
+        commit="af36e9240f30cf7f3ec37f1d82a18a91d45c08e0", allow_approval_reset=False)) == 0
+
+
+def test_an_abbreviated_sha_is_NEVER_described_as_not_resolving(checker):
+    """#11057 review P2 — the false STATEMENT, not only the disagreement.
+
+    `provenance_report` is importable on its own, and its shape arm sits BEFORE the probes.
+    With the old 7-40 predicate an abbreviation cleared the shape arm and fell through to the
+    resolution probe — which returned `fabricated` for any value shorter than 40 — so the
+    problem printed was "does not resolve to a commit in this repository", about a commit that
+    does resolve in this very checkout. The shape arm must name the SHAPE instead, and it is
+    the SHAPE arm's predicate — not the probe — that was wrong: `cut_commit_resolves` is
+    asserted below to still refuse the abbreviation, so the case stays a shape refusal once
+    the two copies agree.
+    """
+    assert checker.cut_commit_resolves("af36e92") is False, (
+        "the resolution probe no longer refuses an abbreviation, so this test would pass "
+        "vacuously")
+    problems, unprovable = checker.provenance_report({"cut_at_commit": "af36e92"})
+    assert unprovable is None
+    assert len(problems) == 1, problems
+    assert "does not resolve" not in problems[0], (
+        "the gate told the operator an abbreviated-but-RESOLVABLE commit does not exist — the "
+        f"false reason this finding is about: {problems[0]}")
+    assert "not an OBJECT ID" in problems[0] and "af36e92" in problems[0], problems[0]
 
 
 def _git(root: Path, *args: str) -> str:

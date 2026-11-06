@@ -351,8 +351,15 @@ def _is_object_id(sha: str) -> bool:
     ANY revision, so a REF NAME answers BOTH provenance questions "yes" (the object resolves,
     and a branch is its own ancestor). The gate would then report a record verified while it
     names no commit at all, and `render` would publish `Cut against main`. Refuse the shape.
+
+    ⛔ #11057 review P2: the FULL 40, never a 7-39 char prefix — the same predicate
+    `tools/surface_manifest.py::_is_object_id` and its `cut_commit_verdict` grade, because a
+    write gate that accepted a prefix while the read gate refused it exited 0 over a baseline
+    the required check then reded. A prefix moves meaning as the repository grows
+    (`gitrevisions(7)`: an abbreviation resolves only while it is unique), so it is not the
+    narrow shape this field requires.
     """
-    return 7 <= len(sha) <= 40 and all(c in _HEX for c in sha)
+    return len(sha) == 40 and all(c in _HEX for c in sha)
 
 
 def _provenance_problems(
@@ -391,20 +398,22 @@ def _provenance_problems(
         # consulted: absence is never "unprovable", it is the record being missing).
         return [
             "the frozen surface baseline records no `cut_at_commit`: it must name the "
-            "default-branch commit the baseline was cut against (a 7-40 char hex commit "
-            "sha), because that is the only provenance a reader can independently verify. "
-            "Re-cut the baseline (`cut --commit <sha-in-main>`), never delete the field"
+            "default-branch commit the baseline was cut against (a full 40-char "
+            "lowercase hex commit sha), because that is the only provenance a reader can "
+            "independently verify. Re-cut the baseline (`cut --commit <full-sha-in-main>`), "
+            "never delete the field"
         ], None
     if not _is_object_id(sha):
-        # #11057 review P1: a REF NAME passes every probe below (a ref resolves, and a branch
-        # is its own ancestor), so this copy of the gate would verify a record naming no
-        # commit. Clone-shape independent ⇒ a PROVEN defect in both arms.
+        # #11057 reviews P1 + P2: a REF NAME passes every probe below (a ref resolves, and a
+        # branch is its own ancestor), and an ABBREVIATION passes them too while the read path
+        # calls it fabricated — one string, two answers. Both are clone-shape independent ⇒ a
+        # PROVEN defect in both arms.
         return [
-            f"`cut_at_commit` {sha!r} is not an OBJECT ID (a 7-40 char hex commit sha) but a "
-            "valid git revision, so every probe below answers `yes` for it — a ref never "
-            "resolves to the commit the baseline was cut against, and a branch is an "
-            "ancestor of itself. Re-cut with the commit id (`cut --commit <sha-in-main>`), "
-            "never a ref name"
+            f"`cut_at_commit` {sha!r} is not an OBJECT ID (a full 40-char lowercase hex "
+            "commit sha). Any other shape names no commit this record can be verified "
+            "against: a ref resolves and is its own ancestor, and an abbreviation's meaning "
+            "moves as the repository grows. Re-cut with the full commit id "
+            "(`cut --commit <full-sha-in-main>`), never a ref name or a short prefix"
         ], None
 
     def cannot_answer(question: str) -> tuple[list[str], str | None]:
