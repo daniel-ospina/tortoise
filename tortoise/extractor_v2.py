@@ -10734,16 +10734,22 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
        only the DM1 record is missing, and that gap is the persistence slice's.
 
     ⛔ **The record stops at the PAYLOAD, and that is stated, not implied.** All
-    THREE write doors drop ``mentions`` — the REST ``CreatePointRequest``, the SDK
-    capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``), and
-    ``hosted_api._execute_commit_writes``, the ``sdk.create_point`` call the v2
-    payload actually rides — so an armed run's ``stats["mentions_recorded"]``
-    counts records the WRITE discards. That is #11239's slice (DM1's home on the
-    Point is declared and unfulfilled): the count is an extraction measurement,
-    never a claim that the graph holds it. There are also FOUR keys carrying a
-    record, and the two producer lists (``result["embed_list"]["mentions"]``,
-    ``result["s2_embed"]["mentions"]``) are the model's RAW channel on the
-    fail-open path — see ``commit_schema.Mention``'s docstring.
+    FOUR write doors drop ``mentions`` — the REST ``CreatePointRequest``, the SDK
+    capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``),
+    ``hosted_api._execute_commit_writes`` (the ``sdk.create_point`` call the v2
+    payload actually rides), and the SELF-HOST mirror
+    ``selfhost_api.CreatePointRequest`` / ``selfhost_api.create_point`` — so an
+    armed run's ``stats["mentions_recorded"]`` counts records the WRITE discards.
+    ⛔ The self-host pair is a SEPARATE model and route, not an alias: ``#4032``
+    frames it as the parity mirror of the hosted pair, so a ``mentions`` field
+    added on one side alone re-opens the divergence (review at `0c15ad04d`, P3 —
+    this line said THREE while the tree had four). That is #11239's slice (DM1's
+    home on the Point is declared and unfulfilled): the count is an extraction
+    measurement, never a claim that the graph holds it. There are also FOUR keys
+    carrying a record, and the two producer lists
+    (``result["embed_list"]["mentions"]``, ``result["s2_embed"]["mentions"]``)
+    are the model's RAW channel on the fail-open path — see
+    ``commit_schema.Mention``'s docstring.
 
     **Held on the SURFACE, not on a live reference — because a hold removes the
     reference it was decided from.** An earlier draft required
@@ -11174,11 +11180,26 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
                         if isinstance(p, dict)
                         and _norm(_mention_ref(p))
                         == _norm(_mention_ref({"content": claim_ref}))), claim)
+        # ⛔ THE DECISION ALREADY TAKEN WINS OVER THE MODEL'S SILENCE. The channel
+        # loop ABOVE wrote the cue's `(rule_id, reason)` into `hold` for this
+        # surface; stamping `entry.rule_id or RULE_CHANNEL` here overrode it, so a
+        # run published `referentiality.channel` ("the model said so") on the
+        # record while `by_rule`/`mention_held` said `referentiality.pronoun` — TWO
+        # ANSWERS to "what did this hold", and the disagreeing one is the surface
+        # plan R1's arming measurement READS. The shape is the one the armed prompt
+        # asks for: a mention its claim does not also NAME in `about_entities`, so
+        # the carrier-driven loop above writes no record for it (review at
+        # `40a0a81e6`, P2; re-verified at `0c15ad04d`).
+        hold_rule, hold_reason = hold.get(surface, ("", ""))
         records.append(_mention_record(
             surface=surface, claim=carrier,
             kind_guess=str(entry.get("kind_guess") or "").strip() or None,
-            rule_id=str(entry.get("rule_id") or _referentiality.RULE_CHANNEL),
+            # `_mention_rule` re-checks the cue rule against `judge()`, so this
+            # can only ever REPEAT a verdict the cue took — never smuggle one.
+            rule_id=(hold_rule
+                     or str(entry.get("rule_id") or _referentiality.RULE_CHANNEL)),
             reason=(str(entry.get("reason") or "").strip()
+                    or hold_reason
                     or "emitted by the extraction model on the mention channel"),
             narrative=narrative,
             quote=str(entry.get("quote") or claim.get("quote") or ""),
@@ -11441,6 +11462,12 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     shipped record (review at ``41fb0c65e``, P1: "a consumer that resolves the
     span per ``span_source`` reads the wrong bytes").
 
+    ⚠️ TWO exceptions, both stated rather than implied, and BOTH builders apply
+    them: an absent **narrative** is UNKNOWABLE (no haystack was supplied, so the
+    declaration stands unchecked instead of being relabelled ``"model"``), while
+    an absent **quote** is a MISMATCH (``"quote": null`` is in the output
+    contract, so there is no text to address).
+
     ⛔ ``isinstance(True, int)`` is ``True``, and ``True`` is not an offset: a
     boolean offset is DROPPED, not coerced to ``1``. ``commit_schema.validate_span``
     has the same rule first (the one home, #5007) — this path may not be the
@@ -11488,7 +11515,19 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
                 if declared == "quote":
                     verified = _mention_span(quote, surface)
                 elif declared == "narrative":
-                    verified = _mention_span(narrative, surface)
+                    # ⛔ AN ABSENT NARRATIVE IS AN UNKNOWABLE HAYSTACK, not a
+                    # failed verification — the rule `_clamped_mention` states and
+                    # pins. `narrative` defaults to `""` in BOTH builders, so
+                    # demoting on it relabelled a genuinely cue-derived address as
+                    # `"model"` AND made the two builders disagree about WHICH TEXT
+                    # the same offsets address: the two-answers class this PR
+                    # closes (review at `40a0a81e6`, P2; re-verified at
+                    # `0c15ad04d`). `_clamped_mention`'s comment named the
+                    # divergence as known and this side as the incorrect one; they
+                    # now agree. An absent QUOTE stays a definite MISMATCH
+                    # (`"quote": null` is in the output contract).
+                    verified = (_mention_span(narrative, surface)
+                                if narrative else (span_start, span_end))
                 else:
                     verified = None
                 span_source = (declared
@@ -11667,9 +11706,11 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
 
     - ``rule_id`` — re-derived by :func:`_mention_rule`, which returns the same
       rule only when :func:`referentiality.judge` agrees with it for THAT surface,
-      else ``referentiality.channel``. This is the last door: ``execute_embed``
-      keeps the raw channel whenever ``route_mentions`` raises, so a record can
-      reach here without ever passing :func:`_mention_record`.
+      else ``referentiality.channel``. This is the last door: the caller that
+      keeps the raw channel whenever ``route_mentions`` raises is
+      :func:`extract_session_v2` (the ``try`` at `:12064`; ``execute_embed`` never
+      calls ``route_mentions``), so a record can reach here without ever passing
+      :func:`_mention_record`.
     - ``span_source`` — a declared space is honoured only when the offsets are
       EXACTLY where that haystack puts the surface; otherwise it is demoted to
       ``"model"`` ("the model asserted these bytes"), never shipped as an address
@@ -11725,6 +11766,16 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
     if not surface:
         return None
     record["surface"] = surface
+    # ⛔ `rule_id` is emitted UNCONDITIONALLY, and this is the LAST door. The field
+    # loop above SKIPS empty values, so an entry that OMITS the key — the shape
+    # `_MENTION_CONTRACT_LINE` actually asks for — shipped with no rule at all and
+    # `commit_schema.Mention.rule_id` defaulted to `""`, a value outside
+    # `referentiality.RULES`: the field whose comment says "no silent hold" saying
+    # nothing. Reachable on the ONE path that never passes `_mention_record` (the
+    # fail-open path), which is exactly where the model's contract-shaped entry
+    # arrives (review at `40a0a81e6`, P2). `_mention_rule` re-derives it from the
+    # cue, which is what this function's docstring promises.
+    record["rule_id"] = _mention_rule(surface, record.get("rule_id"))
     # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
     # one `commit_schema.Mention` accepts — otherwise the whole payload 422s.
     # Both halves are dropped rather than 422 (review cycle 2, P1: an over-cap
@@ -11765,14 +11816,11 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
         want = (record["span_start"], record["span_end"])
         # A `quote` address is ALWAYS checkable (an empty quote is a definite
         # mismatch); a `narrative` one only when a haystack was supplied — the
-        # offsets cannot be checked here, so that declaration stands.
-        # ⚠️ KNOWN, DELIBERATE DIVERGENCE: :func:`_mention_record` DEMOTES the
-        # same declared-narrative-with-no-haystack entry, because it always
-        # holds the narrative `route_mentions` received. The two builders
-        # therefore disagree on that one input, and this side is the correct
-        # one: relabelling to `"model"` asserts the model invented offsets the
-        # cue derived. Cheaply re-aligned by passing `narrative=` from every
-        # `execute_embed` caller (the product path already does).
+        # offsets cannot be checked here, so that declaration stands. `narrative`
+        # defaults to `""` in BOTH builders, so this is not an exemption this
+        # side makes and the record builder declines: :func:`_mention_record`
+        # applies the SAME rule (review at `40a0a81e6`, P2 — the earlier note here
+        # described the divergence as known and this side as the correct one).
         checkable = declared == "quote" or bool(haystack)
         if checkable and _mention_span(haystack, surface) != want:
             record["span_source"] = "model"
@@ -12410,11 +12458,15 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # entries (route_mentions returns the list unchanged), and publishing those as
     # "the mentions held" claimed a hold that never ran (review cycle 4, P3).
     # ⛔ FOUR keys carry a record, not two — and only the two PUBLISHED ones go
-    # through the clamp. `result["s2_embed"]` is S2's raw list by definition
-    # (`:11908`, "S2 raw (pre-S4) — owner loop") and `result["embed_list"]` is
-    # `route_mentions`' output, which on the fail-open path is the model's raw
-    # channel; both are the PRODUCER channel, and a reader who believed "two
-    # surfaces" would not look at them (review at `5da3575b7a`, P2).
+    # through the clamp. `result["s2_embed"]` and `result["embed_list"]` are this
+    # pass's OUTPUT, not S2's raw list: both are assigned from the list
+    # `route_mentions` rewrote (`:12065` rebinds `embed_list`, the value stored at
+    # `:12464`), and the raw identity holds ONLY on the fail-open path, where
+    # `route_mentions` raised and the list was never rewritten. Both are the
+    # PRODUCER channel, and a reader who believed "two surfaces" would not look at
+    # them (review at `5da3575b7a`, P2; the citation this replaces pointed at
+    # `:11908`, which is neither the store nor the rebind — re-cited at
+    # `0c15ad04d`, and corrected again here).
     # ⛔ `records` is the surface plan R1's arming measurement READS, so it is
     # clamped by the SAME function the payload uses (`_clamped_mention`), not
     # copied from the merged list: on the fail-open path the entries there are
