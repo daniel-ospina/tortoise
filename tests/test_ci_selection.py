@@ -10623,7 +10623,8 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         fail safe (red), but they red at the remedy this PR lands (#11065
         cycle 2, finding 6).
         """
-        return _uses_of(step).split("@")[0] in {"actions/cache", "actions/cache/save"}
+        return _uses_of(step).split("@")[0].strip().lower() in {"actions/cache",
+                                                               "actions/cache/save"}
 
     # ── No implicit save may come back: that is the defect itself ──────────────
     # Enumerated by MECHANISM, never by one spelling (#11065 cycle 3, review finding).
@@ -10650,7 +10651,6 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # complete for this workflow's vocabulary, and it is EXACTLY the set of ids that
     # actually appear here plus their two neighbours, so an unrecognised cache-writing
     # action is still a gap. The gap is named in the message rather than implied away.
-    _CACHE_INPUTS = frozenset({"cache"})  # the ONE input that arms a `setup-*` cache
     # OPT-IN, value-gated: the value names a package manager, and an action input is a
     # STRING, so the only values that INSTALL a save are the SUPPORTED ones —
     # `getCacheDistributor` is `default: throw`, and `setup-python`'s
@@ -10668,10 +10668,32 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     _DEFAULT_ON_CACHE_ACTIONS = frozenset({"actions/setup-go"})
     # Actions that ARE a cache write, with no input to read: an allow-list by ID, because
     # there is nothing in the step's own `with:` to detect (`Swatinem/rust-cache`).
-    _CACHE_WRITING_ACTIONS = frozenset({"Swatinem/rust-cache"})
+    # ⛔ KEYS MUST BE LOWER-CASE: `_action` is lower-cased before lookup, so a mixed-case
+    # member can never match and the arm silently stops firing. That exact defect was
+    # introduced and caught in review — `{"Swatinem/rust-cache"}` made the whole arm inert
+    # (#11065 review round 3, NEW-1) — and a pin now asserts every member is lower-case.
+    _CACHE_WRITING_ACTIONS = frozenset({"swatinem/rust-cache"})
     # Inputs that write a foreign cache directly (`docker/build-push-action`'s GHA cache
     # backend). Any non-empty value is a write.
     _GENERIC_CACHE_WRITE_INPUTS = frozenset({"cache-to"})
+    # ⛔ THE TABLES MUST BE KEYED IN LOWER-CASE, and this asserts it (#11065 round 3,
+    # NEW-1). Every lookup is `_uses_of(step).split("@")[0].strip().lower()`, so a
+    # mixed-case member is UNREACHABLE: `{"Swatinem/rust-cache"}` made the whole
+    # `_CACHE_WRITING_ACTIONS` arm inert — the arm never fired, no test noticed, and the
+    # pin certified a workflow it could no longer inspect. That is an INERT ENFORCER, the
+    # same class this file exists to catch, so the guard-about-the-guard is not decoration:
+    # normalising the LOOKUP without normalising the DATA is exactly how such a table rots.
+    for _table_name, _table in (
+            ("_SUPPORTED_CACHE_VALUES", _SUPPORTED_CACHE_VALUES),
+            ("_DEFAULT_ON_CACHE_ACTIONS", _DEFAULT_ON_CACHE_ACTIONS),
+            ("_CACHE_WRITING_ACTIONS", _CACHE_WRITING_ACTIONS),
+            ("_GENERIC_CACHE_WRITE_INPUTS", _GENERIC_CACHE_WRITE_INPUTS)):
+        _bad = sorted(k for k in _table if k != k.lower())
+        assert not _bad, (
+            f"{_table_name} has mixed-case member(s) {_bad}. Every lookup lower-cases the "
+            "action id before matching, so a member that is not already lower-case can "
+            "NEVER match — the arm is silently inert and this pin certifies a workflow it "
+            "cannot see. Lower-case the member (#11065 review round 3, NEW-1).")
     # ⛔ `astral-sh/setup-uv` is a THIRD mechanism, and it is the opposite polarity: there is
     # no `actions/setup-uv` (a nonexistent id keys a set on nothing), and the real action's
     # cache is ON BY DEFAULT — `enable-cache: auto`, `save-cache: true` (v7 action.yml:32-52)
@@ -10681,7 +10703,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # post-step save of `~/.cache/uv` — the payload this PR bounds — so PRESENCE is the
     # arming unless the step states an explicit off (#11065 cycle 8 review, P2).
     # ⚠️ `auto` resolves to OFF when `RUNNER_ENVIRONMENT !== "github-hosted"`
-    # (`src/utils/inputs.ts:61-66`), and `python-ci.yml:790-795` records that
+    # (`src/utils/inputs.ts:173-176`), and `python-ci.yml:790-795` records that
     # `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the SELF-HOSTED pool — which is
     # the runner class the measured incident ran on. So on this repo's own pool the bare
     # form is inert, and this arm is CONSERVATIVE there rather than derived; it is derived
@@ -10734,14 +10756,18 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
             return ["cache"] if _val in _SUPPORTED_CACHE_VALUES[_action] else []
         if _action in _DEFAULT_ON_CACHE_ACTIONS:
             # The off is an EXPLICIT `cache: false`; absence is ON. An EMPTY value is also
-            # off — `core.getInput('cache')` returns `''`, which is falsy in the action's
-            # own gate, so redding it was a false block (#11065 delta review, D1 note).
+            # off, so redding it was a false block (#11065 round 2, C5) — but the MECHANISM
+            # is NOT setup-python's. This branch is `actions/setup-go`, which reads
+            # `core.getBooleanInput('cache')` (`src/main.ts:20`): `getBooleanInput('')`
+            # THROWS, main fails, and `post-if: success()` skips the save. Same polarity,
+            # different reason — stated accurately because the next editor edits against
+            # this comment (#11065 round 3, NEW-6).
             _val = str(_with.get("cache", True)).strip().lower()
             return [] if _val in {"false", ""} else ["cache (default `true`)"]
         return []
 
     implicit = [(s.get("name"), s.get("uses")) for s in steps
-                if _uses_of(s).startswith("actions/cache@")]
+                if _uses_of(s).split("@")[0].strip().lower() == "actions/cache"]
     for s in steps:
         armed = _arming_of(s)
         assert not armed, (
@@ -11134,6 +11160,14 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # the ISSUE NUMBER, because that is what the attribution claim is about.
     for _sentence in re.split(r"(?<=[.;])\s+", _prose):
         if "#7612" not in _sentence or "~/.cache/uv" not in _sentence:
+            continue
+        # ⛔ A PURE NEGATION ASSERTS THE CORRECT FACT and must not red (#11065 round 3,
+        # NEW-4): `#7612's payload … is NOT in ~/.cache/uv` is true, and this arm's contract
+        # is "must not PLACE it there", which a negation does not do. Demanding
+        # `~/.cache/pip` in a negated sentence reddened correct prose while the message
+        # claimed the opposite. `re.IGNORECASE` is load-bearing: prose shouts (`NOT`, `NEVER`)
+        # and a case-sensitive test let the shout through as an affirmative claim.
+        if re.search(r"\b(not|never|isn't|aren't|no longer)\b", _sentence, re.IGNORECASE):
             continue
         assert "~/.cache/pip" in _sentence, (
             "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB torch wheel "
