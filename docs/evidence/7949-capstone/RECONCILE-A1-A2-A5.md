@@ -454,9 +454,11 @@ measured. Three reads disagreed and each was individually defensible:
 |---|---|---|---|
 | `git log --all --grep='#10997'` | "found" | "found" | walks every ref; cannot tell a branch from a landing |
 | `git merge-base --is-ancestor 78e8abae6 origin/main` | 1 | **1** | a **squash** merge leaves the branch commit out of the merged history — it says "not landed" for a landed PR |
-| `git cat-file -e origin/main:<the file the PR adds>` | absent | **present** | — this is the one that answers the question |
+| `git cat-file -e origin/main:<the file the PR adds>` | absent | **present** | — the one that answers whether the *content* is here, and the only answer when ancestry returns 1 |
 
-**So: for "did it land", read the tree at `origin/main`, not the history.** And a measurement is a
+**So: an ancestry `1` answers nothing** (a squash landing reads as 1) — when a history read returns 1,
+read the tree at `origin/main`; **a `0` is already conclusive**, which is why the two earlier rows above
+can rest on it. And a measurement is a
 *point-in-time* fact: this lane's own record had to be re-measured mid-flight, and the correction is in
 §0–§2 rather than in a footnote. The verdicts survived the correction unchanged — which is the test that
 they were about the **behaviour** and not about the merge.
