@@ -2077,8 +2077,25 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # `html_block` in the renderer, so the marker is its TEXT — 8 closes measured).
                 _blanked_still_open = (_blanked_opens_paragraph is not None
                                        and _blanked_opens_paragraph in list_items)
+                # ⛔ A LINE THAT ADDS A `>` STARTS A NEW CONTAINER, SO IT INTERRUPTS THE PARAGRAPH
+                # (round-54 review, P0 — a FAIL-OPEN in the lenient arm, introduced by moving the
+                # content ladder below the ordering guards). §5.1 lets a blockquote opener interrupt
+                # a paragraph, so the type-7 veto ("type 7 cannot interrupt a paragraph") has nothing
+                # to protect here; passing the paragraph state anyway refused the block and left the
+                # paragraph open across it, so the wide-gap marker below read as its lazy
+                # continuation:
+                #     `Notes` + `2. -` + `> <br />` + `     -     Closes #100`
+                #         renderer: `<p>` then a blockquote whose `html_block` is `<br />`, then a
+                #         `code_block` -> CODE; `origin/main` `[]`, this head credited `[100]`
+                # The depth term is the rule `_is_lazy_marker`'s docstring already states, applied
+                # where the leaf question is asked. Measured: that body `[]` in both arms, the
+                # controls (`Notes` + `2. -` + `> x` + …, `Notes` + `2. -` + `2.     Closes #100`,
+                # `x` + `- 1.` + `2.     Closes #100`) unchanged, and a 60,000-body sweep against
+                # the previous head moving 25 bodies with 0 new fail-opens and 0 new lost closes.
                 _opened = _html_block_leaf(
-                    _html_rest, prev_prose or _blanked_still_open)
+                    _html_rest,
+                    (prev_prose or _blanked_still_open)
+                    and _quote_depth(prefix) <= prev_quote_depth)
             if _opened is not None:
                 _html_opened_here = True
                 html_item = container
@@ -2342,7 +2359,9 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # the renderer puts in `<pre><code>`:
         #     `-` + `    code` + `<br />` + `     -     Closes #100`
         #         renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
-        #         `main` before #11186 `[]`; after #11186 `[100]` in `strict` — a FALSE PASS
+        #         `[]` at the branch point `origin/main` `80c912244`; `[100]` in `strict` AND
+        #         `indented_code` at `1177c6708` (still at the tip `3861f0a10`) — a fail-open `main`
+        #         carried until it fixed `strict` there in #11330 (`a022f03ce`)
         # `strict` blanked `    code` (its own declared over-blank), which left no paragraph open, so
         # `<br />` opened a PHANTOM type-7 block and `_html_here` then exempted the line below it.
         # ⛔ THIS TERM IS NARROWER THAN "STRICT IS UNCONDITIONAL", AND THE DIFFERENCE IS A DECLARED
