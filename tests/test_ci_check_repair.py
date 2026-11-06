@@ -1888,9 +1888,11 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     comment lines of the `#:` block, and the assignment
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`) is at `:309` — which is what
     `tools/ci_check_repair.py` cites; and `docs/ops/ci-wall-clock.md` §6
-    "lines 326-332" is §5's `timeout-minutes` kill table (the quoted derivation is
-    at `405-407` — it was `360-362` when that paragraph was written, and `main`'s
-    #11063 insert above §6 moved it again: re-measure, never re-copy). The
+    "lines 326-332" was the span that block originally carried, which at
+    `a7436214f` (a 341-line doc) STARTED at §6's own opening bullet ("It does not
+    bound queue wait") and ENDED inside the quoted derivation at `330-332` — the
+    shape the pin could not see, because a span that CONTAINS the sentence passes.
+    The derivation is at `405-407` at this head: re-measure, never re-copy. The
     docstring names the reader who will follow these numbers and warns that whoever
     mis-locates the derivation "discards the one section that supports this floor" —
     so a stale coordinate sends the next lane to exactly the misreading the paragraph

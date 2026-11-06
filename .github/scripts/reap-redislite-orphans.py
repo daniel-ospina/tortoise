@@ -148,7 +148,7 @@ _SOCKET_FLAG = "unixsocket"
 # At the time of writing the widest is `test` at 90 (`python-ci.yml`);
 # `evals-on-demand.yml::evals` 90, `test-slow` 60,
 # `post-merge-validation.yml::validate` 60, `perf-lane` 45, `test-d14-hosted-api`
-# 40, `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
+# 50 (`#11032` moved it 40 -> 50), `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
 # it was UNCAPPED at 360 and invisible to an earlier, narrower population),
 # `test-record-postgres` 30, `legal-e2e`/`blog-write-e2e` 20, and the rest 15.
 #
