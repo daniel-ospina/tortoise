@@ -3764,10 +3764,10 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: ⚠ Named by ROW, not by section: all four sit in §2 today, and a §-number would re-stale on the
 #: next section this doc gains — the same failure mode as the citations themselves.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4532", ("pip install -e '.[test,postgres]'",)),
-    ("python-ci.yml:2932-2937", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4524-4526", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
-    ("python-ci.yml:3213", ("cache: pip",)),
+    ("python-ci.yml:4617", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2941-2946", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4609-4611", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3222", ("cache: pip",)),
 )
 
 #: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
