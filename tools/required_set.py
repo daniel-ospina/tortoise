@@ -296,7 +296,14 @@ def _snapshot_emitters(doc: dict[str, Any] | None) -> tuple[tuple[str, tuple[str
             if not isinstance(entry, (list, tuple)) or not entry:
                 continue
             workflow = entry[0]
-            # Basename only: an Actions run's `path` is `.github/workflows/<basename>`.
+            # Stored VERBATIM. The basename reduction happens once, at the COMPARISON
+            # (`ready_for_owner._run_emits`), because that is the line that decides PASS vs
+            # FAIL and it must be spelling-insensitive for EVERY door that can supply this
+            # map — the record (here) and the `--fixture` door. ⛔ An earlier version of this
+            # comment claimed "Basename only" while the code did no such thing, and the
+            # consequence was a fail-open: a record naming `.github/workflows/python-ci.yml`
+            # matched no run at all, so the absence arm answered DEFERRED (PASS) on a head
+            # where the emitting workflow had really run.
             if isinstance(workflow, str) and workflow and workflow not in files:
                 files.append(workflow)
         if files:

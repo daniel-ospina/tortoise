@@ -3776,6 +3776,57 @@ def test_a_well_formed_emitter_projection_still_attributes_the_absence() -> None
     assert "DEFERRED(merge-time)(no python-ci.yml run" in gates.raw, gates.raw
 
 
+def test_an_emitter_recorded_with_its_full_path_still_attributes_the_absence() -> None:
+    """★ The EMITTER side of the comparison is reduced to a basename, like the run side.
+
+    `_run_file` reduces an Actions run's `path` (`.github/workflows/python-ci.yml`) to its
+    basename before comparing, so an emitter value must be read the same way.
+    `_snapshot_emitters` said "Basename only" in a comment and did NOT do it, and nothing
+    normalised the value at the comparison either — so a record naming the FULL PATH matched
+    no run at all, the match set came back empty, and `_merge_time_absence` answered
+    `DEFERRED(merge-time)` — a **PASS** — on a head where the emitting workflow had really
+    run. Measured at `995594919`, with a real PR-triggered `python-ci.yml` run on the head:
+
+        emitter as "python-ci.yml"                     -> missing:<ctx>   FAIL (correct)
+        emitter as ".github/workflows/python-ci.yml"   -> reason=''       PASS  ← the hole
+
+    An unmatchable emitter spelling is the record-side twin of `_readable_run`'s `path`
+    guard: "no run of the emitter exists" may not be concluded from evidence that could
+    never match. It is also the shape a RENAMED emitter produces while the record still
+    names the old file — the drift the record's own `gate_digest` leg forces a `--recut`
+    for in CI, but not in this gate.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    probe = rfo.probe_from_dict(
+        _fixture_with_head_runs(
+            {
+                # The `--fixture` door is the one that can carry a full path today; it
+                # must reach the same verdict the record's own spelling would.
+                "merge_emit_files": {MERGE_TIME_REQUIRED[0]: [".github/workflows/python-ci.yml"]},
+                "head_runs": ran,
+            }
+        )
+    )
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    # The aggregate ran here, so its absence is MISSING (a FAIL) — never a deferral.
+    assert gates.passed is False, gates.raw
+    assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+    # The same normalisation must NOT turn an unattributable projection into a pass: with
+    # no run on the head at all, this emitter still means DEFERRED.
+    deferred = rfo.probe_from_dict(
+        _fixture_with_head_runs(
+            {
+                "merge_emit_files": {MERGE_TIME_REQUIRED[0]: [".github/workflows/python-ci.yml"]},
+                "head_runs": [],
+            }
+        )
+    )
+    gates = next(c for c in rfo.evaluate(deferred).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw, gates.raw
+
+
 def test_an_explicit_empty_head_runs_still_defers() -> None:
     """The counterpart: a fixture that DOES state "read it, zero runs" keeps DEFERRED.
 

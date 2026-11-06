@@ -1468,7 +1468,16 @@ def _run_emits(run: Mapping[str, Any], files: tuple[str, ...]) -> bool:
         # and an AttributeError escaping to the CLI exits 1 — which a caller reads as
         # "a required check is red" rather than "I could not read the runs".
         return False
-    if _run_file(run) not in files:
+    # ⛔ BOTH SIDES ARE REDUCED TO A BASENAME HERE, and this is the ONE place that does it.
+    # `_run_file` already reduces the RUN side; the EMITTER side arrives either from the
+    # committed record (`required_set._snapshot_emitters`, which stores the value verbatim)
+    # or from the `--fixture` door, and nothing guarantees those spell the same thing. A
+    # record naming `.github/workflows/python-ci.yml` used to match no run at all, leaving
+    # the match set empty so `_merge_time_absence` answered DEFERRED — a PASS on a head
+    # where the emitting workflow really ran. That is the record-side twin of the
+    # `_readable_run` `path` guard: an emitter value that cannot match is not evidence that
+    # nothing emitted it. Normalising at the comparison keeps it fail-closed for every door.
+    if _run_file(run) not in {f.rsplit("/", 1)[-1] for f in files}:
         return False
     event = run.get("event")
     return not isinstance(event, str) or event in PR_TRIGGERS
