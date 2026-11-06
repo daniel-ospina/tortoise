@@ -3613,7 +3613,7 @@ class TestCaptureOrgIngestBound:
         rides a field that costs nothing to keep, while 200 KB of turn text IS
         stored and extracted. The pre-fix fallback set the term to ``0`` and the
         charge collapsed to the node floor: MEASURED at that head, this exact
-        request was charged 5,120 B instead of 200,220 B and was ADMITTED (200)
+        request was charged 5,120 B instead of 200,270 B and was ADMITTED (200)
         on a window that refused the identical surrogate-free capture (429) —
         the fail-open direction #4051 names.
 
@@ -3643,10 +3643,11 @@ class TestCaptureOrgIngestBound:
             return client.post("/v1/sessions", content=raw,
                                headers={"Content-Type": "application/json"})
 
-        # Window = three node floors. The clean 200 KB capture is over-sized, so
-        # the documented rule admits it once; the SECOND is refused, which is
-        # what proves the window is armed before the hostile leg is tried.
-        self._allow(monkeypatch, 3 * 4096)
+        # Window = three capture node floors (3 x 5,120 B = 15,360 B). The
+        # clean 200 KB capture is over-sized, so the documented rule admits it
+        # once; the SECOND is refused, which is what proves the window is armed
+        # before the hostile leg is tried.
+        self._allow(monkeypatch, 3 * 5_120)
         assert post("sCapSurrWarm", {
             "harness": "claude", "conversation": clean}).status_code == 200
         control = post("sCapSurrClean", {
@@ -3655,7 +3656,7 @@ class TestCaptureOrgIngestBound:
             f"the ingest window is not armed: a second {honest}-byte capture was "
             f"admitted ({control.status_code})")
 
-        self._allow(monkeypatch, 3 * 4096)
+        self._allow(monkeypatch, 3 * 5_120)
         r1 = post("sCapSurrHostile", {
             "harness": "claude", "conversation": clean,
             "metadata": {"k": "\ud800"}})
@@ -3663,9 +3664,10 @@ class TestCaptureOrgIngestBound:
             f"the over-sized rule admits ONE over-allowance request on an empty "
             f"window ({r1.status_code}) — {r1.text[:200]}")
         # ⛔ THE DISCRIMINATOR. Pre-fix the hostile charge was 5,120 B, so this
-        # second request (10,240 B total) fit a 12,288 B window and was ADMITTED —
-        # 400 KB of stored text against a 12 KB allowance. Post-fix the first
-        # request spends the window on its real charge, so the second is refused.
+        # second request (10,240 B total) fit a 15,360 B window and was ADMITTED —
+        # 400 KB of stored text against a 15 KB allowance. Post-fix the first
+        # request spends the window on its real charge (200,270 B), so the second
+        # is refused.
         r = post("sCapSurrHostile2", {
             "harness": "claude", "conversation": clean,
             "metadata": {"k": "\ud800"}})

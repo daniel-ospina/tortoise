@@ -17172,7 +17172,7 @@ def _capture_payload_envelope_bytes(body: SessionRequest) -> int:
     surrogate instead of raising and cannot fail on any ``str`` a JSON body can
     produce. That over-counts the escape rather than under-counting the write —
     before it, a 200 KB capture was charged the node floor (5,120 B) instead of
-    200,220 B and slipped a window that refused its surrogate-free twin, the
+    200,270 B and slipped a window that refused its surrogate-free twin, the
     fail-OPEN direction #4051 names.
     """
     from tortoise.commit_schema import payload_envelope_bytes
@@ -17219,7 +17219,7 @@ def capture_ingest_charge_bytes(body: SessionRequest) -> int:
     and it collapsed the charge to the node floor. Measured at the pre-fix head
     with the body the test now posts (a 200 KB turn, ``session_id`` included):
     charged 5,120 B (the 5-node floor: 3 fixed + 2 per turn) instead of
-    200,266 B, and the endpoint ADMITTED it on a window that refused the
+    200,270 B, and the endpoint ADMITTED it on a window that refused the
     identical capture without the surrogate (200 vs 429).
     """
     from tortoise.commit_schema import COMMIT_INGEST_BYTES_PER_NODE
