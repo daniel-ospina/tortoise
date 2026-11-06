@@ -46,18 +46,21 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   property the cache holds that the partition did not judge, which is a
   DIFFERENT (larger) set than the one this bullet's earlier title named. Two
   facts make a name cache-held — it is outside its label's placement, AND the
-  record side does not carry it — so two populations reach it that are not the
-  one §17.5 owns: (a) the EP and derived scalars §17.5 places on the cache
-  (``ep_alpha``/``ep_beta``/``ep_dirty``/``content_hash``/``confidence``/…),
-  which the record schema REFUSES by name and so can never hold, and (b) any
-  property a SECOND WRITER put on a placed node, which the record does not
-  carry — §17.1's chokepoint signature, reported rather than detected here (its
-  repair is *find the writer*, and ``verdict()`` stays ``clean``; measured at
-  `#10394`'s review). They are neither a mismatch nor invisible:
-  :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
-  count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
-  here — (b) is declared by nothing, which is why it reads ``clean`` — and the
-  three differ in what repairs them: §17.5's cache-owned scalars,
+  record side does not carry it — so FOUR populations reach it: (a) the EP and
+  derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
+  ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
+  REFUSES by name and so can never hold — the one §17.5 owns; (b) any property a
+  SECOND WRITER put on a placed node, which the record does not carry — §17.1's
+  chokepoint signature, DECLARED BY NOTHING and reported rather than detected
+  here (its repair is *find the writer*; measured at `#11184`'s review, filed
+  `#11221`); and the two declared classes below, which the record DOES hold.
+  They are neither a mismatch nor
+  invisible: :func:`reconcile_record_and_cache` partitions them into a named
+  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED
+  classes arrive
+  here — (b) is declared by nothing — and every one of the four reads ``clean``
+  (the whole bucket is partitioned out of ``field_mismatches``), while the
+  three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair); the projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
@@ -404,7 +407,10 @@ class RecordReconcileResult:
     #: (``cache_projection.episodic_source_prose_properties()``, which the RECORD
     #: does hold), PLUS the NOT-PROJECTABLE columns
     #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
-    #: and the cache must not materialise, ``#10394``) — as
+    #: and the cache must not materialise, ``#10394``), PLUS one population no
+    #: declaration names — a property a SECOND WRITER put on a placed node the
+    #: record does not carry (``#11221``; it reads `clean`, and its repair is
+    #: *find the writer*) — as
     #: ``(name, node count)``. Kept OUT of ``field_mismatches``
     #: (counting them
     #: made the clean verdict unreachable on a journal-projected cache) and kept
@@ -570,8 +576,9 @@ def _partition_cache_owned(
         ) -> tuple[dict[str, Any], tuple[tuple[str, int], ...]]:
     """Split the cache side into what is COMPARED and what is CACHE-HELD.
 
-    ⛔ "cache-held" is the whole not-compared side, and it carries THREE
-    omission classes (see the module docstring's (5) and :meth:`verdict`);
+    ⛔ "cache-held" is the whole not-compared side, and it carries THREE DECLARED
+    omission classes plus one undeclared population — a second writer's property
+    (see the module docstring's (5) and :meth:`verdict`);
     "cache-owned" is §17.5's term for only ONE of them — the scalars the
     record CANNOT hold — so it is not the name of this partition.
 

@@ -637,12 +637,12 @@ def test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention():
     fix.
 
     ⚠️ DEFENSIVE for the SANCTIONED shape, and operative for that raw-SQL one
-    (#11184 review, P3): ``read_node`` returns ``node_from_row``'s map, so a
-    caller using the module's own reader cannot produce ``story_arc`` in this
-    loop at all. Stated so the arm is not read as evidence that the
-    ``read_node`` path needs it — it does not, and a raw row also drags the
-    record's COLUMN spellings in (the false reds the module's contract sentence
-    warns about).
+    (#11184 review, P3): `read_node`'s map is the projector's `node_from_row`
+    map (plus the event-stream `status` fold for the labels that have one), so a
+    caller using the module's own reader cannot produce `story_arc` in this
+    loop at all. Stated so the arm is not read as evidence that the `read_node`
+    path needs it — it does not, and a raw row also drags the record's COLUMN
+    spellings in (the false reds the module's contract sentence warns about).
 
     The control arm is the other half: a genuinely made-up name still reddens, so
     this is one declared class and not a blanket amnesty on the record side.
@@ -685,13 +685,15 @@ def test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention():
     explained by nothing — the decline is scoped by the node's identity, so
     blanket-explaining the pair here would decouple this arm from that scoping.
 
-    ⚠️ DEFENSIVE, and scoped rather than claimed as a production shape
-    (#11184 review, P3): with the record side supplied the way this module says
-    to supply it (``read_node`` → ``node_from_row``'s map),
-    ``not_projectable``/``declined`` cannot reach the ``invented`` loop at all —
-    both are absent from that map by construction. So this arm guards the shape
-    a RAW-SQL audit is handed, exactly as the sibling arm below does; the
-    sanctioned path needs no explanation arm because it cannot produce the name.
+    ⚠️ DEFENSIVE for the DENY, and ⛔ NOT for the decline as a whole — MEASURED
+    (#11224's review, P2): `not_projectable` and `summary` are absent from the
+    sanctioned map by construction, but `_searchText` is NOT, because a
+    post-#10000 row projects it (`#10965`). This arm therefore FORGIVES a real
+    gap on that population — a cache that lost the field the Source FTS index is
+    declared on reads `clean` — and the fix is `#11233`'s, not this pin's. The
+    arm still guards the shape a RAW-SQL audit is handed, exactly as the sibling
+    arm ABOVE does; the sanctioned path needs no arm for `not_projectable`/`summary`
+    because it cannot produce those names.
     """
     from tortoise.cache_projection import episodic_source_declined_properties, node_from_row
 
