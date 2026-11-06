@@ -1175,9 +1175,11 @@ def parity_difference(cache_props: Mapping[str, Any],
       it is a not-projectable column, a DECLINED name (the §9.1/D1 pair above),
       or a fold default. The four explanations above are the ONLY sanctioned
       asymmetries, and because all four are enumerated they cannot be used to
-      hide a gap. ⚠️ TWO of the three
+      hide a gap. ⚠️ THREE of the four
       are mirrored into the ``invented`` direction (the decline and the
-      not-projectable set); the CARVE-OUT is not, so a raw record row still
+      not-projectable set explicitly, and a FOLD DEFAULT via its own
+      ``_is_fold_default`` skip — so that arm needs no branch for it); the
+      CARVE-OUT is not, so a raw record row still
       reports its own ``content_hash`` as invented — a pre-existing gap of that
       arm, filed as ``#11192`` rather than absorbed here.
       ⚠️ ``as_dict()`` is DIRECTION-BLIND by design: a legacy cache node still

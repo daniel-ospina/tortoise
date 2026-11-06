@@ -818,7 +818,14 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 
 
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
-    """The rebuild's field set is EXACTLY the record's — never a superset.
+    """The rebuild's field set is EXACTLY the record VIEW's — never a superset of it.
+
+    ⚠️ "The record VIEW's", not "the record's": the classes named below mint
+    properties the record has NO COLUMN for, so against the record's PRIMARY column
+    set the plan IS a strict superset for an `:Object`/`:Subject` carrying a
+    `status`. The assertion below compares `written` against `set(node.props)` —
+    the view — which is the identity that holds, and §17.2 states the same
+    distinction by direction.
 
     ⚠️ FIVE CLASSES THIS COMPARISON CANNOT SEE — and every one of them is
     declared, with a pin of its own. `_view()` builds every fixture row through

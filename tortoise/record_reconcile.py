@@ -47,13 +47,17 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
   REFUSES by name and so can never hold. They are neither a mismatch nor
   invisible: :func:`reconcile_record_and_cache` partitions them into a named
-  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ TWO classes
+  ``graph_only`` count (the ``form_normalized`` precedent). ⚠️ THREE classes
   arrive here, and they differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
-  nothing to repair), and the projection-DECLINED pair an EPISODIC Source's
+  nothing to repair); the projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record
-  DOES hold, and which a record-sourced re-projection removes. Counting them as
+  DOES hold, and which a record-sourced re-projection removes; and the
+  NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
+  — which the record ALSO holds and which a re-projection can never restore,
+  because the graph is where they must not live: their only repair is `#10017`'s
+  destructive graph-side purge, a DIFFERENT lane from the other two. Counting them as
   ``field_mismatches`` would make the clean verdict UNREACHABLE on a
   journal-projected cache — every folded point carries them — which is exactly
   the "a signal indistinguishable from noise is not observability" failure
