@@ -3534,14 +3534,17 @@ operator who read the line above as "CI defends this" would never run it.
 >   | run | when | its `deploy` job |
 >   |---|---|---|
 >   | `41694722380` | 2026-11-03T18:32Z | **`skipped`** — a `push`, not a `workflow_dispatch`; only `check-drift` ran, and that is the 18:56 BLOCKING reading above |
->   | `42091073635` | 2026-11-05T19:45Z | failed in ~14 s — its apply never landed |
+>   | `42091073635` | 2026-11-05T19:45Z | failed in ~17 s (job `2026-11-05T19:45:43Z` → `19:46:00Z`; the `Apply migrations` step itself took 1 s) — its apply never landed |
 >   | `42107006180` | 2026-11-05T21:40Z | failed the same way |
 >   | `42134064961` | 2026-11-06T00:04Z→00:17Z | ⚠️ **CANCELLED after ~13 min** — the one window nobody has examined, and a half-run `supabase db push` is exactly the shape that can leave a partial apply |
 >   | `42136459903` | 2026-11-06T00:55Z | the *job* is marked **failed**, but its *`Apply migrations` step SUCCEEDED* — `supabase db push --linked --include-all` → **«Remote database is up to date.»** The failure is the follow-on `deploy-hosted` dispatch. So this is a **second, later green ledger read**, not evidence of a pending apply |
 >
 >   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z). ⛔ **And no
 >   run in that table can be the one that first RECORDED them:** the two runs inside the window died
->   in `Apply migrations` before any `db push` (both on a `config.toml` validation refusal, exit 1),
+>   in `Apply migrations` — which **is** the `supabase db push --linked --include-all --yes` in that
+>   workflow, so there is no earlier `db push` for them to have died "before" — when that push
+>   refused `supabase/config.toml` (`[inbucket]` is no longer supported, exit 1) before opening a
+>   connection,
 >   and the two that could have applied — the cancelled one and the 00:55 one — were both CREATED
 >   after 23:07:38Z (the cancelled run 56 minutes after it), so they postdate the reading that first
 >   saw the rows. The recorder is therefore an act **this run history does not contain**: an
@@ -3672,9 +3675,12 @@ database per team (refused on cost grounds).
 ✅ **AUTHORISED — the 2026-11-01 postponement this note used to carry was SUPERSEDED on 2026-11-03**
 (see the AUTHORISED box at the top of this section). Every command in the block below performs, or
 confirms, an act the owner authorised. ⚠️ **They are still not a licence to improvise:** the 2026-11-03
-procedure is non-negotiable and **backup-first**, so the block runs in order — a verified backup
-(dump + restore test) before any migration — and that first step is blocked today on a missing
-`TORTOISE_RECORD_BACKUP_DSN`, not on any ruling. `armed: true` with `record_write_failures` EMPTY
+procedure is non-negotiable and **backup-first**, but that ordering is a precondition on the
+**migration apply** (R2's `supabase-deploy.yml` dispatch), **not on this block** — this block only
+sets the credential and confirms it reached the machine (`gh secret set` → deploy → `fly secrets
+list`), so it neither takes a backup nor migrates anything. The backup (dump + restore test) must
+run before that R2 dispatch, and **it is blocked today on a missing `TORTOISE_RECORD_BACKUP_DSN`**,
+not on any ruling. `armed: true` with `record_write_failures` EMPTY
 (re-measured 2026-11-05T11:38:16Z) is the current state to record on `#9548`. The former sentence here
 — *"`armed: true` with `write_failed: 32` is a state to report on #9548, not a step to complete"* —
 is stale on both counts: the count is 0 and the act is authorised.

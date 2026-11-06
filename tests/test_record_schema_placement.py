@@ -414,12 +414,18 @@ _INDEX_ARMED_BUILD_RE = re.compile(r"build `[0-9a-f]{7,40}`")
 #:
 #: The three sites are named by DESCRIPTION, not by character offset (#11064
 #: review round 9, P3): they used to be cited as `08:205-238` and `09:196-212`,
-#: and the second was wrong the moment it was written — `09:196` is the tail of
-#: the PREVIOUS bullet and `09:208-212` is a blank line plus `## Reopening`, while
-#: the SUPERSEDED block is `09:197-207`. Eight lines above this comment is the
-#: rule that predicts exactly that decay:
-#: "No character offsets here on purpose: they were pinned once and were stale by
-#: the next round." A description survives the next edit; an offset does not.
+#: and the second was wrong the moment it was written — the offset it gave as the
+#: START sat on the tail of the PREVIOUS bullet, and the one it gave as the END
+#: on a blank line plus `## Reopening`, while the block it meant to name sat
+#: strictly BETWEEN them (it is the third bullet under *Not verified by this
+#: lane*, named in the list below). That block is therefore ALSO not restated
+#: here as a `09:<n>` span: it was correct when this paragraph was written and is
+#: a decay waiting to happen, which is the whole point. ⛔ **The rule below was
+#: quoted in round 10 as sitting "eight lines above this comment" — it did not
+#: exist anywhere in the repo, so the pointer is now stated here in place rather
+#: than quoted from a home it never had** (#11064 rebase review, P3): *no
+#: character offsets on purpose — they were pinned once and were stale by the
+#: next round.* A description survives the next edit; an offset does not.
 #:   * `08` §R1 — the `SUPERSEDED`-labelled block in its read-back bullet;
 #:   * `09` §6 — the third bullet under *Not verified by this lane* (the one that
 #:     opens "This decision does not arm anything itself — but the arming has
