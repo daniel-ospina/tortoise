@@ -1078,6 +1078,10 @@ def read_graph_turns(uri: str | None, db_path: str | None,
     return {"nodes": nodes, "unidentifiable": unidentifiable}
 
 
+#: A lost-store log bigger than this is treated as REPLAYABLE without being read.
+_LOST_LOG_MAX_BYTES = 64 * 1024 * 1024
+
+
 def _graph_total_node_count(g) -> int:
     """How many nodes the graph holds, of ANY label.
 
@@ -1158,13 +1162,25 @@ def _one_replayable_log(events_dir: str) -> str | None:
     Mirrors `recover_from_log`'s preconditions rather than approximating them:
     exactly ONE `*.jsonl` (two is AMBIGUOUS and recovery refuses), and at least
     one PARSABLE event in it (an empty or garbage log is "nothing to recover").
+    "Parsable" means what `tortoise/log.py::read_all` means — `json.loads`
+    succeeded, any JSON value — NOT "a dict" (#11113 review cycle 6, P3): being
+    stricter than the reader would leave this arm silent where recovery still
+    attempts a replay.
 
-    Hardened the same way `_load_prewipe_snapshot` is, and for the same reason
-    (#11113 review cycle 5, P2): the directory is beside a store an operator may
-    share, and a planted FIFO named `*.jsonl` makes a plain `O_RDONLY` open
-    block FOREVER — the census would wedge with no verdict, no error and no
-    timeout, on exactly the empty-graph state #10017 ends on. So: no symlink
-    follow, non-blocking, and only a REGULAR file is read.
+    A FIFO cannot hang it, and a SYMLINK is followed (#11113 review cycle 6,
+    P2/P3). The two hardening bits that matter are `O_NONBLOCK` and `S_ISREG`
+    (measured: `open(fifo, O_RDONLY|O_NONBLOCK)` returns a fd in ~0.1 ms and
+    fails `S_ISREG`). `O_NOFOLLOW` is deliberately NOT used: recovery follows a
+    symlinked `.jsonl` and replays it, so refusing to look through that link
+    made this arm FAIL OPEN — measured end-to-end, a 0-node store whose log was
+    a symlink certified `CLEAN` (rc 0) while the identical file under a regular
+    name refused (rc 3). A link to a FIFO is still rejected, by `S_ISREG` on
+    the fd.
+
+    Bounded: a file larger than `_LOST_LOG_MAX_BYTES` counts as REPLAYABLE
+    without being read — the conservative direction, because a huge log does
+    hold events and reading it on a shared directory is how a certification run
+    exhausts memory.
     """
     import stat
 
@@ -1177,23 +1193,24 @@ def _one_replayable_log(events_dir: str) -> str | None:
         return None
     path = os.path.join(events_dir, names[0])
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                     | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None           # FIFO/device/symlink: not a log we can read
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None           # FIFO/device/directory: not a log we can read
+        if info.st_size > _LOST_LOG_MAX_BYTES:
+            return path           # too big to read, but it certainly has events
         with os.fdopen(os.dup(fd), "rb") as fh:
             for line in fh:
                 if not line.strip():
                     continue
                 try:
-                    event = json.loads(line)
+                    json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(event, dict):
-                    return path
+                return path
     except OSError:
         return None
     finally:

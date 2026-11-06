@@ -1593,6 +1593,50 @@ def test_TWO_adjacent_logs_are_ambiguous_so_the_arm_does_not_claim_a_replay(
     assert graph["nodes"] == {}, graph["nodes"]
 
 
+def test_a_SYMLINKED_log_is_still_replayable_because_recovery_follows_it(
+        tmp_path, monkeypatch):
+    """⛔ `O_NOFOLLOW` made this arm FAIL OPEN — measured, #11113 review cycle 6.
+
+    Recovery follows a symlinked `.jsonl` and replays it, so an arm that refused
+    to look through the link certified `CLEAN` (rc 0) on a 0-node store whose
+    log was a symlink, while the IDENTICAL file under a regular name refused
+    (rc 3). The FIFO protection is `O_NONBLOCK` + `S_ISREG`, not `O_NOFOLLOW`,
+    so the link is followed and the fd is still checked.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    # the real log lives OUTSIDE the store's directory, so the directory holds
+    # exactly ONE `.jsonl` — the symlink. (Two adjacent logs are "ambiguous" and
+    # recovery refuses, which is a different case with its own pin.)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real = elsewhere / "real.jsonl"
+    real.write_text('{"event_type": "PointAdded", "id": "p1"}\n')
+    os.symlink(os.path.join("elsewhere", real.name),
+               tmp_path / "session-events.jsonl")
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+
+
+def test_an_OVERSIZED_log_is_treated_as_replayable_without_reading_it(
+        tmp_path, monkeypatch):
+    """A huge log holds events, so the bounded arm must REFUSE, not skip.
+
+    The cap exists so a certification run cannot exhaust memory on an
+    operator-shared directory; the conservative direction is to refuse, because
+    `return None` here would certify a lost store `CLEAN` (fail-open).
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_text(
+        '{"event_type": "PointAdded", "id": "p1"}\n')
+    monkeypatch.setattr(tpc, "_LOST_LOG_MAX_BYTES", 4)   # smaller than the file
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+
+
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(
         monkeypatch):
     """Fail closed: "I could not ask" is not "the graph is there"."""
