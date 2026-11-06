@@ -3744,8 +3744,9 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 
 
 #: Files OUTSIDE the two runbooks that cite `python-ci.yml:<line>` for the `test-slow` header's
-#: refusal-cost paragraph. On the `main` this landed against, both were exactly right (the anchor
-#: line was `:1891`), and #6744's +70-line insert in the `test` job's `strategy` block moved it — so
+#: refusal-cost paragraph. On the `main` this landed against, `:1891` was inside that paragraph but was
+#: its SECOND line, not its opener (`:1890` there, and the opener is what the pin below requires), and
+#: #6744's +70-line insert in the `test` job's `strategy` block moved the whole block — so
 #: a reader (or a fixer) sent to `:1891` never found the refusal it was sent to read, and NOTHING
 #: read either file, so the drift shipped green. The numbers keep moving, and the anchors are NOT
 #: the same line: at this head the paragraph's OPENER is `:1966` (what the pin below requires), the
@@ -3987,9 +3988,12 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
     # This doc cites `python-ci.yml:<n>` for four cost arguments (the postgres-extra install row,
     # the falkor/torch install row, the save-arm note, the arm-1 cache-key row — all four in §2;
-    # named by row rather than by section, see the note on `_WALL_CLOCK_CITATION_ANCHORS`). All four
-    # were correct when written and had drifted since — and `_REFUSAL_CITATION_SITES` above cannot
-    # cover them, because its anchor is the `test-slow` cost paragraph's opener and these cite
+    # named by row rather than by section, see the note on `_WALL_CLOCK_CITATION_ANCHORS`). THREE of
+    # them were correct when written and had drifted since; the save-arm note was born WRONG — it was
+    # written as `:3015` in the commit that added it, and `cache: pip` was already at `:3036` in that
+    # same tree, so no insert above it can account for the gap. Drift alone does not explain this
+    # pin's population, which is exactly why the pin is not optional. `_REFUSAL_CITATION_SITES` above
+    # cannot cover them, because its anchor is the `test-slow` cost paragraph's opener and these cite
     # other steps.
     # Nothing read this file either, so its drift shipped green exactly like ci.yml's and
     # actionlint.yaml's did. Pinned by SENTENCE inside the cited range, so a number that lands
