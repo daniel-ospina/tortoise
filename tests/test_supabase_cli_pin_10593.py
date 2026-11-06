@@ -1,4 +1,4 @@
-"""The production migration door must not float the Supabase CLI's MAJOR version (#10593).
+"""The `setup-cli` step must not float the Supabase CLI's MAJOR version (#10593).
 
 Measured failure, 2026-11-05T19:45:57Z, `supabase-deploy` run `42091073635` (the dispatch that
 was supposed to carry `20261102000001`/`20261102000002` to production, and with them the
@@ -88,19 +88,28 @@ def _setup_cli_step(workflow_text: str) -> dict:
 
 
 def _setup_cli_block(workflow_text: str) -> list[str]:
-    """The setup-cli step's own source lines, from its `uses:` line to the end of that step.
+    """The setup-cli step's own source lines, from the step's list item to its end.
 
-    The pin check must be scoped to THIS step. A file-wide search is satisfied by a decoy literal —
-    review demonstrated a green path through an `actions/setup-node` step's `with: version: 2.122.1`
-    while the setup-cli step itself carried none — so "a matching line exists somewhere" is not the
-    claim the guard needs to make.
+    Two scoping rules, each from a demonstrated defect:
+    * The block starts at the step's own `- ` item, not at its `uses:` line — `with:` may legally
+      precede `uses:` in YAML, and starting at `uses:` would then miss the pin and report a false
+      block on a legitimate shape.
+    * The pin check must be scoped to THIS step. A file-wide search is satisfied by a decoy literal
+      — review demonstrated a green path through an `actions/setup-node` step's
+      `with: version: 2.122.1` while the setup-cli step itself carried none — so "a matching line
+      exists somewhere" is not the claim the guard needs to make.
     """
     lines = workflow_text.splitlines()
-    start = next(
+    uses_idx = next(
         (i for i, line in enumerate(lines) if "supabase/setup-cli" in line and "uses" in line),
         None,
     )
-    assert start is not None, "no `uses: supabase/setup-cli` line found — the migration door moved"
+    assert uses_idx is not None, "no `uses: supabase/setup-cli` line found — the migration door moved"
+    start = uses_idx
+    for i in range(uses_idx, -1, -1):
+        if lines[i].lstrip().startswith("- "):
+            start = i
+            break
     step_indent = len(lines[start]) - len(lines[start].lstrip())
     block = [lines[start]]
     for line in lines[start + 1 :]:
@@ -146,6 +155,17 @@ def _requested_version(workflow_text: str) -> str:
         "to remove"
     )
     resolved = str(version).strip()
+    with_keys = [
+        line
+        for line in _setup_cli_block(workflow_text)
+        if re.match(r"^\s*(?:-\s*)?with:\s*", line)
+    ]
+    assert len(with_keys) == 1, (
+        f"the setup-cli step declares `with:` {len(with_keys)} times. A duplicate key's tie-break is "
+        "not measured against GitHub's parser (PyYAML takes the LAST value), so a flow mapping "
+        "carrying one pin and a literal line carrying another could have this reader assert a pin "
+        "CI does not install. Declare `with:` once."
+    )
     literals = _literal_version_lines(workflow_text)
     assert literals, (
         f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step — PyYAML "
@@ -190,8 +210,8 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
     DECLARED OUT OF SCOPE (not silently assumed covered): a `run:` step that installs or invokes a
     v3 CLI by itself (`npx supabase@3.0.0 …`, `npm i -g supabase@…`). That is a code change, and it
     is reviewed as code; the mutating-command argument checks are open PR #11104's own suite. The
-    title above is scoped to the setup-cli STEP for exactly this reason — do not read it as a claim
-    about `run:` bodies.
+    title above names the STEP for exactly this reason — do not read it as a claim about `run:`
+    bodies.
 
     ⛔ The ceiling is deliberately a MAJOR comparison rather than a scan of the workflow's arguments.
     An earlier draft decided v3-readiness by looking for `--yes` in the mutating commands, and review
@@ -258,7 +278,9 @@ def test_a_floating_version_is_refused() -> None:
         workflow,
         count=1,
     )
-    assert "version: latest" in mutated, "mutation did not apply — this test would be vacuous"
+    assert _literal_version_lines(mutated) == ["latest"], (
+        "mutation did not apply to the step's own pin — this test would be vacuous"
+    )
     problems = _violations(mutated, config)
     assert problems, "a floating `version: latest` passed the check"
 
@@ -350,9 +372,25 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         workflow,
         count=1,
     )
-    assert duplicated.count("version: latest") == 1, "mutation did not apply — vacuous"
+    assert _literal_version_lines(duplicated) == ["latest", "2.122.1"], (
+        "mutation did not apply to the step's own pins — this test would be vacuous. The check is "
+        "step-scoped on purpose: a FILE-wide search is satisfied by this workflow's own prose, "
+        "which quotes `version: latest` while explaining #10593"
+    )
     with pytest.raises(AssertionError, match="literal `version:` lines"):
         _requested_version(duplicated)
+
+    # (c) a duplicated `with:` key must be refused: one flow mapping pinning 3.0.0 and one literal
+    #     pinning 2.122.1 leaves PyYAML taking the last, while GitHub's tie-break is unmeasured.
+    twice = re.sub(
+        r"(?m)^(\s*)with:\n\s*version:\s*2\.122\.1\s*$",
+        r"\1with: {version: 3.0.0}\n\1with:\n\1  version: 2.122.1",
+        workflow,
+        count=1,
+    )
+    assert twice.count("with: {version: 3.0.0}") == 1, "mutation did not apply — vacuous"
+    with pytest.raises(AssertionError, match="declares `with:`"):
+        _requested_version(twice)
 
 
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
