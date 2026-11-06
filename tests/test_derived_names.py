@@ -693,13 +693,58 @@ def _raw_detach_violations(root=None):
             # measured GREEN before the corresponding tightening (#11182):
             # comment-only, import-with-no-call, and `def _journal_append`.
             code = _mask_strings_and_comments(block)
+            lineno = src.count(chr(10), 0, m.start()) + 1
             if "os.urandom" not in block or not _journal_calls(code):
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
-                    f"L{src.count(chr(10), 0, m.start()) + 1} without a "
+                    f"L{lineno} without a "
                     f"per-test-unique handle + _journal_append in the same "
                     f"block (cycle-6 P1-3 / cycle-8 P2-2)")
+                continue
+            # The journal is an ownership RECORD only for a name the sweep's
+            # vocabulary accepts — see `_non_owned_handles`.
+            non_owned = _non_owned_handles(block)
+            if non_owned:
+                violations.append(
+                    f"{f.name}: raw FalkorDB( client + bulk DETACH at "
+                    f"L{lineno} journals a handle OUTSIDE the ownership "
+                    f"vocabulary ({', '.join(map(repr, non_owned))} is not in "
+                    f"_SWEEP_OWNED_PREFIXES) — the sweep PRESERVES it and then "
+                    f"consumes the journal, so the graph leaks while this "
+                    f"census is green (#11217 review P1)")
     return violations
+
+
+def _non_owned_handles(block: str) -> list[str]:
+    """The literal prefixes of per-test handles BUILT with `os.urandom` in
+    `block` that the sweep's ownership vocabulary does NOT recognise.
+
+    `_journal_append` is the third half of the raw-client contract because the
+    session-end sweep reads the journal through `owns_by_ownership_record`
+    (`tests/_embedded.py::_SWEEP_OWNED_PREFIXES`). A journaled name OUTSIDE that
+    vocabulary makes the append INERT: `_sweep_drop` classifies the name as
+    `preserved`, drops nothing, and removes the journal anyway (`failed` is
+    empty), so the graph can never be reclaimed and `_owned_survivors` will not
+    report it either. Measured on `tests/test_cache_eviction_evictor.py`, whose
+    `lane` fixture journaled `evict_<12hex>` — the census above was GREEN while
+    the leak the journal exists to close was still open (#11217 review P1).
+
+    Matched on the RAW block (the prefix lives inside string material, which
+    masking would erase) and only for the `name = f"<prefix>{os.urandom(...)}"`
+    shape: a name built by a CALL is not guessed at, so this arm cannot invent a
+    prefix it did not read.
+    """
+    from tests._embedded import _SWEEP_OWNED_PREFIXES
+
+    out: list[str] = []
+    for m in re.finditer(r"(?m)^[ \t]*\w+\s*=\s*f([\"'])([^\n]*)", block):
+        rhs = m.group(2)
+        if "os.urandom" not in rhs:
+            continue
+        prefix = rhs.split("{", 1)[0]
+        if not prefix.startswith(_SWEEP_OWNED_PREFIXES):
+            out.append(prefix)
+    return out
 
 
 def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
@@ -737,7 +782,7 @@ def test_a_comment_NAMING_the_journal_does_not_satisfy_the_raw_detach_census(tmp
         "def test_unowned():"
         "\n    import os"
         "\n    from falkordb import FalkorDB"
-        "\n    name = f\"g_{os.urandom(4).hex()}\""
+        "\n    name = f\"test_g_{os.urandom(4).hex()}\""
         "\n    # the record: _journal_append(name) is what a peer sweep needs"
         "\n    c = FalkorDB(host=\"h\")"
         "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
@@ -782,6 +827,46 @@ def test_a_comment_NAMING_the_journal_does_not_satisfy_the_raw_detach_census(tmp
     )
     assert _raw_detach_violations(root=tmp_path), \
         "a local DEF of _journal_append was accepted as the record"
+
+
+def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
+    """#11217 review P1: journaling is not ownership.
+
+    `_journal_append` closes the leak only for a name the sweep's vocabulary
+    accepts (`_SWEEP_OWNED_PREFIXES`). At `evict_<12hex>` the entry was INERT —
+    `_sweep_drop` classified the name `preserved`, dropped nothing, and removed
+    the journal anyway — so the census went green over a graph that could never
+    be reclaimed (the false PASS this guard pair must not produce).
+
+    Both arms are pinned here: the non-owned prefix REDS, the same site with
+    `test_` in front of the prefix is clean, so the arm cannot go vacuous by
+    flagging every journaled site.
+    """
+    site = tmp_path / "test_non_owned_handle.py"
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    name = f\"evict_{os.urandom(6).hex()}\""
+        "\n    _journal_append(name)"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "OUTSIDE the ownership vocabulary" in bad[0], (
+        f"a journaled NON-OWNED handle was accepted as an ownership record: {bad}")
+    assert "'evict_'" in bad[0], (
+        f"the violation must name the prefix it read, got: {bad[0]}")
+
+    site.write_text(
+        site.read_text(encoding="utf-8").replace('f"evict_', 'f"test_evict_'),
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "the SAME site with a `test_` prefix must be clean — an owned prefix is "
+        "what makes the journal record authorise a drop")
 
 
 def _block_end(masked: str, start: int, indent: int) -> int:
@@ -876,7 +961,7 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
         "def test_journaled_first():\n"
         "    import os\n"
         "    from falkordb import FalkorDB\n"
-        "    name = f\"g_{os.urandom(4).hex()}\"\n"
+        "    name = f\"test_g_{os.urandom(4).hex()}\"\n"
         "    _journal_append(name)\n"
         "    c = FalkorDB(host=\"h\")\n"
         "    c.query(\"MATCH (n) DETACH DELETE n\")\n"
@@ -903,7 +988,7 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
         "def test_journaled_third():\n"
         "    import os\n"
         "    from falkordb import FalkorDB\n"
-        "    other = f\"g2_{os.urandom(4).hex()}\"\n"
+        "    other = f\"test_g2_{os.urandom(4).hex()}\"\n"
         "    _journal_append(other)\n"
         "    d = FalkorDB(host=\"h\")\n"
         "    d.query(\"MATCH (n) DETACH DELETE n\")\n"
