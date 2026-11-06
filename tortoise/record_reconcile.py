@@ -92,7 +92,11 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``state.status = null`` into the record, which the state-op reader collapses
   to "no status write" (``cache_projection``'s stated R4 bound, recorded on
   `#9974`), so the record cannot re-derive the ABSENCE today.
-  chokepoint signature, DECLARED BY NOTHING and reported rather than detected
+  (b) any property a SECOND WRITER put on a placed node, OR on a node the
+  record does not own at all (``scan_cache_view`` fills ``placed`` for every
+  cache node it reads, so such a node's out-of-placement names are bucketed
+  too), which the record does not carry — §17.1's chokepoint signature,
+  DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
   `#11221`); and the two declared classes below, which the record's TABLE holds
   and the record SIDE (this comparison's own projector-built map) omits — which
@@ -577,9 +581,11 @@ def reconcile_record_and_cache(
     name becomes comparable and the bucket empties with the value PRESERVED. The
     mint exists only for a STRING the label's status door ACCEPTS, so on a
     ``:Subject`` it is limited to ``SUBJECT_STATUS_VALUES`` and a value outside
-    that set has no mint (`#11296`); a NON-STRING status has none either — the
-    state-op reader reads ``->> 'status'``, so it would mint back as text and
-    red rather than emptying the bucket. A CLEAR is only for an untrustworthy value
+    that set has no USABLE mint (`#11296`); a NON-STRING status has none either
+    — the state-op reader reads ``->> 'status'``, so a mint comes back as the
+    TEXT spelling (``5`` -> ``'5'``): the bucket EMPTIES and the pair reds as a
+    ``field_mismatches`` entry rather than reading clean. A CLEAR is only for an
+    untrustworthy value
     and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
     {status: null}``, a REMOVAL, on an ``:Object``; on a ``:Subject`` that call
     is REFUSED (#1423's status door accepts only ``SUBJECT_STATUS_VALUES``, and
@@ -587,6 +593,12 @@ def reconcile_record_and_cache(
     ``REMOVE n.status`` — and a clear makes a TERMINAL entity read LIVE. Clear,
     or the wipe, but ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
     leaves the value in place — see the module docstring's (5)),
+    a record-sourced clear IN PLACE for the declined pair —
+    ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
+    ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
+    node, the graph-side purge for a not-projectable column (below), or *find
+    the writer* for the undeclared second-writer population the partition also
+    counts.
 
     ⛔ AND A THIRD OMISSION, from `#10394`: `cache_projection.
     CACHE_FORBIDDEN_COLUMNS` subtracts the NOT-PROJECTABLE class from
