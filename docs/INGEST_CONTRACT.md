@@ -548,8 +548,15 @@ the `{error}`-only shape whose retry action is different.
   the surplus turns, and that sweep journals one `PointRetracted` `:GraphEvent`
   and one `EntityMutated` record per swept turn — neither is in (b), because
   (b) is computed from the request while the sweep is proportional to what the
-  team already stored. Measured: a 1-turn re-capture of a 500-turn session was
-  charged 5 120 B and minted 499 nodes.
+  team already stored. ⛔ Scope it to the lanes where the GRAPH holds the
+  turns: the emit is guarded by `if not _record_first`, and `_record_first`
+  (`record_writer.record_holds_turns`) is true exactly when the record can
+  carry them — so the **record-armed** lane, which is what production runs,
+  mints **no** `:GraphEvent` from the sweep (only the `EntityMutated` JSONL
+  row, which is not a node). The under-count is a graph-held-turns
+  phenomenon: journal-configured/record-unarmed and journal-less. Measured
+  there: a 1-turn re-capture of a 500-turn session was charged 5 120 B and
+  minted 499 nodes.
 
   Exceeding the allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
@@ -563,7 +570,8 @@ the `{error}`-only shape whose retry action is different.
   of the cumulative `ERR_QUOTA` advice above. One edge case an operator must
   size against: a SINGLE request larger than the whole allowance is admitted
   ONCE while the window is completely empty (refusing it would tell a client to
-  retry a request that can never fit), so the real per-request ceiling on the
+  retry a request that can never fit — `quota.py::commit_ingest_admit`,
+  `bucket_used == 0 and charge > limit`), so the real per-request ceiling on the
   capture lane is the route's 16 MiB body cap, once per window — reachable at
   default config because 16 MiB exceeds the 10 MiB allowance (#11218).
 

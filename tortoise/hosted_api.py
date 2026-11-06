@@ -17555,6 +17555,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
          test_the_points_cap_refuses_before_the_ingest_window``),
          because this lane's 402 is skipped on the store-only paths (#3892,
          #4258) — where no capture can be refused by it at all.
+         It also sits BEFORE the first write, so a refused capture leaves no
+         ``:Session``, ``:Event`` or transcript ``:Source`` and the documented
+         ``Retry-After`` retry is a clean first attempt. Not the 429
+         ``_reserve_capture_slot`` raises for CAPACITY (#3060) — a different
+         refusal, taken earlier, in the REST wrapper.
     #3892 (owner ruling 2026-09-18): a missing provider key is NOT a gate —
     the capture is stored for every request and ONLY the LLM extraction is
     skipped, reported truthfully as receipt mode "no-provider".
