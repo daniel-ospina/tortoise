@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:58c4c76261d731cf65d39343e99973ef6f14222f9bbcc36fdd89686add85fd7e",
+  "document_sha256": "sha256:50858600b10f1a1a4ec3d63ca6a8b3e32a77d149cf4397b4b16d2ae112bb9bb7",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -252,13 +252,16 @@
         "TORTOISE_S2_DECISION_SEAM",
         "TORTOISE_SESSION_EXTRACTOR",
         "TORTOISE_EXTRACTOR",
-        "TORTOISE_LABEL_ORDER"
+        "TORTOISE_LABEL_ORDER",
+        "TORTOISE_SESSION_LLM_MOCK",
+        "TORTOISE_EXTRACTOR_PROMPT",
+        "TORTOISE_EXTRACT_MODEL"
       ],
       "pinned_to": {
         "TORTOISE_S4_DELTA": "1"
       },
       "why_value_gate_off": "its default flipped ON in #10996; an arm that declares itself OFF must pin the explicit 0 or it measures the predicate's population",
-      "read_back": "every value is re-read from os.environ after setting and a mismatch REFUSES the run"
+      "read_back": "every value is re-read from os.environ after setting and a mismatch REFUSES the run; the set includes the three measurement switches the #10983 review found unpinned (TORTOISE_SESSION_LLM_MOCK, TORTOISE_EXTRACTOR_PROMPT, TORTOISE_EXTRACT_MODEL)"
     },
     "negative_control": {
       "arms": [
