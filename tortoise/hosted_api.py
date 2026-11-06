@@ -20045,7 +20045,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
     # ── 2. Document transcript (D10, ONTOLOGY v3.15 §4.4: a document is a
     # :Source) — deterministic id, replay-safe MERGE. NO content on the
-    # derived path: `summary`/`title` are §4.4 METADATA, and the S1 narrative is
+    # derived path: `summary`/`title` are §4.6 METADATA, and the S1 narrative is
     # ⛔ NOT among them — §9.1/D1 puts it in `public.session_narrative`, and the
     # `s.story_arc` SET this comment used to include is deleted (#10000; see 2b).
     # Doc_status is retired (§9.5 Q3). ──
@@ -20091,7 +20091,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # SHAPE-KEYED projection `record_projection._narrative_statements` (any
     # record naming its session and carrying `story_arc`), whose production
     # producer below (2b) is the `SessionNarrated` carrier — unchanged, and the
-    # only PRODUCER this path contributes. `summary`/`title` stay: they are §4.4
+    # only PRODUCER this path contributes. `summary`/`title` stay: they are §4.6
     # metadata, not the prose.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "

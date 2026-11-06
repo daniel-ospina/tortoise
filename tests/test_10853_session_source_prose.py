@@ -494,6 +494,53 @@ def test_the_props_tail_cannot_smuggle_the_prose_past_the_guard():
     assert "_search_text" not in node.props
 
 
+def test_a_tail_carried_index_name_cannot_ERASE_the_lexicon_the_column_writes():
+    """The mirror of the leg above, and the one that distinguishes the ORDERINGS.
+
+    On a post-#10000 row the COLUMN door deliberately KEEPS `_searchText` (it is
+    the only field the Source FTS index is declared on, #3518). So when the tail
+    also names that coordinate, the tail's refused value must not take the
+    column's legitimate one with it — otherwise a caller-controlled `props`
+    payload can UN-INDEX a restored session, which is the exact harm the
+    narrowing exists to prevent, reachable from the open set.
+
+    Popping the tail's declined names AFTER the column loop did precisely that:
+    the tail's key had overwritten `out` first, the column then wrote the
+    lexicon over it, and the pop removed the coordinate entirely. Measured at
+    the parent, this leg's first case returned `_searchText is None`; it now
+    returns the join. ⛔ The leg is here rather than beside the provenance legs
+    because it is an ORDERING property, not a provenance one: the same row with
+    no tail, with a canonical tail key and with a snake tail key must produce the
+    SAME node map.
+    """
+    # ⭐ The lexicon is the helper's OWN derivation, never a hand-typed list — the
+    # row is built from the capture's functions so this leg tracks a change to
+    # the derivation instead of staling against it.
+    base = _post_10000_session_row()
+    topics = base["topics"]
+    assert isinstance(topics, list) and topics
+    joined = ", ".join(topics)
+    expected = node_from_row("Source", base)
+    assert expected.props.get(SOURCE_SEARCH_TEXT_FIELD) == joined
+
+    for smuggled in ('{"_searchText": "SMUGGLED"}',
+                     '{"_search_text": "SMUGGLED"}',
+                     '{"summary": "SMUGGLED"}',
+                     '{"_searchText": "SMUGGLED", "_search_text": "SMUGGLED",'
+                     ' "summary": "SMUGGLED"}'):
+        node = node_from_row("Source",
+                             _post_10000_session_row(props=smuggled))
+        assert node.props.get(SOURCE_SEARCH_TEXT_FIELD) == joined, (
+            f"a caller-controlled `props` payload {smuggled} erased the lexicon "
+            "the COLUMN door legitimately projects — the restored session is now "
+            f"un-indexed: {node.props!r}")
+        assert "summary" not in node.props, (
+            f"{smuggled} put a summary on the node — `summary` is declined on "
+            "EVERY row, tail door included")
+        assert "SMUGGLED" not in str(node.props), (
+            f"{smuggled} reached the node under some spelling: {node.props!r}")
+
+
 # ── THE IDENTITY CAN MOVE TOO, and the guard must follow it there ──────────
 
 
@@ -808,7 +855,7 @@ def _post_10000_session_row(**overrides: object) -> dict[str, object]:
     ⭐ Not a hand-typed shape: `_session_source_metadata` and `_source_search_text`
     are the capture's own functions (the single writer of the pair), so this row
     tracks a change to the derivation instead of staling against it. `summary` is
-    the §4.4 display DESCRIPTOR and `_searchText` is the bare lexicon, and both
+    the §4.6 display DESCRIPTOR and `_searchText` is the bare lexicon, and both
     come from the SAME `topics` list in one statement — which is exactly what
     makes the pair's provenance decidable from a record row.
     """
@@ -1361,17 +1408,45 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
         "precedent) — re-quote the authority as it now reads rather than leaving "
         "the citation resting on a sentence that is gone.")
 
-    # The other three sites cite the same ruling by its section number rather
-    # than by quotation, so hold them to that number in the same leg: a stale
-    # §4.4 in any of them re-introduces the rot the quotation check just fixed.
+    # ⛔ THE REST OF THE SITES THAT CITE THE SAME RULING BY NUMBER, and the list
+    # is the DEFINITION (#10962 review, P2 — this leg claimed "the other three
+    # sites" and read three files while FOUR live citations of the same ruling
+    # sat outside its scope having gone stale to §4.4: `hosted_api.py` twice —
+    # the exact sentence #10978 corrected, in a file this PR changes —
+    # `test_10000_source_prose.py` once, and this file's own line 811). A scope
+    # claim that is short by the sites that are actually stale is the false PASS
+    # the leg exists to stop, so the list is widened to the measured population.
+    #
+    # The assertion is CASE-INSENSITIVE on the phrase, because the stale sites
+    # spell it both ways (`§4.4 METADATA` in `hosted_api.py`).
     for rel in (
         "docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md",
         "tortoise/cache_projection.py",
+        "tortoise/hosted_api.py",
         "MEMORY.md",
+        "tests/test_10000_source_prose.py",
+        "tests/test_10853_session_source_prose.py",
     ):
         text = (root / rel).read_text(encoding="utf-8")
-        assert "§4.4 metadata" not in text, (
+        if rel == "tests/test_10853_session_source_prose.py":
+            # ⛔ EXCISE THIS GUARD'S OWN BLOCK — the repo's documented pattern for
+            # a narrative pin. This function QUOTES the old wording as history and
+            # asserts the new one's absence, so scanning itself would red on the
+            # record of the fix instead of on a fix that is missing. The excision
+            # is asserted, so it cannot silently stop excising anything.
+            marker = ("def test_the_10852_obligation_quotes_the_authority"
+                      "_AS_IT_NOW_READS(")
+            assert marker in text, (
+                "this leg's own block is gone from its file, so the excision "
+                "below is unsafe — re-point it rather than deleting the marker")
+            text = text[:text.index(marker)]
+        assert not re.search(r"§4\.4\s+metadata", text, re.IGNORECASE), (
             f"{rel} still calls the pair \u00a74.4 metadata; the authority "
-            "(#10978) now says \u00a74.6 — the section number is part of the citation")
-        assert "§4.6 metadata" in text, (
+            "(#10978) now says \u00a74.6 — the section number is part of the "
+            "citation, and a stale one sends the reader to the wrong section")
+        # ⚠️ PRESENCE IS `§4.6`, NOT `§4.6 metadata`: this file states the ruling
+        # as "the §4.6 display DESCRIPTOR", which cites the section without
+        # repeating the claim's noun. The ABSENCE arm above stays on the phrase,
+        # because that is the rot — a §4.4 that names the metadata class.
+        assert "§4.6" in text, (
             f"{rel} no longer cites the authority's section number at all")

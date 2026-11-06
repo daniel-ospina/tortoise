@@ -293,8 +293,8 @@ bounds, both deliberate:
   row the TAIL won `sourceKind` while the predicate read the COLUMN — the two
   functions disagreed and R1 failed open exactly on the conflicting shape
   (#10867 review ISSUE 1). `_source_row`'s `sorted()` keys put `props` BEFORE the
-  identity columns it can collide with (`source_kind`, `title`, `url` — indices
-  27, 33, 39, 42 of 45), so every agreement leg ran on the one ordering real rows
+  identity columns it can collide with (`props`, `source_kind`, `title`, `url` —
+  indices 27, 33, 39, 42 of 45), so every agreement leg ran on the one ordering real rows
   do not have; the pin now
   has a legs pair that builds the row in `SELECT *` order and one that builds the
   same record both ways and requires the SAME node map;

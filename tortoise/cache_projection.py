@@ -1792,9 +1792,7 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     # — so the tail never legitimately carries one), and the tail stays the
     # open-set surface for the names no column spells.
     out: dict[str, Any] = {}
-    tail_keys: set[str] = set()
     if tail:
-        tail_keys = set(tail)
         refused_tail = sorted(set(tail) & refused)
         if refused_tail:
             raise CacheProjectionError(
@@ -1804,6 +1802,35 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
                 f"schema's own CHECK refuses this row)"
             )
         out.update(dict(tail))
+        # ⛔ THE TAIL'S DECLINED NAMES ARE POPPED **BEFORE** THE COLUMN LOOP.
+        # Popping them AFTER it removed the coordinate the COLUMN had just
+        # legitimately written (#10962 review, P3): a post-#10000 row whose
+        # caller-controlled tail also carries the canonical `_searchText` lost
+        # the lexicon, i.e. the restored session was left un-indexed — the
+        # un-indexing this whole narrowing exists to prevent. Measured at the
+        # parent: tail `{"_searchText": "SMUGGLED"}` → `_searchText is None`,
+        # with no tail the same row keeps `', '.join(topics)`.
+        #
+        # Popping here makes the two rules agree, which is what the docstrings
+        # already claimed and the code did not do: a COLUMN value WINS the
+        # coordinate (`_row_identity_view`'s rule, applied to the node map), and
+        # the tail's spelling of a declined name never reaches the node because
+        # it was never seeded.
+        #
+        # ⭐ THE TAIL DOOR STAYS UNCONDITIONAL — it is NOT narrowed by the
+        # per-row provenance test (#10965): nothing DERIVES this pair into the
+        # tail (the writer classifies both names as COLUMNS), so a tail key is by
+        # construction unclassified prose the row smuggled round the column door.
+        # ⚠️ BOTH spellings: the tail is an OPEN set keyed by whatever the payload
+        # said, so a `_search_text` tail key is the snake spelling of the same
+        # datum and must go too.
+        # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED, now literally: it is scoped
+        # to the tail's own keys and runs before anything else touches `out`, so
+        # it cannot subsume the column-loop guard above (deleting that guard
+        # must still red — measured, it does).
+        if episodic_source:
+            for name in set(tail) & episodic_source_declined_properties():
+                out.pop(name, None)
     for column, value in row.items():
         if column == "props":
             continue
@@ -1831,32 +1858,6 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             f"refused by the schema, and not record bookkeeping — refusing to "
             f"drop it silently"
         )
-    if episodic_source and tail_keys:
-        # ⛔ THE OPEN-SET DOOR (#10853 review). `props` is written verbatim, so a
-        # row whose tail carries the pair would land it on the node and the
-        # guard's own claim — *"whatever build wrote the row"* — would be false
-        # on that door. Not reachable through today's writer (`record_projection`
-        # classifies both names as COLUMNS, so they never reach the tail), and
-        # exactly for that reason it is filtered here rather than assumed: a
-        # classification that moves is the #9710 class, and a guard that stops
-        # guarding without reddening is worse than no guard.
-        # ⚠️ BOTH spellings: the tail is an OPEN set keyed by whatever the payload
-        # said, so a `_search_text` tail key is the snake spelling of the same
-        # datum and would otherwise survive (`_search_text` IS a real column, so
-        # the tail can carry that spelling where it cannot carry `_searchText`).
-        # ⭐ AND THE TAIL DOOR STAYS UNCONDITIONAL — it is NOT narrowed by the
-        # per-row provenance test (#10965): nothing DERIVES this pair into the
-        # tail (the writer classifies both names as COLUMNS), so a tail key is by
-        # construction unclassified prose the row smuggled round the column door.
-        # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED. Rebuilding `out` wholesale
-        # made this filter SUBSUME the column-loop guard above: deleting that
-        # guard reddened nothing at all (measured — 20 passed), so the two doors
-        # were one door and the mutation-check claim covered a branch that no
-        # longer mattered. Scoped by `tail_keys`, each door is independently
-        # exercised, which is the only way "each door is pinned" is true.
-        declared = episodic_source_declined_properties()
-        for name in tail_keys & declared:
-            out.pop(name, None)
     return out
 
 
