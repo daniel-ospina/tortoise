@@ -156,6 +156,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
+from . import referentiality as _referentiality  # #11021: the referentiality test
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
@@ -1703,6 +1704,7 @@ def compile_stories(stories: list[str]) -> str:
 
 OUTPUT_CONTRACT = """{
   "entities": [{"name": str, "kind": str, "lifecycle": "created|changed|unchanged|superseded", "supersedes": "existing-id|null", "note": str|null}],
+  "mentions": [{"surface": str, "claim_ref": str|null, "quote": str|null, "kind_guess": str|null}],  # a phrase that POINTS rather than NAMES (a pronoun, `the former`, `the problem`): recorded against the claim that used it, NEVER an entity (#11021)
   "events": [{"content": str, "eventKind": str, "about_entities": [str], "startedAt": "YYYY-MM-DD|YYYY-MM-DDThh:mm:ss|null", "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
   "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "when": "YYYY-MM-DD|null",
               "slots": {"subject": [...], "object": [...], "event": [...]},
@@ -3584,12 +3586,34 @@ def _merge_key(section: str, item: dict) -> tuple:
         return ("chain", _norm(item.get("chain")), _norm(item.get("finding")))
     if section == "link_before_create":
         return ("lbc", _norm(item.get("searched_for")), bool(item.get("found")))
+    if section == "mentions":
+        # #11021: a mention's identity is the (surface, claim) pair — the same
+        # surface on two different claims is two records, and one surface twice
+        # on ONE claim is one.
+        return ("mention", _norm(item.get("surface")),
+                _norm(str(item.get("claim_ref") or "")))
     if section == "retractions":
         # E7 (D5): retraction refs dedupe by (content | id) — S4's
         # graph-informed version wins on collision (E4 union semantics).
         return ("retraction", _norm(str(item.get("content") or "")),
                 _norm(str(item.get("id") or "")))
     return (section, json.dumps(item, sort_keys=True, default=str))
+
+
+def _merge_mention_records(s2_item: dict, s4_item: dict) -> dict:
+    """Field-wise union of two mentions of the same (surface, claim) — **#11021**.
+
+    The S2-side record is DERIVED (it carries ``rule_id``, the span and the
+    ``kind_guess``); S4's is the model's contract-shaped re-statement
+    (``surface``/``claim_ref``/``quote``). S4 wins on nothing here: it has nothing
+    the derived record lacks, and letting it win erased the rule id and the span
+    (review P1).
+    """
+    out = dict(s4_item)
+    for k, v in s2_item.items():
+        if v not in (None, "", [], {}):
+            out[k] = v
+    return out
 
 
 def merge_embed_lists(s2: dict, s4: dict) -> dict:
@@ -3602,7 +3626,11 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
     None sections and non-dict entries are tolerated (skipped).
     """
     sections = ("entities", "events", "points", "operators",
-                "chain_notes", "link_before_create", "retractions")
+                "chain_notes", "link_before_create", "retractions",
+                # #11021: S4 reviews gaps against an index built while the
+                # surface was still an entity, so the channel is re-merged
+                # rather than replaced; a mention S4 omits is PRESERVED.
+                "mentions")
     out: dict = {}
     for section in sections:
         s2_items = [i for i in (s2.get(section) or []) if isinstance(i, dict)]
@@ -3615,6 +3643,15 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
             if k in seen:
                 continue                      # S2-side duplicate — first wins
             seen.add(k)
+            if section == "mentions" and k in s4_by_key:
+                # ⛔ #11021: S4's contract-shaped entry is {surface, claim_ref,
+                # quote} — it carries NO rule_id and NO span, so "S4 wins" would
+                # replace a derived record with a provenance-free one. For this
+                # section the two sides are COMPLEMENTARY (the derived record has
+                # the rule and the address; S4 can only add text), so they are
+                # merged field-wise, S2's non-empty fields winning.
+                merged.append(_merge_mention_records(item, s4_by_key[k]))
+                continue
             merged.append(s4_by_key.get(k, item))   # S4 wins on collision; S2 never dropped
         for item in s4_items:
             k = _merge_key(section, item)
@@ -9229,6 +9266,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_keys": search_keys,
             "source_turn_id": turn_idx,
         }
+        # #11021: the claim CARRIES the phrases it pointed with. This is the
+        # mention's home (DM1) — the information a hold would otherwise destroy
+        # rides the claim as `surface` + the span it addressed, and nothing here
+        # is ever minted as an :Object.
+        _mentions = _mentions_for_claim(
+            embed_list, content, armed=_referentiality.enabled())
+        if _mentions:
+            pt_entry["mentions"] = _mentions
         # #2684 (Slice B): a VALUE-BEARING point carries the verbatim source
         # SPAN — the offsets of its own quote inside the resolved turn — so a
         # consumer can re-read the exact value instead of re-deriving it from
@@ -9885,6 +9930,26 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         payload["operators"], payload["summary"], payload["story_arc"],
         payload.get("events", []), payload.get("supersessions", []))
 
+    # ── #11021: do the mention records still resolve? ─────────────────────
+    # A claim can be folded away AFTER the selection: an intra-batch duplicate,
+    # a NOOP, or a MERGE (#5006) all exit before this point's `pt_entry` exists,
+    # so its mentions never attach and the information the hold was supposed to
+    # preserve is gone. That is recorded, never silent — the DM2 contract row
+    # says every `claim_ref` resolves to an EMITTED point, and an unchecked
+    # claim would make the row false without saying so.
+    _attached = sum(len(p.get("mentions") or []) for p in payload_points
+                    if isinstance(p, dict))
+    _records = [m for m in (embed_list.get("mentions") or []) if isinstance(m, dict)]
+    _emitted_refs = {_norm(str(p.get("content") or "")) for p in payload_points
+                     if isinstance(p, dict)}
+    unresolved = [m for m in _records
+                  if _norm(str(m.get("claim_ref") or "")) not in _emitted_refs]
+    if unresolved:
+        warnings.append(
+            f"{len(unresolved)} mention record(s) name a claim this run did not "
+            f"emit (a NOOP/duplicate/MERGE folded it away): "
+            + ", ".join(sorted({str(m.get("surface")) for m in unresolved})[:8]))
+
     return {
         "payload": payload,
         "noops": noops,                # E7 (D4): result-level, NOT in the payload
@@ -9907,6 +9972,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_degraded": bool((search or {}).get("degraded")),
             "chain_notes": len(chain_notes),
             "supersessions": len(supersessions),
+            # #11021 — the mention channel's own accounting: records written vs
+            # records that found their claim, and the ones that did not (named
+            # in `warnings`). A mention is never promoted to an :Object.
+            "mentions_recorded": len(_records),
+            "mentions_attached": _attached,
+            "mentions_unresolved": len(unresolved),
         },
     }
 
@@ -10209,6 +10280,416 @@ def _merge_flagged_contents(*surfaces: dict | None) -> frozenset[str]:
     return frozenset(flagged)
 
 
+def route_mentions(embed_list: dict, narrative: str = "") -> dict:
+    """S2.2 — the referentiality selection: hold a mention, never mint it (**#11021**).
+
+    **Where this runs, stated exactly.** At the S2.2 position in
+    :func:`extract_session_v2` — after S2 (and again after S4's union), before
+    S3 RESOLVE — because that is a *selection*, not a create-gate at S5.
+    ``#10997``'s S3/S5 HOLD and ``run_s4``'s gap-filling are untouched: a
+    mention is not a deferred creation, it is a phrase that never had a
+    referent to create.
+
+    **What it does, in four mechanical moves.** For every candidate in
+    ``entities[]`` whose surface :func:`referentiality.judge` holds as a
+    mention:
+
+    1. it is removed from ``entities[]`` — so the entity loop at S5
+       (``execute_embed``, the ``for e in embed_list.get("entities")`` mint)
+       cannot see it, which is the *structural* half of the no-mint guarantee;
+    2. it is stripped from every CLAIM's AND every EVENT's ``about_entities`` —
+       ``commit_schema`` validates both (``points[i].about_entities`` and
+       ``events[i].about_entities`` against the emitted set), and a hold that
+       422s the whole session is worse than the phantom node it removed;
+    3. every operator whose endpoint names it is DROPPED, because
+       ``execute_embed``'s mint-before-wire pass materialises an unresolvable
+       operator endpoint as a fabricated statement Point (#2552) — exactly the
+       hazard ``vet_gate.apply_vet`` prunes for a DISCARD and this must prune
+       for a hold;
+    4. it is recorded as a mention on **every** claim that used it —
+       ``{surface, claim_ref, quote, span_start, span_end, span_source,
+       kind_guess, rule_id}`` — which is where the information a hold would
+       otherwise destroy now lives.
+
+    **Held on the SURFACE, not on a live reference — because a hold removes the
+    reference it was decided from.** An earlier draft required
+    ``_claims_naming(surface)`` to be non-empty *at decision time*, so the second
+    sighting of the same surface (the S4 union pass, or a second entity of the
+    same name but a different kind) found no reference, was refused as
+    ``hold_abandoned_no_claim``, and MINTED — the selection undoing itself. So
+    the decision is taken once over the whole surface set, and a surface already
+    carrying a record is held again without needing a live reference.
+
+    **A mention the model emitted itself is never promoted.** ``mentions[]`` is a
+    one-way channel: an entry there is a statement that the phrase is not a node,
+    so it is recorded and never re-read into ``entities[]``. When the flag is
+    OFF the whole channel is ignored and counted (``channel_ignored``) — the
+    unmeasured state must not lose a surface to a field nobody armed.
+
+    **A mention no claim can carry is refused** (the issue's own contract row: a
+    mention with no claim is not a record). Two DIFFERENT refusals, counted
+    separately because they lose opposite things: ``hold_abandoned_no_claim``
+    (the hold is abandoned, the entity stays — fail-open) and
+    ``channel_refused_no_claim`` (a model-emitted mention with no resolvable
+    claim is dropped and named).
+
+    Returns a NEW embed list — the caller's dicts are never mutated, so a
+    failure after this point cannot leave claims stripped of their aboutness with
+    no record to show for it.
+    """
+    if not embed_list or not isinstance(embed_list, dict):
+        return embed_list
+    if not _referentiality.enabled():
+        # The unmeasured default (plan R1): the list is returned **unchanged**, and
+        # NOTHING is added — not even a stats key. An empty S4-rescue guard reads
+        # `any(embed_list.values())` to tell "S2 produced nothing" from "S2
+        # produced content", and a bookkeeping key would have made an S2-empty
+        # session look non-empty (measured: it silently zeroed
+        # `stats["s4_full_rescues"]`, #2335's 2x-cost counter). "Unarmed is
+        # byte-identical" is the whole promise; a key is not byte-identical.
+        return embed_list
+
+    entities = embed_list.get("entities")
+    if not isinstance(entities, list):
+        return embed_list
+    channel = embed_list.get("mentions")
+    channel = channel if isinstance(channel, list) else []
+    points = [p for p in (embed_list.get("points") or []) if isinstance(p, dict)]
+    events = [e for e in (embed_list.get("events") or []) if isinstance(e, dict)]
+    if not entities and not channel:
+        return embed_list
+
+    # ── the decision, taken ONCE per surface ───────────────────────────────
+    # `hold` maps the surface -> (rule_id, reason). Every entry sharing a surface
+    # is held, so a second entity of the same name but a different kind cannot
+    # slip through the door the first one opened.
+    hold: dict[str, tuple[str, str]] = {}
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        name = str(entity.get("name") or "").strip()
+        verdict = _referentiality.judge(name) if name else None
+        if verdict is not None:
+            hold[name] = verdict
+    # a surface already carrying a record is held again without a live
+    # reference — the union pass's idempotence depends on this.
+    for m in channel:
+        if not isinstance(m, dict):
+            continue
+        surface = str(m.get("surface") or "").strip()
+        if surface and surface in hold:
+            continue
+        if surface and str(m.get("rule_id") or "").startswith("referentiality."):
+            hold.setdefault(surface, (str(m.get("rule_id")),
+                                      "already recorded on a claim"))
+
+    def _claims_naming(surface: str) -> list[dict]:
+        """Every carrier of this surface — claims AND events. Layer-1 validates
+        both sets, so both are stripped (review: events were missed, and an event
+        naming a held surface 422'd the whole session)."""
+        carriers = [p for p in points
+                    if isinstance(p.get("about_entities"), list)
+                    and any(str(a).strip() == surface for a in p["about_entities"])]
+        carriers += [e for e in events
+                     if isinstance(e.get("about_entities"), list)
+                     and any(str(a).strip() == surface for a in e["about_entities"])]
+        return carriers
+
+    stats: dict = {"held": 0, "hold_abandoned_no_claim": 0,
+                   "channel_refused_no_claim": 0, "channel_ignored": 0,
+                   "events_stripped": 0, "operators_dropped": 0,
+                   "by_rule": {}, "armed": True}
+    # ── copy what we touch: the caller's dicts are never mutated ────────────
+    #: surfaces already carrying a record — the union pass re-enters with NO
+    #: live reference (the first pass removed it), so this set is what keeps the
+    #: hold from being abandoned and re-minted one pass later.
+    recorded_surfaces = {str(m.get("surface") or "").strip() for m in channel
+                         if isinstance(m, dict)}
+    kept_entities: list = []
+    kept_points: list = []
+    kept_events: list = []
+    records: list[dict] = []
+    held_surfaces: set[str] = set()
+    abandoned: set[str] = set()
+
+    for entity in entities:
+        if not isinstance(entity, dict):
+            kept_entities.append(entity)          # execute_embed warns + skips
+            continue
+        name = str(entity.get("name") or "").strip()
+        if name not in hold:
+            kept_entities.append(entity)
+            continue
+        carriers = _claims_naming(name)
+        if not carriers and name not in recorded_surfaces:
+            # Nothing to record it against. Keep the entity (fail-open) and NAME
+            # the refusal so the rate is visible.
+            stats["hold_abandoned_no_claim"] += 1
+            abandoned.add(name)
+            kept_entities.append(entity)
+            continue
+        if not carriers:
+            # Already recorded on an earlier pass: hold it again, add no record
+            # (a duplicate record would double-count the measurement).
+            held_surfaces.add(name)
+            continue
+        held_surfaces.add(name)
+        rule_id, reason = hold[name]
+        kind_guess = str(entity.get("kind") or "").strip() or None
+        for carrier in carriers:
+            records.append(_mention_record(
+                surface=name, claim=carrier, kind_guess=kind_guess,
+                rule_id=rule_id, reason=reason, narrative=narrative,
+                quote=str(carrier.get("quote") or "") if "quote" in carrier else ""))
+
+    for point in (embed_list.get("points") or []):
+        if not isinstance(point, dict):
+            kept_points.append(point)
+            continue
+        names = point.get("about_entities")
+        if not isinstance(names, list):
+            kept_points.append(point)
+            continue
+        pruned = [a for a in names
+                  if str(a).strip() not in held_surfaces]
+        kept_points.append(point if len(pruned) == len(names)
+                           else {**point, "about_entities": pruned})
+
+    for event in (embed_list.get("events") or []):
+        if not isinstance(event, dict):
+            kept_events.append(event)
+            continue
+        names = event.get("about_entities")
+        if not isinstance(names, list):
+            kept_events.append(event)
+            continue
+        pruned = [a for a in names if str(a).strip() not in held_surfaces]
+        if len(pruned) != len(names):
+            stats["events_stripped"] += 1
+            kept_events.append({**event, "about_entities": pruned})
+        else:
+            kept_events.append(event)
+
+    kept_operators, dropped = _prune_held_operators(
+        embed_list.get("operators"), held_surfaces)
+    stats["operators_dropped"] = dropped
+
+    for rule_id in [hold[surf][0] for surf in held_surfaces]:
+        stats["by_rule"][rule_id] = stats["by_rule"].get(rule_id, 0) + 1
+
+    # ── the channel itself: model-emitted mentions are recorded, never promoted
+    claims_by_ref = {_norm(str(p.get("content") or "")): p for p in points
+                     if str(p.get("content") or "").strip()}
+    for entry in channel:
+        if not isinstance(entry, dict):
+            continue
+        surface = str(entry.get("surface") or "").strip()
+        if not surface:
+            continue
+        claim_ref = str(entry.get("claim_ref") or "").strip()
+        claim = claims_by_ref.get(_norm(claim_ref))
+        if claim is None:
+            # A mention with no resolvable claim is not a record (contract row).
+            stats["channel_refused_no_claim"] += 1
+            continue
+        carrier = next((p for p in kept_points
+                        if isinstance(p, dict)
+                        and _norm(str(p.get("content") or "")) == _norm(claim_ref)), claim)
+        records.append(_mention_record(
+            surface=surface, claim=carrier,
+            kind_guess=str(entry.get("kind_guess") or "").strip() or None,
+            rule_id=str(entry.get("rule_id") or _referentiality.RULE_CHANNEL),
+            reason="emitted by the extraction model on the mention channel",
+            narrative=narrative,
+            quote=str(entry.get("quote") or claim.get("quote") or ""),
+            span=entry))
+
+    out = dict(embed_list)
+    out["entities"] = kept_entities
+    if "points" in embed_list:
+        out["points"] = kept_points
+    if "events" in embed_list:
+        out["events"] = kept_events
+    if "operators" in embed_list:
+        out["operators"] = kept_operators
+    out["mentions"] = _dedupe_mentions(records)
+    stats["held"] = len(held_surfaces)
+    out["mention_stats"] = stats
+    return out
+
+
+def _prune_held_operators(operators: object,
+                          held_surfaces: set[str]) -> tuple[list, int]:
+    """Drop every operator that NAMES a held surface, with its count.
+
+    ``execute_embed``'s mint-before-wire pass (#2552) materialises an
+    unresolvable operator endpoint as a statement Point carrying the endpoint's
+    own text — so a held pronoun left in an operator comes back as a CLAIM node,
+    which is the same defect one step sideways. ``vet_gate.apply_vet`` prunes
+    this exact class for a DISCARD (Rule 3); this is the hold's mirror, and it
+    drops ``MITIGATES.target_edge`` endpoints too (the same reason).
+    """
+    if not isinstance(operators, list):
+        return (operators if operators is not None else []), 0
+    kept: list = []
+    dropped = 0
+    for op in operators:
+        if not isinstance(op, dict):
+            kept.append(op)
+            continue
+        endpoints = [str(op.get(k) or "").strip() for k in ("src", "dst")]
+        target = op.get("target_edge")
+        if isinstance(target, dict):
+            endpoints += [str(target.get(k) or "").strip() for k in ("src", "dst")]
+        if any(e in held_surfaces for e in endpoints if e):
+            dropped += 1
+            continue
+        kept.append(op)
+    return kept, dropped
+
+
+def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
+                    rule_id: str, reason: str, narrative: str,
+                    quote: str, span: dict | None = None) -> dict:
+    """One mention, in DM1's property shape (#11021) — ``surface``, the span it
+    addressed, and a ``kind_guess``. ``claim_ref`` is the claim's own content (the
+    owning point IS the claim on this branch — there is deliberately no
+    ``claim_id``).
+
+    ⚠️ **The span is resolved from text, never fabricated, and it says which text.**
+    It is searched for in the claim's verbatim ``quote`` first and then in the
+    compiled narrative the extraction saw; ``span_source`` names which one, because
+    the two offset spaces are not interchangeable (a Point's own span is
+    quote-inside-turn). A surface that does not occur EXACTLY ONCE as a whole word
+    gets ``None`` — a half span or a guessed offset is the "fabricated address"
+    ``#5007``'s all-or-nothing contract forbids.
+
+    Every field is clamped to ``commit_schema.Mention``'s caps HERE, on both the
+    derived and the model-emitted path, so a hallucinated 300-character surface
+    cannot 422 the whole session (review P1: the model path bypassed the clamps).
+    """
+    surface = str(surface or "")[:200]
+    span_start: int | None = None
+    span_end: int | None = None
+    span_source = ""
+    if span is not None:
+        # model-emitted offsets: accepted only as a COMPLETE pair of ints
+        try:
+            s0, s1 = span.get("span_start"), span.get("span_end")
+            if isinstance(s0, int) and isinstance(s1, int) and s1 > s0 >= 0:
+                span_start, span_end = s0, s1
+                span_source = "model"
+        except Exception:
+            span_start, span_end, span_source = None, None, ""
+    else:
+        for haystack, label in ((quote, "quote"), (narrative, "narrative")):
+            found = _mention_span(haystack, surface)
+            if found is not None:
+                span_start, span_end = found
+                span_source = label
+                break
+    return {"surface": surface,
+            "claim_ref": str(claim.get("content") or ""),
+            "quote": str(quote or "")[:_MAX_QUOTE],
+            "span_start": span_start,
+            "span_end": span_end,
+            "span_source": span_source,
+            "kind_guess": (kind_guess or "")[:60] or None,
+            "rule_id": rule_id,
+            "reason": reason}
+
+
+def _mention_span(haystack: str, surface: str) -> tuple[int, int] | None:
+    """The offsets of ``surface`` in ``haystack`` as a WHOLE WORD, or None.
+
+    Whole-word and unambiguous only: exactly one match, and the match must not be
+    flanked by letters. Substring arithmetic alone put a span on the ``us`` inside
+    ``usual`` (review P2) — a recorded address that names the wrong bytes, which is
+    worse than no address.
+    """
+    if not haystack or not surface:
+        return None
+    pattern = re.compile(r"(?<![A-Za-z])" + re.escape(surface) + r"(?![A-Za-z])")
+    found = list(pattern.finditer(haystack))
+    if len(found) != 1:
+        return None
+    return (found[0].start(), found[0].end())
+
+
+def _dedupe_mentions(mentions: list) -> list[dict]:
+    """One record per (surface, claim) — the S2 and union passes both run the
+    selection, and a duplicated record is a duplicated measurement."""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for m in mentions:
+        if not isinstance(m, dict):
+            continue
+        key = (_norm(str(m.get("surface") or "")),
+               _norm(str(m.get("claim_ref") or "")))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return out
+
+
+#: The fields ``commit_schema.Mention`` carries — one list, so a field added to
+#: the model without being added here is caught by validation rather than
+#: silently dropped on the way to the payload.
+_MENTION_FIELDS: tuple[str, ...] = (
+    "surface", "claim_ref", "quote", "span_start", "span_end", "span_source",
+    "kind_guess", "rule_id",
+)
+
+#: The caps ``commit_schema.Mention`` enforces. Clamped here for every mention
+#: that reaches the payload — including an UNARMED run, where the model's own
+#: ``mentions[]`` entries are still copied (review P1: an over-long surface or a
+#: half span from a hallucinated field 422'd the entire payload).
+_MENTION_CAPS: dict[str, int] = {"surface": 200, "quote": 200, "kind_guess": 60}
+
+
+def _mentions_for_claim(embed_list: dict, content: str,
+                        *, armed: bool) -> list[dict]:
+    """The mentions whose ``claim_ref`` is THIS claim — in the committed shape.
+
+    Resolution is by the claim's own text (:func:`_norm`), never by position: S4
+    reorders and merges the list, so an index would attach a mention to the wrong
+    claim the first time the order moved.
+
+    ``armed`` is the cue's own switch: with it OFF the attachment is skipped
+    entirely, so an unmeasured run's payload is genuinely unchanged (the comment
+    that claimed this without doing it was a review P2).
+    """
+    if not armed:
+        return []
+    key = _norm(str(content or ""))
+    if not key:
+        return []
+    out: list[dict] = []
+    for m in embed_list.get("mentions") or []:
+        if not isinstance(m, dict):
+            continue
+        ref = str(m.get("claim_ref") or "").strip()
+        if not ref or _norm(ref) != key:
+            continue
+        record: dict = {}
+        for k in _MENTION_FIELDS:
+            v = m.get(k)
+            if v is None or v == "":
+                continue
+            if k in _MENTION_CAPS:
+                v = str(v)[:_MENTION_CAPS[k]]
+            record[k] = v
+        if not record.get("surface"):
+            continue
+        # A half span is not an address: drop BOTH halves rather than 422.
+        if ("span_start" in record) != ("span_end" in record):
+            record.pop("span_start", None)
+            record.pop("span_end", None)
+        out.append(record)
+    return out
+
+
 def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
                   prior: dict | None = None
                   ) -> tuple[dict, dict, list[str], dict]:
@@ -10459,6 +10940,21 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # unchanged, which is the pre-existing behaviour.
     vet_s2_stats: dict = {}
     vet_s2_pool: dict = {}
+    # ── S2.2 referentiality (#11021): a mention is RECORDED ON ITS CLAIM, never
+    # minted. Runs before VET because a mention is not a candidate for VET's
+    # question ("should this exist?") — it is a phrase that never named a thing,
+    # so there is nothing for the gate to decide; and it runs before S3 so the
+    # resolver never sees a phantom referent. Fail-open: any failure returns the
+    # list with a warning, exactly like the VET pass.
+    mention_s2_stats: dict = {}
+    if embed_list:
+        try:
+            embed_list = route_mentions(embed_list, story)
+            mention_s2_stats = embed_list.get("mention_stats") or {}
+        except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+            vet_warnings.append(
+                f"referentiality selection failed ({type(e).__name__}: {e}) — "
+                "candidates kept (fail-open)")
     if vet_enabled and embed_list:
         embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
             embed_list, story, arbiter=vet_arbiter)
@@ -10581,6 +11077,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # than as a delta because merge_embed_lists rewrites/reorders it — the S2
     # verdict ids (which are positional) do not describe the union's items.
     vet_union_stats: dict = {}
+    # S2.2 referentiality, union pass (#11021): S4 can re-emit a held surface
+    # (it reviews gaps against the S3 index, where the entity was still visible
+    # when the search was built), so the selection runs again on the union —
+    # idempotent by (surface, claim), and the second pass is what makes the
+    # no-mint guarantee hold for the whole pipeline rather than for S2 alone.
+    if complete_list:
+        try:
+            complete_list = route_mentions(complete_list, story)
+            if complete_list.get("mention_stats"):
+                mention_s2_stats = {
+                    **mention_s2_stats,
+                    "union": complete_list["mention_stats"],
+                }
+        except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+            vet_warnings.append(
+                f"referentiality selection (union) failed "
+                f"({type(e).__name__}: {e}) — candidates kept (fail-open)")
     if vet_enabled and complete_list:
         complete_list, vet_union_stats, _w, _ = _run_vet_pass(
             complete_list, story, arbiter=vet_arbiter, prior=vet_s2_pool)
@@ -10730,6 +11243,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
         "notes": chain_enforcer_notes,
         "stats": chain_enforcer_stats,
+    }
+    # #11021: the referentiality evidence surface — additive always, like the VET
+    # one below. It reports the mentions HELD (with the rule that held each) and
+    # the mentions REFUSED (a mention with no resolvable claim is not a record),
+    # so "the run held N mentions" is a number the result carries rather than a
+    # claim the lane makes. `held` is 0 when the kill-switch is set to 0.
+    result["mentions"] = {
+        "stats": mention_s2_stats,
+        "records": [m for m in (complete_list.get("mentions") or [])
+                    if isinstance(m, dict)],
     }
     # #1933 (E2E-4 negative a): the chain-completeness evidence surface +
     # human-readable warnings (additive keys — the S5-failure branch above
@@ -12165,6 +12688,10 @@ _OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
     "chain_notes": ("chain", "finding", "action"),
     "link_before_create": ("searched_for", "found"),
     "retractions": ("content", "id"),  # content | id — either satisfies
+    # #11021: the mention channel. `surface` ONLY is required — `claim_ref` and
+    # `quote` are contract-nullable, and `_is_primitive(None)` is False, so
+    # requiring them would reject the contract's own shape.
+    "mentions": ("surface",),
 }
 
 #: D5: primitive types for the required keys (structural strictness only).
@@ -12173,7 +12700,7 @@ _SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
     "eventKind": (str,), "src": (str,), "dst": (str,),
     "op_type": (str,), "chain": (str,), "finding": (str,),
     "action": (str,), "searched_for": (str,), "found": (bool,),
-    "id": (str,),
+    "id": (str,), "surface": (str,),   # #11021: the mention channel
 }
 
 
@@ -12473,7 +13000,7 @@ __all__ = [  # noqa: RUF022
     "run_s2", "render_s2_prompt",
     "resolve_backend_mode", "search_graph",
     "run_s4", "render_s4_prompt",
-    "merge_embed_lists", "_merge_key", "_s4_merge_stats",
+    "merge_embed_lists", "_merge_key", "_s4_merge_stats", "route_mentions",
     "execute_embed", "validate_chains", "validate_chain_completeness",
     "derive_supersessions",
     "classify_consolidation", "DecisionRecord", "resolve_entities",
