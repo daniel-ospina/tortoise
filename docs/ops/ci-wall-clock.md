@@ -174,10 +174,8 @@ uploading a 3.6 GB `~/.cache/pip` archive in the `actions/cache` save POST-step 
 at 20 m, which `python-ci-gate` reads as red (#5219). `max 8.03` therefore never saw it. The
 binding term is the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm —
 read the cap against the SUM of the job's caps, not against its median. ⚠ **Both terms moved again on
-2026-11-06**, so a reader deriving this row TODAY must use the numbers in the block below, not the two
-in that sentence: the in-step watchdog is now `20m` (sized from the COLLECT measurement) and the save
-arm then gives `20 + ~1 + ~9 = 30 m × 1.5 = 45 → 50` — three steps ahead of where this paragraph
-starts, which is the point of it.
+2026-11-06** — the `15m` and the `~9 m` in the sentence above are the SUPERSEDED values; derive this
+row from the block below, which works the move.
 
 ⚠ **Both of those numbers moved again on 2026-11-06, on a measurement that closes the loop the
 paragraph above opens.** Run 42154769896 (PR #11032, head `8f32c5255`) reddened **two** required
