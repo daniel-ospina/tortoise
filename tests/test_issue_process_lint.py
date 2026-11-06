@@ -376,6 +376,32 @@ def test_an_unreadable_object_stays_unreadable_when_the_sentence_continues(tail,
     assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]], why
 
 
+def test_a_blanked_object_followed_by_a_conjunction_is_still_unreadable():
+    """The residual round 19 declared rather than fixed — and the class it belongs to.
+
+    The unreadable-object guard admitted a bare `and`/`or` after the gap as a clause continuation,
+    so a blanked object followed by PROSE read CLEAN while the claim before it was silently dropped
+    (measured at `6d8e4ed8b`):
+
+        Part of #11000 — deliberately not closing `#3300` and this one is separate.   -> rc 0
+
+    That is the same silent drop as the appositive tails above, one word over, and the direction
+    this module ranks worst. The conjunction is now admitted only when it actually introduces the
+    next reference-naming clause. The pinned continuation
+    (`test_two_declines_on_one_line_each_own_their_reference`) is the control that keeps the
+    narrowing from deleting a real decline — asserted here too, so this case cannot be made green
+    by closing the conjunction door altogether.
+    """
+    body = "Part of #11000 — deliberately not closing `#3300` and this one is separate.\n"
+    assert L.claims(body, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[11000]]
+
+    control = ("Refs #100, #200 — #100 is deliberately not Closes and "
+               "#200 is deliberately not Closes.\n")
+    assert L.claims(control, 1)["declined"] == [100, 200]
+    assert L.classify_pr(control, 1) == []
+
+
 def test_a_decline_list_stops_at_the_clause_end():
     """Measured at `0e785300b` (review, P2): `_REF_LIST`'s separator was `_DECLINE_TAIL`, whose class
     contains `.` `;` `:` and `—` — the CLAUSE ENDS — so a list continued straight through a full stop
@@ -425,6 +451,31 @@ def test_a_serial_comma_and_trailing_text_do_not_truncate_the_object_list(body):
     start another ref (a list continuation is the object list's job, not the clause's).
     """
     assert L.classify_pr(body, 1) == [], body
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Part of #1234 — deliberately not closing a closing one.", "article + closing stem + `one`"),
+    ("Part of #1234 — deliberately not closing the closing ref.", "`the closing ref`"),
+    ("Part of #1234 — deliberately not closing a resolving one.", "`resolving` is a closing stem"),
+    ("Part of #1234 — deliberately not closing a closing issue.", "`a closing issue`"),
+])
+def test_the_decline_may_name_the_reference_by_its_kind(body, why):
+    """Measured at `6d8e4ed8b` (review, P2 — the one finding that round declared, not fixed).
+
+    The object slot was `_DET` immediately followed by `_REF_NOUN`, so a closing WORD between them
+    had no route through the grammar, the object captured empty, and the unreadable-object guard
+    suppressed the proximity path — the honest decline was FLAGGED (rc 3). The same sentence with
+    the word `closing` in the other position (`deliberately not a closing one.`) declined, which is
+    what makes this a grammar gap rather than a doctrine.
+
+    The object phrase is strictly shaped — a determiner, a closing stem, one reference noun — so it
+    cannot swallow a following clause; the control below pins that.
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [1234], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+    # the object phrase stops at the noun: the next clause's ref is not swept into the decline
+    assert L.claims("Part of #100 — deliberately not closing a closing one and #300 is"
+                    " separate.\n", 1)["declined"] == [100]
 
 
 def test_a_plural_decline_clears_the_whole_list_it_names():
@@ -1340,7 +1391,19 @@ def test_the_first_ref_clause_is_a_closing_keyword_rule_only():
         d = L.classify_pr(body, 999)
         return d[0].detail if d else ""
     assert "FIRST ref" in detail("Closes #1, #2\n")
-    assert "FIRST ref" in detail("Satisfies #1, #2\n") or detail("Satisfies #1, #2\n") == ""
+    # ⛔ NOT `or detail(...) == ""`. That disjunct passes when the tool returns NO finding at all
+    # for `Satisfies #1, #2` — i.e. exactly the round-6 false PASS this arm exists to shut, so the
+    # assertion had no teeth (review at `2219dfe86`, P3, still open at `6d8e4ed8b`). Dropping the
+    # `if continued` guard from the `SATISFIES_WORDS` branch makes `#2` RESOLVED, `classify_pr`
+    # returns `[]`, and the old assertion still passed. The finding is now required, and the
+    # claims() shape behind it is pinned directly so that mutation cannot be silent.
+    satisfies_cont = detail("Satisfies #1, #2\n")
+    assert satisfies_cont, "a continuation of `Satisfies` must still flag #2"
+    assert "FIRST ref" in satisfies_cont
+    continued = L.claims("Satisfies #1, #2\n", None, None)
+    assert continued["satisfies"] == [1]
+    assert continued["weak"] == [2]
+    assert continued["continued_resolving"] == [2]
     assert "FIRST ref" not in detail("Refs #1, #2\n")
     assert "FIRST ref" not in detail("Part of #1, #2\n")
     assert "FIRST ref" not in detail("Refs #1\n")
