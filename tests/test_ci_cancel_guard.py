@@ -220,6 +220,48 @@ def test_a_non_integer_total_count_is_fail_closed(fixture):
     assert fixture.cancelled() == []
 
 
+@pytest.mark.parametrize("total", [False, True], ids=["false", "true"])
+def test_a_BOOLEAN_total_count_is_fail_closed(fixture, total):
+    """The `or isinstance(total, bool)` half — `bool` IS an `int` in Python.
+
+    JSON `false`/`true` deserialise to `False`/`True`, which pass
+    `isinstance(total, int)` (verified: `isinstance(False, int) is True`), so
+    without the bool clause the payload is read as `total_count: 0`/`1` and the
+    partial-list refusal below it is silently disabled:
+
+        `false` → total 0 → `0 < 0` False, `0 > len(jobs) == 1` False → the read
+                  passes, the queued job reads as "no work" → PERMIT → POST;
+        `true`  → total 1 → `1 > 1` False → same hole.
+
+    A payload that cannot be counted was being counted, and the direction it
+    fails in is a real `POST /cancel` against work the caller never saw — the
+    fail-OPEN direction this whole file exists to refuse.
+
+    ⛔ MEASURED: deleting ` or isinstance(total, bool)` left the whole file green
+    — this arm had NO regression detector before this case, which is how it was
+    reported ("`total_count: false` is naked; `true` is caught incidentally").
+    Both shapes are pinned here because `true` is only "caught" by the
+    partial-list arm when the job list happens to be empty; with one job row it
+    is exactly as naked as `false`. With this case in place, deleting the bool
+    clause reds BOTH parametrisations. No collected count is restated here — see
+    the note in `test_a_STILL_QUEUED_job_…`.
+
+    The message assertion is not decoration: it distinguishes THIS refusal from
+    the partial-list one, so the case cannot be satisfied by a neighbouring arm
+    (an assertion satisfied by an unrelated branch is not a detector).
+    """
+    fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
+    fixture.apply("prs.json", pr(PR_HEAD_MOVED))
+    fixture.apply("jobs.json", {"total_count": total, "jobs": [
+        {"name": "test (a)", "status": "queued", "started_at": None}]})
+    r = guard(fixture, "41840910128", "--apply")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "integer" in (r.stdout + r.stderr).lower(), r.stdout + r.stderr
+    assert fixture.cancelled() == [], (
+        "a boolean total_count was read as a count, disabling the partial-list refusal"
+    )
+
+
 def test_a_non_object_job_row_is_fail_closed(fixture):
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
@@ -315,10 +357,14 @@ def test_a_STILL_QUEUED_job_that_has_STARTED_is_refused(fixture):
     deleted with the suite still green: the job then reads as "no work to
     destroy", the verdict becomes PERMIT, and a real POST destroys running work.
     ⛔ MEASURED WITH THIS TEST REMOVED FROM THE RUN: deleting that disjunct left
-    the whole file green (51 passed, 0 failed — the file collects 51 without
-    this test; `dacd1fc07^` predates BOTH pins and collects 50). With it in
-    place, deleting it reds THIS test and only this test (51 passed, 1 failed),
-    while `test_run_with_a_started_job_is_refused` stays green.
+    the whole file green. With it in place, deleting it reds THIS test and only
+    this test, while `test_run_with_a_started_job_is_refused` stays green.
+    ⛔ The collected-test COUNTS are deliberately not restated here. A count is a
+    property of the file, not of this arm, so it drifts every time any test is
+    added — this paragraph carried 51 while the file collected 53, which reads as
+    "the pin is vacuous" when it is only stale. `dacd1fc07^` predates BOTH pins and
+    collects 50; that is the one figure here that cannot drift, so it is the only
+    one kept.
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
@@ -505,7 +551,7 @@ def test_a_capped_open_PR_list_is_fail_closed(fixture):
     CURRENT-HEAD class (5 of the 42 in the 2026-11-04 audit) arrived at from the
     other direction — a truncated read treated as a complete one.
 
-    Nothing pinned this arm: deleting it left the whole file green (51 passed). It
+    Nothing pinned this arm: deleting it left the whole file green. It
     is the same shape as the two arms cycle 1 pinned (`total > len(jobs)`, an absent
     `total_count`), in the same reader layer, so it gets the same treatment.
 
@@ -596,12 +642,12 @@ def test_a_partial_job_list_is_fail_closed(fixture):
     100 rows. Every row can read `queued` while job 101 is `in_progress`, so
     without this disjunct a partial read becomes the claim "no job started" →
     PERMIT → a POST destroys work the caller never saw. ⛔ MEASURED WITH THIS
-    TEST REMOVED FROM THE RUN: deleting the disjunct left the whole file green
-    (51 passed, 0 failed — the file collects 51 without this test), which is
-    exactly how the 100-row read was unpinned; with the test in place,
-    deleting it reds THIS test (51 passed, 1 failed) with `rc == 0` and a
-    recorded POST. The non-integer arms never reach this line and the negative
-    arm pins only `total < 0`.
+    TEST REMOVED FROM THE RUN: deleting the disjunct left the whole file green,
+    which is exactly how the 100-row read was unpinned; with the test in place,
+    deleting it reds THIS test with `rc == 0` and a recorded POST. (No collected
+    count is restated — see the note in `test_a_STILL_QUEUED_job_…`.) The
+    non-integer arms never reach this line and the negative arm pins only
+    `total < 0`.
     """
     fixture.apply("run.json", _run_meta(sha=HEAD_OLD))
     fixture.apply("prs.json", pr(PR_HEAD_MOVED))
