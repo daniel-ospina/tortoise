@@ -344,8 +344,39 @@ jobs:
           cols = table_columns()
           missing = sorted(c for c in ("node_key", "amount_minor") if c not in cols["point"])
           assert not missing, f"record schema stale in container: public.point missing {missing}"
+          # #10663: the PLACEMENT TABLE must resolve inside the image too — and it
+          # is the one runtime contract the image deliberately does NOT carry as a
+          # doc. `cache_projection` reads the record property namespace from
+          # `docs/epics/.../02-identity-and-placement.md`, which this Dockerfile
+          # does not COPY, so before the packaged carrier every `record-reconcile`
+          # / `record-restore` run refused in production with "the placement table
+          # is not on disk at /app/docs/…" wrapped as "the record is unreadable"
+          # (exit 2, divergence UNKNOWN) while CI read green from a checkout that
+          # HAS `docs/`. Asserted as a RUNTIME READ, not a file presence check:
+          # the failure was the read, and a carrier that ships unreadable would
+          # pass a presence check.
+          # ⛔ NO APOSTROPHE MAY APPEAR BELOW: this whole program is one
+          # SINGLE-QUOTED shell argument, so a stray apostrophe ends it early and
+          # turns the step into a bash syntax error that actionlint cannot see
+          # (the repo runs it with `-shellcheck=`). Verified with `bash -n` on
+          # the step body — the check this block was first written without.
+          from tortoise.cache_projection import (
+              PACKAGED_PLACEMENT_TABLE, placement_columns,
+          )
+          assert not Path("/app/docs").exists(), (
+              "this smoke only proves the packaged carrier when the docs tree is "
+              "absent — the image grew a docs/ COPY and the assertion is now "
+              "vacuous")
+          assert PACKAGED_PLACEMENT_TABLE.exists(), (
+              f"no packaged placement table at {PACKAGED_PLACEMENT_TABLE} — the "
+              "image cannot read the record property namespace (#10663)")
+          placement = placement_columns()
+          got = placement.get("point", {}).get("point_kind")
+          assert got == "pointKind", (
+              "placement table did not resolve in-container: got " + repr(got))
           print(f"hosted image pack smoke OK: {len(reg.packs)} >= {bound}")
           print("hosted image record-schema smoke OK: public.point read from the COPYd migrations")
+          print("hosted image placement-table smoke OK: record property namespace resolves without docs/")
           '
       # ── Out-of-band failure alert (#2240) ──────────────────────────────
       # A failure HERE leaves `deploy-api` skipped, i.e. the deploy is blocked

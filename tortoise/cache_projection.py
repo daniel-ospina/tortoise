@@ -238,10 +238,13 @@ __all__ = [
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
+    "PACKAGED_PLACEMENT_TABLE",
+    "PLACEMENT_DOC",
     "RELATION_TABLE",
     "AmbiguousRecordColumn",
     "CacheProjectionError",
     "LifecycleEvent",
+    "PlacementTableUnavailable",
     "ProjectionPlan",
     "ProjectionReport",
     "RecordNode",
@@ -264,6 +267,7 @@ __all__ = [
     "is_episodic_source_node",
     "node_from_row",
     "node_statement",
+    "parse_placement_rows",
     "placement_columns",
     "placement_spellings",
     "project_records",
@@ -945,13 +949,53 @@ class LifecycleEvent:
         return tuple(out)
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
-_PLACEMENT_DOC = (
+#: THE SOURCE OF TRUTH: prose is where this contract is ruled and reviewed, and
+#: :data:`PACKAGED_PLACEMENT_TABLE` is GENERATED from it
+#: (``tools/gen_placement_table.py``), never hand-edited.
+PLACEMENT_DOC = (
     Path(__file__).resolve().parent.parent
     / "docs"
     / "epics"
     / "2026-10-10-7879-postgres-record"
     / "02-identity-and-placement.md"
 )
+
+#: The same table as PACKAGE DATA (#10663) — the runtime read.
+#:
+#: WHY IT EXISTS. The doc above is a `docs/` file, and **the deployed image ships
+#: no `docs/` tree** (`Dockerfile.hosted` Layer 2 COPYs `tortoise/`, `packs/`,
+#: `tests/sample_transcript.txt`, `product/pricing.json`,
+#: `supabase/migrations/`, and nothing else) — so every verb that reads the
+#: placement table refused in production with *"the placement table is not on
+#: disk at /app/docs/…"*, wrapped as *"the record is unreadable"*, exit 2,
+#: divergence UNKNOWN. Measured in the shipped image: `record-reconcile` could
+#: not run at all (#10663).
+#:
+#: A contract a production verb reads is a RUNTIME DEPENDENCY, and a runtime
+#: dependency must live in the package. Shipping `docs/` instead would keep a
+#: prose file load-bearing at runtime and grow the image; embedding the table in
+#: a `.py` literal would make a SECOND declaration, the one that goes stale. So
+#: the doc stays the one declaration and this file is its generated carrier —
+#: the same shape `record_projection.RECORD_MIGRATIONS` uses to keep the record's
+#: schema read from disk rather than restated.
+#:
+#: PARITY IS PINNED, not hoped for: `tests/test_10663_placement_table_packaged.py`
+#: re-derives these rows from `PLACEMENT_DOC` and reds on any difference, so the
+#: two files cannot drift — and `deploy-hosted.yml`'s `packaging-smoke` asserts
+#: the table RESOLVES INSIDE THE IMAGE, which is the check that would have caught
+#: #10663 before it shipped.
+PACKAGED_PLACEMENT_TABLE = Path(__file__).resolve().parent / "_placement_table.json"
+
+#: The carrier's generator version — BUMP it when the emitted SHAPE changes.
+#:
+#: ONE value, shared: ``tools/gen_placement_table.py`` imports it and stamps it
+#: into ``_generated_by``, and :func:`_read_packaged_placement_rows` REFUSES a
+#: carrier that carries any other value (#10663 review, P2). It lives here, in
+#: the package, rather than in ``tools/`` because the READER is the one that has
+#: to enforce it: a provenance stamp written by the generator and read by nobody
+#: is decoration, so a carrier produced by a different generator version — or
+#: from a different doc — was accepted as authoritative.
+PLACEMENT_TABLE_GENERATOR = "gen_placement_table/2"
 
 #: section heading in the placement table → the physical table.
 _PLACEMENT_SECTION_TABLE: dict[str, str] = {
@@ -977,6 +1021,30 @@ _KEY_DDL = Path(__file__).resolve().parent.parent / "supabase" / "migrations" / 
 
 class CacheProjectionError(RuntimeError):
     """Base class for every refusal on this path."""
+
+
+class PlacementTableUnavailable(CacheProjectionError):
+    """The placement table could not be resolved — a fault in the INSTALL.
+
+    Raised on any of the THREE arms that leave the runtime without a property
+    namespace, all of them packaging faults and none a record fault (#10663):
+
+    1. **neither carrier** — no packaged table (:data:`PACKAGED_PLACEMENT_TABLE`)
+       AND no source document (:data:`PLACEMENT_DOC`);
+    2. **a present-but-corrupt carrier** — the packaged file exists and does not
+       parse. The doc is deliberately NOT consulted: papering a corrupt carrier
+       over with a fallback hides the packaging fault instead of reporting it;
+    3. **a present-but-EMPTY carrier** — the packaged file parses to zero rows.
+       An empty carrier is never legitimate, and accepting it would project
+       every record property as unmapped, silently, in production.
+
+    It is a distinct type because the message it replaces — *"the record is
+    unreadable"* — sent an operator to Postgres credentials for a file that was
+    never shipped.
+
+    It subclasses :class:`CacheProjectionError` so every existing handler keeps
+    its behaviour (a structural refusal, never an availability event).
+    """
 
 
 class UnknownRecordLabel(CacheProjectionError):
@@ -1032,8 +1100,13 @@ def _read_key_property() -> dict[str, str]:
 KEY_PROPERTY: dict[str, str] = _read_key_property()
 
 
-def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
-    """`(table, property)` for every row the placement table declares.
+def parse_placement_rows(text: str) -> list[tuple[str, str]]:
+    """`(table, property)` parsed from the placement table's markdown.
+
+    The ONE parser: the runtime reads the same rows from the generated
+    :data:`PACKAGED_PLACEMENT_TABLE`, and `tools/gen_placement_table.py`
+    generates that file through this function — so the artefact cannot describe
+    a table the doc does not, in either direction.
 
     EVERY class is read (`P`, `D`, `U`) — the class decides whether a field is
     *authoritative*, and the schema decides that (#7968's pin), while the NAME
@@ -1041,14 +1114,6 @@ def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
     the `D`/`U` rows too is what lets the suite assert that a DERIVED column is
     never projected: the name must be known to be refused.
     """
-    path = doc or _PLACEMENT_DOC
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise CacheProjectionError(
-            f"the placement table is not on disk at {path} — the cache "
-            f"projection reads the property namespace from it: {e}"
-        ) from e
     rows: list[tuple[str, str]] = []
     section: str | None = None
     for line in text.splitlines():
@@ -1079,9 +1144,163 @@ def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
                 rows.append((_PLACEMENT_SECTION_TABLE[section], part.strip()))
         else:
             rows.append((_PLACEMENT_SECTION_TABLE[section], prop))
-    for table, extra in ADDITIONAL_PRIMARY_COLUMNS.items():
-        rows.extend((table, prop) for prop in extra.values())
     return rows
+
+
+def _placement_rows_from_doc(path: Path) -> list[tuple[str, str]]:
+    """Parse `path` (an explicit doc, or :data:`PLACEMENT_DOC`)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise PlacementTableUnavailable(
+            f"the placement table is not on disk at {path} — the cache "
+            f"projection reads the property namespace from it: {e}"
+        ) from e
+    return parse_placement_rows(text)
+
+
+def _placed_rows_with_extras(
+        rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The parsed rows PLUS :data:`ADDITIONAL_PRIMARY_COLUMNS`.
+
+    Those columns are PRIMARY by decision but are spelled only in the schema, so
+    they are appended here rather than in either carrier — the doc does not
+    name them and the generated table must not invent them.
+    """
+    out = list(rows)
+    for table, extra in ADDITIONAL_PRIMARY_COLUMNS.items():
+        out.extend((table, prop) for prop in extra.values())
+    return out
+
+
+def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
+    """The generated table's rows, or `None` when the package does not carry it.
+
+    `None` is the SOURCE-CHECKOUT-without-regeneration case (a `git clean` that
+    dropped the generated file): the doc is on disk there and is read instead.
+
+    EVERY OTHER state of a PRESENT carrier is a packaging fault and is reported
+    as one, never papered over with a fallback that hides it (#10663 review):
+
+    * **unparseable** — not JSON, or not an object;
+    * **from another generator** — `_generated_by` is not
+      :data:`PLACEMENT_TABLE_GENERATOR`, so its SHAPE is unknown here;
+    * **shape-wrong** — a row that is not exactly two strings. The old
+      ``[(str(a), str(b)) for a, b in rows]`` was the silent one: iterating a
+      DICT row yields its **keys**, so ``{"table": "point", …}`` became
+      ``("table", "property")`` for every row and every record column then
+      projected as unmapped, with no exception anywhere;
+    * **EMPTY** — zero rows. An empty namespace is never legitimate;
+    * **truncated** — fewer rows than its own `_row_count` declares.
+
+    `_source_sha256` is deliberately NOT enforced here: it can only be checked
+    against the doc, and the deployed image ships no `docs/` tree — the whole
+    reason this carrier exists. It is for the parity pin (which HAS the doc) and
+    for a human reading a bad carrier, and saying so is the point: a provenance
+    field that looks enforced but is not is how the next reader concludes the
+    carrier is validated when only its syntax is.
+
+    The two RELATIVE pins in `tests/test_10663_placement_table_packaged.py`
+    (carrier vs the same parser over the doc, generator vs the committed bytes)
+    cannot see any of these: an artefact that agrees with itself keeps them —
+    and `--check` — green. This function is the only thing that reads the
+    SHIPPED artefact for what it is (the #1929/#9231 silent-empty class).
+    """
+    import json
+
+    def _fault(reason: str) -> PlacementTableUnavailable:
+        return PlacementTableUnavailable(
+            f"the packaged placement table at {PACKAGED_PLACEMENT_TABLE} {reason} "
+            f"— regenerate it with `uv run python tools/gen_placement_table.py`. "
+            f"This is a fault in the INSTALL, not in the record."
+        )
+
+    # NOT `Path.exists()`. It swallows ELOOP/EBADF and reports a carrier that IS
+    # there as ABSENT — which does not merely lose the message, it takes the
+    # DOC FALLBACK, so in an image the operator is told the table is not on disk
+    # and told to regenerate a file that is on disk. Only ENOENT is the benign
+    # source-checkout case; every other read error (ELOOP, EACCES, ENOTDIR, …)
+    # is a fault in the INSTALL and is reported as one.
+    try:
+        text = PACKAGED_PLACEMENT_TABLE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise _fault(f"is unreadable ({type(e).__name__}: {e})") from e
+
+    try:
+        payload = json.loads(text)
+    except ValueError as e:
+        raise _fault(f"is unreadable ({type(e).__name__}: {e})") from e
+    if not isinstance(payload, dict):
+        raise _fault(
+            f"is unreadable (its top level is {type(payload).__name__}, not an "
+            f"object)")
+
+    # PROVENANCE FIRST: it decides what the rest of the file is even supposed to
+    # look like, so a shape check running before it would report a version skew
+    # as a malformed row.
+    if payload.get("_generated_by") != PLACEMENT_TABLE_GENERATOR:
+        raise _fault(
+            f"was generated by {payload.get('_generated_by')!r}, not by "
+            f"{PLACEMENT_TABLE_GENERATOR!r} — it is STALE against the reader")
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise _fault(
+            f"is unreadable (`rows` is {type(rows).__name__}, not a list)")
+    parsed: list[tuple[str, str]] = []
+    for index, row in enumerate(rows):
+        if (not isinstance(row, list) or len(row) != 2
+                or not all(isinstance(part, str) and part for part in row)):
+            raise _fault(
+                f"has a MALFORMED row at index {index} ({row!r}) — every row "
+                f"must be a two-element list of non-empty strings")
+        parsed.append((row[0], row[1]))
+
+    if not parsed:
+        raise _fault(
+            "is EMPTY (it parsed to zero rows) — an empty table would project "
+            "every record property as unmapped, silently; if the doc itself "
+            "parsed empty, the doc is the fault")
+
+    declared_count = payload.get("_row_count")
+    if declared_count != len(parsed):
+        raise _fault(
+            f"declares `_row_count` = {declared_count!r} but holds {len(parsed)} "
+            f"rows — it is TRUNCATED or was hand-edited")
+
+    return parsed
+
+
+def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
+    """`(table, property)` for every row the placement table declares.
+
+    THE PACKAGED TABLE IS PREFERRED (#10663). That is the read the deployed
+    image performs, so it is also the read every test performs — a path only the
+    image takes is a path nothing exercises, which is exactly how a docs/ file
+    became a production verb's dependency with CI green.
+
+    `doc=` (a fixture, or a caller reading a specific revision) still parses
+    markdown directly. With neither carrier present the refusal is
+    :class:`PlacementTableUnavailable` and names BOTH locations.
+    """
+    if doc is not None:
+        return _placed_rows_with_extras(_placement_rows_from_doc(doc))
+    packaged = _read_packaged_placement_rows()
+    if packaged is not None:
+        return _placed_rows_with_extras(packaged)
+    try:
+        return _placed_rows_with_extras(_placement_rows_from_doc(PLACEMENT_DOC))
+    except PlacementTableUnavailable as e:
+        raise PlacementTableUnavailable(
+            f"the cache projection's placement table is in NEITHER location — "
+            f"this is a PACKAGING fault, not a record fault: no packaged table "
+            f"at {PACKAGED_PLACEMENT_TABLE} and no source document at "
+            f"{PLACEMENT_DOC} ({e}). A checkout regenerates the carrier with "
+            f"`uv run python tools/gen_placement_table.py`; an image must ship "
+            f"`tortoise/_placement_table.json` as package data (#10663)."
+        ) from e
 
 
 #: NOTE on caching: the parsers below read FILES, and every accessor is memoized.

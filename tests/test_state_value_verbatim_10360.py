@@ -2623,3 +2623,184 @@ def test_an_IDENTIFIER_shaped_token_is_not_read_as_a_quantity():
     assert v2._value_core(
         v2._value_bindings("the value was .5k miles")[0][1]) == (
             "", "500", "mi")
+
+
+def test_the_registry_rows_measured_disclosures_are_pinned():
+    """The four residual clauses named at the row's ⚠️ paragraph are pinned here.
+
+    The `state_value_carve_out` row is the residual ledger an auditor reads
+    ("⛔ WHAT IS STILL NOT ENFORCED — read this before improving a number"). A
+    disclosure in that row with no pin can drift silently: closing the behaviour
+    leaves the row asserting the old state, and re-breaking it leaves the row
+    claiming a shape it no longer has — the "guarantee documented, mechanism
+    absent" defect #10360 exists to remove.
+
+    ⛔ WHAT THIS TEST DOES **NOT** CLAIM: that every clause of that row is now
+    pinned. Residuals (a) and (b2) are unpinnable in a unit test by construction
+    (a value the model never EMITS is upstream of selection; the survival target
+    needs an E2 LLM arm run), and (e)–(o) are pinned where they live or are
+    out of this test's scope. What it pins is the set the row's ⚠️ paragraph
+    names as a battery: (c) the `4:32` non-clock, (d) `per <unit>` rates,
+    (d2) the identifier fail-open, and `20k-mile`/`20000 miles`.
+
+    ⛔ TWO PAIRS IN THAT BATTERY ARE **RE**-PINS, and that is deliberate rather
+    than an oversight: `forty thousand requests per day`/`per week` is already
+    asserted by `test_the_carve_outs_own_ADJACENT_time_units_are_judged`, and
+    `UTC+03:00`/`UTC+3` by
+    `test_a_clock_valid_colon_form_is_excluded_but_a_duration_is_judged`. The
+    rest — `4:32` in both directions, `1:23 seconds`/`83 seconds`, `27:12`,
+    `x4k ms`, `20k-mile` and the two range refusals — had no pin before this
+    test. Repeating the two keeps ONE place that names the whole clause set, so
+    a lane editing a clause finds its verdict beside its siblings.
+
+    ⛔ EVERY VERDICT BELOW WAS MEASURED AT `origin/main` `277a559b1`, this file's
+    own head, and each assert that holds a row clause names it. NINE of them are
+    REFUSALS (`:MM` with a fused unit, its pre-existing `27:12` spelling, an
+    identifier against a quantity, a different identifier, an identifier with a
+    PLAIN unit tail against two different quantities — `x4 ms`/`5000 ms` and
+    `arr4 ms`/`9000 ms` — an identifier whose TAIL spells a known unit
+    (`arr4ms`/`4 seconds`), and the two range comparisons) and the TWELVE others
+    are TOLERANCES — a tolerance is not a bug, but an UNDISCLOSED or
+    UNPINNED tolerance is how a future narrowing ("why does this pair fail
+    open?") quietly reverses a measured decision.
+    """
+    # (c) a colon form that is a valid CLOCK SHAPE without being a clock — the
+    # row's own example, `4:32` read as a marathon time — is NOT caught, and
+    # neither is the same value converted to seconds. The exclusion is by SHAPE,
+    # so `4:32`/`3:59` is outside the judged set on both sides.
+    assert v2._value_slot_divergence("the marathon was 4:32",
+                                     "the marathon was 3:59") == ()
+    assert v2._value_slot_divergence("the marathon was 4:32",
+                                     "the marathon was 272 seconds") == ()
+    # …and the clock-VALID exclusion is the only one that may fire: the row
+    # records that a BARE-shape arm REFUSED this pair (one offset spelled two
+    # ways), which is why the CLOCK-VALID rung is the one that landed.
+    assert v2._value_slot_divergence("the offset was UTC+03:00",
+                                     "the offset was UTC+3") == ()
+
+    # (d) a RATE unit written as `per <unit>` — the carve-out's own fifth
+    # example — is not judged: no unit is ADJACENT to the number, so nothing is
+    # fused and the pair fails open. Pinned in both spellings, and the mechanism
+    # is asserted directly so a future adjacency widen cannot silently "fix" the
+    # row and leave it saying the opposite.
+    assert v2._value_bindings("we served 40000 requests per day") == (
+        ("served", "40000"),)
+    for content, quote in (
+        ("we served 40000 requests per day", "we served 40000 requests per week"),
+        ("we served forty thousand requests per day",
+         "we served forty thousand requests per week"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # the REFUSALS the row discloses, kept adjacent to the tolerances so no row
+    # edit can move one without the other:
+    #   * `1:23 seconds`/`83 seconds` — `_CLOCK_FORM` anchors on `$`, so a colon
+    #     token with a FUSED unit word after it is not a clock: the core is the
+    #     RATIO `1/23` with unit `s` (a conversion is a different identity);
+    #   * `27:12 minutes`/`27:12 seconds` — the pre-existing spelling of the same
+    #     shape, which is what proves the rule was always there.
+    assert v2._value_slot_divergence("the lap took 1:23 seconds",
+                                     "the lap took 83 seconds") == (
+        ("took", "1/23s", "83s"),)
+    assert v2._value_slot_divergence("the lap took 27:12 minutes",
+                                     "the lap took 27:12 seconds") == (
+        ("took", "27/12min", "27/12s"),)
+
+    # (d2) AN IDENTIFIER-SHAPED value beside a unit word fails OPEN (#10943, which
+    # records this clause as `(q2)`), and it fails open by INVENTING A SCALE
+    # rather than by declining to judge: `x4k ms` binds `x4kms` (core `4`, suffix
+    # `kms`), `_composed_identity` folds `k`+`ms` and multiplies to `4000 ms`, and
+    # the pair then AGREES. So the assert below does not hold because an array
+    # index is outside the judged set — measured, both sides bind slots — and the
+    # refusal against `5000 ms` shows the pair IS judged. The TOKEN-level reading
+    # is held separately by
+    # `test_an_IDENTIFIER_shaped_token_is_not_read_as_a_quantity`
+    # (`_NUMERIC_HEAD` keeps `x4k` from being read as 4000 in place); the GLUED
+    # token is not guarded by it, and that gap is the residual.
+    # ⛔ THESE pairs are the mutation-sensitive ones: drop the `x1000`
+    # multiplication — an OVER-BROAD stand-in for the #10943 fix, which scopes the
+    # fold by the token's HEAD, so under that fix `20k-mile` (head `2`) still
+    # composes and stays tolerated — and both the `x4k ms`/`4000 ms` pair below and
+    # its `s4[k ms` splice flip to a refusal `('see', '4kms', '4000ms')`; the
+    # `20k-mile`/`20000 miles` tolerance one block further down flips too, which is
+    # why the mutation is NOT a fix: it withholds a truthful point. The `5000 ms`
+    # refusal below does NOT move under that mutation — it is over-determined (core
+    # `4` vs `5000` and unit `kms` vs `ms` already differ before the fold) — so it
+    # is evidence that the pair is judged, never evidence about the multiplication.
+    assert v2._value_slot_divergence("the see was x4k ms",
+                                     "the see was 4000 ms") == ()
+    assert v2._value_slot_divergence("the see was s4[k ms",
+                                     "the see was 4000 ms") == ()
+    assert v2._value_slot_divergence("the see was x4k ms",
+                                     "the see was 5000 ms") == (
+        ("see", "4kms", "5000ms"),)
+    assert v2._value_slot_divergence("the see was x4k ms",
+                                     "the see was x5k ms") == (
+        ("see", "4kms", "5kms"),)
+    # ⛔ SCOPE, pinned (#10943 review cycle 2): (d2) is the PREFIX-TAIL shape, not
+    # a blanket identifier tolerance. An identifier followed by a PLAIN unit word
+    # is judged normally — `x4 ms` against a different quantity REFUSES, and
+    # `arr4 ms` against `9000 ms` REFUSES — while `x4 ms` against the SAME value
+    # tolerates. A future fix that broadens (d2) into "identifiers are not judged"
+    # has to move these.
+    assert v2._value_slot_divergence("the see was x4 ms",
+                                     "the see was 5000 ms") == (
+        ("see", "4ms", "5000ms"),)
+    assert v2._value_slot_divergence("the field was arr4 ms",
+                                     "the field was 9000 ms") == (
+        ("field", "4ms", "9000ms"),)
+    assert v2._value_slot_divergence("the see was x4 ms",
+                                     "the see was 4 ms") == ()
+
+    # ⛔ AND THE SUFFIX IS READ AS A UNIT WITH NO IDENTIFIER/UNIT DISTINCTION,
+    # which is what the row's THE DISCRIMINATOR paragraph states: the identifier's
+    # own letters reach the identity through the SUFFIX slot, so a tail drives BOTH
+    # directions. A tail that SPELLS a known unit is compared AS that unit —
+    # `arr4ms` IS `4 ms`, so against `4 seconds` it REFUSES — while a tail that
+    # spells NOTHING in `_UNIT_EQUIV` leaves the unit UNJUDGEABLE on equal cores,
+    # the module's own unknown-unit tolerance, so `arr4zz` against `4 hours` fails
+    # open. Both sides BIND in that tolerance (`_value_bindings` yields a token on
+    # each side), which is what makes it a FAIL-OPEN rather than an absent
+    # binding. Only the `k` tail is ADDITIONALLY read as a SCALE — that is (d2)
+    # above and arm (i)'s bare shape — so the row must not be read as saying these
+    # are the only tails that reach the identity: that is how a lane scoping the
+    # #10943 fix to the `k` shape misses this class entirely.
+    # ⛔ MUTATION, measured: narrowing the SUFFIX read by the token's HEAD (drop
+    # the suffix when the token does not start with a numeral — the `_NUMERIC_HEAD`
+    # scope applied one slot too far, an OVER-BROAD stand-in for #10943) reads
+    # `('', '4', None)` and flips the `4 seconds` refusal to a tolerance, so the
+    # two asserts below it red. The `arr4zz` fail-open does NOT move under that
+    # narrowing, which is precisely why a `k`-scoped fix does not close it.
+    assert v2._value_core("arr4ms") == ("", "4", "ms")
+    assert v2._value_core("arr4zz") == ("", "4", "zz")
+    assert v2._value_slot_divergence("the field was arr4ms",
+                                     "the field was 4 seconds") == (
+        ("field", "4ms", "4s"),)
+    assert v2._value_slot_divergence("the field was arr4zz",
+                                     "the field was 4 hours") == ()
+
+    # a HYPHENATED compound is ONE token, so it never reaches the fusion arm and
+    # the composition folds `kmile` into `k`+`mile`: `20k-mile`/`20000 miles` is
+    # the SAME value, one spelling. It did DIVERGE before #10801 (core `20` +
+    # unit `kmile` against core `20000`), which WITHHELD a truthful point.
+    assert v2._value_slot_divergence("the drive was 20k-mile",
+                                     "the drive was 20000 miles") == ()
+    # ⛔ …and it did NOT buy that by reading a RANGE as one quantity: a
+    # hyphenated range carries ONE suffix for several numbers, so the core stays
+    # `20/30` and a different range still refuses. This is the hazard that keeps
+    # a blanket prefix peel out of `_value_core`, and the two refusals below are
+    # the second half of the `20k-mile` clause above.
+    assert v2._value_core("20k-30kmiles") == ("", "20/30", "kmiles")
+    assert v2._value_slot_divergence("the drive was 20k-30k miles",
+                                     "the drive was 20000 miles")
+    assert v2._value_slot_divergence("the drive was 20k-30k miles",
+                                     "the drive was 20k-40k miles")
+
+    # CONTROLS, holding row (i)'s `k`-as-unit identity: no clause above may be
+    # satisfied by a rule that refuses every `Nk` — the `k`-abbreviation bridge
+    # still lets `3k` name `3000 km`/`3000 kg`.
+    for content, quote in (
+        ("the load is 3000 kg", "the load is 3k"),
+        ("the trip is 3000 km", "the trip is 3k"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
