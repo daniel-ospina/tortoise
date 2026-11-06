@@ -3989,3 +3989,33 @@ def test_the_required_sets_raw_discloses_which_repo_it_was_derived_from(
     _, foreign = rfo._read_required_contexts(REPO_ROOT, "someone-else/another-repo")
     assert "repo-scope=MISMATCH" in foreign, foreign
     assert "someone-else/another-repo" in foreign, foreign
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    (
+        ("https://github.com/daniel-ospina/tortoise.git", "daniel-ospina/tortoise"),
+        ("https://github.com/daniel-ospina/tortoise.git/", "daniel-ospina/tortoise"),
+        ("https://github.com/daniel-ospina/tortoise/", "daniel-ospina/tortoise"),
+        ("git@github.com:daniel-ospina/tortoise.git", "daniel-ospina/tortoise"),
+        ("/absolute/local/path", ""),
+    ),
+)
+def test_the_origin_slug_is_normalised_however_the_remote_url_is_spelled(
+    tmp_path: Path, remote: str, expected: str
+) -> None:
+    """★ `repo-scope=` must not cry wolf on a legal remote spelling.
+
+    A remote may be spelled `…/tortoise.git/` — `.git` and a trailing slash, in that order.
+    Normalising `.git` FIRST made the suffix strip a no-op and left `tortoise.git` as the
+    slug, so an exactly-matching checkout printed `repo-scope=MISMATCH(… from
+    daniel-ospina/tortoise.git's origin/main, judging daniel-ospina/tortoise …)`. The whole
+    value of the token is that a reader can trust it, and a false MISMATCH teaches them to
+    ignore it. Swapping the two calls back reds this.
+    """
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "remote", "add", "origin", remote], check=True, env=env
+    )
+    assert rfo._origin_slug(tmp_path) == expected

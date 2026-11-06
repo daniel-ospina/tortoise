@@ -2325,7 +2325,13 @@ def _origin_slug(workdir: Path) -> str:
         return ""
     if proc.returncode != 0:
         return ""
-    url = proc.stdout.strip().removesuffix(".git").rstrip("/")
+    # ⛔ ORDER MATTERS: strip the trailing slash BEFORE the `.git` suffix. A remote
+    # spelled `https://github.com/owner/name.git/` (a trailing slash is legal) ends in
+    # `/`, so `removesuffix(".git")` would be a no-op and the slug would keep `.git` —
+    # printing `repo-scope=MISMATCH(… from owner/name.git's origin/main, judging
+    # owner/name …)` on a checkout that is exact. A disclosure that cries wolf is a
+    # disclosure readers learn to skip.
+    url = proc.stdout.strip().rstrip("/").removesuffix(".git")
     # `git@github.com:owner/name` (scp-like) and `https://host/owner/name`.
     slug = url.rsplit(":", 1)[-1] if "://" not in url else "/".join(url.split("/")[-2:])
     return slug if slug.count("/") == 1 else ""
