@@ -640,7 +640,12 @@ def test_env_uri_assignment_uses_live_uri_helper(fname):
 
 
 def _journal_calls(code: str) -> int:
-    """How many CALLS to `_journal_append(` the masked block contains.
+    """How many `_journal_append(` OCCURRENCES the given text contains.
+
+    ⛔ It is COMMENT-BLIND: it does not mask, so `# _journal_append(name)` counts
+    as 1 (pinned by `test_journal_calls_helper_excludes_non_calls`). The old
+    summary line said "the masked block", which was never true at this head —
+    the census no longer passes this helper any text at all.
 
     ⛔ NO LONGER part of the census's PRESENCE decision (#11217 review round 9,
     ISSUE 4). It is a REGEX and `own` (an AST scope/`Call` scan) subsumes it — a
