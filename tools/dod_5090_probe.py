@@ -87,6 +87,24 @@ it is quoted with the repo's one identifier rule
 read-only verb makes "this module stores nothing" the engine's rule instead of
 this file's memory.
 
+### …and WHICH `entity_type` values stop answering (`#11088`)
+
+A row's `unindexed` count is not the surface consequence. The consequence is a
+**set of `entity_type` values**, and the label→type relation is not one-to-one:
+`security.entity_label` sends `document`+`source` to `:Source` and
+`point`+`operator` to `:Point`. So every row carries
+`affected_entity_types` (derived from `VALID_ENTITY_TYPES` through that one
+translation) and `removal_changes_query_results`, and the census carries a
+top-level `surface_consequence` naming the MCP tools and REST route that can
+hand `entity_type` to the vector leg — **derived from
+`tool_registry.TOOL_REGISTRY`, not listed here**, so the consequence tracks the
+surface instead of a copy of it.
+
+⛔ `surface_consequence["requested_not_performed"]` is `True` because this
+instrument **reports**; the removal is an MCP/SDK surface change and needs the
+owner's approval BEFORE it is implemented (`AGENTS.md`). There is no flag on
+this tool that removes anything.
+
 Usage::
 
     uv run python tools/dod_5090_probe.py                     # the four rows
@@ -1918,6 +1936,177 @@ def _cypher_label(label: str) -> str:
     return _quote_identifier(str(label))
 
 
+# ── `entity_type` ← label, and the callers that reach it (#11088) ───────────
+
+#: The ONE SDK method the vector leg is reachable through. Named, not derived:
+#: it is the function `degradation_chain` is called FROM (sdk.py's
+#: `tortoise_fts_query`), and a rename there must red
+#: `tests/test_dod_5090_probe.py`'s caller pin rather than silently make this
+#: census name a method that no longer exists.
+VECTOR_LEG_SDK_METHOD = "tortoise_fts_query"
+
+#: The module-level runner the leg itself lives in — the second half of the
+#: path, so a reader can walk it without searching.
+VECTOR_LEG_RUNNER = "tortoise.search_engine.run_vector_query"
+
+
+def affected_entity_types(label: str) -> list[str]:
+    """The ``entity_type`` values a vector-leg query for ``label`` answers.
+
+    ⛔ The mapping is NOT one-to-one and that is exactly why this is not
+    bookkeeping (#11088): ``security.entity_label`` sends **two** entity types
+    to `:Source` (``document``, ``source``) and **two** to `:Point`
+    (``point``, ``operator``). A census that names only labels therefore names
+    the wrong population for the surface question it exists to answer — a
+    reader would remove `:Object`'s vectors believing one query changes when it
+    is one, or believe `:Source`'s vectors serve one caller when they serve two.
+
+    Derived from :data:`tortoise.security.VALID_ENTITY_TYPES` through the
+    product's ONE translation (:func:`tortoise.security.entity_label`) — never
+    a second table here, so a type added to the vocabulary appears without an
+    edit to this file.
+    """
+    from tortoise.security import VALID_ENTITY_TYPES, entity_label
+
+    return sorted(
+        et for et in VALID_ENTITY_TYPES
+        if entity_label(et) == label
+    )
+
+
+def vector_leg_surface() -> list[dict]:
+    """Every MCP tool / REST route that can hand `entity_type` to the vector leg.
+
+    ⛔ DERIVED from :data:`tortoise.tool_registry.TOOL_REGISTRY`, the ONE
+    declaration of the MCP/REST surface — never a list written here. A
+    hardcoded list would be a second declaration of the surface, and the whole
+    point of this half of #11088 is that the consequence is stated for *the
+    tools that exist now*: a tool added tomorrow (or removed today) is named by
+    this function without an edit, and one retired here cannot linger as a
+    claim about a surface that no longer exists.
+
+    The binding is `sdk_method`, not the tool NAME: `tortoise_search` and
+    `tortoise_query` are two MCP tools over one SDK method, and matching on
+    names would miss the second.
+
+    `takes_entity_type` is read from the SDK method's SIGNATURE — a fact, not a
+    prose sniff on a description — so a tool that stopped forwarding the
+    argument cannot keep reading as affected.
+
+    ⛔ A `sdk_method` filter ALONE IS INCOMPLETE, and incompleteness here is a
+    false claim rather than an omission: `tortoise_query`'s registry binding is
+    `paginated_query` (its structural arm), yet its MCP handler forwards a
+    `text=` argument to `tortoise_fts_query(entity_type=…)`. A census built on
+    the binding would therefore name ONE tool where the surface has two. So the
+    handler body is AST-scanned for a `tortoise_fts_query` call that passes
+    `entity_type` — the same technique this file already uses for embedding
+    writers — and the two sources are UNIONED, each entry carrying which one
+    named it.
+    """
+    try:
+        from tortoise.tool_registry import TOOL_REGISTRY
+    except Exception as e:  # pragma: no cover - import failure is the caller's
+        return [{"tools": f"UNMEASURED({type(e).__name__}: {e})"}]
+
+    takes: object = "UNMEASURED(the SDK method could not be imported)"
+    try:
+        import inspect
+
+        from tortoise.sdk import TortoiseSDK
+
+        params = inspect.signature(
+            getattr(TortoiseSDK, VECTOR_LEG_SDK_METHOD)).parameters
+        takes = "entity_type" in params
+    except Exception as e:
+        takes = f"UNMEASURED({type(e).__name__}: {e})"
+
+    by_binding = {t.name for t in TOOL_REGISTRY
+                  if getattr(t, "sdk_method", None) == VECTOR_LEG_SDK_METHOD}
+    by_handler, handler_error = _handlers_forwarding_entity_type()
+    registered = {t.name for t in TOOL_REGISTRY}
+    spec = {t.name: getattr(t, "rest_spec", None) for t in TOOL_REGISTRY}
+
+    out: list[dict] = []
+    for name in sorted(by_binding | by_handler):
+        if name in by_binding and name in by_handler:
+            how = "registry sdk_method AND handler forwards entity_type"
+        elif name in by_binding:
+            how = "registry sdk_method"
+        else:
+            how = "handler forwards entity_type into the hybrid engine"
+        route = spec.get(name)
+        if route is not None:
+            rest = f"{route.method} {route.path}"
+        elif name in registered:
+            # ⛔ A registry tool with NO `rest_spec` is MCP-only — that is a
+            # fact about the surface, not a failed measurement, and conflating
+            # the two would report `tortoise_query` as unregistered.
+            rest = "MCP only (no REST route)"
+        else:
+            rest = "UNMEASURED(handler not in TOOL_REGISTRY — not on the MCP surface)"
+        out.append({
+            "tool": name,
+            "rest": rest,
+            "named_by": how,
+            "takes_entity_type": takes,
+        })
+    if handler_error:
+        out.append({"tools": handler_error})
+    return out
+
+
+def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
+    """MCP handlers that pass `entity_type` into `tortoise_fts_query`.
+
+    Both call shapes are accepted: `graph.tortoise_fts_query(…, entity_type=…)`
+    (the attribute IS the callee) and `_safe(graph.tortoise_fts_query, …,
+    entity_type=…)` (the attribute is the first ARGUMENT — the shape every
+    `_safe`-wrapped handler in this repo uses). A scan that only matched the
+    first would miss `tortoise_search`, the tool the claim is primarily about.
+
+    Returns `(names, error)`; `error` is the reason when the scan could not be
+    taken, so the caller reports it instead of reading an empty set as "no tool
+    is affected".
+    """
+    path = REPO_ROOT / "tortoise" / "mcp_server.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return set(), f"UNMEASURED(handler scan failed: {type(e).__name__}: {e})"
+
+    names: set[str] = set()
+
+    def _is_target(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == VECTOR_LEG_SDK_METHOD
+        return isinstance(node, ast.Name) and node.id == VECTOR_LEG_SDK_METHOD
+
+    def _calls_with_entity_type(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        # Only THIS function's own body — a nested `def` is its own handler and
+        # attributing its call to the outer scope would name the wrong tool.
+        stack: list[ast.AST] = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                continue
+            if isinstance(node, ast.Call):
+                passes_entity_type = any(k.arg == "entity_type"
+                                         for k in node.keywords)
+                targets = _is_target(node.func) or any(
+                    _is_target(a) for a in node.args)
+                if passes_entity_type and targets:
+                    return True
+            stack.extend(ast.iter_child_nodes(node))
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and _calls_with_entity_type(node):
+            names.add(node.name)
+    return names, None
+
+
 def vector_census(graph, graph_name: str, at: str | None = None,
                   graph_names: list[str] | None = None,
                   uri_graph_name: str | None = None) -> dict:
@@ -2115,13 +2304,42 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             unindexed = stored
         if isinstance(stored, int) and stored == 0:
             payload = {"derived_payload_B": 0, "how": "no stored vectors on this label"}
-        elif dim is None:
-            payload = {"derived_payload_B": "UNMEASURED(no VECTOR index on "
-                                            "`embedding` — nothing to derive from)",
-                       "how": "needs a covering index dimension"}
         elif width is None:
+            # ⛔ The refusal, BEFORE the index is consulted: without a measured
+            # width there is no byte figure, indexed or not.
             payload = {"derived_payload_B": "UNMEASURED(stored width not probeable)",
-                       "how": "needs a width probe agreeing with the index"}
+                       "how": "needs a width probe"}
+        elif not covering:
+            # ⛔ #11088: THE UNINDEXED LABELS ARE THE POPULATION THIS CENSUS IS
+            # FOR, and they had no byte figure at all. The payload used to be
+            # derived from the covering index's `dimension`, so every label the
+            # issue exists to quantify reported
+            # `UNMEASURED(no VECTOR index on embedding — nothing to derive
+            # from)` — while the stored WIDTH had already been probed one branch
+            # above (the `#4280` cross-check needs it). The number was in hand
+            # and not printed, which is exactly the `stored`-only / missing-figure
+            # class this instrument exists to refuse. The width is the
+            # measurement; with no index there is nothing to cross-check it
+            # against, and `how` says so rather than implying it was verified.
+            #
+            # ⛔ The predicate is `not covering`, NOT `dim is None`: a label can
+            # carry a VECTOR index on `embedding` whose `dimension` cell is
+            # unreadable, and keying on `dim` put "NO covering index" in `how`
+            # beside `indexed=True` and a populated `vector_indexes_on_label` —
+            # the row contradicting its own field (review, P2).
+            payload = {"derived_payload_B": stored * width * 4,
+                       "how": f"stored {stored} x probed width {width} dims x 4 B "
+                              "(vecf32); NO covering index, so the width is "
+                              "measured but not cross-checked"}
+        elif dim is None:
+            # A covering index EXISTS and its `dimension` is unreadable. The
+            # stored width is still measured, but coverage is not provable —
+            # the same posture `unindexed` takes for this row — so the byte
+            # figure refuses too rather than reading as verified.
+            payload = {"derived_payload_B": "UNMEASURED(a covering index exists "
+                                            "but its dimension is unreadable)",
+                       "how": "needs the index dimension to cross-check the "
+                              "measured width"}
         elif width != dim:
             payload = {"derived_payload_B": "UNMEASURED(stored width "
                                             f"{width} != index dimension {dim})",
@@ -2130,6 +2348,22 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             payload = {"derived_payload_B": stored * dim * 4,
                        "how": f"stored {stored} x {dim} dims x 4 B (vecf32), "
                               f"probed width {width} agrees"}
+        # ── #11088: WHICH entity_type values stop answering ──────────────
+        # `unindexed` above is a COUNT. The surface question is a SET: removing
+        # this label's vectors does not change "a query", it changes the query
+        # for every `entity_type` the product translates onto this label — and
+        # returns zero rows for it, because the leg falls back to a full scan
+        # (`CALL db.idx.vector.queryNodes` on an unindexed label raises, and
+        # `run_vector_query` degrades to brute force). A label with no
+        # `entity_type` at all is the worst class: stored, unindexed AND
+        # unqueryable — so it is reported as affected-for-nobody, not omitted.
+        ets = affected_entity_types(label)
+        if isinstance(unindexed, int) and isinstance(stored, int):
+            changes = bool(unindexed > 0 and ets)
+        else:
+            # Neither the count nor the coverage is measured, so neither is
+            # the consequence: `False` here would be a claim built on a hole.
+            changes = "UNMEASURED(removal consequence needs a measured count)"
         labels[label] = {
             "stored": stored,
             # An unreadable catalogue row is NOT "this label has no index": it
@@ -2142,12 +2376,50 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             "vector_indexes_on_label": found or "none",
             "index": idx or "none",
             "payload": payload,
+            "affected_entity_types": ets,
+            "removal_changes_query_results": changes,
         }
     return {"graph": graph_name, "at": at, "labels": labels,
             "catalogue": "CALL db.indexes()", "population": population_source,
             "command": CENSUS_COMMAND,
             "uri_path_graph": uri_graph_name,
-            "unreadable_catalogue_rows": unreadable}
+            "unreadable_catalogue_rows": unreadable,
+            "surface_consequence": surface_consequence(labels)}
+
+
+def surface_consequence(labels: dict) -> dict:
+    """The MCP/SDK surface a removal would change, from the census rows.
+
+    ⛔ This is REQUESTED, not performed (#11088 / `AGENTS.md`'s MCP-SDK surface
+    rule). The dict therefore carries `requested_not_performed: True` as a
+    FIELD rather than as a sentence in a document, so a consumer reading the
+    machine form cannot mistake a census for an authorisation.
+
+    Only labels whose removal would change a query are listed. A label that is
+    stored, unindexed and served by NO `entity_type` is reported in its row
+    (empty `affected_entity_types`) and is deliberately absent here: nothing
+    queries it, so nothing changes.
+    """
+    affected = []
+    for label, row in sorted(labels.items()):
+        if row.get("removal_changes_query_results") is not True:
+            continue
+        affected.append({
+            "label": label,
+            "entity_types": row["affected_entity_types"],
+            "unindexed": row["unindexed"],
+            "stored": row["stored"],
+            "derived_payload_B": row["payload"]["derived_payload_B"],
+        })
+    return {
+        "requested_not_performed": True,
+        "sdk_method": VECTOR_LEG_SDK_METHOD,
+        "runner": VECTOR_LEG_RUNNER,
+        "surface": vector_leg_surface(),
+        "entity_types_whose_query_results_change": sorted(
+            {et for a in affected for et in a["entity_types"]}),
+        "labels": affected,
+    }
 
 
 def _connect(uri: str):
@@ -2372,6 +2644,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {label:10s} stored={d['stored']!s:12s} "
                   f"indexed={d['indexed']!s:6s} unindexed={d['unindexed']!s:12s} "
                   f"payload={d['payload']['derived_payload_B']}")
+            # #11088: the count is not the consequence — the SET of
+            # `entity_type` values is. Printed on the row it belongs to, so a
+            # reader cannot lift the number without reading what removing it
+            # would change.
+            print(f"  {'':10s} entity_type(s) served by this label: "
+                  f"{d.get('affected_entity_types') or 'none (no query path)'}"
+                  f" — removal changes query results: "
+                  f"{d.get('removal_changes_query_results')}")
+        sc = c.get("surface_consequence")
+        if sc:
+            print("  surface consequence — removal is REQUESTED, not "
+                  "performed; it needs the owner's approval (MCP/SDK surface):")
+            print(f"    affected entity_type values: "
+                  f"{sc.get('entity_types_whose_query_results_change') or 'none'}")
+            print(f"    path: {' / '.join(t['tool'] + ' (' + t['rest'] + ')' for t in sc.get('surface') or [] if 'tool' in t)}"
+                  f" → {sc.get('sdk_method')}(entity_type=…) → {sc.get('runner')}")
         if "error" in c:
             print(f"  {c['error']}")
         if c.get("population"):
