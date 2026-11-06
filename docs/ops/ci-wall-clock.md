@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-wall-clock, ci-headroom-guards
 aboutObjects: tortoise, .github/workflows/python-ci.yml, .github/workflows/ci.yml, .github/workflows/ai-review-gate.yml, .github/workflows/drift-guard.yml
 created: 2026-10-27
-updated: 2026-11-05
+updated: 2026-11-06
 ---
 
 # CI wall-clock bounds on the merge path
@@ -422,7 +422,7 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 
 | cap (fast/slow/carve) | per-PR peak (p50 / max) | matrix-band end delta (p50 / max) |
 | --- | --- | --- |
-| 2 / 2 / 2 ⛔ | 8 / 9 | +31.8 m / +38.5 m |
+| 2 / 2 / 2 — ⛔ rejected by invariant 1 (`ceil(9/2) = 5` waves) | 8 / 9 | +31.8 m / +38.5 m |
 | **3 / 3 / 3 (shipped)** | **9 / 12** | **+17.9 m / +23.2 m** |
 | 4 / 4 / 3 | 10 / 13 | +10.1 m / +14.4 m |
 | 5 / 3 / 3 | 10 / 12 | +8.1 m / +9.6 m |
@@ -475,21 +475,21 @@ outside it. That is how a run was measured at **18 simultaneous jobs against a 1
 what was unbounded, and what made one PR own the pool); it is not a total concurrency budget, and
 reading 9 as one would understate the hold by nearly half (it is 9 of 17).
 
-⛔ **What the cap does NOT exempt: a `batch-fold` run.** The three caps are bare integer literals
-(`python-ci.yml:817`, `:2049`, `:3188`) with no condition, so they apply to a fold's validation run
-exactly as to any other PR. That matters because a fold is the one run this repo deliberately
-saturates capacity for: `docs/ops/batch-integration.md` §3 (mechanism 3) gives the fold's own matrix
-rows a dedicated runner class, and the emitter that applies it —
-`tools/ci_selection.py::fast_matrix_include` — states the scope in its own words — *"A fold gets
-priority on the eight legs that carry the wall"* (the nine fast shards less the `canary_producer`
-row). **The class buys those legs a class, not parallel slots:** on a fold run with dedicated
-capacity for all eight, at most three run at once, and the matrix-band delta above (`+17.9 m p50 /
-+23.2 m max`) applies to the fold's own band as well. So a
-later reader of mechanism 3 must not assume the dedicated class buys parallel legs. Nothing here
-exempts a fold, and exempting one is NOT the route taken: `max-parallel` is a JOB-level `strategy`
-key rather than per-row data like `runs-on`, so an exemption would have to be an expression on the
-key itself — a shape this document does not verify GitHub accepts, and one that would also have to
-be pinned so a silent re-tune cannot reinstate the other behaviour.
+⛔ **What the cap does NOT exempt: a `batch-fold` run.** The cap is a bare literal on all three
+matrices, so it applies to a fold's validation run exactly as to any other PR. That matters because
+a fold is the one run this repo deliberately gives extra capacity to:
+`docs/ops/batch-integration.md` mechanism 3 ("CI priority for the fold") gives the fold's matrix
+rows their own runner class, and `tools/ci_selection.py::fast_matrix_include` states that
+exemption's scope in its own words — "A fold gets priority on the eight legs that carry the wall",
+the fast matrix's 9 shards minus the `canary_producer` row, which stays on the hosted label for the
+streak. Those eight are legs this cap bounds, so while the class seam is engaged (it is OFF by
+default: with `CI_FOLD_RUNNER_LABELS` unset every row resolves to its own runner) a fold with
+dedicated capacity for all 8 still runs them **3 at a time**, and its own validation run carries the
+matrix-band delta above (+17.9 m p50 / +23.2 m max). This is recorded as a KNOWN COST of #6744, not
+as a decision that a fold run should be capped — the cap's justification ("no single PR may hold the
+pool") is a fairness bound between concurrent PRs, and a fold is not competing with them that way.
+Exempting one would need an expression-valued `max-parallel`; this repo has no evidence GitHub
+accepts one, so measure that before relying on it.
 
 ⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
 these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a

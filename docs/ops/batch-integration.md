@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: batch-integration, ci-wall-clock, ci-headroom-guards
 aboutObjects: tortoise, "#10399", "#10897", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
 created: 2026-10-31
-updated: 2026-11-05
+updated: 2026-11-06
 ---
 
 # Batch integration — the gate is the batch, not the PR
@@ -1208,7 +1208,7 @@ work rather than reordering it, and they are the larger half of the answer:
 |---|---|---|
 | **1. Entry gate** | a superseded constituent cannot ENTER the queue (`-label=superseded-by-fold` in `queue_conditions`) | `.mergify.yml`, PR #10902 |
 | **2. Close at fold-open** | `tools/batch_open.py` proves the constituent's head is contained in the fold's tree, then labels, comments and closes it | `tools/batch_open.py`, PR #10902 |
-| **3. CI priority for the fold** | the fold's own matrix rows get their own runner class, and the fold is ordered first in the queue. **The class does not buy parallel legs: `strategy.max-parallel: 3` (#6744) applies to a fold run too** | this change; the cap's cost on a fold is booked in `docs/ops/ci-wall-clock.md` §7 |
+| **3. CI priority for the fold** | the fold's own matrix rows get their own runner class, and the fold is ordered first in the queue — ⛔ bounded by the matrix fan-out cap: 3 legs of a matrix run at once, on a fold run too (`docs/ops/ci-wall-clock.md` §7 "What the cap does NOT exempt") | this change |
 
 Entry, not merge, is where mechanism 1 must bite: a PR blocked at entry never costs a CI cycle, while
 one blocked at merge has already spent the queue's validation run — and under the queue's own
