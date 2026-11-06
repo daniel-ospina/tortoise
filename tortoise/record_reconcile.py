@@ -99,8 +99,8 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair — bar ``status``, which the record's own derivation makes
-  COMPARABLE wherever the record carries the carrier, and whose form the record
-  cannot corroborate has a DESTRUCTIVE CLEAR, see (a) above); the
+  COMPARABLE wherever the record DERIVES one, and a ``status`` the record derives
+  NOWHERE is the form that has a DESTRUCTIVE CLEAR, see (a) above); the
   projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record's
@@ -551,7 +551,7 @@ def reconcile_record_and_cache(
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
     a ``graph_only`` name has one repair per population: none (schema-refused —
-    bar ``status``: where the record carries a carrier the name is COMPARED, and
+    bar ``status``: where the record DERIVES one the name is COMPARED, and
     its uncorroborated form — a value the record cannot place — is cleared by an
     explicit caller clear that is LABEL-DEPENDENT: ``update_entity(…,
     status=None)``, ``SET n += {status: null}``, a REMOVAL, on an ``:Object``;
