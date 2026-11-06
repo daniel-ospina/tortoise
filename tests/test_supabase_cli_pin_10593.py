@@ -143,20 +143,18 @@ def _setup_cli_step_node(text: str) -> yaml.MappingNode:
     assert found, "no `supabase/setup-cli` step found — the migration door changed shape"
     assert len(found) == 1, f"expected exactly one setup-cli step, found {len(found)}"
     return found[0]
-
-
 def _setup_cli_block(workflow_text: str) -> list[str]:
     """The setup-cli step's own source lines, sliced from the PARSED node's marks.
 
     Three scoping rules, each from a demonstrated defect:
-    * The block comes from `yaml.compose`'s `start_mark`/`end_mark`, not from a line pattern. A text
-      scan is a SECOND reader of "which step is this" with its own dialect, and it disagreed:
+    * The block comes from the composed node's `start_mark`/`end_mark`, not from a line pattern. A
+      text scan is a SECOND reader of "which step is this" with its own dialect, and it disagreed:
       measured in review, `uses : supabase/setup-cli@v1` (a space before the colon — legal YAML, and
       what PyYAML and GitHub both read as the same step) did not match the pattern, so a legitimate
-      workflow was REFUSED with a message claiming the migration door had MOVED. A flow-mapping
-      step (`- {uses: …, with: {version: …}}`) had the same failure. The node cannot disagree with
-      `yaml.safe_load` about which step this is, so key spelling is not a surface at all — and the
-      pin still has to be a literal line, which the flow mapping then fails for the RIGHT reason.
+      workflow was REFUSED with a message claiming the migration door had MOVED. The node cannot
+      disagree with `yaml.safe_load` about which step this is, so key spelling is not a surface
+      here — and `_setup_cli_step_node` is the ONE locator, shared with the construct walk and
+      with `_setup_cli_step`'s predicate, so there is no second answer to "which step" to drift.
     * `with:` may legally precede `uses:`, so nothing here assumes an order.
     * The pin check must be scoped to THIS step. A file-wide search is satisfied by a decoy literal
       — review demonstrated a green path through an `actions/setup-node` step's
@@ -185,12 +183,21 @@ def _setup_cli_block(workflow_text: str) -> list[str]:
     return block
 
 
+#: A `version:` KEY, as the author may legally spell it: `version:`, `version :`, `'version':`,
+#: `"version":`. All four are the same plain scalar key to PyYAML AND to GitHub, so none of them is
+#: a divergence and refusing one would be a false block (found in review: the reader matched only the
+#: canonical spelling and blamed a merge key for the rest).
+_LITERAL_VERSION_LINE = re.compile(
+    r"""^\s*['"]?version['"]?\s*:\s*['"]?([^'"\s#]+)['"]?\s*(?:#.*)?$"""
+)
+
+
 def _literal_version_lines(workflow_text: str) -> list[str]:
     """Every literal `version:` value inside the setup-cli step, in source order."""
     return [
         match.group(1)
         for line in _setup_cli_block(workflow_text)
-        if (match := re.match(r"^\s*version:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$", line))
+        if (match := _LITERAL_VERSION_LINE.match(line))
     ]
 
 
@@ -273,7 +280,10 @@ def _construct_refusals(workflow_text: str) -> list[str]:
       another node, not from the step's own literal pin (which the literals arm below also refuses).
       ⚠️ This one CANNOT be found in the composed tree: PyYAML 6 has no `AliasNode` — it substitutes
       the anchored node object in place, so an alias and its anchor are indistinguishable afterwards.
-      It is therefore found by scanning TOKENS (`AliasToken`) inside the step's line span.
+      It is therefore found in the TOKEN stream, and ONLY where it SUPPLIES the pin — a `KeyToken`
+      for `with:`/`version:` immediately followed by an `AliasToken`. An alias anywhere else in the
+      step (`env: *shared`) is read identically by both parsers, so refusing it would be a false
+      block, not a guard (measured in review, P2).
 
     A QUOTED `"<<"` is deliberately NOT refused: it is an ordinary string key in both parsers, so it
     is not a divergence and refusing it would be a false block.
@@ -295,11 +305,33 @@ def _construct_refusals(workflow_text: str) -> list[str]:
                 walk(item)
 
     walk(step_node)
-    for token in yaml.scan(workflow_text):
-        if isinstance(token, yaml.tokens.AliasToken) and first_line <= token.start_mark.line <= last_line:
-            found.append(
-                f"an alias (`*{token.value}`) at line {token.start_mark.line + 1}"
-            )
+    # ⛔ An alias is a divergence only where it SUPPLIES the pin. The old scan refused ANY alias
+    # inside the step's line span, so `env: *shared` — an alias with nothing to do with `version`,
+    # next to an untouched literal pin — was refused with a message asserting the action "would see
+    # no `version` input", which is false for that shape (found in review, P2). Both parsers read
+    # `env: *…` exactly the same way, so it is not a divergence and refusing it is a false block.
+    # The hazard is precisely an alias as the WHOLE value of `with:` (or of `version:`), which is
+    # visible in the token stream as `ScalarToken(with|version)` -> `ValueToken` -> `AliasToken`.
+    # (`KeyToken` carries no `.value` in PyYAML — the key's text arrives as the following
+    # `ScalarToken` — so the key is matched on that scalar, not on the key marker.)
+    tokens = list(yaml.scan(workflow_text))
+    for index in range(len(tokens) - 2):
+        key_token, separator, value_token = tokens[index], tokens[index + 1], tokens[index + 2]
+        if not (
+            isinstance(key_token, yaml.tokens.ScalarToken)
+            and key_token.value in ("with", "version")
+        ):
+            continue
+        if not isinstance(separator, yaml.tokens.ValueToken):
+            continue
+        if not isinstance(value_token, yaml.tokens.AliasToken):
+            continue
+        if not (first_line <= key_token.start_mark.line <= last_line):
+            continue
+        found.append(
+            f"an alias (`*{value_token.value}`) as the value of `{key_token.value}:` "
+            f"at line {value_token.start_mark.line + 1}"
+        )
     return found
 
 
@@ -355,10 +387,11 @@ def _requested_version(workflow_text: str) -> str:
         f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step. Two shapes land "
         "here and this message must not send a reader hunting for the wrong one: a YAML CONSTRUCT "
         "this reader resolves differently from CI (merge key, alias — `_construct_refusals` refuses "
-        "those first), or a step written on ONE LINE as a flow mapping "
+        "those first), or a step written as a FLOW MAPPING "
         "(`- {uses: …, with: {version: …}}`), which has no `version:` line of its own for any reader "
         "to check. In both cases the value asserted here is not provably the value installed; write "
-        "`version:` on its own line inside the step."
+        "`version:` on its own line inside the step (a quoted key, or a space before the colon, is "
+        "fine — both are the same plain key to YAML and to GitHub)."
     )
     assert len(literals) == 1, (
         f"the setup-cli step carries {len(literals)} literal `version:` lines ({', '.join(literals)}) "
@@ -613,32 +646,30 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     failure is the signal to update these mutations.
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
+    # The live pin, so a MANUAL PATCH BUMP does not turn every mutation below vacuous at once. The
+    # workflow says in as many words that the pin is taken up by hand (`supabase-deploy.yml`: an
+    # `x.y.z` in a `with:` input is invisible to Dependabot), so a hardcoded `2.122.1` here would RED
+    # this required suite on a bump that is correct and expected, with a message about a mutation
+    # that did not apply (found in review, P2). The sibling mutation tests already derive it.
+    pin = _requested_version(workflow)
+    literal_pin = re.compile(r"(?m)^(\s*)version:\s*" + re.escape(pin) + r"\s*$")
+    canonical_with = re.compile(r"(?m)^(\s*)with:\n\s*version:\s*" + re.escape(pin) + r"\s*$")
 
     # (a) the step pins via a flow mapping (no `version:` LINE inside it) while a decoy literal sits
     #     in an unrelated step. A file-wide search is satisfied by the decoy; the step-scoped check is
     #     not. This is the exact shape review used to turn the old search green.
-    flow = re.sub(
-        r"(?m)^(\s*)with:\n\s*version:\s*2\.122\.1\s*$",
-        r"\1with: {version: 2.122.1}",
-        workflow,
-        count=1,
-    )
-    assert "with: {version: 2.122.1}" in flow, "mutation did not apply — this test would be vacuous"
-    assert not re.search(r"(?m)^\s*version:\s*2\.122\.1\s*$", flow), (
+    flow = canonical_with.sub(r"\1with: {version: " + pin + "}", workflow, count=1)
+    assert f"with: {{version: {pin}}}" in flow, "mutation did not apply — this test would be vacuous"
+    assert not re.search(r"(?m)^\s*version:\s*" + re.escape(pin) + r"\s*$", flow), (
         "a literal pin line survived the mutation — the arm would not test the scope"
     )
-    flow += "\n      - uses: actions/setup-node@v4\n        with:\n          version: 2.122.1\n"
+    flow += f"\n      - uses: actions/setup-node@v4\n        with:\n          version: {pin}\n"
     with pytest.raises(AssertionError, match="not a literal"):
         _requested_version(flow)
 
     # (b) two literal pins in the step must be refused, not silently resolved to one.
-    duplicated = re.sub(
-        r"(?m)^(\s*)version:\s*2\.122\.1\s*$",
-        r"\1version: latest\n\1version: 2.122.1",
-        workflow,
-        count=1,
-    )
-    assert _literal_version_lines(duplicated) == ["latest", "2.122.1"], (
+    duplicated = literal_pin.sub(lambda mm: f"{mm.group(1)}version: latest\n{mm.group(1)}version: {pin}", workflow, count=1)
+    assert _literal_version_lines(duplicated) == ["latest", pin], (
         "mutation did not apply to the step's own pins — this test would be vacuous. The check is "
         "step-scoped on purpose: a FILE-wide search is satisfied by a decoy literal in an unrelated "
         "step — the `actions/setup-node` pin mutated in directly above, which is exactly the shape "
@@ -650,10 +681,9 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         _requested_version(duplicated)
 
     # (c) a duplicated `with:` key must be refused: one flow mapping pinning 3.0.0 and one literal
-    #     pinning 2.122.1 leaves PyYAML taking the last, while GitHub's tie-break is unmeasured.
-    twice = re.sub(
-        r"(?m)^(\s*)with:\n\s*version:\s*2\.122\.1\s*$",
-        r"\1with: {version: 3.0.0}\n\1with:\n\1  version: 2.122.1",
+    #     pinning the live pin leaves PyYAML taking the last, while GitHub's tie-break is unmeasured.
+    twice = canonical_with.sub(
+        lambda mm: f"{mm.group(1)}with: {{version: 3.0.0}}\n{mm.group(1)}with:\n{mm.group(1)}  version: {pin}",
         workflow,
         count=1,
     )
@@ -663,10 +693,15 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
 
     # (d) the refusal must be STRUCTURAL: YAML lets the same key be spelled `"with"`, `'with'`, or
     #     `with :`, and a text scan misses every one of them while the second pin hides behind it.
+    canonical_with_text = f"        with:\n          version: {pin}"
+    assert canonical_with_text in workflow, (
+        "the setup-cli step's `with:` no longer has the canonical shape these mutations drive — "
+        "update them rather than silently proving nothing"
+    )
     for respelled in ('"with": {version: 3.0.0}', "'with': {version: 3.0.0}", "with : {version: 3.0.0}"):
         smuggled = workflow.replace(
-            "        with:\n          version: 2.122.1",
-            f"        {respelled}\n        with:\n          version: 2.122.1",
+            canonical_with_text,
+            f"        {respelled}\n{canonical_with_text}",
             1,
         )
         assert respelled in smuggled, f"mutation did not apply for {respelled!r} — vacuous"
@@ -675,11 +710,11 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
 
     # (e) GitHub normalizes an input name to `INPUT_<NAME>` (upper-cased, spaces → underscores), so
     #     two keys differing only in case are ONE input to the action and TWO keys to PyYAML. Measured
-    #     by review: this shape resolved to `2.122.1`, reported no duplicate key, and left
+    #     by review: this shape resolved to the pin, reported no duplicate key, and left
     #     `_violations` empty — a major-3 pin, green behind a capital letter.
     case_variant = workflow.replace(
-        "        with:\n          version: 2.122.1",
-        "        with:\n          version: 2.122.1\n          Version: 3.0.0",
+        canonical_with_text,
+        f"{canonical_with_text}\n          Version: 3.0.0",
         1,
     )
     assert "Version: 3.0.0" in case_variant, "mutation did not apply — this test would be vacuous"
@@ -731,6 +766,61 @@ def test_a_legal_spelling_of_the_step_is_read_not_refused() -> None:
     )
     assert _requested_version(reordered) == pin, "`with:` before `uses:` was not read as the step"
     assert not _violations(reordered, config), "the reordered step produced a false violation"
+
+    # (c) the PIN's key, in every spelling both parsers read as the same plain key. The reader
+    #     matched only the canonical `version:` and blamed "a construct (merge key, alias)" for the
+    #     rest — a false block with a diagnosis the text contradicted (found in review, P2).
+    canonical = f"        with:\n          version: {pin}"
+    assert canonical in workflow, "the step's `with:` lost its canonical shape — update this arm"
+    for respelled in (f"version : {pin}", f'"version": {pin}', f"'version': {pin}"):
+        spelled = workflow.replace(canonical, f"        with:\n          {respelled}", 1)
+        assert respelled in spelled, f"mutation did not apply for {respelled!r} — vacuous"
+        assert _requested_version(spelled) == pin, (
+            f"a legal `{respelled.split(':')[0]}` spelling was not read as the pin"
+        )
+        assert not _violations(spelled, config), "a legal spelling produced a false violation"
+
+
+def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
+    """Only an alias that SUPPLIES the pin is a divergence; any other alias is read by both parsers.
+
+    ⛔ Measured in review (P2): the alias arm scanned for ANY `AliasToken` inside the step's line
+    span, so `env: *shared` — an alias with nothing to do with `version`, beside an untouched
+    literal pin — was REFUSED, with a message asserting the action "would see no `version` input".
+    That claim is false for that shape: `env: *…` is read identically by PyYAML and by GitHub, so
+    the refusal is a false block, not a guard. The arm now fires only where the alias IS the value
+    of `with:`/`version:`, which is the shape that really hides the asserted pin from CI.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    pin = _requested_version(workflow)
+
+    # (a) an `env:` supplied by an alias, pin untouched → ACCEPTED.
+    env_block = (
+        "        env:\n"
+        "          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}\n"
+    )
+    assert env_block in workflow, (
+        "the setup-cli step's `env:` no longer has the shape this mutation drives — update it "
+    )
+    env_aliased = workflow.replace(env_block, "        env: *shared\n", 1)
+    env_aliased = "env: &shared\n  SUPABASE_ACCESS_TOKEN: token\n" + env_aliased
+    assert "        env: *shared" in env_aliased, "mutation (a) did not apply — vacuous"
+    assert _construct_refusals(env_aliased) == [], _construct_refusals(env_aliased)
+    assert _requested_version(env_aliased) == pin, "an unrelated alias refused the guard"
+
+    # (b) the pin ITSELF supplied by an alias → still REFUSED (this is the hazard).
+    canonical = f"        with:\n          version: {pin}"
+    aliased_pin = workflow.replace(
+        "      - uses: supabase/setup-cli@v1\n",
+        "      - uses: actions/checkout@v9\n"
+        "        with: &pinned\n"
+        "          version: 9.9.9\n"
+        "      - uses: supabase/setup-cli@v1\n",
+        1,
+    ).replace(canonical, "        with: *pinned", 1)
+    assert "        with: *pinned" in aliased_pin, "mutation (b) did not apply — vacuous"
+    with pytest.raises(AssertionError, match="alias"):
+        _requested_version(aliased_pin)
 
 
 def test_a_case_variant_second_step_cannot_pin_a_different_major() -> None:
