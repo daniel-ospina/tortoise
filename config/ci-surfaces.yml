@@ -1950,6 +1950,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_pack_hierarchy_11001.py  # #11001: the pack's DECLARED `ontology.hierarchies` is READ and replayed as Object→Object edges, so an INVENTED edge (kind nesting, name similarity) fails here instead of shipping a structure nobody asserted. Selected by a `tortoise/pack_hierarchy.py` change — `select()` resolves that path to `core` (the fallback), and the diff that shipped the module (PR #11213) did NOT register this file, so `tools/ci_selection.py --integrity` redded on main from that merge until this line and the suite ran in NO shard (a false pass of the test surface, which is why this is registered rather than left to the surface audit). No graph fixture, no network.
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   - test_8447_c3_ingest_door.py
   - test_9881_rename_reaches_the_record.py
