@@ -88,14 +88,38 @@ def _setup_cli_step(workflow_text: str) -> dict:
 
 
 def _requested_version(workflow_text: str) -> str:
+    """The CLI version the workflow pins, and proof that CI resolves the same value.
+
+    ⛔ The reader has its own bypass surface, separate from the comparison (found in review): PyYAML
+    implements the YAML MERGE KEY (`<<: {version: 2.122.1}`), which GitHub Actions does NOT — so a
+    step could carry no `version:` line at all, PyYAML would synthesize one, and the
+    `version is None` arm below would never fire while the action fell back to `latest` (3.x). The
+    same class covers a duplicate `version:` key, where PyYAML takes the last one. So the resolved
+    value must also be present as a LITERAL `version:` line, and merge keys are refused outright.
+    """
     step = _setup_cli_step(workflow_text)
-    version = (step.get("with") or {}).get("version")
+    with_ = step.get("with") or {}
+    assert "<<" not in with_, (
+        "the setup-cli step's `with:` uses a YAML merge key (`<<`). GitHub Actions does not implement "
+        "merge keys, so the `version` PyYAML reads here is not the version CI resolves — the action "
+        "would see no `version` input and fall back to its own default (`latest`), which is exactly "
+        "the float this pin exists to remove"
+    )
+    version = with_.get("version")
     assert version is not None, (
         "the setup-cli step no longer names a version — the action then falls back to its own "
         "default (the root lockfile's version, else `latest`), which is the float this pin exists "
         "to remove"
     )
-    return str(version).strip()
+    resolved = str(version).strip()
+    assert re.search(
+        rf"(?m)^\s*version:\s*['\"]?{re.escape(resolved)}['\"]?\s*(?:#.*)?$", workflow_text
+    ), (
+        f"the pin `{resolved}` was not read from a literal `version:` line — PyYAML resolved it "
+        "from a construct (merge key, duplicate key, alias) that GitHub reads differently, so the "
+        "value asserted here is not necessarily the CLI CI installs"
+    )
+    return resolved
 
 
 def _config_declares_inbucket(config_text: str) -> bool:
@@ -112,16 +136,26 @@ def _config_declares_inbucket(config_text: str) -> bool:
 
 
 def _violations(workflow_text: str, config_text: str) -> list[str]:
-    r"""Every way the workflow demands a CLI this repo cannot safely run in production.
+    r"""Every way the workflow PINS a CLI this repo cannot safely run in production.
 
-    ⛔ This is deliberately a MAJOR ceiling rather than a scan of the workflow's arguments. An
-    earlier draft of this arm decided v3-readiness by looking for `--yes` in the mutating commands,
-    and review defeated it five ways — `--yes` named in a trailing comment, `--yes=false`, a global
-    flag before the subcommand (`supabase --debug db push ...`, which the CLI accepts and which its
-    own error text recommends), and a `--yes` belonging to a different command or a commented-out
-    line after a `\` continuation. Every one of those is a false PASS on the exact defect this arm
-    exists to catch. An integer comparison has no such surface: the pin either moves to a new major
-    or it does not.
+    DECLARED THREAT SURFACE — in scope, each covered by an arm below:
+      (1) a floating pin (`latest`, `v2`, `^2.122.1`, …) — any shape that is not an exact x.y.z;
+      (2) a pin this reader resolves differently from CI (merge key, duplicate key, alias), so the
+          value asserted is not the value installed;
+      (3) a major-3 pin — the config-load break while `[inbucket]` is declared, and the hosted-
+          mutation consent gate once it is not.
+
+    DECLARED OUT OF SCOPE (not silently assumed covered): a `run:` step that installs or invokes a
+    v3 CLI by itself (`npx supabase@3.0.0 …`, `npm i -g supabase@…`). That is a code change, and it
+    is reviewed as code; the mutating-command argument checks are open PR #11104's own suite. A
+    reader of this file must not take its title as a claim about that surface.
+
+    ⛔ The ceiling is deliberately a MAJOR comparison rather than a scan of the workflow's arguments.
+    An earlier draft decided v3-readiness by looking for `--yes` in the mutating commands, and review
+    defeated it five ways — `--yes` named in a trailing comment, `--yes=false`, a `--yes` belonging
+    to another command, one commented out after a `\` continuation, and the global-flag form
+    `supabase --debug db push` (valid in the CLI, and its own error text recommends `--debug`). An
+    integer comparison has no such surface: the major either moves or it does not.
 
     The ceiling is lifted by the PR that makes the workflow v3-ready, not by a symptom moving.
     """
@@ -213,6 +247,29 @@ def test_a_major_the_committed_config_cannot_load_is_refused() -> None:
     problems = _violations(mutated, config)
     assert problems, "pinning major 3 against an [inbucket] config passed the check"
     assert "DbConfigLoadError" in problems[0], problems[0]
+
+
+def test_a_pin_this_reader_cannot_see_literally_is_refused() -> None:
+    """A pin must be a LITERAL `version:` line, not a YAML construct PyYAML resolves for it.
+
+    PyYAML implements the merge key (`<<:`); GitHub Actions does not. Measured by review: a step
+    whose `with:` is `<<: {version: 2.122.1}` carries no `version:` line anywhere in the file, yet
+    PyYAML synthesizes `{'version': '2.122.1'}` — so the `version is None` arm never fired and the
+    action would fall back to `latest` (3.x), a fail-open identical to #10593.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    merged = re.sub(
+        r"(?m)^(\s*)version:\s*\S+\s*$",
+        r"\1<<: {version: 2.122.1}",
+        workflow,
+        count=1,
+    )
+    assert "<<: {version:" in merged, "mutation did not apply — this test would be vacuous"
+    assert not re.search(r"(?m)^\s*version:\s*2\.122\.1\s*$", merged), (
+        "the mutation left a literal `version:` line behind — the arm would not test the reader"
+    )
+    with pytest.raises(AssertionError, match="merge key"):
+        _requested_version(merged)
 
 
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
