@@ -482,18 +482,16 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
                 after_stem = line[m.end("stem_a"):]
                 # …but a clause that CONTINUES (`Closes and #200 is deliberately not Closes.`) also
                 # begins with a space, and there the space is the conjunction's, not a blanked span's.
-                # Only `and`/`or` are admitted as that continuation: any other word after the gap is
-                # the appositive or the rest of the sentence, which cannot tell us what was blanked.
-                # ⛔ …and a CONJUNCTION is admitted as that continuation only when it actually
-                # introduces the next reference-naming clause (`… is deliberately not Closes and
-                # #200 is deliberately not Closes.`). Admitting the bare word was still a silent
-                # drop one word over: a blanked object followed by `and <prose>`
-                #     `Part of #11000 — deliberately not closing `\u0060#3300\u0060` and this one is separate.`
+                # ⛔ A CONJUNCTION IS ADMITTED ONLY WHEN IT INTRODUCES THE NEXT REFERENCE
+                # (`_CONJ_REF_RE`: a `#N` follows it). Admitting the bare word `and`/`or` was a
+                # SILENT DROP one word over — a blanked object followed by `and <prose>`
+                #     Part of #11000 — deliberately not closing `#3300` and this one is separate.
                 # read CLEAN, rc 0, with `#11000` claimed and resolved by nothing (measured at
-                # `6d8e4ed8b`) — the same class as the appositive tails pinned above, and the
-                # direction this module ranks worst. A `#N` right after the conjunction is the one
-                # mechanical signal that the conjunction joins CLAUSES ABOUT REFERENCES rather
-                # than continuing prose about the blanked object.
+                # `6d8e4ed8b`, the residual the round before declared). A `#N` after the conjunction
+                # is the one mechanical signal that it joins CLAUSES ABOUT REFERENCES rather than
+                # continuing prose about the blanked object. Any OTHER word after the gap — a
+                # conjunction that names no ref included — is the appositive or the rest of the
+                # sentence, which cannot tell us what was blanked, so the claim stays flagged.
                 head = re.match(r"[ \t]+([A-Za-z]+)?", after_stem)
                 if head:
                     is_conj = (head.group(1) or "").lower() in ("and", "or")
