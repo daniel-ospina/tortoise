@@ -493,10 +493,12 @@ def test_a_carrier_row_naming_no_declared_table_is_refused(tmp_path,
 def test_the_explicit_doc_arm_raises_only_the_PUBLIC_type(tmp_path):
     """The private absence type must never escape a public accessor.
 
-    Measured pre-fix: `_read_placement_rows(doc=<absent>)` re-raised
-    `_PlacementDocAbsent` — a class that is not exported, so no out-of-module
-    handler could name what it caught, while the no-arg form of the SAME
-    function raised the public type for the identical condition.
+    Measured while this branch was being built, BEFORE the wrapping below was
+    added: `_read_placement_rows(doc=<absent>)` re-raised `_PlacementDocAbsent`
+    — a class that is not exported, so no out-of-module handler could name what
+    it caught, while the no-arg form of the SAME function raised the public type
+    for the identical condition. (Not a `main` measurement: `_PlacementDocAbsent`
+    does not exist there, so the doc arm raised the public type already.)
     """
     absent = tmp_path / "not-there.md"
 
