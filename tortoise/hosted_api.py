@@ -35591,15 +35591,29 @@ def _registry_probe_sdk() -> TortoiseSDK:
     test_create_team_then_session_key_mint_registry` (shard (f)).
 
     So: build, re-read, and CACHE ONLY IF BOTH READS AGREE. That is strictly
-    stronger than either single-read shape — a drift landing anywhere inside
-    (before `_make_sdk`'s own read, or after it during `_get_proj()`) makes the
-    two reads disagree, and a handle whose identity is ambiguous is CLOSED and
-    never installed, then rebuilt. A reconfiguration therefore costs one extra
+    stronger than either single-read shape — a SINGLE, non-reverting drift landing
+    anywhere inside (before `_make_sdk`'s own read, or after it during `_get_proj()`)
+    makes the two reads disagree, and a handle whose identity is ambiguous is CLOSED
+    and never installed, then rebuilt. A reconfiguration therefore costs one extra
     build, and the CACHED path can never serve a wrong graph: the pair is
     published as one immutable tuple (`_REGISTRY_PROBE_CACHE`), so a reader
     that is not building sees either the old pairing or the new one, never a
     mixture — the two-store window this docstring's claim used to outrun.
     Production never rebinds the pin, so the retry path is inert there.
+
+    ⛔ THE PAIR DOES NOT SEE A REVERTING DRIFT, AND THAT IS A DECLARED RESIDUAL.
+    `A → B → A` inside ONE build leaves both reads at `A` while `_make_sdk`'s own
+    read — the one the handle was actually built against — saw `B`, so the two
+    agree and a graph-B handle is CACHED under identity `A`. Nothing else here
+    covers it: `_REGISTRY_PROBE_EPOCH` tracks RESETS, not pin drift, and
+    `_build_registry_probe_handle` does not report what `_make_sdk` read. The
+    structural close is to capture the URI in the SAME frame as `_make_sdk`'s own
+    read and return it, so all three reads are of the value the construction used;
+    that is not worth a signature change for a window no production caller can
+    enter (the pin never rebinds there, and the suite's `monkeypatch` reverts are
+    paired with `tests/conftest.py`'s `_reset_registry_probe_sdk()`, whose epoch
+    bump makes the builder discard). It is live only for a caller that writes
+    `TORTOISE_DB_URI` directly and reverts it inside one build without a reset.
 
     ⛔ AND THE IDENTITY HOLDING STILL IS NOT ENOUGH — the cache can also be
     INVALIDATED while the handle is being built (#10962 review finding 1).

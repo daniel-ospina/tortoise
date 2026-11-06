@@ -1888,8 +1888,8 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     ⛔ NEITHER DRIFT'S ILLUSTRATIVE SPAN IS RESTATED HERE (round 13's P3s, and round
     14's P3: an earlier revision described them with numbers that were stale at this
     very head — and in one case had never been right at ANY head, which is why an
-    anecdote about them is not evidence worth keeping). This PR grew that document by
-    48 lines, so a coordinate that is only true on `origin/main` hands the next reader
+    anecdote about them is not evidence worth keeping). This PR grew that document, so
+    a coordinate that is only true on `origin/main` hands the next reader
     a checkable fact that is false here. The lesson needs no coordinate: a citation can
     name another section entirely, and the docstring quoted above warns that whoever
     mis-locates the derivation "discards the one section that supports this floor" — so
@@ -1963,7 +1963,7 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
         "the cited span must open on the sentence the docstring quotes")
 
     # 3. THIS test's own docstrings carry the third citation of the same span, and
-    #    it is exactly what drifted when this PR grew `ci-wall-clock.md` by 48 lines:
+    #    it is exactly what drifted when this PR grew `ci-wall-clock.md`:
     #    the other two citations were re-cut to the span of that head and this one was
     #    left behind
     #    (on a span that had become other prose entirely). "Pinned MECHANICALLY

@@ -188,7 +188,7 @@ was: the save this row pays on a key change is the SHARED archive, not its own d
 comes from the `test-d14-hosted-api` incident (#10182) and is not re-measured here; 15.9 m is a
 different runner on a different day, so it does not by itself falsify it — but it does show a
 3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, `test`'s
-53 m — which clears its 90 m by 30 m either way — and the `test-carve-out` /
+53 m — which still clears its 90 m by 37 m here and by 26 m at the `~20 m` re-derivation — and the `test-carve-out` /
 `test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below) are
 optimistic by ~7 m against the censored 15.9 m and by ~11 m against the completed ~20 m — so the
 re-derivation owed below should use the ~20 m figure (at which `test-slow` is ~11 m PAST its cap,
@@ -238,7 +238,7 @@ cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at
 30). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
-because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so
+because it installs `install-cpu-torch` and `.[test,embeddings]` (both in the `test-concurrency-falkor` job) and so
 writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
 move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
 
