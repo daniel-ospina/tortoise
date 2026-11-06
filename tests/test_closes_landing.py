@@ -3612,3 +3612,40 @@ def test_a_NEW_CONTAINER_can_interrupt_a_paragraph_and_an_EMPTY_content_opens_no
         assert cl.parse_closing_refs(body) == [100], body
     # …and a bullet CAN interrupt (§5.2), so `- ` opening an item leaves no paragraph open either way.
     assert cl.parse_closing_refs("- Closes #100\n") == [100]
+
+def test_the_two_nested_container_SHAPES_that_remain_are_DECLARED():
+    """Round 39 review — the two families the round-38/39 fixes do NOT close, pinned as residuals.
+
+    Both are nested-container shapes where a marker line's container is one level away from what the
+    line's own prefix shows, and both need the INNER quote's content column rather than the outer
+    container's. They are pinned rather than left silent because each is a REGRESSION against
+    `origin/main` in one direction, and a declared residual that a test asserts is the difference
+    between a decision and drift:
+
+    * `> q` + `2. x` + `2.     Closes #100` — `origin/main` and this head both CREDIT a keyword the
+      renderer puts in `<pre><code>` (measured: 140 vs 60 such bodies in the family; 0 are new here).
+      Declared as PARITY, which is the honest status — it is not a regression, and fixing it means
+      deciding a new item's paragraph state, a change of its own.
+    * `> - q` + (indent >= 4) + a wide-gap marker — the renderer keeps the line as prose inside the
+      item while this head blanks it. `origin/main` credits all 120 such bodies, so this IS a
+      regression in the WARN direction (a lost close, never a false pass — the module ranks that
+      second-worst, and it is the direction that costs a warning rather than a wrong `lands`).
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    parity = "> q\n2. x\n2.     Closes #100\n"
+    assert token_type(parity) == "code_block", parity
+    assert cl.parse_closing_refs(parity) == [100], "parity with origin/main, declared"
+    lost = "> - q\n    -     Closes #100\n"
+    assert token_type(lost) == "inline", lost
+    assert cl.parse_closing_refs(lost) == [], "regression vs origin/main, declared, warn direction"
+    # …and the shapes the SAME mechanism must keep right, so the declaration cannot widen:
+    assert cl.parse_closing_refs("- > q\n  > 2.     Closes #100\n") == [100]
+    assert cl.parse_closing_refs("- > q\n  2.     Closes #100\n") == []
+    assert cl.parse_closing_refs("> q\n2. x\n   2.     Closes #100\n") == [100]

@@ -1400,15 +1400,27 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # a lazy INDENT continuation may drop its blockquote marker (it is indentation that continues
         # the paragraph), while the MARKER half must keep the depth term (a marker at another depth
         # opens its own list).
+        # ⛔ ONE COORDINATE SPACE, NOT TWO (round 39 review, P2 — a regression against
+        # `origin/main` in the warn direction). The container's `rest_col` is expressed in the space
+        # of the line that OPENED the item, so comparing it against this line's `rest_indent` (which
+        # is measured after this line's own quote prefix) mixes the two spaces and blanks real
+        # closes: `- > q` + `  > 2.     Closes #100` renders as PROSE inside the item, and the item
+        # is still open — 0 >= 2 was simply the wrong pair of numbers. `_fence_line_column` is the
+        # existing conversion between them (it consumes at most the container's own markers), which
+        # is why this is a third reader of one definition rather than a fourth formula.
+        if container is not None:
+            _line_col = _fence_line_column(line, container.depth)[2]
+        else:
+            _line_col = rest_indent
         _indent_base = container.rest_col if container is not None else 0
         _lazy_indent = (prev_prose
-                        and rest_indent > _indent_base + _MAX_FENCE_INDENT
+                        and _line_col > _indent_base + _MAX_FENCE_INDENT
                         and container is prev_container)
         _lazy_marker = (prev_prose
                         and _ordered_marker_at_least_two(rest)
                         and _quote_depth(prefix) == prev_quote_depth
                         and container is prev_container
-                        and (container is None or rest_indent >= container.rest_col))
+                        and (container is None or _line_col >= container.rest_col))
         ordered_continuation = _lazy_indent or _lazy_marker
         own_code = own_gap > 4 and not ordered_continuation
         indent_code = rest_indent > _MAX_FENCE_INDENT and (
@@ -1470,8 +1482,20 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         _own_depth = _quote_depth(prefix)
         if pushed:
             _own_depth += _quote_depth(_split_prefix(_inner)[0])
+        # ⛔ AND THE CARRY IS ONLY FOR PARAGRAPH-CONTINUATION TEXT (round 39 review, P1). An
+        # unconditional `max()` lost 2,040 closes `origin/main` credits: §4.6's lazy continuation
+        # applies to TEXT only, so a shallower line that STARTS ITS OWN BLOCK closes the quote and
+        # carrying the depth onto it invents a container that is gone —
+        #     `> q` + `2. x` + `   2.     Closes #100`  line 2 opens an <ol start="2">, so line 3's
+        #                                               paragraph belongs to the NEW item (PROSE)
+        # — while `> Notes` + `lazy` + `2.     Closes #100` must still read CODE, because `lazy`
+        # starts nothing and the quote is still open. `not pushed` and `_BLOCK_START_RE` are the two
+        # spellings of "this line started something of its own"; both are required, because a line
+        # can start a heading or a break without `_content_column` seeing an item.
         prev_quote_depth = (max(_own_depth, prev_quote_depth)
-                            if (prev_prose and not pushed) else _own_depth)
+                            if (prev_prose and not pushed
+                                and not _BLOCK_START_RE.match(rest))
+                            else _own_depth)
         # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
         # text inside the `<li>`), not in the item it sat in before.
         prev_container = (list_items[-1] if pushed else container)
