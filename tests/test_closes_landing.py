@@ -1834,17 +1834,28 @@ def test_a_line_that_IS_prose_but_ENDS_the_paragraph_does_not_open_one():
     assert cl.parse_closing_refs(item_body) == [100], item_body
     assert cl.strip_code("- item\n   2.     Closes #100\n", strict=True) != "", "unindented control"
     assert cl.parse_closing_refs("- item\n   2.     Closes #100\n", None, strict=True) == [100]
-    # …and the four families that END a paragraph, each of which was credited before this fix.
-    # `<div>` is an HTML block: its content is raw HTML, so a `Closes #N` there is a quotation too.
+    # …and the three families that END a paragraph AND put the marker line in CODE, each of which
+    # was credited before this fix.
+    # ⛔ `<div>` IS NOT ONE OF THEM (round 43 review, P2 — this loop used to assert `[]` for it).
+    # An HTML block ends the paragraph, but it also SWALLOWS the following lines as its own raw text:
+    # no list opens inside it, so the marker line is content, not code — the same rule the module
+    # states in `_leaves_no_paragraph` ("WHAT AN HTML BLOCK DOES NOT DO IS HIDE ITS OWN TEXT … only
+    # FENCED content is blanked") and the same answer `origin/main` gives. Blanking it lost a real
+    # close (90 bodies per opener family over the 32-opener grid) and left the family incoherent
+    # with itself: a gap of 4 inside the block was credited, a gap of 5 blanked.
     for body, kind, why in (("# H\n2.     Closes #100\n", "code_block", "an ATX heading"),
                             ("***\n2.     Closes #100\n", "code_block", "a thematic break"),
                             ("Notes\n---\n2.     Closes #100\n", "code_block", "a setext underline"),
                             ("    Notes\n2.     Closes #100\n", "code_block",
-                             "an indented code block (§4.4)"),
-                            ("<div>\n2.     Closes #100\n", "html_block", "an HTML block")):
+                             "an indented code block (§4.4)")):
         assert block_kind(body) == kind, (why, body)
         assert cl.parse_closing_refs(body) == [], (why, body)
         assert cl.parse_closing_refs(body, None, strict=True) == [], (why, body)
+    # The HTML-block half, asserted where it now belongs: the block still ENDS the paragraph (so the
+    # line is not a lazy continuation), and its content is raw text, so the keyword is read.
+    assert block_kind("<div>\n2.     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n") == [100]
+    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n", None, strict=True) == [100]
     # The sweep: every paragraph-ENDER x marker x gap x indent, both arms, against the renderer.
     sweep = 0
     for ctx in ("# H\n", "***\n", "Notes\n---\n", "    Notes\n", "<div>\n"):
@@ -1861,15 +1872,12 @@ def test_a_line_that_IS_prose_but_ENDS_the_paragraph_does_not_open_one():
                         assert not (kind == "code_block" and kept(body, strict)), \
                             ("fail-open", ctx, marker, gap, indent, strict)
     assert sweep == 1260, sweep
-    # ⚠️ DECLARED RESIDUAL, measured here so it is not rediscovered as news: a marker line with a
-    # gap of 4 or LESS inside an HTML block is KEPT (`own_code` only ever claimed the gap > 4
-    # family, at every head this series touched), so `<div>` + `- Closes #100` is credited while the
-    # renderer puts it in `html_block`. Pre-existing, outside this fix's rule, and left alone rather
-    # than widened here: blanking the CONTENT of every HTML block is its own change with its own
-    # blast radius. The two directions are separate tests (`…the paragraph does not open one`
-    # above closes the gap > 4 half).
+    # ⛔ THE DECLARED RESIDUAL ABOVE IS CLOSED (round 43 review, P2), not re-declared: the gap <= 4
+    # and gap > 4 halves of an HTML block now answer the SAME way, which is what the renderer says and
+    # what `_leaves_no_paragraph` states. Both are pinned.
     assert block_kind("<div>\n- Closes #100\n") == "html_block"
-    assert cl.parse_closing_refs("<div>\n- Closes #100\n") == [100], "residual, not a regression"
+    assert cl.parse_closing_refs("<div>\n- Closes #100\n") == [100]
+    assert cl.parse_closing_refs("<div>\n-     Closes #100\n") == [100]
 
 
 def test_the_paragraph_ender_is_NOT_over_applied_in_either_direction():
@@ -1926,13 +1934,15 @@ def test_the_paragraph_ender_is_NOT_over_applied_in_either_direction():
                        "…so a 4-column BULLET line under one is a continuation, not code")):
         assert token_type(body) == "inline", (why, body)
         assert cl.parse_closing_refs(body) == [100], (why, body)
-    # (C) The controls, which must NOT move. A genuine HTML block still ends the paragraph (raw HTML
-    # is not markdown); a wide-gap bullet that opens a real item is still code; and the `- item` +
-    # `  2.` lazy continuation is still prose.
-    # (the TEXT lands in the `html_block` token, not a `code_block` — raw HTML is passed through,
-    # which is exactly why GitHub does not act on a keyword inside it)
+    # (C) The controls. A genuine HTML block still ENDS the paragraph (raw HTML is not markdown, so
+    # the marker line is not a lazy continuation); a wide-gap bullet that opens a real item is still
+    # code; and the `- item` + `  2.` lazy continuation is still prose.
+    # ⛔ AND ITS CONTENT IS READ (round 43 review, P2 — this control asserted `[]`). An HTML block is
+    # a LEAF block: no list opens inside it, so the line is the block's own raw text, which the
+    # renderer keeps in `html_block` (not a `code_block`) and `origin/main` credits. The old
+    # expectation reversed the module's own rule and lost a real close.
     assert token_type("<div>\n2.     Closes #100\n") == "html_block"
-    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n") == []
+    assert cl.parse_closing_refs("<div>\n2.     Closes #100\n") == [100]
     assert cl.parse_closing_refs("Notes\n-     Closes #100\n") == []
     assert cl.parse_closing_refs("Notes\n\n-     Closes #100\n") == []
     assert token_type("- item\n  2.     Closes #100\n") == "inline"
@@ -2016,9 +2026,13 @@ def test_the_HTML_block_rule_is_the_SPEC_s_two_rules_not_one():
         # does not otherwise honour.
         body = tag + "\n2.     Closes #100\n"
         assert cl.parse_closing_refs(body) == [100], (tag, body)
+    # ⛔ TYPES 1-6 ANSWER THE SAME WAY AS TYPE 7 NOW (round 43 review, P2 — this loop asserted `[]`).
+    # The tag list decides where the block BOUNDARY is, never whether the block's own text is read:
+    # the text lands in an `html_block` token, not a `code_block`, for every one of these openers, and
+    # `origin/main` credits all of them. Blanking them was a lost close, and an incoherent one.
     for tag in ("<div>", "<blockquote>", "<p>", "<!-- c -->", "<?php"):
         body = tag + "\n2.     Closes #100\n"
-        assert cl.parse_closing_refs(body) == [], (tag, body)
+        assert cl.parse_closing_refs(body) == [100], (tag, body)
     # What an HTML block does NOT do is hide its own text: only FENCED content is blanked, and that
     # is parity with every head before this one — stated here so the ender's justification cannot be
     # read as a claim about GitHub's behaviour for raw HTML.
