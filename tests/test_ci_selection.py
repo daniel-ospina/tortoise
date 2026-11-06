@@ -6206,9 +6206,12 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
 
     `config/ci-surfaces.yml` carries `merge=union`, which keeps BOTH sides' lines for
-    a conflicting hunk — so a same-surface duplicate is the exact shape union emits
-    when two lanes register the same test. It used to be a ⚠️ note; a note on a
-    union-merged registry lets the duplicate in silently.
+    a conflicting hunk — so a same-surface duplicate can be exactly what a merge emits
+    when two lanes register the same test, and a note on a union-merged registry lets it
+    in silently. ⛔ Do not expect a byte-identical append to collapse, though: MEASURED
+    on real merges, the same row appended at two DIFFERENT positions survives as two
+    rows with `merge=union` and without it alike; only the same change made in the same
+    place collapses, by git's ordinary identical-change resolution (#3153).
     """
     import tools.ci_selection as cs
 
