@@ -150,7 +150,9 @@ _SOCKET_FLAG = "unixsocket"
 # `post-merge-validation.yml::validate` 60, `perf-lane` 45, `test-d14-hosted-api`
 # 40, `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
 # it was UNCAPPED at 360 and invisible to an earlier, narrower population),
-# `test-record-postgres`/`legal-e2e`/`blog-write-e2e` 20, and the rest 15.
+# `test-record-postgres` 50 (raised from 20 when its post-step cache save was
+# bounded inside the job — the #11063 class), `legal-e2e`/`blog-write-e2e` 20,
+# and the rest 15.
 #
 # A server YOUNGER than the widest outer cancel bound can still belong to a live
 # leg, so reaping on age is only a proof ABOVE it. The invariant is

@@ -553,6 +553,89 @@ def test_a_record_served_read_carries_no_derived_name():
     assert not (set(props) & _refused("point")), set(props) & _refused("point")
 
 
+# ── the THIRD explanation: §9.1/D1's decline (#10867 review ISSUE 1) ────────
+#
+# `record_serve.parity_difference` and `record_reconcile.scan_cache_view` are two
+# of the tree's THREE record↔cache field-comparison instruments (the third,
+# `tools/turn_parity_census.py`, compares turn rows rather than Source nodes and
+# so is not touched by this decline). #10853 taught `scan_cache_view` that an
+# episodic Source's turn prose is CACHE-OWNED; leaving `parity_difference`
+# unaware made a DECLARED asymmetry and a real projection gap the same red — the
+# "signal indistinguishable from noise" class this change grades P1 elsewhere.
+
+#: A legacy episodic Source as it actually sits in the CACHE: the capture still
+#: writes and journals the prose at this head, so the node carries the pair.
+LEGACY_SESSION_NODE = {
+    "id": "s-1",
+    "url": "session:abc",
+    "sourceKind": "agentSession",
+    "title": "a session",
+    "summary": "the user asked for the record to hold the turn text",
+    "_searchText": "the user asked for the record to hold the turn text",
+}
+
+
+def _narrowed_record_source(**over: object) -> dict:
+    """The record's answer for that node — built through the PROJECTION itself.
+
+    Not a hand-written map on purpose: the record side of this comparison is
+    ``cache_projection.node_from_row`` (the same map ``read_node`` returns), so
+    the leg exercises the real narrowing instead of restating its outcome.
+    """
+    from tortoise.cache_projection import node_from_row
+
+    row = {"id": "s-1", "url": "session:abc", "source_kind": "agentSession",
+           "title": "a session",
+           "summary": "the user asked for the record to hold the turn text",
+           "_search_text": "the user asked for the record to hold the turn text"}
+    row.update(over)
+    return dict(node_from_row("Source", row).props)
+
+
+def test_parity_explains_the_episodic_source_decline_instead_of_reddening():
+    """The recorded prose is DECLINED by the projection, so it is not a gap."""
+    record = _narrowed_record_source()
+    assert "summary" not in record and "_searchText" not in record, (
+        "the projection did not narrow the row — this leg would then prove "
+        "nothing about the explanation it is here to pin")
+
+    diff = rs.parity_difference(LEGACY_SESSION_NODE, record, label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) >= {"summary", "_searchText"}, diff.as_dict()
+    # The explanation is the PROJECTION's declaration, not a list this test
+    # curates — a name added to the decline is explained without touching here.
+    from tortoise.cache_projection import episodic_source_declined_properties
+    assert set(diff.explained_missing) <= episodic_source_declined_properties()
+
+
+def test_parity_reddens_on_the_same_names_for_a_document_source():
+    """The decline is keyed on the two IDENTITY arms, so a document keeps its own.
+
+    This is the negative direction, and it is the one that matters: a rule that
+    fired on every Source would explain away a REAL projection gap on every
+    transcript document in the cache — the mirror of the defect the decline
+    exists to avoid.
+    """
+    document_node = {"id": "s-2", "url": "corpus://notes/session.md",
+                     "sourceKind": "agentSession", "title": "a document",
+                     "summary": "a document abstract", "_searchText": "abstract"}
+    record = {"id": "s-2", "url": "corpus://notes/session.md",
+              "sourceKind": "agentSession", "title": "a document"}
+    diff = rs.parity_difference(document_node, record, label="Source")
+    assert not diff.clean, (
+        "a DOCUMENT Source's own summary was explained away — the decline is "
+        "not scoped to the identity arms")
+    assert set(diff.unexplained_missing) == {"summary", "_searchText"}, diff.as_dict()
+
+
+def test_parity_explains_only_the_declined_names_on_a_session_source():
+    """Scoped by NAME too: the identity opens the decline, it does not blanket it."""
+    node = dict(LEGACY_SESSION_NODE, aFieldTheRecordMadeUp="x")
+    diff = rs.parity_difference(node, _narrowed_record_source(), label="Source")
+    assert not diff.clean, diff.as_dict()
+    assert set(diff.unexplained_missing) == {"aFieldTheRecordMadeUp"}, diff.as_dict()
+
+
 # ── the mode ───────────────────────────────────────────────────────────────
 
 

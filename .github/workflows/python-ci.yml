@@ -4001,23 +4001,37 @@ jobs:
             --junit "${RUNNER_TEMP:-/tmp}/junit-d14.xml"
           [ "$rc" -eq 0 ] || exit "$rc"
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
-          # widened. The floor is 30 and the number is NOT arbitrary: the four
+          # widened. The floor is 40 and the number is NOT arbitrary: the four
           # marked files that are ALREADY carve-out registered (precision_leak
-          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27 marked,
-          # of which 25 PASS on the ubuntu runner — the two darwin-gated
-          # fork_safety ones skip) are the always-passing baseline, so a floor at
-          # 25 would still be met by a hook broadened to skip exactly the class
-          # #4164 rescues. 30 sits above that baseline (25) and below the measured
-          # total, so losing the rescued class reds the job while a few legitimate
-          # removals do not.
-          # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
-          # passed / 34 skipped (each skip exogenous — the 32 module-level gate
-          # markers, and the two darwin-gated #3845 fork tests; no real test skips
-          # for any other reason). The contract is that the marks RUN; the exact
-          # count is free to grow.
+          # 6 + test_hosted_api 12 + fork_slot_wedge 12 + fork_safety 4 = 34
+          # marked, of which 32 PASS on the ubuntu runner — the two darwin-gated
+          # fork_safety ones skip) are the always-passing baseline, so a floor
+          # that is not ABOVE that baseline is met by a hook broadened to skip
+          # exactly the class #4164 rescues. 40 sits above the baseline (32) and
+          # far below the measured total, so losing the rescued class reds the
+          # job while a few legitimate removals do not.
+          # ⛔ THE FLOOR MUST BE RE-CUT WHEN THE BASELINE GROWS — this is the rule
+          # that had silently stopped holding. The floor was 30, calibrated
+          # against a 25-PASS baseline; #10962 marked six further `embedded_only`
+          # legs inside `test_hosted_api.py` — a BASELINE file — taking that file
+          # 5→12 passing and the baseline to 32, i.e. ABOVE the 30 floor, so the
+          # arm this comment exists for could no longer fire while the step stayed
+          # green. The `#4207` manifest arm below does NOT cover it:
+          # `skip-guard.py --manifest-only` accepts a nodeid appearing as passed
+          # OR skipped, so a broadened skip-hook leaves the manifest green and
+          # this count is the only detector left.
+          # Measured 2026-11-06 at this head (the marker selection over `tests/`,
+          # URI unset, `TORTOISE_TEST_CARVE_OUT=1`): 261 passed / 40 skipped
+          # overall, and the
+          # four baseline files ALONE 32 passed / 2 skipped. The earlier figure is
+          # kept only to show the growth, NOT as current: 35 passed / 34 skipped
+          # (measured 2026-09-20 on run 35518962357, head fd23a4033; each skip
+          # exogenous — the 32 module-level gate markers and the two darwin-gated
+          # #3845 fork tests). The contract is that the marks RUN; the exact count
+          # is free to grow.
           passed=$(grep -c ' PASSED' "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || true)
           echo "embedded_only-marked tests passed: $passed"
-          [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
+          [ "$passed" -ge 40 ] || { echo "::error::expected >=40 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
           # #4207: the floor above is a COUNT of PASSED lines, so a single
           # subtracted test leaves 34 and the step stays green — and the pin in
           # tests/test_markers.py reads this step's TEXT, so a deselecting flag
@@ -4510,9 +4524,52 @@ jobs:
     # against a warm database, and ~100s when the container first applies the
     # record migrations. The arm-gate tests this PR adds (they run the gate over
     # fixture XMLs) take the collection to 70 — measured 2026-10-23 on a fresh
-    # container: 70 passed / 0 skipped in ~194s, migrations included. 20m is a
-    # runaway bound, not a measurement-thin one.
-    timeout-minutes: 20
+    # container: 70 passed / 0 skipped in ~194s, migrations included.
+    #
+    # ⛔ 50, NOT 20, and the WORK is not why. `20m is a runaway bound, not a
+    # measurement-thin one` was the reasoning here and the post-step falsified it:
+    # the bound was never measured against the SUM of this job's steps, and the
+    # `actions/cache` save POST-step (#10182) is charged against it like any other
+    # step. MEASURED (run 41975408278, job 127110027242, head 9e32e81a3):
+    #
+    #   07:40:25  job starts (cap 20m)
+    #   07:42:36  pytest starts        07:44:46  pytest ends — 130s, 0 failed
+    #   07:44:53  work is DONE (postgres stopped); every WORK step green
+    #   07:44:53  `Post Cache pip dependency caches` begins a ~3.6 GB save
+    #   08:00:46  killed at 79.8% (2,885,681,152 of 3,616,385,407 sent) when the
+    #             20m cap elapsed -> conclusion `cancelled`
+    #
+    # `python-ci-gate` reads `cancelled` as red BY DESIGN (#5219: a cancelled leg
+    # certifies nothing), so a green leg reddened a REQUIRED check on a diff that
+    # never touched this job — the #5219 / #10327 class, on the one job
+    # `docs/ops/ci-wall-clock.md` had already flagged as arm-2 and left for a
+    # measurement. This is that measurement.
+    #
+    # Derived per that document's arm-2 rule (`cap = SUM x 1.5, rounded UP to the
+    # next 10m`), from THIS run rather than from the estimate the document
+    # pre-computed, because the estimate is the term the run falsified:
+    #
+    #   12m in-step pytest watchdog + ~1m setup/provision + 15.9m observed save
+    #   = 28.9m  ->  x1.5 = 43.4  ->  50
+    #
+    # The 15.9m is 953 s (07:44:53 -> 08:00:46) and it is a CENSORED lower bound:
+    # killed at 79.8%, so the save never finished. Applied the way every other row
+    # in docs/ops/ci-wall-clock.md is, with the COMPLETED save rather than the
+    # censored one: a 3.6 GB save STEP (tar + transfer; the transfer alone is 977 s
+    # at the ~3.7 MB/s the log reports) is ~20m, so 12 + ~1 + ~20 = ~33m and
+    # 33 x 1.5 = 49.5 -> 50. The censored 15.9m is the floor under that and alone
+    # gives 28.9 x 1.5 = 43.4 -> 50 as well, so both brackets agree. That is
+    # `x 1.5, round up to the next 10` — the document's rule, not an override.
+    # The document's pre-computed `20 -> 40` came from an ESTIMATED 9m save, so it
+    # is the INPUT that moved, not the rule.
+    #
+    # Raising the cap is the right arm HERE — and restore-only (#10327) is the
+    # right arm for `test-carve-out` — because this cap has room to hold the SUM
+    # while that one is pinned to 3x its measured pytest step. It is not free:
+    # the cap IS the stale-head exposure (#3239), so 50m is the most this job may
+    # hold a per-PR concurrency slot when it genuinely wedges (p50 1.62m, p95
+    # 14.61m — `docs/ops/ci-wall-clock.md`).
+    timeout-minutes: 50
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
       # no `TORTOISE_DB_URI`, so `tests/conftest.py`'s epic #1647 P4 gate needs
