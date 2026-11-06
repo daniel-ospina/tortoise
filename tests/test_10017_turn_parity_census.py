@@ -1289,6 +1289,56 @@ def test_a_present_but_EMPTY_graph_passes_presence_and_reaches_the_emptiness_ver
     assert rc == 0, err
 
 
+def test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone(
+        tmp_path, monkeypatch):
+    """⛔ `ensure_indexes=False` ALONE still WRITES — the pair is the guarantee.
+
+    #11113 review cycle 2, finding 1: the comment on the new keyword said
+    `ensure_indexes=False` is "for a caller that must address the store WITHOUT
+    writing to it". It is not — it skips only the schema DDL, while the
+    open-time health probe (`_auto_health_recover`) is a `GRAPH.QUERY` too, and
+    on a graph the store does not hold the FIRST ONE CREATES IT. Measured
+    before this pin existed: `ensure_indexes=False` with `skip_health_check` at
+    its default ADDED the missing graph to `GRAPH.LIST`.
+
+    This is the trap the comment now names, so it is pinned rather than
+    described: half the rule looks like it works (it does skip the DDL) and the
+    caller who needs it most — a gate that certifies a store it must not
+    mutate — would still mint its target.
+
+    RED under the mutation this defends: make `_auto_health_recover` a no-op
+    (the pin's first half then observes NO new graph, so its assertion fails —
+    that half exists precisely because the health probe, not the DDL, is what
+    still writes here).
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    from tortoise.projection import FalkorProjection
+
+    # (a) the HALF rule still writes: `ensure_indexes=False` ALONE, health probe
+    # at its default. The DDL is skipped and the graph is created anyway — by
+    # `_auto_health_recover`'s `_probe_ok()` (`MATCH (n) RETURN count(n) LIMIT 1`),
+    # the first `GRAPH.QUERY` on the new graph. Measured on a spy: exactly ONE
+    # graph-level query, and `GRAPH.LIST` gains the name.
+    half = FalkorProjection(db_path, graph_name="half_rule",
+                            ensure_indexes=False)
+    try:
+        assert sorted(half.db.list_graphs()) == ["half_rule", "tortoise"], (
+            "`ensure_indexes=False` alone did NOT create the graph — if that is "
+            "true by design, the comment on the flag must be re-derived, "
+            "because the census's write-freedom would then come from one flag "
+            "and not the pair")
+    finally:
+        half.close()
+
+    # (b) the PAIR does not: same store, a name it does not hold, nothing minted.
+    pair = FalkorProjection(db_path, graph_name="pair_rule",
+                            skip_health_check=True, ensure_indexes=False)
+    try:
+        assert sorted(pair.db.list_graphs()) == ["half_rule", "tortoise"]
+    finally:
+        pair.close()
+
+
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(
         monkeypatch):
     """Fail closed: "I could not ask" is not "the graph is there"."""

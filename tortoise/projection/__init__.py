@@ -11276,6 +11276,19 @@ class FalkorProjection(
         # inventory at "not measured"; both are read-path-neutral (the census
         # issues no vector query), and the schema is recreated by the next
         # ordinary construction.
+        #
+        # ⛔ THIS FLAG ALONE IS NOT WRITE-FREEDOM — it skips only the schema
+        # DDL. The open-time health probe (`_auto_health_recover`, above) is a
+        # `GRAPH.QUERY` too and creates a missing graph just the same: measured
+        # with `ensure_indexes=False` and `skip_health_check` left at its
+        # default, binding a graph the store did not hold ADDED it to
+        # `GRAPH.LIST` (#11113 review P2). Write-freedom is the PAIR —
+        # `skip_health_check=True, ensure_indexes=False` — which is what the
+        # census passes; pinned by
+        # `test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone`.
+        # Without this paragraph the comment sends the next fixer (e.g.
+        # `tools/purge_legacy_turns.py`'s default-binding sites, #11112
+        # residual 2) after a knob that does not deliver on its own.
         if ensure_indexes:
             self._ensure_indexes()
 
