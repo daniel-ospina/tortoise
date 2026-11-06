@@ -654,6 +654,60 @@ def test_the_natural_markdown_shapes_are_still_markers(marker):
     assert L.in_flight_markers([marker]) == ["3.2c — branch b"]
 
 
+@pytest.mark.parametrize("line", [
+    # A real line from docs/scoping/2026-09-08-2519-coverage-loop.md — `in flight` is this
+    # fleet's everyday vocabulary, so an UNANCHORED search made ordinary prose a WIP marker and
+    # flagged a finished issue (review P1, false-positive direction).
+    "> levers already in flight: C1 baseline seal (#2513 Phase 0), C2 entity/fact-augmented",
+    "The campaign was in flight: 6 lanes were reading. Nothing here is WIP.",
+    "2. It already exists, green, in flight: **PR #10226** carries the 160-file deletion",
+])
+def test_prose_containing_the_phrase_in_flight_is_not_a_marker(line):
+    """The marker BEGINS a line (optionally after a bullet/emphasis); a mid-sentence phrase is prose.
+
+    Measured before the anchor: every one of these lines produced a live marker, so arm 2 reported
+    "has WIP but no `## Satisfies`" about an issue whose only "WIP" was a clause — a false positive
+    pointing bureaucracy at legitimate work, the direction this module treats as worse than the
+    defect it looks for.
+    """
+    assert L.in_flight_markers([line]) == []
+
+
+@pytest.mark.parametrize("line", [
+    # The marker must BEGIN the line (optionally after a list bullet / emphasis). Text before it —
+    # including a bullet's own prose with its own colon — means the marker is being QUOTED or
+    # discussed, not asserted, so it is not WIP.
+    "- note: see IN FLIGHT: 11077 for the lane",
+    "1. the older convention read `status: IN FLIGHT: 3.2c`",
+])
+def test_a_marker_quoted_inside_another_sentence_is_not_wip(line):
+    assert L.in_flight_markers([line]) == []
+
+
+@pytest.mark.parametrize("line, expected", [
+    (
+        "IN FLIGHT: 3.2c — branch feat/x — since 09:00Z",
+        "3.2c — branch feat/x — since 09:00Z",
+    ),
+    (
+        "**IN FLIGHT:** 3.2c — box cell-3",
+        "3.2c — box cell-3",
+    ),
+])
+def test_the_marker_remainder_comes_from_the_markers_own_colon(line, expected):
+    """The remainder is the marker's OWN captured group, never `line.split(":", 1)[1]`.
+
+    Read-side half of the same review P1. Pinned against the regex's `rest` group rather than
+    against a second copy of the stripping logic, so a future widening of the anchor cannot
+    reintroduce the first-colon split: `IN_FLIGHT_RE`'s group IS the definition of "after the
+    marker", and this asserts the helper agrees with it.
+    """
+    m = L.IN_FLIGHT_RE.search(line)
+    assert m is not None, line
+    assert L._marker_rest(line) == m.group("rest").strip(" *_`").strip("-–— ").strip()
+    assert L.in_flight_markers([line]) == [expected]
+
+
 @pytest.mark.parametrize("marker", [
     "IN FLIGHT: ",
     "IN FLIGHT: none — released 2026-11-05",
@@ -693,6 +747,7 @@ def _run(*args: str) -> subprocess.CompletedProcess:
 
 
 def test_cli_offline_pr_exit_codes(tmp_path):
+    """Pins the offline PR exit-code contract."""
     flagged = tmp_path / "body.md"
     flagged.write_text("Refs #10534\n", encoding="utf-8")
     clean = tmp_path / "clean.md"
@@ -861,6 +916,13 @@ def test_a_fenced_example_does_not_clear_the_satisfies_arm():
 @pytest.mark.parametrize("body, expected", [
     ("Part of #10085, #10063\n", [10063, 10085]),
     ("Refs #10327, #10182, #7612, #5219, #3719\n", [3719, 5219, 7612, 10182, 10327]),
+    # A conjunction / Oxford-comma list is the SAME list. Admitting only the comma form made
+    # `Part of #100 and #200` + `Closes #100` read NOTHING FLAGGED with `#200` claimed and resolved
+    # by nothing — the #10534 false PASS (review P1). The decline grammar in this same module
+    # already treats `#A and #B` as one list, so the two arms disagreed about what a list is.
+    ("Part of #100 and #200\n", [100, 200]),
+    ("Part of #100, #200, and #300\n", [100, 200, 300]),
+    ("Part of #100, #200 & #300\n", [100, 200, 300]),
 ])
 def test_a_comma_continued_claim_list_claims_every_subject(body, expected):
     """`Part of #A, #B` claims BOTH; reading only the first dropped every subject after it (F3).
@@ -869,6 +931,40 @@ def test_a_comma_continued_claim_list_claims_every_subject(body, expected):
     evaluated, so a claimed-and-unresolved issue went unreported.
     """
     assert L._claims_in(L.strip_code(body)[0], None)["weak"] == expected
+
+
+@pytest.mark.parametrize("body, expected", [
+    # The conjunction separator requires a REF immediately after it, so ordinary prose that happens
+    # to contain `and` claims nothing. Paired with the positives above, so tightening one direction
+    # cannot silently reopen the other.
+    ("Part of #100 and the fix is in tools/x.py\n", [100]),
+    ("Refs #100 and see the plan for the rest\n", [100]),
+    ("Part of #100 & the fix is in tools/x.py\n", [100]),
+])
+def test_a_conjunction_in_prose_does_not_manufacture_a_claim(body, expected):
+    """The separator is admitted only when a `#N` follows it — not for every `and` on the line."""
+    assert L._claims_in(L.strip_code(body)[0], None)["weak"] == expected
+
+
+def test_a_conjunction_list_of_a_closing_word_is_claimed_but_never_RESOLVED():
+    """The conjunction list widens the CLAIM, never the RESOLUTION — the safety half of review P1.
+
+    Widening `more` to admit `and`/`&`/Oxford must not manufacture a false PASS in the other
+    direction: if a continuations of `Closes` counted as resolutions, `Closes #100 and #200` would
+    silently clear `#200` when GitHub credits only the first ref (the documented multi-issue form
+    repeats the keyword) — the #10534 hole this arm exists to shut. The continuation therefore
+    lands in `weak` and is still flagged, exactly as the comma form already did.
+    """
+    got = L._claims_in(L.strip_code("Closes #100 and #200\n")[0], None)
+    assert got["closing"] == [100], got
+    # `weak` carries the CONTINUATIONS only — the first ref of a closing word IS the resolution —
+    # so `#200` is claimed-but-unresolved and therefore still flagged.
+    assert got["weak"] == [200], got
+    assert got["continued_resolving"] == [200], got
+
+    oxford = L._claims_in(L.strip_code("Fixes #100, #200, and #300\n")[0], None)
+    assert oxford["closing"] == [100], oxford
+    assert oxford["weak"] == [200, 300], oxford
 
 
 def test_a_continuation_keeps_its_own_repo_and_self_number_rules():
@@ -1490,6 +1586,29 @@ def test_the_peer_vocabulary_excludes_the_doc_under_test_and_survives_a_frontmat
 
 _MODES_THAT_READ_WIP = ("--issue", "--issue-body-file")
 _MODES_THAT_DO_NOT = ("--pr", "--body-file", "--sweep", "--sweep-issues")
+
+
+def test_the_wip_line_is_printed_by_the_modes_that_actually_run_the_arm(tmp_path, capsys):
+    """The module docstring said "every run prints how many subjects carried a marker" — it does not.
+
+    Only a run whose population consults the WIP arm populates `measured_rows`, so the `WIP arm: N
+    subject(s) read` line is printed for `--issue-body-file` and never for `--body-file`. The
+    docstring is the spec a maintainer edits this arm from, so an overstated "every run" is the
+    claim-vs-code class this PR is about (review P3). Pinned in BOTH directions: the issue mode
+    must print the line and the PR mode must not, so neither always-printing it nor deleting it
+    can read as a pass.
+    """
+    body = tmp_path / "issue.md"
+    body.write_text("IN FLIGHT: 1.1 — branch b\n", encoding="utf-8")
+    assert L.main(["--issue-body-file", str(body)]) == L.RC_FINDINGS
+    assert "WIP arm:" in capsys.readouterr().out
+
+    pr = tmp_path / "pr.md"
+    pr.write_text("Refs #10534\n", encoding="utf-8")
+    L.main(["--body-file", str(pr)])
+    out = capsys.readouterr().out
+    assert "WIP arm:" not in out, out
+    assert "advisory only" in out, out
 
 
 @pytest.mark.parametrize("flag", ["--wip", "--no-wip"])

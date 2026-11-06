@@ -78,9 +78,13 @@ remote-only query cannot — #4256); a caller that has already run it injects it
 
 Building a second branch census here would be a second source of truth that can disagree with the
 first, which this repo has already paid for (AGENTS.md: *"a second census path that can disagree"*).
-So the arm is explicit about its bound in the OUTPUT, not only here: every run prints how many
-subjects carried a marker and how many carried none, because **``0 markers read`` and ``0 issues with
-WIP`` are different claims** and a bare "NOTHING FLAGGED" would launder one into the other.
+So the arm is explicit about its bound in the OUTPUT, not only here: every run whose population
+actually consults the WIP arm (``--issue``, ``--sweep-issues``, ``--issue-body-file`` and the
+injected ``--wip``/``--no-wip`` forms) prints how many subjects carried a marker and how many
+carried none, because **``0 markers read`` and ``0 issues with WIP`` are different claims** and a
+bare "NOTHING FLAGGED" would launder one into the other. A PR-side run (``--pr``, ``--sweep``,
+``--body-file``) never evaluates this arm, so it prints no WIP line at all — that is a different
+bound and it is stated here rather than implied away by "every run".
 
 Why the fence/inline-code scan
 ------------------------------
@@ -198,10 +202,17 @@ CLAIM_RE = re.compile(
     r"(?P<cmid>[\s:]*))"
     # A COMMA-CONTINUED list is claimed in full: `Part of #10085, #10063` claims BOTH, and
     # reading only the first dropped every subject after it (F3) — measured on three open PRs
-    # (#11038, #11065, #11093). The list shape is unambiguous in a way a bare `#N` elsewhere on
-    # the line is not, so only the comma-continued form is taken.
+    # (#11038, #11065, #11093). A CONJUNCTION / OXFORD-comma list is the SAME list: admitting only
+    # the comma form made `Part of #100 and #200` + `Closes #100` read NOTHING FLAGGED while `#200`
+    # was claimed and resolved by nothing — the #10534 false PASS (review P1). This module's own
+    # decline grammar (`_REF_LIST` below) already treats `#A and #B` as one list, so before this
+    # the two arms gave two different answers to "what is a list".
+    # Every separator alternative requires a `#N` IMMEDIATELY after it, so a conjunction in ordinary
+    # prose (`Part of #100 and the fix is …`) still claims only `#100`.
     r"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b"
-    r"(?P<more>(?:\s*,\s*(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{1,7}\b)*)",
+    r"(?P<more>(?:"
+    r"(?:\s*,\s*(?:(?:and|&)\s+)?|\s+(?:and|&)\s+)"
+    r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{1,7}\b)*)",
     re.IGNORECASE,
 )
 # One entry per continued ref; a named group inside a repeated group keeps only the LAST match, so
@@ -396,7 +407,9 @@ SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNO
 # scoping). Not imported verbatim because that pattern also requires trailing whitespace after the
 # bracket, which would miss a bare `- [ ]` at end of line.
 CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULTILINE)
-IN_FLIGHT_RE = re.compile(r"IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE)
+IN_FLIGHT_RE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?[\s*_`]*IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE
+)
 # A marker whose remainder is only a placeholder (`<ids> — branch <b> …`) is the CONVENTION being
 # quoted, not a claim; a remainder that says the issue was released is a release, not a claim.
 PLACEHOLDER_RE = re.compile(r"^[\s<>a-zA-Z0-9_./—-]*$")
@@ -661,8 +674,16 @@ def has_satisfies_checklist(comment_bodies: list[str]) -> bool:
 
 
 def _marker_rest(line: str) -> str:
-    """The text after `IN FLIGHT:`, with markdown emphasis/bullets stripped."""
-    rest = line.split(":", 1)[1] if ":" in line else ""
+    """The text after the `IN FLIGHT:` marker, with markdown emphasis/bullets stripped.
+
+    The remainder is the marker's OWN captured group, never `line.split(":", 1)[1]`. Splitting on
+    the line's FIRST colon read a colon that was not the marker's, so a real marker sharing its line
+    with other prose had its remainder truncated to the text between the two colons (review P1).
+    The group is also the single definition of "after the marker", so the anchor in `IN_FLIGHT_RE`
+    and this helper cannot disagree about where the marker ends.
+    """
+    match = IN_FLIGHT_RE.search(line)
+    rest = match.group("rest") if match else ""
     rest = rest.strip()
     rest = rest.strip("*_`").strip()          # **IN FLIGHT:** / _IN FLIGHT:_
     rest = rest.strip("-–— ").strip()
