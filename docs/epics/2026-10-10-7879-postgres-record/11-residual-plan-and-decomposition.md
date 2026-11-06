@@ -48,8 +48,9 @@ drill, and the R5 edge producers. **All 13 native sub-issues are closed.**
 
 ⚠️ **No census count is asserted here.** Two populations are in play and they do not agree: the native
 sub-issue links (13, all closed, before this lane added 23 — 36 in total, **21 open / 15 closed**: #10683 closed
-when its answer was recorded, and **#9548 closed 2026-11-06T01:57Z** by `#11109`'s merge — landed on `main`,
-still **undelivered by `#10896`**; re-measured 2026-11-06T05:14Z with `gh api …/issues/7879/sub_issues
+when its answer was recorded, and **#9548 closed 2026-11-06T01:57Z** by `#11109`'s merge — landed on `main`
+and, since the 2026-11-06T04:24:26Z deploy (`ba87797c`), **SERVED** (`record_writes_applied` is published on
+`/health`); re-measured 2026-11-06T05:14Z with `gh api …/issues/7879/sub_issues
 --paginate | jq '.state'`, and the pair moves as issues close, so read it as a dated census) and the issues
 whose *body* carries an
 `Epic: #7879` field. The GitHub search API's tokenized `in:body` match returned **99 total / 26 open** by one
@@ -130,10 +131,12 @@ So **even the sites named here are not the set**, and ⚠️ **none of the sites
 OTHER post-#10648 contradictions, proposes no correction to the `#10620` **attribution**, and no open issue or
 PR sweeps the number. It is **not** a home for this correction, and nothing else in this plan names one.
 ⚠️ **"No correction to the attribution" is not "no correction to a `#10620` occurrence", and the difference
-lands on two of the sites this paragraph names.** `#10864`'s §2 rewrites `docs/infra-runbook.md:3415` — that
+lands on two of the sites this paragraph names.** `#10864`'s §2 rewrites `docs/infra-runbook.md:3517` — that
 file's **only** occurrence, the `degraded` / `degraded_reasons` / `refusing` row — and the comment near
-`tortoise/hosted_api.py:6400` (`:6435` at this head, *"⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW
-(#10185/#10620)"*), one of that file's **4** occurrences; its fix reads *"add the second clause (and the same
+`tortoise/hosted_api.py:6503`, *"⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW
+(#10185/#10620)"*, one of that file's **4** occurrences; the numbers #10864 quotes for it are its own head's
+(`:6400`, and `:6435` at the head the sentence was written on — both shifted by main), so the durable handle is
+the symbol, not the number; its fix reads *"add the second clause (and the same
 one-clause note at `hosted_api.py:6400`)"*. Both edits add the missing `refusing`-absence clause and neither
 touches the number, so the residual is still uncarried — but a lane that reads a blanket *"proposes no
 correction"* can leave the two lines most likely to be rewritten under `#10864` unflagged. Its other **two** texts
@@ -230,7 +233,8 @@ acceptance criteria**, with one criterion honestly marked *waived* rather than s
   ⚠️ **But #10000 is not fully excludable, and the review found it:** the capstone's one open PARTIAL leg is
   the `:Source.summary` prose route, whose **writer is the capture path** (`sdk._session_source_metadata`) —
   i.e. #10000's producer. **G2 therefore cannot PASS on that route without a #10000-family change** — that
-  change is **#10852**, landed on `main` 2026-11-06 and still undelivered (§5.2). It is
+  change is **#10852**, landed on `main` 2026-11-06, **carried in this branch and in the serving build**
+  (§5.2). It is
   carried as an explicit **G2** carrier gap in **§5.2** — not as silent exclusion, and not billed to G3, because
   G2's PASS is the thing it blocks.
 - **#10976** (nothing evicts the cache) — the egress half, explicitly gated on this epic.
@@ -265,7 +269,7 @@ guards is only *live* once the deploy lands.
    │      └── #9276  reconcile on a schedule
    │
    └── #9567  CAPSTONE (G2)
-          ├── #9548  ← NOT an owner gate: arming AUTHORISED 2026-11-03; **CLOSED 2026-11-06** (#11109 = Target (a)'s channel), still undelivered by the deploy
+          ├── #9548  ← NOT an owner gate: arming AUTHORISED 2026-11-03; **CLOSED 2026-11-06** (#11109 = Target (a)'s channel), **SERVED since the 2026-11-06T04:24:26Z deploy** (`ba87797c`)
           └── #9559  CONDITIONAL — gates D11/D12 only (#9567: "must not absorb", `FOLLOW`)
 
 G3 (parallel once writes land): #10394 · #10429 · #10369 · #10193 · #9881 · #9833 · #10864 · #9129 · #9997
@@ -320,7 +324,7 @@ has already paid for once, so the decomposition's product is **navigation and or
 | 6 | **#10683** the `search_keys` decision record | G1 | OPEN at `3ac6b1636` — **CLOSED 2026-11-05T16:31Z (this lane)** | answer recorded in comment `6663370867` — shape A + the `OVERRIDES:` marker + three factual corrections (§6) |
 | 7 | **#10671** the losing shape | G1 | **CLOSED, unmerged** | none |
 | 8 | **#9567** capstone | G2 | OPEN, `owner-decision` | linked; **#9567's own body lists `#9548` in `Blocked by`** — that edge is now **satisfied** (`#9548` CLOSED 2026-11-06, `#11109`), leaving the deploy (`#10896`) as the only live one: `#9548` is a DEPENDENT, not a gate (see §3) |
-| 9 | **#9548** arm the record (R1) | G2 | OPEN at `3ac6b1636` — **now CLOSED 2026-11-06 (#11109)** | linked; **do not re-post the superseded "postponed" ruling** — the record is already armed, and **PR #11064** is the open sweep that purges it. ⚠️ **The closure is landed-on-main, undelivered by #10896** — Target (a)'s positive channel, not an observation that the hosted app writes today |
+| 9 | **#9548** arm the record (R1) | G2 | OPEN at `3ac6b1636` — **now CLOSED 2026-11-06 (#11109)** | linked; **do not re-post the superseded "postponed" ruling** — the record is already armed, and **PR #11064** is the open sweep that purges it. ⚠️ **The closure is landed-on-main and the channel is SERVED** — `record_writes_applied` is published on `/health` from build `ba87797c` (2026-11-06T04:24:26Z) onward, read on `443498e66` at 2026-11-06T06:57Z. A served channel is still **not** an observation that the hosted app writes: it reads `0` |
 | 10 | **#9559** the byte gate | G2 | OPEN (`FOLLOW`) | linked; **conditional — D11/D12 only** |
 | 11 | **#8607** id normalisation | G3 | OPEN, owner-deferred P2 | linked; **not a capstone precondition** |
 | 12 | **#10394** the restore re-materialises the narrative | G3 | OPEN | linked |
@@ -366,10 +370,11 @@ epic, so G5 must not absorb it; and #10977, the tracking issue above, remains th
 
 | what | why it blocks G2 | carrier |
 |---|---|---|
-| **the `:Source.summary` prose route** | the committed capstone run (`docs/verify/2026-10-31-record-capstone.md`, #10456) returns `PARTIAL`, and this is one of its open routes: the capture path (`sdk._session_source_metadata`) writes a transcript slice into `:Source.summary` | ⚠️ **LANDED ON MAIN, still uncarried here:** **PR #10852** — *"the session :Source stops carrying turn prose — the summary is a topic lexicon"* — is that change, **MERGED 2026-11-06T02:36:52Z (`ba87797c4`)**. ⚠️ That merge is **not in this branch**: the last `origin/main` merge here is `f1aa7362b`, so the change landed after it — and like every record change it is **undelivered by `#10896`**. It belongs to #10000's family, which §2.1 excludes from this epic, so **G2 cannot PASS on this route from inside this epic's scope** unless the owner (a) accepts it as NOT MEASURED in writing on #9567, or (b) admits #10852 here |
+| **the `:Source.summary` prose route** | the committed capstone run (`docs/verify/2026-10-31-record-capstone.md`, #10456) returns `PARTIAL`, and this is one of its open routes: the capture path (`sdk._session_source_metadata`) writes a transcript slice into `:Source.summary` | ⚠️ **LANDED AND NOW CARRIED HERE:** **PR #10852** — *"the session :Source stops carrying turn prose — the summary is a topic lexicon"* — is that change, **MERGED 2026-11-06T02:36:52Z (`ba87797c4`)**. `ba87797c4` **is an ancestor of this head** as of the rebase onto `origin/main` `5dc22c19a`, and it is in the **serving build** (`443498e66`, started 2026-11-06T05:57:25Z) — so the route is no longer uncarried, and the earlier reading (*"not in this branch: the last `origin/main` merge here is `f1aa7362b`"*) is retired by the rebase, which leaves no merge commit to point at. **What that changes for G2:** the committed capstone run predates the change, so its `PARTIAL` on this route is a **stale measurement**, and G2 needs the run REPEATED on a build carrying `ba87797c4` — not an owner admission for a change the branch already has. Whether the change is *in scope* is a separate question from whether it is *carried*: it belongs to #10000's family, which §2.1 excludes from this epic, so if the re-run still returns `PARTIAL` the owner must either accept it as NOT MEASURED in writing on #9567 or admit #10852 here |
 
 ⚠️ **This plan's first draft overstated this as "no path removes it".** A merged PR does. The gap is real but it is a
-**dependency on landed-but-undelivered work**, not an orphan — and a decomposition that called it an orphan would have sent a
+**dependency on work that has now landed and is carried here** (until the rebase it was landed-but-uncarried), not an
+orphan — and a decomposition that called it an orphan would have sent a
 lane to re-implement #10852.
 
 **This is a G2 row, not a G3 row** — G2's PASS is what it blocks. It was billed to G3 in this plan's first draft,
@@ -438,7 +443,8 @@ value the column's **declared** type cannot hold.
 ⚠️ **Review cycle 1 measured `grep -rn jsonb_columns` → zero code hits, and that was TRUE at the commit it
 measured (`3ac6b1636`) — it is FALSE at this head.** `git grep -c jsonb_columns -- '*.py'` → **29 hits across 2
 files**; `jsonb_columns()` is defined at `tortoise/record_projection.py:1607`, landed by `e74361912` (#10726's fold
-batch), which is in this branch through `f1aa7362b`. So #10671's reader **did** land, by another route, together
+batch), which is in this branch through the rebase onto `origin/main` `5dc22c19a` (`f1aa7362b` named the merge
+that used to carry it — a rebase leaves no such commit). So #10671's reader **did** land, by another route, together
 with the parsers this section said had to be built. **What survives — and is the reason this section still
 exists — is the narrower claim about `_COLUMN_RE` itself, below.**
 
