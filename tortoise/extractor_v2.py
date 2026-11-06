@@ -3585,8 +3585,15 @@ def _merge_key(section: str, item: dict) -> tuple:
     if section == "relations":
         # E4 (#10999): an entity↔entity relation's identity is its
         # (src, dst, predicate) triple — the same edge stated twice is ONE
-        # relation, and the semantics rides along on the survivor.
-        return ("relation", _norm(item.get("src")), _norm(item.get("dst")),
+        # relation, and the semantics rides along on the survivor. The
+        # ENDPOINTS are compared EXACTLY (stripped): `_norm` lowercases, and
+        # two entities whose names differ only in case are distinct Layer-1
+        # Objects (`execute_embed` dedupes on `(name, kind)`), so folding them
+        # here merged two DIFFERENT edges before S5 ever saw them and the loss
+        # was reported as `relations_dropped == 0`. The PREDICATE is folded —
+        # `IMPL`/`impl` is one verb, and S5 records the DECLARED spelling.
+        return ("relation", str(item.get("src") or "").strip(),
+                str(item.get("dst") or "").strip(),
                 _norm(item.get("predicate")))
     if section == "chain_notes":
         return ("chain", _norm(item.get("chain")), _norm(item.get("finding")))
@@ -3639,6 +3646,28 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
                 "mentions")
     out: dict = {}
     for section in sections:
+        # A MISTYPED section value (the one-object shape S5 drops and COUNTS)
+        # must reach S5 AS IT ARRIVED, or it is indistinguishable from "no
+        # relations" and the record reports nothing lost. But a mistype never
+        # DISPLACES a usable list from the other side (`#1789 Task 3`: the
+        # section keeps whichever side carries content) — it rides through only
+        # when NEITHER side carries one. S4 wins a mistype-vs-mistype collision.
+        #
+        # ⛔ SCOPED TO `relations`, the ONE section whose S5 consumer tolerates a
+        # non-list. For `points`/`events` a passed-through non-list reaches
+        # `validate_chains`, which concatenates them as lists → `TypeError` →
+        # `execute_embed` raises and its "S5 must NEVER block the pipeline" arm
+        # sets `payload=None`, so NOTHING in the batch commits. The other
+        # sections keep the pre-existing coercion (their malformed-section
+        # census, `_s4_malformed_sections`, still reports the drop).
+        raw_s2, raw_s4 = s2.get(section), s4.get(section)
+        if section == "relations" and not any(
+                isinstance(raw, (list, tuple)) for raw in (raw_s2, raw_s4)):
+            mistyped = next((raw for raw in (raw_s4, raw_s2)
+                             if raw is not None), None)
+            if mistyped is not None:
+                out[section] = mistyped
+                continue
         s2_items = [i for i in (s2.get(section) or []) if isinstance(i, dict)]
         s4_items = [i for i in (s4.get(section) or []) if isinstance(i, dict)]
         s4_by_key = {_merge_key(section, i): i for i in s4_items}
@@ -13677,9 +13706,11 @@ _OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
 _SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
     "name": (str,), "kind": (str,), "content": (str,),
     "eventKind": (str,), "src": (str,), "dst": (str,),
-    "predicate": (str,),   # #10999: a shape error must not read as a
-    # vocabulary error downstream (`_assemble_relations` would report a
-    # non-string as "not a declared relation verb")
+    "predicate": (str,),   # #10999: typed so a shape error is not read as a
+    # vocabulary error downstream. NOTE: the `relations` section is deferred to
+    # S5 wholesale (see `_validate_output_shape`), and S5's own arm names a
+    # non-string predicate as a SHAPE error — this entry is kept so the type is
+    # declared once, and would gate again if the section were re-admitted.
     "op_type": (str,), "chain": (str,), "finding": (str,),
     "action": (str,), "searched_for": (str,), "found": (bool,),
     "id": (str,),
@@ -13698,9 +13729,10 @@ def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
     must carry its required keys with primitive values; unknown keys and
     empty arrays are VALID (fields ride through by reference — S5's
     execution validation owns semantic repair). ``retractions`` items need
-    ``content`` OR ``id`` (the contract's ``content|id``). The ONE shape
-    exception is a non-list ``relations``: S5 drops and counts it (fail-open),
-    so this gate must not fail the candidate and truncate the emission."""
+    ``content`` OR ``id`` (the contract's ``content|id``). The ONE exception is
+    the ``relations`` section: its shape (section- AND item-level) is S5's,
+    which drops and COUNTS every mistype, so this gate must not fail the
+    candidate and truncate the emission over it."""
     issues: list[str] = []
     if not isinstance(parsed, dict):
         return False, [f"top-level output is {type(parsed).__name__}, not an object"]
@@ -13708,16 +13740,19 @@ def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
         if section not in parsed:
             continue
         items = parsed[section]
+        if section == "relations":
+            # S5 OWNS this section's shape, at BOTH levels: `_assemble_relations`
+            # drops the whole section or the single bad item and COUNTS every
+            # case — a non-list value, a non-dict entry, a missing/None
+            # endpoint, a non-string predicate (named as a SHAPE error) and a
+            # non-string `semantics` (named). Failing the candidate here would
+            # make the recovery ladder accept a SHORTER prefix instead, silently
+            # losing every section the model emitted after `relations` — and,
+            # because rung 1 returns parsed JSON without running this gate, a
+            # gate verdict here never protected the clean-parse path anyway.
+            # Every other section keeps the structural gate.
+            continue
         if not isinstance(items, list):
-            if section == "relations":
-                # S5 OWNS this section's shape failure: `_assemble_relations`
-                # drops the whole section and COUNTS it into
-                # `connections_incomplete` (fail-open, #10999). Failing the
-                # candidate here would make the recovery ladder accept a
-                # SHORTER prefix instead, silently losing every section the
-                # model emitted after `relations` — a mistype S5 already handles
-                # correctly must not truncate the emission.
-                continue
             issues.append(f"section {section!r} is {type(items).__name__}, not a list")
             continue
         for idx, item in enumerate(items):

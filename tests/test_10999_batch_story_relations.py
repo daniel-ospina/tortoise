@@ -112,17 +112,46 @@ def test_every_verb_the_contract_advertises_actually_survives_the_gate():
         assert result["relations"][0].get("semantics") == meaning, meaning
 
 
-def test_shape_gate_covers_the_new_channel():
-    """The D5 structural schema parses a relations item and REFUSES one with
-    no predicate — the channel is validated, not merely advertised."""
-    ok, issues = v2._validate_output_shape(
-        {"relations": [{"src": "A", "dst": "B", "predicate": "IMPL"}]})
-    assert ok and not issues
+def test_the_shape_gate_defers_the_relations_section_to_s5():
+    """The D5 gate's ONE exception: `relations` shape (section- AND item-level)
+    is S5's, which drops and COUNTS every mistype.
 
-    ok, issues = v2._validate_output_shape(
-        {"relations": [{"src": "A", "dst": "B"}]})
+    A gate verdict here would make the recovery ladder accept a SHORTER prefix
+    and lose every section emitted after `relations`; rung 1 never runs this
+    gate at all, so it never protected the clean-parse path either. The
+    structural gate stays live for every other section — asserted below so the
+    exception cannot silently become a no-op gate.
+    """
+    for relations in ({"src": "A", "dst": "B", "predicate": "IMPL"},
+                      [{"src": "A", "dst": "B"}],
+                      [{"src": "A", "dst": None, "predicate": "IMPL"}],
+                      [42]):
+        ok, issues = v2._validate_output_shape({"relations": relations})
+        assert ok and not issues, (relations, issues)
+
+    # ...and the gate is ALIVE for a non-deferred section
+    ok, issues = v2._validate_output_shape({"entities": [{"name": "A"}]})
     assert not ok
-    assert any("missing required key 'predicate'" in i for i in issues), issues
+    assert any("'kind'" in i for i in issues), issues
+
+
+def test_s5_owns_every_relations_mistype_the_gate_defers():
+    """The deferral is only sound because S5 COUNTS every one of those shapes
+    (the reporting discipline rule 1 rests on) — no mistype is silent."""
+    cases = [
+        {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL"},
+        [{"src": "Retry Storm", "dst": "Deadline Rule"}],
+        [{"src": "Retry Storm", "dst": None, "predicate": "IMPL"}],
+        [42],
+    ]
+    for relations in cases:
+        emission = copy.deepcopy(EMISSION)
+        emission["relations"] = relations
+        result = _run(emission)
+        assert result["relations"] == [], relations
+        assert result["stats"]["relations_dropped"] >= 1, relations
+        assert any("connections_incomplete" in w
+                   for w in result["warnings"]), (relations, result["warnings"])
 
 
 # ── 2. the story lands, between the two resolved entities ────────────────
@@ -825,13 +854,17 @@ def test_a_case_variant_semantics_resolves_to_the_closed_spelling():
     assert not [w for w in result["warnings"] if "semantics" in w], result
 
 
-def test_shape_gate_refuses_a_non_string_predicate():
-    """The D5 gate types `predicate` like `src`/`dst`, so a shape error is not
-    reported downstream as a VOCABULARY error (\"not a declared relation verb\")."""
-    ok, issues = v2._validate_output_shape(
-        {"relations": [{"src": "A", "dst": "B", "predicate": 42}]})
-    assert not ok
-    assert any("predicate" in i for i in issues), issues
+def test_a_non_string_predicate_is_a_SHAPE_error_at_s5_not_a_vocabulary_miss():
+    """The gate defers the section (see above), so S5 must carry the typing —
+    and it names the defect as a SHAPE error, never as an invented verb."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": 42}]
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    rel_warns = [w for w in result["warnings"] if "relations[0]" in w]
+    assert rel_warns and "not a string" in rel_warns[0], rel_warns
 
 
 def test_the_declared_vocabulary_has_one_home():
@@ -1139,3 +1172,131 @@ def test_the_vet_guard_and_the_resolver_agree_on_the_endpoint_fold():
             ref, exact, v2._endpoint_fold_index(exact))
         assert (vg._norm(emitted) in protected) == (resolved is not None), (
             emitted, ref, protected, resolved)
+
+
+def test_the_s2_s4_union_keeps_relations_whose_endpoints_differ_only_in_case():
+    """Round-7 P2: the union's identity key folded the endpoints.
+
+    `_merge_key` used `_norm`, which LOWERCASES — so the S2∪S4 union merged two
+    DIFFERENT relations between two pairs of DISTINCT Layer-1 entities before S5
+    ever saw them, and the loss was reported as `relations_dropped == 0`. S5's
+    own collapse key is exact on the resolved endpoints; the union must agree or
+    the two derivations of relation identity contradict each other.
+    """
+    s2 = {"relations": [{"src": "Billing", "dst": "Ledger", "predicate": "IMPL"}]}
+    s4 = {"relations": [{"src": "billing", "dst": "Ledger", "predicate": "IMPL"}]}
+    merged = v2.merge_embed_lists(s2, s4)
+    assert [r["src"] for r in merged["relations"]] == ["Billing", "billing"]
+    # ...and the predicate is still folded: IMPL/impl is ONE verb
+    merged2 = v2.merge_embed_lists(
+        {"relations": [{"src": "A", "dst": "B", "predicate": "IMPL"}]},
+        {"relations": [{"src": "A", "dst": "B", "predicate": "impl",
+                        "semantics": "supports"}]})
+    assert len(merged2["relations"]) == 1
+    assert merged2["relations"][0]["semantics"] == "supports"
+
+
+def test_the_union_carries_a_one_object_relations_section_to_s5():
+    """Round-7 P2: the union coerced a mistyped section to `[]`.
+
+    Iterating a dict yields its KEYS, all filtered out by the `isinstance(item,
+    dict)` comprehension, and the section was then written as an empty list — so
+    S5's counted-drop arm saw "no relations" and the record reported nothing
+    lost. The mistyped value must reach S5 as it arrived.
+    """
+    merged = v2.merge_embed_lists(
+        {"entities": [{"name": "Retry Storm", "kind": "core:rule"},
+                      {"name": "Deadline Rule", "kind": "core:rule"}],
+         "relations": {"src": "Retry Storm", "dst": "Deadline Rule",
+                       "predicate": "IMPL"}},
+        {})
+    assert merged["relations"] == {"src": "Retry Storm", "dst": "Deadline Rule",
+                                   "predicate": "IMPL"}
+    result = _run(merged)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("connections_incomplete" in w for w in result["warnings"])
+
+
+def test_the_restore_does_not_duplicate_an_entity_already_held_in_another_case():
+    """Round-7 P2: the Rule-4 restore's exact-`_norm` branch had no casefold
+    guard, so it appended a SECOND copy of an entity the pass already held.
+
+    Two Objects for one entity also make S5's fold arm ambiguous, so the edge
+    the restore exists to save was dropped one step later — the arm failing at
+    the exact shape it was widened for.
+    """
+    emission = {
+        "entities": [{"name": "Straße", "kind": "core:rule"},
+                     {"name": "Other", "kind": "core:rule"}],
+        "points": [], "events": [], "operators": [],
+        "relations": [{"src": "Strasse", "dst": "Other", "predicate": "IMPL"}],
+    }
+    prior = {"removed_entities": {
+        "strasse": {"name": "STRASSE", "kind": "core:rule"}}}
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    names = [e["name"] for e in out["entities"]]
+    assert names == ["Straße", "Other"], names
+    assert not [w for w in warns if "restored" in w], warns
+    assert [(r["src"], r["dst"]) for r in _run(out)["relations"]] == [
+        ("Straße", "Other")]
+
+
+def test_the_restore_adds_one_copy_when_both_spellings_are_referenced():
+    """Round-7 P3 (the same guard, from the other side): two divergent spellings
+    of one entity can both be in `to_restore`; the second must not restore the
+    same entity again."""
+    emission = {
+        "entities": [{"name": "Alpha", "kind": "core:rule"}],
+        "points": [], "events": [], "operators": [],
+        "relations": [
+            {"src": "STRASSE", "dst": "Alpha", "predicate": "IMPL"},
+            {"src": "Straße", "dst": "Alpha", "predicate": "NAND"},
+        ],
+    }
+    prior = {"removed_entities": {
+        "strasse": {"name": "STRASSE", "kind": "core:rule"}}}
+    out, _warns = vg.apply_vet(emission, {}, prior=prior)
+    names = [e["name"] for e in out["entities"]]
+    assert names.count("STRASSE") == 1, names
+    assert len(names) == 2, names
+
+
+def test_a_mistyped_section_never_displaces_a_valid_list_from_the_other_side():
+    """Round-7 P1 (a regression the VGATE verifier caught): the mistype
+    passthrough applied to EVERY section and preferred a mistype over a usable
+    list on the other side, reversing #1789 Task 3 ("kept S2 content for that
+    section") and, for `entities`, producing a Layer-1 422-class payload."""
+    s2 = {"relations": [{"src": "A", "dst": "B", "predicate": "IMPL"},
+                        {"src": "B", "dst": "C", "predicate": "NAND"}]}
+    s4 = {"relations": {"src": "X", "dst": "Y", "predicate": "IMPL"}}
+    merged = v2.merge_embed_lists(s2, s4)
+    assert len(merged["relations"]) == 2, merged["relations"]
+
+    # a mistype on the OTHER side of a valid section must not win either
+    merged2 = v2.merge_embed_lists(
+        {"entities": [{"name": "A", "kind": "core:rule"}]},
+        {"entities": "garbage"})
+    assert [e["name"] for e in merged2["entities"]] == ["A"]
+
+    # and when NEITHER side carries a list, the mistype rides through (S5 counts)
+    merged3 = v2.merge_embed_lists({"relations": {"src": "A"}},
+                                   {"relations": {"src": "B"}})
+    assert merged3["relations"] == {"src": "B"}
+
+
+def test_the_restore_guard_still_reconciles_a_divergent_fold_reference():
+    """Round-7 P1 (a regression the VGATE verifier caught): skipping the append
+    for an already-held entity also skipped `canonical`, so a Layer-1 reference
+    written in the divergent fold was never re-spelled and `validate_layer1`
+    rejected the payload ("about_entities reference unknown entities")."""
+    emission = {
+        "entities": [{"name": "Straße", "kind": "core:rule"}],
+        "points": [{"content": "a point", "about_entities": ["STRASSE"]}],
+        "events": [], "operators": [], "relations": [],
+    }
+    prior = {"removed_entities": {
+        "strasse": {"name": "STRASSE", "kind": "core:rule"}}}
+    out, _warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Straße"]
+    assert out["points"][0]["about_entities"] == ["Straße"]
