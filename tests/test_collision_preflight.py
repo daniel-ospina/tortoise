@@ -10246,6 +10246,47 @@ exec {real} "$@"
         self.assertIn("own sub-agent(s) exempted", out)
         self.assertNotIn("do NOT dispatch", out)
 
+    def test_a_same_cwd_process_that_is_NOT_my_child_still_blocks(self):
+        """LOCATION alone is not the exemption — parentage is the other half.
+
+        Review cycle 4 (P2): deleting the parentage term from `_is_own_subagent`
+        (`row[0] not in self_pids`) left the WHOLE file green — 426 passed — and
+        turned every process standing in the caller's exact directory into "my
+        own sub-agent". That is the direction this gate may never fail in: the
+        fleet dispatches lanes along the same edges, so a peer that happens to
+        share the directory would read as mine and the dispatch would be
+        permitted. The row below is that shape — cwd matches the caller's,
+        `ppid` is NOT any of the caller's pids — and it must BLOCK.
+        """
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        lane_wt = worktrees / "fix-3061-samecwd"
+        subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                        "-b", "fix/3061-samecwd", str(lane_wt), "HEAD"],
+                       cwd=self.repo, check=True, capture_output=True, text=True)
+        fakebin = worktrees / "fakebin-samecwd"
+        fakebin.mkdir(exist_ok=True)
+        binary = fakebin / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(lane_wt),
+            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            table = self.tmp / "table-samecwd-not-mine.txt"
+            # ⛔ `ppid = 1`, i.e. NOT an ancestor of the tool: parentage fails.
+            table.write_text(f"1 0 /sbin/init\n{proc.pid} 1 pi\n")
+            rc, out = self.run_tool(
+                repo_arg=lane_wt, cwd=lane_wt,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("own sub-agent(s) exempted", out)
+
     def test_a_DISPATCHED_lane_in_its_own_worktree_still_blocks(self):
         """The polarity `_is_own_subagent` must keep: parentage ALONE is not it.
 
