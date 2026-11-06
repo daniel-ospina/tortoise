@@ -262,6 +262,7 @@ def _bare(index_rows=None, raise_on_indexes=False, *, ver=(4, 18, 3),
     proj._falkordb_version = ver
     proj._vector_index_api = None
     proj._vector_indexed_labels = None
+    proj._vector_index_served_labels = None
     if index_rows is not None:
         # Accept (label, types) pairs and expand to the 9-column row shape.
         index_rows = _rows(*index_rows)
@@ -341,6 +342,8 @@ def test_raising_inventory_read_is_fail_open(caplog):
     with caplog.at_level(logging.DEBUG):
         proj._ensure_indexes()  # must not raise
     assert proj._vector_indexed_labels is None
+    # #11087: the served half is None too, so the pair stays coherent.
+    assert proj._vector_index_served_labels is None
     assert "inventory read failed" in caplog.text
 
 
@@ -413,6 +416,110 @@ def test_a_store_with_no_gap_does_not_warn(caplog):
         proj._ensure_indexes()
     assert not [r for r in caplog.records if "#4997" in r.getMessage()]
     assert proj._vector_indexed_labels == set(SERVED)
+
+
+# ── #11087 (S4): the contract is reported POSITIVELY ──────────────────────
+#
+# The pin above is deliberately UNCHANGED (plan §6.1): it captures at
+# WARNING, so "no gap ⇒ no warning" stays true and the warning semantics a
+# caller may match on are preserved. What #11087 ends is the SILENCE — the
+# same store must now report the serves/indexes pair at INFO, and so must a
+# store that HAS a gap (which also still warns).
+
+def _pair_records(caplog):
+    return [r for r in caplog.records if "#11087" in r.getMessage()]
+
+
+def test_a_store_with_no_gap_reports_the_serves_indexes_pair(caplog):
+    """Plan §7 D5 — today this store says nothing at all.
+
+    Falsifiable: before #11087 the report lived behind `if gap:`, so a
+    fully-indexed store emitted no record and `_pair_records` is empty.
+    """
+    proj = _bare([_vector_row(label) for label in SERVED])
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 1, (
+        "a fully-indexed store must report the pair, exactly once per setup"
+    )
+    assert pairs[0].levelno == logging.INFO
+    msg = pairs[0].getMessage()
+    assert f"serves={SERVED}" in msg, msg
+    assert f"indexes={SERVED}" in msg, msg
+    assert not [r for r in caplog.records
+                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
+    assert proj._vector_index_served_labels == set(SERVED)
+    assert proj._vector_indexed_labels == set(SERVED)
+
+
+def test_a_gap_reports_the_pair_and_still_warns(caplog):
+    """Plan §7 D6 — the pair is TWO halves: serves is every declared label,
+    indexes is the measured subset. A store with a gap gets both records."""
+    proj = _bare([_vector_row("Point")])
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 1
+    msg = pairs[0].getMessage()
+    assert f"serves={SERVED}" in msg, msg
+    assert "indexes=['Point']" in msg, msg
+    warnings = [r for r in caplog.records
+                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, "the gap must still WARN — #11087 adds a report only"
+
+
+def test_the_reported_served_set_is_the_one_declaration(caplog):
+    """Plan §7 D8 — one label declaration, no third vocabulary.
+
+    The reported served set must BE `ENTITY_TYPE_LABELS.values()`, not a copy
+    re-derived from anything else. Patching the module-global binding proves
+    provenance the way `test_run_vector_query_reads_the_declaration` does: a
+    re-derived literal would ignore the sentinel.
+    """
+    import tortoise.projection as projection_mod
+
+    original = projection_mod.ENTITY_TYPE_LABELS
+    try:
+        projection_mod.ENTITY_TYPE_LABELS = {"widget": "WidgetLabel"}
+        proj = _bare([_vector_row("WidgetLabel")])
+        with caplog.at_level(logging.INFO):
+            proj._ensure_indexes()
+        assert proj._vector_index_served_labels == {"WidgetLabel"}, (
+            "the served set must be READ from the declaration, not re-derived"
+        )
+        assert "serves=['WidgetLabel']" in _pair_records(caplog)[0].getMessage()
+        assert proj._vector_indexed_labels == {"WidgetLabel"}
+    finally:
+        projection_mod.ENTITY_TYPE_LABELS = original
+
+
+def test_unmeasured_pair_is_none_in_both_halves(caplog):
+    """#11087: the pair is never half-populated — `None` means NOT MEASURED
+    for both halves, so a caller cannot read `served is None` + `indexed ==
+    set()` as "serves nothing, indexes nothing". (Plan §7 D7's fail-open lane.)"""
+    proj = _bare(raise_on_indexes=True)
+    with caplog.at_level(logging.DEBUG):
+        proj._ensure_indexes()  # must not raise
+    assert proj._vector_indexed_labels is None
+    assert proj._vector_index_served_labels is None
+    assert not _pair_records(caplog), "an unmeasured pair must not be reported"
+
+    proj2 = _bare()
+
+    class _NoneGraph(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            self.calls.append(cypher)
+            if "db.indexes()" in cypher.lower():
+                return _MockResult(None)
+            return super().query(cypher, params=params, timeout=timeout)
+
+    proj2.g = _NoneGraph()
+    proj2._ensure_indexes()
+    assert proj2._vector_indexed_labels is None
+    assert proj2._vector_index_served_labels is None
 
 
 def test_distinct_graphs_each_report_once(caplog):
