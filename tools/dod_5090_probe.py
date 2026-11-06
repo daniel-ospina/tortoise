@@ -2216,8 +2216,6 @@ def measure() -> dict:
     # leave the rest of the caller's process with both gates disabled.
     _flags = {v: os.environ.get(v) for v in ("TORTOISE_EMBED_GATE", "TORTOISE_VALUE_GATE")}
     for var in _flags:
-        os.environ.pop(var, None)
-    for var in _flags:
         os.environ[var] = "0"
     try:
         rows = _measure_rows()

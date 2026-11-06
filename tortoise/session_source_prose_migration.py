@@ -4,7 +4,7 @@ WHAT THIS EXISTS FOR
 ====================
 #10852 stopped the capture writing the transcript's first substantive utterance
 into ``Source.summary`` (and deriving ``_searchText`` from it). It deliberately
-did NOT heal the nodes that already hold the pair, and no route reaches them:
+did NOT heal the nodes that already hold the pair, and no OTHER route reaches them:
 
 * a **re-capture** of the same ``session_id`` is the #1727 no-op replay — the
   only production caller of ``_materialize_session_source`` sits inside the

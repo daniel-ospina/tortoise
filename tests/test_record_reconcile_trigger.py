@@ -416,6 +416,46 @@ def test_a_partial_declaration_reports_its_coverage():
     assert result.as_dict()["declaration_coverage"] == COVERAGE_PARTIAL
 
 
+def test_the_UNDECLARED_second_writer_population_is_reported_but_never_divergence():
+    """The FOURTH population: named in ``graph_only``, and still ``clean``.
+
+    Three omission classes are DECLARED (§17.5's cache-owned scalars, the
+    §9.1/D1 declined pair, the NOT-PROJECTABLE columns); a property a SECOND
+    WRITER put on a placed node is named by nothing, which is why the census in
+    the module docstring reads "THREE DECLARED classes plus one that no
+    declaration names". `_partition_cache_owned` has no class list at all — its
+    rule is mechanical, ``outside the placement AND absent from the record`` —
+    so both halves of that rule are pinned here:
+
+    * the undeclared name is REPORTED (not silently swallowed, and not a
+      ``field_mismatches`` entry, which would make the clean verdict unreachable
+      on a cache a second writer has touched);
+    * the CONTROL keeps the partition from amnestying real divergence: the same
+      out-of-placement name, held by the RECORD, is still COMPARED.
+    """
+    placed = {"Point:p1": frozenset({"id"})}
+
+    undeclared = rr.reconcile_record_and_cache(
+        {"Point:p1": {"id": "p1"}},
+        {"Point:p1": {"id": "p1", "someSecondWriterProp": 1}},
+        placed=placed)
+    assert dict(undeclared.graph_only) == {"someSecondWriterProp": 1}, (
+        undeclared.graph_only)
+    assert undeclared.report.field_mismatches == 0, undeclared.report.render()
+    assert undeclared.report.divergent == 0, undeclared.report.render()
+    assert undeclared.verdict() == rr.VERDICT_CLEAN
+    assert rr.exit_code_for(undeclared) == rr.EXIT_CLEAN
+
+    # CONTROL — record-held, so compared, so divergence survives the partition.
+    held = rr.reconcile_record_and_cache(
+        {"Point:p1": {"id": "p1", "someSecondWriterProp": 1}},
+        {"Point:p1": {"id": "p1", "someSecondWriterProp": 2}},
+        placed=placed)
+    assert held.graph_only == (), held.graph_only
+    assert held.report.field_mismatches == 1, held.report.render()
+    assert held.verdict() == rr.VERDICT_DIVERGENT
+
+
 # ── 5. the trigger exists in production ───────────────────────────────────
 
 
