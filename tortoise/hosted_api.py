@@ -17559,9 +17559,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
          one capture's charge, so a charge taken before the gate would spend the
          window and turn the retry into a 429 — and the commit lane by
          ``TestCommitPointsGate::test_the_points_cap_refuses_before_the_ingest_window``.
-         ⚠️ This lane's gate is SKIPPED on the store-only paths (#3892, #4258),
-         which is why ``TestCaptureOrgIngestBound``'s legs (all
-         ``no_provider_keys``) cannot pin it.
+         ⚠️ Item 5 — the points/cohort 402 — is SKIPPED on the store-only paths
+         (#3892, #4258); THIS gate is not (the charge sits outside that guard),
+         so a store-only capture is still charged and still 429'd. That skip is
+         why ``TestCaptureOrgIngestBound``'s four endpoint legs cannot pin the
+         ORDERING: they reach this 429 without ever being 402'd.
          It also sits BEFORE the first write, so a refused capture leaves no
          ``:Session``, ``:Event`` or transcript ``:Source`` and the documented
          ``Retry-After`` retry is a clean first attempt. Not the 429

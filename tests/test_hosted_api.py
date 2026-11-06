@@ -6150,13 +6150,18 @@ class TestSessionFloodGate:
         a request that can never fit is the unbreakable-loop class
         ``quota.commit_ingest_admit`` warns about.
 
-        ⛔ THIS IS THE ONLY LEG THAT PINS THE ORDERING ON THIS LANE, and the
-        charge whose placement it guards is the one #4051 §3.1 ADDED here.
+        ⛔ TWO legs pin the ordering on this lane, and the charge whose
+        placement they guard is the one #4051 §3.1 ADDED here: THIS one for the
+        POINTS 402 (`max_points`), and
+        `test_the_ingest_window_does_not_run_ahead_of_the_cohort_cap` for the
+        COHORT 402 (`cohort_cost_cap`). The charge must sit after BOTH — a charge
+        in the gap between them turns one permanent refusal into a retryable 429.
         `TestCommitPointsGate::test_the_points_cap_refuses_before_the_ingest_window`
-        pins the COMMIT lane; `TestCaptureOrgIngestBound`'s legs cannot reach
-        this gate at all — they run with `no_provider_keys`, i.e. the #3892
-        store-only path that skips the estimate gate by design (measured: a
-        store-only capture at `max_points=1` returns 200).
+        pins the COMMIT lane; `TestCaptureOrgIngestBound`'s four endpoint legs
+        cannot pin this ordering — they run with `no_provider_keys`, i.e. the
+        #3892 store-only path where the 402 is skipped by design (measured: a
+        store-only capture at `max_points=1` returns 200), so they reach the 429
+        without ever being 402'd.
 
         THE DISCRIMINATOR is the second POST: the window is armed at exactly one
         capture's charge, so a charge taken BEFORE the 402 would spend the whole
