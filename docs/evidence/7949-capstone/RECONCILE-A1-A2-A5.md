@@ -182,7 +182,7 @@ deictics, generic heads**. Its scope is explicitly *not* A2's population:
 **What the shipped selection path does, measured — re-run AFTER `#11212` landed.** `probes/e1_e2_probe.py`
 on the committed 25-candidate corpus, on a tree that contains `tortoise/identity_hold.py` (exit 3 =
 `UNPREREGISTERED`, by design — a verdict needs a frozen threshold). **Selected lines** — the §5 command
-prints all twelve arm lines; the six quoted here (plus the `e1 ` summary) are the ones that decide the
+prints all twelve arm lines; the six quoted here (plus the `e1` summary) are the ones that decide the
 reading:
 
 ```text
