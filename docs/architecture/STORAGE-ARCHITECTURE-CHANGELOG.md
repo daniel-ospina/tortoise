@@ -2103,7 +2103,10 @@ from `public.session_narrative` (`record_text.serve_from_record` never consults 
 nothing is lost. `record-reconcile` treats a legacy cache node still carrying the prose as a `graph_only`
 occurrence (one property the projection declines to write), NOT as a `field_mismatches` against a record
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
-pair, and the repair for it is `#10017`'s graph-side purge rather than a re-projection.
+pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
+a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
+whole-graph and therefore clears a legacy copy too. ⛔ What no class has here is a NON-destructive repair:
+the classes differ in WHY the name must be absent, not in which lane clears it.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED

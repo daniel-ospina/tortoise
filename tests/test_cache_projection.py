@@ -820,73 +820,21 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record VIEW's — never a superset of it.
 
-    ⚠️ "The record VIEW's", not "the record's": the classes named below mint
-    properties the record has NO COLUMN for (class (2)/(3) mint `status`), so
-    against the record's PRIMARY COLUMN set the plan carries a name that set does
-    not have. ⛔ It is a WIDENING, not a superset, and the difference is not
-    pedantry — it is measurable on this file's own `_view()`: its `:Object` row is
-    `{"id", "name", "props"}`, so the plan carries `objectKind`, a name P does not
-    have, while `P - props` holds 13 of its 16 names (`_props_from_row` SKIPS a
-    column whose value is `None`). A row that also carries a supersession carrier
-    adds `status` (class (2)/(3)) and its own spellings, and STILL lacks the same
-    13 — i.e. the plan is never a superset of P, and never a subset either. The
-    assertion below compares `written` against `set(node.props)` —
-    the view — which is the identity that DOES hold, and §17.2 states the same
-    distinction by direction.
-
-    ⚠️ FIVE CLASSES THIS COMPARISON CANNOT SEE — and every one of them is
-    declared, with a pin of its own. `_view()` builds every fixture row through
-    `cp.node_from_row`, so any property the VIEW adds is on BOTH sides of the
-    assertion below and the assertion is silent about it:
-
-    (1) #9634: `cp.FOLD_ON_CREATE_DEFAULTS` are the FOLD's `ON CREATE` constants,
-    applied where the record row is silent. Bound by
-    `test_the_declared_fold_defaults_are_the_folds_own_constants`.
-    (2) §2.6's DERIVED half, `cp.DERIVED_FROM_RECORD` (#9974): a property the
-    record is FORBIDDEN to store and the cache must COMPUTE from the columns it
-    does carry — `status` from a supersession carrier
-    (`supersededBy`/`supersededAt`), for which `public.object` has NO column at
-    all. Bound by that table's own stated divergences from the record's
-    `*_current_status` views.
-    (3) `cp.EVENT_STREAM_FOLDS` (#10198): the same `status`, derived from the
-    record's EVENT STREAM (`public.journal_event`) rather than from a column,
-    because the lifecycle vocabulary is declared by packs at RUNTIME. Bound by
-    `tortoise.status_folds`, which owns that vocabulary.
-    (4) #10853: `cp._EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_searchText`) is
-    DELIBERATELY not written for an episodic Source. ⛔ A narrowing is a
-    SILENT-LOSS surface, so it is pinned by a leg that MEASURES the drop set:
-    `tests/test_10853_session_source_prose.py::test_the_DROP_SET_itself_is_exactly_the_declared_pair`
-    (and its widening mutation).
-    (5) #10394: `cp.CACHE_FORBIDDEN_COLUMNS` (`source`/`event` → `story_arc`) —
-    authority the record KEEPS and the cache must never materialise, dropped in
-    `node_from_row` by name on the column door and the `props` tail. Bound by
-    `test_every_primary_property_has_a_canonical_spelling_that_is_projected`
-    (which pins the declaration's CONTENTS, so an over-broad entry reds) and by
-    `tests/test_9555_narrative_cache_rebuild.py::test_the_record_restore_writes_no_story_arc_on_any_node`.
-
-    ⛔ AND THE BLINDNESS IS NOT LIMITED TO THOSE FIVE — it is the whole of
-    `node_from_row`, because that is what BUILDS `node.props`: the schema
-    REFUSAL set (a column dropped by name, `if column in refused: continue`) is
-    equally invisible here, and so is any column the projection stops**projecting**
-    (note: NOT "stops placing" — class (5) is still PLACED, `P` in the placement
-    table, and dropped by the projector only; the two words are distinct in this
-    module and conflating them is what made this disclaimer miss the one case it
-    needed to cover). Listing only the five above would close the question too
-    early; they are listed because each has a named pin, not because they are the
-    whole bound.
-
-    What this assertion DOES pin is the STATEMENT layer: `node_statement` must
-    write exactly the props the plan's model carries. A field IT drops or invents
-    reds here (that mutation is why this leg compares statements and not
-    `node.props`). Anything decided upstream, in `node_from_row`, cannot — both
-    sides are built there, so a drop and an identical drop cancel.
-
-    This is S3's contract clause at the STATEMENT level: a superset would be the
-    cache carrying state the record does not hold, i.e. the cache becoming a
-    second authority. ⛔ The assertion runs over `plan.statements` — the thing
-    that decides what is written — NOT over `plan.node_props()`, which returns
-    `RecordNode.props` and would compare the record to itself (a mutation that
-    made `node_statement` drop a field was invisible to the model-level check).
+    ⚠️ "The record VIEW's", not "the record's COLUMNS". ⛔ Comparing the plan
+    against `projected_columns()` is the field-set/VALUE-and-SPELLING conflation
+    §17.2 exists to forbid, and it manufactures a difference both ways: measured on
+    this file's own `_view()` `:Object` row (`{"id","name","props":{}}`), the plan
+    is `{id, name, objectKind, title}`, which against the 16 COLUMN names reports
+    `objectKind` as "extra" — while `object_kind` IS a projected column; only the
+    camelCase spelling differs. Against the record's projected PROPERTIES the same
+    plan is a strict SUBSET (no extra, 12 of 16 missing), because `_props_from_row`
+    SKIPS a column whose value is `None`. The ONE widening name is `status`, and it
+    appears only when the row carries a supersession carrier: then the plan is
+    `_view()`'s set + `{status}`, i.e. one property with no column at all. So the
+    identity that holds is against `set(node.props)` — the VIEW — and `§17.2`
+    states the same distinction by direction. The assertion below compares `written`
+    against that set, which is the only comparison where both sides speak the same
+    vocabulary.
     """
     view = _view()
     plan = cp.record_plan(view.nodes, view.relations)

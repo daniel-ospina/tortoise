@@ -1155,7 +1155,11 @@ def parity_difference(cache_props: Mapping[str, Any],
       ``_searchText`` / ``_search_text``). The record KEEPS them and this
       projector deliberately does not materialise them, so a cache node that
       still carries them — the legacy population, and every session the current
-      capture wrote — is CACHE-OWNED, not a gap. Scoped by the node's own
+      capture wrote — is CACHE-HELD, not a gap. ⛔ "cache-held", never
+      "cache-owned": the record DOES hold this pair, so the term reserved for what
+      the record cannot hold (`record_reconcile.ReconciliationResult.graph_only_total`)
+      would tell an operator there is nothing to repair (#10394 review, cycle 9).
+      Scoped by the node's own
       identity, never by the label alone: a transcript DOCUMENT Source keeps its
       own ``summary``, and there the same absence IS a projection gap (leg
       ``test_parity_reddens_on_the_same_names_for_a_document_source``).
@@ -1255,7 +1259,9 @@ def parity_difference(cache_props: Mapping[str, Any],
         if field_name in declined:
             # §9.1/D1 decline (#10853): the record keeps the prose, the
             # projection does not materialise it, and a cache node that still
-            # carries it is CACHE-OWNED — never a projection gap.
+            # carries it is CACHE-HELD — never a projection gap. Not
+            # "cache-owned": the record holds it (§17.5's term is for what the
+            # record cannot hold; see `graph_only_total`'s retraction).
             explained[field_name] = value
             continue
         unexplained[field_name] = value

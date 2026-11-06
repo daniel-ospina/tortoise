@@ -55,9 +55,13 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``cache_projection.episodic_source_prose_properties()``) — which the record
   DOES hold, and which a record-sourced re-projection removes; and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
-  — which the record ALSO holds and which a re-projection can never restore,
-  because the graph is where they must not live: their only repair is `#10017`'s
-  destructive graph-side purge, a DIFFERENT lane from the other two. Counting them as
+  — which the record ALSO holds and which no projection may ever write, because
+  the graph is where they must not live. ⛔ The repair is a DESTRUCTIVE CLEAR, the
+  same class of route as the declined pair's: ``record-restore`` /
+  ``rebuild_from_record`` wipe the graph first (``_wipe_all_nodes``, unconditional
+  and whole-graph) and therefore clear a legacy copy, and ``#10017`` is the
+  targeted graph-side purge for an operator who does not want the wipe. What no
+  class here has is a NON-destructive repair. Counting them as
   ``field_mismatches`` would make the clean verdict UNREACHABLE on a
   journal-projected cache — every folded point carries them — which is exactly
   the "a signal indistinguishable from noise is not observability" failure
@@ -462,7 +466,11 @@ def reconcile_record_and_cache(
     where the cache is the whole graph — so an absent key really is divergence.
 
     ``placed`` is :attr:`CacheScan.placed` — per key, the property names the
-    record PLACES for its label. It enables the **cache-owned partition**: a
+    record PLACES for its label. It enables the **cache-HELD partition** (⛔ not
+    "cache-owned": the partition carries THREE omission classes, only the first of
+    which is §17.5-owned — ``_partition_cache_owned`` keeps its function name
+    for history, but the term in prose is `cache-held`, matching the label
+    :func:`log_result` renders): a
     property the cache holds that the record can neither place nor hold (the
     EP/derived scalars §17.5 assigns to the cache, which the record schema
     refuses by name) is NOT a field mismatch and is reported as its own named
@@ -479,9 +487,12 @@ def reconcile_record_and_cache(
     there and §9.1/D1 forbids it only in the graph — so a legacy cache node
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
-    against a record that is correct. The repair for that occurrence is
-    `#10017`'s destructive graph-side purge, which is a different lane from a
-    re-projection; nothing here performs it. ⚠️ **What the exclusion CAN and
+    against a record that is correct. The repair for that occurrence is a
+    DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full
+    ``record-restore`` (whose wipe is whole-graph, so it clears the copy too;
+    measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm
+    (3)) — never a non-destructive one, which is the only sense in which this
+    class differs from the declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. For the DECLINED pair
@@ -539,7 +550,12 @@ def _partition_cache_owned(
         truth: Mapping[str, Mapping],
         placed: Mapping[str, frozenset[str]] | None,
         ) -> tuple[dict[str, Any], tuple[tuple[str, int], ...]]:
-    """Split the cache side into what is COMPARED and what is cache-owned.
+    """Split the cache side into what is COMPARED and what is CACHE-HELD.
+
+    ⛔ "cache-held" is the whole not-compared side, and it carries THREE
+    omission classes (see the module docstring's (5) and :meth:`verdict`);
+    "cache-owned" is §17.5's term for only ONE of them — the scalars the
+    record CANNOT hold — so it is not the name of this partition.
 
     A cache property is excluded only when it is **both**
 

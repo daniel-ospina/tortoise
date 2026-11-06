@@ -159,13 +159,16 @@ to have none.
   * **rebuild == record VIEW**: re-projecting the plan writes exactly the record
     **VIEW's** key set and field set — **no extra node**, and no field the view
     does not carry — asserted over the plan's `Statement.params['props']`, not
-    over the input model. ⛔ "the VIEW's", not "the record's": against the
-    record's PRIMARY COLUMN set the plan carries the names the widening classes
-    mint (`objectKind`/`subjectKind`, class (2); class (3)'s `status`), which have
-    no column of their own, while `_props_from_row` SKIPS a `None` column — so the
-    plan is neither a superset nor a subset of P, and reading "no extra field"
-    against P would have an implementer DELETE a derived name the terminal row
-    needs (#9974: a `status`-less superseded Object answers LIVE). ⚠️ The
+    over the input model. ⛔ "the VIEW's", not "the record's COLUMNS": the one
+    widening name is `status` (classes (2)/(3)), which has NO column — and reading
+    "no extra field" against the column names would have an implementer DELETE it,
+    leaving a superseded Object that answers LIVE (#9974). ⚠️ Class (1) must not
+    be read as widening: `objectKind`/`subjectKind`/`title` ARE projected columns
+    (`object_kind`, `subject_kind`, `title`), the fold only supplies a VALUE where
+    the row is silent — the field-set/VALUE conflation §17.2 exists to stop. Note
+    `_props_from_row` SKIPS a `None` column, so a sparse row's plan is a strict
+    SUBSET of the projected properties, and a column-name comparison reports a
+    projected name as "extra" purely on spelling (`objectKind` vs `object_kind`). ⚠️ The
     assertion reads the VIEW, so it cannot see any class that is materialised in
     the VIEW-BUILDING path; the bound on those is a drift pin, not this
     assertion. ⛔ **The census is ONE, stated in full at
@@ -369,17 +372,22 @@ bounds, both deliberate:
   work, not a replay's;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
-  the cache-owned partition keeps every name the record side holds, so a drifted
+  the cache-held partition keeps every name the record side holds, so a drifted
   `_searchText` is compared and reds. `summary`, and a legacy row's whole pair,
-  are CACHE-OWNED for an episodic Source
+  are CACHE-HELD for an episodic Source (not "cache-owned": the record holds
+  them, and §17.5's term is for the scalars it cannot)
   (`cache_projection.episodic_source_prose_properties()`) and counted under their
   own `graph_only` bucket: visible, and not a divergence against a record that is
   correct. The graph side of a legacy node is repaired by a record-sourced
-  re-projection (`record-restore` / `rebuild_from_record`) — **for a node the
-  projection CREATES**: the write is additive (`MERGE … SET n += $props`), and
+  re-projection — **for a node the
+  projection CREATES**: the INCREMENTAL write is additive (`MERGE … SET n += $props`), and
   `summary` is declined on this door, so a node that ALREADY carries the pair
-  keeps it across a re-projection — the projection produces a prose-free node
+  keeps it across an incremental projection — it produces a prose-free node
   only where none existed, which PREVENTS the defect rather than clearing it.
+  ⛔ But `record-restore` / `rebuild_from_record` are NOT that path: they WIPE
+  the graph first (`_wipe_all_nodes`, *unconditional and whole-graph*), so a
+  FULL restore CLEARS an existing node's pair instead of preserving it —
+  measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3).
 
 ### The pin
 
