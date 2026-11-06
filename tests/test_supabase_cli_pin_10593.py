@@ -556,7 +556,11 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
     assert not re.search(r"(?m)^\s*version:\s*" + re.escape(pin), inside), (
         "a literal pin line survived mutation (a) — the arm would not test the merge tag"
     )
-    with pytest.raises(AssertionError, match="merge key"):
+    # ⛔ The `match` names the ARM, not the verb (#11134 review P2). `match="merge key"` was
+    # satisfied by the LITERALS arm's prose (which says "merge key, alias" while explaining what a
+    # construct could be), so a deleted merge walk passed this case — the failure it produced came
+    # from a different arm. "does not implement" appears in the construct refusal and nowhere else.
+    with pytest.raises(AssertionError, match=r"does not implement: a merge key"):
         _requested_version(inside)
 
     # (b) a merge key that SUPPLIES `with:` — the shape the dict-level probe could not see at all.
@@ -566,7 +570,7 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
         "mutation (b) introduced a duplicate key — the structural-key arm would be what fires, "
         "not the merge arm this case is for"
     )
-    with pytest.raises(AssertionError, match="merge key"):
+    with pytest.raises(AssertionError, match=r"does not implement: a merge key"):
         _requested_version(supplying)
 
     # (c) an ALIAS — the step's `with:` is `*pin`, anchored on the step above it. PyYAML follows it;
@@ -581,7 +585,15 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
     )
     aliased = canonical.sub("        with: *pinned\n", aliased)
     assert "with: *pinned" in aliased, "mutation (c) did not apply — vacuous"
-    with pytest.raises(AssertionError, match="alias"):
+    # ⛔ This is the ONLY arm that proves the `AliasToken` scan exists. `match="alias"` was
+    # satisfied by the literals arm's prose, so deleting the scan left the whole suite green
+    # (#11134 review P2, measured: merge-walk-only `8/9 passed`, identical to the real detector;
+    # alias-scan-only `7/9`, with case (a) the only red). Assert the ARM by name, then the refusal.
+    assert any("alias" in refusal for refusal in _construct_refusals(aliased)), (
+        "the alias case did not reach the construct arm — `_construct_refusals` returned "
+        f"{_construct_refusals(aliased)!r}, so this case would pass on the literals arm alone"
+    )
+    with pytest.raises(AssertionError, match=r"does not implement: an alias"):
         _requested_version(aliased)
 
 
