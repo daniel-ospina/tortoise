@@ -2000,11 +2000,33 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                     rest, prev_prose or _blanked_still_open)
             if _opened is not None:
                 html_item = container
-                if html_item is None and blank_carried is not None:
-                    _carried_consumed, _ = _consume_blockquote_markers(line, blank_carried.depth)
-                    if (_carried_consumed >= blank_carried.depth
-                            and not _item_dedented(line, blank_carried)):
-                        html_item = blank_carried   # the block opened inside the item after all
+                # ⛔ A BLOCK OPENED ON A LAZY LINE IS STILL INSIDE THE `<li>` THE RENDERER KEPT, SO
+                # THAT ITEM IS ITS CONTAINER (round 51 review, P1 — a FAIL-OPEN in all three arms,
+                # and the reason the §4.6 `</tag>` arm was unsafe). `container` is the live STACK
+                # top, and the column test that pops a LAZY continuation empties it before this
+                # line is read — but the renderer keeps the `<li>` open, so §4.6's "last line of the
+                # CONTAINER block" end condition is the item's last line, not EOF:
+                #     `- a` + `x` + `  </ul>` + `> > 2.     Closes #100`
+                #         renderer: `<li>` holds the paragraph and an `html_block` whose raw text
+                #         is `</ul>`; the block ENDS with the item, so the last line is a NEW
+                #         blockquote whose wide-gap item is `<pre><code>` -> CODE.
+                #         `origin/main` `[]`; the head credited `[100]` in ALL THREE arms.
+                # `dropped_paragraph_item` is exactly the fact "the paragraph above is still in that
+                # `<li>`" (the pop records it, `_is_lazy_marker` already reads it), and the
+                # `blank_carried` term below asks the SAME question for the blank-line spelling — so
+                # one loop asks it once and neither term can drift from the other. A line that
+                # DEDENTS out of the candidate is not inside it, which is what keeps the type-6
+                # spelling that legitimately ends the list (`<div>` at column 0, renderer
+                # `html_block`, `origin/main` `[100]`) reading as the block's own text.
+                if html_item is None:
+                    for _candidate in (blank_carried, dropped_paragraph_item):
+                        if _candidate is None:
+                            continue
+                        _carried_consumed, _ = _consume_blockquote_markers(line, _candidate.depth)
+                        if (_carried_consumed >= _candidate.depth
+                                and not _item_dedented(line, _candidate)):
+                            html_item = _candidate  # the block opened inside the item after all
+                            break
                 html_depth = _quote_depth(prefix)
                 _html_here = True
                 html_closer = None if _html_block_ended(_opened, rest) else _opened

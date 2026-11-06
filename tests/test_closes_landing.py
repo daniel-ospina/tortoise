@@ -5249,3 +5249,62 @@ def test_a_PHANTOM_item_needs_FOUR_columns_and_the_SETEXT_exclusion_is_PINNED():
     assert next(t.type for t in md.parse(setext)) == "heading_open", setext   # §4.3: a heading
     assert cl.parse_closing_refs(setext, None, strict=True) == [], setext
     assert "#100" not in cl.strip_code(setext, indented_code=True), setext
+
+
+def test_a_type_6_block_on_a_LAZY_line_belongs_to_the_item_it_is_still_inside():
+    """Round 51 review — a FAIL-OPEN in ALL THREE arms, and it is the reason §4.6's `</tag` arm was
+    unsafe. §4.6's end condition for types 1-6 is "the first line that meets a matching end
+    condition, or the last line of the document, or the LAST LINE OF THE CONTAINER BLOCK" — and the
+    container of a type-6 block opened on a LAZY continuation is the `<li>` the renderer kept open,
+    even though the COLUMN test that pops the item has already emptied the stack by then. The block
+    then had no container to end with, so a line DEEPER than its own depth was swallowed as the
+    block's raw text and the wide-gap claim inside it was credited:
+
+        `- a` + `x` + `  </ul>` + `> > 2.     Closes #100`
+            renderer: the `<li>` holds the paragraph AND an `html_block` whose raw text is `</ul>`;
+            that block ends WITH THE ITEM, so the last line is a NEW blockquote whose wide-gap
+            content is `<pre><code>` -> CODE. `origin/main` `[]`; the pre-fix head `[100]` in
+            `lenient`, `strict=True` (the `issue_process_lint` PASS arm) AND `indented_code=True`.
+
+    The same root is why the `<div>` spelling has always leaked on `origin/main`
+    (50 of 244 renderer-CODE bodies in the round-50 targeted grid): the binding was the container
+    STACK TOP, and this makes it the open PARAGRAPH's item — the fact `dropped_paragraph_item`
+    already records for `_is_lazy_marker`.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for tag in ("ul", "div", "p", "table"):
+        for spelling in (f"  </{tag}>", f"  <{tag}>"):
+            body = f"- a\nx\n{spelling}\n> > 2.     Closes #100\n"
+            assert keyword_types(body) == {"code_block"}, body
+            assert cl.parse_closing_refs(body) == [], body
+            assert cl.parse_closing_refs(body, None, strict=True) == [], body
+            assert "#100" not in cl.strip_code(body, indented_code=True), body
+
+    # …and a wide-gap claim on TOP of the same block, with no blockquote to escape through. (A
+    # 5-column line is NOT one of these: the block is still open there, so the renderer reads it as
+    # the block's raw text and credits it — the `html_block` control below.)
+    for body in ("- a\nx\n  </ul>\n2.     Closes #100\n",
+                 "- a\nx\n  </ul>\n-     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # CONTROLS. (a) A type-6 line at COLUMN 0 really does end the item — the block is then the
+    # document's own and its raw text holds the marker line, so the renderer says PROSE.
+    for keep in ("- a\nx\n<div>\n> > 2.     Closes #100\n",
+                 "- a\nx\n</ul>\n> > 2.     Closes #100\n"):
+        assert keyword_types(keep) == {"html_block"}, keep
+        assert cl.parse_closing_refs(keep) == [100], keep
+    # (b) a CLOSING `</div>` that ends the list is still a block whose text is the marker line.
+    closing = "- a bullet\n</div>\n2.     Closes #100\n"
+    assert keyword_types(closing) == {"html_block"}, closing
+    assert cl.parse_closing_refs(closing) == [100], closing
+    assert cl.parse_closing_refs(closing, None, strict=True) == [100], closing
+    # (c) a type-7 tag opens no block at all, so the item's column still governs it.
+    leaf = "- a\nx\n  </span>\n> > 2.     Closes #100\n"
+    assert keyword_types(leaf) == {"code_block"}, leaf
+    assert cl.parse_closing_refs(leaf) == [], leaf
