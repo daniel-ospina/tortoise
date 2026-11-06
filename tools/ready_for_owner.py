@@ -23,9 +23,12 @@ each printing PASS/FAIL with the RAW VALUE it read:
                           ``mergeable`` flag (a stale flag is not evidence).
   2. ``gates``            the newest attempt per ``(app.slug, workflow, job)`` for every
                           required ENTRY context, and ``success`` is the ONLY pass.
-                          ``merge_conditions`` names are DEFERRED at a PR head (Mergify
-                          settles them on the queue branch) but still fail it if they
-                          ran here and red — see ``check_gates``.
+                          ``merge_conditions`` names are DEFERRED at a PR head ONLY
+                          when no PR-triggered run of the emitting workflow is on that
+                          head (then Mergify settles them on the queue branch). A name
+                          whose workflow DID run here is graded `MISSING` (pending or
+                          never posted — absence is not deferral) unless it is green, and
+                          an unattributable absence is a FAIL. See ``check_gates``.
   3. ``review``           ``record-review.sh --check-carry`` bound to the LIVE head.
   4. ``coverage``         the CI selection covers the union of the touched files; a
                           hand-picked subset of a declared union is refused.
@@ -69,16 +72,18 @@ rather than assumed:
   that the tree is sound. Absence is not a pass **for an ENTRY context** — the
   fail-closed rule this file shares with ``/v1``-style convergence (see ``docs``/
   ``AGENTS.md`` check-run polarity). A ``merge_conditions`` name absent at the head is a
-  different case and is DEFERRED, not passed: see condition 2 above.
+  different case, and it is DEFERRED **only when nothing shows the emitting workflow ran
+  here** — see condition 2 above for the attributed cases.
 
 The strict direction holds for a MEASURED result, and it is worth stating its edge
 precisely rather than absolutely: this tool never treats ``skipped``/``neutral``/
 ``cancelled``/an unknown conclusion as a pass where ``.mergify.yml``'s ``check-success``
 would refuse, so it cannot allow a merge for a reason the queue would reject. What it does
-NOT claim is that the queue will accept the merge: a ``merge_conditions`` check that has
-not run on the author head is DEFERRED there and settled by Mergify on
-``mergify/merge-queue/<sha>``. READY therefore means *every ENTRY context passed here, and
-no merge-time check measured red here* — never *the queue will merge this*.
+NOT claim is that the queue will accept the merge: a ``merge_conditions`` check whose
+emitting workflow did not run on the author head is DEFERRED there and settled by Mergify on
+``mergify/merge-queue/<sha>`` (one whose workflow DID run here must be green — absence is a
+FAIL). READY therefore means *every ENTRY context passed here, and every merge-time context
+was either measured green here or genuinely deferred* — never *the queue will merge this*.
 
 Grouping is NOT re-derived here
 -------------------------------
@@ -177,11 +182,15 @@ CONDITIONS: tuple[str, ...] = (
 #: The ONLY conclusion that passes a required context. See the module docstring.
 REQUIRED_CONCLUSION = "success"
 
-#: A ``merge_conditions`` name absent at a PR head is DEFERRED, not missing. Mergify
-#: runs those on ``mergify/merge-queue/<sha>``, so absence there is the queue working
-#: as designed — measured 2026-11-04, every sampled PR head carried ZERO
-#: ``python-ci-gate`` runs. Counting it as ``FAIL(missing)`` reports NOT-READY for
-#: every PR forever, which is a false verdict of exactly the kind this tool exists to end.
+#: A ``merge_conditions`` name is DEFERRED at a PR head **only when there is no evidence
+#: its emitting workflow ran here** — Mergify settles those on ``mergify/merge-queue/<sha>``.
+#: ⛔ NOT "absent is deferred": ``python-ci-gate`` DOES report on author PR heads, and a
+#: ``needs``-gated job has no check-run until its prerequisites finish, so an absent
+#: aggregate is indistinguishable from a PENDING one. The 2026-11-04 "every sampled PR head
+#: carried ZERO runs" reading is RETRACTED (`tools/required_set.py`: it was taken while the
+#: matrix was still running) — do not restore the unconditional deferral from it, that was
+#: the fail-open `_merge_time_absence` now closes. Absence with a run of the emitter on this
+#: head is ``MISSING`` (a FAIL); absence with no attribution at all is a FAIL.
 DEFERRED = "DEFERRED(merge-time)"
 
 #: A head younger than this is still settling: CI may not have been scheduled, the
@@ -1482,7 +1491,8 @@ def check_gates(probe: Probe) -> Check:
         groups = by_job.get(context) or []
         if not groups:
             # A required check that is ABSENT is a FAIL, never a skip — for an ENTRY
-            # context. (`merge_conditions` absence is DEFERRED, handled below.)
+            # context. (`merge_conditions` absence is attributed, not deferred on sight —
+            # see `_merge_time_absence` below.)
             failed.append(f"missing:{context}")
             seen.append(f"{context}=MISSING(no check-run on this head)")
             continue
@@ -3072,12 +3082,15 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         # context's ABSENCE, so the fixture door must be able to express both — a fixture
         # that could not would force every absent-merge-time fixture into the
         # UNATTRIBUTABLE arm and make the DEFERRED arm unreachable from `--fixture`.
-        # Same absent-vs-null idiom as `labels`/`required_deferred`: an omitted key is a
-        # pre-attribution fixture (no runs read), an explicit null is "the READ failed".
+        # ⛔ NOT the `labels` idiom. Omitted and explicit null BOTH mean "not read" here
+        # (=> FAIL, unattributable): `()` is not a neutral default, it ASSERTS "read it,
+        # zero runs exist", which is the DEFERRED PASS arm. So a fixture that never spoke
+        # about attribution must not silently exercise the pass arm — a legitimate
+        # DEFERRED is spelled `"head_runs": []`.
         head_runs=(
             None
-            if "head_runs" in data and data["head_runs"] is None
-            else tuple(data.get("head_runs") or ())
+            if "head_runs" not in data or data["head_runs"] is None
+            else tuple(data["head_runs"])
         ),
         merge_emit_files={
             str(name): tuple(files or ())

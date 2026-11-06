@@ -3529,3 +3529,54 @@ def test_a_malformed_run_entry_reaching_attribution_is_skipped_not_a_traceback()
     # No ATTRIBUTABLE run => no evidence the workflow ran here => DEFERRED, and no crash.
     assert gates.passed is True, gates.raw
     assert "DEFERRED(merge-time)" in gates.raw
+
+
+def _fixture_with_head_runs(extra: dict[str, object]) -> dict[str, object]:
+    """The smallest fixture that reaches the merge-time ABSENCE arm."""
+    return {
+        "pr": 10999,
+        "head": HEAD,
+        "tree": True,
+        "required": list(ENTRY_REQUIRED),
+        "required_deferred": list(MERGE_TIME_REQUIRED),
+        "merge_emit_files": {MERGE_TIME_REQUIRED[0]: ["python-ci.yml"]},
+        "groups": [
+            {
+                "job": job,
+                "state": ci_verdict.GROUP_GREEN,
+                "status": "completed",
+                "conclusion": "success",
+                "check_id": 1000 + i,
+            }
+            for i, job in enumerate(ENTRY_REQUIRED)
+        ],
+        **extra,
+    }
+
+
+def test_an_omitted_head_runs_is_unattributable_not_a_deferral() -> None:
+    """★ Omission is "not read", never "read it, zero runs" — the PASS arm.
+
+    `()` is not a neutral default for `head_runs`: it asserts a MEASUREMENT (the listing
+    was read and carried no matching run), which is exactly the DEFERRED/PASS arm. A
+    fixture that never spoke about attribution must therefore land on the fail-closed
+    arm, or the door by which tests construct this state silently exercises the pass.
+    """
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({}))
+    assert probe.head_runs is None, probe.head_runs
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+    assert "UNATTRIBUTABLE" in gates.raw
+
+
+def test_an_explicit_empty_head_runs_still_defers() -> None:
+    """The counterpart: a fixture that DOES state "read it, zero runs" keeps DEFERRED.
+
+    Without this, the pin above could be satisfied by deleting the deferred arm.
+    """
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []}))
+    assert probe.head_runs == ()
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw
