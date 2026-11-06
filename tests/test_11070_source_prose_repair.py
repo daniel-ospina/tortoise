@@ -946,6 +946,14 @@ def test_a_census_runs_on_a_box_that_exports_a_record_dsn(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "census BEFORE: 1" in captured.out
     assert "NOT consulted" in captured.err
+    # ⛔ AND THE REMEDY MUST NAME THE ARM THAT WRITES. This branch fires only on a
+    # census, where the write is `continue`d before the Cypher — so an operator
+    # who follows "pass --record-dsn … to re-derive" and nothing else gets a PLAN
+    # and zero writes (#11152 review P3).
+    assert "NOT written" in captured.err, (
+        "this test is vacuous unless the no-reader warning fired")
+    assert "--repair" in captured.err.split("NOT written")[1], (
+        "the census's own warning offers a remedy that cannot write")
 
 
 def test_the_writing_arm_still_refuses_a_missing_record_scope(monkeypatch,
@@ -1222,6 +1230,85 @@ def test_a_candidate_with_no_usable_url_is_REPORTED_not_silently_dropped():
     assert graph.writes == []
 
 
+def test_the_CLEARED_shape_is_not_a_candidate_again_EITHER():
+    """The body claims both arms are idempotent; only the re-derived one was pinned.
+
+    The clear arm writes `summary=''` with `_searchText` ABSENT (its SET is
+    `coalesce($st, s._searchText)` with `$st` None, and FalkorDB drops a null
+    property), and THAT is the shape nothing fed back into the predicate — the
+    nearest census fixture carried `_searchText=''`, which the module itself calls
+    "a state no writer reaches".
+
+    This is the arm that CANNOT be undone, so its non-candidacy is what makes the
+    irreversibility safe to reason about: if a later edit makes the absent shape a
+    candidate again, a second run re-derives a lexicon over a node whose `topics`
+    are the pre-fix word frequencies, and no test would red (#11152 review P3).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    for cleared in (
+        # the write's own shape: the property is ABSENT after `SET … = null`
+        {"url": "session:s-11070", "sourceKind": "agentSession",
+         "summary": "", "topics": ["friday", "rebuild"]},
+        # …and the row a Cypher read returns for the same node
+        {"url": "session:s-11070", "sourceKind": "agentSession",
+         "summary": "", "_searchText": None, "topics": ["friday", "rebuild"]},
+    ):
+        assert m.carries_pre_lexicon_prose(cleared) is False, (
+            f"the clear arm's own output is a candidate again: {cleared}")
+        assert m.census(_RecordingGraph([(cleared,)])) == 0, (
+            f"a cleared node still counts: {cleared}")
+
+
+def test_a_gap_caused_by_a_REPEATED_index_is_not_blamed_on_the_cache_mark():
+    """`_shortfall` holds a SET; the tail arm must too (#11152 review P2).
+
+    `record_read._shortfall` does `held = {turn.index for turn in turns}` and
+    subtracts `len(held)`, so a repeated index (`s_t01` and `s_t1` both parse to
+    1 — `_turn_index` takes any `int()`-parsable suffix, and
+    `tools/backfill_graph_turns.py` copies ids verbatim) is a GAP there. The
+    module built `held` as a LIST, where `[0, 1, 3, 3]` is contiguous to
+    `max(held) + 1 != len(held)` — so it named the record's own hole and then
+    blamed the cache mark in the next sentence, the round-5 misdiagnosis again.
+    """
+    from tortoise import record_read
+    from tortoise import session_source_prose_migration as m
+
+    # [0, 1, 3, 3]: a GAP to `_shortfall`, contiguous to a list-based check.
+    held = (record_read.Turn(turn_id="t0", index=0, content="[user] a"),
+            record_read.Turn(turn_id="t1", index=1, content="[user] b"),
+            record_read.Turn(turn_id="t3a", index=3, content="[user] c"),
+            record_read.Turn(turn_id="t3b", index=3, content="[user] d"))
+    answer = record_read.TurnAnswer(
+        answered=False, turns=held, turn_count=None,
+        reason=record_read._shortfall(held, None, 5),
+        kind=record_read.TurnAnswer.PARTIAL)
+    assert "no turn row for index" in answer.reason, (
+        "this test is vacuous unless the reason is the GAP arm")
+
+    def fake(conn, *, org_id, graph_id, session_id, turn_max_index=None):
+        return answer
+
+    reader = m.record_turn_reader(object(), org_id="o", graph_id="g")
+
+    class _Patch:
+        def __enter__(s):
+            s._real = record_read.session_turns
+            record_read.session_turns = fake
+
+        def __exit__(s, *exc):
+            record_read.session_turns = s._real
+
+    graph = _RecordingGraph([(_session_node(turn_max_index=5),)])
+    with _Patch():
+        report = m.reconcile_session_source_prose(
+            graph, read_transcript=reader, dry_run=True)
+
+    note = report["notes"]["session:s-11070"]
+    assert "MAY BE THE CACHE'S FAULT" not in note, (
+        "the record reported a gap itself; the cache's mark is irrelevant")
+
+
 def test_a_LEADING_GAP_partial_is_not_blamed_on_the_cache_mark():
     """⛔ `_shortfall`'s gap arm measures from ZERO, not from `min(held)`.
 
@@ -1485,6 +1572,85 @@ def test_the_flag_still_drops_the_inherited_dsn_when_NO_scope_is_typed(
     assert len(graph.writes) == 1
     assert graph.writes[0][1]["sum"] == "", (
         "the by-name clear arm did not clear where no scope was typed")
+
+
+@pytest.mark.parametrize("half_argv", [
+    ["--org-id", "org_x"],          # --graph-id forgotten (a typo)
+    ["--graph-id", "gx"],           # --org-id forgotten
+])
+def test_a_HALF_typed_scope_REFUSES_instead_of_clearing_everything(
+        monkeypatch, capsys, half_argv):
+    """⛔ A forgotten half must not select the destructive arm (#11152 P1).
+
+    `typed_scope_here` required BOTH halves, so a half scope counted as NO scope:
+    with ONE half typed and the other forgotten, a `--clear-without-record` run
+    DISCARDED the inherited `TORTOISE_RECORD_DSN`, never opened the record, and
+    CLEARED every candidate — exit 0 — while the identical half scope with a
+    TYPED `--record-dsn` was refused with exit 2. The omission picked the
+    destructive arm, and the record was never asked.
+    """
+    _export_a_record_dsn(monkeypatch)          # inherited DSN only
+    graph = _RecordingGraph([(_session_node(),)])
+    _install_cli(monkeypatch, graph, ["--repair", *half_argv,
+                                      "--clear-without-record"])
+
+    code = _cli.main()
+    err = capsys.readouterr().err
+    assert code == 2, (
+        "a half-typed scope must REFUSE, not degrade to clear-everything")
+    assert "requires BOTH --org-id and --graph-id" in err
+    assert graph.writes == [], (
+        "the half scope cleared every candidate instead of refusing")
+
+
+def test_a_census_with_an_UNUSABLE_record_dsn_EXITS_instead_of_tracebacking(
+        monkeypatch, capsys):
+    """The runbook's step 3 must not die with a traceback (#11152 review P2).
+
+    `open_record` sat OUTSIDE any `try`, so `--dry-run --assert-clean --org-id X
+    --graph-id Y` on a box whose exported `TORTOISE_RECORD_DSN` is unusable
+    raised `RecordServeError` out of `main()` — no census, no exit code, on the
+    VERIFICATION step. A verification step that cannot run cannot fail.
+
+    The real door is used here (no fake): a non-Postgres DSN is refused by
+    `record_writer.record_dsn` BEFORE any connection is attempted, so this case
+    dials nothing.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:x@127.0.0.1:1/none")
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "sqlite:///not-postgres.db")
+    monkeypatch.delenv("TORTOISE_ORG_ID", raising=False)
+    monkeypatch.setattr(sys, "argv", [
+        _CLI_PATH.name, "--dry-run", "--assert-clean",
+        "--org-id", "org_x", "--graph-id", "gx"])
+
+    code = _cli.main()                     # must RETURN, not raise
+
+    err = capsys.readouterr().err
+    assert code == 2, "an unusable record DSN is a misconfiguration, not a crash"
+    assert "could not be opened" in err
+    assert "Traceback" not in err
+
+
+def test_the_help_text_does_NOT_promise_the_clear_arm_is_recoverable():
+    """`--help` is `description=__doc__`; an operator acts on it (#11152 P1).
+
+    It read "…un-findable through the Source FTS index **until a run WITH the
+    record re-derives it**", which the NEXT sentence in the same paragraph
+    contradicted. `_derive(None)` writes `summary=''` with `_searchText` ABSENT,
+    which `carries_pre_lexicon_prose` rejects at its blank check — so no later
+    run selects the node again, `record-restore` declines `_searchText` for a
+    pre-fix row, a re-capture is the #1727 no-op, and the CLI has no `--url`.
+    """
+    doc = " ".join((_cli.__doc__ or "").split())
+    assert "until a run WITH the record" not in doc, (
+        "--help still promises a later recorded run re-derives a cleared node")
+    assert "PERMANENTLY" in doc and "NOTHING re-derives it" in doc, (
+        "--help does not state that the clear arm's effect is permanent")
+    # …and the claim is false for a measurable reason, not a stylistic one.
+    from tortoise import session_source_prose_migration as m
+
+    assert m.carries_pre_lexicon_prose(
+        {"url": "session:x", "summary": "", "topics": ["a"]}) is False
 
 
 def test_an_EMPTY_graph_name_is_refused_at_the_boundary(monkeypatch, capsys):

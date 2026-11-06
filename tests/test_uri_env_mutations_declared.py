@@ -557,6 +557,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # monkeypatch auto-restores at teardown (no lane leak).
     "test_4125_legacy_session_source_migration.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*\w+\)'],
+    # #11070: the operator-CLI arms are driven against a deliberately UNREACHABLE
+    # docker URI — `open_projection` is faked at both sites, so the value is a
+    # placeholder that is never dialled, not a lane choice. Two sites, one intent.
+    # DELIBERATE_URI.
+    "test_11070_source_prose_repair.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@127\.0\.0\.1:1/none"\)'],
     "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      # the URI literal sits on the FOLLOWING line at
                                      # :251 (`setenv(` then the string), so the site's
@@ -846,6 +852,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # process and asserts a REFUSAL, never a measurement.
     "test_7949_capstone_measure.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:@127\.0\.0\.1:1/'],
+    # #11112/#11113 `turn_parity_census`: the FOUR sites here are the helpers that
+    # build a REAL embedded store (`_embedded_store_with_tortoise`, its EMPTY
+    # twin — a default bind, i.e. one `(:Meta)` and ZERO Points, nothing seeded
+    # and nothing drained — the TWO-graph fixture the `--expect-empty` LIMIT pin
+    # needs, and the NO-node fixture the lost-store refusal needs), so the
+    # presence pre-check, the write-freedom pins and the lost-store arm can be
+    # measured against a real `GRAPH.LIST` (a fake cannot show that a typo'd
+    # `--graph-name` mints `tortise`, nor that `ensure_indexes=False` alone still
+    # does, nor that a 0-total-node store reads as LOST) — the embedded
+    # lane is the test's SUBJECT, not a fallback, and the ambient URI has to be
+    # out of the way or the epic-#1647 redirect would retarget an explicit
+    # `--db-path` run onto the docker lane. DELIBERATE_EMBEDDED_LANE: nothing
+    # here claims a docker-half green — the embedded store IS the measurement and
+    # no server is ever dialled. Function-scoped `monkeypatch`, auto-undone at
+    # teardown, so no lane flip reaches a later test.
+    "test_10017_turn_parity_census.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

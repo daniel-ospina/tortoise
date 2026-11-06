@@ -66,8 +66,18 @@ happens to be exported is a verification that cannot fail. Requiring a scope on
 every arm made steps 1 and 3 unrunnable on the very deployment they target
 (``TORTOISE_RECORD_DSN`` is exported there, which is most boxes), and the only
 escape the error offered was ``--clear-without-record`` — the flag that
-authorises clearing. So on a census the record is simply NOT OPENED, and the run
-says so on stderr.
+authorises clearing. So a census does not open the record UNLESS a scope is
+supplied, and it says which of the two happened on stderr.
+
+⛔ THE CLEAR ARM IS NOT RECOVERABLE, AND THE HELP MUST NOT SAY IT IS. It leaves
+the session un-findable through the Source FTS index PERMANENTLY — the cleared
+node stops matching this census (``summary=''`` with ``_searchText`` ABSENT, which
+``carries_pre_lexicon_prose`` rejects at its blank check), so NOTHING re-derives
+it: not a later run WITH the record (the node is no longer a candidate), not
+``record-restore`` (it declines ``_searchText`` for a pre-fix row), not a
+re-capture (the #1727 no-op), and this CLI has no ``--url`` to target it. Because
+that arm is destructive and not self-correcting (the second run finds no
+candidates), it must be asked for BY NAME: ``--clear-without-record``.
 
 ⛔ PRESENCE IS NOT PROOF, so the writing arm also judges the ANSWER: if the
 record was asked about N sessions and answered for NONE of them, that is what a
@@ -79,10 +89,7 @@ record answered for nobody, check your scope".
 
 The clear-only arm (no record) is CORRECT for §9.1/D1 — the prose does not belong
 on a node — but a replay engine's trailing sweep does NOT take it (that sweep is
-plan-only and writes nothing), and it leaves the session un-findable through the
-Source FTS index until a run WITH the record re-derives it. Because that arm is
-destructive and not self-correcting (the second run finds no candidates), it
-must be asked for BY NAME: ``--clear-without-record``. ⛔ That is enforced
+plan-only and writes nothing). The by-name gate is enforced
 PER NODE, not on whether a DSN string was supplied (#11152 review P2): a DSN
 with an empty or wrong scope satisfies "a DSN exists" while the record answers
 for NOBODY, and a gate keyed on the string alone would take the clear arm for
@@ -228,14 +235,25 @@ def main() -> int:
     # not", which is what the flag's own help promises (#11152 round 8, P1).
     # Dropping the inherited DSN in that case opened no record at all and cleared
     # every candidate, including ones the record could have re-derived.
-    typed_scope_here = bool((args.org_id or os.environ.get("TORTOISE_ORG_ID"))
-                            and args.graph_id)
+    # ⛔ `--org-id ""` SUPPRESSES an exported `TORTOISE_ORG_ID`, exactly as
+    # `--record-dsn ""` suppresses an exported DSN — `is not None`, not
+    # truthiness. The env fallback is load-bearing for the scope check below, so
+    # "I typed nothing on purpose" has to be expressible (#11152 review P3).
+    org_id = (args.org_id if args.org_id is not None
+              else os.environ.get("TORTOISE_ORG_ID", ""))
+    graph_id = args.graph_id
+    # ⛔ ANY HALF TYPED IS SCOPE INTENT — requiring BOTH here made a half scope
+    # read as NO scope (#11152 review, P1). With ONE half typed and the other
+    # forgotten (a typo), a `--clear-without-record` run DISCARDED the inherited
+    # `TORTOISE_RECORD_DSN`, never opened the record, and CLEARED every
+    # candidate — while the identical half scope with a TYPED `--record-dsn` was
+    # refused with exit 2. The omission must not pick the destructive arm: it
+    # falls into the scope refusal below instead.
+    typed_scope_here = bool(org_id or graph_id)
     drop_inherited = (args.clear_without_record and not explicit_dsn
                       and not typed_scope_here)
     if drop_inherited:
         record_dsn = ""
-    org_id = args.org_id or os.environ.get("TORTOISE_ORG_ID", "")
-    graph_id = args.graph_id
     record_conn = None
     # Replaced by the projection's OWN name once one is opened (see `report["graph"]`).
     actual_graph = graph_name
@@ -295,9 +313,22 @@ def main() -> int:
         # anywhere, so a raw `import psycopg` made this arm — the only one that
         # can re-derive a lexicon — raise ModuleNotFoundError on every
         # deployment (review, P1).
-        from tortoise.record_serve import open_record
+        from tortoise.record_serve import RecordServeError, open_record
 
-        record_conn = open_record(record_dsn)
+        # ⛔ A REFUSED/UNREACHABLE DSN IS THIS TOOL'S EXIT CODE, NOT A TRACEBACK.
+        # `open_record` used to sit outside any `try`, so the runbook's step 3 on
+        # a box whose exported `TORTOISE_RECORD_DSN` is unusable raised straight
+        # out of `main()` — no census, no exit code, on the VERIFICATION step.
+        # A verification step that cannot run cannot fail (#11152 review P2).
+        try:
+            record_conn = open_record(record_dsn)
+        except RecordServeError as exc:
+            print(f"ERROR: the record could not be opened ({exc}).\n"
+                  f"       Nothing was read and NOTHING WAS WRITTEN. Fix the "
+                  f"DSN (--record-dsn / TORTOISE_RECORD_DSN), or run a census "
+                  f"WITHOUT a scope — without one the record is not consulted.",
+                  file=sys.stderr)
+            return 2
         read_transcript = record_turn_reader(
             record_conn, org_id=org_id, graph_id=graph_id)
 
@@ -418,9 +449,10 @@ def main() -> int:
             print(f"⚠️ {len(report['left_alone'])} candidate(s) were NOT written: "
                   f"no record was consulted, so no lexicon could be re-derived "
                   f"(this is a CENSUS). Clearing is irreversible — a second run "
-                  f"cannot find the node to re-derive it. Pass --record-dsn with "
-                  f"--org-id/--graph-id to re-derive, or --clear-without-record "
-                  f"to take the clear-only arm deliberately.", file=sys.stderr)
+                  f"cannot find the node to re-derive it. Re-run with --repair "
+                  f"--record-dsn and --org-id/--graph-id to re-derive (a census "
+                  f"only PLANS), or --clear-without-record to take the "
+                  f"clear-only arm deliberately.", file=sys.stderr)
         else:
             print(f"⚠️ {len(report['left_alone'])} candidate(s) were NOT written: "
                   f"the record could not supply a replacement, and clearing is "
