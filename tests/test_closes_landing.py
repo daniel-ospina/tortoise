@@ -4132,3 +4132,134 @@ def test_a_quote_only_line_is_BLANK_CONTENT_and_ends_the_block():
                  ">  <div>\n> -     Closes #100\n"):
         assert token_type(body) == "html_block", body
         assert cl.parse_closing_refs(body) == [100], body
+
+
+def test_a_content_blank_line_pops_ONLY_the_item_it_is_not_inside_of():
+    """Round 46 review (P1 x2) — the pop guard the parent commit added was over-broad, twice over.
+
+    A quote-only line carries no CONTENT, so it opens no item and continues no paragraph — but
+    "blank" is not one question. It is blank INSIDE an item when, after consuming the markers the
+    item's own container holds, nothing remains: §5.2 lets an item hold blank lines at any column,
+    so `> - a` + `>` keeps the `<li>`. It is NOT blank inside an item whose container it left:
+    `- a` + `>` opens a new top-level blockquote, which ENDS the item.
+
+    Two consequences of treating every content-blank line as "no dedent at all", both measured:
+
+      * FAIL-OPEN. With the item still on the stack, the fence in `- a` + `>` + ` ``` ` bound at
+        the dead item's content column, so the column-0 claim was read as a fence-ending DEDENT and
+        then re-examined as fresh prose — credited in BOTH arms (renderer `fence`).
+      * CRASH. The per-line reset (round 38) was gated on `line.strip()`, which a quote-only line
+        passes, so the previous line's `pushed=True` survived onto `>     `; the `indent_code`
+        branch then popped the item the flag referred to, twice, and raised `IndexError: pop from
+        empty list` in `strict=True` and `indented_code=True`.
+
+    (`sweep()` has no per-PR guard, so the crash aborts `--sweep` for EVERY PR — round 38's
+    recorded consequence, which is why a second route to it is a P1 and not a papercut.)
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    fail_opens = ("- a\n>\n  ```\nCloses #100\n",
+                  "- [ ] a\n>\n  ```\nCloses #100\n",
+                  # …and the same shape with the item already inside a quote, where the blanket
+                  # guard left the item alive AND the fence inherited its content column.
+                  "> - a\n>\n  ```\nCloses #100\n",
+                  "> - a\n>\n    ```\n  ```\nCloses #100\n")
+    for body in fail_opens:
+        assert token_type(body) == "fence", body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # The CRASH: no exception in ANY of the four modes, and the same text `origin/main` produces
+    # (the blank lines are code in the two width-aware modes, prose in the lenient arm).
+    crashes = (("- a\n>     \n>     \n", "- a\n\n", "- a\n>     \n>     "),
+               ("- [ ] b\n>      \n>      \n", "- [ ] b\n\n", "- [ ] b\n>      \n>      "),
+               ("> - a\n>\n>     \n>     \n", "> - a\n>\n\n", "> - a\n>\n>     \n>     "))
+    for body, blanked, kept in crashes:
+        for kw in ({"strict": True}, {"indented_code": True},
+                   {"strict": True, "indented_code": True}):
+            assert cl.strip_code(body, **kw) == blanked, (body, kw)
+        assert cl.strip_code(body) == kept, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # CONTROLS — a blank line inside the item's own container does NOT end the item, and the claim
+    # below it is still a claim (renderer: one `<li>`, prose).
+    for body in ("> - a\n>\n>   Closes #100\n",
+                 "> - a\n>  \n>   Closes #100\n",
+                 "- a\n>\n  Closes #100\n"):
+        assert cl.parse_closing_refs(body) == [100], body
+
+
+def test_a_quote_only_line_is_NOT_blank_for_the_HTML_BLOCK_that_holds_it():
+    """Round 46 review (P2) — 180 lost closes per opener family, against `origin/main` (F3).
+
+    §4.6 ends a type-6/7 HTML block at a blank line, and the parent commit tested `rest.strip()`.
+    `rest` cannot answer it: `_split_prefix` consumes EVERY `>` in a prefix, so at depth 1 the line
+    `> >` reads as an EMPTY `rest` and ended a block that the `>` — the block's own TEXT, because an
+    HTML block is a LEAF — keeps open. The blank test consumes at most the markers the BLOCK's
+    container holds (the same reader the fence edges use), so:
+
+        `<div>` + `>` + `-     Closes #100`            renderer ONE `html_block`, `[100]`
+        `> <div>` + `> >` + `> -     Closes #100`      the second `>` is text — same
+
+    and a `>` that really is blank (`> <span>` + `>` at depth 1) still ends the block, which is the
+    fail-open the test above pins.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_types(body: str) -> list[str]:
+        return [t.type for t in md.parse(body)]
+
+    kept = ("<div>\n>\n-     Closes #100\n",
+            "<pre>\n>\n-     Closes #100\n",
+            "> <div>\n> >\n> -     Closes #100\n",
+            "> <pre>\n>  >\n> -     Closes #100\n")
+    for body in kept:
+        assert "html_block" in token_types(body), body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # CONTROL — the `>` that IS blank for the block still ends it, and the claim under it is a
+    # renderer `code_block`, so it must NOT be credited (the fail-open direction).
+    ended = "> <span>\n>\n> -     Closes #100\n"
+    assert "code_block" in token_types(ended), ended
+    assert cl.parse_closing_refs(ended) == [], ended
+    assert cl.parse_closing_refs(ended, None, strict=True) == [], ended
+
+
+def test_an_HTML_block_reads_its_own_fence_shaped_lines_as_TEXT():
+    """Round 46 review (P2) — the leaf rule reaches the FENCE path too.
+
+    An HTML block's own text is READ, not hidden (the module's round-43 rule), so a ``` inside one
+    opens nothing and hides nothing. Tracked as a fence anyway, a fence-shaped line inside a type 1-5
+    block (whose closer never arrives) swallowed the claim the renderer keeps as HTML text:
+
+        `<?php` + blank + `> - ``` ` + `  ``` ` + `Closes #100`   renderer ONE `html_block`
+
+    This one is a REGRESSION GUARD, not a pre-fix bug: `origin/main` and the pre-fix head both credit
+    these bodies. It goes red on the variant of THIS fix that narrowed `_fence_candidate` without
+    also refusing fences inside an open HTML block — measured at 90 lost closes on the review grid —
+    so the two halves of the fence change cannot drift apart later.
+    """
+    md = MarkdownIt("commonmark")
+
+    for body in ("<?php\n\n> - ```\n  ```\nCloses #100\n",
+                 "<pre>\n\n> - ```\n  ```\nCloses #100\n",
+                 "<!-- c\n\n> - ```\n  ```\nCloses #100\n",
+                 "<![CDATA[\n\n> - ```\n  ```\nCloses #100\n"):
+        assert [t.type for t in md.parse(body)] == ["html_block"], body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # …and inside a blockquote (the markers the block's container holds are consumed, the extra
+    # `>` in `> - ``` ` is the block's text).
+    quoted = "> <?php\n>\n> - ```\n>   ```\n> Closes #100\n"
+    assert [t.type for t in md.parse(quoted)] == ["blockquote_open", "html_block", "blockquote_close"]
+    assert cl.parse_closing_refs(quoted) == [100], quoted
+    assert cl.parse_closing_refs(quoted, None, strict=True) == [100], quoted

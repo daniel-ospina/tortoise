@@ -782,6 +782,53 @@ def _item_dedented(line: str, item: _ListItem) -> bool:
     return residual < item.rest_col
 
 
+def _item_ends_on_blank(line: str, item: _ListItem) -> bool:
+    """Does a CONTENT-BLANK line dedent out of `item` — so the item, and its fence, END?
+
+    ⛔ "BLANK LINE" IS NOT ONE QUESTION (round 46 review, P1 — a fail-open this module produced
+    while fixing a lost close one shape over). A blank line never ends an item that CONTAINS it:
+    §5.2 lets an item hold blank lines at any column, so `> - a` + `>` keeps the `<li>` open. But a
+    content-blank line that is NOT blank in the item's own space carries container markers of its
+    own, and those can place it left of the item's content column — `- a` + `>` opens a NEW
+    top-level blockquote, which ends the item:
+
+        `- a` + `>` + `  ``` ` + `Closes #100`
+            renderer `<ul><li>a</li></ul><blockquote></blockquote><pre><code>…`
+            with the item left on the stack the fence bound at the item's content column, the
+            column-0 `Closes #100` read as a fence-ending dedent, and the claim was CREDITED
+
+    The test is the item's OWN space: consume at most `item.depth` markers (the same consumption
+    `_item_dedented` measures in) and ask whether what remains is blank. If it is, the line is a
+    blank line inside the item's container and the item survives; if it is not, the usual column
+    dedent decides, which is what this returns.
+    """
+    consumed, _residual, column = _fence_line_column(line, item.depth)
+    if consumed >= item.depth and not line[column:].strip():
+        return False
+    return _item_dedented(line, item)
+
+
+def _html_block_ended_by_blank(line: str, depth: int) -> bool:
+    """Is `line` a BLANK LINE for an HTML block living at quote `depth`?
+
+    ⛔ §4.6 ENDS TYPES 6/7 AT A BLANK LINE, AND "BLANK" IS MEASURED IN THE BLOCK'S OWN CONTAINER
+    (round 46 review, P2 — 180 lost closes per opener family, against `origin/main`). An HTML block
+    is a LEAF block: everything it consumes is its own literal TEXT, so a `>` past the depth the
+    block opened at is text, not a marker, and the line is not blank:
+
+        `<div>` + `>` + `-     Closes #100`   renderer ONE `html_block`, `origin/main` `[100]`
+        `> <div>` + `> >` + `> -     Closes #100`   the second `>` is text — same, `[100]`
+
+    `rest` cannot answer it: `_split_prefix` consumes EVERY marker, so at depth 1 the line `> >`
+    reads as an empty `rest` and ended the block. Consuming at most the block's own `depth` markers
+    (`_fence_line_column`, the same reader the fence edges use) leaves the `>` where it belongs —
+    in the content — and `>` alone still ends it at depth 1 while a raw-blank line ends it at any
+    depth.
+    """
+    _consumed, _residual, column = _fence_line_column(line, depth)
+    return not line[column:].strip()
+
+
 def _content_column(rest: str) -> int | None:
     """The list item's CONTENT column in `rest` space, or None if this line starts no item.
 
@@ -1193,15 +1240,42 @@ def _fence_candidate(prefix: str, rest: str,
         return _Fence(opener, prefix, 0, False)
     enclosing = list_items[-1]
     if enclosing.depth == depth:
-        # SAME container: the item's column is already a `rest` column, so the
-        # dedent is measured with it directly and no raw number is needed.
+        # SAME container: the item's column is already a `rest` column, so the dedent is measured
+        # with it directly and no raw number is needed.
         opener = _fence_open(rest, enclosing.rest_col)
         if opener is None:
             return None
-        return _Fence(opener, prefix, enclosing.rest_col, True, 0,
-                      enclosing.depth)
-    # The item is OUTSIDE the fence's blockquote, so it is matched BEFORE the
-    # quote's markers and its edge is the RAW column (`item_col_raw`).
+        return _Fence(opener, prefix, enclosing.rest_col, True, 0, enclosing.depth)
+    if enclosing.depth > depth:
+        # ⛔ A FENCE IS A BLOCK START, SO IT CANNOT CONTINUE AN ITEM FROM A CONTAINER IT DROPPED
+        # (round 46 review, P1 — the fail-open half of the pop change). A line whose blockquote
+        # depth is SHALLOWER than the item's has left the container that holds the item: LAZY
+        # CONTINUATION is the only way a line belongs to a container whose markers it dropped, and a
+        # fence INTERRUPTS a paragraph, so it is never that. Binding the fence to the item measured
+        # the block's closing dedent from a column the item no longer had:
+        #
+        #     `> - a` + `>` + `  ``` ` + `Closes #100`
+        #         renderer puts the fence at TOP level (`<blockquote>…</blockquote><pre>`)
+        #         bound to the item (close_base 2) the column-0 line ended the fence and the
+        #         keyword was then re-read as PROSE -> CREDITED
+        #     `> - <div>` + blank + `    ``` ` + `  ``` ` + `Closes #100`
+        #         the same binding let a 4-space line be a fence at the item's content column, where
+        #         the renderer makes it an INDENTED CODE block; the next line then closed the phantom
+        #         fence and was credited
+        #
+        # ⛔ THE SUBTRAHEND IN THE BRANCH BELOW IS A MARKER CONVERSION (`rest_col - len(prefix)`): it
+        # is only a conversion when the line carries the item's own markers. A line that dropped them
+        # is measured from ITS container's content column, which is 0 in its own `rest` space — the
+        # same reasoning `_fence_line_column` uses for the fence's own edges.
+        opener = _fence_open(rest, 0)
+        if opener is None:
+            return None
+        return _Fence(opener, prefix, 0, False)
+    # The item is OUTSIDE the fence's blockquote (the line ADDED markers), so it is matched BEFORE
+    # the quote's markers and its edge is the RAW column (`item_col_raw`):
+    #     `- item` + `  > ``` ` + `> > Closes #100`   the fence's quote is not the item's, and the
+    #     item still ends it — the claim is measured 0 < 2 in the item's raw column, so #100 is
+    #     prose (`[100]`).
     residual_col = max(0, enclosing.rest_col - len(prefix))
     opener = _fence_open(rest, residual_col)
     if opener is None:
@@ -1439,20 +1513,31 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # A crash is not a narrow blast radius in this tool: `sweep()` has no per-PR guard, so one
         # such body aborts `--sweep` for EVERY PR and the run exits 1 against a documented 0/3/2
         # contract. Reset at the top of the iteration, which is where "this line's own" begins.
-        if not line.strip():
+        # ⛔ THE RESET IS "NO CONTENT", NOT "NO RAW BYTES" (round 46 review, P1 — a CRASH, and one
+        # shape over from round 38's). A quote-only line (`>`, `>     `) is non-empty as a raw line
+        # and empty of CONTENT, so `line.strip()` let the PREVIOUS line's `pushed=True` survive onto
+        # it — and the `indent_code` branch then popped the item the flag referred to, twice:
+        #     `- a` + `>     ` + `>     `   strict=True -> IndexError: pop from empty list
+        # Round 38's fix was right about WHICH state is per-line and wrong about which lines reset
+        # it; the space both ask in is `rest`.
+        if not rest.strip():
             pushed = False
             container = None
             own_gap = 0
             _lazy_push = False
-        # ⛔ A BLANK LINE IS BLANK CONTENT, NOT A DEDENT (round 46 review, P1 — a fail-open that swept
-        # in 350,316 bodies). A quote-only line (`>`, `>  `, `> >`) is NON-EMPTY as a raw line but
-        # carries no content after its container prefixes, so `_item_dedented` read it as a dedent,
-        # popped the item — and the HTML block that opened next bound to `None` and could never end.
-        # §4.6 ends types 6/7 at a blank line, which is what `rest.strip()` decides; the pop needs
-        # the same test.
-        if line.strip() and rest.strip():
-            while list_items and _item_dedented(line, list_items[-1]):
+        # ⛔ A BLANK LINE IS BLANK CONTENT, NOT A DEDENT — BUT IT IS STILL A DEDENT QUESTION (round 46
+        # review, P1, fail-open). A quote-only line (`>`, `>  `, `> >`) carries no content after its
+        # container prefixes, so it can never open an item and never continues a paragraph. It CAN
+        # still end one: whether it does depends on whether it is blank INSIDE the item's container
+        # or left it — `_item_ends_on_blank`, not "is the line blank". Suppressing the pop for every
+        # content-blank line kept `- a`'s item alive through a `>`, and the fence that opened next
+        # inherited the dead item's content column.
+        if line.strip():
+            while list_items and (
+                    _item_dedented(line, list_items[-1]) if rest.strip()
+                    else _item_ends_on_blank(line, list_items[-1])):
                 list_items.pop()
+        if line.strip() and rest.strip():
             # The container THIS line sits in, captured BEFORE the line can push its own
             # item: an indented code block's first line is very often itself a list marker
             # (`    - [ ] x`), and reading the stack after the push measures that line
@@ -1495,7 +1580,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 if html_closer:
                     if html_closer.lower() in rest.lower():
                         html_closer = None    # types 1-5: this line carries the block's own closer
-                elif not rest.strip():
+                elif _html_block_ended_by_blank(line, html_depth):
                     _html_here = False        # types 6/7: the next blank line ends the block
                     html_closer = None
         else:
@@ -1508,7 +1593,12 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 html_depth = _quote_depth(prefix)
                 _html_here = True
                 html_closer = None if (_opened and _opened.lower() in rest.lower()) else _opened
-        fence = _fence_candidate(prefix, rest, list_items)
+        # ⛔ AN HTML BLOCK IS A LEAF, SO ITS OWN LINES ARE TEXT AND A ``` INSIDE ONE OPENS NOTHING
+        # (round 46 review, P2 — the same rule that makes the block's text READ, applied to the
+        # fence path). Tracked as a fence anyway, a `` ``` ``-shaped line inside a type 1-5 block
+        # (whose closer never arrives) hid a claim the renderer keeps as HTML text:
+        #     `<?php` + blank + `> - ``` ` + `  ``` ` + `Closes #100`   renderer ONE `html_block`
+        fence = None if _html_here else _fence_candidate(prefix, rest, list_items)
         if fence:
             hidden_lines = 0
             out.append("")
