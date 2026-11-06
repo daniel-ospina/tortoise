@@ -1920,7 +1920,8 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         # door stayed shut. Not reachable through today's writer
         # (`record_projection` classifies `story_arc` as a COLUMN, so it never
         # reaches the tail) — filtered rather than assumed, exactly as the
-        # episodic pair is two blocks down.
+        # episodic pair is one block below (the tail's declined names are popped
+        # in the same seed).
         # ⚠️ BOTH SPELLINGS. `forbidden` holds RECORD COLUMN names and the tail
         # is keyed by GRAPH PROPERTY names, which coincide only for a column the
         # placement table spells one way. Five columns in this projection are
@@ -1993,7 +1994,8 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             # reading a `story_arc` drop is told the column is derived, which is
             # false (§9.1/D1 makes it authority the record keeps). The operative
             # denies are `projected_columns` for the column and the TAIL filter
-            # below for the open set — and the tail filter IS load-bearing
+            # ABOVE (in the seed) for the open set — and the tail filter IS
+            # load-bearing
             # (deleting it reds `test_the_record_restore_writes_no_story_arc…`).
             continue
         if column in projected:

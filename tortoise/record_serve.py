@@ -1163,13 +1163,25 @@ def parity_difference(cache_props: Mapping[str, Any],
         cache_forbidden_columns,
         episodic_source_declined_properties,
         is_episodic_source_node,
+        placement_spellings,
     )
 
     table = NODE_TABLES.get(label)
     if table is None:
         raise RecordServeError(f"{label!r} has no record table")
     refused = _refused(table)
-    not_projectable = cache_forbidden_columns(table)
+    # ⚠️ WIDENED through the placement table, because the loop below compares
+    # GRAPH property names (`cache_props` keys) while `CACHE_FORBIDDEN_COLUMNS`
+    # holds RECORD COLUMN names — the contract
+    # :func:`cache_projection.cache_forbidden_columns` states and the `props`-tail
+    # filter honours. Today's one entry (`story_arc`) spells one way, so this
+    # changes no behaviour; it is here so a forbidden AMBIGUOUS column cannot be
+    # explained at the tail door and reported as a projection gap HERE, which
+    # would tell an operator to re-project the very field the deny keeps out.
+    not_projectable = cache_forbidden_columns(table) | {
+        spelled for column in cache_forbidden_columns(table)
+        for spelled in placement_spellings().get(table, {}).get(column, ())
+    }
     defaults = FOLD_ON_CREATE_DEFAULTS.get(label, {})
     # #10853's declared decline, resolved ONCE per comparison and only for a
     # Source: the set is graph-property names AND the raw column spellings, read

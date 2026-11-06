@@ -577,6 +577,22 @@ def test_a_not_projectable_column_is_EXPLAINED_and_not_a_projection_gap():
     # The explanation is the DECLARATION's, not a list curated here.
     assert set(diff.explained_missing) <= cache_forbidden_columns("source")
 
+    # ⚠️ AND IT IS SPELLED IN GRAPH VOCABULARY, not column vocabulary: every
+    # spelling the placement table declares for a forbidden column is explained.
+    # Non-vacuous for the future rather than today — `story_arc` spells one way,
+    # so this leg passes on a set of one; its job is to red the moment a
+    # forbidden AMBIGUOUS column (`ambiguities()`) is explained at the
+    # `props`-tail door but reported as a projection gap here, the shape that
+    # arrives the day `CACHE_FORBIDDEN_COLUMNS` grows a second entry.
+    from tortoise.cache_projection import placement_spellings
+
+    for column in cache_forbidden_columns("source"):
+        for spelled in placement_spellings().get("source", {}).get(column, ()):
+            only_cache = rs.parity_difference({spelled: prose}, {"url": "u"},
+                                              label="Source")
+            assert spelled in only_cache.explained_missing, (spelled,
+                                                            only_cache.as_dict())
+
     # …and the amnesty is exactly that class, not every absence.
     gap = rs.parity_difference({"url": "u", "unexplained_prop": "x"},
                                {"url": "u"}, label="Source")
