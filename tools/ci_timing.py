@@ -3365,7 +3365,24 @@ def integrity_problems(manifest_text: str) -> list[str]:
                 + red
                 + cs.carve_shard_issues(manifest)
                 + cs.slow_shard_issues(manifest)
-                + cs.watchdog_headroom_issues(manifest))
+                + cs.watchdog_headroom_issues(manifest)
+                # #10726 review: the DUPLICATE-KEY walk must run on this side too.
+                # `config/ci-surfaces.yml` is `merge=union`, so a replay can leave the
+                # same mapping key in the file twice. The shape that actually REACHES
+                # this writer is a duplicated TOP-LEVEL `durations:` key: the renderer
+                # does not see it (`_locate_durations_block` stops at the first block's
+                # end) and emits BOTH blocks, while `validate_refreshed_manifest` does
+                # not report it either — so without this term the refresh writes a
+                # manifest the required `manifest-integrity` job reds. (A duplicated
+                # `.durations:` ROW is already refused earlier, by
+                # `_locate_durations_block`'s own duplicate check — measured: it raises
+                # `DurationsBridgeError`; that shape cannot reach the write.)
+                # It is graded on `manifest_text` (the document about to be written)
+                # rather than on the path, which is a deliberate design choice and NOT
+                # the only possible one: in the reachable shape the duplicate is already
+                # in the input file, so a path-based composition would also catch it.
+                + cs.duplicate_mapping_key_issues(
+                    text=manifest_text, shown="refreshed manifest"))
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
     problems += wf_issues
     if not wf_issues:
