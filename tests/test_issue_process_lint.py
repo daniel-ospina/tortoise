@@ -1659,3 +1659,112 @@ def test_the_flags_do_not_call_a_cap_a_population(capsys):
     doc = (ROOT / "docs" / "ops" / "ISSUE-WORKING-PROCESS.md").read_text(encoding="utf-8")
     assert "every open PR" not in doc
     assert "a CAP, not the population" in doc
+
+
+# --- review round 20 (the merge head): the separator, the reason tail, and the PR's own state -----
+# The review at `0b6cb52ca4c5` (the post-merge head) returned four findings; three were defects in
+# THIS grammar and one was the merge resolution in `tests/test_ci_selection.py`. Each case below is
+# pinned as a PAIR — the shape that must flag and the control that must not — for the reason rounds
+# 13-19 recorded: every previous round moved one direction of error and traded it for the other.
+
+
+@pytest.mark.parametrize("body,unresolved,why", [
+    ("Part of #10543 — reverses the recorded #10119 trade.\n\n"
+     "The arm was added to close. #10543 is the issue this PR serves.\n",
+     10543, "a sentence-final verb plus a full stop"),
+    ("Refs #100\n\nCloses. #100 remains open.\n", 100, "a full stop after the closing word"),
+    ("Refs #100\n\nCloses (#100)\n", 100, "a parenthetical after the closing word"),
+    ("Refs #100\n\nCloses — #100 is the umbrella.\n", 100, "an em dash after the closing word"),
+    ("Refs #100\n\nCloses, #100 remains open.\n", 100, "a comma after the closing word"),
+])
+def test_a_closing_word_must_be_ADJACENT_like_githubs_own_grammar(body, unresolved, why):
+    """Measured at the merge head `0b6cb52ca4c5` (review round 20, P1) — the FALSE PASS direction.
+
+    Round 5 narrowed the WINDOW between a resolving word and its `#` and left the separator's CLASS
+    carrying every clause end. So a sentence-final verb plus punctuation manufactured a closing
+    resolution and arm 1 reported clean — `closes_landing.parse_closing_refs(body) == []`, i.e.
+    GitHub performs NO close, while this lint had nothing to say. The separator is now
+    `closes_landing`'s own (`\\s*:?\\s*`, `_CLOSING_SEPARATORS["lenient"]`), so the two grammars
+    cannot disagree about whether a body closed a reference.
+
+    Red-first: all five are RED against `0b6cb52ca4c5`'s tool (verified by swapping that head's file
+    back in: `6 failed / 213 passed`, the sixth being the reason-tail case below).
+    """
+    assert L.claims(body, 1)["closing"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[unresolved]], why
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — deliberately not closing this issue because it is a measurement PR.",
+     "the convention with its reason attached"),
+    ("Refs #100 — deliberately not closing this issue since the criteria are unproven.",
+     "a `since` reason"),
+    ("Refs #100 — deliberately not closing this issue (measurement only).",
+     "a parenthetical qualifier"),
+    ("Refs #100 — no close intended.", "`no … intended`"),
+])
+def test_an_honest_decline_may_carry_its_reason(body, why):
+    """Measured at `0b6cb52ca4c5` (review round 20, P2) — the FALSE POSITIVE direction.
+
+    The object's tail admitted `$`, `.`, `;`, a comma or a conjunction, so the most natural way to
+    write the honest sentence — with the REASON attached — was flagged. The admitted shapes are one
+    structural rule rather than a longer word list: whatever follows must contain NO `#`, so a
+    reason clause can never sweep a live claim into the decline. That bound is pinned by the
+    negative case below, which is the half that keeps this from being a new false PASS.
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [100], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
+def test_a_reason_clause_that_names_a_reference_is_not_a_decline():
+    """The other half of the rule above: a reason naming a `#N` is a live claim in the same breath
+    as the decline, so it must NOT buy the decline — a structural bound, not a word list."""
+    body = "Refs #100 — deliberately not closing this issue because #300 must land.\n"
+    assert L.claims(body, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]]
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — the PR is not closed.", "`the PR` is the pull request, not the reference"),
+    ("Refs #100 — this PR is not closed.", "`this PR is not closed` is a merge state too"),
+])
+def test_the_pull_requests_own_merge_state_is_not_a_decline(body, why):
+    """Measured at `0b6cb52ca4c5` (review round 20, P3) — the FALSE PASS direction.
+
+    The bridge admitted bare `pr` as a subject word, so a sentence about the PULL REQUEST's merge
+    state declined the reference and the claim vanished: `the PR is not closed` says nothing about
+    whether #100 is closed. `pr`/`prs` are now admitted only in the two-word form whose
+    demonstrative makes it the reference (`this PR does not close the issue`), and the state copulas
+    (`is`/`was`/`are`/`were`) are admitted only behind a reference-only subject — both NARROWINGS of
+    the decline direction, whose worst case is a false positive and never a new false PASS.
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[100]], why
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — it is not closed.", "a pronoun subject IS the reference"),
+    ("Refs #100 — this PR does not close the issue.", "an action with the reference as object"),
+    ("Refs #100 — the author deliberately does not close the issue.", "a human agent"),
+    ("Refs #100 — #100 is deliberately not Closes.", "the reference as the copula's subject"),
+])
+def test_the_narrowed_bridge_keeps_every_honest_decline(body, why):
+    """The controls for the narrowing above — each is a decline the earlier rounds pinned, and each
+    must survive it. Asserted here so the narrowing cannot be made green by deleting the branch."""
+    assert L.claims(body + "\n", 1)["declined"] == [100], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
+def test_naming_the_parent_as_the_declines_object_is_a_DECLARED_residual():
+    """`Refs #100 — deliberately not closing the parent.` is FLAGGED, and that is the recorded
+    decision rather than an oversight (review round 20, P2, declared not fixed).
+
+    Adding `parent`/`epic` to `_REF_NOUN` would decline `#100` by proximity, and the noun CAN name a
+    different issue than the one on the line — the exact ambiguity the module's doctrine resolves
+    the other way ("absent evidence is the flag, never the clear"). So the grammar does not guess:
+    the honest author writes `… not closing this issue` / `… not closing #100`, which does decline.
+    Pinned so the state is a decision a future round can reopen, not a silence it can "discover".
+    """
+    body = "Refs #100 — deliberately not closing the parent.\n"
+    assert L.claims(body, 1)["declined"] == []
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]]
