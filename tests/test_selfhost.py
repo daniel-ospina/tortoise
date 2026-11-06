@@ -852,6 +852,149 @@ def _mcp_post_auth(tc, key, payload):
     return r, _parse_sse_json(r)
 
 
+def _is_wait_bound_refusal(body) -> bool:
+    """Is this JSON-RPC body the #3834 transport-wait-bound REFUSAL?
+
+    The refusal is a caller-visible "this call did not start in time" answer,
+    not a tool verdict: the server says so structurally
+    (``structuredContent.error.code == -32009``) and flags the payload with
+    ``_meta.tortoise_wait_bound``. Any OTHER error shape (a tool's own
+    fail-closed dict, a protocol error) is NOT a refusal and must never be
+    retried here — retrying it would mask the very answer under test.
+    """
+    result = (body or {}).get("result") or {}
+    meta = result.get("_meta") or {}
+    if meta.get("tortoise_wait_bound"):
+        return True
+    err = (result.get("structuredContent") or {}).get("error") or {}
+    return err.get("code") == -32009
+
+
+def _mcp_tool_call_after_cold_start(tc, key, payload, *, attempts: int = 2):
+    """One ``tools/call``, tolerating the transport wait bound ONCE on cold start.
+
+    #3834's transport bound refuses a ``tools/call`` whose dispatch exceeds 10 s
+    with the legible ``-32009``/``tortoise_wait_bound`` shape. A FRESH embedded
+    graph pays a cold SDK construction + ``_ensure_indexes()`` + the selfhost
+    onboarding node inside the tool call, which on the self-hosted ARM pool
+    (measured 4.46x a hosted runner per the python-ci leg's own note) can exceed
+    that 10 s — measured in run 41964347676 / job 127067312539, where
+    ``test_tortoise_health_degraded_matches_http_health`` got the refusal
+    instead of its answer while the SAME probe was already stubbed to fail.
+    That is a cold-start property of the harness, not a health verdict, so the
+    call is retried once and the assertions run on the warm answer.
+
+    Nothing is masked: only the refusal shape is retried, and a refusal that
+    survives the retry is returned to the caller like any other body, so a
+    genuinely over-bounded tool call still reds its assertion.
+    """
+    r = body = None
+    for _attempt in range(max(1, attempts)):
+        r, body = _mcp_post_auth(tc, key, payload)
+        if not _is_wait_bound_refusal(body):
+            return r, body
+    return r, body
+
+
+def _wait_bound_refusal_body():
+    """The #3834 transport-wait-bound refusal, byte-shaped like the server's."""
+    return {"jsonrpc": "2.0", "id": 1, "result": {
+        "_meta": {"tortoise_wait_bound": True},
+        "content": [{"type": "text", "text": "The server's wait budget for this "
+                                             "request was exceeded"}],
+        "structuredContent": {"error": {
+            "code": -32009,
+            "message": "wait budget exceeded",
+            "data": {"retry_after": 10},
+        }},
+        "isError": True,
+    }}
+
+
+def _verdict_body(payload: dict):
+    import json
+    return {"jsonrpc": "2.0", "id": 1, "result": {"content": [
+        {"type": "text", "text": json.dumps(payload)}]}}
+
+
+def test_the_cold_start_tolerance_retries_the_refusal_and_never_a_verdict(
+        monkeypatch):
+    """The wait-bound tolerance is bounded and shape-specific (#10726 `test (b)`).
+
+    Both directions are pinned, because a tolerance that retried ANY body would
+    silently turn a wrong verdict into a right-looking one: the refusal shape is
+    retried once (and the warm answer is what the assertions see), while a real
+    tool verdict is returned on the FIRST call.
+    """
+    import sys
+
+    mod = sys.modules[__name__]
+    calls = []
+
+    def _refusing(tc, key, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return object(), _wait_bound_refusal_body()
+        return object(), _verdict_body({"status": "degraded"})
+
+    monkeypatch.setattr(mod, "_mcp_post_auth", _refusing)
+    _r, body = mod._mcp_tool_call_after_cold_start(
+        None, "k", {"params": {"name": "tortoise_health"}})
+    assert len(calls) == 2, "the refusal must be retried exactly once"
+    assert mod._tool_result(body)["status"] == "degraded"
+
+    calls.clear()
+
+    def _answering(tc, key, payload):
+        calls.append(payload)
+        return object(), _verdict_body({"status": "degraded"})
+
+    monkeypatch.setattr(mod, "_mcp_post_auth", _answering)
+    _r, body = mod._mcp_tool_call_after_cold_start(
+        None, "k", {"params": {"name": "tortoise_health"}})
+    assert len(calls) == 1, "a real verdict must NOT be retried"
+    assert mod._tool_result(body)["status"] == "degraded"
+
+
+def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
+    """A slot-starved probe is `unknown`, so the wait RECOVERS instead of expiring.
+
+    #3683 decision `2026-09-30-3683-health-probe-honesty`: a probe that never
+    reached the DB is not a verdict. Measured failure this pins — CI run
+    41964347676, job 127067312539 (`test (b)`), the required gate on #10726:
+    every refresh for 40 s reported ``{'ok': False, 'observed': False, 'error':
+    'probe sdk acquisition did not start within 2.0s'}``, so the pre-fix wait
+    could only ever raise while the daemon was healthy throughout.
+
+    The slot is held here exactly as a wedged/overrunning probe holds it, and
+    the ONE refresh period is shortened so the recovery is a couple of seconds
+    rather than the shipped 15 s cadence.
+    """
+    import threading
+
+    from tortoise import monitoring as mon
+
+    monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "1")
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold_the_one_shared_slot():
+        held.set()
+        release.wait(30.0)  # abandoned, never joined: the wait must not block on it
+
+    tc = _client_for_env(monkeypatch, tmp_path)
+    from tortoise import selfhost
+
+    mon._probe_worker().submit(_hold_the_one_shared_slot)
+    assert held.wait(5.0), "the slot holder never started"
+    try:
+        with tc:
+            _wait_for_probe(selfhost, timeout=25.0)
+    finally:
+        release.set()
+    assert selfhost._HEALTH_PROBE.snapshot()["ok"] is True
+
+
 class TestHealthTruthMCP:
     """#2202 — tortoise_health reports the same truth as the daemon's /health.
 
@@ -876,7 +1019,7 @@ class TestHealthTruthMCP:
             assert health.status_code == 200
             assert health.json()["status"] == "ok"
 
-            r, body = _mcp_post_auth(tc, "k", {
+            r, body = _mcp_tool_call_after_cold_start(tc, "k", {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "tortoise_health", "arguments": {}},
             })
@@ -923,7 +1066,7 @@ class TestHealthTruthMCP:
                 "also produce 'degraded', so assert the MESSAGE (#3446)"
             )
 
-            r, body = _mcp_post_auth(tc, "k", {
+            r, body = _mcp_tool_call_after_cold_start(tc, "k", {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "tortoise_health", "arguments": {}},
             })
