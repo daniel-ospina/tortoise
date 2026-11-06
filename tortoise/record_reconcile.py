@@ -71,10 +71,14 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``EntityMutated`` carrying ``state.status='archived'`` folds onto the row and
   ``graph_only`` goes ``(('status', 1),)`` -> ``()``; a mint carrying a
   DIFFERENT value reds as ``field_mismatches=1``, so a mint cannot launder a
-  disagreement. ⚠️ The mint exists only for a value the label's status door
+  disagreement. ⚠️ The mint exists only for a STRING the label's status door
   ACCEPTS — any string on an ``:Object``, but on a ``:Subject`` only
   ``_SUBJECT_STATUS_VALUES``, so a ``:Subject`` value outside that set has NO
-  mint and keeps only the clear below (`#11296`).
+  mint and keeps only the clear below (`#11296`). A NON-STRING status (which
+  the ``:Object`` door accepts, it validates nothing) has no mint either: the
+  state-op reader reads ``payload -> 'state' ->> 'status'``, so a minted ``5``
+  comes back as the TEXT ``'5'`` — the bucket empties, but the pair reds as a
+  ``field_mismatches`` entry instead of reading clean.
   ⛔ A CLEAR is the route only where the value is not trustworthy, and it is
   LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
   as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
@@ -84,9 +88,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   n.status`` or the wipe below, and it makes a TERMINAL entity read LIVE
   (``live._terminal_excluded`` reads an absent ``status`` as live). ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
-  no REMOVE pass) and would leave the value in place — and a clear journals NO
-  ``status`` at all (``LifecycleEvent.restatus_status``: a clear is "not a
-  representable state here"), so the record can never re-derive the absence;
+  no REMOVE pass) and would leave the value in place — and a clear writes
+  ``state.status = null`` into the record, which the state-op reader collapses
+  to "no status write" (``cache_projection``'s stated R4 bound, recorded on
+  `#9974`), so the record cannot re-derive the ABSENCE today.
   chokepoint signature, DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
   `#11221`); and the two declared classes below, which the record's TABLE holds
@@ -570,9 +575,11 @@ def reconcile_record_and_cache(
     value through the write door (``update_entity(…, status=<the value>)``),
     which journals the ``EntityMutated`` record the derivation folds, so the
     name becomes comparable and the bucket empties with the value PRESERVED. The
-    mint exists only for a value the label's status door ACCEPTS, so on a
+    mint exists only for a STRING the label's status door ACCEPTS, so on a
     ``:Subject`` it is limited to ``SUBJECT_STATUS_VALUES`` and a value outside
-    that set has no mint (`#11296`). A CLEAR is only for an untrustworthy value
+    that set has no mint (`#11296`); a NON-STRING status has none either — the
+    state-op reader reads ``->> 'status'``, so it would mint back as text and
+    red rather than emptying the bucket. A CLEAR is only for an untrustworthy value
     and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
     {status: null}``, a REMOVAL, on an ``:Object``; on a ``:Subject`` that call
     is REFUSED (#1423's status door accepts only ``SUBJECT_STATUS_VALUES``, and
