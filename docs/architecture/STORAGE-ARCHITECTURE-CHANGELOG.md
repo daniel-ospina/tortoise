@@ -2104,11 +2104,26 @@ nothing is lost. `record-reconcile` treats a legacy cache node still carrying th
 occurrence (one property the projection declines to write), NOT as a `field_mismatches` against a record
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
-a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE class lacks a non-destructive repair (nothing writes
-the column, so no in-place route can exist); the declined pair has one, shipped —
+a DESTRUCTIVE CLEAR — a full `record-restore`, whose wipe is
+whole-graph and therefore clears a legacy copy too (and the targeted alternative, a graph-side `REMOVE n.story_arc`, is
+in place in principle but shipped by no instrument — `#10017`'s purge is the precedent on a DIFFERENT population, legacy
+episodic turn `:Point`s, and names no `story_arc`). ⛔ Only the NOT-PROJECTABLE class lacks a repair that RESTORES the
+value and a non-destructive one (nothing writes the column, so no in-place route can put a value back — ⛔ though a
+targeted `REMOVE` IS in place, it is destructive); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
+
+⚠️ **CORRECTED (`#11325`, review of the `#10394` follow-up)**: this entry named `#10017`'s purge as the targeted repair
+for THIS class. Measured at the tool, `tools/purge_legacy_turns.py`'s single destructive statement deletes legacy
+episodic turn `:Point`s (`MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids
+DETACH DELETE t`), never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
+survives it, and an operator following the sentence reads the sweep's unchanged `graph_only` as "the repair did not
+work". ⚠️ This stamp scopes itself to the REPAIR claim; the entry's earlier durability sentences ("`#10017`'s
+graph-side purge was undone by the next routine recovery", "what makes `#10017`'s purge durable") are left as
+recorded, because a changelog is a historical record — but they carry the SAME assumption this stamp retracts,
+that the purge clears THIS class. What the restore undid was `#10000`'s write deletions, and the acceptance
+they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the restore now writes no
+`story_arc` and its whole-graph wipe clears a legacy copy — not because a purge ran.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED
