@@ -1928,6 +1928,9 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # blank line (types 6/7) end the leaf block AT that line, so anything after it still belongs
         # to it and a new block may only start on the NEXT line.
         _scan_for_opener = False
+        #: Did THIS line open the leaf block (`_opened` answered)? A block's OPENER line is its
+        #: own raw text, so it must survive `strict` — see the note at `indent_code`.
+        _html_opened_here = False
         # ⛔ A LINE INSIDE AN ALREADY-OPEN LEAF BLOCK IS THAT BLOCK'S RAW TEXT, SO IT OPENS NO
         # PARAGRAPH (round 49 review, P1 — a FAIL-OPEN in `strict=True`, the PASS arm). The prose
         # write below asks `_leaves_no_paragraph`, which answers about BLOCK BOUNDARIES: an html
@@ -2003,6 +2006,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 _opened = _html_block_leaf(
                     _html_rest, prev_prose or _blanked_still_open)
             if _opened is not None:
+                _html_opened_here = True
                 html_item = container
                 # ⛔ A BLOCK OPENED ON A LAZY LINE IS STILL INSIDE THE `<li>` THE RENDERER KEPT, SO
                 # THAT ITEM IS ITS CONTAINER (round 51 review, P1 — a FAIL-OPEN in all three arms,
@@ -2238,8 +2242,27 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                                 or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                           prev_container, rest_indent, indent))
         own_code = own_gap > 4 and not ordered_continuation and not _html_here
-        indent_code = rest_indent > _MAX_FENCE_INDENT and not _html_here and (
-            strict or (indented_code
+        # ⛔ `not _html_here` IS A TERM OF THE LENIENT BRANCHES ONLY, NEVER OF `strict` (round 52
+        # review, P1 — a FAIL-OPEN in the `strict` PASS arm, the arm `issue_process_lint` refuses
+        # `lands` with). `_html_here` is this module's own HTML-block state machine, and `strict`
+        # reads the CARRIER body where a lenient-only match is a PASS — so a state machine that is
+        # WRONG about a line must not be able to EXEMPT that line from the arm whose whole contract
+        # is "blank every indented line" (this file states that contract two screens down: "The
+        # `strict` half deliberately does NOT take the term"). It became a shared prefix with the
+        # leaf-block work, and the consequence is the arm crediting a keyword the renderer puts in
+        # `<pre><code>`:
+        #     `-` + `    code` + `<br />` + `     -     Closes #100`
+        #         renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
+        #         `origin/main` `[]`; the pre-fix head `[100]` in `strict` AND `indented_code`
+        # `strict` blanked `    code` (its own declared over-blank), which left no paragraph open, so
+        # `<br />` opened a PHANTOM type-7 block and `_html_here` then exempted the line below it.
+        # The lenient and `indented_code` branches keep the term: there `_html_here` is protecting a
+        # real close — a leaf block's own TEXT is read, not hidden.
+        indent_code = rest_indent > _MAX_FENCE_INDENT and (
+            # ⛔ the block's OWN OPENER line is its raw text and is never blanked by `strict`: it is
+            # where the state below is LEARNED, so blanking it loses the block (and the `_html_here`
+            # answer every later line depends on). Every line INSIDE the block is still `strict`'s.
+            (strict and not _html_opened_here) or (not _html_here and indented_code
                        # ⛔ §4.4's PROTECTION IS THE ARM'S OWN RULE, NOT `strict`'s (round 50 review,
                        # P1 — LOST CONTENT in the one arm `in_flight_markers` and the comment-body
                        # read go through). "An indented code block cannot interrupt a paragraph", so a
