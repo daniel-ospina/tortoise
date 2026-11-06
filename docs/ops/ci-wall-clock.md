@@ -257,9 +257,9 @@ recorded here rather than moved: nothing had measured any of them being cancelle
 document's own rule is to move a cap from a measurement instead of on suspicion. THREE of the four
 are still in that state — `test-slow`, `test-carve-out` and `test-concurrency-falkor`.
 `test-record-postgres` was the FIRST of them (22 m against 20 on the arm-2 estimate), and it
-false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its cap rose: #11063
-took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its
-cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
+false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its cap rose: #11063 took that
+save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its cap
+(10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all; its own ungated `~/.cache/huggingface` POST is unmeasured) and
 `test-carve-out` sits at ~31.6 m against 30: 10 m embedder + 19 m shard watchdog + ~1 m, plus the 1 m 38 s
 `~/.cache/huggingface` POST (`python-ci.yml:3539-3541`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a

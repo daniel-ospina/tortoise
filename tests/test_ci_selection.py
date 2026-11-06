@@ -12857,8 +12857,9 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     against the job's `timeout-minutes` like any other step. This job cannot
     amortize such a save, and no cap it is allowed to carry can: the cap above
     is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
-    at the ceiling), while ONE shard already spends its 19m floor-clamped
-    watchdog plus ~1.5m of setup/provision — and the SAVE has no timeout of its
+    at the ceiling), while ONE shard already spends its 10m embedder cap + 19m
+    floor-clamped watchdog + ~1m setup + the 1m38s `~/.cache/huggingface` POST
+    ≈ 31.6m against a 30m cap — and the SAVE has no timeout of its
     own, so a slow one is unbounded, not merely large. Headroom amortizes a
     bounded cost; it cannot amortize an unbounded one.
 
@@ -12873,8 +12874,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     check on a diff that never touched this job.
 
     Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`), written on EVERY run by `test-d14-hosted-api`
-    (unconditional, PR + push) and by `test-slow` only under `slow_run`, so this
+    (`pip-<os>-<hash uv.lock>`), written by `test-d14-hosted-api` on EVERY run
+    (unconditional, PR + push), by `test-slow` only under `slow_run` — each saving on a MISS, so this
     job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
