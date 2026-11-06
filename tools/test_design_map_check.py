@@ -358,6 +358,22 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         if not row or all(set(cell) <= {"-", ":", ""} for cell in row):
             continue  # the header separator
         label = row[0] or "?"
+        # A crosswalk row that names NO surface was the third "names nothing" hole:
+        # R1 (`:279`) and R4 (`:306`) both carry the arm, R5 did not, so blanking
+        # §6.4's surface cell — the row that carries the approval request — graded
+        # CLEAN on the REQUIRED `docs` job (measured). Deleting the row reds R5 as
+        # `missing`; emptying its cell must red it as `names no surface`.
+        #
+        # This reads the SURFACE CELL, not the whole line (the referential arm below
+        # reads the line, which is correct for it): §6.4's own `why` cell says
+        # "**SF13 is the row a capstone must not skip**", so a whole-line test would
+        # keep the blanked row green — the self-test case below proved that the whole-
+        # line form of this arm does not fire (measured: `expected violation, got
+        # clean`). The header row's first cell is `plan §`, which does not start with
+        # `§`, so it is not tested here.
+        surface_cell = row[2] if len(row) > 2 else ""
+        if label.strip().startswith("§") and not surface_tokens(surface_cell):
+            violations.append(f"R5 {label}: names no surface")
         for sf in sorted(surface_tokens(line) - set(surfaces)):
             violations.append(f"R5 {label}: names {sf}, which has no surface row")
 
@@ -513,13 +529,25 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "violation",
     ),
     (
+        # The referential half's own "names nothing" hole. R1 (`:279`) and R4
+        # (`:306`) both refuse a row that names no surface; R5 did not, so
+        # blanking §6.4's surface cell graded CLEAN on the REQUIRED `docs` job
+        # (measured). Deleting the row reds R5 as `missing`; emptying its cell must
+        # red it as `names no surface`, and this case is what proves the arm runs —
+        # it is also what proved the arm must read the SURFACE CELL: a whole-line
+        # form does not fire, because §6.4's `why` cell names SF13 too (measured).
+        "blank the §6.4 surface cell (a crosswalk row that names nothing)",
+        lambda t: _rewrite_crosswalk_row(t, "§6.4", ""),
+        "violation",
+    ),
+    (
         # The width rule must be covered by the arm that is supposed to catch a
         # quietly weakened rule. Without this case, reverting `!= 7` to the old
         # `< 7` floor left --self-test green at 10/10 — the false PASS this rule
         # closes, re-opened with the REQUIRED `docs` job fully green. Since
         # MIN_SELF_TEST_MUTATIONS exists, re-opening it costs TWO edits: at the
-        # shipped floor, deleting this case alone is red ("11 mutation(s)
-        # registered, at least 12 required", exit 1) before the relaxed rule is
+        # shipped floor, deleting this case alone is red ("12 mutation(s)
+        # registered, at least 13 required", exit 1) before the relaxed rule is
         # ever exercised.
         "splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns)",
         lambda t: _rewrite_row(t, "SF2", 5, "live-docker | unit"),
@@ -559,7 +587,7 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 12
+MIN_SELF_TEST_MUTATIONS = 13
 
 
 def self_test(text: str) -> int:
