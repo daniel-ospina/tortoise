@@ -675,13 +675,17 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         f"metrics() publishes {sorted(published)}"
     )
     # …and the claim must be pinned WHERE IT IS MADE, not merely mentioned: the
-    # docstring says (a) the block publishes these "under the SAME names
-    # ``metrics()`` publishes" and (b) they are the POSITIVE channel. A bare
-    # `name in docstring` was measured GREEN on both halves being broken — a
-    # renamed bullet head (`applied_writes` / `last_write_at`) still mentions the
-    # real names later in the same bullet, and "SAME names" inverted to
-    # "DIFFERENT names" matched nothing. So both sentences are pinned, on a
-    # whitespace-normalised copy so a reflow cannot red them (#9548 review P2).
+    # docstring says the record counters are published "under the SAME names
+    # ``metrics()`` publishes". A bare `name in docstring` was measured GREEN on
+    # both halves being broken — a renamed bullet head (`applied_writes` /
+    # `last_write_at`) still mentions the real names later in the same bullet, and
+    # "SAME names" inverted to "DIFFERENT names" matched nothing. So the pair's
+    # bullet and the SAME-names sentence are both pinned, on a whitespace-normalised
+    # copy so a reflow cannot red them (#9548 review P2).
+    # ⚠️ The SAME-names pin is the WHOLE sentence on purpose: that sentence is about
+    # "the record counters" collectively, so a substring pin (or pinning only the
+    # trailing clause) stays green on a docstring that NARROWS the claim to exclude
+    # the pair — measured green on exactly that edit (#9548 review P2).
     # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
     # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
     # here: a runbook-only diff selects no surface and runs `tier1` only, and this
@@ -696,10 +700,13 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         "pair the payload publishes — the field is published but undocumented, "
         "which is the paper-only claim inverted"
     )
-    assert "under the SAME names ``metrics()`` publishes" in doc, (
-        "`_record_health`'s docstring no longer claims the pair is published under "
-        "`metrics()`'s own names — that claim is what ties the /health keys to the "
-        "ones the rest of the process reads, so losing it makes a rename silent"
+    assert (
+        "the record counters, under the SAME names ``metrics()`` publishes" in doc
+    ), (
+        "`_record_health`'s docstring no longer claims the record counters are "
+        "published under `metrics()`'s own names (or has narrowed that claim so it "
+        "excludes the positive pair) — that claim is what ties the /health keys to "
+        "the ones the rest of the process reads, so losing it makes a rename silent"
     )
 
 
