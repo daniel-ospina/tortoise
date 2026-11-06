@@ -752,13 +752,16 @@ def _non_owned_handles(block: str) -> list[str]:
     `_mk(f"evict_…")` and `"evict_%s" % …` all read NO violation while
     `os.urandom` + `_journal_calls` still satisfied the outer half (a shape
     enumeration cannot converge: every fix moves the bypass one form over). This
-    arm therefore resolves the JOURNALED EXPRESSION — one hop through a named
-    handle, then the first string literal in it — so parenthesised, annotated,
-    multi-line, concatenated, `%`-formatted, wrapper-called and one-hop-variable
-    constructions all classify identically. Reading only the journaled name also
-    keeps it from reding an UNRELATED random token in the same block (measured at
-    `ede858414`: `tok = f"n{os.urandom(6).hex()}"` red a block whose journaled
-    handle was owned).
+    arm therefore resolves the HEAD of the expression the journal is CALLED with
+    — the literal it starts with, the first element's head in a `"".join([…])`,
+    or a named handle rebound (plain, annotated, tuple-target or walrus) at most
+    twice BEFORE the call — so parenthesised, annotated, multi-line,
+    concatenated, `%`-formatted, `str.format`-ed, wrapper-called and
+    variable-prefix constructions all classify identically. Reading the head — and
+    only the binding LIVE at the call — is also what keeps it from reding
+    unrelated material: a `tok = f"n{…}"` elsewhere in the block, the `"-"` step
+    of a `X + "-" + …` concatenation, a keyword argument (`build(kind="x", …)`)
+    and an apostrophe in a comment are none of them the name's head.
 
     DECLARED fail-opens, each because the prefix is not decidable from the
     literal alone:
@@ -766,10 +769,10 @@ def _non_owned_handles(block: str) -> list[str]:
     * a prefix that could still COMPLETE into an owned one (`te` → `test_`): the
       built name starts with the prefix, so the arm must not violate on a site it
       cannot judge (it did once — `c84c3d68`);
-    * an EMPTY prefix (`f"{name}"`, `"" .join([…])` whose first element is not a
-      literal): the name begins in a value, not in the literal;
-    * an expression with NO readable literal at all (`_journal_append(pick())`):
-      there is no prefix to classify, and inventing one is a false block.
+    * an EMPTY prefix (`f"{name}"`, or a `"".join([…])` whose FIRST element is
+      not a literal): the name begins in a value, not in the literal;
+    * an expression whose head is neither a literal nor a name (`pick()`): there
+      is no prefix to classify, and inventing one is a false block.
 
     The ambiguity boundary is exact — `te_` is NOT ambiguous, because
     `"test_".startswith("te_")` is false, so it is still reported.
@@ -794,13 +797,22 @@ def _journaled_prefixes(block: str, masked: str) -> list[str]:
     """The static prefix of every handle `_journal_append` is CALLED with in
     `block` — the name that becomes an ownership record, whichever shape builds
     it. A `def _journal_append(...)` and a comment naming the symbol are not
-    calls (#11182), so both are skipped, and the argument span is balanced on the
-    MASKED block so a paren inside a literal (`hint="("`) cannot unbalance it."""
+    calls (#11182), so both are skipped.
+
+    The call's OFFSET is threaded into the resolution because a name can be
+    REBOUND later in the same block: only the binding live at the call is the one
+    journaled, so `name = f"evict_…"`, `_journal_append(name)`, then
+    `name = f"test_evict_…"` must still red (measured at `549e297f1`: reading the
+    last binding in the block instead read it CLEAN).
+    """
     out: list[str] = []
     for call in re.finditer(r"_journal_append\(", masked):
         line_start = masked.rfind("\n", 0, call.start()) + 1
         if re.fullmatch(r"\s*(?:async\s+)?def\s+", masked[line_start:call.start()]):
             continue  # a definition of the symbol, not a use of it
+        # The argument SPAN bounds the read: a multi-line call (arguments on
+        # their own lines, a comment after one of them) is otherwise bounded by
+        # the next newline, which cuts the argument to nothing.
         depth, i = 1, call.end()
         while i < len(masked) and depth:
             if masked[i] == "(":
@@ -808,70 +820,135 @@ def _journaled_prefixes(block: str, masked: str) -> list[str]:
             elif masked[i] == ")":
                 depth -= 1
             i += 1
-        out.append(_handle_prefix(block, masked, block[call.end():i - 1]))
+        out.append(_handle_prefix(block, masked, call.end(), call.start(),
+                                  limit=i - 1))
     return out
 
 
-def _handle_prefix(block: str, masked: str, expr: str, _depth: int = 0) -> str:
-    """The static prefix of the name `expr` builds, one identifier hop deep.
+def _handle_prefix(block: str, masked: str, start: int, at: int,
+                   limit: int | None = None, _hops: int = 3) -> str:
+    """The static prefix of the name the expression beginning at `start` builds,
+    resolved from the HEAD of that expression: the literal it STARTS with, the
+    first element's head of a `"".join([…])`, or a named handle rebound at most
+    `_hops` times strictly BEFORE the journal call at `at` (three resolutions =
+    the journal's own argument plus TWO rebindings, `name = q` then `q = p`).
 
-    `""` means "not decidable from a literal" (a declared fail-open)."""
-    prefix = _literal_prefix(expr)
-    if prefix is not None:
-        return prefix
-    ident = re.match(r"\s*([A-Za-z_]\w*)\s*(?:[%+]|$)", expr)
-    if ident and _depth < 2:
-        # `prefix = "evict_"` then `name = prefix + os.urandom(...)`: the literal
-        # is one hop away, and a site must not evade the arm by naming it.
-        for assigned in reversed(_assigned_exprs(block, masked, ident.group(1))):
-            hop = _handle_prefix(block, masked, assigned, _depth + 1)
-            if hop:
-                return hop
+    `""` means "not decidable from a literal" (a declared fail-open). Only the
+    head is read: a literal that is not the head (`build(kind="x", …)`, the `"-"`
+    step of `X + "-" + …`) is not the name's prefix, which is why this arm cannot
+    fabricate a prefix out of unrelated text or out of a comment."""
+    if limit is None:  # a binding: bounded by its own statement
+        limit = _statement_end(masked, start)
+    i = _head_pos(block, masked, start, limit)
+    if i >= limit:
+        return ""
+    if block[i] in "\"'":
+        body = block[i + 1:]
+        cut = len(body)
+        for sep in ("{", block[i], "%", "\n"):
+            k = body.find(sep)
+            if k != -1:
+                cut = min(cut, k)
+        prefix = body[:cut]
+        if prefix:
+            return prefix
+        # `"".join([…])`: the name's head is the FIRST element's head, never a
+        # later element's — a suffix literal there is not the head, and reading it
+        # would both miss a dynamic head and false-block an owned one.
+        join = re.match(r"\s*\.\s*join\s*\(\s*\[\s*", masked[i + 1:limit])
+        if join:
+            return _handle_prefix(block, masked, i + 1 + join.end(), at,
+                                  limit=limit, _hops=_hops)
+        return ""
+    ident = re.match(r"[A-Za-z_]\w*", block[i:])
+    if not ident:
+        return ""
+    j = _skip_ws(masked, block, i + ident.end(), limit)
+    tail = masked[j] if j < limit else ""
+    if tail == "=":
+        return ""  # `kind="x"`: a keyword argument, not a name
+    if tail not in ("", "+", "%", ",", ")", "]", "}", "\n"):
+        return ""  # `_GRAPH.upper()`, a subscript, an operator we cannot read
+    if not _hops:
+        return ""
+    for assigned_start, _assigned in reversed(
+            _assigned_exprs(block, masked, ident.group(0), at)):
+        prefix = _handle_prefix(block, masked, assigned_start, at,
+                                _hops=_hops - 1)
+        if prefix:
+            return prefix
     return ""
 
 
-def _literal_prefix(expr: str) -> str | None:
-    """The leading literal text of `expr` — the part of the built name that is
-    known BEFORE any interpolation — or None when `expr` holds no string literal.
+def _head_pos(block: str, masked: str, start: int, limit: int) -> int:
+    """The index of the first token of the expression at `start`, with leading
+    whitespace, `(` and a wrapper call (`str(…`, `_mk(…`) skipped and any string
+    prefix (`f`, `rb`) consumed — so the caller sees a QUOTE or an identifier.
 
-    `"evict_" + os.urandom(...)` → `evict_`; `f"evict_{...}"` → `evict_`;
-    `"evict_%s" % ...` → `evict_` (a `%` conversion starts the dynamic tail, the
-    same way `{` does in an f-string); `"".join(["evict_", ...])` → `evict_`.
+    Structure is read from `masked` (string material blanked, SAME LENGTH); the
+    quote test is read from `block`, where the literal still exists. Bounded, so a
+    pathological expression cannot spin.
     """
-    m = re.search(r"""(?s)[rRbBfFuU]{0,3}(?P<q>\"\"\"|'''|\"|')""", expr)
-    if not m:
-        return None
-    q = m.group("q")
-    rest = expr[m.end():]
-    cut = len(rest)
-    for sep in ("{", q, "%"):
-        k = rest.find(sep)
-        if k != -1:
-            cut = min(cut, k)
-    prefix = rest[:cut]
-    if prefix:
-        return prefix
-    # An empty first element of a `"".join([...])` is not the name's head — the
-    # list's first element is. Any other empty prefix is undecidable (declared).
-    join = re.match(r"""[rRbBfFuU]{0,3}(?P<q>\"\"\"|'''|\"|')\s*\.\s*join\(""", rest)
-    if join:
-        inner = _literal_prefix(rest[join.end():])
-        if inner:
-            return inner
-    return ""
+    i = start
+    for _ in range(8):
+        if i >= limit:
+            return limit
+        i = _skip_ws(masked, block, i, limit)
+        if i < limit and masked[i] == "(":
+            i += 1
+            continue
+        wrap = re.match(r"[A-Za-z_][\w.]*\s*\(\s*", masked[i:limit])
+        if wrap:
+            i += wrap.end()
+            continue
+        lit = re.match(r"[rRbBfFuU]{0,2}[\"']", block[i:limit])
+        if lit:
+            return i + lit.end() - 1
+        return i
+    return i
 
 
-def _assigned_exprs(block: str, masked: str, name: str) -> list[str]:
-    """The RAW right-hand sides of every `name = …` statement in `block`
-    (annotations and a doubled `==` excluded), statement-bounded so a
-    parenthesised continuation is read WHOLE."""
-    pat = re.compile(rf"(?m)^[ \t]*(?P<n>{re.escape(name)})\s*(?::[^=\n]*)?=(?!=)")
-    out: list[str] = []
-    for m in pat.finditer(masked):
-        if masked[m.start("n")] == " ":
+def _skip_ws(masked: str, block: str, i: int, limit: int) -> int:
+    """The next non-whitespace index (line continuations and blanked comments
+    included), stopping at a LITERAL'S OPENING QUOTE.
+
+    Masking blanks string material to spaces, so a plain whitespace skip walks
+    straight THROUGH `"evict_" + …` and lands on the `+` — every literal-headed
+    expression then read as an operator. `masked` still supplies the structure
+    (comments are blanked there), `block` supplies the quote test."""
+    while i < limit and masked[i] in " \t\r\n\\":
+        if block[i] in "\"'":
+            break
+        i += 1
+    return i
+
+
+def _assigned_exprs(block: str, masked: str, name: str,
+                    before: int) -> list[tuple[int, str]]:
+    """`(expression_start, raw_expression)` for every BINDING of `name` whose
+    statement starts strictly before `before` — plain (`name = …`), annotated
+    (`name: str = …`), tuple-target (`name, other = …`) and walrus
+    (`name := …`).
+
+    Position-aware on purpose: the caller reads the binding LIVE at the journal
+    call (the last one before it), not whichever binding happens to be last in the
+    block. Statement-bounded, so a parenthesised continuation is read WHOLE.
+    """
+    pat = re.compile(
+        rf"(?m)^[ \t]*(?P<n>{re.escape(name)})\s*(?:,\s*\w+\s*)*\s*(?::[^=\n]*)?=(?!=)"
+    )
+    walrus = re.compile(rf"(?<![\w.]){re.escape(name)}\s*:=(?!=)")
+    found: list[tuple[int, str]] = []
+    for m in list(pat.finditer(masked)) + list(walrus.finditer(masked)):
+        if m.start() >= before:
+            continue  # a LATER rebinding is not the name this call journals
+        name_pos = m.start("n") if "n" in m.groupdict() else m.start()
+        if masked[name_pos] == " ":
             continue  # prose, not code
-        out.append(block[m.end():_statement_end(masked, m.end())])
-    return out
+        start = _skip_ws(masked, block, m.end(), len(masked))
+        found.append((start, block[start:_statement_end(masked, start)]))
+    found.sort()
+    return found
 
 
 def _statement_end(masked: str, start: int) -> int:
@@ -994,6 +1071,17 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
     flagging every journaled site.
     """
     site = tmp_path / "test_non_owned_handle.py"
+
+    def _site(*lines: str) -> str:
+        """A minimal raw-client block whose body is `lines`, so each case below
+        states only the shape under test."""
+        return ("def test_evictor_lane():"
+                "\n    import os"
+                "\n    from falkordb import FalkorDB"
+                + "".join("\n" + ln for ln in lines)
+                + "\n    c = FalkorDB(host=\"h\")"
+                "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+                "\n")
     site.write_text(
         "def test_evictor_lane():"
         "\n    import os"
@@ -1174,6 +1262,97 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
     )
     assert not _raw_detach_violations(root=tmp_path), (
         f"a variable-prefix name was reported as a violation: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # POSITION, not only shape (#11217 re-review round 2, measured at
+    # `549e297f1`): only the binding LIVE at the call is journaled, so a LATER
+    # rebinding to an owned name must not launder an unowned one...
+    site.write_text(_site(
+        '    name = f"evict_{os.urandom(6).hex()}"',
+        "    _journal_append(name)",
+        '    name = f"test_evict_{os.urandom(6).hex()}"',
+    ), encoding="utf-8")
+    assert _raw_detach_violations(root=tmp_path), (
+        "a LATER rebinding to an owned name laundered the unowned handle this "
+        f"call journals: {_raw_detach_violations(root=tmp_path)}")
+
+    # ...and the mirror: an OWNED handle journaled, rebound to an unowned name
+    # afterwards, is a compliant site and must not red.
+    site.write_text(_site(
+        '    name = f"test_evict_{os.urandom(6).hex()}"',
+        "    _journal_append(name)",
+        '    name = f"evict_{os.urandom(6).hex()}"',
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "an OWNED handle was red because of a rebinding AFTER the journal call: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # Every BINDING form of a named handle resolves: tuple target, walrus, and a
+    # chain of TWO rebindings (the docstring's stated bound).
+    for lines in (
+            ('    name, other = f"evict_{os.urandom(6).hex()}", 1',
+             "    _journal_append(name)"),
+            ('    if (name := f"evict_{os.urandom(6).hex()}") is None:',
+             "        pass",
+             "    _journal_append(name)"),
+            ('    p = "evict_"',
+             "    q = p",
+             "    name = q + os.urandom(6).hex()",
+             "    _journal_append(name)"),
+    ):
+        site.write_text(_site(*lines), encoding="utf-8")
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "'evict_'" in bad[0], (
+            f"a name bound as `{lines[0].strip()}` read NO violation: {bad}")
+
+    # Only the HEAD is read, so unrelated material in the same expression is not
+    # mistaken for the prefix (#11217 re-review round 2): an owned module-level
+    # constant with a `"-"` step, and a keyword argument carrying a literal.
+    site.write_text(_site(
+        '    _GRAPH = "tortoise_test_lane"',
+        '    name = _GRAPH + "-" + os.urandom(6).hex()',
+        "    _journal_append(name)",
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a `\"-\"` step of an OWNED concatenation was read as the prefix: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    site.write_text(_site(
+        '    _journal_append(build(kind="x", seed=os.urandom(6).hex()))',
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a keyword argument's literal was read as the name's head: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # An apostrophe in a COMMENT inside the call's arguments is not a literal
+    # opener: the identifier is still resolved (and here it is unowned).
+    site.write_text(_site(
+        '    name = f"evict_{os.urandom(6).hex()}"',
+        "    _journal_append(",
+        "        name,  # don't reuse the graph",
+        "    )",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "'evict_'" in bad[0], (
+        f"a comment inside the call's arguments defeated the arm: {bad}")
+
+    # `"".join([…])` reads the FIRST element's head, never a later element's:
+    # an unowned head is still reported, an owned head stays clean.
+    site.write_text(_site(
+        '    head = f"evict_{os.urandom(6).hex()}"',
+        '    graph = "".join([head, "test_suffix"])',
+        "    _journal_append(graph)",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "'evict_'" in bad[0], (
+        f"a `\"\".join([…])` with an unowned head read clean: {bad}")
+    site.write_text(_site(
+        '    head = f"test_evict_{os.urandom(6).hex()}"',
+        '    graph = "".join([head, "_suffix"])',
+        "    _journal_append(graph)",
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "an OWNED `\"\".join([…])` head was red on a later suffix literal: "
         f"{_raw_detach_violations(root=tmp_path)}")
 
     # PROSE is not a site in either direction (#11182): a comment showing an
