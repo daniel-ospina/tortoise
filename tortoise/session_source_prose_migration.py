@@ -460,14 +460,42 @@ def find_session_sources_carrying_prose(
     """READ-ONLY: every node this repair would touch, with its byte sizes.
 
     The dry-run/audit surface. Writes nothing of any kind.
+
+    ⛔ ONE ROW PER NODE. The read is ROW-oriented — `OPTIONAL MATCH (sess:Session
+    {id: s.sessionId})` yields ONE ROW PER MATCHING `:Session`, and `:Session`
+    declares NO uniqueness constraint on `id` (`projection._ensure_indexes`
+    creates an INDEX, not a CONSTRAINT — and `record_projection` names the
+    duplicate-`:Session` state as REACHABLE: a whitespace-only id re-`MERGE`s a
+    duplicate, #9599). So one `:Source` whose `sessionId` is carried by two
+    `:Session` nodes is visited TWICE, and that is not cosmetic:
+
+    * `census()` over-reported (one node counted as two), and `repaired` listed
+      the url once per visit — a node reported as repaired twice for one write.
+    * The SECOND visit's compare-and-set cannot match (the first visit already
+      wrote the node), so it emitted *"NOTHING was written; re-run"* about a
+      node the SAME report lists in `written` — a report contradicting its own
+      writes (PR #11152 review round 3, R3-F1).
+    * The visits disagree on `turn_max_index`. `_derive` runs on whichever row
+      is visited first, so the tail witness that decides REFUSE-vs-WRITE was
+      chosen by FalkorDB's row order — a non-deterministic witness on a write
+      path, where the module's contract is to refuse a PARTIAL outright.
+
+    Deduped by `id(s)`, keeping the LARGEST mark: a higher `turn_max_index` is
+    the stronger tail witness (a mark AHEAD of the record is named as its own
+    cause by `_no_record_note`, never lost). A row without an integer
+    `id(s)` — a seven-column seam/fake — cannot be deduped and keeps today's
+    behaviour; `reconcile_session_source_prose` names such a node
+    `unaddressable`.
     """
+    by_node: dict[int, dict] = {}
+    pos: dict[int, int] = {}
     out: list[dict] = []
     for props in _read_source_rows(g, timeout_ms):
         if not carries_pre_lexicon_prose(props):
             continue
         summary = props.get(_SUMMARY)
         search_text = props.get(_SEARCH_TEXT)
-        out.append({
+        rec = {
             "url": props.get("url"),
             "session_id": _session_id(props),
             # The session's LIVE id-space end, read in the SAME scan. It is the
@@ -496,7 +524,24 @@ def find_session_sources_carrying_prose(
             _NODE_ID: props.get(_NODE_ID),
             _SUMMARY: summary,
             _SEARCH_TEXT: search_text,
-        })
+        }
+        nid = rec.get(_NODE_ID)
+        if not isinstance(nid, int):
+            out.append(rec)          # not addressable — nothing to dedupe on
+            continue
+        prev = by_node.get(nid)
+        if prev is None:
+            pos[nid] = len(out)
+            by_node[nid] = rec
+            out.append(rec)
+            continue
+        # SAME NODE, visited once per `:Session` carrying its `sessionId`.
+        # Keep the STRONGEST tail witness; on a tie keep the first (stable).
+        new_mark, old_mark = rec.get("turn_max_index"), prev.get("turn_max_index")
+        if isinstance(new_mark, int) and (not isinstance(old_mark, int)
+                                          or new_mark > old_mark):
+            out[pos[nid]] = rec
+            by_node[nid] = rec
     out.sort(key=lambda n: str(n["url"]))
     return out
 

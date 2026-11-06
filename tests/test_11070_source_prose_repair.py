@@ -136,8 +136,19 @@ class _RecordingGraph:
         self.requested_timeouts.append(timeout)
         if self.timeout_cap and timeout and int(timeout) > int(self.timeout_cap):
             raise RuntimeError(self.TIMEOUT_CAP_ERR)
-        return _Result([tuple(props.get(c) for c in self.COLUMNS)
-                        for (props,) in self._rows])
+        # ⛔ `id(s)` IS UNIQUE PER NODE — that is what makes it the write's node
+        # identity (`_REPAIR_PAIR`'s ⛔) and what the census dedupes on (R3-F1).
+        # A fake that hands every row the SAME id is unfaithful to the invariant
+        # it emulates, and it silently merged two distinct `:Source` nodes into
+        # one census row. Rows therefore default to a per-row id; a test that
+        # needs a row with NO id passes `node_id=None` by name.
+        rows = []
+        for i, (props,) in enumerate(self._rows):
+            row = dict(props)
+            if "node_id" not in row:
+                row["node_id"] = i
+            rows.append(tuple(row.get(c) for c in self.COLUMNS))
+        return _Result(rows)
 
     @property
     def writes(self):
@@ -146,7 +157,6 @@ class _RecordingGraph:
 
 def _session_node(**overrides):
     props = {
-        "node_id": 1,
         "url": "session:s-11070",
         "sourceKind": "agentSession",
         "sessionId": "s-11070",
@@ -2017,3 +2027,77 @@ def test_the_printed_and_json_detail_never_carries_the_utterance(monkeypatch,
     assert set(detail) == {"url", "session_id", "turn_max_index",
                            "summary_bytes", "search_text_bytes"}, detail
     assert detail["summary_bytes"] == len(PROSE)
+
+
+def test_ONE_node_reachable_from_TWO_Session_nodes_is_counted_ONCE():
+    """R3-F1: the census is ROW-oriented — one row per matching `:Session`.
+
+    (1) FAILS on the underlined census: `OPTIONAL MATCH (sess:Session {id:
+        s.sessionId})` yields one row per matching `:Session`, and `:Session`
+        declares NO uniqueness constraint on `id` (`record_projection` names the
+        duplicate-`:Session` state as REACHABLE — a whitespace-only id
+        re-`MERGE`s a duplicate, #9599). Without a dedupe by `id(s)` the run
+        reported `census() == 2` for ONE node, listed the url in `repaired`
+        TWICE, and emitted *"NOTHING was written; re-run"* about the very node
+        its own `written` bucket names.
+    (2) REACHABLE: two `:Session` nodes at one id, the SECOND one carrying a
+        lower `turn_max_index`.
+    (3) THE WITNESS MUST NOT BE ARBITRARY: the pair of rows disagree on
+        `turn_max_index`, and that mark decides REFUSE-vs-WRITE (`_derive` runs
+        only when the record answered). Row order is FalkorDB's, so the run must
+        take the STRONGEST mark rather than whichever row came first.
+    """
+    from tests import _live_utils
+
+    _live_utils._skip_unless_live_uri()
+    import contextlib
+    import os
+
+    from falkordb import FalkorDB
+
+    from tortoise import session_source_prose_migration as m
+    from tortoise.projection import resolve_db_endpoint
+
+    graph_name = f"test_11070_dupsess_{os.urandom(4).hex()}"
+    endpoint = resolve_db_endpoint(os.environ["TORTOISE_DB_URI"], graph_name)
+    client = FalkorDB(host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, password=endpoint.password,
+                      ssl=endpoint.ssl)
+    g = client.select_graph(endpoint.graph_name)
+    url = "session:dupsession-11152"
+
+    try:
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'dup',"
+            " summary:$p, _searchText:$p, topics:['friday','rebuild']})",
+            {"u": url, "p": PROSE})
+        g.query("CREATE (:Session {id:'dup', turn_max_index:7})")
+        g.query("CREATE (:Session {id:'dup', turn_max_index:3})")
+        assert g.query("MATCH (s:Session {id:'dup'}) RETURN count(s)"
+                       ).result_set == [[2]], "precondition: TWO :Session rows"
+
+        assert m.census(g) == 1, (
+            "the census counts ROWS, not NODES: one `:Source` reachable from "
+            "two `:Session` nodes is counted twice (R3-F1)")
+
+        seen = []
+        report = m.reconcile_session_source_prose(
+            g, read_transcript=lambda sid, tmi=None: seen.append(tmi) or
+            "We decided Friday. Then we chose the rebuild.", dry_run=False)
+
+        assert seen == [7], (
+            f"the run asked the record for mark {seen} — the census kept "
+            f"whichever duplicate row came first instead of the STRONGEST "
+            f"tail witness")
+        assert report["written"] == [url], report
+        assert report["repaired"] == [url], (
+            f"one write reported as {len(report['repaired'])} repairs: {report}")
+        assert report["census_before"] == 1, report
+        assert report["census_after"] == 0, report
+        assert not any("NOTHING was written" in n
+                       for n in report["notes"].values()), (
+            "the report says NOTHING was written about a node it lists in "
+            f"`written`: {report['notes']}")
+    finally:
+        with contextlib.suppress(Exception):
+            g.delete()
