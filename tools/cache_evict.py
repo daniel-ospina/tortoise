@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
             # retry FLAGS against a store nobody could reach.
             _emit({"verdict": "REFUSED",
                    "reason": (f"the cache could not be reached "
-                              f"({type(exc).__name__}: {exc})  # nothing is claimed")},
+                              f"({type(exc).__name__}: {exc}) — nothing is claimed")},
                   args.out)
             return CACHE_EVICTION_EXIT_REFUSED
         # ⛔ A graph that is not on the instance is REFUSED, never opened: reading a
@@ -323,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
             # retry FLAGS against a store that did not answer.
             _emit({"verdict": "REFUSED",
                    "reason": (f"the cache could not be measured "
-                              f"({type(exc).__name__}: {exc})  # nothing is claimed")},
+                              f"({type(exc).__name__}: {exc}) — nothing is claimed")},
                   args.out)
             return CACHE_EVICTION_EXIT_REFUSED
         if assessment.verdict == "UNBOUNDED":

@@ -40,33 +40,48 @@ class _Graph:
     #: unreachable from this harness.
     NODES = 10
 
-    def __init__(self, *, fail_delete: bool = False):
+    def __init__(self, *, fail_delete: bool = False, delete_removes: int | None = None,
+                 fail_recount: bool = False):
         self.statements: list[str] = []
         #: Raise INSIDE the `DETACH DELETE` — the statement was ISSUED and its effect is
         #: unknown, which is the one case the exit code must not call "nothing happened".
         self.fail_delete = fail_delete
+        #: ⛔ How many rows the delete REPORTS removing. Without this the fake answered
+        #: `[]` for every delete, so `report.deleted` was EMPTY in all of these tests and the
+        #: `report.deleted` operand of the CLI's exit-code gate could never be true — a
+        #: half-untested guard on the most safety-critical line in the tool.
+        self.delete_removes = delete_removes
+        #: Raise on the POST-DELETE re-count: the DELETE landed, then the after-state
+        #: could not be measured. The report must still carry the deletions.
+        self.fail_recount = fail_recount
+        self._deleted = False
 
-    def _answer(self, statement):
+    def _answer(self, statement, params=None):
         low = statement.lower()
         if "detach delete" in low:
             if self.fail_delete:
                 raise RuntimeError("RUNTIME reset on the delete")
-            return _Result([])
+            rows = list((params or {}).get("rows") or [])
+            self._deleted = True
+            removed = len(rows) if self.delete_removes is None else self.delete_removes
+            return _Result([[removed]])
         if "call db.labels" in low:
             return _Result([("Point",)])
         if "size(labels(n)) = 0" in low:
             return _Result([(0,)])
         if "count(" in low:
+            if self.fail_recount and self._deleted:
+                raise RuntimeError("recount transport blip")
             return _Result([(self.NODES,)])
         return _Result([])
 
     def ro_query(self, statement, params=None, timeout=None):
         self.statements.append(statement)
-        return self._answer(statement)
+        return self._answer(statement, params)
 
     def query(self, statement, params=None, timeout=None):
         self.statements.append(statement)
-        return self._answer(statement)
+        return self._answer(statement, params)
 
     @property
     def mutations(self) -> list[str]:
@@ -365,3 +380,39 @@ def test_a_REFUSED_run_that_deleted_nothing_still_reports_3(wired, tmp_path):
         "--parity-graph", "tortoise"))
     assert code == 3
     assert graph.mutations == []
+
+
+def test_a_SUCCESSFUL_delete_whose_after_state_is_UNMEASURED_reports_2(wired, tmp_path,
+                                                                     capsys):
+    """⛔ The OTHER operand of the exit-code gate: `report.deleted`.
+
+    The DELETE lands, then the post-delete re-count raises, so the pass cannot measure its
+    after-state and returns `deleted=<n>` with `verdict="REFUSED"`. Two things must hold,
+    and neither was covered before this test:
+
+    * the report still CARRIES the deletions (a measurement fault after a commit must not
+      lose the record of what was committed);
+    * the CLI reports **2**, not 3. Reverting `if report.deleted or
+      report.delete_unverified:` to `if report.delete_unverified:` left the whole CLI
+      suite green, i.e. a one-token regression would report "nothing was removed" for a
+      run that removed four nodes — the exact R2 violation the operand exists to prevent.
+    """
+    client, _unused = wired
+    graph = _Graph(delete_removes=4, fail_recount=True)
+    import tools.cache_eviction_census as census
+
+    census._connection = lambda ep: (client, graph)  # type: ignore[assignment]
+    report = _parity_report(tmp_path, instrument="tools/turn_parity_census.py")
+
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(report), "--parity-graph", "tortoise",
+        "--execute", "--confirm-graph", "tortoise"))
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["metric"]["nodes_evicted"] == 4, body["metric"]
+    assert body["metric"]["delete_unverified"] is False, (
+        "the delete SUCCEEDED; only the after-state is unmeasured")
+    assert code == 2, ("a run that removed nodes must never report 3 ('nothing was "
+                       "removed')")

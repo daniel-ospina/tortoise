@@ -461,7 +461,7 @@ def _key_property(key_prop: str) -> str:
     if not quoted.startswith("`") and not re.fullmatch(_BARE_SAFE, quoted):
         raise EvictionConfigError(
             f"key property {key_prop!r} is not a safe Cypher identifier "
-            f"(shared quoting returned it bare as {quoted!r})  # refusing rather than "
+            f"(shared quoting returned it bare as {quoted!r}) — refusing rather than "
             f"interpolating it into a DELETE"
         )
     return quoted
@@ -603,7 +603,7 @@ def evict(
     if population not in licensed:
         return _refuse(
             f"population {population!r} is not licensed by the census plan "
-            f"(evictable: {sorted(licensed) or 'none'})  # an unproven population may "
+            f"(evictable: {sorted(licensed) or 'none'}) — an unproven population may "
             f"not be swept"
         )
 
@@ -618,7 +618,7 @@ def evict(
     except Exception as exc:  # any store fault refuses the pass
         return _refuse(
             f"the resident node count could not be read "
-            f"({type(exc).__name__}: {exc})  # an unreadable cache cannot be measured, "
+            f"({type(exc).__name__}: {exc}) — an unreadable cache cannot be measured, "
             f"so nothing may be swept"
         )
     before_bytes = _resident_bytes(client)
@@ -726,7 +726,7 @@ def evict(
             offered = list(selector(graph, window, population))
         except Exception as exc:
             abort_reason = (
-                f"selector failed ({type(exc).__name__}: {exc})  # an unreadable "
+                f"selector failed ({type(exc).__name__}: {exc}) — an unreadable "
                 f"selection is a refusal, not an empty one"
             )
             break
@@ -896,7 +896,7 @@ def evict(
         except Exception as exc:
             abort_reason = (
                 f"the cache could not be re-measured after {len(deleted)} node(s) were "
-                f"evicted ({type(exc).__name__}: {exc})  # the deletions above are "
+                f"evicted ({type(exc).__name__}: {exc}) — the deletions above are "
                 f"recorded, but the remaining state is UNKNOWN"
             )
             after_measured = False
@@ -927,7 +927,7 @@ def evict(
         # for the whole one, and the verdict word is the only thing contradicting it.
         abort_over = after_nodes - resolved.max_nodes
         suffix = (
-            f"  # {len(deleted)} node(s) were evicted by pass(es) of this call"
+            f" — {len(deleted)} node(s) were evicted by pass(es) of this call"
             if deleted
             else ""
         )
