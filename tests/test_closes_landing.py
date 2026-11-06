@@ -4067,9 +4067,12 @@ def test_the_opener_allowance_inside_a_CONTAINER_is_a_DECLARED_residual():
     relative 0-3 but raw 4-5 is invisible, and the wide-gap marker line below it is blanked:
 
         `- item` + `    <div>` + `  -     Closes #100`    renderer `html_block`
-            head `[]`, `origin_main` `[100]` — 9,072 such bodies in the review's grid, ALL of them
+            head `[]`, `origin_main` `[]` TOO — 9,072 such bodies in the review's grid, ALL of them
             already `[]` at the previous head (so: parity, not a regression, and the LOST-CLOSE
-            direction, never a false PASS)
+            direction, never a false PASS). ⚠️ `origin_main` was measured as `[]` at round 48 (both
+            arms, the module loaded by path): an earlier revision of this docstring said `[100]`,
+            which contradicts its own next clause — if `origin_main` credited, this would be a
+            REGRESSION, not parity. The residual is real and pre-existing; the figure is not.
 
     The fix is the same `content_col` treatment `_fence_open` already uses (measure the allowance
     from the containing block's content column), and it is deliberately NOT taken here: it touches
@@ -4207,15 +4210,21 @@ def test_a_content_blank_line_never_leaks_the_per_line_pop_state():
     instead of a verdict. Measured: 336 crashing (body, mode) pairs over the review's grid at the
     gated head, 0 at `origin/main`, 0 here.
     """
-    for body in ("- a\n>     \n>     \n",
-                 "- a\n>     \n>     \n>     \n",
-                 "- [ ] a\n>     \n>     \n"):
-        # Never raises, and answers what `origin/main` answers rather than a traceback.
-        assert cl.strip_code(body, strict=True) == cl.strip_code(body, strict=True)
-        for kwargs in ({"strict": True}, {"indented_code": True}):
+    # EXACT parity with `origin/main` (measured, module loaded by path, both arms). The first version
+    # of this loop compared `strip_code(x)` to ITSELF — an assertion that can only fail by raising —
+    # and asserted `"Closes" not in out` on bodies that contain no `Closes` at all (round 48 review,
+    # P3: two dead lines). A literal table cannot rot silently the way a restated figure can.
+    for body, strict_out, indented_out in (
+            ("- a\n>     \n>     \n", "- a\n\n", "- a\n\n"),
+            ("- a\n>     \n>     \n>     \n", "- a\n\n\n", "- a\n\n\n"),
+            ("- [ ] a\n>     \n>     \n", "- [ ] a\n\n", "- [ ] a\n\n")):
+        # Never raises, and the pop state does not LEAK: every `>     ` line is blanked, and the
+        # output keeps one line per input line so nothing is silently dropped.
+        for kwargs, expected in (({"strict": True}, strict_out),
+                                 ({"indented_code": True}, indented_out)):
             out = cl.strip_code(body, **kwargs)
             assert isinstance(out, str), (body, kwargs)
-            assert "Closes" not in out
+            assert out == expected, (body, kwargs, out)
     # The exact parity pin: `main`'s answer for the review's body, in both modes, is `'- a\n\n'`.
     assert cl.strip_code("- a\n>     \n>     \n", strict=True) == "- a\n\n"
     assert cl.strip_code("- a\n>     \n>     \n", indented_code=True) == "- a\n\n"
@@ -4344,3 +4353,159 @@ def test_a_LAZY_item_marker_does_NOT_leave_a_stale_container_behind():
                 if "Closes #100" in getattr(t, "content", "")] == ["html_block"], body
         assert cl.parse_closing_refs(body) == [100], body
         assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+
+def test_a_fence_that_DROPS_the_items_marker_is_TOP_LEVEL():
+    """Round 48 review, P0 — a FAIL-OPEN in the `strict=True` PASS arm, rooted in the BINDING.
+
+    `> - item` followed by `  ``` ` drops the item's `>` marker. A fence cannot continue a paragraph
+    (§4.5 — a fence line inside an open paragraph is that paragraph's TEXT), so the blockquote — and
+    the item with it — ends on that line and the renderer opens a TOP-LEVEL fence. `_fence_candidate`
+    bound the fence to the item anyway (`in_list=True`, `close_base` = the item's 2-column content),
+    so the NEXT line measured as a 0-column dedent and ENDED the fence: the rest of the body was
+    re-read as fresh prose and a keyword the renderer puts inside `<pre><code>` was credited in BOTH
+    arms. `origin/main` blanks all of them; the pre-fix head credits all of them.
+
+    A depth-0 fence has NO container, so nothing but a matching closer (or EOF) ends it — which is
+    what `strip_code`'s own docstring already states for a depth-0 fence.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for body in ("> - item\n  ```\n> <div>\n<div>\n-     Closes #100\n",
+                 "> - \n  ```\n> > <div>\n<span>\n  -     Closes #100\n",
+                 "> - item\n  ```\n> <div>\n<span>\n  -     Closes #100\n",
+                 # …and the same fence CLOSED by a real closer: the marker inside it is still code.
+                 "> - item\n  ```\n> <div>\n<div>\nCloses #100\n  ```\n"):
+        # The renderer is the oracle: every occurrence of the keyword is CODE here.
+        assert keyword_types(body) <= {"fence", "code_block"}, body
+        assert "<pre><code>" in md.render(body), body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # Controls — the fix must not become "a fence under an item is never inside it".
+    # (i) the opener KEEPS the item's marker: the fence is in the item, and the marker at the item's
+    #     own depth is still its content.
+    assert keyword_types("> - item\n>   ```\n>   Closes #100\n") == {"fence"}
+    assert cl.parse_closing_refs("> - item\n>   ```\n>   Closes #100\n") == []
+    # (ii) a marker line that opens a fence ON the item (`- ``` `), whose block the renderer really
+    #      does close, still credits the prose under the closer.
+    assert cl.parse_closing_refs("- ```\n  Closes #100\n  ```\n") == []
+    assert cl.parse_closing_refs("<div>\n-     Closes #100\n") == [100]
+
+
+def test_the_CARRIED_item_must_have_CONTENT():
+    """Round 48 review, P1 — a LOST close: `blank_carried` carried an item the renderer had CLOSED.
+
+    A blank line does not end a list item, so the round-47 fix carries the item across it. But it
+    carried an EMPTY one too, and §5.2's lazy continuation has nothing to continue there: an empty
+    `<li>` is closed by the blank line, so the type-1 block that opens on the next line belongs to
+    the BLOCKQUOTE and its only end-condition is the end of that quote — not a dedent out of the
+    (gone) item. Binding it to the item ended the block one line early and blanked a real close:
+
+        `> - ` + `>` + `>   <pre>` + `>` + `> -     Closes #100`
+            renderer: `<li></li>` then the `<pre>` OUTSIDE the list — ONE `html_block` whose own
+            text is the marker (§4.6's end at "the last line of the container block")
+            `origin/main` `[100]`, pre-fix head `[]`
+
+    The discriminator is CONTENT ON THE ITEM, which is what makes the renderer keep the `<li>` open
+    across the blank line — taken from the marker line and from lines that stay inside the item,
+    never from a LAZY line (`> - ` + `> text` renders `<li></li><p>text</p>`, so that item is still
+    empty). Both halves are pinned below, so the fix cannot be reverted into over-crediting.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    # EMPTY item -> the block survives, the marker is the block's own text -> CREDITED.
+    for body in ("> - \n>\n>   <pre>\n>\n> -     Closes #100\n",
+                 "> * \n>\n>   <pre>\n>\n> -     Closes #100\n"):
+        assert keyword_types(body) == {"html_block"}, body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # NON-EMPTY item -> the `<pre>` is inside the `<li>`, the dedent ends the block, the wide-gap
+    # marker below it is CODE. Control (a): content on the MARKER line.
+    for body in ("> - item\n>\n>   <pre>\n>\n> -     Closes #100\n",
+                 # Control (b): content on a line that STAYS INSIDE the item — the same item, so the
+                 # `<li>` survives the blank line exactly as in (a).
+                 "> - \n>   text\n>\n>   <pre>\n>\n> -     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # Control (c): a LAZY line adds no content, so the item is still empty and the close is REAL.
+    lazy = "> - \n> text\n>\n>   <pre>\n>\n> -     Closes #100\n"
+    assert keyword_types(lazy) == {"html_block"}, lazy
+    assert cl.parse_closing_refs(lazy) == [100], lazy
+
+
+def test_a_fence_INSIDE_an_HTML_block_is_not_a_fence():
+    """A leaf-block rule: §4.6's types 1-7 are LEAVES, so ` ``` ` written inside one opens no fence.
+
+    This is the round-43 decision ("an HTML block's own TEXT is READ, not hidden") applied to the
+    FENCE path, and it is what keeps the two state machines agreeing. Before it, a fence opened on a
+    line inside an open HTML block and blanked every line after it (a fence runs to its closer or to
+    EOF), so a body the renderer reads as ONE `html_block` lost its close:
+
+        `<span>` + `>   <pre>` + `> - ` + `   ``` ` + `2.     Closes #100`
+
+    Pinned with the renderer's answer rather than a prose figure, because the point is that the
+    renderer and the scanner agree on WHICH block is open. ⚠️ This is a PIN, not a discriminator: it
+    passes at the pre-fix head too. It fails against the intermediate tree where the fence binding
+    was fixed and the leaf rule was not, which is the variant this commit must not regress into.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for body in ("<span>\n>   <pre>\n> - \n   ```\n2.     Closes #100\n  -     Closes #100\n",
+                 "<pre>\n> > <div>\n> - item\n  ```\n> ```\n- item\n> - a\n-     Closes #100\n"):
+        assert keyword_types(body) == {"html_block"}, body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # An EMPTY quoted item adds no container of its own: the blockquote closes at the next line, so
+    # the 4-column run is an indented CODE block at top level and the `<span>` under it opens a fresh
+    # type-7 block — the marker is that block's text.
+    for body in ("> - \n    ```\n<span>\n-     Closes #100\n",
+                 "> * \n    ```\n> <span>\n> -     Closes #100\n"):
+        assert keyword_types(body) == {"html_block"}, body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+
+def test_an_INDENTED_line_blanked_as_code_does_not_close_the_open_paragraph():
+    """§4.4: an indented code block cannot INTERRUPT a paragraph, so the paragraph survives it.
+
+    The `strict` arm blanks every indented line, and clearing the paragraph state there made the next
+    type-7 leaf look like a fresh block; a ` ``` ` inside that phantom block then opened a fence over
+    the rest of the body, which blanked a marker the renderer puts in CODE — a FAIL-OPEN, in the arm
+    `issue_process_lint` uses as its PASS path:
+
+        `> Notes` + `> Notes` + `    ``` ` + `<br />` + ` ``` ` + `2.     Closes #100`
+            renderer: ONE `<p>` (the indented run and `<br />` are lazy continuations) and then a
+            FENCE holding the marker -> CODE in both arms.
+
+    A CONTENT-BLANK line (`>     `) really is a blank line for the block grammar and still ends the
+    paragraph, so the round-38 state reset is untouched; the last assertion is that control.
+
+    ⚠️ This is a PIN, not a discriminator: the pre-fix head answers `[]` here too, because a fence it
+    opened inside the phantom block happened to be short-lived. It fails against the intermediate
+    tree whose fence runs to EOF, which is the variant this commit must not regress into.
+    """
+    md = MarkdownIt("commonmark")
+    body = "> Notes\n> Notes\n    ```\n<br />\n```\n2.     Closes #100\n-     [ ] x\n"
+    assert {t.type for t in md.parse(body)
+            if "Closes #100" in getattr(t, "content", "")} == {"fence"}, body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # The paragraph really does end at a CONTENT-BLANK line, so the leaf below it is a fresh block
+    # and its own text is prose (control for "the fix did not make every blank line lazy").
+    control = "- [ ] a\n>     \n> <span>\n>   -     Closes #100\n"
+    assert cl.parse_closing_refs(control, None, strict=True) == [100], control
