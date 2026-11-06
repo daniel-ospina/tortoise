@@ -407,10 +407,44 @@ def test_finalising_the_same_batch_twice_does_not_duplicate_the_story():
     second = _run(EMISSION)
     assert first["relations"] == second["relations"]
     assert len(first["relations"]) == 1
-    # the commit id is stable across the two finalisations (nothing in the
-    # channel leaks into the payload's canonical form)
-    assert (first["payload"]["client_commit_id"]
-            == second["payload"]["client_commit_id"])
+
+
+def test_the_channel_never_reaches_the_payload_nor_its_canonical_id():
+    """#10000 (P0) — the payload boundary, pinned so the pin can FAIL.
+
+    The assertion this replaces compared the `client_commit_id` of two runs of
+    `_run(EMISSION)` — the same deterministic function over the same
+    deep-copied input — so no mutation of this channel could ever change it,
+    including the one it was cited for (agent-infra#3442 rule 3: an assertion
+    whose value cannot vary under any mutation of the diff). The PR body cited
+    it as a second pin on the P0 while `assert "relations" not in result[
+    "payload"]` was doing all the work.
+
+    This pin varies the INPUT instead of re-running the same code: the same
+    batch WITH the channel and WITHOUT it. `compute_client_commit_id` hashes an
+    explicit argument list, so the two ids agree only while the channel stays
+    out of the canonical payload — add `relations` to the payload dict AND to
+    that argument list and the ids diverge HERE, which is the mutation the dead
+    version left green.
+    """
+    with_channel = _run(EMISSION)
+    without_channel_emission = copy.deepcopy(EMISSION)
+    without_channel_emission["relations"] = []
+    without_channel = _run(without_channel_emission)
+
+    # NON-VACUITY: the two runs differ in the channel and in nothing else, so
+    # an id that agrees here agrees because the channel is excluded — not
+    # because the two inputs were the same object.
+    assert with_channel["relations"], "the channel must be non-empty here"
+    assert without_channel["relations"] == []
+
+    assert "relations" not in with_channel["payload"]
+    assert "relations" not in without_channel["payload"]
+    assert (with_channel["payload"]["client_commit_id"]
+            == without_channel["payload"]["client_commit_id"]), (
+        "the relation channel reached the commit payload's canonical form — "
+        "#10000 (P0): the story's TEXT stays out of the graph, and a typed "
+        "relation is RESULT-level (D8), never part of the client_commit_id")
 
 
 def test_intra_emission_duplicate_triples_collapse_first_wins():
@@ -637,6 +671,37 @@ def test_mutation_the_predicate_gate_is_live(monkeypatch):
                               "predicate": "vibesWith"}]
     result = _run(emission)
     assert [r["predicate"] for r in result["relations"]] == ["vibesWith"]
+
+
+def test_an_unreadable_vocabulary_fails_OPEN_and_names_the_relation(monkeypatch):
+    """The ONE route by which an invented predicate reaches the channel.
+
+    `_declared_relation_predicates()` returns `None` when the pack registry
+    cannot be read, and `_assemble_relations` then KEEPS the relation with a
+    warning — #10999 §4.4's declared fail-open ("Job 1 fails **open** … a
+    quality problem in the reading, re-derivable from the same narrative"), not
+    a fail-closed gate. Nothing in the suite reached this arm: the only other
+    `_declared_relation_predicates` monkeypatch widens the set, so deleting the
+    `else:` arm, flipping it to a drop, or keeping SILENTLY all left the suite
+    green — i.e. the entire residual risk of #2766 was unpinned prose.
+
+    Pins the direction AND the naming, so a later "tightening" to fail closed
+    reds here instead of silently destroying relations it could not judge.
+    """
+    monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "vibesWith"}]
+    result = _run(emission)
+
+    assert len(result["relations"]) == 1, result["warnings"]
+    assert result["relations"][0]["predicate"] == "vibesWith"
+    assert result["stats"]["relations_dropped"] == 0, result["warnings"]
+    assert any("vibesWith" in w and "unverified" in w
+               for w in result["warnings"]), (
+        "a kept-but-uncheckable predicate must be NAMED as unverified, or the "
+        "fail-open is indistinguishable from a passing gate: "
+        f"{result['warnings']}")
 
 
 def test_mutation_the_union_arm_is_live():
