@@ -250,8 +250,10 @@ to be re-quoted, and §4.1 above is the first reason why.
 INDEX fact, not a claim about the property … what the label holds is measured by
 `tools/dod_5090_probe.py --census`, never inferred from the inventory"*. So the dated reading never
 claimed `Source`/`Subject` hold no vectors. What is stale is the **inference** a reader draws from
-§12.1a's additive legs (`Point ~31 MB + Object ~11.8 MB + Event ~7.2 MB ≈ the whole 33,580 / 51.6 MB`),
-which leaves nothing for the other two labels — while both labels' writers DO store `embedding` (§4.1).
+**§12.1's** additive legs (`Point ~31 MB + Object ~11.8 MB + Event ~7.2 MB ≈ the whole 33,580 / 51.6 MB`
+— the legs are §12.1's table, and the 33,580 / 51.6 MB total they are reconciled against is §12.1a's
+measured total, so the two sections are easy to confuse), which leaves nothing for the other two labels —
+while both labels' writers DO store `embedding` (§4.1).
 Treat the 12,657 as the shape of the answer, never as the answer.
 
 ---
