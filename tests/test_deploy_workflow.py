@@ -5687,11 +5687,20 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 #    `047c91f7a`."                                    -> REFUSED (must pass)
                 # `_third_sha_in_clause` already encodes the doctrine — skip the TRUE tree
                 # and the ARMING COMMIT, and treat a DENIED sha as a correction — so the two
-                # guards cannot disagree about the same sentence. An aside between a copula
-                # and its object is not the predication, so incises are blanked first.
-                if not _third_sha_in_clause(
-                    _INCISE.sub(lambda _m: " " * len(_m.group(0)), _inv_between)
-                ):
+                # guards cannot disagree about the same sentence.
+                # ⛔ …AND THE GAP IS READ UNBLANKED (#11191 review r17, P1 — MEASURED false
+                # PASS). Blanking incises here first was a widening with NO benefit: the
+                # helper already skips the arming commit, so every truth control passes
+                # WITHOUT the blanking, while the blanking HID a third tree sitting in the
+                # comma-incise and turned a refusal into an acceptance —
+                #   "The tree immediately before #9548 is, `c5cbcbb4f`, not `047c91f7a`."
+                #                                             -> ACCEPTED (pin GREEN)
+                # — a shape the head before this guard REFUSED. `c5cbcbb4f` is the doc's
+                # own stale pre-#9548 attribution with the true tree additionally denied.
+                # It also contradicted this file's own clause doctrine: `_CLAUSE_DELIM`
+                # deliberately does NOT split on a plain comma because apposition depends on
+                # it, so the same comma must not erase a sha from this guard.
+                if not _third_sha_in_clause(_inv_between):
                     return True  # "the tree before #9548 IS `047c91f7a`"
             # 4. A REFERENT. The phrase refers to the nearest sha written before it — that
             #    is what apposition and attribution mean in prose, with no distance
@@ -7468,6 +7477,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             f"REFUSED: {_true_copula!r}\n"
             "the TRUE copula is the correction the pin exists to accept "
             "(#11191 review r15, P1)"
+        )
+    # ⛔ …AND THE GAP IS READ UNBLANKED (#11191 review r17, P1 — MEASURED false PASS).
+    # Blanking incises in the inverted-true gap was a widening with NO benefit: the helper
+    # already skips the arming commit, so every truth control above passes WITHOUT it, while
+    # the blanking HID a third tree inside a comma-incise and turned a refusal into an
+    # acceptance. `c5cbcbb4f` is the doc's own stale pre-#9548 attribution, with the TRUE
+    # tree additionally DENIED — the equivalence this pin exists to refuse.
+    for _incised_third in (
+        "The tree immediately before #9548 is, `c5cbcbb4f`, not `047c91f7a`.",
+        "The tree immediately before #9548 is (`c5cbcbb4f`) `047c91f7a`.",
+        "The tree immediately before #9548 is, `deadbeef1`, not `047c91f7a`.",
+        "The tree immediately before #9548 is, the stale `c5cbcbb4f`, not `047c91f7a`.",
+    ):
+        assert _refuses_before_9548(_incised_third), (
+            f"ACCEPTED: {_incised_third!r}\n"
+            "an incise between the copula and the true tree must not ERASE a third sha "
+            "from this guard — `_CLAUSE_DELIM` deliberately does not split a plain comma "
+            "because apposition depends on it, so the same comma may not hide the defect "
+            "(#11191 review r17, P1)"
         )
     # ⛔ THE ANAPHORA RESIDUAL, PINNED AS A CHARACTERISATION — NOT AS CORRECT BEHAVIOUR
     # (#11191 review r11, P3 — the PR body states this residual but the CODE did not, and
