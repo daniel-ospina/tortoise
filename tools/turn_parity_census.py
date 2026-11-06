@@ -15,7 +15,8 @@ open rewrites the RDB on EVERY open/close — measured at this head on a 1-node
 store: `live.db` 861 B → 854 B across two consecutive read-only CLI runs, with a
 different sha256 each time — so the #10017 byte census is taken AROUND a run,
 never from a copy the run itself touched. It also leaves a
-`<db>.<graph>-construct.lock` beside the store, and a `<db>.settings` that lives
+`<db>.tortoise-construct.lock` beside the store (the suffix is a CONSTANT,
+not the graph's name — measured), and a `<db>.settings` that lives
 ONLY while the daemon does (measured: present mid-run, GONE after `close()`). A
 `--db-path` that does not exist gets an empty 118-byte store file plus that
 lock — the file has no graphs in it (`GRAPH.LIST` → `[]`), which is the claim
@@ -430,8 +431,9 @@ USAGE
                      `tortoise` for --db-path). It selects the GRAPH leg only
                      — it never scopes the record read; the record's tenant is
                      chosen with --org-id/--graph-id. A wrong --graph-name is
-                     checked against the store BEFORE any graph is opened or
-                     queried ("Presence", above): a name the store does NOT
+                     checked against the store before any graph is opened or
+                     queried — the presence check, which runs first: a name the
+                     store does NOT
                      hold exits 3 naming what it does hold, and never becomes
                      a graph. ⛔ That check proves the NAME EXISTS — it does
                      not prove it is the graph you meant. A wrong name the

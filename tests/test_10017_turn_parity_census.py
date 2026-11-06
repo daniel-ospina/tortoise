@@ -1137,7 +1137,13 @@ def _embedded_store_with_tortoise(tmp_path, monkeypatch):
 
 
 def _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch):
-    """A real embedded store holding exactly one graph, `tortoise`, and ZERO nodes.
+    """A real embedded store holding exactly one graph, `tortoise`, and zero POINTS.
+
+    #11113 review cycle 3, finding 2: the earlier wording said "ZERO nodes" and
+    "no node is ever written", and both are false — the default bind issues the
+    schema DDL, which on a fresh graph writes one `(:Meta)` node (measured:
+    `MATCH (n) RETURN count(n)` → 1, `Point` → 0). The property this fixture is
+    for is the CENSUS predicate, `is_episodic`, which really is 0 here.
 
     This is #10017's own post-purge state: the drain has happened, the graph
     still EXISTS. It is the state the presence check must NOT refuse.
@@ -1146,7 +1152,8 @@ def _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch):
     from tortoise.projection import FalkorProjection
 
     db_path = str(tmp_path / "census_empty.db")
-    # default bind kwargs: the graph is created, no node is ever written.
+    # default bind kwargs: the graph is created and its DDL writes one (:Meta),
+    # but no Point — which is the population the census counts.
     proj = FalkorProjection(db_path, graph_name="tortoise")
     try:
         assert sorted(proj.db.list_graphs()) == ["tortoise"]
@@ -1299,7 +1306,8 @@ def test_a_present_but_EMPTY_graph_passes_presence_and_reaches_the_emptiness_ver
     node, so it never exercised the drained graph — a future guard that refused
     an existing-but-empty graph passed it green, and the run #10017 ends on
     (delete happened, graph now empty, `--expect-empty`) would start exiting 3.
-    This test is that graph: it exists, it holds zero nodes.
+    This test is that graph: it exists, it holds zero POINTS (the bind's DDL
+    writes one `(:Meta)`, not a Point — measured, #11113 review cycle 3).
 
     Two assertions, because the failure has two halves:
       (a) the READ must not raise — presence, not content, is the question;
@@ -1473,6 +1481,32 @@ def test_the_expect_empty_help_NAMES_the_intent_residual():
     # and the USAGE block must not repeat the old claim either.
     assert "cannot be blessed" not in usage
     assert "NOT the same answer as a drained graph" not in usage
+
+
+def test_an_EMPTY_graph_name_is_refused_by_the_LIBRARY_not_substituted(
+        tmp_path, monkeypatch):
+    """#11113 review cycle 3, P2: `graph_name or "tortoise"` pre-empted the guard.
+
+    The CLI refuses `--graph-name ""` before this point (`empty_graph_target_flag`),
+    so the defect was reachable only from the library — the arm `read_graph_turns`
+    is. Measured on the pre-fix code: `read_graph_turns(None, db, "")` on a store
+    holding `['live','tortoise']` returned `tortoise`'s turns, i.e. it CERTIFIED a
+    graph the caller never asked about, and `_refuse_unless_graph_present` (which
+    refuses a nameless handle outright) never saw the name. `None` still means
+    "the default"; `""` is a name that cannot be verified.
+    """
+    db_path = _embedded_store_with_TWO_graphs(tmp_path, monkeypatch)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "")
+    assert "no NAME" in str(exc.value), str(exc.value)
+    # ... and the default is still the default, so the refusal is about "" and
+    # not about an absent argument: `None` resolves to `tortoise`, which in this
+    # fixture is the drained graph, so it reads (nothing) instead of raising.
+    assert tpc.read_graph_turns(None, db_path, None).get("nodes") == {}
+    # the non-default line is reachable, so the fixture really holds `live_t1`.
+    graph = tpc.read_graph_turns(None, db_path, "live")
+    assert sorted(graph["nodes"]) == ["live_t1"], graph["nodes"]
 
 
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(
