@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -1537,6 +1538,56 @@ def test_a_DRAINED_graph_is_never_mistaken_for_a_LOST_one(
     """
     db_path = _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch)
     _write_replayable_log(tmp_path)          # same log, same directory
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_a_FIFO_named_like_a_log_does_NOT_hang_the_refusal_arm(
+        tmp_path, monkeypatch):
+    """⛔ A planted FIFO must not wedge the census with no verdict (#11113 c5, P2).
+
+    `_one_replayable_log` reads a file beside the store, which the operator may
+    share; a plain `O_RDONLY` open on a FIFO blocks FOREVER, and this runs on
+    exactly the empty-graph state #10017 ends on — so the gate would hang
+    silently instead of refusing. The sibling `_load_prewipe_snapshot` was
+    hardened this way for the same reason; this pin keeps the census on that
+    rule (no symlink follow, non-blocking, REGULAR file only).
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    fifo = tmp_path / "session-events.jsonl"
+    os.mkfifo(fifo)
+
+    # A FIFO is not a replayable log: the arm must read PAST it (no refusal, no
+    # hang). The pin is that this call RETURNS at all — on the pre-fix code the
+    # plain open() blocked here and the test would time out, not fail.
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_a_GARBAGE_log_is_not_called_replayable(tmp_path, monkeypatch):
+    """The arm must match `recover_from_log`'s boundary, not approximate it.
+
+    #11113 review cycle 5, P2: recovery replays only from a log with at least
+    one PARSABLE event, so a garbage-only log is `nothing to recover`. Claiming
+    "recovery would REPLAY this" there tells the operator a false cause — the
+    same class of misdiagnosis this PR fixes elsewhere. Measured on the sibling:
+    `recover_from_log` → `{'recovered': False, 'reason': 'event log empty or
+    unreadable — nothing to recover'}`.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_text("not json at all\n{\n")
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_TWO_adjacent_logs_are_ambiguous_so_the_arm_does_not_claim_a_replay(
+        tmp_path, monkeypatch):
+    """Recovery refuses an ambiguous pair; the arm must not assert otherwise."""
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "a.jsonl").write_text('{"event_type": "SessionStarted"}\n')
+    (tmp_path / "b.jsonl").write_text('{"event_type": "SessionStarted"}\n')
 
     graph = tpc.read_graph_turns(None, db_path, "tortoise")
     assert graph["nodes"] == {}, graph["nodes"]
