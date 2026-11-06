@@ -1463,6 +1463,18 @@ def test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so():
             f"`cache_forbidden_columns({table!r})` no longer denies "
             "`story_arc` — the deny is per COLUMN as well as per table, so a "
             "row that drops the name must red here and not only the table map")
+        # ⛔ The §9.1(b) scope note says a `storyArc` spelling is NOT covered by
+        # this deny, and both the tail filter and the parity set deny every
+        # DECLARED spelling. The two coincide because this column spells once —
+        # pinned here, so a placement change that gives it a second spelling
+        # makes the doc's sentence false LOUDLY rather than silently.
+        assert cache_projection.placement_spellings().get(
+            table, {}).get("story_arc", ()) == ("story_arc",), (
+            f"`story_arc` is spelled more than once on `public.{table}` — the "
+            "§9.1(b) scope note (a `storyArc` spelling is not covered), the "
+            "`props`-tail filter and `parity_difference` all assumed a single "
+            "declared spelling for this column; re-state the note and re-check "
+            "the two denies against every spelling (#10394)")
         assert "story_arc" not in cache_projection.projected_columns(table), (
             f"`projected_columns({table!r})` keeps `story_arc` again, so the "
             f"RECORD → CACHE restore writes it back onto `:{node_label}` and "

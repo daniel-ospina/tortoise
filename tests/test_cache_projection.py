@@ -177,6 +177,22 @@ def test_every_primary_property_has_a_canonical_spelling_that_is_projected():
         "a PRIMARY property the placement table declares is NOT projected — "
         f"the cache would be poorer than the record: {unresolved}"
     )
+    # ⛔ THE SET'S CONTENTS ARE PINNED SEPARATELY, because the equality above
+    # cannot catch an OVER-BROAD entry (measured: adding a live PRIMARY column —
+    # `source.title` — to the declaration reds NOTHING; the gate ratifies it,
+    # since `exempt` is built from the same declaration). One explicit allowance
+    # per table means a new entry forces a deliberate edit here, and a leaked
+    # one is a red rather than a silently narrower projection.
+    assert {
+        "source": frozenset({"story_arc"}),
+        "event": frozenset({"story_arc"}),
+    } == cp.CACHE_FORBIDDEN_COLUMNS, (
+        "the not-projectable declaration changed: "
+        f"{ {t: sorted(c) for t, c in cp.CACHE_FORBIDDEN_COLUMNS.items()} }. "
+        "Every entry is a PRIMARY column the cache will NEVER write — adding one "
+        "silently narrows the restored field set, so it is a decision that "
+        "belongs in this test and in §9.1's placement rows, not in a one-line "
+        "dict edit (#10394)")
     assert exempt == _declared_not_projectable(), (
         "the set of PRIMARY rows that do not project is not the set the "
         f"projection DECLARES it must not materialise: {sorted(exempt)} vs "

@@ -1047,9 +1047,11 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
 class ParityDiff:
     """The EXPLAINED difference between a cache answer and the record's.
 
-    ``unexplained_missing``  cache fields the record did not answer, and whose
-                             absence the schema's carve-out does NOT explain —
-                             i.e. a projection gap. Non-empty = RED.
+    ``unexplained_missing``  cache fields the record did not answer, and that NO
+                             declared asymmetry explains — not the schema's
+                             carve-out, not a fold `ON CREATE` default, and not
+                             the not-projectable set — i.e. a projection gap.
+                             Non-empty = RED.
     ``invented``             record fields the cache does not have, and that no
                              declared ``ON CREATE`` default explains — i.e. a
                              field the record path made up. Non-empty = RED.
