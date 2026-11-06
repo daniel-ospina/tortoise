@@ -97,8 +97,12 @@ A row's `unindexed` count is not the surface consequence. The consequence is a
 translation) and `removal_changes_query_results`, and the census carries a
 top-level `surface_consequence` naming the MCP tools and REST route that can
 hand `entity_type` to the vector leg — **derived from
-`tool_registry.TOOL_REGISTRY`, not listed here**, so the consequence tracks the
-surface instead of a copy of it.
+`tool_registry.TOOL_REGISTRY` AND the handlers' own bodies (an AST scan of
+`tortoise/mcp_server.py`), not listed here**, so the consequence tracks the
+surface instead of a copy of it. ⛔ Both sources are load-bearing and neither is
+redundant: the registry binding alone names one tool where the surface has two
+(`tortoise_query` binds `paginated_query` yet forwards a `text=` argument into the
+same method).
 
 ⛔ `surface_consequence["requested_not_performed"]` is `True` because this
 instrument **reports**; the removal is an MCP/SDK surface change and needs the

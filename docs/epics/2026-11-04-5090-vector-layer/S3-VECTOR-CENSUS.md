@@ -47,9 +47,13 @@ materialises an empty graph (a write, reported as a measured zero).
 
 ## 2. What a row says
 
-Per **label** (the population is `CALL db.labels()` — *not* the served set and *not* the indexed set,
-so a label that stores vectors with neither a query path nor an index is reported rather than omitted
-by construction):
+Per **label**. The population is the **union** of the graph's own labels (`CALL db.labels()`), the
+labels the catalogue reports an index on, and the served set — deliberately *wider* than any one of
+them, so a label that stores vectors with neither a query path nor an index is reported rather than
+omitted by construction. ⚠️ One consequence, so no row is misread: a **served** label the graph does
+not have still appears (with `stored=0`), and that row means "no such label here", **not** "this label
+exists and holds nothing". The `population` field names `CALL db.labels()` — the read that was taken —
+not the union that formed the row set:
 
 | field | meaning |
 |---|---|
@@ -236,12 +240,19 @@ uv run python tools/dod_5090_probe.py --census --json \
   --uri docker://:<pw>@<host>:6379/<graph> --graph <graph>
 ```
 
-**The last production reading on record is 2026-09-24** (§12.1b): `:Object` 7,859 and `:Event` 4,798
-stored-but-unindexed embeddings — **12,657 vectors**, cited by `#5090` and by `STORAGE-ARCHITECTURE.md`
+**The last production reading on record is 2026-09-24** (`STORAGE-ARCHITECTURE.md` §12.1b): `:Object`
+7,859 and `:Event` 4,798 stored-but-unindexed embeddings — **12,657 vectors**, cited by `#5090` and by
 §12.1b/§12.1c as a dated prior. It is **not a current figure**, the tool's own docstring says it is not
-to be re-quoted, and §4.1 above is the first reason why: that reading's "no vectors on `Source`/`Subject`"
-half cannot be reconciled with what both labels' writers store. Treat it as the shape of the answer,
-never as the answer.
+to be re-quoted, and §4.1 above is the first reason why.
+
+⚠️ **The reason is stated precisely, because the obvious version of it is wrong.** §12.1b's table is an
+**index** inventory (`VECTOR field(s)`) and it says so — its own `:Source` footnote reads *"that is an
+INDEX fact, not a claim about the property … what the label holds is measured by
+`tools/dod_5090_probe.py --census`, never inferred from the inventory"*. So the dated reading never
+claimed `Source`/`Subject` hold no vectors. What is stale is the **inference** a reader draws from
+§12.1a's additive legs (`Point ~31 MB + Object ~11.8 MB + Event ~7.2 MB ≈ the whole 33,580 / 51.6 MB`),
+which leaves nothing for the other two labels — while both labels' writers DO store `embedding` (§4.1).
+Treat the 12,657 as the shape of the answer, never as the answer.
 
 ---
 

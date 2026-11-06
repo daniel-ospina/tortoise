@@ -116,7 +116,11 @@ claim and not an assertion:
 - **O:** quantify the stored vectors that no index and no efficient query path can serve, and put the
   consequence of removing them in front of the owner — because removal is a **surface change**.
 - **I:** a **read-only** dry-run census naming every label whose stored vectors have no vector index, with
-  vector count and bytes, and **exactly which `entity_type` values would return zero rows** afterwards.
+  vector count and bytes, and **exactly which `entity_type` values would change** afterwards. ⚠️ **Corrected
+  2026-11-05 (`#11088`, measured):** this read "would return zero rows". That holds only for a query that
+  matched *only* by meaning — a lexically-matching query keeps answering from the FTS leg — so the
+  delivered census names the affected `entity_type` SET and the loss as **semantic recall**. Evidence and
+  the `:Source` caveat: `S3-VECTOR-CENSUS.md` §3.1/§7.
 - **T:** the census runs without writing; it exits non-zero on an unreadable catalogue rather than reporting
   an empty population; the affected query paths are enumerated; **the removal is requested, not performed**.
 - **Complexity:** standard · **Blocked by:** none (the census half) · **Blocks:** none.

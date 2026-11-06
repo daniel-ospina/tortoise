@@ -168,8 +168,11 @@ duplicate keys (a duplicated declaration must not silently win), and the census 
 unreadable catalogue rather than reporting an empty population.
 
 **6.4 Surface statement (⛔ the hard rule).** Nothing here adds or removes an MCP tool or public SDK method.
-**S3 is the one place that could**: removing the `Object`/`Event` vectors makes
-`entity_type='object'` / `'event'` return **zero rows** where they return rows today (`Source`/`Subject`
+**S3 is the one place that could**: removing the `Object`/`Event` vectors empties the **dense leg** for
+`entity_type='object'` / `'event'`, so a query that matched only by meaning returns **zero rows** —
+⚠️ **CORRECTED 2026-11-05 (`#11088`, measured):** an earlier version said those queries return zero rows,
+which is false while the FTS leg answers (`classify_query` turns every leg on for a text query); the
+measurement is `S3-VECTOR-CENSUS.md` §3.1, and §7 there scopes it for `:Source`. (`Source`/`Subject`
 carry no vector INDEX, and the 2026-09-24 count found none there — though both labels' writers do store
 `embedding`, so the census measures the live population — §12.1b). That is a surface
 change and **requires Daniel's approval before it is implemented** — so it is carried in the child's body as
