@@ -37,11 +37,13 @@ operator at Postgres credentials.
 from __future__ import annotations
 
 import fnmatch
+import json
 import sys
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tortoise import __main__ as cli
 from tortoise import cache_projection as cp
@@ -195,6 +197,42 @@ def test_a_corrupt_carrier_is_reported_not_silently_fallen_back(tmp_path,
     assert "INSTALL" in str(excinfo.value)
 
 
+def test_an_empty_carrier_is_refused_not_read_as_no_rows(tmp_path, monkeypatch):
+    """A carrier that parses to ZERO rows is a packaging fault, not a namespace.
+
+    THE SILENT-EMPTY CLASS, one artefact over (#10663 review, P2). `{"rows": []}`
+    parses cleanly and yields an empty namespace, so every record property would
+    project as **unmapped**, in production, with no error — measured before the
+    guard: `_read_placement_rows()` returned the 4 `ADDITIONAL_PRIMARY_COLUMNS`
+    extras alone and `placement_columns()` lost `point_kind`.
+
+    Every pin in section 1 is RELATIVE — the carrier is compared to the same
+    parser over the doc, and the generator to the committed bytes — so a
+    generator that emitted nothing agrees with itself and keeps all of them, and
+    `--check`, green. Nothing else in the tree reads the SHIPPED artefact.
+    """
+    empty = tmp_path / "_placement_table.json"
+    empty.write_text(json.dumps({"rows": [], "_source_sha256": "0" * 64}),
+                     encoding="utf-8")
+    monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", empty)
+    assert cp.PLACEMENT_DOC.exists(), "the fixture presumes a source checkout"
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+
+    message = str(excinfo.value)
+    assert "EMPTY" in message, message
+    assert str(empty) in message
+    assert "gen_placement_table.py" in message
+    # Still a CacheProjectionError, so every existing handler keeps its shape.
+    assert isinstance(excinfo.value, cp.CacheProjectionError)
+
+    # …and the SAME refusal reaches `placement_columns()`, which is the call the
+    # projection actually makes — an empty namespace must never be usable.
+    with pytest.raises(cp.PlacementTableUnavailable):
+        cp.placement_columns()
+
+
 # ── 3. The carrier reaches an installed user ───────────────────────────────
 
 
@@ -327,3 +365,44 @@ def test_record_reconcile_does_not_call_a_packaging_fault_an_unreadable_record(
     assert str(cp.PACKAGED_PLACEMENT_TABLE) in captured.err
     assert "record is unreadable" not in captured.err
     assert "divergence is UNKNOWN, not zero" in captured.err
+
+
+# ── 5. The images that ship the carrier must assert it ─────────────────────
+
+_WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+
+
+def test_the_selfhost_publish_gate_asserts_the_carrier_in_the_image():
+    """#10663 was MEASURED in the selfhost image — its gate must assert the carrier.
+
+    `publish-selfhost.yml` builds **`Dockerfile.selfhost`**, a different recipe
+    from the `Dockerfile.hosted` file the deploy-hosted assertion targets, and
+    its `build-and-publish` job is gated on `packaging-smoke` — so a carrier lost
+    from THIS image would publish with every gate green. The hosted assertion
+    cannot cover it: different Dockerfile, different workflow, different image.
+
+    The docs-absent half is pinned too: an assertion that only checks the file
+    exists would go vacuous the moment the image grew a `docs/` COPY, which is
+    exactly the state that hid the original defect (the verb resolved the DOC and
+    the image was believed fine).
+    """
+    doc = yaml.safe_load((_WORKFLOWS / "publish-selfhost.yml").read_text(
+        encoding="utf-8"))
+    smoke = doc["jobs"]["packaging-smoke"]
+    body = "\n".join(step.get("run", "") for step in smoke["steps"])
+
+    assert "PACKAGED_PLACEMENT_TABLE" in body, (
+        "publish-selfhost's packaging-smoke never names the packaged placement "
+        "table — the selfhost image can lose it and still publish (#10663)")
+    assert 'assert not Path("/app/docs").exists()' in body, (
+        "the selfhost assertion must also prove docs/ is absent, or it can pass "
+        "on a stale docs/ read without proving the carrier resolves")
+    assert "pointKind" in body, (
+        "the assertion must read a DOC-SPELLED property through the carrier "
+        "(point_kind -> pointKind); an existence check alone passes on a stale "
+        "or empty table")
+    # The GATE relationship, not merely the presence of a job: a smoke nobody
+    # requires is a report, not a gate.
+    assert doc["jobs"]["build-and-publish"]["needs"] == "packaging-smoke", (
+        "build-and-publish must depend on packaging-smoke, or the assertion "
+        "cannot block a publish")

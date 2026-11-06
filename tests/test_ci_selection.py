@@ -714,6 +714,22 @@ def test_the_placement_table_drift_pin_runs_on_a_placement_doc_only_diff():
         "a generator-only diff must select the carrier pin — it is the only "
         "detector of a carrier that no longer matches its generator (#10663)"
     )
+    # ⛔ THE CLI HALF (#10663 review, P3). `tortoise/__main__.py` carries the
+    # `api` registration that keeps the carrier pin selected for a change to the
+    # verbs that READ the table. The registration landed but nothing pinned it,
+    # so it could be deleted back to a silent drop and every gate would stay
+    # green — the same silent-drop shape as the two legs above (#4309).
+    cli = _sel(["tortoise/__main__.py"])
+    assert cli["full"] is False
+    assert cli["surfaces"] == ["api"], (
+        "tortoise/__main__.py must select `api` through its ci-surfaces "
+        f"registration — if it selects nothing the pin is asleep on the verbs "
+        f"that read the table: {cli['surfaces']}"
+    )
+    assert "test_10663_placement_table_packaged.py" in cli["test_files"], (
+        "a tortoise/__main__.py diff must run the carrier pin — the two record "
+        "verbs resolve the namespace through it (#10663)"
+    )
 
 
 def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():

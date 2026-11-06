@@ -11019,7 +11019,7 @@ durations:
   test_record_projection.py: 3.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.9s) is a LOWER bound; kept 3.2
   test_record_reconcile_trigger.py: 2.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_record_schema_placement.py: 0.2
-  test_10663_placement_table_packaged.py: 0.5  # new in #10663 — PR-added file: the header's flat DEFAULT_FAST_WEIGHT, not a local reading
+  test_10663_placement_table_packaged.py: 2.0  # new in #10663 — PR-added file: the header's flat DEFAULT_FAST_WEIGHT, not a local reading (the note and the value must agree, #2818)
   test_11075_record_declared_type_contract.py: 2.0  # PR-added file: the header's flat DEFAULT_FAST_WEIGHT, NOT a local reading (this map forbids a local reading as a shard input, #2818/#3419)
   test_record_writer_seam.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4
   test_references_boundary_5213.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2

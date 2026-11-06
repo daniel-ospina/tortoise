@@ -957,13 +957,23 @@ class CacheProjectionError(RuntimeError):
 
 
 class PlacementTableUnavailable(CacheProjectionError):
-    """The placement table is in NEITHER location — a fault in the INSTALL.
+    """The placement table could not be resolved — a fault in the INSTALL.
 
-    Raised only when BOTH the packaged table (:data:`PACKAGED_PLACEMENT_TABLE`)
-    and the source document (:data:`PLACEMENT_DOC`) are unreadable, which is a
-    PACKAGING fault and not a record fault (#10663). It is a distinct type
-    because the message it replaces — *"the record is unreadable"* — sent an
-    operator to Postgres credentials for a file that was never shipped.
+    Raised on any of the THREE arms that leave the runtime without a property
+    namespace, all of them packaging faults and none a record fault (#10663):
+
+    1. **neither carrier** — no packaged table (:data:`PACKAGED_PLACEMENT_TABLE`)
+       AND no source document (:data:`PLACEMENT_DOC`);
+    2. **a present-but-corrupt carrier** — the packaged file exists and does not
+       parse. The doc is deliberately NOT consulted: papering a corrupt carrier
+       over with a fallback hides the packaging fault instead of reporting it;
+    3. **a present-but-EMPTY carrier** — the packaged file parses to zero rows.
+       An empty carrier is never legitimate, and accepting it would project
+       every record property as unmapped, silently, in production.
+
+    It is a distinct type because the message it replaces — *"the record is
+    unreadable"* — sent an operator to Postgres credentials for a file that was
+    never shipped.
 
     It subclasses :class:`CacheProjectionError` so every existing handler keeps
     its behaviour (a structural refusal, never an availability event).
@@ -1101,9 +1111,17 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
 
     `None` is the SOURCE-CHECKOUT-without-regeneration case (a `git clean` that
     dropped the generated file): the doc is on disk there and is read instead.
+
     A file that IS present and does not parse is NOT `None` — a corrupt carrier
     is a packaging fault and is reported as one, never papered over with a
-    fallback that hides it.
+    fallback that hides it. The same holds for a carrier that parses to ZERO
+    rows (#10663 review, P2): an empty table is never legitimate, and accepting
+    it hands the projection an empty namespace, which maps every record property
+    to nothing and degrades the cache silently. Every drift pin in
+    `tests/test_10663_placement_table_packaged.py` is RELATIVE (carrier vs the
+    same parser over the doc, generator vs committed bytes), so an empty carrier
+    that agrees with an empty parse keeps all of them green — the #1929/#9231
+    silent-empty class, one artefact over.
     """
     import json
 
@@ -1112,7 +1130,7 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
     try:
         payload = json.loads(PACKAGED_PLACEMENT_TABLE.read_text(encoding="utf-8"))
         rows = payload["rows"]
-        return [(str(table), str(prop)) for table, prop in rows]
+        parsed = [(str(table), str(prop)) for table, prop in rows]
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise PlacementTableUnavailable(
             f"the packaged placement table at {PACKAGED_PLACEMENT_TABLE} is "
@@ -1120,6 +1138,16 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
             f"`uv run python tools/gen_placement_table.py`. This is a fault in "
             f"the INSTALL, not in the record."
         ) from e
+    if not parsed:
+        raise PlacementTableUnavailable(
+            f"the packaged placement table at {PACKAGED_PLACEMENT_TABLE} is "
+            f"EMPTY (it parsed to zero rows) — an empty table would project "
+            f"every record property as unmapped, silently. Regenerate it with "
+            f"`uv run python tools/gen_placement_table.py`; if the doc itself "
+            f"parsed empty, the doc is the fault. This is a fault in the "
+            f"INSTALL, not in the record."
+        )
+    return parsed
 
 
 def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
