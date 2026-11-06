@@ -2156,7 +2156,13 @@ if [ "$NO_COVERAGE" = "1" ]; then
   # summarised as "backed up nothing" — that is the claim this whole change
   # exists to stop making one layer up, and it is equally unmeasured here.
   case "$RUN_STATUS" in
-    driver_timeout|empty_response|transport_error)
+    # Round 21 (fresh-context review): `already_running` belongs here too. The
+    # held-lock arm reaches NO_COVERAGE from three unmeasured shapes (a FUTURE
+    # stamp, an absent stamp, a stale stamp) and in none of them did the driver
+    # receive a sweep report — the app answered `already_running`. Ending those
+    # on "backed up nothing" re-makes one layer down exactly the claim this
+    # change exists to stop making.
+    driver_timeout|empty_response|transport_error|already_running)
       fail "no sweep report was read (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE / POOL_STALE incidents" ;;
     *)
       fail "sweep backed up nothing (status=$RUN_STATUS_SAFE) — see the SWEEP_NO_COVERAGE incident" ;;

@@ -2467,8 +2467,12 @@ export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78r. an over-long unparseable timestamp still reds"
 assert_not_contains "$OUT" "$LONG_NONSECRET_TS" "78r. the ACTIONS LOG does not publish the whole value"
-# The prefix assertion is what pins the width from ABOVE: it fails if the bound
-# is lowered, and the not-contains above fails if it is raised or dropped.
+# The prefix assertion pins the width from BELOW (it fails if the bound is
+# lowered). The not-contains only fails if the value is published WHOLE, so it
+# does NOT catch a WIDENED bound — the `[^']{81}` legs below are what do. (Round
+# 21: this comment used to claim the not-contains caught a raised bound; measured,
+# it did not — a 90- or 99-char prefix still leaves the whole 100-char value
+# absent.)
 assert_contains "$OUT" "$LONG_TS_PREFIX" "78r. the Actions log keeps the first 80 chars, so the bound is 80 and not merely some bound"
 # Round 20 (fresh-context review): the width's UPPER side was not pinned on EITHER
 # channel. The fixture is 100 chars, so a bound of 81-99 still satisfied both

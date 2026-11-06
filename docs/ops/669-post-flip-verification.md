@@ -295,7 +295,8 @@ curl -s --max-time 1800 -X POST https://api.premiselabs.co/v1/internal/backups/s
 > driver did exactly that for 12 days while the sweep completed behind it. A
 > client that gives up does **not** stop the sweep — the route has no
 > server-side ceiling — so on `curl` rc=28 (or no JSON) do not conclude the
-> sweep failed: poll §5.1's status and read `last_sweep.last_sweep_at`, which is
+> sweep failed: poll `/v1/internal/backups/status` (§10, the only status read in
+> this runbook) and read `last_sweep.last_sweep_at`, which is
 > written only when the roll-up reaches its end.
 
 ✅ **Expect:** one of:
