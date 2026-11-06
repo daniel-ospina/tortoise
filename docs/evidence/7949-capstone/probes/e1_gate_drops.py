@@ -299,9 +299,14 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
         # aggregate even when it was not requested — otherwise the record says
         # `coverage_complete: true` beside a `drops_across_sections` smaller than
         # the `drops_total` on the same line.
-        "drops_across_sections": (sum((b["drops_total"] or 0)
-                                      for b in per_section.values())
-                                  + (0 if "objects" in per_section else len(drops))),
+        # ⛔ `None` when ANY section in the record is unmeasured — the same
+        # rule as the headline above, because `b["drops_total"] or 0` folds an
+        # explicit unmeasured `None` into a pickable `0`, which is the zero this
+        # probe exists to stop printing (review cycle 6, `#11242`).
+        "drops_across_sections": (
+            None if any(not b["measured"] for b in per_section.values())
+            else sum((b["drops_total"] or 0) for b in per_section.values())
+            + (0 if "objects" in per_section else len(drops))),
         # ⛔ THE PASS CONDITION'S OWN NUMBER (#10996 Step 4: "0 drops over
         # points+events"). `drops_total` above is the LEGACY Objects-only count,
         # and taking it for the pass condition is a false PASS whenever the

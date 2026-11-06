@@ -165,11 +165,11 @@ def test_e1_gate_drops_coverage_is_judged_over_the_pass_not_the_request(
     assert record["coverage_complete"] is False
     assert record["unmeasured_sections"] == ["events", "points"]
     assert record["sections_not_requested"] == ["events", "points"]
-    # The objects census is measured unconditionally, so the aggregates must
-    # include it even when it was not requested — a `drops_across_sections`
-    # smaller than the `drops_total` on the same line is a pickable wrong number.
-    assert record["drops_across_sections"] >= record["drops_total"]
-    assert record["candidates_total"] >= record["objects"]
+    # The aggregate is NOT asserted here: with `sections="objects"` the
+    # unconditional-objects branch contributes 0 either way, so any `>=` between
+    # the aggregates holds with or without the code it would claim to pin
+    # (review cycle 6). `test_e1_gate_drops_aggregates_include_the_unconditional_
+    # objects_census` is the test that actually reds on that mutant.
     assert record["sections"] == {"objects": record["sections"]["objects"]}, (
         "only the requested section is measured — the rest are disclosed, not invented")
     assert "TORTOISE_VALUE_GATE=0" in record["arm_precondition"], (
@@ -291,6 +291,9 @@ def test_e1_gate_drops_discloses_an_empty_section_instead_of_zero(monkeypatch, t
     assert record["step4_points_events_drops"] is None, (
         "a missing half makes the Step-4 number UNTAKEN (null), never 0 — a "
         "sum's default is the same false zero one level up")
+    assert record["drops_across_sections"] is None, (
+        "the same rule one field over: `drops_total or 0` folds an unmeasured "
+        "section into a pickable 0 (review cycle 6)")
     out = capsys.readouterr().out
     assert "events=0/UNMEASURED" in out
 
