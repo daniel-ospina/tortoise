@@ -672,9 +672,11 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
         proj.g.query(
             "MERGE (s:Source {url:$u}) SET s.story_arc = $arc",
             params={"u": "legacy/pre-purge.md", "arc": NARRATIVE})
-        # The state #10017's purge leaves behind is what the restore must not
-        # undo; the pre-restore count is informational (the wipe removes the
-        # legacy node either way, so it can never be the assertion).
+        # A legacy copy of the prose is what the restore must not re-create;
+        # the pre-restore count is informational (the wipe removes the legacy
+        # node either way, so it can never be the assertion). ⛔ NOT "#10017's
+        # purge's state": that purge deletes legacy episodic turn `:Point`s and
+        # never matches a `:Source` (#11325).
 
         out = restore_from_record_view(
             view, org_id="org-door-2", graph_id="g-door-2", cache_graph=graph,
@@ -689,9 +691,10 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
         assert not bytes_of_prose, (
             "the RESTORE re-materialised §9.1's narrative as a node property — "
             "`sum(size(n.story_arc))` = "
-            f"{bytes_of_prose} B after a record→cache restore, so #10017's "
-            "purge is undone by the next routine recovery operation (#10394 "
-            "door 2)")
+            f"{bytes_of_prose} B after a record→cache restore, so the next "
+            "routine recovery re-rents the prose §9.1 removed (#10394 door 2; "
+            "`#10017`'s purge is the legacy turn population and never matched "
+            "a `:Source` — #11325)")
 
         held = proj.g.query(
             "MATCH (s:Source {url:$u}) RETURN s.summary",

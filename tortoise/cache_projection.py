@@ -1571,7 +1571,8 @@ def _refused(table: str) -> frozenset[str]:
 #: lane this undoes (#11325): its single destructive statement deletes legacy
 #: episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` —
 #: so this class's targeted repair is a graph-side `REMOVE` that no instrument
-#: ships, or the full restore's whole-graph wipe.
+#: ships, or the full restore's whole-graph wipe (itself refused pre-wipe on a
+#: production server graph name, `#2944`'s L2 guard).
 #:
 #: So an entry here is a statement about the CACHE, not about the record: the
 #: placement table keeps the row's class (`P` — the record does store it) and

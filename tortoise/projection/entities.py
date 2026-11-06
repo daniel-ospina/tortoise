@@ -2032,9 +2032,13 @@ class _EntityHandlers:
         # ⚠️ Deliberate trade, stated: a legacy JOURNAL whose `DocumentCreated`
         # carried `story_arc` now replays without it, so a rebuild of a graph
         # holding that property no longer reproduces it. Accepted because the
-        # owner rule says the property must not exist, the destructive purge of
-        # what does exist is #10017, and no in-tree producer ever emitted the key
-        # on this event (`api.add_document` takes no such parameter).
+        # owner rule says the property must not exist, no in-tree producer ever
+        # emitted the key on this event (`api.add_document` takes no such
+        # parameter), and the destructive removal of what DOES exist has no
+        # shipped instrument — a full restore's whole-graph wipe (refused
+        # pre-wipe on a production server graph name) or a graph-side
+        # `REMOVE n.story_arc` nobody issues; `#10017`'s purge is the legacy
+        # turn `:Point` population and never matches a `:Source` (`#11325`).
         #
         # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
         # Another spelling (`storyArc`) still lands, exactly as any unknown key
