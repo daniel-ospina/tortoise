@@ -715,13 +715,33 @@ def test_the_routing_index_census_matches_the_record_migrations():
 # this PR exists to close — a gate that reports OK over the artifact being wrong.
 #
 # So the label requirement is now per occurrence AND adjacent: every occurrence
-# needs a `SUPERSEDED` marker before it with **no sentence boundary in between**,
-# i.e. the marker must be in the SAME sentence as the sentence it retires. That
-# is what "labelled history" means here, and it is the property both mutations
-# above break. `test_the_retired_sentence_guard_rejects_its_own_regressions`
-# pins the property by MUTATING this head's text and requiring a red — so the
-# guard's non-vacuity is executed, not asserted in a docstring.
+# needs a `SUPERSEDED` **label** before it with no sentence boundary in between,
+# i.e. the marker must label the same sentence the retired text sits in. "Label"
+# is not "mention": the marker counts only where it is a standalone token closed
+# by punctuation (`SUPERSEDED,` / `SUPERSEDED:` / `**SUPERSEDED** —`), never where
+# it merely modifies a following noun (`the SUPERSEDED note`). Without that split
+# the guard was still beaten by a sentence that MENTIONS the label and re-asserts
+# the premise in the same breath — *"Per the SUPERSEDED note, because R1 has still
+# not armed the DSN, nothing lands."* — which passed, and which is the most
+# plausible way a lane re-introduces the stale premise while sounding careful
+# (#11064 round-8 review, P3).
+#
+# The property this enforces, stated exactly (do not restate it as "labelled"):
+# **some `SUPERSEDED` LABEL token occurs before the retired text, inside the same
+# sentence, and that label's own clause-supplied span has not been closed off by a
+# sentence boundary.** It is a textual proxy for "this clause is labelled history",
+# not a proof of intent — a label token followed by a comma chain that then
+# re-asserts the premise still passes. That residual is accepted and named, because
+# the alternative (parsing the prose) is a bigger fail-open than the one it closes.
+# `test_the_retired_sentence_guard_rejects_its_own_regressions` pins all four
+# mutations — the two original ones and the two mention-shaped ones.
 _SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s|$)|;\s")
+#: A `SUPERSEDED` that is a LABEL — a standalone token closed by punctuation (or
+#: end of text), optionally wrapped in emphasis. Anything else (`the SUPERSEDED
+#: note`, `SUPERSEDED-ish`) is a mention and does not label a clause.
+_SUPERSEDED_LABEL_RE = re.compile(
+    re.escape(_INDEX_SUPERSEDED_MARKER) + r"[\s*_]*(?:[,;:.!?)\]]|$)"
+)
 
 
 def _assert_retired_claim_is_labelled(
@@ -731,28 +751,31 @@ def _assert_retired_claim_is_labelled(
     where: str,
     remedy: str,
 ) -> None:
-    """Raise unless EVERY `needle` in `text` carries its own `SUPERSEDED` label.
+    """Raise unless EVERY `needle` in `text` is covered by its own `SUPERSEDED` label.
 
     Per occurrence, not first-occurrence (see the block comment above): a
     retired sentence may be kept as labelled history — this repo's convention for
     an overridden ruling — but each retained copy must be inside the sentence
-    whose marker labels it. A copy with no marker before it, or with the covering
-    marker a sentence away (so it was never actually covering this clause), is
+    whose LABEL covers it. A copy with no label before it, with only a *mention*
+    of the word (`the SUPERSEDED note`) in a preceding clause, or with the
+    covering label a sentence away (so it was never covering this clause), is
     telling a reader something was measured false as if it were live.
     """
     for match in re.finditer(re.escape(needle), text):
-        marker_at = text.rfind(_INDEX_SUPERSEDED_MARKER, 0, match.start())
-        assert marker_at != -1, (
+        labels = list(_SUPERSEDED_LABEL_RE.finditer(text, 0, match.start()))
+        assert labels, (
             f"{where} asserts {needle!r} with no "
-            f"{_INDEX_SUPERSEDED_MARKER} marker before it — that is a live "
-            f"instruction, not labelled history. {remedy}"
+            f"{_INDEX_SUPERSEDED_MARKER} LABEL before it (a bare mention such as "
+            f"'the {_INDEX_SUPERSEDED_MARKER} note' does not label a clause) — "
+            f"that is a live instruction, not labelled history. {remedy}"
         )
-        gap = text[marker_at + len(_INDEX_SUPERSEDED_MARKER) : match.start()]
+        label = labels[-1]
+        gap = text[label.end() : match.start()]
         assert not _SENTENCE_BOUNDARY_RE.search(gap), (
             f"{where} asserts {needle!r} with the nearest "
-            f"{_INDEX_SUPERSEDED_MARKER} marker a SENTENCE away ({gap[:160]!r}); "
-            "a marker in an earlier clause does not label this one, so the "
-            f"sentence still reads as live. {remedy}"
+            f"{_INDEX_SUPERSEDED_MARKER} label a SENTENCE away ({gap[:160]!r}); "
+            "a label in an earlier sentence does not cover this one, so the "
+            f"retired text still reads as live. {remedy}"
         )
 
 
@@ -1029,33 +1052,36 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
     )
     needle = retained[0]
 
+    def _expect_red(mutated: str, why: str) -> None:
+        """The guard must REFUSE this mutation — the assertion is the deliverable."""
+        try:
+            _assert_retired_claim_is_labelled(
+                mutated, needle, where="the mutation", remedy="none"
+            )
+        except AssertionError:
+            return
+        raise AssertionError(why)
+
     # MUTATION 1 — the stale premise re-appended as a live claim. `find`-based
     # first-occurrence logic sees the earlier, unrelated marker and passes;
     # per-occurrence logic sees no marker inside this sentence and reds.
     mutated_append = f"{row} In short: {needle}."
-    first_needle = mutated_append.find(needle)
     assert mutated_append.rfind(needle) >= len(row), (
         "the append mutation did not land a second occurrence after the head "
         "row, so it does not exercise the appended-live-claim shape"
     )
-    assert mutated_append.find(marker) < first_needle, (
+    assert mutated_append.find(marker) < mutated_append.find(needle), (
         "the append mutation must leave a `SUPERSEDED` BEFORE the first "
         f"{needle!r}, or a first-occurrence check would red anyway and the "
         "mutation tests nothing"
     )
-    try:
-        _assert_retired_claim_is_labelled(
-            mutated_append, needle, where="the append mutation", remedy="none"
-        )
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError(
-            "the retired-sentence guard accepted a row that re-appends "
-            f"{needle!r} as a LIVE claim — it is fail-open for the regression it "
-            "documents (the earlier `SUPERSEDED` it matched is an unrelated "
-            "clause). Require the label per occurrence AND in the same sentence"
-        )
+    _expect_red(
+        mutated_append,
+        "the retired-sentence guard accepted a row that re-appends "
+        f"{needle!r} as a LIVE claim — it is fail-open for the regression it "
+        "documents (the earlier `SUPERSEDED` it matched is an unrelated "
+        "clause). Require the label per occurrence AND in the same sentence",
+    )
 
     # MUTATION 2 — the covering label deleted from the retained clause. Its own
     # marker sits in the same sentence; removing it must red even though an
@@ -1073,19 +1099,39 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
         "first-occurrence check would red too). The row is expected to carry an "
         "unrelated earlier marker"
     )
-    try:
-        _assert_retired_claim_is_labelled(
-            mutated_strip, needle, where="the strip mutation", remedy="none"
+    _expect_red(
+        mutated_strip,
+        "the retired-sentence guard accepted a row whose retained "
+        f"{needle!r} lost its OWN `SUPERSEDED` label, because an unrelated "
+        "earlier marker still existed — that is the first-occurrence "
+        "defect. Require the label in the same sentence as the sentence",
+    )
+
+    # MUTATIONS 3 and 4 — the MENTION shapes (round-8 review, P3). A sentence
+    # that names the label and re-asserts the premise in the same breath defeated
+    # the sentence-boundary rule alone, because "the SUPERSEDED note" is a marker
+    # occurrence with no sentence break after it. These are the two live sentences
+    # the review replayed that passed; a label is a token closed by punctuation
+    # (`SUPERSEDED,` / `SUPERSEDED:` / `**SUPERSEDED** —`), never a modifier of a
+    # following noun, and that distinction is what these two mutations pin.
+    for mention in (
+        f"In short, the earlier {marker} note stands, and {needle}.",
+        f"Per the {marker} note, {needle}, nothing lands.",
+    ):
+        mutated_mention = f"{row} {mention}"
+        assert mutated_mention.rfind(needle) >= len(row), (
+            "the mention mutation did not land a second occurrence after the "
+            f"head row: {mention!r}"
         )
-    except AssertionError:
-        pass
-    else:
-        raise AssertionError(
-            "the retired-sentence guard accepted a row whose retained "
-            f"{needle!r} lost its OWN `SUPERSEDED` label, because an unrelated "
-            "earlier marker still existed — that is the first-occurrence "
-            "defect. Require the label in the same sentence as the sentence"
+        _expect_red(
+            mutated_mention,
+            "the retired-sentence guard accepted a sentence that only MENTIONS "
+            f"{marker!r} ('{mention}') and re-asserts {needle!r} as live — a "
+            "mention is not a label, and this is the most plausible way the "
+            "stale premise gets re-introduced by a lane sounding careful. "
+            "Require a LABEL token (punctuation-closed), not the bare word",
         )
+
 
 
 def test_the_prerequisites_a1_census_matches_the_record_migrations():

@@ -3285,7 +3285,7 @@ operator who read the line above as "CI defends this" would never run it.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and it does **not** attribute the drop's fix: the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which **predates `#10648` / `fafb8fdcc` and does not carry it**, so whether the dropping stopped is unproven from this read — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so the remaining work is the migration + backup procedure, not the arming. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
+| TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `:1025`: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` and was **not** measured here. Re-read `/health` before reusing any of these values. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so the remaining work is the migration + backup procedure, not the arming. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
@@ -3303,6 +3303,29 @@ operator who read the line above as "CI defends this" would never run it.
 >
 > **What that changes here, precisely.** The *arming* act this section describes is **authorised**, and
 > the DSN is **already armed** (`GET /health` → `"record":{"armed":true,…}` at 2026-11-05T11:38:16Z).
+>
+> ⚠️ **Two LATER owner decisions on `#9548` postdate the 2026-11-03 authorisation, and they are
+> relayed here because they lived ONLY on the issue** — which is the defect this section was
+> corrected for:
+>
+> * **2026-11-05T20:58:18Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6669289145),
+>   `owner-decision-relay`) — *"#9548 yes i never authorised to wait. we need this asap."* So
+>   **"wait for authorisation" is no longer a valid state**, no lane may cite `#9548` as a reason to
+>   pause, and *"the only legitimate stop is a **specific technical blocker**, named with its failing
+>   step."*
+> * **2026-11-05T22:10:54Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6670861090),
+>   `owner-decision-relay`) — *"doesn't matter much because i'm the only one using tortoise before we
+>   finish the p0 and p1 … so just do what's fastest."* So: **arm the hosted deployment directly and
+>   apply the pending migrations directly — no staging detour, no rehearsal deploy, no extra cycle to
+>   be safe.** *"Fastest" keeps the proofs*: a written row read back, the migrations visible in
+>   `supabase_migrations`, a deploy reaching green.
+>
+> ⛔ **What those two do NOT settle — and a lane must not settle it either:** whether the 2026-11-05
+> *"no extra cycle to be safe"* lifts the 2026-11-03 decision's **backup-first** step (1) below. The
+> two owner decisions are in tension on exactly that point, and the later one carves out *"anything
+> **irreversible to data that cannot be regenerated** — a purge, a drop, an overwriting backfill."*
+> The owner resolves it; a lane reports it. Steps (2)–(4) stand either way.
+>
 > The 2026-11-03 decision keeps a **non-negotiable procedure** in exchange: *(1)* a **verified backup
 > first** — dump the Postgres record and confirm it restores, no migration on an unbacked store;
 > *(2)* deploy the record migrations, including `20261102000002_record_point_search_keys_text.sql` and
@@ -3321,10 +3344,42 @@ operator who read the line above as "CI defends this" would never run it.
 >
 > ⚠️ **So do not go hunting for a brand-new ROLE** — a bypassing role already exists. What is missing is a
 > **DIRECT** connection string (`db.<ref>.supabase.co:5432`, never the pooler) for one, which is exactly
-> what `TORTOISE_RECORD_BACKUP_DSN` resolves (`record_backup.py:205`). Until it exists no backup can be
-> taken and no migration may run — measured 2026-11-03 by lane `hosted-arm-9548`, recorded on `#9548`.
-> **So the accurate state is AUTHORISED-BUT-BLOCKED-CRED, not postponed.** A lane reading this section
-> must not re-derive "postponed"; it must report the missing backup credential.
+> what `TORTOISE_RECORD_BACKUP_DSN` resolves (`record_backup.py:205`). Measured 2026-11-03 by lane
+> `hosted-arm-9548`, recorded on `#9548`.
+>
+> ⚠️ **A BACKUP IS STILL IMPOSSIBLE FROM THIS ENVIRONMENT — and the wording that made the migrations
+> look outstanding is now false, so it is corrected here rather than left to mislead.**
+> `GET /health` re-read **2026-11-05T23:54:47Z** serves build **`46ea687dc`**
+> (`started_at 2026-11-05T23:14:03Z`). Two facts follow, and they are DIFFERENT facts:
+>
+> * **The deployed CODE carries `#10648`** (`fafb8fdcc`) — verified in-tree, not from the endpoint:
+>   `git merge-base --is-ancestor fafb8fdcc 46ea687dc` → **0**. So "the serving build predates the
+>   fix and does not carry it" is **false as of that deploy**, and the drop can no longer be
+>   attributed to an unfixed build.
+> * **The deployed IMAGE carries both migrations** — `migrations_head:
+>   20261102000002_record_point_search_keys_text`, i.e. `20261102000001_graphs_promote_default` and
+>   `20261102000002_…_search_keys_text` are in the image too. ⛔ **That is NOT "applied to the
+>   database"** — this file's own `migrations_head` row (`:1025`) says so in as many words: the value
+>   is *"the highest numeric-prefixed `supabase/migrations/*.sql` file this IMAGE CARRIES"*, and
+>   *"It is NOT 'which migration has been APPLIED to the database'"*. The applied set is a database
+>   fact, read from `supabase_migrations.schema_migrations` — and it was **not** read here, so it is
+>   **not** claimed. (The same applies to the 2026-11-05 decision's own third proof, *"the migrations
+>   visible in `supabase_migrations`"* — that proof has not been collected.)
+>
+> So: the reason this section gave for believing the `point.search_keys` narrowing was absent —
+> *"the serving build predates `#10648`"* — **is gone**, but the applied-schema question is **open and
+> unmeasured**, not resolved. What still survives unchanged is the blocker: **no backup can be taken
+> from this environment** until a **direct** backup-capable DSN exists, so any further migration
+> would run unbacked — and whether that is acceptable is the owner's call, not a lane's (see the two
+> 2026-11-05 decisions above).
+>
+> **So the accurate state — measured 2026-11-05T23:54:47Z — is AUTHORISED · CODE DEPLOYED ·
+> APPLIED SCHEMA UNMEASURED · BACKUP CREDENTIAL STILL MISSING.** A lane reading this section must not
+> re-derive "postponed"; it reports the missing backup credential, and it reads
+> `supabase_migrations.schema_migrations` before asserting that a migration is or is not applied.
+> (This is a **measurement**, not a standing fact — re-read `/health` and stamp the date. The deploy
+> that invalidated the previous wording landed 2026-11-05T23:14:03Z, ~40 minutes after that wording
+> was written.)
 >
 > ---
 >
@@ -3355,8 +3410,15 @@ operator who read the line above as "CI defends this" would never run it.
 > write happened** — see this section's own rule — *"`record_write_failures: {}` is NOT evidence
 > that a row was written"* — and its capture-verification step: presence is shown by a
 > `journal_event` / `point` row appearing, never by a zero counter.
-> It also does **not** prove the drop was fixed: the serving build `fc6a8a64b` predates
-> `#10648` (`fafb8fdcc`), and the dropped rows recorded on `#9548` (302 measured 2026-11-02, 331 in the 2026-11-03 decision) are still unreaped. ⛔ **This paragraph's "never a licence" clause is SUPERSEDED with the ruling it
+> It also does **not** prove the drop stopped happening: the dropped rows recorded on `#9548` (302
+> measured 2026-11-02, 331 in the 2026-11-03 decision) are still unreaped. ⚠️ **The reason this
+> paragraph used to give is now FALSE and is recorded as such:** it read *"the serving build
+> `fc6a8a64b` predates `#10648` (`fafb8fdcc`)"* — true until the deploy at **2026-11-05T23:14:03Z**,
+> which now serves **`46ea687dc`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits
+> **0**, so the deployed code carries the fix (re-read 2026-11-05T23:54:47Z; `migrations_head:
+> 20261102000002` — the IMAGE-carried head, not the applied set, per `:1025`). So the drop can no
+> longer be attributed to a build that lacks the fix; whether it stopped is still **unproven**,
+> because a zero counter cannot prove a write (the bound above is unchanged). ⛔ **This paragraph's "never a licence" clause is SUPERSEDED with the ruling it
 > serves:** the 2026-11-03 decision authorises the act, so the live state is evidence *and* the
 > procedure above is the licence. Until `#9548` closes, the authority for **captured sessions** is
 > still the **local** record under `~/.tortoise/session-events/` — that half is unchanged, because it
