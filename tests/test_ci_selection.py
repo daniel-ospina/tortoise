@@ -252,10 +252,10 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     * the **78** is `tier1`'s own size — the entire set an empty-surface diff
       selects. It is NOT "the whole `full`-less fast pool" — that is a
       DIFFERENT measurement, `len(fast_pool(manifest))`, and this bullet
-      deliberately carries no figure for it: that pool does not move with these
-      registrations (all three files were already classified, so it is the same
-      on `main`), and it moves for a third reason again, so re-derive it rather
-      than reading this sentence. ⚠️ And `fast_pool` subtracts `ENV_BROKEN_FILES`
+      deliberately carries no figure for it: these three registrations do not
+      change it (all three files were already classified), and it moves for
+      other reasons again, so re-derive it rather than reading this sentence.
+      ⚠️ And `fast_pool` subtracts `ENV_BROKEN_FILES`
       itself, so a hand count of the classification sets lands one high — which
       is how a figure re-derived by counting can look like it disagrees with the
       code that produced it (#11064 review r15, P3).
@@ -282,12 +282,15 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
 
     # ⛔ AND THE FAST-POOL CLAUSE STATES NO FIGURE — EXECUTED (#11064 review r15,
-    # P3). That clause carried `1109`, a number no tree returned: the expression
-    # it names yields 1111 at `b8e3acc52b` and on `main`, while a hand count of
-    # the classification sets yields 1112 because `fast_pool` subtracts
-    # `ENV_BROKEN_FILES` itself. A pool size is a measurement with three separate
-    # reasons to move, so restating it is the decay this docstring warns about;
-    # the derivation pointer is the durable form and this pin holds it there.
+    # P3, r16 P2). That clause carried `1109`, a number no tree returned: the
+    # expression it names read 1111 when this comment was written, 1112 once an
+    # unrelated test file landed on `main`, and 1113 after the next merge — so
+    # the figure is gone rather than corrected a third time, exactly as was done
+    # for `1109`. (A hand count of the classification sets lands one high anyway,
+    # because `fast_pool` subtracts `ENV_BROKEN_FILES` itself.) A pool size is a
+    # measurement with several independent reasons to move, so restating it is
+    # the decay this docstring warns about; the derivation pointer is the durable
+    # form and this pin holds it there.
     _doc = test_v4_membership_gate_runs_on_both_architecture_docs.__doc__ or ""
     _clause = re.search(r"full`-less fast pool(.{0,600}?)re-derive\s+it", _doc, re.S)
     assert _clause, (

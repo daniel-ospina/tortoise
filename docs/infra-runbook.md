@@ -3542,7 +3542,8 @@ operator who read the line above as "CI defends this" would never run it.
 >   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z). ⛔ **And no
 >   run in that table can be the one that first RECORDED them:** the two runs inside the window died
 >   in `Apply migrations` — which **is** the step that runs `supabase db push --linked --include-all`
->   in that workflow (the `--yes` this file quotes elsewhere was added on 2026-11-06 by #11104, after
+>   in that workflow (the `--yes` that workflow carries today — `.github/workflows/supabase-deploy.yml`'s
+>   `supabase db push --linked --include-all --yes` — was added on 2026-11-06 by #11104, after
 >   every run in this table), so there is no earlier `db push` for them to have died "before" — when
 >   that push refused `supabase/config.toml` (`[inbucket]` is no longer supported, exit 1) before
 >   opening a connection,

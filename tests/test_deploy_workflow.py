@@ -4427,6 +4427,40 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "§A8's evidence cell still carries the retired 3-line reading — the "
         "figure the census note's own last paragraph calls stale"
     )
+    # ⛔ AND THE ROW MUST NOT CALL `ff6379eb2` THE TREE BEFORE #9548 (#11064 review
+    # r16, P1). The §G note was corrected — `ff6379eb2` is the #9601 merge, an
+    # ANCESTOR of this branch's base, and the commit immediately before the #9548
+    # arming (`785bb2b59`) is its parent `047c91f7a`, where the same path set
+    # returns 10 lines, not 5 — but the identical sentence survived HERE, 893 lines
+    # away, where this pin read only the count and the tree NAME. Measured:
+    # `git rev-list --count ff6379eb2..047c91f7a` → 12, and the row's own parenthetical
+    # already said "an ancestor of this branch's base", so the clause contradicted
+    # the sentence it was attached to.
+    assert not re.search(r'what\s+"?immediately before #9548"?\s+means', row, re.I), (
+        "§A8's evidence cell calls ff6379eb2 what \"immediately before #9548\" "
+        "means — that is the #9601 merge, 12 commits and three runbook-touching "
+        "commits BEFORE the arming commit `785bb2b59`; the tree immediately "
+        "before it is `047c91f7a`, where the same path set returns 10, not the "
+        "5 this cell states at ff6379eb2"
+    )
+    # ... and a cell that still NAMES the phrase must DENY the equivalence. Deleting
+    # the clause is equally correct, so both shapes pass — what may not pass is the
+    # bare equivalence, which is what the cell carried before this pin existed. The
+    # denial must sit ADJACENT to the phrase (a `not` anywhere in a 900-word cell
+    # sentence is not the correction — measured: the pre-fix sentence contains
+    # "not empty and not one" AFTER the false clause and satisfied a whole-sentence
+    # test, so this arm is windowed like the manifest denial above).
+    for sentence in re.split(r"(?<=\.)\s+", row):
+        if not re.search(r"immediately\s+before\s+#9548", sentence, re.I):
+            continue
+        assert re.search(
+            r"\b(?:not|never|isn't|is not)\b[^.]{0,40}?immediately\s+before\s+#9548",
+            sentence,
+            re.I,
+        ), (
+            "§A8's evidence cell names \"immediately before #9548\" without "
+            "denying it applies to ff6379eb2:\n  " + sentence
+        )
 
 
 def test_the_census_git_guard_fails_closed_and_never_reds_a_shallow_checkout(tmp_path):
