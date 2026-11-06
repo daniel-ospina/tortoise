@@ -4518,13 +4518,17 @@ surfaces:
   - test_5095_s3_identity_policy.py
   - test_extractor_v2.py
   # #10999: S5 Job 1's entity↔entity channel — the contract clause, the D5
-  # shape gate over the new section, and `_assemble_relations`' three rules
+  # shape gate over the new section, `_assemble_relations`' three rules
   # (an endpoint resolves to an entity THIS emission produced or is dropped
   # and named, never minted; a predicate must be a DECLARED verb; a duplicate
-  # triple collapses). Its subject is `tortoise/extractor_v2.py` — the default
-  # `core` surface — and nothing else selects it, so it is registered here or
-  # `--integrity` reports it as drift. Hermetic: `execute_embed` driven
-  # directly with a two-entity emission — no model, no graph, no network.
+  # triple collapses), and the S2.2 VET guard arm that keeps an entity whose
+  # only tie to the emission is a relation endpoint from being DISCARDed out
+  # from under it. Its subjects are `tortoise/extractor_v2.py` AND
+  # `tortoise/vet_gate.py` — both the default `core` surface (this block,
+  # beside `test_vet_gate_5005.py`) — and nothing else selects it, so it is
+  # registered here or `--integrity` reports it as drift. Hermetic:
+  # `execute_embed` driven directly with a two-entity emission and `apply_vet`
+  # driven with an explicit verdict map — no model, no graph, no network.
   - test_10999_batch_story_relations.py
   # #2684 (Slice B): the value-span census — the wave's per-question T leg
   # ("the value-bearing evidence is verbatim-present") measured over the

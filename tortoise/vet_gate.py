@@ -647,7 +647,8 @@ def vet_candidates(embed_list: object, *,
 # ── Applying the verdicts — the removal, and the Layer-1 guard ─────────────
 
 def _referenced_entity_names(embed_list: object,
-                             discarded_ids: set[str]) -> set[str]:
+                             discarded_ids: set[str], *,
+                             relation_endpoints: bool = True) -> set[str]:
     """Entity names referenced by any candidate that is NOT being discarded.
 
     This is the P0 guard's input. Only *surviving* items are scanned: an
@@ -658,6 +659,16 @@ def _referenced_entity_names(embed_list: object,
     :func:`apply_vet` handles the removed-entity-endpoint case separately. A
     shape we do not recognise contributes nothing, which is safe because the
     guard's only failure mode is keeping too much.
+
+    ``relation_endpoints`` (#10999) decides which of the TWO questions the
+    entity↔entity channel's endpoints answer. For the DISCARD guard (default
+    ``True``) an endpoint is a reference and must protect its entity. For the
+    Rule-4 RESTORE leg it is not, because the channel is **result-level**: an
+    endpoint naming an entity no pass emitted leaves ``execute_embed``'s
+    ``relations`` unresolved — dropped and named, the declared fail-open — and
+    the Layer-1 payload never carries it, so it cannot 422. Counting it there
+    asserted the opposite ("the payload will fail Layer-1 unless the extractor
+    emits it") on the routine case.
     """
     names: set[str] = set()
     for section, index, item in _iter_items(embed_list):
@@ -682,33 +693,35 @@ def _referenced_entity_names(embed_list: object,
     # unreferenced and could be DISCARDed — and S5 would then drop the
     # relation as unresolvable, one stage after this guard authorised it.
     #
-    # Read through `_as_items` (the same tolerance the section scan above
-    # uses): `relations` is MODEL-emitted, so a mistyped value is reachable —
-    # `relations: 5` must contribute nothing, never raise. An exception here
-    # escapes `apply_vet` and abandons the ENTIRE S2.2 pass (every candidate
-    # kept, no discards), which is not the "contributes nothing" this guard
-    # documents.
-    #
-    # ⛔ EMITTED only. A relation endpoint naming an entity no pass produced is
-    # exactly the case `_assemble_relations` DROPS (never mints), so counting it
-    # here would push that name into Rule 4's `to_restore` and emit a factually
-    # false "the payload will fail Layer-1 unless the extractor emits it" — a
-    # prescription to MINT, which #10999 forbids and which cannot fail Layer-1
-    # in any case, because relations never enter the payload.
-    emitted_names = {
-        _norm(e.get("name")) for e in _as_items(
-            embed_list.get("entities") if isinstance(embed_list, Mapping) else None)
-        if isinstance(e, Mapping) and e.get("name")}
-    if isinstance(embed_list, Mapping):
-        for rel in _as_items(embed_list.get("relations")):
-            if not isinstance(rel, Mapping):
+    # ⚠️ `_norm(ref)` ALONE leaves this arm half-closed. S5 resolves the
+    # endpoint by ``.casefold()`` (``extractor_v2._resolve_relation_endpoint``)
+    # while this module normalises by ``.lower()`` — the very pair the
+    # ``_norm`` docstring above names as DIVERGENT on ('Straße', 'İ'). For a
+    # spelling variant the two folds disagree on, S5 resolves "STRASSE" →
+    # "Straße" and ``_norm("STRASSE")`` is "strasse" ≠ "straße", so the
+    # entity whose ONLY tie is that relation is still DISCARDed — the gap this
+    # arm exists to close, one spelling variant in. Carry every emitted entity
+    # the endpoint could resolve to instead; keeping too much is this guard's
+    # only safe failure mode.
+    if not relation_endpoints:
+        return names
+    emitted: dict[str, set[str]] = {}
+    for entity in _section_items(embed_list, "entities"):
+        if isinstance(entity, Mapping):
+            key = _norm(entity.get("name"))
+            if key:
+                emitted.setdefault(key.casefold(), set()).add(key)
+    for rel in _section_items(embed_list, "relations"):
+        if not isinstance(rel, Mapping):
+            continue
+        for side in ("src", "dst"):
+            ref = rel.get(side)
+            if not (isinstance(ref, str) and ref.strip()):
                 continue
-            for side in ("src", "dst"):
-                ref = rel.get(side)
-                if isinstance(ref, str) and ref.strip():
-                    _ref = _norm(ref)
-                    if _ref in emitted_names:
-                        names.add(_ref)
+            names.add(_norm(ref))
+            # both folds, because the emitter's own key may carry either
+            for probe in (ref.strip().casefold(), _norm(ref).casefold()):
+                names |= emitted.get(probe, set())
     return names
 
 
@@ -1089,7 +1102,8 @@ def apply_vet(embed_list: Mapping[str, Any],
     # prune: a restored name is present again, so it must not be pruned as if
     # it were discarded.
     present = set(_entity_map(out))
-    to_restore = _referenced_entity_names(out, set()) - present
+    to_restore = _referenced_entity_names(out, set(),
+                                          relation_endpoints=False) - present
     for name in sorted(to_restore):
         original = prior_entities.get(name)
         if original is not None and str(original.get("name") or ""):

@@ -1715,7 +1715,7 @@ OUTPUT_CONTRACT = """{
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
-  "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
+  "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace/Unicode-fold-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
   "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
@@ -5402,22 +5402,38 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
     # exactly one RESOLVED name spelled like this", a different question.
     emitted = {str(e.get("name")).strip() for e in out.get("entities") or []
                if isinstance(e, dict) and e.get("name")}
+    # Keyed by BOTH folds — `_endpoint_fold_keys`, the same enumeration S5's
+    # resolver probes — so the rename stage and the resolver cannot disagree
+    # about which spellings are the same entity (`_norm` collapses a whitespace
+    # RUN, `.casefold()` folds ß/İ; neither is a superset of the other).
     folded_emitted: dict[str, list[str]] = {}
     for _n in emitted:
-        folded_emitted.setdefault(_n.casefold(), []).append(_n)
+        for _key in _endpoint_fold_keys(_n):
+            _bucket = folded_emitted.setdefault(_key, [])
+            if _n not in _bucket:
+                _bucket.append(_n)
+
+    def _fold_hits(ref: str) -> list[str]:
+        found: list[str] = []
+        for _key in _endpoint_fold_keys(ref):
+            for _n in folded_emitted.get(_key) or []:
+                if _n not in found:
+                    found.append(_n)
+        return found
 
     def _canonical_endpoint(ref: str) -> str:
         if ref in emitted:
             return ref
-        hits = folded_emitted.get(ref.casefold()) or []
+        hits = _fold_hits(ref)
         if len(hits) == 1:
             return hits[0]
         if hits:
             return ref                      # ambiguous: never pick a witness
+        ref_keys = set(_endpoint_fold_keys(ref))
         renamed = ({name_map[ref]} if ref in name_map else set()) | {
             new_name for old_name, new_name in name_map.items()
             if isinstance(old_name, str) and isinstance(new_name, str)
-            and old_name.strip().casefold() == ref.strip().casefold()}
+            and ref_keys & set(_endpoint_fold_keys(old_name))}
         # A resolved name this emission never produced is not an endpoint —
         # keeping the original spelling lets S5 drop it, rather than minting a
         # name the emission does not carry.
@@ -8705,17 +8721,45 @@ def _declared_relation_predicates() -> frozenset[str] | None:
         return None
 
 
+def _endpoint_fold_keys(name: str) -> tuple[str, ...]:
+    """The TWO folds an endpoint is matched on — both, always.
+
+    ``_norm`` (whitespace-collapsed + lower) is the pipeline's name identity:
+    ``_merge_key`` builds this section's dedupe key with it and
+    ``vet_gate._norm`` matches entity references with it, so two spellings that
+    differ by a whitespace RUN are the same entity to every other stage.
+    ``str.casefold()`` is the wider Unicode fold, and it is what
+    ``vet_gate._referenced_entity_names``' relation arm probes (the 'Straße' /
+    'STRASSE' pair on which ``_norm`` and ``casefold`` DIVERGE).
+
+    Neither fold is a superset of the other — ``casefold`` folds the ß/İ pair
+    that ``lower`` does not, and ``_norm`` collapses the whitespace run that
+    ``casefold`` does not — so resolving on one of them alone silently loses a
+    spelling every other stage accepts.
+    """
+    return (_norm(name), name.casefold())
+
+
 def _resolve_relation_endpoint(name: str, exact: set[str],
                                folded: dict[str, list[str]]) -> str | None:
     """The emitted entity an endpoint names, or ``None`` (never a new one).
 
-    Exact name first; then a UNIQUE case-insensitive match. An ambiguous
-    case-fold (two entities differing only in case) resolves to ``None`` —
-    guessing which one the story meant would attribute an edge to the wrong
-    node, which is worse than the missing edge this channel exists to fix."""
+    Exact name first; then a UNIQUE match on EITHER fold (see
+    :func:`_endpoint_fold_keys`) — an endpoint differing from the emitted name
+    only by case, a whitespace run or a Unicode fold is the same entity every
+    other stage treats it as, and dropping it was "an edge lost to a space".
+
+    An ambiguous match (two entities differing only by one of those) resolves
+    to ``None`` — guessing which one the story meant would attribute an edge to
+    the wrong node, which is worse than the missing edge this channel exists to
+    fix. ``folded`` must be keyed by BOTH ``_endpoint_fold_keys`` of each name."""
     if name in exact:
         return name
-    hits = folded.get(name.casefold()) or []
+    hits: list[str] = []
+    for key in _endpoint_fold_keys(name):
+        for hit in folded.get(key) or []:
+            if hit not in hits:
+                hits.append(hit)
     return hits[0] if len(hits) == 1 else None
 
 
@@ -8749,7 +8793,10 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     exact.discard("")
     folded: dict[str, list[str]] = {}
     for n in exact:
-        folded.setdefault(n.casefold(), []).append(n)
+        for key in _endpoint_fold_keys(n):
+            bucket = folded.setdefault(key, [])
+            if n not in bucket:
+                bucket.append(n)
 
     declared = _declared_relation_predicates()
     # The closed Layer-2 vocabulary, imported lazily for the same reason as
@@ -8777,7 +8824,7 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 f"({src!r}, {dst!r}, {predicate!r}) — dropped")
             dropped += 1
             continue
-        if src.casefold() == dst.casefold():
+        if _norm(src) == _norm(dst) or src.casefold() == dst.casefold():
             warnings.append(f"relations[{i}] is a self-relation "
                             f"('{_clip(src, 40)}') — dropped")
             dropped += 1
