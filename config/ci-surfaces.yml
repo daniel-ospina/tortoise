@@ -608,7 +608,10 @@ surfaces:
   # rename that leaves the docstring false reds this suite. ⚠️ The RUNBOOK half of
   # that claim is deliberately NOT here: a runbook-only diff selects no surface and
   # runs `tier1` only, so the field-row pin lives in `test_deploy_workflow.py`
-  # (tier1), where that diff actually runs it. Same dual
+  # (tier1), where that diff actually runs it — and it DERIVES its names from
+  # `metrics()`'s record keys rather than repeating these literals, so a coherent
+  # rename (code + docstring + literals) reds it while the runbook is untouched.
+  # Same dual
   # registration as the guards
   # above and for the same reason: the file it guards is `tortoise/hosted_api.py`,
   # which selects the `api` surface — and the arming state is invisible from

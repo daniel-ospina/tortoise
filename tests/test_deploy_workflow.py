@@ -2340,6 +2340,17 @@ _RECORD_ARMING_HEADING = "### Arming the Postgres record"
 _NUMERALS = {"TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
 
 
+def _record_keys_missing_a_row(heads: list[str], names: set[str]) -> set[str]:
+    """The `names` that NO row's HEAD CELL in the arming table documents.
+
+    Split out of the pin so its non-vacuity can be MEASURED against the real head
+    cells instead of asserted: the same predicate applied to a coherently renamed
+    payload must report every renamed key missing, which is the state the pin
+    exists to catch (#9548 review P3).
+    """
+    return {name for name in names if not any(f"`{name}`" in head for head in heads)}
+
+
 def _record_arming_section() -> str:
     """The runbook's `Arming the Postgres record` section, verbatim.
 
@@ -4712,7 +4723,7 @@ def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
 
 
 def test_the_runbook_field_row_documents_the_positive_pair():
-    """#9548: the operator's FIELD ROW must name the two fields the payload publishes.
+    """#9548: the operator's FIELD ROWS must name the fields `metrics()` publishes.
 
     ⛔ Registered on `tier1` — that is the whole point. `docs/infra-runbook.md` is under
     `docs/`, which is in `NON_PYTHON_PREFIXES` and matches no `SOURCE_PATTERNS` entry, so
@@ -4729,14 +4740,43 @@ def test_the_runbook_field_row_documents_the_positive_pair():
     passes, while a rename (or a deletion) reds. ⚠️ Head-cell scope is not fussiness: a same-row
     substring test was measured GREEN on a rename of the pair in the head cell, because the row's
     own explanation still names both fields further along it.
+
+    ⛔ The NAMES themselves are DERIVED FROM `metrics()`, never duplicated here. That is the
+    finding this pin was rewritten for (#9548 review P3): the earlier form asserted two LITERALS,
+    so a *coherent* rename — payload keys, docstring, `test_9548`'s literals and this file's
+    literals all renamed together — left `docs/infra-runbook.md` documenting a field the payload no
+    longer publishes with **every test green**, while this docstring claimed it pinned "the two
+    fields the payload publishes". A pin that names its names by hand cannot check that sentence;
+    one that reads them from `metrics()` can, and it is the only form that reds the runbook-stale
+    half — which is also the reason this pin is in `tier1` rather than beside the docstring pin.
     """
+    from tortoise import monitoring  # local: this file keeps heavy imports inside tests
+
     section = _record_arming_section()
     rows = [line for line in section.splitlines() if line.lstrip().startswith("|")]
     assert rows, "the arming section has no table rows at all — the field docs vanished"
     heads = [row.split("|")[1] for row in rows if len(row.split("|")) > 1]
-    for name in ("record_writes_applied", "record_last_write_at"):
-        assert any(f"`{name}`" in head for head in heads), (
-            f"the arming section's field table documents no `{name}` row — the "
-            "operator has no reading to take for the positive channel, however "
-            "correct the `/health` payload is"
-        )
+    published = monitoring.metrics()
+    record_keys = {name for name in published if name.startswith("record_")}
+    assert {"record_writes_applied", "record_last_write_at"} <= record_keys, (
+        "`metrics()` no longer publishes the positive pair #9548 exists to add, so "
+        f"an empty failure object cannot be read as a write — record keys: {sorted(record_keys)}"
+    )
+    missing = _record_keys_missing_a_row(heads, record_keys)
+    assert not missing, (
+        f"the arming section's field table documents no row for {sorted(missing)} — "
+        "the operator has no reading to take for a counter the payload publishes, "
+        "however correct the `/health` payload is; a renamed key leaves this row "
+        "naming a field that no longer exists"
+    )
+    # Non-vacuity MEASURED against the real head cells, not asserted: the same
+    # predicate, run against a coherently renamed payload while the runbook (and so
+    # every head cell) is untouched, must report every renamed key missing. That is
+    # precisely the state this pin exists to catch, and precisely the state the
+    # literal-membership form it replaces stayed green on.
+    renamed = {f"{name}_renamed" for name in record_keys}
+    assert _record_keys_missing_a_row(heads, renamed) == renamed, (
+        "this pin would stay GREEN on a coherent rename of `metrics()`'s record "
+        "keys — the runbook would keep documenting the retired names while the "
+        "suite passed, the paper-only claim #9548 exists to end"
+    )
