@@ -1093,12 +1093,14 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
     ⛔ #11113 review cycle 4, P1. The write-free bind (`skip_health_check=True`)
     is load-bearing — the open-time probe replays the adjacent event log, which
     would RESURRECT purged turns — but the probe was also a DETECTOR, and
-    `recover_from_log` draws the line precisely: it rebuilds only when the graph
-    has **0 TOTAL nodes** and the adjacent log has events (`tortoise/consistency.py`:
-    "Only rebuilds when db has 0 total nodes and the log has > 0 events").
+    `recover_from_log` draws the line precisely (`tortoise/consistency.py`):
+    it rebuilds only when the graph has **0 TOTAL nodes**, there is **exactly
+    one** adjacent `.jsonl` (two is "ambiguous", and it refuses), and that log
+    holds **at least one parsable event**. This arm applies the SAME three
+    conditions, so that "recovery would have replayed this" is a measured
+    statement rather than a plausible one (#11113 review cycle 5, P2).
 
-    So the two states ARE distinguishable, and this arm distinguishes them the
-    same way:
+    So the two states ARE distinguishable:
 
       * a PURGED graph keeps its non-turn nodes (the bind's `(:Meta)`, any
         neighbouring Points) — total > 0 — and the emptiness verdict is the
@@ -1110,54 +1112,93 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
         `--expect-empty` certified it CLEAN — a false PASS about a store that
         lost its graph.
 
-    Embedded leg only (a remote graph is never rebuilt from a local log, and
-    `_find_local_jsonl_dir` is embedded-only by construction). Answering "I could
-    not ask" is NOT this arm's job: a failed count is left to the read arm,
-    which already refuses with its own message.
+    Embedded leg only, decided BEFORE any query (#11113 review cycle 5, P3):
+    the resolved-log DIRECTORY is asked first, because on the URI leg
+    `_find_local_jsonl_dir` exists on the class but answers `None` (`self._path`
+    is None), and issuing the count first put an unbounded `MATCH (n)` scan on
+    every remote run. Answering "I could not ask" is NOT this arm's job: a
+    failed count is left to the read arm, which already refuses with its own
+    message.
     """
     finder = getattr(proj, "_find_local_jsonl_dir", None)
     if finder is None:            # a URI leg: recovery never applies there
         return
-    try:
-        if _graph_total_node_count(proj.g):
-            return                # non-empty graph: drained, not lost
-    except Exception:
-        return                    # the read arm owns an unreadable graph
     try:
         events_dir = finder()
     except Exception:
         return
     if not events_dir:
         return                    # no adjacent log: nothing would replay
-    replayable = None
-    try:
-        for name in sorted(os.listdir(events_dir)):
-            if not name.endswith(".jsonl"):
-                continue
-            path = os.path.join(events_dir, name)
-            try:
-                with open(path, "rb") as fh:
-                    if any(line.strip() for line in fh):
-                        replayable = path
-                        break
-            except OSError:
-                continue
-    except OSError:
-        return
+    replayable = _one_replayable_log(events_dir)
     if replayable is None:
-        return                    # the log is empty too: nothing to lose
+        return                    # recovery would refuse this log too
+    try:
+        if _graph_total_node_count(proj.g):
+            return                # non-empty graph: drained, not lost
+    except Exception:
+        return                    # the read arm owns an unreadable graph
     raise CensusError(
-        "the graph EXISTS and holds ZERO nodes of ANY label, while a replayable "
-        f"event log sits beside the store ({replayable!r}) — that is the "
-        "LOST-STORE shape (a fresh redislite daemon on a corrupt RDB, an "
-        "interrupted restore, a manual delete), not a drained graph: tortoise's "
-        "own recovery would REPLAY that log and refill the graph. An empty "
-        "graph with a replayable log is NOT evidence of a drained graph, so "
-        "--expect-empty must not certify it. This gate never recovers — a "
-        "replay here would resurrect purged turns (#10017). Restore or rebuild "
-        "deliberately (python -m tortoise rebuild --dir <log-dir> --db <db>) and "
-        "re-run; if the store really is meant to be empty, remove or archive "
-        "the log first so the state is unambiguous.")
+        "the graph EXISTS and holds ZERO nodes of ANY label, while the one "
+        f"replayable event log beside the store ({replayable!r}) holds events — "
+        "that is the LOST-STORE shape (a fresh redislite daemon on a corrupt "
+        "RDB, an interrupted restore, a manual delete), not a drained graph: "
+        "these are the SAME conditions under which tortoise's own recovery "
+        "would REPLAY that log and refill the graph. An empty graph with a "
+        "replayable log is NOT evidence of a drained graph, so --expect-empty "
+        "must not certify it. This gate never recovers — a replay here would "
+        "resurrect purged turns (#10017). Restore or rebuild deliberately "
+        "(python -m tortoise rebuild --dir <log-dir> --db <db>) and re-run; if "
+        "the store really is meant to be empty, remove or archive the log "
+        "first so the state is unambiguous.")
+
+
+def _one_replayable_log(events_dir: str) -> str | None:
+    """The single `.jsonl` recovery would replay from `events_dir`, else None.
+
+    Mirrors `recover_from_log`'s preconditions rather than approximating them:
+    exactly ONE `*.jsonl` (two is AMBIGUOUS and recovery refuses), and at least
+    one PARSABLE event in it (an empty or garbage log is "nothing to recover").
+
+    Hardened the same way `_load_prewipe_snapshot` is, and for the same reason
+    (#11113 review cycle 5, P2): the directory is beside a store an operator may
+    share, and a planted FIFO named `*.jsonl` makes a plain `O_RDONLY` open
+    block FOREVER — the census would wedge with no verdict, no error and no
+    timeout, on exactly the empty-graph state #10017 ends on. So: no symlink
+    follow, non-blocking, and only a REGULAR file is read.
+    """
+    import stat
+
+    try:
+        names = sorted(n for n in os.listdir(events_dir)
+                       if n.endswith(".jsonl"))
+    except OSError:
+        return None
+    if len(names) != 1:           # 0 = nothing; 2+ = ambiguous, recovery refuses
+        return None
+    path = os.path.join(events_dir, names[0])
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None           # FIFO/device/symlink: not a log we can read
+        with os.fdopen(os.dup(fd), "rb") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict):
+                    return path
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return None
 
 
 def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:
