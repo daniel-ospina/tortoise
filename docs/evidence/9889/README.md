@@ -220,7 +220,10 @@ discards before the payload is written, so a graph from a run with
 vacuous. The measurement needs a graph written by a run that pinned the
 predicate **OFF** (`TORTOISE_VALUE_GATE=0` — since `#10996` "unset" is the ON
 arm), which is what `capstone_measure.measured_arm()` does; the probe's record
-carries that precondition as `arm_precondition`. Why the gap matters, measured with no
+carries that precondition as `arm_precondition`. Its `graph` names the run, and
+the authoritative witness is that run's `# arm:` readback in its own log
+(`capstone_measure.arm_header`), not the record — the probe cannot see the log.
+Why the gap matters, measured with no
 DB at all: an identifier-only *claim* is discarded and takes the entity only it
 named with it (Rule 2 has no survivor left to reference), so one Discard removes
 two nodes while an Objects-only census shows one

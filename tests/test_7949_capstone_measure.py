@@ -10015,7 +10015,8 @@ def test_a_forged_drop_census_cannot_size_its_own_ceiling(tmp_path, capsys):
     longer vouch for itself: a census larger than `objects`; a key that is not one of
     the run's `object_names`; a non-string `rule_id`; and
     `drops_among_bare_definite` — the record's second statement of the same drops,
-    written unconditionally by the producer and read by nothing before this.
+    written by the producer on every run whose Objects census is non-empty and
+    read by nothing before this.
     """
     repo = _bundle(tmp_path / "forged")
     path = repo / "docs/evidence/9889/e1-gate-drops.json"

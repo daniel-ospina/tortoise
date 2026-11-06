@@ -41,8 +41,11 @@ measure, because the population is post-pass.) Since `#10996` "unset" IS the ON
 arm, the OFF arm has to be pinned explicitly — that is what
 `capstone_measure.measured_arm()` does (`ARM_OFF` sets `TORTOISE_VALUE_GATE` and
 `TORTOISE_S2_DECISION_SEAM` to an explicit `"0"`). The
-record carries this as `arm_precondition` so a reader cannot take the number for
-a different run shape.
+record STATES this precondition as `arm_precondition` and names its `graph`;
+the authoritative witness is that run's `# arm:` readback in its own log
+(`capstone_measure.arm_header` writes all four switches on every run), which this
+probe cannot see — so the field is a warning attached to the number, never a
+guarantee about it.
 
 The positive controls are not decoration. A probe that reports "0 drops" without
 showing that the predicate CAN drop would be indistinguishable from one whose
