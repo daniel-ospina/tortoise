@@ -73,7 +73,16 @@ def enabled_sentry(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     importlib.reload(tsentry)
     assert tsentry.init() is True
     assert len(calls["init"]) == 1
-    return calls
+    try:
+        yield calls
+    finally:
+        # ``_enabled`` is module state, which monkeypatch does not unwind; reload it
+        # back to OFF so no later test inherits an enabled module whose ``sentry_sdk``
+        # was restored to the real one (review round 16, P3). Without this a later
+        # test's capture runs the REAL SDK's event builder — the per-event cost this
+        # module exists to remove — and ``enabled()`` lies to any later assertion.
+        monkeypatch.delenv("SENTRY_DSN", raising=False)
+        importlib.reload(tsentry)
 
 
 def test_init_turns_source_context_off(enabled_sentry: dict[str, list]) -> None:
@@ -513,7 +522,11 @@ def live_sentry_client(monkeypatch: pytest.MonkeyPatch):
         assert tsentry.init() is True
         yield transport
     finally:
-        sentry_sdk.Hub.current.bind_client(None)
+        # ``get_global_scope().set_client`` is the modern spelling of
+        # ``Hub.current.bind_client`` (which ``hub.py`` aliases to it and deprecates
+        # for removal; the pin ``sentry-sdk>=2.0`` has no upper bound) — review
+        # round 16, P3.
+        sentry_sdk.get_global_scope().set_client(None)
         importlib.reload(tsentry)
 
 
