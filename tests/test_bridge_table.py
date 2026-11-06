@@ -786,7 +786,9 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     from tools.bridge_table import DESTINATION, _registry_rows
 
     retired = [r for r in _registry_rows() if r["use_instead"]]
-    assert len(retired) == 18, f"expected 18 retired rows, got {len(retired)}"
+    # 18 after #3540; 23 after #4282's `graph_overview` container retired five more names
+    # (the served registry is live + retired, so this counts the shim-served population).
+    assert len(retired) == 23, f"expected 23 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "
