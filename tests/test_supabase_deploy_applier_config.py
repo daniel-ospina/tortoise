@@ -235,7 +235,26 @@ _ERRETIT_DISABLED = re.compile(r"(?m)^\s*set\s+\+[A-Za-z]*[eo][A-Za-z]*\b")
 #: `set -n` (noexec) parses the body and executes NOTHING, then the step exits 0 — ONE CHARACTER
 #: from the allowed `set -e`. Measured at the shell: a body of `set -n` followed by `exit 3` exits 0,
 #: while `set -e` followed by `exit 3` exits 3 (review cycle 11).
-_NOEXEC = re.compile(r"\bset\s+-n\b|\bset\s+-o\s+noexec\b")
+def _disables_execution(body: str) -> str | None:
+    """The `set` token that puts the shell in noexec, if the body carries one.
+
+    Matched on FLAG WORDS, not on the literal `-n`. `set -en`, `set -ne`, `set -e -n` and
+    `set -euon pipefail` all disable execution (`bash -c 'set -en; echo ran; exit 3'` prints nothing
+    and exits 0) and all passed a `-n`-literal check — measured GREEN over an applier that never ran,
+    which is the same widening `_ERRETIT_DISABLED` already needed for `set +eu` (review cycle 13).
+    A bare `-o` is a word of its own whose VALUE is the flag name, so it is read as a pair.
+    """
+    for line in body.splitlines():
+        words = line.split()
+        if not words or words[0] != "set":
+            continue
+        rest = words[1:]
+        for index, word in enumerate(rest):
+            if word == "-o" and index + 1 < len(rest) and rest[index + 1] == "noexec":
+                return "set -o noexec"
+            if word.startswith("-") and not word.startswith("--") and "n" in word[1:]:
+                return f"set {word}"
+    return None
 
 
 def _run_body(step: dict) -> str:
@@ -551,7 +570,8 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # so the most natural note on this very step ("# NOTE: v3 consent-gates this; keep --yes")
         # must not be read as shell and red a correct step (measured, review cycle 9).
         body = "\n".join(_strip_shell_comment(line) for line in _run_body(step).splitlines())
-        assert not _NOEXEC.search(body), (
+        noexec = _disables_execution(body)
+        assert noexec is None, (
             f"{where} puts the body in noexec (`set -n` / `set -o noexec`): bash parses and executes "
             f"NOTHING and the step exits 0, so the apply never runs and the co-move dispatch "
             f"(#3627) flips the app over an unapplied schema. Measured at the shell: `set -n` then "
@@ -655,7 +675,13 @@ def test_printed_remediations_pass_yes_too() -> None:
         "supabase/README.md must keep its manual-fallback apply block: it is the operator's "
         "copy-paste path when the automated co-move has already failed (#3627)"
     )
-    unconsented = [remedy for remedy in readme_remedies if "--yes" not in remedy]
+    # Asserted on the STRIPPED command, not the raw line: `db push --project-ref …   # add --yes later`
+    # kept a substring assertion satisfied while an operator copy-pasting it would hit the v3 consent
+    # gate and apply nothing — the same shape closed for the workflow one branch above (measured,
+    # review cycle 13). `_strip_trailing_comment` is the helper that already exists for this.
+    unconsented = [
+        remedy for remedy in readme_remedies if "--yes" not in _strip_trailing_comment(remedy)
+    ]
     assert not unconsented, (
         f"supabase/README.md prints {len(unconsented)} manual-fallback command(s) without `--yes` "
         f"({unconsented}): CLI v3 consent-gates `db push` and `functions deploy` and cannot prompt "
