@@ -197,10 +197,7 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
 - **This decision does not arm anything itself — but the arming has since happened.** ⚠️ **SUPERSEDED
   in part:** the sentence below said `TORTOISE_RECORD_DSN` "remains unset"; measured, it has been set
   and `armed` since at least **2026-10-26** (`/health` re-measured 2026-11-05T13:11:13Z:
-  `"record":{"armed":true,…}`), provisioned by the operator **as the app role** — which the 302
-  `22P02` `record_write_failures` themselves prove, since those writes required a successful login as
-  `tortoise_record_app` and would have been refused outright by the RLS-bound role had it bypassed or
-  lacked the grants. The owner's **2026-11-03** decision superseded the 2026-11-01 postponement that
+  `"record":{"armed":true,…}`), provisioned by the operator **as the app role**, proven by connecting **as** it — `#9548` `6407834085`: `current_user = tortoise_record_app` with `app.current_org_id` unset reads `0` rows, and a synthetic cross-tenant `INSERT` into `journal_event` is refused by the `(org_id, graph_id)` FK, i.e. the grants and the RLS `WITH CHECK` passed. ⛔ **The `22P02` `record_write_failures` are NOT that proof** (this paragraph used to say they were): an invalid-JSON-input cast fires identically for `postgres`, `service_role` and the app role, so it establishes a connection and an `INSERT` attempt and never which role made it — and *"would have been refused by the RLS-bound role had it bypassed"* had it backwards, a bypassing role being the one that would **not** be refused. The owner's **2026-11-03** decision superseded the 2026-11-01 postponement that
   had forbidden the provisioning (`#9548` comment `6612968196`). So the posture is in force on
   production writes, not merely proven by the PGlite suite — while the *verified* proof of the
   boundary remains the suite plus the PGlite SQL, because an armed seam with an empty
