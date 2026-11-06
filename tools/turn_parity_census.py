@@ -410,6 +410,7 @@ import re
 import struct
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 #: The all-decimal suffix rule (`sdk._capture_turn_ids` — `isdecimal`, never
 #: prefix alone, so `sec` cannot claim `sec_t0_t3` and a `²`-class suffix is
@@ -696,6 +697,77 @@ def _graph_rows(g) -> list:
         cursor = int(page[-1][0]) + 1
         if len(page) < _GRAPH_PAGE_SIZE:
             return rows
+
+
+def empty_graph_target_flag(args: Any) -> str | None:
+    """The refusal message for a graph-target flag passed EMPTY, else ``None``.
+
+    ⛔ ONE IMPLEMENTATION, TWO CALLERS. `turn_parity_census` and
+    `purge_legacy_turns` both open a graph from the same three flags, and both were
+    exposed to the same shell accident: `--uri "$TORTOISE_DB_URI"` with the variable
+    UNSET is a set-but-EMPTY value, `read_graph_turns` selects its arm by TRUTHINESS,
+    so the run silently read the EMBEDDED store — and because this tool now authors the
+    graph identity into the artifact, the report then named a graph on an instance the
+    run never touched, which the cache census accepts for a hosted graph of the same
+    name (review P2 on #11097, both cycles). `--graph-name ""` is the mirror: it won
+    `graph_name is not None`, so the artifact said ``graph: ""`` while the read fell
+    back to ``tortoise``.
+
+    An empty flag value is NOT "no flag". Both callers must refuse it BY NAME before
+    anything is read, and both say the same thing, because a second copy of this rule
+    is a second chance to disagree about it.
+    """
+    for flag in ("--uri", "--db-path", "--graph-name"):
+        value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
+        if value is not None and not str(value).strip():
+            return (
+                f"{flag} was passed but is EMPTY (a shell expansion like {flag} "
+                f"\"$UNSET_VAR\" yields nothing). An empty flag value is NOT 'no "
+                f"flag': falling through reads the EMBEDDED store instead of the "
+                f"target you named, and the report would then name a graph on an "
+                f"instance this run never touched. Refusing instead."
+            )
+    return None
+
+
+def resolve_graph_name(uri: str | None, db_path: str | None,
+                       graph_name: str | None) -> str:
+    """The graph this run MEASURED — the name the report must carry.
+
+    ⛔ NOT A SECOND URI PARSER. The URI arm delegates to
+    ``tortoise.projection.resolve_db_endpoint``, the canonical derivation
+    ``FalkorProjection.from_uri`` itself calls, so the name written into the artifact is
+    the name the connection actually addressed. A report naming a graph the read never
+    opened is exactly the defect this closes (review P1 on PR #11004), and re-deriving
+    the name here with a hand-rolled parse would be the same class one layer down.
+
+    ``--graph-name`` still overrides the URI's own name (multi-tenant isolation, #7886),
+    and the embedded store selects the graph by name too, defaulting to ``tortoise`` —
+    the same default :func:`read_graph_turns` applies.
+
+    An EMPTY ``uri`` is not treated as "no URI": it is the URI arm, and the canonical
+    derivation refuses a degenerate one. Passing the embedded default instead would let
+    a shell accident write a graph name onto an artifact measured on a different store
+    (review P2 on #11097).
+    """
+    if graph_name is not None:
+        return graph_name
+    if uri is not None:
+        # ⛔ `is not None`, NOT truthiness: an EMPTY value is not "no URI" (the CLI
+        # refuses it by name before reaching here, and a library caller must not get
+        # the embedded default for a target it did not ask for). The canonical
+        # derivation refuses a degenerate URI rather than inventing a name.
+        # The import is GUARDED for the same reason `read_graph_turns` guards its own:
+        # a broken/partial install must read as "the graph could not be resolved"
+        # (exit 3), never as a traceback a caller mistakes for the exit-1 usage code.
+        try:
+            from tortoise.projection import resolve_db_endpoint
+        except Exception as exc:  # pragma: no cover - import env problem
+            raise CensusError(
+                f"tortoise import failed ({type(exc).__name__}: {exc})") from exc
+
+        return resolve_db_endpoint(uri).graph_name
+    return "tortoise"
 
 
 def read_graph_turns(uri: str | None, db_path: str | None,
@@ -1553,8 +1625,18 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     }
 
 
-def census(graph: dict, record: dict, *, sample: int) -> dict:
-    """The comparison and the classification. Pure: no I/O, no verdict I/O."""
+def census(graph: dict, record: dict, *, sample: int,
+           graph_name: str | None = None) -> dict:
+    """The comparison and the classification. Pure: no I/O, no verdict I/O.
+
+    ``graph_name`` is the graph the GRAPH leg actually read (:func:`resolve_graph_name`)
+    and it is emitted in the report as ``graph``. It is not decoration: the consumer
+    (``tortoise/cache_eviction.load_parity_report``) refuses a report that names no
+    graph, because a loader that fills the name in with the CALLER's own has nothing
+    left to compare — the binding then proves only that the operator typed one string
+    (review P1 on PR #11004). The identity is therefore authored HERE, by the leg that
+    opened the graph, and never by the consumer.
+    """
     nodes, rows = graph["nodes"], record["rows_by_key"]
     # The record's own declaration of what it cannot compare. It narrows the
     # comparison, so it is validated HERE and surfaces in the report — a
@@ -1812,6 +1894,14 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
         # emitting it here is what keeps the honest path open without making provenance
         # a caller's assertion.
         "instrument": INSTRUMENT,
+        # ⚠️ REQUIRED by the consumer for the same reason, one level up: a report with
+        # no graph identity was ATTRIBUTED to whatever graph the consumer asked about,
+        # so `mismatched`/`unbound` could never fire on the only path that produces a
+        # real report — a CLEAN census of another instance licensed a sweep of this one
+        # (review P1 on PR #11004). ``None`` is emitted as ``None`` rather than omitted:
+        # an artifact that does not know its target must say so, not look like a shape
+        # from before the field existed.
+        "graph": graph_name,
         "compared_fields": compared_fields,
         "declared_absent": sorted(declared_absent),
         "population": {
@@ -1996,6 +2086,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.sample < 0:
         parser.error("--sample must be >= 0")
 
+    # ⛔ THE GRAPH TARGET GETS THE SAME PRESENCE-NOT-TRUTHINESS RULE the record flags
+    # already carry below (review P2 on #11097). `--uri "$TORTOISE_DB_URI"` with the
+    # variable UNSET is a set-but-empty value; `read_graph_turns` tests truthiness, so
+    # the run silently fell through to the EMBEDDED store — and because this tool now
+    # authors the graph identity into the artifact, that accident produced a report
+    # naming `tortoise`, which the cache census accepts for a hosted graph of the same
+    # name. A shell accident therefore licensed a sweep of an instance the census never
+    # touched: the exact `different instance` shape the binding exists to refuse.
+    # `--graph-name` is in the same rule for the mirror reason (review P2, cycle 2):
+    # `--graph-name ""` used to win `graph_name is not None` and be written into the
+    # artifact as `graph: ""` while the EMBEDDED read fell back to `tortoise` — an
+    # artifact that misstates its own target AND can never be loaded as evidence.
+    # The rule itself is `empty_graph_target_flag` — ONE implementation, because
+    # `purge_legacy_turns` opens a graph from the same three flags and was exposed to
+    # the same accident (review P2, cycle 3).
+    empty_flag = empty_graph_target_flag(args)
+    if empty_flag:
+        sys.stderr.write(f"turn_parity_census: {empty_flag}\n")
+        return 1
+
     # ⛔ THE FLAG'S PRESENCE, NOT ITS TRUTHINESS (review P2). `if
     # args.local_record_dir:` treated a set-but-EMPTY value as "no flag", so
     # `--local-record-dir "$EVENTS_DIR"` with an unset variable fell into the
@@ -2076,9 +2186,19 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     try:
-        graph = read_graph_turns(args.uri, args.db_path, args.graph_name)
+        measured_graph = resolve_graph_name(args.uri, args.db_path,
+                                            args.graph_name)
+        graph = read_graph_turns(args.uri, args.db_path, measured_graph)
     except CensusError as exc:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
+        return 3
+    except ValueError as exc:
+        # The canonical URI → endpoint derivation refuses a scheme it does not know.
+        # Same outcome as an unreachable graph (exit 3), never a traceback: the target
+        # was never established, so nothing may be certified about it.
+        sys.stderr.write(f"turn_parity_census: the graph could not be resolved "
+                         f"from {args.uri!r} ({exc}) — an absence is NOT "
+                         f"established\n")
         return 3
 
     # Zero episodic nodes is not evidence of parity — it is the same answer a
@@ -2135,7 +2255,8 @@ def main(argv: list[str] | None = None) -> int:
             return 3
 
     try:
-        report = census(graph, record, sample=args.sample)
+        report = census(graph, record, sample=args.sample,
+                        graph_name=measured_graph)
     except CensusError as exc:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
         return 3
@@ -2144,6 +2265,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(report, indent=2, default=str), encoding="utf-8")
 
     pop = report["population"]
+    # The target is PRINTED as well as emitted: an operator reading the run must be
+    # able to see which graph produced it, and that is the same fact the artifact
+    # carries for the consumer.
+    print(f"graph      : {report['graph']}")
     print(f"population : {pop['episodic_graph_nodes']} episodic graph node(s) "
           f"(the delete set), {pop['turn_shaped_nodes']} of them turn-shaped, "
           f"across {pop['sessions_with_graph_turns']} session(s)")
