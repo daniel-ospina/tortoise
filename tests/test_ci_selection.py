@@ -13043,7 +13043,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     3,616,385,308 B in a PR scope and 397,897,273 B in `refs/heads/main`, while
     `uv-pip-Linux-8755d72f…` is 662,393,744 B in `refs/heads/main` — so pip (the
     torch wheel set, #7612's own payload, installed by `install-cpu-torch` with
-    `pip`) is 93% of the uploaded payload on its own, and FOUR other jobs write
+    `pip`) is 93% of the uploaded payload on its own, and TWO other jobs write
     `pip-<os>-<hash uv.lock>`, so this job reads it and writes nothing. The uv
     half has no other writer (`refs/heads/main` puts it at 252 MiB, an order of
     magnitude rather than a bound — scope variance is large), so this job keeps
@@ -13365,10 +13365,10 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "Use `actions/cache/restore@` plus an explicit, BOUNDED "
         "`actions/cache/save@` — for a NEW key. The two keys this job already "
         "carries are pinned separately and a save is REJECTED for both: `pip-` "
-        "because four other jobs write it, and `uv-cache-` because it must keep "
+        "because two other jobs write it, and `uv-cache-` because it must keep "
         "exactly one bounded writer (the next two arms).")
 
-    # ── The pip half: READ ONLY, because FOUR other jobs write it ──────────────
+    # ── The pip half: READ ONLY, because TWO other jobs write it ──────────────
     pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
     assert pip_steps, (
         "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
@@ -13408,7 +13408,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"the `test` job WRITES the shared pip cache again {pip_writers_here}. "
         "That archive measured 3,616,385,308 B in a PR scope — restoring it and "
         "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
-        "and it buys nothing: FOUR other jobs already write the key (#10327's "
+        "and it buys nothing: TWO other jobs already write the key (#10327's "
         "argument, applied to the bigger half).")
     pip_writer_rows = [(jid, s.get("name"), _key_of(s))
                        for jid, jd in wf["jobs"].items() if jid != "test"
