@@ -52,18 +52,24 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   REFUSES by name and so can never hold — the one §17.5 owns. ⚠️ ONE refused
   name the record's own derivation DOES supply: ``status`` (``Object``/
   ``Subject``) is refused as a record ``props`` KEY, but ``DERIVED_FROM_RECORD``
-  and ``EVENT_STREAM_FOLDS`` synthesise it on the record side, so wherever
-  the record carries a carrier the name is COMPARED and a mismatch reds; only a
-  ``status`` the record cannot corroborate (no carrier on the record side)
-  reaches this bucket, and that is a lifecycle value, not "nothing to repair".
+  and ``EVENT_STREAM_FOLDS`` synthesise it on the record side, so wherever the
+  record DERIVES one the name is COMPARED and a mismatch reds; only a
+  ``status`` the record derives NOWHERE reaches this bucket, and that is a
+  lifecycle value, not "nothing to repair". ⛔ Say "derives", not "carries a
+  carrier": ``DERIVED_FROM_RECORD`` reads the supersede columns, but
+  ``EVENT_STREAM_FOLDS`` reads THREE more legs — the ``ObjectRegistered``/
+  ``SubjectAdded`` birth record, an ``EntityMutated`` whose payload carries a
+  STRING ``state.status``, and the connector/pack fold — so a node with no
+  ``supersededBy``/``supersededAt`` can still be corroborated (measured: a
+  carrier-less ``:Object`` with a birth record folds ``status='draft'`` and a
+  disagreeing cache is a ``field_mismatches`` entry, not a bucket occurrence).
   ⛔ Its repair door is LABEL-DEPENDENT: on an ``:Object``
   ``update_entity(…, status=None)`` is applied as ``SET n += {status: null}``, a
   REMOVAL; on a ``:Subject`` the SAME call is REFUSED — ``sdk._update_entity``'s
   Subject status door validates against ``_SUBJECT_STATUS_VALUES``, and ``None``
-  is not one of them — measured,
-  `#11252`'s review; the missing SDK door is `#11271`), so a ``:Subject``'s clear
-  is the graph-side ``REMOVE n.status`` or the wipe below. ⛔ Never a
-  record-sourced re-projection, which is ADDITIVE
+  is not one of them (measured, `#11252`'s review; the missing SDK door is
+  `#11271`) — so a ``:Subject``'s clear is the graph-side ``REMOVE n.status`` or
+  the wipe below. ⛔ Never a record-sourced re-projection, which is ADDITIVE
   (``MERGE … SET n += $props``, no REMOVE pass) and would leave the value in
   place;
   (b) any property a
