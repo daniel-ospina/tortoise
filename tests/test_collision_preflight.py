@@ -9596,6 +9596,41 @@ exec {real} "$@"
         self.assertIn("lane:prd-test-owner-test-repo-7654", out)
         self.assertIn("background harness lane is RUNNING for PR #7654", out)
 
+    def test_a_MERGED_pr_naming_the_issue_only_in_its_BODY_still_reaches_the_queue(self):
+        """The closed-PR page is REST-shaped: the BODY is its closing evidence.
+
+        Review of #11105 (P2, fail-open). `_prs_serving_issue` widened the
+        harness-queue arm from the closed-PR sample too, but it read only
+        `closingIssuesReferences` — a field a REST `/pulls` payload never
+        carries — so it answered "not by that arm" for EVERY entry on exactly
+        the page the change extended. The PR surface on that page attributes
+        through `closing_reference(body, issue)` instead
+        (`elif closing_reference(body, issue):`, scan_pr_surface). A merged PR
+        whose TITLE and BRANCH name neither the issue nor `Closes #N` in the
+        body therefore never entered `attributed_prs`, and a live `prd-…` lane
+        for it was invisible: the verdict could be CLEAN while a lane held the
+        work — the precise fail-open the closed-PR feed was added to close.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654,
+            "title": "fix(tools): the bundled shape",
+            "body": "Closes #3061.",
+            "headRefName": "fix/bundled-shape",
+            "state": "closed",
+            "mergedAt": "2026-11-05T12:00:00Z",
+        }])
+        queue = self.tmp / "lane-queue-body-only"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.started").write_text("0")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("lane:prd-test-owner-test-repo-7654", out)
+        self.assertIn("background harness lane is RUNNING for PR #7654", out)
+
     def test_a_finished_harness_lane_does_not_block(self):
         """An `.end` marker outranks a live pid — a finished lane is not a holder.
 

@@ -5357,6 +5357,19 @@ def _prs_serving_issue(prs: list[dict], issue: int) -> set[int]:
     here, because the PR surface ALREADY reports that surface INCOMPLETE (an
     unmeasured test is not evidence either way). This helper can therefore only
     ever NARROW the queue arm, never decide the verdict.
+
+    ⛔ BUT THE BODY IS STILL CLOSING EVIDENCE (review of #11105, P2 — fail-open).
+    The closed-PR page is REST `/pulls`, which carries NO
+    `closingIssuesReferences` at all, and `scan_pr_surface` attributes there
+    through `closing_reference(body, issue)` (`elif closing_reference(body,
+    issue):`). Reading only the computed field therefore answered "not by that
+    arm" for EVERY entry on exactly the page the closed-PR feed was added to
+    widen: a merged PR whose title/branch name neither the issue nor "Closes #N"
+    and whose BODY carries the closing keyword never entered `attributed_prs`,
+    so a live `prd-<owner>-<repo>-<PR>` lane for it was invisible and the verdict
+    could be CLEAN while a lane held the work. `closing_reference` is the SAME
+    predicate the surface itself uses — not a second owner of it — so this can
+    only add PR numbers, never invent a different attribution.
     """
     numbers: set[int] = set()
     for pr in prs:
@@ -5372,8 +5385,13 @@ def _prs_serving_issue(prs: list[dict], issue: int) -> set[int]:
         try:
             if issue in _closing_ref_numbers(pr):
                 numbers.add(number)
+                continue
         except SurfaceError:
-            continue
+            # The field is absent (a REST payload) or unreadable. Neither is a
+            # pass: fall through to the body keyword the surface itself uses.
+            pass
+        if closing_reference(pr.get("body") or "", issue):
+            numbers.add(number)
     return numbers
 
 
@@ -9408,7 +9426,10 @@ def format_report(
         "comment prose is NOT read. A lane attributed to the issue and still "
         "holding it BLOCKS; a stopped holder is reported only; an unmeasured "
         "liveness, an ambiguous attribution, or an unreadable board is INCOMPLETE "
-        "(fail-closed). The gate offers NO dismissal switch (#8175)."
+        "(fail-closed). NO dismissal switch in TEXT (#8175): self-identity is the "
+        "one declared input — the caller's pid and ancestors automatically, and "
+        "`--self-pid` as a caller DECLARATION with the same trust model as "
+        "`--self-branch` (see the remedy below)."
     )
     lines.append("")
     surface_width = max(len("SURFACE"), *(len(s) for s in ALL_SURFACES))
