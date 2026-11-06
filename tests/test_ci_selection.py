@@ -10349,6 +10349,7 @@ def test_only_a_job_that_can_absorb_the_pip_cache_save_carries_one():
         steps = _pip_cache_steps(job)
         if not steps:
             continue
+        readers.add(job_id)
         cap = job.get("timeout-minutes", _GH_DEFAULT_JOB_CAP_MINUTES)
         saving = [s.get("uses") for s in steps
                   if str(s.get("uses") or "").startswith("actions/cache@")]
@@ -10371,7 +10372,6 @@ def test_only_a_job_that_can_absorb_the_pip_cache_save_carries_one():
                     f"job {job_id!r}: the pip-cache restore must be "
                     "`continue-on-error: true` — a cache-SERVICE error "
                     "(transport/503) must never red the leg.")
-            readers.add(job_id)
     assert savers == set(_PIP_CACHE_WRITER_JOBS), (
         "the set of jobs carrying an implicit pip-cache SAVE moved: "
         f"{sorted(savers)} against the pinned {sorted(_PIP_CACHE_WRITER_JOBS)}. "

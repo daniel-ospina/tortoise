@@ -2642,7 +2642,7 @@ jobs:
         # content-addressed and cannot substitute a different version.
         #
         # ⛔ RESTORE-ONLY, for the same measured reason as
-        # `test-record-postgres` above (#10182's remedy applied by #11063): a
+        # `test-record-postgres` (#10182's remedy applied by #11063): a
         # POST cache SAVE is charged against this job's `timeout-minutes` and
         # has no timeout of its own, so at a 15m cap it can never be amortized —
         # and the `cancelled` it causes reds a REQUIRED check on a green leg
