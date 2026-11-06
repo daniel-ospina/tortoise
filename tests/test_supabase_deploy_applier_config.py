@@ -171,9 +171,10 @@ def _mutates_production(step: dict) -> bool:
     GREEN.
 
     ⛔ BUT "NO TARGET FLAG" IS NOT ONE DIRECTION (#11135, fifth review). `db reset`, `migration
-    up`/`down`/`squash`/`repair` are LOCAL BY DEFAULT — the pinned CLI's own help: "Resets the local
-    database to current migrations", "Apply pending migrations to local database", and each takes
-    `--linked` / `--project-ref` / `--db-url` as its REMOTE form. Treating those as production would
+    up`/`down`/`squash` are LOCAL BY DEFAULT — RAN against the pinned CLI: "Connecting to local
+    database", `"isLocal":true`, "supabase start is not running" — while `migration repair` is NOT
+    (bare, it answers `ProjectRefNotLinkedError`, so it addresses the linked project). Each local
+    root takes `--linked` / `--project-ref` / `--db-url` as its REMOTE form. Treating those as production would
     put the applier's body-IS-its-invocation rule on a local harness step (`supabase db reset` then
     `supabase start`, the #11100 shape `_applier_jobs` anticipates) and red a correct workflow — the
     false-RED class this file spent four cycles removing. So the exemption is: an EXPLICIT local
@@ -274,19 +275,25 @@ _CONSENT_GATED_ROOTS = (
 #: (see `_applier_contract`) — three predicates, three questions, no nesting assumption (#11135).
 _SWEPT_ROOTS = _MUTATING_ROOTS + _CONSENT_GATED_ROOTS
 
-#: Mutating roots that act on the LOCAL stack unless a remote selector is passed — MEASURED against
-#: the pinned v2 CLI, whose own help text is the source: `db reset` / `migration up` / `migration
-#: down` / `migration squash` say "local database", `migration repair` documents `--project-ref` as
-#: "Not needed with --local or --db-url", and each one's REMOTE form is `--linked` /
-#: `--project-ref` / `--db-url`. The remaining mutating roots (`db push`, `functions deploy` /
-#: `delete`, `secrets set` / `unset`, `config push`) address the project and take a target only to
-#: OVERRIDE it — so for those, "no target flag" is production (#11135, fifth review).
+#: Mutating roots that act on the LOCAL stack unless a remote selector is passed. MEASURED by RUNNING
+#: the pinned v2 CLI in an unlinked directory, not read off help prose (that is how the first version
+#: of this tuple went wrong): `migration up` and `db reset` print "Connecting to local database" /
+#: "supabase start is not running", and `migration squash` reports `"isLocal":true`.
+#:
+#: ⛔ `migration repair` IS NOT ONE OF THEM (#11135, sixth review). Bare
+#: `supabase migration repair --status applied <v> --yes` answers `ProjectRefNotLinkedError: Cannot
+#: find project ref. Have you run supabase link?` — it targets the LINKED project, i.e. the
+#: fail-open direction — and the repo's own printed remedy passes `--linked`. Its help line
+#: ("Not needed with --local or --db-url") describes the ACCESS-TOKEN requirement, not the default
+#: target, and reading it as the latter put a production mutation behind the same exemption as a
+#: local harness. The remaining mutating roots (`db push`, `functions deploy` / `delete`,
+#: `secrets set` / `unset`, `config push`) address the project outright and take a target only to
+#: OVERRIDE it, so for all of those "no target flag" is production.
 _LOCAL_BY_DEFAULT_ROOTS = (
     "supabase db reset",
     "supabase migration up",
     "supabase migration down",
     "supabase migration squash",
-    "supabase migration repair",
 )
 
 #: A shell `run:` body can turn a failing apply into a green one. Enumerating the swallow tokens is
@@ -966,7 +973,8 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # ONE predicate, one place: `_applier_contract` answers "did this step owe the apply
         # contract?" and that answer is what narrows the operator scan below. (An earlier version
         # tested the predicate in BOTH the caller and the callee, which made the callee's gate
-        # unreachable and its deletion unobservable — measured: 17 passed with it removed.)
+        # unreachable and its deletion unobservable — measured on that commit's 15-test tree: 15
+        # passed with the callee's gate removed.)
         applies = _applier_contract(job_name, job, step)
         # Comment lines are dropped first, exactly as `_printed_remedies` does: a comment is prose,
         # so the most natural note on this very step ("# NOTE: v3 consent-gates this; keep --yes")
@@ -1427,14 +1435,21 @@ def test_an_untargeted_mutating_step_still_owes_the_apply_contract(monkeypatch) 
 
 
 def test_a_local_by_default_mutation_is_not_a_production_apply(monkeypatch) -> None:
-    """`db reset` / `migration up|down|squash|repair` are LOCAL unless a remote selector is passed.
+    """`db reset` / `migration up` / `migration down` / `migration squash` are LOCAL by default.
 
-    Measured against the pinned CLI's own help (#11135, fifth review): "Resets the local database to
-    current migrations", "Apply pending migrations to local database", and each root's REMOTE form is
-    `--linked` / `--project-ref` / `--db-url`. Treating those as production would put the applier's
+    Measured by RUNNING the pinned v2 CLI in an unlinked directory — not from help prose, which is
+    how the first version of `_LOCAL_BY_DEFAULT_ROOTS` acquired a fifth member it should not have
+    had: `migration up` and `db reset` print "Connecting to local database" / "supabase start is not
+    running", `migration squash` reports `"isLocal":true`, and each root's REMOTE form is `--linked`
+    / `--project-ref` / `--db-url`. Treating those as production would put the applier's
     body-IS-its-invocation rule on a local harness step — `supabase db reset` then `supabase start`,
     the shape `_applier_jobs`' docstring anticipates for #11100 — and red a correct workflow, which
     is the false-RED class this file spent four cycles removing.
+
+    ⛔ `migration repair` is NOT one of them and is asserted the other way (#11135, sixth review):
+    bare, it answers `ProjectRefNotLinkedError` ("Cannot find project ref"), so it addresses the
+    LINKED project, and the repo's own printed remedy passes `--linked`. It sat in this tuple for one
+    commit, which made a production repair with `continue-on-error: true` read GREEN.
 
     The remote form must still be production: `db reset --linked` mutates the hosted database, so a
     swallow on it has to red.
@@ -1450,11 +1465,39 @@ def test_a_local_by_default_mutation_is_not_a_production_apply(monkeypatch) -> N
         ],
     }
     monkeypatch.setattr(sys.modules[__name__], "_workflow_doc", lambda: doc)
+    # ALL FOUR tuple members are asserted, not just `db reset`: the first version of this tuple had a
+    # fifth member (`migration repair`) that is REMOTE by default, and pinning only one entry is what
+    # let that survive (#11135, sixth review). Each of these was RAN against the pinned CLI.
+    for local_root in (
+        "supabase db reset --yes",
+        "supabase migration up",
+        "supabase migration down --last 1",
+        "supabase migration squash",
+    ):
+        assert _mutates_production({"run": local_root}) is False, local_root
+        assert _mutates_production({"run": f"{local_root} --linked"}) is True, local_root
+    # ⛔ ...and `migration repair` is NOT local-by-default: bare, it answers ProjectRefNotLinkedError
+    # (`Cannot find project ref`), so it addresses the linked project. Measured, and it is the shape
+    # that reads green if the tuple is trusted from help prose instead.
+    assert _mutates_production({"run": "supabase migration repair --status applied 1 --yes"}) is True
     assert _mutates_production({"run": "supabase db reset --yes"}) is False
     assert _mutates_production({"run": "supabase db reset --linked --yes"}) is True
     assert _mutates_production({"run": "supabase db push --include-all --yes"}) is True
     test_the_apply_and_function_steps_pass_yes()
 
+    doc["jobs"]["deploy"]["steps"].append(
+        {
+            "name": "Repair migration history",
+            "continue-on-error": True,
+            "run": "supabase migration repair --status applied 20240101000000 --yes\nexit 0",
+        }
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_workflow_doc", lambda: doc)
+    with pytest.raises(AssertionError, match="continue-on-error"):
+        test_the_apply_and_function_steps_pass_yes()
+
+    # Drop the repair step again, so the next scenario fails on ITS defect and not this one.
+    doc["jobs"]["deploy"]["steps"].pop()
     doc["jobs"]["deploy"]["steps"].append(
         {"name": "Reset the linked project", "run": "supabase db reset --linked --yes || true"}
     )
