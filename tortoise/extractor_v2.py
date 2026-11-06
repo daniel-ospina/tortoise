@@ -11618,15 +11618,24 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
     elif declared in ("quote", "narrative") and "span_start" in record:
         haystack = (str(record.get("quote") or "") if declared == "quote"
                     else str(narrative or ""))
-        # ⛔ NO HAYSTACK is not a failed verification. `execute_embed`'s
-        # `story_arc` defaults to `""`, so a caller that omits it (every test and
-        # any seam) would otherwise DEMOTE a genuinely cue-derived `narrative`
-        # address to `"model"` — telling a consumer that reads the span per
-        # `span_source` that the cue invented offsets it actually derived (review
-        # at `5da3575b7a`, P2). `"quote"` needs no such guard: the record's own
-        # quote is always present when it carries a quote-space address.
-        if haystack and _mention_span(haystack, surface) != (record["span_start"],
-                                                            record["span_end"]):
+        # ⛔ THE AMNESTY IS `narrative`-ONLY. An absent NARRATIVE is not a failed
+        # verification: `execute_embed`'s `story_arc` defaults to `""`, so a
+        # caller that omits it (every test, any seam) otherwise DEMOTED a
+        # genuinely cue-derived `narrative` address to `"model"` — telling a
+        # consumer that resolves the span per `span_source` that the cue invented
+        # offsets it derived (review at `5da3575b7a`, P2).
+        # ⛔ An absent QUOTE is the opposite: `"quote": null` is IN the output
+        # contract, and `Mention.quote` defaults to `""`, so an empty quote is a
+        # definite MISMATCH, never an unknown. Exempting it (the first cut of this
+        # guard did) shipped a `quote`-labelled address into a record that has no
+        # quote — the caller resolves `quote[start:end]` to bytes that do not
+        # exist, which is the forgery this branch is (review at `1a7072e22`, P2).
+        want = (record["span_start"], record["span_end"])
+        # A `quote` address is ALWAYS checkable (an empty quote is a definite
+        # mismatch); a `narrative` one only when a haystack was supplied — the
+        # offsets cannot be checked here, so that declaration stands.
+        checkable = declared == "quote" or bool(haystack)
+        if checkable and _mention_span(haystack, surface) != want:
             record["span_source"] = "model"
     return record
 

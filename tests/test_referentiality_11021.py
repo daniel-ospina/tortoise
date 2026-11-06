@@ -1567,3 +1567,24 @@ def test_a_narrative_address_is_not_demoted_when_no_haystack_was_supplied():
     # demotes, which is the whole point of the verification.
     assert _clamped_mention(dict(entry), narrative="alpha it beta")["span_source"] == "narrative"
     assert _clamped_mention(dict(entry), narrative="no pronoun here or there")["span_source"] == "model"
+
+
+def test_the_narrative_amnesty_does_not_extend_to_an_absent_QUOTE():
+    """⛔ An absent NARRATIVE is an unknowable haystack; an absent QUOTE is a
+    definite mismatch (`"quote": null` is IN the output contract and
+    `Mention.quote` defaults to `""`). The first cut of the guard above exempted
+    both, so a record declaring `span_source: "quote"` with no quote shipped its
+    offsets VERIFIED-LABELLED — a consumer resolving `quote[start:end]` reads
+    bytes that do not exist (review at `1a7072e22`, P2)."""
+    from tortoise.extractor_v2 import _clamped_mention
+
+    for quote in (None, ""):
+        entry = {"surface": "it", "claim_ref": "c", "quote": quote,
+                 "span_source": "quote", "span_start": 0, "span_end": 2}
+        got = _clamped_mention(entry, narrative="whatever")
+        assert got["span_source"] == "model", (
+            f"a quote-space address with quote={quote!r} shipped as verified: {got!r}")
+    # …and a quote that DOES contain the surface at the declared offsets keeps it
+    ok = {"surface": "it", "claim_ref": "c", "quote": "x it y",
+          "span_source": "quote", "span_start": 2, "span_end": 4}
+    assert _clamped_mention(ok, narrative="")["span_source"] == "quote"
