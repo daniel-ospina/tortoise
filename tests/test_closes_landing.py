@@ -5308,3 +5308,115 @@ def test_a_type_6_block_on_a_LAZY_line_belongs_to_the_item_it_is_still_inside():
     leaf = "- a\nx\n  </span>\n> > 2.     Closes #100\n"
     assert keyword_types(leaf) == {"code_block"}, leaf
     assert cl.parse_closing_refs(leaf) == [], leaf
+
+
+def test_a_BLANKED_nested_marker_still_owns_the_paragraph_below_it():
+    """Round-51, P0 — a FAIL-OPEN in `strict=True`, the `issue_process_lint` PASS arm, and the one
+    the PASS arm's own shape made WORSE: it was more permissive than the finding arm.
+
+    `strict` blanks every 4+-column line, so a nested MARKER there is popped and the paragraph the
+    renderer opens inside it (`<ul><li>x`) is left holding the following lines — but the blank branch
+    `continue`s, so `prev_container` was never moved to the item the line created. The next wide-gap
+    marker then read as the OUTER item's lazy continuation and its `<pre><code>` content was credited:
+
+        `- outer` + `    - x` + `  2.     Closes #100`
+            renderer: `<li>outer<ul><li>x</li></ul><ol start="2"><li><pre><code>` -> CODE
+            `origin/main` `[]`; the round-50 head `[100]` in `strict=True`
+
+    The `- a bullet` spelling is the CONTROL and is pinned by
+    `test_a_PHANTOM_item_needs_FOUR_columns_and_the_SETEXT_exclusion_is_PINNED`: there a line
+    (`Summary.`) comes between the blanked marker and the claim, and the paragraph it continues is
+    lazily inside the abandoned `<li>`, so the recorded pop has to survive one line.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for body in ("- outer\n    - x\n  2.     Closes #100\n",
+                 "- outer\n    - x\n2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # CONTROL — the paragraph inside an item it is STILL inside keeps a real close, in BOTH arms.
+    control = "- outer\nx\n  2.  Closes #100\n"
+    assert keyword_types(control) == {"inline"}, control
+    assert cl.parse_closing_refs(control) == [100], control
+    assert cl.parse_closing_refs(control, None, strict=True) == [100], control
+
+
+def test_a_TYPE4_declaration_ends_at_a_line_CONTAINING_the_gt():
+    """Round-51, P0 — a FAIL-OPEN in `strict`, the PASS arm, on §4.6's type-4 end condition.
+
+    Type 4 (`<!` + letters) ends at "a line containing the string `>`", and the test read it from
+    `rest` — the line AFTER its blockquote prefix, so the `>` that IS the closer had already been
+    consumed: `_html_block_open('<!DOCTYPE x')` returns `frozenset({'>'})` and
+    `_html_block_ended({'>'}, '')` is False. The block never ended, `_html_here` then suppressed the
+    indentation rule for the rest of the body, and the 4-column claim below was credited:
+
+        `<!DOCTYPE x` + `>` + `    Closes #100`
+            renderer `<pre><code>` -> CODE; `origin/main` `[]`, round-50 head `[100]` in `strict`
+
+    The closer now reads the line at the depth the BLOCK opened at (the same rule the blank-line arm
+    already used), which keeps the case that made a raw reading wrong: a `>` deeper than the block's
+    own depth is LITERAL TEXT, so `> <!DOCTYPE` + `> more` keeps the block open.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "<!DOCTYPE x\n>\n    Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # …including when the fence spelling is quoted, where BOTH arms credited it.
+    quoted = "<!DOCTYPE x\n> - item\n>  ```\n> -  Closes #100\n"
+    assert keyword_types(quoted) == {"fence"}, quoted
+    assert cl.parse_closing_refs(quoted) == [], quoted
+    assert cl.parse_closing_refs(quoted, None, strict=True) == [], quoted
+
+    # CONTROL — the block's own text is still READ, not hidden (the round-43 rule): a line inside a
+    # type-4 block that does NOT carry `>` does not end it.
+    control = "<!DOCTYPE x\nx\n\nCloses #100\n"
+    assert keyword_types(control) == {"html_block"}, control
+    assert cl.parse_closing_refs(control) == [100], control
+    assert cl.parse_closing_refs(control, None, strict=True) == [100], control
+
+
+def test_an_item_whose_CONTENT_is_a_bare_marker_leaves_NO_paragraph():
+    """Round-51, P0 — a FAIL-OPEN in BOTH arms, the worst direction.
+
+    `_content_column` answers about ONE marker and `- -` nests two, so the outer item's content was
+    the string `-`: not empty (the round-39 rule does not fire), matching no leaf test, and the
+    fall-through said "a paragraph is open". That was harmless while a bare marker opened nothing —
+    round 49 made `-` an ITEM (§5.2's end-of-line form), so the marker below was read as a lazy
+    continuation of a paragraph the renderer had closed:
+
+        `-` + `- -` + `  2.     Closes #100`
+            renderer: `<li></li>`, the nested empty item, then `<ol start="2">` whose wide-gap
+            content is `<pre><code>` -> CODE, in BOTH arms
+            `origin/main` `[]` in both arms, round-50 head `[100]` in both
+
+    The same ladder is now applied to the item's CONTENT, so `- -`, `- 1.` and the deeper nestings
+    answer on what is left after the markers.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for body in ("-\n- -\n  2.     Closes #100\n",
+                 "- -\n  2.     Closes #100\n",
+                 "- 1.\n  2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # …and it fixes the LOST CLOSE the same phantom produced from the other side: the type-7 `<pre/>`
+    # under `- -` now OPENS, so the marker line is that block's raw text — PROSE.
+    leaf = "- -\n<pre/>\n> -     Closes #100\n"
+    assert keyword_types(leaf) == {"html_block"}, leaf
+    assert cl.parse_closing_refs(leaf) == [100], leaf
+    assert cl.parse_closing_refs(leaf, None, strict=True) == [100], leaf
