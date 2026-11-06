@@ -1350,8 +1350,12 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
 #: the waiver is applied per sentence, so one word defeated the gate, the same
 #: class as round 3's finding one layer in.
 #: ⛔ WIDEN THIS SET, NOT `_RESIDUAL_CLASS_ANCHOR`: the anchor also arms
-#: `_RESIDUAL_ANCHORED_OPENNESS`, and adding these spellings to it reds 29 of the
-#: 32 truthful statements (measured) — the withholding set is the narrow surface.
+#: `_RESIDUAL_ANCHORED_OPENNESS`, and adding these spellings to it reds EVERY
+#: truthful statement — no exception survives (MEASURED at the 33-statement
+#: revision; the earlier "29 of 32" was stale on both operands, #11258 review
+#: round 11 `P2`) — so the withholding set is the narrow surface. ⛔ THE COUNT IS
+#: DELIBERATELY NOT RESTATED: it drifted once already, and the measurement is the
+#: claim.
 #: The `(?<!['’])` guards are what keep the bare `m`/`s` alternatives from
 #: arming on a contraction: `\b` treats `'` as a boundary, so without them
 #: `I'm confident … is no longer fused` and `the pair's refusal … is no longer
@@ -1488,7 +1492,16 @@ _RESIDUAL_OPENNESS = (
     # `residual (a) is never closed by any rule` are honest and both RED when these
     # forms are unanchored (#11258 review round 5 `P1`, measured). See
     # `_RESIDUAL_CLOSED_VERDICT`.
-    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    # ⛔ AND THE FILLER WINDOW, which the verb list alone did not have (#11258
+    # review round 11 `P1`, MEASURED): `no longer judged` RED but `no longer BEING
+    # judged`, `no longer EVEN judged`, `no longer ACTIVELY judged` and `no longer
+    # BEING closed` were all GREEN — the arm required the verb to follow `no
+    # longer` immediately, while its sibling `not` arm deliberately carries a
+    # window for exactly this reason. It is phrased with `no longer` + `closed`/
+    # `judged`, i.e. the vocabulary this arm CLAIMS to read, so it is not the
+    # disclosed residual.
+    r"\bno\s+longer\s+[^.;]{0,20}?"
+    r"(closed|fuses|judged|caught|compared|enforced|retained)\b",
     # ⛔ THE PARTICIPLE, SUBJECT-GATED. The `no longer` arm above carries only the
     # 3sg `fuses`, so "the ADJACENCY half is no longer fused" — the row's OWN
     # register (`the unit word IS fused`, `THE FUSION ITSELF MULTIPLIES`) — stayed
@@ -1526,7 +1539,7 @@ _RESIDUAL_OPENNESS = (
     # row's own `, after the widen, ` register (MEASURED: `\`minute\` is, after the
     # widen landed, no longer fused` → GREEN at 20, RED at 80).
     r"\b(?:adjacency|the\s+half|carve-?out|value\s+class|numeric\s+side|"
-    r"time[- ]unit)\b[^.;]{0,80}?\bno\s+longer\s+(?:fused|fusing)\b",
+    r"time[- ]unit)\b[^.;]{0,80}?\bno\s+longer\s+[^.;]{0,20}?(?:fused|fusing)\b",
     r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
     r"week|weeks|month|months|mos|year|years|mile|miles|mi|millisecond|"
     r"milliseconds|millisec|millisecs|min|mins|ms|sec|secs|hr|hrs|km|kg|"
@@ -2063,6 +2076,14 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # pins that pattern by.
     "the ADJACENCY half is no longer closed.",
     "the ADJACENCY half is no longer judged.",
+    # ⛔ THE FILLER WINDOW (#11258 review round 11 `P1`, MEASURED): each of these
+    # was GREEN while its window-free twin RED, because the arm required the verb
+    # to follow `no longer` immediately.
+    "the ADJACENCY half is no longer being closed.",
+    "the ADJACENCY half is no longer being judged.",
+    "the ADJACENCY half is no longer even judged.",
+    "the ADJACENCY half is no longer actively judged.",
+    "the ADJACENCY half is no longer being fused.",
     # ⛔ THE APOSTROPHE-LESS CONTRACTIONS (#11258 review round 10 `P1`, MEASURED):
     # these four were RED, then went GREEN when round 9 made the apostrophe
     # mandatory to avoid `point`/`count` — a REGRESSION introduced by a fix. They
@@ -2429,10 +2450,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 100, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 105, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (100), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (105), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
