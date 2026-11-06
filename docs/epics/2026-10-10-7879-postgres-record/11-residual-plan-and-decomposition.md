@@ -294,9 +294,9 @@ That class has now cost rows twice. The delta is appended to `01-test-design.md`
 
 ## 5. The decomposition
 
-**24 existing issues carry this work; exactly one is new** (25 rows: at the `3ac6b1636` snapshot **22 open / 2
+**24 existing issues carry this work; two are new** (26 rows: at the `3ac6b1636` snapshot **22 open / 2
 closed** — #10185, #10671 — with **#10683 closed later that same day** (2026-11-05T16:31Z, by this lane) and
-**#9548 closed since** (2026-11-06), so the live split is **20 open / 4 closed**; plus 1 new child, #11075). Filing a peer for a known root is the defect this tracker
+**#9548 closed since** (2026-11-06), so the live split is **20 open / 4 closed**; plus 2 new children, #11075 and #11129). Filing a peer for a known root is the defect this tracker
 has already paid for once, so the decomposition's product is **navigation and order**.
 
 | # | what | group | state at `3ac6b1636` | action |
@@ -326,6 +326,7 @@ has already paid for once, so the decomposition's product is **navigation and or
 | 23 | **#9558** pooling + column-map cache | G4 | OPEN (`FOLLOW`) | linked |
 | 24 | **#10600** the census docs still read "not armed yet" | G4 | OPEN, docs-only | linked |
 | 25 | **#10977** hosted-graph cost/structure | G5 | OPEN, cross-epic **tracking** | linked — **but it is not G5's deliverable** (below) |
+| 26 | **#11129** the "blocked deploy / 2 migrations unapplied" premise vs. the deploy that shipped `c3af2d018` | G1 | **NEW** | **filed** by PR #11128 — §1's *the two migrations* and *the deploy* rows and the one-sentence verdict defer to it |
 
 ### 5.1 G5 has no closable carrier yet — and the ruling names FIVE measurements, not three
 
