@@ -4939,6 +4939,36 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         + _PHRASE_RE,
         re.I,
     )
+    #: THE SECOND ELEMENT OF A `neither … nor` (#11191 review r13, P2 — MEASURED false
+    #: RED at `ea30c63e19d`). A coordinated negation denies BOTH complements, but the
+    #: per-occurrence span hands the second one a slice that starts AFTER the previous
+    #: occurrence, so `neither` is outside it and the `nor` element reads as an
+    #: unattributed predication — the default deny — and a truthful denial is refused:
+    #:   "`ff6379eb2` is neither the tree before #9548 nor the tree immediately before
+    #:    #9548."                                              -> REFUSED (both are denials)
+    #: ⛔ The arm is PHRASE-LOCAL and PREDICATE-ANCHORED: `nor` must lead directly to the
+    #: phrase it denies (`nor the tree … ` + `before #9548`), anchored at the END of the
+    #: prefix so the `nor` belongs to THIS occurrence; a coordinating negator must be
+    #: present before it; and the denied element must CLOSE there
+    #: (nothing after it in the clause). The closing condition is what keeps
+    #: the arm from exempting an ASSERTION — ", nor the tree before #9548 IS `ff6379eb2`"
+    #: continues into a copula, so it is the claim, not a denial element. All three
+    #: conditions are load-bearing and each is separately pinned (#11191 review r13, P1).
+    _NOR_PREDICATE_DENIAL = re.compile(
+        r"\bnor\b\s*(?:the\s+)?(?:tree\s+)?(?:immediately\s+)?$", re.I
+    )
+    #: ⛔ …and NOTHING may follow it inside the clause. `and|but|or|while` cannot occur
+    #: here at all — `_CLAUSE_DELIM` already ends the clause on them, so those alternatives
+    #: were dead (measured: deleting all four left the suite green). `which` was live and
+    #: WRONG: a relative clause CONTINUES the denied element into a copula, so
+    #:   "It is not the #9601 merge, nor the tree before #9548, which is the arming
+    #:    commit itself."                                        -> ACCEPTED
+    #: was a fail-open this arm introduced (#11191 review r13r2, P2 — fixed here). The
+    #: truthful relative clause ("…, which is `047c91f7a`") is consequently refused, a
+    #: PRE-EXISTING false RED this spelling shares with `_DENIED_IN_PREDICATE`, recorded in
+    #: #11304 rather than bought back with the fail-open.
+    _DENIAL_COMPLEMENT_ENDS = re.compile(r"[\s,;.]*$", re.I)
+    _COORDINATING_NEGATOR = re.compile(r"\b(?:neither|not|never)\b", re.I)
     #: THE CLEFT — `<sha>, not <sha>, is the tree before #9548` (#11191 review, P1 —
     #: MEASURED). A fronted appositive negation does NOT negate the predication: it
     #: negates the APPENDIX, so the sha that FRONTS the sentence is the SUBJECT of the
@@ -5553,6 +5583,22 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             if _DENIED_BY_SHA.search(own):  # "`ff6379eb2` is not / isn't / cannot be"
                 return True
             if _DENIED_IN_PREDICATE.search(own):  # "… NOT the tree before #9548"
+                return True
+            # …and the COORDINATED spelling of the same denial (`neither A … nor B`),
+            # where the negator sits in front of the PREVIOUS complement and therefore
+            # outside this occurrence's span (#11191 review r13, P2 — measured false RED).
+            _hard_left = max(
+                norm.rfind(";", 0, phrase.start()),
+                norm.rfind(".", 0, phrase.start()),
+                norm.rfind("\u2014", 0, phrase.start()),
+                norm.rfind("\u2013", 0, phrase.start()),
+            )
+            _prefix = norm[_hard_left + 1 : phrase.start()]
+            if (
+                _COORDINATING_NEGATOR.search(_prefix)
+                and _NOR_PREDICATE_DENIAL.search(_prefix)
+                and _DENIAL_COMPLEMENT_ENDS.match(norm[phrase.end() : clause_end])
+            ):
                 return True
             # 2b. THE CLEFT — `<sha>, not <sha>, is the tree before #9548` (#11191
             #     review, P1 — MEASURED). It is decided BEFORE the complement arm, because
@@ -8224,6 +8270,142 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "`_FIGURE_NEAR_TRUE_TREE`'s gap was a 12-character count, and the spelling "
         "'7** lines, read at' puts the second figure 18 characters away, so the A4 defect "
         "(the cell stating 7 AND 10 at one tree) merges green (#11191 review r12, P2)"
+    )
+    # ⛔⛔ CONTROLS FOR THE DECLARED RULE THAT HAD NONE (#11191 review r13, P2 —
+    # MUTATION-MEASURED at `ea30c63e19d`). The `_CLEFT_PREDICATION` arm deliberately does
+    # NOT return `True` on a true-fronted cleft when a false sha sits beside the phrase in
+    # the same clause ("a TRUE-FRONTED CLEFT MAY NOT SHORT-CIRCUIT A FALSE SHA IN THE
+    # CLAUSE") — and NEUTERING THAT CHECK (`if not _FALSE_SHA_ADJACENT.search(clause)` ->
+    # `if True`) left the whole suite GREEN. A rule the contract lists, deciding a
+    # fail-open, with no test is exactly what the contract's reviewer question asks about,
+    # so these shapes are chosen by MUTATION: they are the ones that flip.
+    _cleft_then_assertion = (
+        (
+            "`047c91f7a`, not `ff6379eb2`, is the tree before #9548, and the tree before "
+            "#9548 is `ff6379eb2`.",
+            True,
+        ),
+        (
+            "`047c91f7a` rather than `ff6379eb2` is the tree before #9548, and the tree "
+            "before #9548 is `ff6379eb2`.",
+            True,
+        ),
+    )
+    _cleft_then_wrong = [
+        (s, want, _refuses_before_9548(s))
+        for s, want in _cleft_then_assertion
+        if _refuses_before_9548(s) is not want
+    ]
+    assert not _cleft_then_wrong, (
+        "a TRUE-fronted cleft short-circuits the rest of its clause, so a false equivalence "
+        "asserted beside it passes — and neutering that check leaves this suite GREEN, "
+        "i.e. the rule had no control at all (#11191 review r13, P2, measured by "
+        "mutation):\n  "
+        + "\n  ".join(
+            f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _cleft_then_wrong
+        )
+    )
+    # …and the SAME cleft followed by the TRUTH stays accepted. ⛔ A FALSE-RED guard, not an
+    # arm-discrimination control (#11191 review r13, P3 — MEASURED): it is green under
+    # every mutation of the veto, because other arms already accept it, so it is asserted
+    # plainly rather than listed above as if it discriminated the arm.
+    assert not _refuses_before_9548(
+        "`047c91f7a`, not `ff6379eb2`, is the tree before #9548, and the tree before "
+        "#9548 reads 10 lines."
+    ), (
+        "the true-fronted cleft followed by the truthful reading is refused — that is the "
+        "false-RED direction of the veto the controls above pin (#11191 review r13)"
+    )
+    # ⛔ CONTROLS FOR THE COORDINATED DENIAL (#11191 review r13, P2 — measured false RED
+    # at `ea30c63e19d`): `neither … nor` denies BOTH complements, but the per-occurrence
+    # span began after the previous occurrence, so the negator was outside it and the
+    # `nor` element was refused as an unattributed predication.
+    _coordinated_denials = (
+        "`ff6379eb2` is neither the tree before #9548 nor the tree immediately before #9548.",
+        "`ff6379eb2` is not the #9601 merge nor the tree immediately before #9548.",
+        "`ff6379eb2` was never the #9601 merge nor the tree immediately before #9548.",
+        "`ff6379eb2` is neither the #9601 merge nor the tree immediately before #9548, "
+        "and `047c91f7a` is the tree before #9548.",
+    )
+    _coordinated_refused = [
+        s for s in _coordinated_denials if _refuses_before_9548(s)
+    ]
+    assert not _coordinated_refused, (
+        "a truthful coordinated denial is refused — `neither … nor` denies both of its "
+        "complements, so refusing the `nor` element is the false-RED class this file "
+        "names as the worse one (#11191 review r13, P2):\n  "
+        + "\n  ".join(_coordinated_refused)
+    )
+    # …and the ADMISSION MAY NOT BE USED AS AN ALIBI: the mirror spelling continues into a
+    # copula, so it asserts the equivalence and must stay refused.
+    assert _refuses_before_9548(
+        "`047c91f7a` is neither the #9601 merge, nor is `ff6379eb2` the tree before #9548."
+    ), (
+        "the coordinated-denial arm excuses an ASSERTION — `nor is `ff6379eb2` the tree "
+        "before #9548` states the false equivalence, so the arm must be anchored to the "
+        "predicate, not to any `nor` near the phrase (#11191 review r13, P2)"
+    )
+    # ⛔ …AND THE ARM MAY NOT EXEMPT AN ASSERTION THAT MERELY MENTIONS `nor` (#11191 review
+    # r13, P1 — MEASURED): every shape below was ACCEPTED by the first cut of this arm and
+    # is REFUSED by the head before it. They are what `_DENIAL_COMPLEMENT_ENDS` decides — a
+    # complement that runs on into a copula, a figure or a named tree is the CLAIM.
+    _nor_assertions = (
+        "It is not the #9601 merge, nor the tree before #9548 is `ff6379eb2`.",
+        "It is not the #9601 merge, nor the tree before #9548 returns 3 lines.",
+        "It is not the #9601 merge, nor the tree before #9548 is the arming commit itself.",
+        "It is not the #9601 merge, nor the tree before #9548 is `c5cbcbb4f`.",
+        "`047c91f7a` is not the #9601 merge, the census returns 10 lines there, nor the "
+        "tree before #9548 is `ff6379eb2`.",
+    )
+    # …including the RELATIVE-CLAUSE continuation, which the first cut of the closing
+    # condition admitted (measured ACCEPTED at `b60500255b0`, REFUSED at its parent):
+    _nor_relative_assertions = (
+        "It is not the #9601 merge, nor the tree before #9548, which is the arming "
+        "commit itself.",
+        "It is not the #9601 merge, nor the tree before #9548, which returns 3 lines.",
+        "It is not the #9601 merge, nor the tree before #9548, which is what the note said.",
+    )
+    _nor_assertion_passed = [
+        s
+        for s in tuple(_nor_assertions) + tuple(_nor_relative_assertions)
+        if not _refuses_before_9548(s)
+    ]
+    assert not _nor_assertion_passed, (
+        "the coordinated-denial arm exempts an ASSERTION that merely carries a `nor` — the "
+        "complement-closes condition is what separates `nor the tree before #9548.` (a "
+        "denial) from `nor the tree before #9548 IS …` (the claim) and it is load-bearing "
+        "(#11191 review r13, P1):\n  " + "\n  ".join(_nor_assertion_passed)
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` is the #9601 merge nor the tree immediately before #9548."
+    ), (
+        "a bare `nor` with no coordinating negator in the clause exempts the phrase — the "
+        "`neither`/`not`/`never` requirement is load-bearing (#11191 review r13, P2; "
+        "re-measured by deleting it at this head: this assertion reds)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` is neither the #9601 merge, nor the tree before #9601, and the tree "
+        "before #9548 is `ff6379eb2`."
+    ), (
+        "a `nor` element naming a DIFFERENT reference (`nor the tree before #9601`) "
+        "exempts the phrase's own predication — the arm's `$` anchor is what binds the "
+        "`nor` to THIS occurrence (#11191 review r13, P2; at this head dropping the "
+        "anchor reds the `nor is …` control instead, so this shape is over-determined)"
+    )
+    # ⛔ …AND THE MIRROR THAT WAS A RESIDUAL IS NOW A CONTROL (#11191 review r13, P2 —
+    # MEASURED): at `ea30c63e19d` the phrase-first spelling of the same construction was
+    # ACCEPTED ("…, nor the tree before #9548 IS `ff6379eb2`" — the mirror of an assertion,
+    # where the denial cue sits on the other side). The r12 round at `fb3a95dfd5e` closes it
+    # (the adjacent-cue rule), so it is asserted as REFUSED rather than pinned as a
+    # characterisation: a residual that has been closed must move with the fix, or the note
+    # keeps claiming a gap the code no longer has.
+    assert _refuses_before_9548(
+        "`047c91f7a` is not the #9601 merge, nor the tree before #9548 is `ff6379eb2`."
+    ), (
+        "the phrase-first mirror of the coordinated construction is ACCEPTED — it asserts "
+        "the false equivalence with its denial cue on the other side, so it is the claim "
+        "and not a denial element (#11191 review r13, P2). It is OVER-DETERMINED — several "
+        "arms refuse it at once, so no single-arm revert reds it; asserted as a class guard"
     )
 
 
