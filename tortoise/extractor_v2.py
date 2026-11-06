@@ -10947,13 +10947,17 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     derived and the model-emitted path, so a hallucinated 300-character surface
     cannot 422 the whole session (review P1: the model path bypassed the clamps).
 
-    ⚠️ **A ``span`` entry is read as model offsets ONLY when it declares no
-    provenance** (or declares \"model\"). A record this module already derived
-    carries ``span_source: quote|narrative`` and pass 2 re-reads it through this
-    path — labelling those offsets \"model\" claimed the model emitted an address
-    that came from the cue's own search, on every shipped record (review at
-    ``41fb0c65e``, P1: \"a consumer that resolves the span per ``span_source``
-    reads the wrong bytes\").
+    ⚠️ **A declared ``span`` provenance is a CLAIM and must VERIFY.** An entry
+    that declares none (or declares "model") is read as model offsets. One that
+    declares ``quote``/``narrative`` keeps that space ONLY when its offsets are
+    exactly where that haystack puts the surface — otherwise it is demoted to
+    ``"model"``, so a fabricated ``span_source`` cannot ship an address that
+    names bytes the surface never occupied (review cycle 4, P2). A record this
+    module already derived carries ``span_source: quote|narrative`` and pass 2
+    re-reads it through this path — labelling those offsets "model" claimed the
+    model emitted an address that came from the cue's own search, on every
+    shipped record (review at ``41fb0c65e``, P1: "a consumer that resolves the
+    span per ``span_source`` reads the wrong bytes").
 
     ⛔ ``isinstance(True, int)`` is ``True``, and ``True`` is not an offset: a
     boolean offset is DROPPED, not coerced to ``1``. ``commit_schema.validate_span``
