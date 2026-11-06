@@ -609,8 +609,11 @@ surfaces:
   # that claim is deliberately NOT here: a runbook-only diff selects no surface and
   # runs `tier1` only, so the field-row pin lives in `test_deploy_workflow.py`
   # (tier1), where that diff actually runs it — and it DERIVES its names from
-  # `metrics()`'s record keys rather than repeating these literals, so a coherent
-  # rename (code + docstring + literals) reds it while the runbook is untouched.
+  # `metrics()`'s record keys for the set it DEMANDS rather than repeating these
+  # literals as that set, so a coherent rename (code + docstring + literals) reds it while the runbook is
+  # untouched. ⚠️ The pair is still hand-spelled where it must be — a precondition and a survivor check, at
+  # the sites the pin's own docstring enumerates — because naming it IS the #9548 claim; what is derived is
+  # the set a rename would have to move.
   # Same dual
   # registration as the guards
   # above and for the same reason: the file it guards is `tortoise/hosted_api.py`,

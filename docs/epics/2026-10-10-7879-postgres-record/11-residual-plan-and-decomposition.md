@@ -50,8 +50,8 @@ drill, and the R5 edge producers. **All 13 native sub-issues are closed.**
 sub-issue links (13, all closed, before this lane added 23 — 36 in total, **21 open / 15 closed**: #10683 closed
 when its answer was recorded, and **#9548 closed 2026-11-06T01:57Z** by `#11109`'s merge — landed on `main`
 and, since the 2026-11-06T04:24:26Z deploy (`ba87797c`), **SERVED** (`record_writes_applied` is published on
-`/health`); re-measured 2026-11-06T05:14Z with `gh api …/issues/7879/sub_issues
---paginate | jq '.state'`, and the pair moves as issues close, so read it as a dated census) and the issues
+`/health`); re-measured 2026-11-06T05:14Z with `gh api …/issues/7879/sub_issues --paginate
+| jq -r '.[].state' | sort | uniq -c`, and the pair moves as issues close, so read it as a dated census) and the issues
 whose *body* carries an
 `Epic: #7879` field. The GitHub search API's tokenized `in:body` match returned **99 total / 26 open** by one
 query and **38 / 11** by a stricter re-match — **so no count of THAT population is quoted anywhere in this
@@ -123,7 +123,8 @@ and **two files landed after the measurement**: `tests/test_supabase_cli_pin_105
 **23 lines** (`:267` reads *"#10620 — R4's remaining half: `public.point.search_keys` NARROWED to …"*), and
 `tests/test_9078_record_written_by_production_path.py` carries it inside the **assertion message** at `:2367`
 (*"… #10620 closed `search_keys`"*) — the text a future failing pin prints, and the very file this document
-quotes at §7.2. `tortoise/hosted_api.py` (4 lines) and `config/ci-surfaces.yml` (`:615`, plus the *"#10620: same dual
+quotes at §7.2. `tortoise/hosted_api.py` (4 lines) and `config/ci-surfaces.yml` (`:622` at this head — `:615` before this PR's own
+comment was added; plus the *"#10620: same dual
 registration as the guards above"* comment — `:3627` at the measurement commit; the number is a convenience every
 rebase moves, so the quoted comment is the handle) assert it too.
 So **even the sites named here are not the set**, and ⚠️ **none of the sites named here is carried today**:
@@ -247,8 +248,10 @@ acceptance criteria**, with one criterion honestly marked *waived* rather than s
   that the beta is blocked on P0/P1 closure."* The record **is** armed (`/health` → `"armed": true`, `dsn:
   adb0c38b`). #9548 is **CLOSED** as of 2026-11-06T01:57Z — `#11109`'s merge (`74fdd9ca0`) landed the record's
   POSITIVE channel, which is Target (a)'s evidence — and it was never an owner gate. ⚠️ **The closure is
-  landed-on-main, not delivered:** `#10896` still carries 2 unapplied migrations — the same distinction §5 row 5
-  draws for `#10185` — so *"closed"* is not evidence the hosted app writes today. **PR #11064** (open, `BLOCKED`) is the doc sweep that purges
+  landed-on-main and the channel is SERVED** — `/health` publishes `record_writes_applied` from build `ba87797c`
+  (2026-11-06T04:24:26Z) onward, read on `443498e66` at 2026-11-06T06:57Z; §5 rows 4, 5 and 9 carry the same
+  statement. ⚠️ **A served channel is still not evidence the hosted app writes today:** the counter reads `0`, so
+  *"closed"* remains a statement about the code, not about rows landing. **PR #11064** (open, `BLOCKED`) is the doc sweep that purges
   the superseded instruction; this plan must not re-seed it — and the first draft did.
 
 ---
