@@ -186,6 +186,96 @@ The other pins survived re-derivation unchanged at this commit: 90 planted units
 14 value-bearing units, 29 marker sentences of 343, and the 25/15/9/6 salience measurement. Only the
 hash had moved.
 
+### 1.6 Amendment — the DOOR, and which corpus carries which row (`#10983` / C2)
+
+Added by `#10983`. Nothing above changes: no metric, no denominator, no threshold. What this section
+adds is the two facts a reader needs to know **what a number in §3 is a number ABOUT**, and it is
+written here — into the registration — because a measurement contract that lives in prose is one
+a reader can re-decide.
+
+#### 1.6.1 The door
+
+**The acceptance runs the fleet's v2 extraction lane:**
+
+```
+tortoise/hosted_api.py::_capture_lane()            → "v2" (default), "m2" iff TORTOISE_SESSION_EXTRACTOR == "m2"
+  sdk.capture_session → sdk._extract_session_v2    → tortoise/extractor_v2.py::extract_session_v2
+```
+
+The hosted endpoint and the SDK path **select the lane from the same variable with the same
+comparison**, so the "hosted endpoint or SDK path" question is not a choice between two doors — it is
+one door with an optional HTTP boundary in front of it. The probe drives `sdk.capture_session`, i.e.
+the SDK side of that one door. The `m2` lane (`_extract_session_llm` → `tortoise/extractor.py`) is the
+**opt-in, non-default** extractor and is *not* the door.
+
+Every citation above is resolved from the tree by `tests/test_7949_c2_door.py`, not typed — a renamed
+or relocated function reds that suite.
+
+#### 1.6.2 The seam set, as the CODE resolves it at this head
+
+| seam | resolver | default at this head | behaviour seam? |
+|---|---|---|---|
+| `TORTOISE_VET` | `extractor_v2._vet_enabled` | **off** | yes |
+| `TORTOISE_CLASSIFY_LATER` | `extractor_v2._classify_later_enabled` | **off** | yes |
+| `TORTOISE_S2_DECISION_SEAM` | `s2_decision_seam.seam_enabled` | **off** | yes |
+| `TORTOISE_VALUE_GATE` | `value_gate.value_gate_enabled` | **ON** ⚠️ | yes |
+| `TORTOISE_S4_DELTA` | `extractor_v2._s4_delta_enabled` | **ON** | yes |
+| `TORTOISE_LABEL_ORDER` | `extractor_v2._label_order_rng` | off (render diagnostic) | **no** |
+
+⚠️ **`TORTOISE_VALUE_GATE` is default-ON at this head** — `#10996` made the mechanical predicate run
+unless the flag says otherwise (`is_truthy(os.environ.get(ENV_FLAG, "1"))`), and `extractor_v2` ORs it
+into `vet_enabled`. **The S2.2 VET pass is therefore armed on the fleet's default write path even
+with `TORTOISE_VET` unset**, so "VET is off by default" is true of the flag and false of the pass.
+`#10983`'s own ledger and the epic's "the fleet's write path performs zero selection" both predate
+that change; this table is the record at this head, and the pin suite resolves every row against the
+modules so it cannot rot quietly.
+
+**What the acceptance run arms:** `TORTOISE_VET=1`, `TORTOISE_CLASSIFY_LATER=1`,
+`TORTOISE_VALUE_GATE=0`, `TORTOISE_S2_DECISION_SEAM=0`; the lane pinned to (unset ⇒) `v2`;
+`TORTOISE_S4_DELTA` pinned to `1`; `TORTOISE_LABEL_ORDER` pinned unset; `TORTOISE_EXTRACTOR` pinned
+unset. Every one is written in-process, **read back**, and a run whose read-back disagrees is
+**refused** (`probes/capstone_measure.py`). The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
+default-ON predicate the arm would otherwise measure the predicate's population while declaring an
+arm that does not include it.
+
+#### 1.6.3 Which corpus carries which row
+
+**The registered corpus (`tests/eval/write_path`) is a FIXTURE**, pinned by `fixtures_hash`, and one
+of its arms (`E1b`) is defined as a run on the **`m2`** lane. So the registered E1/E2 rows are
+statements about *this fixture on this lane* — they are **not** a proof about the graph the fleet
+builds. Writing that down does not weaken any row; it stops a green row from being read as a claim it
+never made.
+
+| row | corpus that carries it | the claim it supports | it is NOT a proof of |
+|---|---|---|---|
+| **E1** | `tests/eval/write_path` (fixture, this hash) | `^the <X>` share falls ≥50% **on this corpus**, both arms, same commit | that the fleet's graph volume falls |
+| **E1b** | `tests/eval/write_path` **on the `m2` lane** | the anti-gaming control: planted units survive the deterministic lane (90/90 at this hash) | anything about the v2 door — the `m2` lane writes no relation edges at all |
+| **E2a / E2b** | `tests/eval/write_path` (fixture) | value-bearing units survive; claims are not fused | the fleet's correctness, which needs a capture through the door |
+| **E3** | any graph **written through the door** (shape, not content) | every derived node carries a version anchor | a content claim: it is a structural property of the writer |
+| **E4** | `tests/eval/write_path` gold, **graded on the `m2` baseline** | operator edges wired/persisted on the registered bar (15) | the fleet's connect step: the m2 lane has no relation extraction, so its operator figure is structural, not product |
+| **E5** | `tests/eval/write_path` (fixture, §10) | the raw-vs-narrative premise, measured on this corpus | a fleet-corpus premise: a different corpus is a different measurement |
+| **any fleet-graph claim** | **`fleet-capture`** — a real capture through the door | what the fleet's write path actually produces | nothing yet: this registration pins no fleet-capture corpus, and one must be registered **before** such a number is scored |
+
+#### 1.6.4 The negative control, MEASURED
+
+Same corpus session (`wp01_quarry_debug`), same offline model seam, both lanes, one embedded
+graph each:
+
+| lane | `:Object` | `:Point` | `:Event` | `:Session` | `:Operator` | `:Object` names |
+|---|---|---|---|---|---|---|
+| **v2 — the door** | **1** | **27** | **2** | 1 | 0 | `['the strategy']` |
+| **m2 — the other lane** | **0** | **149** | **1** | 1 | 0 | `[]` |
+
+The difference is measured, and it is **structural, not a matter of degree**: the `m2` lane mints
+**no `:Object` at all** on this session and **5.5×** the `:Point`s, because it is a *different
+extractor*, not a different seam of the same one.
+
+⇒ **A number measured on one lane is not a number about the other.** That is exactly why the `m2`
+columns in §1.6.3 must not be read as fleet facts, and why the door is pinned structurally (§1.6.1)
+as well as measured here — a control measures the two lanes *as they are today*, while the pin is
+what stops the selector moving tomorrow.
+
+
 ---
 
 ## 2. The split

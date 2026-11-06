@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:9624411c6d76c4cfd1b81c9d6e6326d4e431ea5edcd04a4e99cc6fcfebccb794",
+  "document_sha256": "sha256:a16a87705858c45504dc4138c39647f3db8176ba06245cd436290abe9fc07c79",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -189,5 +189,132 @@
     "e5_rate_min_sentences": 10
   },
   "below_floor": "REFUSED, which is neither a pass nor a fail",
-  "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over."
+  "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over.",
+  "door": {
+    "lane": "v2",
+    "lane_env": "TORTOISE_SESSION_EXTRACTOR",
+    "entry_point": "sdk.capture_session -> sdk._extract_session_v2 -> extractor_v2.extract_session_v2",
+    "hosted_selector": "tortoise/hosted_api.py::_capture_lane",
+    "hosted_selector_semantics": "the hosted endpoint and the SDK dispatch read the SAME variable with the SAME comparison, so 'hosted endpoint or SDK path' is one door with an optional HTTP boundary, not two doors (#10983)",
+    "not_the_door": "the m2 lane (sdk._extract_session_llm -> tortoise/extractor.py::LLMExtractor) is the opt-in, non-default extractor",
+    "seams": [
+      {
+        "env": "TORTOISE_VET",
+        "resolver": "extractor_v2._vet_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "the VET flag contributes nothing; the pass can still be armed by TORTOISE_VALUE_GATE (see below)"
+      },
+      {
+        "env": "TORTOISE_CLASSIFY_LATER",
+        "resolver": "extractor_v2._classify_later_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "S2.3 CLASSIFY is entirely off-path; kinds are emitted inline by S2.1"
+      },
+      {
+        "env": "TORTOISE_S2_DECISION_SEAM",
+        "resolver": "s2_decision_seam.seam_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "no arbiter: the model-backed typed-decision seam is off-path. Fail-closed: no network call, no spend"
+      },
+      {
+        "env": "TORTOISE_VALUE_GATE",
+        "resolver": "value_gate.value_gate_enabled",
+        "default": "on",
+        "behaviour_seam": true,
+        "unset_behaviour": "ON since #10996. The mechanical identifier-only predicate runs inside the VET pass, and extractor_v2 ORs this term into vet_enabled — so the S2.2 pass is ARMED on the fleet's default write path even with TORTOISE_VET unset. #10983's ledger said this seam was default-off; the code says otherwise at this head",
+        "evidence": "value_gate.value_gate_enabled / extractor_v2.vet_enabled"
+      },
+      {
+        "env": "TORTOISE_S4_DELTA",
+        "resolver": "extractor_v2._s4_delta_enabled",
+        "default": "on",
+        "behaviour_seam": true,
+        "unset_behaviour": "unset -> delta contract (the shipped default); an explicit falsy value selects the LEGACY complete-list contract, which changes S4's output without an audible seam"
+      },
+      {
+        "env": "TORTOISE_LABEL_ORDER",
+        "resolver": "extractor_v2._label_order_rng",
+        "default": "off",
+        "behaviour_seam": false,
+        "unset_behaviour": "NOT a behaviour seam: a render DIAGNOSTIC. 'shuffle' randomises the kind lists per call, so pinning it unset is what makes two runs of the same arm comparable"
+      }
+    ],
+    "acceptance_arm": {
+      "set_on": [
+        "TORTOISE_VET",
+        "TORTOISE_CLASSIFY_LATER"
+      ],
+      "pinned_off": [
+        "TORTOISE_VALUE_GATE",
+        "TORTOISE_S2_DECISION_SEAM",
+        "TORTOISE_SESSION_EXTRACTOR",
+        "TORTOISE_EXTRACTOR",
+        "TORTOISE_LABEL_ORDER"
+      ],
+      "pinned_to": {
+        "TORTOISE_S4_DELTA": "1"
+      },
+      "why_value_gate_off": "its default flipped ON in #10996; an arm that declares itself OFF must pin the explicit 0 or it measures the predicate's population",
+      "read_back": "every value is re-read from os.environ after setting and a mismatch REFUSES the run"
+    },
+    "negative_control": {
+      "arms": [
+        "v2 (the door)",
+        "m2 (sdk._extract_session_llm)"
+      ],
+      "seam": "TORTOISE_SESSION_LLM_MOCK=1",
+      "measured": "v2 (the door): Object=1 Point=27 Event=2 Session=1 Operator=0, objects=['the strategy']; m2 (the other lane): Object=0 Point=149 Event=1 Session=1 Operator=0, objects=[] — same corpus session wp01_quarry_debug, same offline model seam, one embedded graph each",
+      "verdict": "MEASURED DIFFERENCE (structural)",
+      "why": "it is a different EXTRACTOR, not a different seam of the same one: the m2 lane mints no :Object at all on this session and 5.5x the Points, so a number measured on one lane is not a number about the other",
+      "consequence": "rows whose corpus is the m2 lane (E1b, E4) are not fleet facts; the door is ALSO pinned structurally so the control cannot be the only guard"
+    },
+    "pinned_by": "tests/test_7949_c2_door.py"
+  },
+  "corpus_rows": {
+    "E1": {
+      "corpus": "tests/eval/write_path",
+      "claim": "the ^the <X> share falls >=50% on THIS fixture corpus, both arms, same commit",
+      "not_a_proof_of": "that the fleet's graph volume falls"
+    },
+    "E1b": {
+      "corpus": "tests/eval/write_path",
+      "claim": "anti-gaming control: planted units survive the deterministic m2 lane (90/90 at this fixtures_hash)",
+      "not_a_proof_of": "anything about the v2 door — the m2 lane writes no relation edges at all",
+      "lane": "m2"
+    },
+    "E2a": {
+      "corpus": "tests/eval/write_path",
+      "claim": "value-bearing units survive; nothing is filtered away",
+      "not_a_proof_of": "the fleet's correctness, which needs a capture through the door"
+    },
+    "E2b": {
+      "corpus": "tests/eval/write_path",
+      "claim": "surviving units are not fused into each other",
+      "not_a_proof_of": "the fleet's atomicity on a real capture"
+    },
+    "E3": {
+      "corpus": "fleet-capture",
+      "claim": "every derived node from a door-written graph carries a version anchor (a structural property of the writer)",
+      "not_a_proof_of": "any content claim — E3 is shape, not extraction quality"
+    },
+    "E4": {
+      "corpus": "tests/eval/write_path",
+      "claim": "operator edges are wired and persisted on the registered bar (15)",
+      "not_a_proof_of": "the fleet's connect step: the m2 lane's operator figure is structural (2/15), not a product claim",
+      "lane": "m2"
+    },
+    "E5": {
+      "corpus": "tests/eval/write_path",
+      "claim": "the raw-vs-narrative premise, measured on this corpus (§10)",
+      "not_a_proof_of": "a fleet-corpus premise: a different corpus is a different measurement"
+    },
+    "fleet-claim": {
+      "corpus": "fleet-capture",
+      "claim": "what the fleet's write path actually produces, measured on a real capture through the door",
+      "not_a_proof_of": "nothing yet — this registration pins NO fleet-capture corpus, and one must be registered BEFORE such a number is scored"
+    }
+  }
 }

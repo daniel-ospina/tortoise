@@ -326,6 +326,72 @@ ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 #: includes the predicate, at a header claiming it was pinned off.
 ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
+# ── the DOOR (#10983 / C2) ────────────────────────────────────────────────
+#
+# "Which code path produced this number" is a SEPARATE question from "which arm
+# was it run under", and this probe answered only the second one. The extraction
+# LANE is selected by an ordinary environment variable that ``measured_arm`` did
+# not touch:
+#
+#   * ``tortoise/sdk.py`` — ``TORTOISE_SESSION_EXTRACTOR == "m2"`` routes
+#     ``capture_session`` to ``_extract_session_llm``; everything else routes to
+#     ``_extract_session_v2`` (the v4 door).
+#   * ``tortoise/hosted_api.py::_capture_lane`` — the hosted endpoint's mirror of
+#     the SAME predicate, so the two entry points select ONE lane, not two.
+#
+# An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
+# rerouted all seven acceptance captures to the OTHER extractor while the log
+# still printed an ``arm:`` line that said nothing about it — the silent seam
+# #10983 exists to close. The lane, and the two switches that change the
+# rendered prompts rather than the pipeline, are pinned here and READ BACK like
+# every other switch (the ``arm:`` rule, applied to the door).
+
+#: The env var that selects the extraction lane.
+DOOR_LANE_ENV = "TORTOISE_SESSION_EXTRACTOR"
+
+#: The lane the acceptance runs when that var is unset — and the one the run is
+#: PINNED to (``_capture_lane()``'s default, ``hosted_api.py``).
+DOOR_LANE = "v2"
+
+#: Unset (not ``"0"``) is the correct pin for each of these: every one selects a
+#: DIFFERENT behaviour when PRESENT, and none is an on/off switch whose absent
+#: state is the risky one.
+#:
+#: * ``TORTOISE_SESSION_EXTRACTOR`` — ``m2`` is the OTHER extractor; only
+#:   ``unset`` is the default the fleet runs, and the log must state which one
+#:   this was.
+#: * ``TORTOISE_EXTRACTOR=v1`` — the v1 dispatch in ``sdk.py`` bypasses the v2
+#:   extractor entirely (a route off this door).
+#: * ``TORTOISE_LABEL_ORDER=shuffle`` — NOT a behaviour seam (#10983): it is a
+#:   render DIAGNOSTIC that reorders the kind lists per call, i.e. it makes two
+#:   runs of this probe differ for a reason that is not the arm. Pinned off.
+DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
+                   "TORTOISE_LABEL_ORDER")
+
+#: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
+#: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
+#: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
+#: which changes the embed list a run measures without changing the arm.
+DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"),)
+
+#: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
+#:
+#: ``(env var, module.resolver, default, is a behaviour seam)``. The DEFAULT
+#: column is the CODE's, not a document's — a ledger copied out of prose is how
+#: this one came to call ``TORTOISE_VALUE_GATE`` default-off after #10996 had
+#: already made it default-ON at ``value_gate.value_gate_enabled`` and, through
+#: ``extractor_v2``'s ``vet_enabled`` OR, armed the S2.2 pass on the fleet's
+#: default write path. ``tests/test_7949_c2_door.py`` resolves every row against
+#: the modules and reds if this table and the tree disagree.
+SEAM_LEDGER = (
+    ("TORTOISE_VET", "extractor_v2._vet_enabled", "off", True),
+    ("TORTOISE_CLASSIFY_LATER", "extractor_v2._classify_later_enabled", "off", True),
+    ("TORTOISE_S2_DECISION_SEAM", "s2_decision_seam.seam_enabled", "off", True),
+    ("TORTOISE_VALUE_GATE", "value_gate.value_gate_enabled", "on", True),
+    ("TORTOISE_S4_DELTA", "extractor_v2._s4_delta_enabled", "on", True),
+    ("TORTOISE_LABEL_ORDER", "extractor_v2._label_order_rng", "off", False),
+)
+
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
 #: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2455`` — turn
@@ -407,7 +473,9 @@ def measured_arm():
     (fail closed) rather than printing a claim nothing supports.
     """
     keys = (*ARM_ON, *ARM_OFF)
-    saved = {key: os.environ.get(key) for key in keys}
+    door_off = tuple(DOOR_PINNED_OFF)
+    door_on = tuple(key for key, _ in DOOR_PINNED_ON)
+    saved = {key: os.environ.get(key) for key in (*keys, *door_off, *door_on)}
     try:
         for key in ARM_ON:
             os.environ[key] = "1"
@@ -415,7 +483,12 @@ def measured_arm():
             # explicit falsy, never absent — `#10996`: an unset default-ON
             # switch is the ON arm, so a pop would be a lie in the header below.
             os.environ[key] = "0"
-        observed = {key: os.environ.get(key) for key in keys}
+        for key in door_off:
+            os.environ.pop(key, None)
+        for key, value in DOOR_PINNED_ON:
+            os.environ[key] = value
+        observed = {key: os.environ.get(key)
+                    for key in (*keys, *door_off, *door_on)}
         for key in ARM_ON:
             if observed[key] != "1":
                 raise SystemExit(
@@ -423,6 +496,21 @@ def measured_arm():
                     f"{key}=1 but os.environ reads back {observed[key]!r}; a log "
                     f"that declares an arm it did not run is a fabricated "
                     f"measurement, so this pass writes no table")
+        leaked_lane = observed.get(DOOR_LANE_ENV)
+        if leaked_lane not in (None, ""):
+            raise SystemExit(
+                f"capstone-measure: REFUSED — the run pins the {DOOR_LANE!r} "
+                f"extraction lane, but {DOOR_LANE_ENV} reads back "
+                f"{leaked_lane!r} after being unset. A capture taken under "
+                f"another lane measures a DIFFERENT door (#10983), so this pass "
+                f"writes no table")
+        for key, expected in DOOR_PINNED_ON:
+            if observed.get(key) != expected:
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned to "
+                    f"{expected!r} but reads back {observed.get(key)!r}; that "
+                    f"seam changes what the run measures, so the arm cannot be "
+                    f"declared (#10983)")
         yield observed
     finally:
         for key, value in saved.items():
@@ -450,6 +538,50 @@ def arm_record(observed: dict[str, str | None]) -> dict:
                                      for key in (*ARM_ON, *ARM_OFF)}
     record["source"] = "os.environ read-back after measured_arm() forced it"
     return record
+
+
+def door_header(observed: dict[str, str | None]) -> str:
+    """The ``door:`` line, DERIVED from the run's own read-back (#10983).
+
+    Names the entry point in CODE terms — the function chain and the lane
+    selector, not "the pipeline" — plus the value each pinned switch RESOLVED TO
+    on this run and the six-seam ledger with the DEFAULTS the pin suite resolves
+    against the modules. A log therefore states the seam set it ran rather than
+    the one a reader remembers (`#10983` Target 3).
+    """
+    lane = observed.get(DOOR_LANE_ENV)
+    lane_word = lane if lane not in (None, "") else "<unset>"
+    pins = [f"{key}=<unset>" if observed.get(key) in (None, "")
+            else f"{key}={observed.get(key)}"
+            for key in DOOR_PINNED_OFF]
+    pins += [("<unset>" if observed.get(key) in (None, "")
+              else f"{observed.get(key)}") .join([f"{key}=", ""])
+             for key, _ in DOOR_PINNED_ON]
+    seams = ", ".join(f"{env}={default}" for env, _where, default, _seam
+                      in SEAM_LEDGER)
+    return (f"{DOOR_LANE} lane (sdk.capture_session -> sdk._extract_session_v2 "
+            f"-> extractor_v2.extract_session_v2; hosted_api._capture_lane() "
+            f"mirrors the same predicate) | {DOOR_LANE_ENV}={lane_word} "
+            f"({' '.join(pins)} read back from os.environ) | seam defaults at "
+            f"this head: {seams}")
+
+
+def door_record(observed: dict[str, str | None]) -> dict:
+    """The machine half of the door: lane, pins, and the six-seam ledger."""
+    return {
+        "lane": DOOR_LANE,
+        "lane_env": DOOR_LANE_ENV,
+        "lane_read_back": observed.get(DOOR_LANE_ENV),
+        "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                        "extractor_v2.extract_session_v2"),
+        "hosted_selector": "hosted_api._capture_lane",
+        "pinned_off": {key: observed.get(key) for key in DOOR_PINNED_OFF},
+        "pinned_on": {key: observed.get(key) for key, _ in DOOR_PINNED_ON},
+        "seams": [{"env": env, "resolver": where, "default": default,
+                   "behaviour_seam": seam}
+                  for env, where, default, seam in SEAM_LEDGER],
+        "source": "os.environ read-back after measured_arm() forced the door",
+    }
 
 
 # ── pure helpers (pinned by tests/test_7949_capstone_measure.py) ───────────
@@ -2818,7 +2950,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                required: list[str] | None = None,
                accounts: list[dict] | None = None,
                steps_gap: str = "",
-               arm: dict | None = None) -> str:
+               arm: dict | None = None,
+               door: dict | None = None) -> str:
     """The human log with the machine table at the bottom (one artifact, one read)."""
     lines: list[str] = []
     add = lines.append
@@ -2834,6 +2967,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"# graph: {graph} (fresh, disposable; every node in it was written by "
         "this run)")
     add(f"# arm: {arm_header(arm or {})}")
+    add(f"# door: {door_header(door or {})}")
     add("")
     add("## the run — one pass over the pre-registered corpus")
     for run in runs:
@@ -3039,6 +3173,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
             "graph": graph,
             "arm": arm_record(arm or {}),
+            "door": door_record(door or {}),
             # #10215: V5 reads the step split from THESE two fields. A log that
             # omits them is read as the pre-#10215 "all eight required" shape,
             # which is why emitting them is the whole point of the accounting.
@@ -3334,7 +3469,7 @@ def main(argv: list[str] | None = None) -> int:
                       e3_out=e3_result, e4=receipt, e4_out=e4_result, e5=e5,
                       e5_out=e5_result, rows=rows, out_path=out_path,
                       required=required, accounts=accounts, steps_gap=steps_gap,
-                      arm=arm)
+                      arm=arm, door=arm)
 
     destination = ROOT / out_path
     destination.parent.mkdir(parents=True, exist_ok=True)
