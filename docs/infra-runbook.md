@@ -3439,9 +3439,9 @@ operator who read the line above as "CI defends this" would never run it.
 > longer be attributed to a build that lacks the fix; whether it stopped is still **unproven**,
 > because a zero counter cannot prove a write (the bound above is unchanged). ⛔ **This paragraph's "never a licence" clause is SUPERSEDED with the ruling it
 > serves:** the 2026-11-03 decision authorises the act, so the live state is evidence *and* the
-> procedure above is the licence. Until `#9548` closes, the authority for **captured sessions** is
-> still the **local** record under `~/.tortoise/session-events/` — that half is unchanged, because it
-> is a read-authority statement, not a postponement.
+> procedure above is the licence. The authority for **captured sessions** is still the **local**
+> record under `~/.tortoise/session-events/` — that half is unchanged, because it is a
+> read-authority statement, not a postponement, and no arming decision touches it.
 >
 > **The reopening route — where it lives, and what would lift it.** ⛔ **SUPERSEDED — but NOT by this
 > route.** The paragraph below describes the route the 2026-11-01 ruling itself prescribed, and that
