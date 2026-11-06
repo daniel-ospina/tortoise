@@ -190,11 +190,15 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 #     `Part of #10543 — reverses the recorded #10119 trade.`
 #     `The arm was added to close. #10543 is the issue this PR serves.`      -> NOTHING FLAGGED
 # plus `Closes. #100 remains open.`, `Closes — #100 is the umbrella.`, `the gate resolves (#9957)`.
-# The spelling below is `tools/closes_landing.py`'s OWN separator (`_CLOSING_SEPARATORS["lenient"]`
-# = `\s*:?\s*`), this repo's authoritative model of what GitHub acts on, so the two grammars can no
-# longer disagree about whether a body closed a reference. It is a NARROWING: the only error it can
-# introduce is a claim this lint no longer credits (a finding where there was none), never a close
-# it invents.
+# The spelling is `tools/closes_landing.py`'s OWN separator, this repo's authoritative model of what
+# GitHub acts on, so the two grammars can no longer disagree about whether a body closed a reference.
+# ⚠️ WHICH spelling is documented at the token itself (`CLAIM_RE`'s `cmid`, with the doctrine): the
+# LENIENT form (`_CLOSING_SEPARATORS["lenient"]` = `\s*:?\s*`) backs FINDING arms only, and the
+# STRICT form backs every PASS. This lint's `NOTHING FLAGGED` is a pass, so the token is strict. That
+# sentence used to read "the spelling below is ... the lenient one" AFTER the token had been narrowed
+# to strict (round 27, P3) — a comment stating what the code does not do, which is the exact defect
+# class this file names elsewhere, and a reader trusting it could revert the narrowing believing it
+# was documented.
 # The list grammar's SHARED tokens, defined here above every reader. `_LIST_SEP` is the
 # emphasis/whitespace that may sit around a list separator; `_GLOSS` is the ONE balanced
 # parenthetical that may sit between a reference and its separator (`#100 (the parent), #200 (the
@@ -489,7 +493,7 @@ _CLOSING_OBJ = rf"{_DET}{_CLOSING_STEM}{_EMPH}{_REF_LIST}"
 # (`Refs #100 — not closing it — #300 must land first.` stays FLAGGED, pinned).
 _REASON_TAIL = (rf"(?:{_EMPH}(?:because|since|as|intended)\b"
                 rf"|[ \t]*\("
-                rf"|{_EMPH}[—–])[^#\n]*$")
+                rf"|{_EMPH}[—–-])[^#\n]*$")
 # ⛔ THE NEGATION HAS CONTRACTED FORMS TOO (round 22, P2). Alternative (b) admitted `does not` / `not`
 # / `no ` / `non-` and no contraction, so the most natural spelling of the honest decline was flagged
 # while its uncontracted twin declined — a false positive on exactly the honesty the block asks for:
@@ -610,7 +614,8 @@ _REF_POS_RE = re.compile(r"#(?P<num>\d{1,7})\b")
 # unreadable-object guard uses to tell a continuing clause from a blanked object plus prose.
 _CONJ_REF_RE = re.compile(
     rf"[ \t]+(?:and|or){_EMPH}(?:[A-Za-z0-9_.\-/]+/)?#\d{{1,7}}", re.IGNORECASE)
-SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
+SATISFIES_HEADING_RE = re.compile(
+    r"^[ \t]{0,3}(?P<hashes>#{2,3})[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
 # The task-list marker SET is the sibling grammar's (`closes_landing._TASK_ITEM_RE`), including
 # `+` and ordered markers: GitHub renders all four as task lists, so counting only `-`/`*` reads a
 # legitimately scoped issue as having NO checklist and flags it (a false positive on finished
@@ -625,7 +630,7 @@ CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULT
 # Any ATX heading at line start — the terminator of a `## Satisfies` SECTION (see
 # `_satisfies_sections`). Deliberately ANY level, not only `<= 2`: a `### criteria` or a later
 # `### Claim` opens a new section, and a box under it is that section's list.
-_ATX_HEADING_ANY_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]", re.MULTILINE)
+_ATX_ANY_RE = re.compile(r"^[ \t]{0,3}(?P<hashes>#{1,6})[ \t]", re.MULTILINE)
 IN_FLIGHT_RE = re.compile(
     r"^[ \t]*(?:[-*+][ \t]+)?[\s*_`]*IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE
 )
@@ -706,7 +711,34 @@ def strip_code(body: str) -> tuple[str, int]:
     separates a blanked OBJECT from a sentence that simply names none.
     """
     stats: dict[str, int] = {}
-    text = _strip_fenced_blocks(body, stats=stats)
+    # ⛔ STRICT (round 27, P2) — the PASS direction, for the same reason F1 narrowed the separator.
+    # `strict=True` additionally treats an INDENTED block as code and refuses to let an inline span
+    # cross a block boundary. Without it, this lint's CLEAN verdict rested on two shapes
+    # `closes_landing` refuses to pass on:
+    #     `Refs #100\n\n    Closes #100\n`                    -> closing=[100], rc 0, while
+    #        `parse_closing_refs(b, None, strict=True) == []`   (an indented block is code)
+    #     an inline span across a soft line break (`Part of #10085,\n#10063` in backticks) was never
+    #        blanked, so a QUOTED example's refs were read as claims — a false positive on honest
+    #        prose, and live on this PR's own body.
+    # Blanking MORE can only lose a claim this lint used to credit (a finding where there was none),
+    # never invent a close, so the narrowing is safe in the direction the module forbids.
+    #
+    # ⚠️ DECLARED RESIDUAL (round 27, P2) — an inline code span that CROSSES A SOFT LINE BREAK is
+    # still not blanked, because the span scanner is `closes_landing`'s and it leaves a run that
+    # wraps a newline literal, emitting the span content verbatim. So a QUOTED multi-line example
+    # leaks refs as claims — a FALSE POSITIVE, the less-bad direction:
+    #     `Prose.\n\nRefs #100\n\n`Part of #10085,\n#10063` is an example.`  -> weak=[100,10063,10085]
+    # It is live on #11078's OWN body (the only `#10085` there is inside exactly that span). Not
+    # fixed here on purpose: the fix is in the sibling grammar's span boundary, which needs its own
+    # red-first pins and its own round; patching it from this module would duplicate the span rule
+    # this file exists to NOT duplicate.
+    #
+    # ⚠️ DECLARED RESIDUAL (round 27, P3) — a SETEXT heading (`Verification` + `---`) does not end a
+    # `## Satisfies` SECTION, so an unrelated list under one can still clear arm 2. A `---` underline
+    # is indistinguishable from a thematic break without a full block grammar, and guessing it wrong
+    # re-opens the false-positive direction; an ATX heading (`## Verification`) is the shape the
+    # docs use and is handled.
+    text = _strip_fenced_blocks(body, strict=True, stats=stats)
     # HTML comments, now that code regions are already blanked. ⛔ BLANKED, NOT DELETED: deletion
     # collapsed `does not close<!-- #11078 -->` to `does not close ` (ONE space), which the
     # unreadable-object guard reads as an honest reason and clears the ref before it — the silent
@@ -1057,9 +1089,20 @@ def _satisfies_sections(text: str) -> list[str]:
     """
     sections: list[str] = []
     for match in SATISFIES_HEADING_RE.finditer(text):
+        level = len(match.group("hashes"))
         remainder = text[match.end():]
-        nxt = _ATX_HEADING_ANY_RE.search(remainder)
-        sections.append(remainder[: nxt.start()] if nxt else remainder)
+        # ⛔ THE SECTION ENDS AT THE NEXT HEADING THAT IS NOT A SUBSECTION OF IT (round 27, P3).
+        # "Any ATX heading" ended the section at a `###` SUB-HEADING too, so the most natural
+        # structured checklist — a `###` per criterion, boxes underneath — read as having NO
+        # criteria and the arm flagged an issue whose criteria plainly exist:
+        #     `## Satisfies` + `### 1. Guard holds` + `- [ ] a`  -> False  (false positive)
+        # A heading of the SAME OR HIGHER level closes the section; a deeper one is part of it.
+        for nxt in _ATX_ANY_RE.finditer(remainder):
+            if len(nxt.group("hashes")) <= level:
+                sections.append(remainder[: nxt.start()])
+                break
+        else:
+            sections.append(remainder)
     return sections
 
 
