@@ -53,7 +53,12 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   SECOND WRITER put on a placed node, which the record does not carry — §17.1's
   chokepoint signature, DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
-  `#11221`); and the two declared classes below, which the record DOES hold.
+  `#11221`); and the two declared classes below, which the record's TABLE holds
+  and the record SIDE (this comparison's own projector-built map) omits — which
+  is why they are bucketed here rather than compared. The distinction is
+  load-bearing, not pedantry: a name is withheld from the comparison because
+  ``record_props`` does not carry it, and for these two classes that is because
+  the projection declines them, not because the record has nothing to say.
   They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
   count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
@@ -63,11 +68,11 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair); the projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
-  (``cache_projection.episodic_source_prose_properties()``) — which the record
-  DOES hold, and which a record-sourced re-projection removes; and the
+  (``cache_projection.episodic_source_prose_properties()``) — which the record's
+  TABLE holds, and which a record-sourced re-projection removes; and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
-  — which the record ALSO holds and which no projection may ever write, because
-  the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
+  — which the record's TABLE ALSO holds and which no projection may ever write,
+  because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
   ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
   legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
@@ -521,13 +526,20 @@ def reconcile_record_and_cache(
     class differs from the declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
-    divergence in a caller-supplied ``props``-tail property. For the DECLINED pair
-    itself it does suppress a VALUE comparison, and that is by construction, not
-    an oversight: on this path the record side is ``read_record_view``, which
-    builds every node through the same projector, so both sides omit the pair and
-    a disagreement inside it surfaces only as the ``graph_only`` occurrence count
-    (a property present in the cache where the projection writes none). An
-    operator who wants the values compared must read the record COLUMNS directly;
+    divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
+    and for a LEGACY row's whole pair, it does suppress a VALUE comparison, and
+    that is by construction, not an oversight: on this path the record side is
+    ``read_record_view``, which builds every node through the same projector, so
+    both sides omit those names and a disagreement inside them surfaces only as
+    the ``graph_only`` occurrence count (a property present in the cache where
+    the projection writes none). ⛔ NOT so for `_searchText` on a POST-#10000
+    row: the projector PROJECTS it there (#10965), so the record side HOLDS it,
+    `keep` includes it, and a cache that lost it is a ``field_mismatches``
+    entry — measured at `#11224`'s review (1 mismatch, ``divergent``). That is
+    the one name in the pair this instrument still compares, and it is why
+    `record_serve.parity_difference`'s declined mirror forgives a real gap on
+    exactly that population (filed `#11233`). An operator who wants the VALUES
+    compared for the omitted names must read the record COLUMNS directly;
     the reconciler does not. Without it, a journal-projected cache — the
     shape production runs — reports a permanent ``field_mismatches`` on every
     point and can never be clean (#9196 review, P1).
