@@ -2039,7 +2039,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             _scan_for_opener = True
         if _scan_for_opener:
             _html_here = False
-            _opened = (_html_block_open(rest) if line.strip() else None)
+            _html_rest = (rest[container.rest_col:]
+                          if (container is not None and rest_indent >= container.rest_col
+                              and _quote_depth(prefix) >= container.depth)
+                          else rest)
+            _opened = (_html_block_open(_html_rest) if line.strip() else None)
             if _opened is None and line.strip():
                 # …and the item must still HOLD this line: a line that dedented out of it ended
                 # that paragraph, which is how a column-0 `</div>` after a list opens its own block
@@ -2048,7 +2052,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 _blanked_still_open = (_blanked_opens_paragraph is not None
                                        and _blanked_opens_paragraph in list_items)
                 _opened = _html_block_leaf(
-                    rest, prev_prose or _blanked_still_open)
+                    _html_rest, prev_prose or _blanked_still_open)
             if _opened is not None:
                 html_item = container
                 # ⛔ A BLOCK OPENED ON A LAZY LINE IS STILL INSIDE THE `<li>` THE RENDERER KEPT, SO
@@ -2080,6 +2084,21 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                             break
                 html_depth = _quote_depth(prefix)
                 _html_here = True
+                _html_leaf_text = True
+                # ⛔ THE CLOSER IS TESTED IN THE BLOCK'S OWN SPACE, NOT AFTER EVERY `>` IN THE
+                # PREFIX (round-51 review, P0 — a FAIL-OPEN in `strict`, the PASS arm, and the same
+                # term the blank-line arm one screen down already takes). §4.6 type 4's end condition
+                # is "a line containing the string `>`", and `rest` has already consumed the `>` that
+                # IS that string: `_html_block_open('<!DOCTYPE x')` returns `frozenset({'>'})` and
+                # `_html_block_ended({'>'}, '')` is False, so the block never ended and the 4-column
+                # line below it was credited while the renderer put it in `<pre><code>`:
+                #     `<!DOCTYPE x` + `>` + `    Closes #100`
+                #         renderer `<pre><code>` -> CODE; `origin/main` `[]`, the round-50 head
+                #         `[100]` in `strict`
+                # Consuming at most the `html_depth` the block OPENED at is the rule the blank-line
+                # arm uses, and it keeps the case that made a raw reading wrong: a `>` deeper than the
+                # block's own depth is LITERAL TEXT (`> <!DOCTYPE` + `> more` keeps it open, because
+                # `more` carries no `>`).
                 html_closer = (None if _html_block_ended(
                     _opened, _consume_blockquote_markers(line, html_depth)[1]) else _opened)
         if rest.strip():

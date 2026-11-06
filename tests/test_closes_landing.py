@@ -4066,35 +4066,79 @@ def test_the_shallower_reopened_quote_lazy_case_is_a_DECLARED_residual():
     assert cl.parse_closing_refs(control) == [100]
 
 
-def test_the_opener_allowance_inside_a_CONTAINER_is_a_DECLARED_residual():
-    """Round 46 review (P3) — a LOST close, pre-existing and not a regression, pinned not waved through.
+def test_the_opener_allowance_inside_a_CONTAINER_is_measured_from_its_CONTENT_COLUMN():
+    """Round 52 review — the residual round 46 DECLARED and round 46's docstring named the fix for.
 
     §4.6 allows an HTML block to open at 0-3 spaces PAST the containing block's content column, but
-    `_HTML_BLOCK_INTERRUPT_RE`, `_HTML_TYPE1_TAG_RE` and `_HTML_TYPE7_RE` all anchor ` {0,3}` at the
+    `_HTML_BLOCK_INTERRUPT_RE`, `_HTML_TYPE1_TAG_RE` and `_HTML_TYPE7_RE` anchored ` {0,3}` at the
     start of `rest`, which still carries the item's content columns — so an opener at container-
-    relative 0-3 but raw 4-5 is invisible, and the wide-gap marker line below it is blanked:
+    relative 0-3 but raw 4-5 was invisible, the paragraph above it was never ended by the block, and
+    the wide-gap marker line below it was blanked:
 
-        `- item` + `    <div>` + `  -     Closes #100`    renderer `html_block`
-            head `[]`, `origin_main` `[]` TOO — 9,072 such bodies in the review's grid, ALL of them
-            already `[]` at the previous head (so: parity, not a regression, and the LOST-CLOSE
-            direction, never a false PASS). ⚠️ `origin_main` was measured as `[]` at round 48 (both
-            arms, the module loaded by path): an earlier revision of this docstring said `[100]`,
-            which contradicts its own next clause — if `origin_main` credited, this would be a
-            REGRESSION, not parity. The residual is real and pre-existing; the figure is not.
+        `- item` + `` + `    <div>` + `  -     Closes #100`      renderer `html_block` -> PROSE
+            `origin/main` `[]`, the round-46..51 heads `[]` — a LOST close, the allowed direction,
+            so it was pinned as a residual rather than waved through.
 
-    The fix is the same `content_col` treatment `_fence_open` already uses (measure the allowance
-    from the containing block's content column), and it is deliberately NOT taken here: it touches
-    every opener predicate at once, on the last leg of a 46-round review, for a direction that
-    cannot produce a false PASS. Pinned with its renderer answer so the next lane starts from the
-    measurement rather than from this docstring.
+    The fix is the `content_col` treatment the round-46 docstring named (the one `_fence_open`
+    already used): the openers are asked about `rest` with up to the enclosing item's content column
+    removed. It is now TAKEN, and this test is pinned as a CLOSE — the residual's own instruction —
+    so it cannot be reverted into the residual it used to be. Measured on 34,920 bodies x 3 arms
+    against `MarkdownIt("commonmark")`, including the QUOTED-item and lazy families the first
+    round-52 grid was blind to: 0 new fail-opens, 0 new lost closes, 282 lost closes closed.
+
+    ⛔ THE ALLOWANCE IS ONLY MEASURED FROM AN ITEM THAT STILL HOLDS THE LINE. `rest_indent >=
+    rest_col` is satisfied by a line that LEFT the container — a blank line that closed the item's
+    blockquote, or a lazy line that dropped its `>` — and asking the openers about such a dead item's
+    column turned a 4-space INDENTED CODE line into a container-relative type-6 opener, i.e. a
+    FAIL-OPEN in all three arms (the `strict` arm is `issue_process_lint`'s PASS arm):
+
+        `> - item` + `` + `    <div>` + `  -     Closes #100`   renderer `code_block`
+        `> - item` + `    <div>` + `  -     Closes #100`         renderer `code_block` (lazy line)
+
+    Both are pinned as BLANK below. `_quote_depth(prefix) >= container.depth` is the term: an item
+    inside a quote cannot hold a line that dropped the quote.
+
+    ⛔ ONE ANCHOR FOR ALL THREE READERS, NOT THREE PATCHES. A type-6 block opened at a container-
+    relative column is a LEAF whose opener line is its own raw text, so the paragraph above it ENDS
+    there (§4.6 types 1-6 interrupt a paragraph) and the next line may open a block of its own:
+
+        `- a` + `    <div>` + `<br />` + `2.     Closes #100`   renderer: the item's `<div>` html
+            block ends with the item, the `<br />` then opens a TYPE-7 block at top level whose raw
+            text is the marker line -> PROSE. `origin/main` `[100]` in all three arms; the
+            round-46..51 heads blanked it in all three.
     """
     item_relative = "- item\n\n    <div>\n  -     Closes #100\n"
     md = MarkdownIt("commonmark")
     assert [t.type for t in md.parse(item_relative)
             if "Closes #100" in getattr(t, "content", "")] == ["html_block"]
-    assert cl.parse_closing_refs(item_relative) == [], "DECLARED residual"
+    assert cl.parse_closing_refs(item_relative) == [100]
+    assert cl.parse_closing_refs(item_relative, None, strict=True) == [100]
+    # The sibling the same root lost: an opener on the item's LAST line, then a type-7 block at
+    # column 0 whose raw text is the marker line.
+    lazy_then_leaf = "- a\n    <div>\n<br />\n2.     Closes #100\n"
+    assert [t.type for t in md.parse(lazy_then_leaf)
+            if "Closes #100" in getattr(t, "content", "")] == ["html_block"]
+    assert cl.parse_closing_refs(lazy_then_leaf) == [100]
+    assert cl.parse_closing_refs(lazy_then_leaf, None, strict=True) == [100]
+    assert cl.strip_code(lazy_then_leaf, indented_code=True).strip().endswith("Closes #100")
     # The control: at the TOP level the same opener is inside the allowance and IS read.
     assert cl.parse_closing_refs("   <div>\n-     Closes #100\n") == [100]
+    # …and the fail-closed side of the same measurement: an opener PAST the allowance opens
+    # nothing, so the marker below it stays blanked (renderer `<pre><code>`).
+    past = "- item\n\n     <div>\n-     Closes #100\n"
+    assert [t.type for t in md.parse(past)
+            if "Closes #100" in getattr(t, "content", "")] == ["code_block"]
+    assert cl.parse_closing_refs(past) == []
+    # …and the two QUOTED controls, which is the family the first round-52 grid was missing: the
+    # blank line closed the item's blockquote in the first, the second is a lazy line that dropped
+    # its `>`, and in BOTH the item `container` still points at does NOT hold the line — so its
+    # content column must not be stripped, and the marker line stays blanked in every arm.
+    for quoted in ("- item\n\nx\n> - item\n\n    <div>\n  -     Closes #100\n",
+                   "- item\n\n> - item\n    <div>\n  -     Closes #100\n"):
+        assert [t.type for t in md.parse(quoted)
+                if "Closes #100" in getattr(t, "content", "")] == ["code_block"], quoted
+        assert cl.parse_closing_refs(quoted) == [], quoted
+        assert cl.parse_closing_refs(quoted, None, strict=True) == [], quoted
 
 
 def test_a_quote_only_line_is_BLANK_CONTENT_and_ends_the_block():
