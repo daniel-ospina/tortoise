@@ -111,7 +111,10 @@ def lane():
     # anyway, so the graph can never be reclaimed, and the leak this contract
     # exists to close (#1647 cycle-8 P2-2: a per-test-unique name alone leaks one
     # graph per run, and a killed run leaves it for the whole session) stays
-    # open while the census above goes GREEN — a false PASS.
+    # open while the ownership census goes GREEN. That census is not in this
+    # file: it is
+    # `tests/test_derived_names.py::_raw_detach_violations` — a false PASS there
+    # is what this prefix closes (#11217 review round 8, A4).
     #
     # With all three halves a live peer's `scope=None` sweep is held off MID-TEST
     # by `_peer_journaled_graphs` (#3074/#3214), and a killed run leaves a graph

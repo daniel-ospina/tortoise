@@ -678,6 +678,9 @@ def _raw_detach_violations(root=None):
         # Once per file: the handles every `_journal_append(…)` call RECEIVES, as
         # (line, static prefix) — see `_journal_prefixes`.
         journaled = _journal_prefixes(src)
+        # Nested-scope spans, computed once per file the first time a block's
+        # ownership half is actually examined (`_nested_scope_spans`).
+        nested_spans = None
         # every raw-client CONSTRUCTION site (from falkordb import /
         # import falkordb / falkordb.FalkorDB( form) whose enclosing block
         # bulk-DETACHes must carry per-test-unique + journal in the SAME block
@@ -699,22 +702,39 @@ def _raw_detach_violations(root=None):
             # comment-only, import-with-no-call, and `def _journal_append`.
             code = _mask_strings_and_comments(block)
             lineno = src.count(chr(10), 0, m.start()) + 1
-            if "os.urandom" not in block or not _journal_calls(code):
+            # The journal is an ownership RECORD only for a name the sweep's
+            # vocabulary accepts — see `_non_owned_handles`. Resolved over the
+            # whole file (the AST needs whole-file context) and restricted to the
+            # journal calls THIS block contains — in THIS block's OWN scope.
+            # A `_journal_append` written inside a nested `def`/`lambda`/`class`/
+            # comprehension journals the name THAT scope builds, which says nothing
+            # about the handle this block DETACHes — for EITHER half of the
+            # contract. Restricted by LINE RANGE alone it satisfied both: a block
+            # whose only journal was a nested `helper()`'s owned name read CLEAN
+            # while it DETACHed an unowned, un-journaled graph (measured: 0
+            # violations — the false PASS this arm exists to prevent, #11217
+            # review round 8).
+            first_line = src.count(chr(10), 0, block_start) + 1
+            last_line = src.count(chr(10), 0, max(block_end - 1, block_start)) + 1
+            if nested_spans is None:
+                nested_spans = _nested_scope_spans(src)
+            in_block = [(line, prefix) for line, prefix in journaled
+                        if first_line <= line <= last_line]
+            own = [(line, prefix) for line, prefix in in_block
+                   if not _inside_a_nested_scope(line, first_line, nested_spans)]
+            if "os.urandom" not in block or not _journal_calls(code) or not own:
+                # `not own` covers BOTH "no journal at all" and "the only
+                # journals are nested" — neither is this block journaling the
+                # handle it drops. Note `own` is empty for a file that does not
+                # PARSE, which keeps the documented behaviour (`_journal_prefixes`
+                # returns nothing there) exactly as it was.
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
                     f"L{lineno} without a "
                     f"per-test-unique handle + _journal_append in the same "
                     f"block (cycle-6 P1-3 / cycle-8 P2-2)")
                 continue
-            # The journal is an ownership RECORD only for a name the sweep's
-            # vocabulary accepts — see `_non_owned_handles`. Resolved over the
-            # whole file (the AST needs whole-file context) and restricted to the
-            # journal calls THIS block contains.
-            first_line = src.count(chr(10), 0, block_start) + 1
-            last_line = src.count(chr(10), 0, max(block_end - 1, block_start)) + 1
-            non_owned = _non_owned_handles(
-                [prefix for line, prefix in journaled
-                 if first_line <= line <= last_line])
+            non_owned = _non_owned_handles([prefix for _line, prefix in own])
             if non_owned:
                 outside = [p for p in non_owned if p]
                 undecidable = [p for p in non_owned if not p]
@@ -727,13 +747,58 @@ def _raw_detach_violations(root=None):
                     detail.append(
                         "(UNDECIDABLE: no literal prefix could be resolved, "
                         "and this arm fails CLOSED)")
+                # The CONSEQUENCE differs by case, and stating the outside one
+                # for an undecidable name asserts something this arm has not
+                # established (#11217 review round 8, A3).
+                if outside:
+                    consequence = (
+                        "the sweep PRESERVES it and then consumes the journal, "
+                        "so the graph leaks while this census is green")
+                else:
+                    consequence = (
+                        "this arm certifies only what it can PROVE, so the site "
+                        "fails CLOSED — make the journaled name literal if the "
+                        "name IS owned")
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
                     f"L{lineno} journals a handle OUTSIDE the ownership "
-                    f"vocabulary {' and '.join(detail)} — the sweep PRESERVES "
-                    f"it and then consumes the journal, so the graph leaks "
-                    f"while this census is green (#11217 review P1)")
+                    f"vocabulary {' and '.join(detail)} — {consequence} "
+                    f"(#11217 review P1)")
     return violations
+
+
+def _nested_scope_spans(source: str) -> list[tuple[int, int]]:
+    """The `(first_line, last_line)` span of every NESTED scope in `source`:
+    every `def`/`lambda`/`class`/comprehension, the module itself excluded by
+    the caller's strict comparison on `block_first_line`.
+
+    `_raw_detach_violations` uses this to tell a block's OWN journal from one
+    written inside a nested scope in the same block (#11217 review round 8).
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    spans: list[tuple[int, int]] = []
+    for _scopes, node in _nodes_with_scopes(tree, [tree]):
+        first = getattr(node, "lineno", None)
+        if isinstance(node, _NESTED_SCOPES) and first is not None:
+            # `ast.Module` is in `_NESTED_SCOPES` and carries no `lineno`; the
+            # module IS the outermost scope, so it is never a NESTED one.
+            last = getattr(node, "end_lineno", None) or first
+            spans.append((first, last))
+    return spans
+
+
+def _inside_a_nested_scope(
+        line: int, block_first_line: int, spans: list[tuple[int, int]]) -> bool:
+    """Is `line` inside a nested scope that BEGINS after the block's own body
+    starts? The block's enclosing `def` starts ON `block_first_line`, so the
+    strict `>` excludes it — everything else spanning `line` is nested INSIDE
+    the block."""
+    return any(block_first_line < first <= line <= last for first, last in spans)
 
 
 def _non_owned_handles(prefixes: list[str]) -> list[str]:
@@ -786,7 +851,8 @@ def _non_owned_handles(prefixes: list[str]) -> list[str]:
 #     a nested scope;
 #   false BLOCK — an apostrophe in a COMMENT became "the literal opener", and a
 #     DEAD earlier binding was reported when the binding live at the call was
-#     the declared fail-open.
+#     UNDECIDABLE (this arm declines to certify it, and the census fails CLOSED
+#     on it — see `_non_owned_handles`).
 #
 # A text matcher has no notion of a binding, a scope, a call or a literal — so
 # it cannot converge on "which name does the journal receive?", and enumerating
@@ -805,8 +871,9 @@ _NESTED_SCOPES = _SCOPE_NODES + (ast.Lambda,) + _COMPREHENSIONS
 # `str` methods whose result depends on nothing but their receiver and their
 # arguments — so a call on a CONSTANT receiver has a constant result, evaluated
 # below by the interpreter's own implementation. A method not listed here (or a
-# non-constant receiver) is a declared fail-open: this arm does not try to reason
-# about what arbitrary code returns.
+# non-constant receiver) is UNDECIDABLE: this arm does not try to reason about
+# what arbitrary code returns, and the census fails CLOSED on it rather than
+# certifying the method's ARGUMENT as the name.
 _PURE_STR_METHODS = frozenset({
     "capitalize", "casefold", "center", "expandtabs", "format", "join",
     "ljust", "lower", "lstrip", "removeprefix", "removesuffix", "replace",
@@ -855,8 +922,8 @@ def _target_values(target, value) -> list[tuple[str, object]]:
     target with its value POSITIONALLY — `name, other = f"evict_…", 1` binds
     `name` to the f-string, never to the tuple that holds it.
 
-    A STARRED target pairs nothing (declared fail-open, see
-    `_journal_prefixes`): a star captures a slice, so every key after it sits at a
+    A STARRED target pairs nothing (UNDECIDABLE, and the census fails CLOSED on
+    it — see `_journal_prefixes`): a star captures a slice, so every key after it sits at a
     different index than its mirror in `value`, and a positional read would name
     the wrong element (#11217 review round 4).
     """
@@ -886,8 +953,8 @@ _CONDITIONAL_NODES = (
 
 # The ONE field of a conditional node that runs on EVERY path: an `if`/`while`
 # TEST is always evaluated, so a walrus there binds unconditionally even though
-# the bodies beside it do not (#11217 review round 5: a declared fail-open must
-# not also swallow the case that IS decidable).
+# the bodies beside it do not (#11217 review round 5: declining to certify an
+# undecidable case must not also swallow the case that IS decidable).
 _ALWAYS_EXECUTED_FIELD = {ast.If: "test", ast.While: "test"}
 
 
@@ -1066,7 +1133,8 @@ def _const_str(node, _depth: int = 0) -> str | None:
                 # a table of shapes: a pure method on constant arguments has a
                 # constant result, so `.upper()`, `.removeprefix(…)`, `.zfill(…)`
                 # and `.replace(…)` are all decidable. An IMPURE or unknown
-                # method stays None (declared fail-open, see `_journal_prefixes`).
+                # method stays None (UNDECIDABLE, and the census fails CLOSED on
+                # it — see `_journal_prefixes`).
                 args = [_const_str(arg, _depth + 1) if _const_str(arg, _depth + 1) is not None
                         else _const_int(arg) for arg in node.args]
                 if any(arg is None for arg in args):
@@ -1074,7 +1142,7 @@ def _const_str(node, _depth: int = 0) -> str | None:
                 try:
                     folded = getattr(receiver, func.attr)(*args)
                 except (TypeError, ValueError, KeyError, IndexError,
-                        AttributeError):
+                        AttributeError, OverflowError):
                     # A template whose fields the arguments do not satisfy
                     # (`"{missing}".format("x")` -> KeyError, `"{0.nope}"` ->
                     # AttributeError, `"{0[9]}"` -> IndexError): NOT decidable —
@@ -1321,6 +1389,12 @@ def _journal_prefixes(source: str) -> list[tuple[int, str]]:
     * a file that does not PARSE: the census is about live test modules, and an
       unparseable one cannot run, so pytest reports it and this arm stays silent.
     """
+    if "_journal_append" not in source:
+        # Fast path: any CALL of the symbol (bare, or via an attribute/getattr)
+        # names it in the source, so a file without the substring journals
+        # nothing. The census walks 1,360 files to find 9 calls in 5 of them,
+        # and parsing each one cost ~+12 s (#11217 review round 8, A5).
+        return []
     try:
         with warnings.catch_warnings():
             # The census compiles OTHER test modules; a legacy invalid escape
@@ -1819,24 +1893,37 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
     # ── fail OPEN (category A: the census passed while the journal was inert) ──
     # `evict_`-journaling expressions whose LEADING literal is owned or whose
     # head is not a plain literal, each of which read GREEN at `2f6af8b7`.
-    for journaled in (
+    for journaled, head in (
         # the join branch read the SECOND element (round 2's fix, inverted)
-        '"".join(["evict_", os.urandom(4).hex()])',
+        ('"".join(["evict_", os.urandom(4).hex()])', "'evict_'"),
         # a transform: the leading literal is owned, the VALUE is not
-        '"test_log".replace("test_log", "evict") + os.urandom(4).hex()',
-        '"test_g"[:0] + "evict_" + os.urandom(4).hex()',
-        '"{}".format("evict_") + os.urandom(4).hex()',
+        ('"test_log".replace("test_log", "evict") + os.urandom(4).hex()', "'evict'"),
+        ('"test_g"[:0] + "evict_" + os.urandom(4).hex()', "'evict_'"),
+        ('"{}".format("evict_") + os.urandom(4).hex()', "'evict_'"),
         # …and the two directions a pure `str` method can take an owned literal:
         # it can destroy the prefix (`removeprefix`) or change its case
         # (`upper`, and the vocabulary is case-sensitive).
-        '"test_evict_".removeprefix("test_") + os.urandom(4).hex()',
-        '"evict_".upper() + os.urandom(4).hex()',
+        ('"test_evict_".removeprefix("test_") + os.urandom(4).hex()', "'evict_'"),
+        ('"evict_".upper() + os.urandom(4).hex()', "'EVICT_'"),
     ):
         site.write_text(_raw_client_site(
             f'    _journal_append({journaled})'), encoding="utf-8")
         bad = _raw_detach_violations(root=tmp_path)
-        assert bad and "OUTSIDE the ownership vocabulary" in bad[0], (
-            f"a handle journaled as `{journaled}` read NO violation: {bad}")
+        assert bad, f"a handle journaled as `{journaled}` read NO violation: {bad}"
+        # ASSERT THE FOLDED VALUE, not a phrase every violation also carries.
+        # `"OUTSIDE the ownership vocabulary"` is emitted for the UNDECIDABLE
+        # case too, so asserting only that left EVERY constant-folding branch of
+        # `_const_str` un-pinned: deleting the `Subscript`/slice fold alone kept
+        # this whole test GREEN, although `"test_g"[:0] + "evict_"` is one of the
+        # cases below (#11217 review round 8, C2). These two assertions fail when
+        # any fold is removed — the prefix stops resolving and becomes the
+        # UNDECIDABLE case, which must not be how a DECIDABLE site is reported.
+        assert "UNDECIDABLE" not in bad[0], (
+            f"`{journaled}` is DECIDABLE — the census must name the value it "
+            f"folded, not fall back to UNDECIDABLE: {bad}")
+        assert head in bad[0], (
+            f"`{journaled}` folds to {head}, but the violation named something "
+            f"else: {bad}")
 
     # An ATTRIBUTE target is a binding like any other: `t.name = f"evict_…"`
     # then `_journal_append(t.name)` journals the unowned name.
@@ -1865,20 +1952,85 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
     assert bad and ("'evict_'" in bad[0] or "UNDECIDABLE" in bad[0]), (
         f"a NESTED-scope rebinding laundered the journaled handle: {bad}")
 
+    # A PATH-DEPENDENT binding decides NOTHING: `_bound_prefix` returns `""` when
+    # ANY candidate binding of the name sits inside a conditional/loop/try, and
+    # the census fails CLOSED on it (#11217 review round 5, finding 2). Pinned
+    # BEHAVIOURALLY here because that guard was cited as the fix and exercised by
+    # nothing: with `if any(candidate_depth …): return ""` deleted, the `if`/`else`
+    # shape below read NO violation at all — a false PASS — while every test
+    # stayed green (#11217 review round 8, C3).
+    for path_dependent in (
+        # `if`/`else`: the LAST binding decided the prefix before the guard
+        ['    if os.environ.get("X"):',
+         '        name = f"evict_{os.urandom(4).hex()}"',
+         '    else:',
+         '        name = f"test_ok_{os.urandom(4).hex()}"',
+         '    _journal_append(name)'],
+        # a `for` TARGET carries no readable value at all (`value is None`)
+        ['    for name in [f"evict_{os.urandom(4).hex()}"]:',
+         '        pass',
+         '    _journal_append(name)'],
+        # …and so does a `with … as` target
+        ['    with open(os.devnull) as name:',
+         '        pass',
+         # the block still needs its unique handle for the OUTER half
+         '    other = f"test_x_{os.urandom(4).hex()}"',
+         '    _journal_append(other)',
+         '    _journal_append(name)'],
+    ):
+        site.write_text(_raw_client_site(*path_dependent), encoding="utf-8")
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "UNDECIDABLE" in bad[0], (
+            f"a PATH-DEPENDENT binding was certified: {path_dependent} -> {bad}")
+
+    # A journal inside a NESTED `def` in the block does NOT journal this block's
+    # handle. Resolved file-wide by LINE RANGE only, it satisfied the ownership
+    # half for an unowned, un-journaled handle the block then DETACHed — measured
+    # at 0 violations (#11217 review round 8, C4: category A, a false PASS inside
+    # the gate).
+    site.write_text(_raw_client_site(
+        '    name = f"evict_{os.urandom(4).hex()}"',
+        "    def helper():",
+        '        _journal_append(f"test_owned_{os.urandom(4).hex()}")',
+        "    helper()",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "_journal_append in the same block" in bad[0], (
+        "a journal written in a NESTED def satisfied the block's ownership half "
+        f"for an unowned, un-journaled handle: {bad}")
+
+    # …and when the block DOES journal its own handle, that journal is judged on
+    # its OWN prefix — the nested scope's owned name must not stand in for it.
+    site.write_text(_raw_client_site(
+        '    name = f"evict_{os.urandom(4).hex()}"',
+        "    def helper():",
+        '        _journal_append(f"test_owned_{os.urandom(4).hex()}")',
+        "    helper()",
+        "    _journal_append(name)",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "'evict_'" in bad[0], (
+        "a NESTED def's owned journal was read as THIS block's record: "
+        f"{bad}")
+
     # ── the TRANSFORM false-pass / false-block pair (#11217 review round 5, B2) ──
     # A pure `str` method on a receiver this arm cannot FOLD rewrites the value,
     # so the method's first ARGUMENT is an operand, not the head. Measured at
     # `aa2e15c40` both directions were wrong off the ARGUMENT: the leaking
     # `evict_<hex>` below read GREEN (off the owned-looking `"test_"`), and the
-    # mirror read RED on an OWNED name off `"g"`. Pinned as the declared
-    # fail-open: no prefix, no violation — and the same claim this arm already
-    # makes about `pick()`, since what a transform returns is not statically
-    # decidable without running the module under test.
-    for transformed in (
+    # mirror read RED on an OWNED name off `"g"`. What a transform returns is not
+    # statically decidable without running the module under test, so this arm
+    # DECLINES TO CERTIFY it: the prefix is `""` and the census fails **CLOSED**
+    # on it — a VIOLATION saying UNDECIDABLE, not the exemption the first version
+    # of this comment claimed (#11217 review round 8, C1: the prose stated the
+    # opposite of the implementation, and the pin below inspected the helper's
+    # return value instead of the census verdict, so a return to fail-OPEN could
+    # not be caught).
+    for transformed, argument_literal in (
         # category A: the VALUE is unowned while the argument looks owned
-        'f"test_{os.urandom(4).hex()}".replace("test_", "evict_")',
+        ('f"test_{os.urandom(4).hex()}".replace("test_", "evict_")', "'test_'"),
         # category B: the VALUE is owned while the argument looks unowned
-        'f"g{os.urandom(4).hex()}".replace("g", "test_g")',
+        ('f"g{os.urandom(4).hex()}".replace("g", "test_g")', "'g'"),
     ):
         site.write_text(_raw_client_site(
             f"    _journal_append({transformed})",
@@ -1890,7 +2042,13 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
                     _journal_prefixes(site.read_text(encoding="utf-8"))]
         assert "" in prefixes, (
             f"a TRANSFORMED handle `{transformed}` was classified off its "
-            f"argument instead of failing open: {prefixes}")
+            f"argument instead of declining to certify: {prefixes}")
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "UNDECIDABLE" in bad[0], (
+            f"a TRANSFORMED handle `{transformed}` must fail CLOSED: {bad}")
+        assert argument_literal not in bad[0], (
+            f"the census classified `{transformed}` off its ARGUMENT "
+            f"({argument_literal}) instead of declining: {bad}")
 
     # ── false BLOCK (category B: a compliant site red for a reason it is not) ──
     # …and the mirror reds a compliant site, which is the other half of the same
@@ -1952,8 +2110,8 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
             f"a handle journaled as `{journaled}` read NO violation: {bad}")
 
     # CRASHES: the census runs over the WHOLE tests root, so a shape it cannot
-    # handle must degrade to its declared fail-open, never raise — a traceback
-    # names no file and reports nothing about the site.
+    # handle must degrade to UNDECIDABLE (which the census fails CLOSED on),
+    # never raise — a traceback names no file and reports nothing about the site.
     for body in (
         # an `ast.Lambda` carries an EXPRESSION as `body`, not a statement list
         '    cb = lambda n: _journal_append(n)',
@@ -1977,31 +2135,52 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
     # Each was measured GREEN at `3e0f0a5d8` while the journal received
     # `evict_<hex>` — the inert-journal false PASS this arm exists to close — or
     # raised out of the census. All three now fail CLOSED.
-    for body_lines, label in (
+    for body_lines, label, reason in (
         # (1) PEP 572: a walrus inside a COMPREHENSION binds the scope ENCLOSING
         # it, so the outer `name` is rewritten by a line the outer walk skipped.
         (('    name = f"test_ok_{os.urandom(4).hex()}"',
           '    [None for _i in range(1) if (name := f"evict_{os.urandom(4).hex()}")]',
-          "    _journal_append(name)"), "comprehension walrus"),
+          "    _journal_append(name)"), "comprehension walrus", "UNDECIDABLE"),
         # (2a) `nonlocal` in a nested def REALLY does rewrite the outer binding.
         (('    name = f"test_ok_{os.urandom(4).hex()}"',
           "    def helper():",
           "        nonlocal name",
           '        name = f"evict_{os.urandom(4).hex()}"',
           "    helper()",
-          "    _journal_append(name)"), "nonlocal rebinding"),
+          "    _journal_append(name)"), "nonlocal rebinding", "UNDECIDABLE"),
         # (2b) a closure read executes at CALL time, so a rebinding positioned
         # AFTER the nested def still decides the value the journal receives.
+        # Round 8 rejects this shape one layer EARLIER: a journal written inside
+        # a nested scope is no longer this block's record at all (C4), so the
+        # reason is the outer half. The closure-order guard itself is pinned
+        # directly on the value resolver below.
         (('    name = f"test_ok_{os.urandom(4).hex()}"',
           "    def run_it():",
           "        _journal_append(name)",
           '    name = f"evict_{os.urandom(4).hex()}"',
-          "    run_it()"), "closure read after a rebinding"),
+          "    run_it()"), "closure read after a rebinding",
+         "_journal_append in the same block"),
     ):
         site.write_text(_raw_client_site(*body_lines), encoding="utf-8")
         bad = _raw_detach_violations(root=tmp_path)
-        assert bad and "UNDECIDABLE" in bad[0], (
+        assert bad and reason in bad[0], (
             f"a stale owned prefix was certified for {label}: {bad}")
+
+    # The closure-ORDER guard itself (`_bound_prefix`'s "call runs inside a nested
+    # scope defined before a rebinding HERE" branch): the journal call sits inside
+    # `run_it()`, and the outer `name` is rebound AFTER that def but BEFORE the
+    # call, so source order does not describe run order. Read through the value
+    # resolver — the census rejects the nested journal one layer earlier — the
+    # prefix must be the undecidable `""`.
+    closure_src = _raw_client_site(
+        '    name = f"test_ok_{os.urandom(4).hex()}"',
+        "    def run_it():",
+        "        _journal_append(name)",
+        '    name = f"evict_{os.urandom(4).hex()}"',
+        "    run_it()")
+    assert [prefix for _line, prefix in _journal_prefixes(closure_src)] == [""], (
+        "the closure-order guard stopped failing closed: "
+        f"{_journal_prefixes(closure_src)}")
 
     # (3) A pathological left-nested concatenation is walked ITERATIVELY and its
     # fold is BOUNDED, so the census reports instead of raising RecursionError.
