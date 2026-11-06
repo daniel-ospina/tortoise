@@ -3532,9 +3532,15 @@ operator who read the line above as "CI defends this" would never run it.
 >   | `42134064961` | 2026-11-06T00:04Z→00:17Z | ⚠️ **CANCELLED after ~13 min** — the one window nobody has examined, and a half-run `supabase db push` is exactly the shape that can leave a partial apply |
 >   | `42136459903` | 2026-11-06T00:55Z | the *job* is marked **failed**, but its *`Apply migrations` step SUCCEEDED* — `supabase db push --linked --include-all` → **«Remote database is up to date.»** The failure is the follow-on `deploy-hosted` dispatch. So this is a **second, later green ledger read**, not evidence of a pending apply |
 >
->   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z), and **no
->   run is identified as the one that first recorded them** — the cancelled run is the only
->   unexplained candidate. ⛔ **Do not read `supabase-deploy`'s red as "the apply never ran"**: that
+>   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z). ⛔ **And no
+>   run in that table can be the one that first RECORDED them:** the two runs inside the window died
+>   in `Apply migrations` before any `db push` (both on a `config.toml` validation refusal, exit 1),
+>   and the two that could have applied — the cancelled one and the 00:55 one — were both CREATED
+>   after 23:07:38Z (the cancelled run 56 minutes after it), so they postdate the reading that first
+>   saw the rows. The recorder is therefore an act **this run history does not contain**: an
+>   out-of-band `supabase db push`, or a `supabase migration repair` recording a version whose
+>   objects were already present (#9613) — which is exactly what the gate's own "sees versions, not
+>   schema" bound permits. ⛔ **Do not read `supabase-deploy`'s red as "the apply never ran"**: that
 >   is the same *a red signal means nothing happened* misread this section exists to correct, and on
 >   `42136459903` the apply step is **green inside a failed job**. The quoted `#9548` `6669720078`
 >   (*"the deployment cannot be refreshed until the migration apply runs"*) was written
