@@ -2650,6 +2650,61 @@ def test_the_8447_census_pins_run_on_a_census_doc_only_diff():
         )
 
 
+def test_the_10602_bound_pins_run_on_every_subject_they_read():
+    """#11057 review round 7 (P1, measured): register the guard where its DIFFS land.
+
+    `tests/test_10602_query_limit_bound.py` pins four subjects and was registered
+    on `api` alone — which selects it on ONE of them. The other three fell to a
+    surface the file was not on, so a diff that could break a pin ran no pin:
+
+    * `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` -> `core`. `docs/` is in
+      `NON_PYTHON_PREFIXES` and the doc is a `CORE_ALSO` entry (`tools/
+      ci_selection.py`), so a census-only edit is `core`; deleting the
+      `tortoise_query(tag=…)` row — the row whose whole purpose is that a lane
+      auditing #8447 can find the residue — would have reddened nothing.
+    * `config/served-skills-upstream.yml` -> `core` (a `config/` path, no
+      SOURCE_PATTERN).
+    * a served `SKILL.md` -> `onboarding`, and a named-surface match REPLACES the
+      `core` fallback, so this is the one diff that can strip a skill's
+      `offset=`/`hasMore` disclosure — the arm's entire failure mode.
+
+    Measured pre-fix at `c6717da29`, same helper, `8447`'s pin as the control:
+    `_sel([<census doc>])` -> `surfaces=['core']`, 10602 ABSENT, 8447 present
+    (8447 is dual-registered); `_sel([<served skill>])` -> `['onboarding']`, 10602
+    ABSENT. Non-vacuity: deleting the `core` or the `onboarding` entry above
+    fails the corresponding arm below.
+    """
+    root = Path(__file__).resolve().parents[1]
+    subjects = {
+        "docs/architecture/BOUNDED-OPERATION-CONTRACT.md": ["core"],
+        "config/served-skills-upstream.yml": ["core"],
+        "website/apps/dashboard/public/skills/analyse-for-contradictions/SKILL.md":
+            ["onboarding"],
+    }
+    for changed, expected in subjects.items():
+        assert (root / changed).exists(), f"the pinned subject is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == expected, (
+            f"{changed} selects {r['surfaces']}, expected {expected} — this pin "
+            "is only meaningful against the surface the diff actually takes"
+        )
+        assert "test_10602_query_limit_bound.py" in r["test_files"], (
+            f"a change to {changed} does not run "
+            "tests/test_10602_query_limit_bound.py, so the arm that pins it "
+            "cannot fire on the change it guards (review round 7 P1)"
+        )
+
+    # The fourth subject is a SHARED_MODULE, so its diff takes the FULL matrix —
+    # a superset of the guard. Pinned so a demotion out of `SHARED_MODULES` cannot
+    # leave both the bound and its pins asleep on the handler they bound.
+    r = _sel(["tortoise/mcp_server.py"])
+    assert r["full"] is True, (
+        "tortoise/mcp_server.py no longer selects the full matrix, so the #10602 "
+        "bound's own regression arms would not run on a handler edit"
+    )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
@@ -6037,6 +6092,47 @@ def test_duplicate_entries_reports_same_surface_repeats():
     assert duplicate_entries({"surfaces": {"core": None}}) == []
 
 
+def test_ci_surfaces_declares_each_yaml_key_at_most_once():
+    """Review round 5 on #11057 — a duplicate `durations` key is SILENT, and worse than a list one.
+
+    `duplicate_entries` (#2913/#5373, the test above) gates a name repeated within one
+    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union`: a conflicting
+    hunk keeps BOTH sides' lines, so two lanes appending the same registration is the
+    natural conflict shape. The `durations` map has the same hazard and a strictly worse
+    failure mode — it is a YAML MAPPING, so a second row for the same file is not a repeat
+    any list check can see. The loader collapses it and the LAST row wins, silently.
+
+    Measured on #11057, not hypothesised: a round-5 commit appended a second
+    `test_10602_query_limit_bound.py` row on top of an existing one. The effective weight
+    became the newcomer's, the row the newcomer's author never saw stayed in the file, and
+    `--integrity` stayed GREEN — it reads the PARSED map, where only one key survives, so
+    the evidence is gone before any Python check runs. Parsing at the NODE level here is
+    the whole point: `yaml.safe_load` has already discarded the duplication.
+    """
+    manifest_path = REPO / "config" / "ci-surfaces.yml"
+    duplicates: list[str] = []
+
+    def walk(node, path: str = "") -> None:
+        if isinstance(node, yaml.MappingNode):
+            seen: set[str] = set()
+            for key, value in node.value:
+                if isinstance(key, yaml.ScalarNode):
+                    if key.value in seen:
+                        duplicates.append(
+                            f"{path}: {key.value} (line {key.start_mark.line + 1})")
+                    seen.add(key.value)
+                walk(value, f"{path}/{getattr(key, 'value', '?')}")
+        elif isinstance(node, yaml.SequenceNode):
+            for i, value in enumerate(node.value):
+                walk(value, f"{path}[{i}]")
+
+    walk(yaml.compose(manifest_path.read_text(), Loader=yaml.SafeLoader))
+    assert duplicates == [], (
+        "config/ci-surfaces.yml declares the same key twice, so the LAST one wins "
+        "silently and `--integrity` cannot see it (`merge=union` makes this the natural "
+        f"conflict shape): {duplicates}")
+
+
 def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
 
@@ -8708,15 +8804,23 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
     # describes the counterfactual ("the file is in the fast pool, so its absence
     # packs it at the flat 2.0s default") is not read as a claim.
     #
-    # The default is ALSO spelled by its constant's NAME, and a note that says "it
-    # takes the flat `DEFAULT_FAST_WEIGHT`" asserts exactly the same basis while
-    # carrying no `2.0s` token — which is how `test_oauth_consent_page_step4.py:
-    # 3.1` and `test_5095_s3_identity_policy.py: 0.4` kept a false basis statement
-    # past this guard after the 2026-11-02 census refreshed them (#10790 review,
-    # P3). Both spellings are matched; the VERB gate is what keeps the legitimate
-    # counterfactual forms silent ("its absence packs it at the flat
-    # `DEFAULT_FAST_WEIGHT`", "the flat default is what it REPLACED").
-    r"\b(?:takes|carries|holds)\b[^.;]{0,60}?flat\s+(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
+    # The claim is spelled TWO ways — by the value (`2.0s`) and by the constant's
+    # NAME (`DEFAULT_FAST_WEIGHT`) — and BOTH arms must read both spellings, or a
+    # note asserting the flat basis is invisible to the guard whose whole purpose is
+    # that claim. This arrived from two directions and the arms are the union:
+    #   * by VALUE: the constant-name spelling kept `test_oauth_consent_page_step4.py:
+    #     3.1` and `test_5095_s3_identity_policy.py: 0.4` past this guard after the
+    #     2026-11-02 census refreshed them (#10790 review, P3).
+    #   * by VERB: `test_10602_query_limit_bound.py: 2.3` shipped "the weight STAYS
+    #     the flat `DEFAULT_FAST_WEIGHT`", and the verb list carried neither `stays`
+    #     nor `remains`/`keeps`, so the claim went unread (review P3 on #11057 at
+    #     `4727c013a`). That is the map's own #2818 shape — "the claim and the value
+    #     disagree in the same row, and the claim is the half a reader trusts".
+    # The VERB gate is what keeps the legitimate counterfactual forms silent ("its
+    # absence packs it at the flat `DEFAULT_FAST_WEIGHT`", "the flat default is what
+    # it REPLACED").
+    r"\b(?:takes|carries|holds|stays|remains|keeps)\b[^.;]{0,60}?flat\s+"
+    r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
     r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+"
     r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)",
     re.IGNORECASE)
@@ -8908,16 +9012,31 @@ def test_flat_default_claim_check_is_not_vacuous():
         "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
         "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
         "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.\n"
-        # The counterfactual forms, spelled with the constant's name.
-        "  test_i.py: 0.4  # THAT SWEEP HAS NOW LANDED: the flat"
-        " `DEFAULT_FAST_WEIGHT` is what it REPLACED rather than what it needs.\n"
-        "  test_j.py: 23.8  # must carry a row or it packs at the flat 2.0 s"
+        # the COUNTERFACTUAL spelling of the constant NAME — no claim verb, so it
+        # must stay silent
+        "  test_g.py: 6.5  # its absence packs it at the flat `DEFAULT_FAST_WEIGHT`."
+        # …and the two counterfactual forms that phrase the constant's name without
+        # a claim verb (#10790 review).
+        "\n  test_i.py: 0.4  # THAT SWEEP HAS NOW LANDED: the flat"
+        " `DEFAULT_FAST_WEIGHT` is what it REPLACED rather than what it needs."
+        "\n  test_j.py: 23.8  # must carry a row or it packs at the flat 2.0 s"
         " `DEFAULT_FAST_WEIGHT`, not a dev-box reading.")
+    # …and the NAMED-CONSTANT spelling of the CLAIM, which shipped twice on the real
+    # map (`test_10602_query_limit_bound.py: 2.3`, `test_5095_s3_identity_policy.py:
+    # 0.4`) because neither guard's verb list carried `stays` and the first
+    # alternation insists on the literal `flat 2.0s default` phrase.
+    named_constant = (
+        "  test_h.py: 2.3  # The weight stays the flat `DEFAULT_FAST_WEIGHT`"
+        " declaration a file a PR ADDS takes.\n"
+        "  test_i.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
     durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
     assert _durations_rows_claiming_the_flat_default(stale, durations) == [
         ("test_a.py", 2.2), ("test_b.py", 3.7),
         ("test_g.py", 3.1), ("test_h.py", 0.4)]
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
+    assert _durations_rows_claiming_the_flat_default(named_constant, durations) == [
+        ("test_h.py", 2.3), ("test_i.py", 0.4)]
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")

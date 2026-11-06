@@ -4223,11 +4223,46 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # #11057 review P2: the `cut_at_commit` provenance step below must be able to
+          # RESOLVE the recorded commit, and a `fetch-depth: 1` checkout cannot (an
+          # ancestor is absent from it by construction). The `changes` job already pays a
+          # full-history fetch on every run, so this is the same shape one job over — and
+          # it is the price of the alternative being worse: a provenance gate that runs
+          # only where it cannot answer is a NO-OP gate, and an unresolvable recorded
+          # commit stayed green in every job for eight review rounds while `render`
+          # published that sha to `docs/product/mcp-sdk-surface.md` for the owner to read.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install
         run: pip install -e .
+      # ── THE RECORDED CUT COMMIT MUST RESOLVE AND SURVIVE (#11057) ───────────────
+      # ⛔ IT RUNS BEFORE THE PIN, and the reason is the STRICT ARM: this is the only
+      # arm that fails CLOSED when the checkout cannot answer, so it runs while the clone
+      # is certainly full. The pin below used to fetch its base ref with `--depth=1`,
+      # which sets the REPO-LEVEL shallow flag while keeping the objects it had already
+      # fetched (measured on a 3-commit scratch clone: full clone → `false`, then a
+      # `--depth=1` fetch → `true`, first commit still present) — so any LATER answer was
+      # "unprovable", and the strict arm would have red for the wrong reason. The pin no
+      # longer passes a depth at all (see its own note), so this ordering is defence in
+      # depth rather than the only thing between the check and a false red.
+      # `--provenance-strict` turns "this checkout cannot answer" into a RED rather than a
+      # notice, so dropping `fetch-depth: 0` above reds here instead of silently
+      # weakening the gate to a log line.
+      #
+      # ⚠️ THIS STEP RUNS THE CHECKOUT'S OWN `tools/surface_manifest.py`, so on its own it
+      # is a rule the PR under test can delete in the same commit that records a bogus
+      # SHA (#11057 review F2). The AUTHORITATIVE half is the pinned copy of
+      # `tools/surface-guard.py`, which grades the same two questions from the base ref
+      # — see the step below the pin. This one is kept because it is the only arm that
+      # fails CLOSED on an unprovable checkout (the pinned copy's default arm reds only
+      # on a PROVEN defect, so that a shallow local run is not a false red) and because
+      # it is what covers the single PR that introduces the pinned arm (#5192's accepted
+      # residual: the base copy of a tool cannot yet contain the rule being added).
+      - name: The baseline's recorded cut commit resolves
+        run: python3 tools/surface_manifest.py check --provenance-strict
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the
@@ -4254,11 +4289,21 @@ jobs:
       # On `push`/`schedule` there is no `base_ref` and the checkout IS the
       # protected ref, so `HEAD` is used. A `git show` that fails leaves `set -e`
       # to fail the step, so the pin fails CLOSED rather than silently skipping.
+      #
+      # ⛔ NO `--depth=1` ON THE FETCH (#11057 review F2). `--depth=1` marks the WHOLE
+      # clone shallow (a repo-level flag) while keeping the objects it already fetched,
+      # which disarms the provenance arm in the PINNED copy of `tools/surface-guard.py`
+      # that the next step runs: "cannot answer" is not a red in its default arm, so the
+      # one gate the PR cannot edit would quietly stop grading. The job already pays
+      # `fetch-depth: 0` at checkout, so a full fetch of the base branch is a ref update.
+      # With the depth dropped, a checkout that someone makes shallow later reports
+      # "unprovable" — and the strict step ABOVE reds on exactly that, which is the
+      # fail-closed behaviour this ordering was protecting.
       - name: Pin the gate's tooling to the base ref
         run: |
           set -euo pipefail
           if [ -n "${{ github.base_ref }}" ]; then
-            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            git fetch --no-tags origin "${{ github.base_ref }}"
             base=FETCH_HEAD
           else
             base=HEAD
@@ -4290,6 +4335,12 @@ jobs:
           done
           wc -l tools/surface-guard.py tools/surface_manifest.py
       - name: The surface cannot expand without an explicit human decision
+        # #11057 reviews F1 + F2: the pinned copy ALSO grades the baseline's recorded
+        # `cut_at_commit` — it must resolve AND be in the default branch's history. It
+        # runs from the BASE REF (the pin above), so a PR cannot delete the rule while
+        # recording a SHA that will not survive the squash merge. Its default arm prints
+        # a `::notice::` where the checkout cannot answer; the strict step above is what
+        # turns that state into a red.
         run: python3 tools/surface-guard.py
       - name: The ordering lint (AC13)
         run: python3 tools/surface_manifest.py check
