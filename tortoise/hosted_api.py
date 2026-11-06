@@ -35441,10 +35441,17 @@ _REGISTRY_PROBE_CACHE: tuple[tuple[str, str], TortoiseSDK] | None = None
 #: `_KEEPALIVE_LOCK` (#8867 finding 2), so a builder holds NOTHING while it
 #: builds — and the build is not microseconds, it is the whole `_get_proj()`
 #: (a connect plus nine `CREATE INDEX` statements). On `main` the construction
-#: ran INSIDE the lock, so a reset could never slip past a build: it blocked
+#: ran INSIDE the lock, so a reset arriving against a NON-EMPTY cache blocked
 #: until the builder installed, then cleared AND closed that handle. That mutual
-#: exclusion was what made the #5049 rule-4 contract true, and moving the build
-#: out of the lock silently gave it up. At this head a reset that runs while a
+#: exclusion — incomplete even then — was the whole of the #5049 rule-4 contract.
+#: ⛔ SAY WHAT `main` ACTUALLY DID, because it is what makes the fence a repair
+#: rather than a restoration: `_reset_registry_probe_sdk` there returns BEFORE
+#: taking the lock when the cache is EMPTY (`if _REGISTRY_PROBE_SDK is None:
+#: return`), so a reset issued while a builder held the lock against an empty
+#: cache never blocked at all and the builder installed afterwards. Moving the
+#: build out of the lock WIDENED that hole from "a reset that finds an empty
+#: cache" to "any reset that arrives during a build"; it did not create it. At
+#: this head a reset that runs while a
 #: builder is inside `_make_sdk`/`_get_proj()` RETURNS FIRST (the lock is free),
 #: and the builder then takes the lock, finds nothing to match (`cached_entry is
 #: None` — the reset just emptied it), falls into the `else` branch whose only

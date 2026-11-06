@@ -1862,7 +1862,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:309`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 390-392 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 393-395 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
@@ -1964,7 +1964,8 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
 
     # 3. THIS test's own docstrings carry the third citation of the same span, and
     #    it is exactly what drifted when this PR grew `ci-wall-clock.md` by 48 lines:
-    #    the other two citations were re-cut to 390-392 and this one was left behind
+    #    the other two citations were re-cut to the span of that head and this one was
+    #    left behind
     #    (on a span that had become other prose entirely). "Pinned MECHANICALLY
     #    instead of corrected by hand a third time" has to include it, or the next
     #    insert re-arms the same silent drift (#10962 round 11, P3).

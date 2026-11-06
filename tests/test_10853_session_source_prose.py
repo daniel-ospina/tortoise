@@ -1269,10 +1269,12 @@ def test_the_TAIL_SHAPE_prose_names_no_driver_this_repo_never_imports():
     no code reaches sends the next reader to preserve compatibility for a code
     path that does not exist.
 
-    This leg is the anti-drift pin, and it is why the correction cannot rot back:
-    the claim is checkable (no module under `tortoise/` imports `asyncpg`), so a
-    future edit that re-introduces the phantom driver reds here instead of in a
-    reviewer's read. ⛔ THE PREDICATE IS AN IMPORT, NOT A SUBSTRING. The scan is
+    This leg pins the PREMISE the correction rests on — that no module under
+    `tortoise/` imports `asyncpg` — so a future edit that ACTUALLY ADOPTS the
+    driver reds here instead of in a reviewer's read. It does NOT pin the
+    CORRECTION's prose: re-wording `_tail_payload`'s docstring back to an
+    asyncpg narrative would leave this leg green, and that is deliberate rather
+    than a gap, for the reason stated below. ⛔ THE PREDICATE IS AN IMPORT, NOT A SUBSTRING. The scan is
     scoped to `tortoise/` — this file sits outside it, precisely because it names
     the driver in order to REFUTE it — and inside that scope it parses each
     module and matches an `Import`/`ImportFrom` of `asyncpg` alone. A substring

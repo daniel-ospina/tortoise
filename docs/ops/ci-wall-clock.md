@@ -167,7 +167,8 @@ the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.t
 matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
 exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
 everything the restore just put there. This job — p50 1.62 m, the fastest of them — is the likely
-payer: its own `.[test,postgres]` downloads (`python-ci.yml:4258`; `[embeddings]`/torch
+payer: its own `.[test,postgres]` downloads (the `Install package + the postgres extra`
+step in `test-record-postgres`; `[embeddings]`/torch
 deliberately absent) are a rounding error beside the shared archive it restores and re-saves.
 
 **Re-derived by the arm-2 rule from THIS run, not from the estimate this note used to carry.** It
@@ -202,7 +203,8 @@ rationale has three parts, two of which do not carry over. **It holds:** its cap
 its measured pytest step, so it could never hold the SUM, while this one can. **It does not:** the
 `UNBOUNDED save has no timeout` objection is answered by a cap that now clears the COMPLETED save
 rather than the censored one; and `nothing is lost by not saving, the key is written elsewhere
-unconditionally` WOULD apply (same key, `python-ci.yml:4251`) — but only because of the third
+unconditionally` WOULD apply (same key, the `Cache pip dependency caches (#7612)`
+step in `test-record-postgres`) — but only because of the third
 reason. **What decides it here:** this job is the FASTEST participant (p50 1.62 m), so it reaches
 the post step first and is the one that warms the shared key for the long legs that start earlier
 and are tighter (`test-slow` sits AT its cap). Standing it down would move its ~20 m onto those
@@ -278,7 +280,8 @@ produces no runs — and because a warn-only step added to that workflow never e
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:4244-4252`) and is therefore NOT an arm-1 row — on a key
+  writable shared key (the `Cache pip dependency caches (#7612)` step's `with:` block
+in `test-record-postgres`) and is therefore NOT an arm-1 row — on a key
   change its save IS the archive, measured at 3.6 GB / 15.9 m on 2026-11-05 (see the note under the
   table, and the cap it moved to). Arm 1 applies to a job whose save is
   small because nothing restores an archive into its cache path, not because its `pip install`
