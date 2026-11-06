@@ -282,15 +282,17 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
 
     # ⛔ AND THE FAST-POOL CLAUSE STATES NO FIGURE — EXECUTED (#11064 review r15,
-    # P3, r16 P2). That clause carried `1109`, a number no tree returned: the
-    # expression it names read 1111 when this comment was written, 1112 once an
-    # unrelated test file landed on `main`, and 1113 after the next merge — so
-    # the figure is gone rather than corrected a third time, exactly as was done
-    # for `1109`. (A hand count of the classification sets lands one high anyway,
-    # because `fast_pool` subtracts `ENV_BROKEN_FILES` itself.) A pool size is a
-    # measurement with several independent reasons to move, so restating it is
-    # the decay this docstring warns about; the derivation pointer is the durable
-    # form and this pin holds it there.
+    # P3, r16 P2). That clause carried `1109`, a number no tree returned (#11064
+    # review r15). Its replacement published a different one, which was already
+    # stale on `main` when it was written and moved twice more inside this single
+    # lane — once when an unrelated test file landed on `main`, once when
+    # `origin/main` was integrated — so the figure is now GONE rather than
+    # corrected a third time, exactly as was done for `1109` (#11064 review r16,
+    # P2). (A hand count of the classification sets lands one high anyway, because
+    # `fast_pool` subtracts `ENV_BROKEN_FILES` itself.) A pool size is a
+    # measurement with several independent reasons to move, so restating it is the
+    # decay this docstring warns about; the derivation pointer is the durable form
+    # and this pin holds it there.
     _doc = test_v4_membership_gate_runs_on_both_architecture_docs.__doc__ or ""
     _clause = re.search(r"full`-less fast pool(.{0,600}?)re-derive\s+it", _doc, re.S)
     assert _clause, (
