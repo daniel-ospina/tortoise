@@ -10890,8 +10890,23 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
                 # `reason` re-described a derived record as a model-emitted one
                 # (review cycle 3, P2; the same defect the cycle-5 carry fixes at
                 # its root — this branch still has to be right for a model entry).
-                span_source = (declared if declared in _MENTION_SPAN_SOURCES
-                               else "model")
+                #
+                # ⛔ BUT a declared space is a CLAIM, and this branch is reachable by
+                # the MODEL: honour it only when it VERIFIES — the offsets must be
+                # exactly where that haystack puts the surface. Without this an entry
+                # asserting `quote` for made-up offsets shipped an address whose
+                # provenance field names a text it does not index (measured:
+                # `span_start=3, span_end=9, span_source="quote"` against
+                # `quote[3:9] == ' quick'` for surface `the problem`), and
+                # `validate_payload_dict` accepts it (review cycle 4, P2).
+                if declared == "quote":
+                    verified = _mention_span(quote, surface)
+                elif declared == "narrative":
+                    verified = _mention_span(narrative, surface)
+                else:
+                    verified = None
+                span_source = (declared
+                               if verified == (span_start, span_end) else "model")
         except Exception:
             span_start, span_end, span_source = None, None, ""
     else:

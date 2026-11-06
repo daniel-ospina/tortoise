@@ -263,6 +263,31 @@ def test_a_span_never_addresses_bytes_the_record_does_not_store():
         assert rec["quote"][rec["span_start"]:rec["span_end"]] == "it", rec
 
 
+def test_a_model_supplied_span_source_must_VERIFY():
+    """Honouring a declared `span_source` (so a re-entering record keeps its
+    provenance) also honoured one a MODEL supplied: an entry could assert `quote`
+    for offsets it made up and the payload shipped an address whose provenance field
+    names a text it does not index (review cycle 4, P2)."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{
+        "surface": "the problem", "quote": "the quick brown fox",
+        "claim_ref": el["points"][0]["content"],
+        "span_start": 3, "span_end": 9, "span_source": "quote"}]
+    payload, _ = _mint(el)
+    rec = _mentions_of(payload)[0]
+    assert rec["span_source"] == "model", rec
+    assert rec["quote"][rec["span_start"]:rec["span_end"]] != "the problem"
+    # …and a VERIFYING declared space is still honoured, or a re-entering record
+    # loses the provenance this branch exists to keep
+    ok = _embed_list("config/ci-surfaces.yml")
+    ok["mentions"] = [{
+        "surface": "the problem", "quote": "the problem is real",
+        "claim_ref": ok["points"][0]["content"],
+        "span_start": 0, "span_end": 11, "span_source": "quote"}]
+    payload_ok, _ = _mint(ok)
+    assert _mentions_of(payload_ok)[0]["span_source"] == "quote"
+
+
 # ── the flag ───────────────────────────────────────────────────────────────
 
 def test_the_predicate_is_off_at_the_default(monkeypatch):
