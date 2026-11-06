@@ -49,16 +49,31 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   record side does not carry it — so FOUR populations reach it: (a) the EP and
   derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
   ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
-  REFUSES by name and so can never hold — the one §17.5 owns; (b) any property a
+  REFUSES by name and so can never hold — the one §17.5 owns. ⚠️ One refused
+  name the record's own derivation DOES supply: ``status`` (``Object``/
+  ``Subject``) is refused as a record COLUMN, but ``DERIVED_FROM_RECORD`` / the
+  ``EVENT_STREAM_FOLDS`` synthesise it on the record side, so where the record
+  carries a carrier the name is COMPARED and a mismatch reds; only a cache-only
+  ``status`` (no carrier on the record side) reaches this bucket, and that is a
+  lifecycle value the record cannot corroborate, not "nothing to repair";
+  (b) any property a
   SECOND WRITER put on a placed node, which the record does not carry — §17.1's
   chokepoint signature, DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
   `#11221`); and the two declared classes below, which the record's TABLE holds
-  and the record SIDE (this comparison's own projector-built map) omits — which
-  is why they are bucketed here rather than compared. The distinction is
-  load-bearing, not pedantry: a name is withheld from the comparison because
-  ``record_props`` does not carry it, and for these two classes that is because
-  the projection declines them, not because the record has nothing to say.
+  while the projection declines them from the record SIDE (this comparison's own
+  projector-built map) — which is why they are bucketed here rather than
+  compared. The distinction is load-bearing, not pedantry: a name is withheld
+  from the comparison because ``record_props`` does not carry it, and for these
+  two classes that is because the projection declines them, not because the
+  record has nothing to say. ⚠️ The decline resolves PER NAME and PER ROW, so
+  this bucket is NOT the pair's whole membership: ``summary`` is never projected
+  and a LEGACY row projects neither — but since `#10965` a post-`#10000` row
+  DERIVES ``_searchText`` from the topic lexicon and PROJECTS it, so the record
+  side carries it, ``keep`` keeps it, and it is COMPARED (a cache that lost it is
+  a ``field_mismatches`` entry — measured at `#11224`'s review). See
+  :func:`reconcile_record_and_cache` for the same boundary stated for an
+  operator.
   They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
   count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
@@ -66,7 +81,9 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (the whole bucket is partitioned out of ``field_mismatches``), while the
   three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
-  nothing to repair); the projection-DECLINED pair an EPISODIC Source's
+  nothing to repair — bar ``status``, which the record's own derivation makes
+  comparable wherever the record carries the carrier, see (a) above); the
+  projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record's
   TABLE holds, and which a record-sourced re-projection removes; and the
@@ -506,7 +523,9 @@ def reconcile_record_and_cache(
     refuses by name) is NOT a field mismatch and is reported as its own named
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
-    a ``graph_only`` name has one repair per population: none (schema-refused),
+    a ``graph_only`` name has one repair per population: none (schema-refused —
+    bar ``status``, whose repair where the record's own carrier exists is a
+    record-sourced re-projection, see the module docstring's (5)),
     a record-sourced re-projection (declined), the graph-side purge for a
     not-projectable column (below), or *find the writer* for the undeclared
     second-writer population the partition also counts.
