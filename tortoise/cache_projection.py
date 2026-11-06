@@ -1026,17 +1026,29 @@ class CacheProjectionError(RuntimeError):
 class PlacementTableUnavailable(CacheProjectionError):
     """The placement table could not be resolved — a fault in the INSTALL.
 
-    Raised on any of the THREE arms that leave the runtime without a property
-    namespace, all of them packaging faults and none a record fault (#10663):
+    Raised on EVERY arm that leaves the runtime without a property namespace,
+    all of them packaging faults and none a record fault (#10663):
 
     1. **neither carrier** — no packaged table (:data:`PACKAGED_PLACEMENT_TABLE`)
        AND no source document (:data:`PLACEMENT_DOC`);
     2. **a present-but-corrupt carrier** — the packaged file exists and does not
-       parse. The doc is deliberately NOT consulted: papering a corrupt carrier
-       over with a fallback hides the packaging fault instead of reporting it;
+       parse, or does not DECODE. Undecodable bytes raise `UnicodeDecodeError`,
+       a `ValueError` and not an `OSError`, so they are caught here explicitly;
+       left alone they escaped to the caller's "record is unreadable" wrapper,
+       which is the misdiagnosis this type exists to end. The doc is
+       deliberately NOT consulted: papering a corrupt carrier over with a
+       fallback hides the packaging fault instead of reporting it;
     3. **a present-but-EMPTY carrier** — the packaged file parses to zero rows.
        An empty carrier is never legitimate, and accepting it would project
-       every record property as unmapped, silently, in production.
+       every record property as unmapped, silently, in production;
+    4. **a stale or malformed carrier** — written by another generator version,
+       carrying a row that is not two non-empty strings, or holding fewer rows
+       than its own `_row_count` declares;
+    5. **the source document fails the same way** — it is undecodable, or it
+       parses to zero rows. A checkout is not exempt from the checks an image's
+       carrier gets: the doc IS the declaration the carrier is generated from,
+       and a doc that lost its table projected every record property as
+       unmapped with no error at all.
 
     It is a distinct type because the message it replaces — *"the record is
     unreadable"* — sent an operator to Postgres credentials for a file that was
@@ -1044,6 +1056,18 @@ class PlacementTableUnavailable(CacheProjectionError):
 
     It subclasses :class:`CacheProjectionError` so every existing handler keeps
     its behaviour (a structural refusal, never an availability event).
+    """
+
+
+class _PlacementDocAbsent(PlacementTableUnavailable):
+    """INTERNAL: the source document is not on disk — the only ABSENCE arm.
+
+    Separate from the other refusals (:class:`PlacementTableUnavailable` is
+    public and stays the handler's type) so `_read_placement_rows` can tell
+    "neither location" from "the doc is right there and is broken". Collapsing
+    the two told an operator the table was missing while they were looking at
+    it — the same false-absence that `Path.exists()` produced at the carrier
+    path (#10663 review, P3), one arm over.
     """
 
 
@@ -1148,15 +1172,49 @@ def parse_placement_rows(text: str) -> list[tuple[str, str]]:
 
 
 def _placement_rows_from_doc(path: Path) -> list[tuple[str, str]]:
-    """Parse `path` (an explicit doc, or :data:`PLACEMENT_DOC`)."""
+    """Parse `path` (an explicit doc, or :data:`PLACEMENT_DOC`).
+
+    Refuses exactly like the packaged arm: bytes that do not decode and a table
+    that parses to ZERO rows are both install faults, never an empty namespace.
+    The EMPTY guard landed on the carrier first (#11227) and this arm kept the
+    hole one file over, where a doc that lost its table projected every record
+    property as unmapped with no error at all.
+    """
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise PlacementTableUnavailable(
+    except FileNotFoundError as e:
+        # ABSENCE is its own type, so `_read_placement_rows` can turn it into
+        # the "in NEITHER location" message. Any other read fault is reported
+        # here as itself, naming a file the operator can see.
+        raise _PlacementDocAbsent(
             f"the placement table is not on disk at {path} — the cache "
             f"projection reads the property namespace from it: {e}"
         ) from e
-    return parse_placement_rows(text)
+    except OSError as e:
+        raise PlacementTableUnavailable(
+            f"the placement table at {path} is unreadable "
+            f"({type(e).__name__}: {e}) — a fault in the INSTALL, not in the "
+            f"record"
+        ) from e
+    except UnicodeDecodeError as e:
+        # `read_text(encoding="utf-8")` raises this — a `ValueError`, NOT an
+        # `OSError` — so it bypassed every handler and reached the CLI as
+        # "record is unreadable (UnicodeDecodeError)": the #10663 misdiagnosis.
+        raise PlacementTableUnavailable(
+            f"the placement table at {path} is unreadable "
+            f"(UnicodeDecodeError: {e}) — a fault in the INSTALL, not in the "
+            f"record"
+        ) from e
+    rows = parse_placement_rows(text)
+    if not rows:
+        raise PlacementTableUnavailable(
+            f"the placement table at {path} parsed to ZERO rows — a table "
+            f"with no rows would project every record property as unmapped, "
+            f"silently. The DOC is the fault here: restore its table and "
+            f"regenerate the carrier with `uv run python "
+            f"tools/gen_placement_table.py`"
+        )
+    return rows
 
 
 def _placed_rows_with_extras(
@@ -1182,7 +1240,8 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
     EVERY OTHER state of a PRESENT carrier is a packaging fault and is reported
     as one, never papered over with a fallback that hides it (#10663 review):
 
-    * **unparseable** — not JSON, or not an object;
+    * **unparseable** — not JSON, not an object, or bytes that do not DECODE
+      (`UnicodeDecodeError` is a `ValueError`, so it needs its own arm);
     * **from another generator** — `_generated_by` is not
       :data:`PLACEMENT_TABLE_GENERATOR`, so its SHAPE is unknown here;
     * **shape-wrong** — a row that is not exactly two strings. The old
@@ -1227,6 +1286,12 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
         return None
     except OSError as e:
         raise _fault(f"is unreadable ({type(e).__name__}: {e})") from e
+    except UnicodeDecodeError as e:
+        # NOT an `OSError` (it is a `ValueError`), so a bare `except OSError`
+        # let it escape to the CLI's "record is unreadable" wrapper — a
+        # packaging fault reported as a record fault, which is the exact
+        # misdiagnosis #10663 exists to end.
+        raise _fault(f"is unreadable (UnicodeDecodeError: {e})") from e
 
     try:
         payload = json.loads(text)
@@ -1292,7 +1357,7 @@ def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
         return _placed_rows_with_extras(packaged)
     try:
         return _placed_rows_with_extras(_placement_rows_from_doc(PLACEMENT_DOC))
-    except PlacementTableUnavailable as e:
+    except _PlacementDocAbsent as e:
         raise PlacementTableUnavailable(
             f"the cache projection's placement table is in NEITHER location — "
             f"this is a PACKAGING fault, not a record fault: no packaged table "

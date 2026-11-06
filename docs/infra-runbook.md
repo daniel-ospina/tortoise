@@ -3123,11 +3123,12 @@ whole reason this path exists.
 #    "The record's connecting role"). ⛔ A THIRD type is neither of those:
 #    `PlacementTableUnavailable` means the cache projection's placement table
 #    could not be resolved — absent from the package (an image ships no
-#    `docs/`), present but unreadable, or present but EMPTY — a fault in the
-#    INSTALL, not in the record, and since #10663 the verb names it as such
-#    INSTEAD of collapsing it into "the record is unreadable". No DSN or
-#    credential change clears it; regenerate/ship the carrier
-#    (`uv run python tools/gen_placement_table.py`).
+#    `docs/`), present but unreadable (including bytes that do not decode), or
+#    present but EMPTY (a carrier, or in a source checkout the doc itself, that
+#    parses to zero rows) — a fault in the INSTALL, not in the record, and since
+#    #10663 the verb names it as such INSTEAD of collapsing it into "the record
+#    is unreadable". No DSN or credential change clears it; regenerate/ship the
+#    carrier (`uv run python tools/gen_placement_table.py`).
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \
@@ -4195,8 +4196,9 @@ verdict (exit 3): those are what a correctly-roled but EMPTY record would produc
 exception TYPE as the discriminator — `RecordProjectionError` is a role/scope refusal (fix the
 DSN); a driver `OperationalError` in the same message is a transient outage; and
 `PlacementTableUnavailable` (#10663) is neither — the placement table could not be resolved (absent
-from the package, with no `docs/` in an image; present but unreadable; or present but empty), i.e.
-the INSTALL is broken, and that verb now says so in its own words rather than reporting an
+from the package, with no `docs/` in an image; present but unreadable, including bytes that do not
+decode; or present but empty — a carrier, or in a checkout the doc itself, that parses to zero rows),
+i.e. the INSTALL is broken, and that verb now says so in its own words rather than reporting an
 unreadable record.
 ⚠️ Note `-m tortoise record-restore` behaves as described here, and "read-only" here means
 **read-only with respect to the RECORD**: the verb never writes the record — it reads it through

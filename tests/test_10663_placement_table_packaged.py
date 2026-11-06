@@ -379,6 +379,95 @@ def test_a_symlink_loop_at_the_carrier_path_is_a_fault_not_an_absence(
     assert "is not on disk" not in str(excinfo.value), str(excinfo.value)
 
 
+# ── 2c. The BYTES arm and the DOC arm: two more ways to lose the namespace ─
+#
+# Every test above exercises a carrier whose bytes DECODE. These do not: one
+# is undecodable on disk, and two are a doc that decodes to zero rows. Each was
+# measured as a live escape before the guards below existed.
+
+def test_a_non_utf8_carrier_is_a_packaging_fault_not_a_decode_error(
+        tmp_path, monkeypatch):
+    """`UnicodeDecodeError` is a `ValueError`, so `except OSError` never saw it.
+
+    Measured pre-fix on a carrier holding undecodable bytes: the reader raised
+    `UnicodeDecodeError`, which is not a `PlacementTableUnavailable`, so the
+    CLI's own `except Exception` re-wrapped it as *"record is unreadable"* /
+    exit 2 / divergence UNKNOWN — the #10663 misdiagnosis, pointing an operator
+    at the record's credentials for a file that is ON DISK and merely damaged.
+
+    The neighbouring corrupt-carrier test writes `"{not json"`, which is valid
+    UTF-8, so every gate in the tree stayed green on this class.
+    """
+    damaged = tmp_path / "_placement_table.json"
+    damaged.write_bytes(b'\xff\xfe{"rows": []}')
+    monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", damaged)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+
+    message = str(excinfo.value)
+    assert "unreadable" in message, message
+    assert "UnicodeDecodeError" in message, message
+    assert "INSTALL" in message, message
+    # It is present, so it must never be reported as absent (the doc fallback).
+    assert "is not on disk" not in message, message
+    assert isinstance(excinfo.value, cp.CacheProjectionError)
+
+
+def test_a_non_utf8_doc_is_a_packaging_fault_not_a_decode_error(tmp_path):
+    """The DOC arm reads bytes too, and had the same hole.
+
+    A checkout doc that does not decode must be named as the install fault it
+    is; escaping as `UnicodeDecodeError` reaches the CLI as *"record is
+    unreadable"* — the same misdiagnosis, through the other arm.
+    """
+    damaged = tmp_path / "02-identity-and-placement.md"
+    damaged.write_bytes(b"\xff\xfe# Placement\n")
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows(doc=damaged)
+
+    message = str(excinfo.value)
+    assert "UnicodeDecodeError" in message, message
+    assert str(damaged) in message, message
+
+
+def test_a_doc_that_parses_to_zero_rows_is_refused_not_read_as_the_extras_only(
+        tmp_path, monkeypatch):
+    """The EMPTY guard landed on the packaged arm only — the doc arm kept it open.
+
+    Measured pre-fix with the carrier absent and a doc that parses to zero rows:
+    `_read_placement_rows()` returned the four `ADDITIONAL_PRIMARY_COLUMNS`
+    extras and `placement_columns()["point"]` held only `baseline_alpha` /
+    `baseline_beta` — every record property projects UNMAPPED, silently. The
+    test that owns this branch compared the runtime answer against the same
+    parser over the same empty doc, so it passed on exactly this state.
+    """
+    empty_doc = tmp_path / "02-identity-and-placement.md"
+    empty_doc.write_text("# Placement\n\nno table here\n", encoding="utf-8")
+
+    # (a) the explicit-doc arm
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows(doc=empty_doc)
+    message = str(excinfo.value)
+    assert "ZERO rows" in message, message
+    assert str(empty_doc) in message, message
+    assert "is not on disk" not in message, message
+
+    # (b) the runtime fallback arm: carrier absent, doc present but empty
+    monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", tmp_path / "absent.json")
+    monkeypatch.setattr(cp, "PLACEMENT_DOC", empty_doc)
+    with pytest.raises(cp.PlacementTableUnavailable) as runtime:
+        cp._read_placement_rows()
+    # The doc IS on disk, so the "NEITHER location" message would be a false
+    # statement about a file the operator can see.
+    assert "NEITHER" not in str(runtime.value), str(runtime.value)
+    assert "ZERO rows" in str(runtime.value), str(runtime.value)
+
+    with pytest.raises(cp.PlacementTableUnavailable):
+        cp.placement_columns()
+
+
 # ── 3. The carrier reaches an installed user ───────────────────────────────
 
 
