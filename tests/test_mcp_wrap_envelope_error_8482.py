@@ -334,7 +334,7 @@ def test_the_raw_tool_function_still_returns_the_safe_error_dict(quiet, stdio):
 @pytest.mark.asyncio
 async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
         quiet, monkeypatch):
-    """The class guard, over all 82 registry tools — the #8482 invariant.
+    """The class guard, over EVERY registry tool — the #8482 invariant.
 
     The issue could only name two tools and explicitly asked for a repo-wide
     sweep of declared-vs-returned shape. A refusal is forced for EVERY registry
@@ -347,7 +347,7 @@ async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
     refusal's delay must be findable whichever channel the schema permits
     (structured payload for an object tool, the re-homed `_meta` for a wrap
     tool). A repair that made a call legible but dropped the delay would fail
-    here for all 11 typed tools at once.
+    here for every typed tool at once.
     """
     from tortoise.mcp_auth import _TRANSPORT_WAIT_BOUND_MESSAGE, ERR_TIMEOUT
     from tortoise.tool_registry import TOOL_REGISTRY
@@ -393,9 +393,34 @@ async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
     # Shrinkage is the dangerous direction: the sweep must keep measuring the
     # surface it was written for. Growth (a new envelope tool) is fine and is
     # covered by the loop itself.
-    assert repaired >= 11 and delivered >= 60, (
-        f"sweep saw {repaired} wrap + {delivered} object tools; measured at "
-        "11 + 71 when this guard was written")
+    #
+    # The COVERAGE pin is exact and it is the invariant that matters: both arms
+    # are tallied by the loop, so a row the loop skipped (an early `continue`, a
+    # name it failed to resolve) shows up here as a shortfall. That is strictly
+    # stronger than a count floor for the property this file guards.
+    assert repaired + delivered == len(TOOL_REGISTRY), (
+        f"the sweep measured {repaired + delivered} of {len(TOOL_REGISTRY)} "
+        f"registry tools ({repaired} wrap + {delivered} object) — a skipped row "
+        "is a row this guard would pass without measuring")
+    # …and both arms stay LIVE, or half this file is dead code.
+    assert repaired >= 1 and delivered >= 1, (
+        f"sweep saw {repaired} wrap + {delivered} object tools — one arm of "
+        "this sweep is dead")
+    # The WRAP population is where #8482 lives, so it never shrinks below the
+    # baseline it was measured at.
+    #
+    # The OBJECT floor is deliberately NOT a count. It was `>= 60` against a
+    # measured 71, and #4282 then moved the sweep from 11 + 71 (82 tools) to
+    # 13 + 59 (72 tools) by absorbing four names into `graph_overview` and
+    # retiring a fifth — an OWNER-APPROVED shrink toward the 27-tool target in
+    # `docs/product/canonical-mcp-tools.md`, with no defect in it. A count floor
+    # therefore reds on a recorded decision, and accidental surface shrinkage is
+    # already the canonical gate's verdict (`tools/surface-guard.py` against the
+    # frozen baseline, plus `config/surface-manifest.yml`) — not this file's.
+    assert repaired >= 11, (
+        f"sweep saw only {repaired} wrap-envelope tools; 11 was the measured "
+        "baseline when this guard was written, and they are the population "
+        "#8482 actually occurs in")
 
 
 def test_the_sweep_helper_can_reject_a_non_wrap_payload():

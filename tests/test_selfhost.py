@@ -1099,8 +1099,11 @@ class TestHealthTruthMCP:
             })
             assert r.status_code == 200, r.text
             names = [t["name"] for t in body["result"]["tools"]]
-            assert "tortoise_overview" in names
-            # #3883: tortoise_health is RETIRED — callable and warned, never listed.
+            # #4282: the orientation container is `tortoise_graph_overview`;
+            # #3883: `tortoise_health` — and now `tortoise_overview` itself — are
+            # RETIRED, callable and warned, never listed.
+            assert "tortoise_graph_overview" in names
+            assert "tortoise_overview" not in names
             assert "tortoise_health" not in names
 
         stray_after = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
