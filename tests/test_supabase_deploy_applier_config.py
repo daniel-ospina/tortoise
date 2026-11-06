@@ -153,7 +153,7 @@ def _mutates_hosted(step: dict) -> bool:
 
 
 def _mutates_production(step: dict) -> bool:
-    """True when the step RUNS a hosted-mutating command that is NOT explicitly local.
+    """True when the step RUNS a hosted-mutating command whose target is not the LOCAL stack.
 
     ⛔ DIFFERENT QUESTION FROM `_mutates_hosted`, AND THE DIFFERENCE IS A FALSE PASS (#11135, fourth
     review). Job selection must demand a REMOTE selector — a job with no remote-targeted mutation is
@@ -168,14 +168,25 @@ def _mutates_production(step: dict) -> bool:
     So `_mutates_hosted` returns **False** for both untargeted forms — measured — and gating the
     contract on it (or on the containing job's membership, the same predicate one level up) leaves a
     step that really mutates production free to set `continue-on-error: true` and `exit 0`: MEASURED
-    GREEN. The fail-closed rule this file applies everywhere else decides it — an UNKNOWN target must
-    never read as a safe one — so only an EXPLICIT local target (`--local`, loopback `--db-url`) is
-    exempt.
+    GREEN.
+
+    ⛔ BUT "NO TARGET FLAG" IS NOT ONE DIRECTION (#11135, fifth review). `db reset`, `migration
+    up`/`down`/`squash`/`repair` are LOCAL BY DEFAULT — the pinned CLI's own help: "Resets the local
+    database to current migrations", "Apply pending migrations to local database", and each takes
+    `--linked` / `--project-ref` / `--db-url` as its REMOTE form. Treating those as production would
+    put the applier's body-IS-its-invocation rule on a local harness step (`supabase db reset` then
+    `supabase start`, the #11100 shape `_applier_jobs` anticipates) and red a correct workflow — the
+    false-RED class this file spent four cycles removing. So the exemption is: an EXPLICIT local
+    target, or a LOCAL-BY-DEFAULT root with NO remote selector. Everything else — including an
+    untargeted `db push` / `functions deploy` / `secrets set` / `config push` — counts as production,
+    fail-closed.
     """
     for command in _commands_in(step):
         if not command.startswith(_MUTATING_ROOTS):
             continue
         if _LOCAL_TARGET.search(command):
+            continue
+        if command.startswith(_LOCAL_BY_DEFAULT_ROOTS) and not _REMOTE_TARGET.search(command):
             continue
         return True
     return False
@@ -262,6 +273,21 @@ _CONSENT_GATED_ROOTS = (
 #: job SELECTOR reads `_MUTATING_ROOTS` alone; the APPLY contract is decided per STEP, not per job
 #: (see `_applier_contract`) — three predicates, three questions, no nesting assumption (#11135).
 _SWEPT_ROOTS = _MUTATING_ROOTS + _CONSENT_GATED_ROOTS
+
+#: Mutating roots that act on the LOCAL stack unless a remote selector is passed — MEASURED against
+#: the pinned v2 CLI, whose own help text is the source: `db reset` / `migration up` / `migration
+#: down` / `migration squash` say "local database", `migration repair` documents `--project-ref` as
+#: "Not needed with --local or --db-url", and each one's REMOTE form is `--linked` /
+#: `--project-ref` / `--db-url`. The remaining mutating roots (`db push`, `functions deploy` /
+#: `delete`, `secrets set` / `unset`, `config push`) address the project and take a target only to
+#: OVERRIDE it — so for those, "no target flag" is production (#11135, fifth review).
+_LOCAL_BY_DEFAULT_ROOTS = (
+    "supabase db reset",
+    "supabase migration up",
+    "supabase migration down",
+    "supabase migration squash",
+    "supabase migration repair",
+)
 
 #: A shell `run:` body can turn a failing apply into a green one. Enumerating the swallow tokens is
 #: unbounded and was measured defeated by `|| exit 0`, `|| echo …`, `|| { …; exit 0; }`, `| tee p`
@@ -834,7 +860,7 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         "the workflow must still RUN a consent-gated hosted command — finding none means the sweep "
         "broke, and every assertion below would pass vacuously (#10896)"
     )
-    def _applier_contract(job_name: str, job: dict, step: dict) -> None:
+    def _applier_contract(job_name: str, job: dict, step: dict) -> bool:
         """The APPLY contract — asserted for every swept step that MUTATES production.
 
         ⛔ THE PREDICATE IS THE STEP, NOT THE JOB, AND NOT `_mutates_hosted` (#11135, fourth review).
@@ -863,12 +889,13 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
           warn-only `check-drift` step (`set +e` … `exit 0`, documented as "warn-only … not a
           failure").
 
-        The failure-swallow checks are NOT gated — they stay on both halves, in the caller, and on
-        the read half they scan the INVOCATION rather than the whole shell body (a read step's body
-        is ordinary shell: `if …; then`, `for …; do`, `&&`).
+        The failure-swallow checks are NOT gated this way — they stay on both halves, in the caller,
+        and on the read half it is the CONTROL-OPERATOR scan that narrows to the swept INVOCATION
+        (`set -n` / `trap … exit 0` stay whole-body on both halves, since neither can appear in a
+        line that begins with `supabase `).
         """
         if not _mutates_production(step):
-            return
+            return False
         where = f"step {step.get('name')!r} in job {job_name!r}"
         assert not step.get("continue-on-error"), (
             f"{where} runs a hosted mutation and must not set `continue-on-error`: a failed apply "
@@ -932,30 +959,26 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"the step still exits 0, so the co-move dispatch fires over an unapplied schema "
             f"(#10896, #3627)"
         )
+        return True
 
     for job_name, job, step in mutating:
         where = f"step {step.get('name')!r} in job {job_name!r}"
-        applies = _mutates_production(step)
-        if applies:
-            _applier_contract(job_name, job, step)
-            # Comment lines are dropped first, exactly as `_printed_remedies` does: a comment is
-            # prose, so the most natural note on this very step ("# NOTE: v3 consent-gates this;
-            # keep --yes") must not be read as shell and red a correct step (measured, review
-            # cycle 9).
-            body = "\n".join(_strip_shell_comment(line) for line in _run_body(step).splitlines())
-        else:
-            # ⛔ ON THE READ HALF THE SWALLOW SCAN READS THE INVOCATION, NOT THE SCRIPT AROUND IT
-            # (#11135, fourth review — this lane's own docstring claimed this shape green and was
-            # measured RED). A read step's body is ordinary shell: this repo's own `check-drift`
-            # is `set +e` … `if [ "$rc" -eq 1 ]; then` … `exit 0`, whose `;` is not a control
-            # operator composed with the CLI call. What a swallow would have to touch is the
-            # INVOCATION — `supabase db pull --linked || true` — so that is what is scanned.
-            body = "\n".join(
-                _strip_shell_comment(command)
-                for command in _commands_in(step)
-                if command.startswith(_SWEPT_ROOTS)
-            )
-        noexec = _disables_execution(body)
+        # ONE predicate, one place: `_applier_contract` answers "did this step owe the apply
+        # contract?" and that answer is what narrows the operator scan below. (An earlier version
+        # tested the predicate in BOTH the caller and the callee, which made the callee's gate
+        # unreachable and its deletion unobservable — measured: 17 passed with it removed.)
+        applies = _applier_contract(job_name, job, step)
+        # Comment lines are dropped first, exactly as `_printed_remedies` does: a comment is prose,
+        # so the most natural note on this very step ("# NOTE: v3 consent-gates this; keep --yes")
+        # must not be read as shell and red a correct step (measured, review cycle 9).
+        whole_body = "\n".join(_strip_shell_comment(line) for line in _run_body(step).splitlines())
+        # ⛔ `set -n` AND `trap … exit 0` ARE SCANNED ON THE WHOLE BODY, ON BOTH HALVES (#11135, fifth
+        # review). They can never appear on a line that begins with `supabase `, so narrowing the
+        # read-half scan to the invocation made them structurally invisible there — measured, the
+        # first fix turned `set -n` + a pull, `set -en` + a pull and `trap 'exit 0' ERR` + a pull
+        # from RED to GREEN. Only the CONTROL-OPERATOR scan is narrowed (below), because that is the
+        # one a read step's ordinary shell (`if …; then`) false-REDs on.
+        noexec = _disables_execution(whole_body)
         assert noexec is None, (
             f"{where} puts the body in noexec (`set -n` / `set -o noexec`): bash parses and executes "
             f"NOTHING and the step exits 0 — on the applier the apply never runs and the co-move "
@@ -964,13 +987,29 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"`set -e` then `exit 3` exits 3 — and `set -n` is ONE CHARACTER from the allowed "
             f"`set -e` (#10896)"
         )
-        assert not _EXIT_ZERO_TRAP.search(body), (
+        assert not _EXIT_ZERO_TRAP.search(whole_body), (
             f"{where} installs a `trap … exit 0`: that re-zeroes the command's exit status with no "
             f"control operator to catch (`set -e; trap 'exit 0' ERR; false` exits 0 — measured), so "
             f"a failed apply — and, on a read-only step, a failed pull — still reads green "
             f"(#10896, #3627)"
         )
-        operator = _CONTROL_OPERATOR.search(_REDIRECTION.sub(" ", _QUOTED.sub('""', body)))
+        # ⛔ THE CONTROL-OPERATOR SCAN IS THE ONLY NARROWED ONE (#11135, fourth + fifth review). A
+        # read step's body is ordinary shell — this repo's own `check-drift` is `set +e` … `if
+        # [ "$rc" -eq 1 ]; then` … `exit 0`, whose `;` is not composition with the CLI call — so on
+        # the read half the scan reads the swept INVOCATION (`supabase db pull --linked || true`). A
+        # step that mutates production keeps the whole-body scan.
+        operator_text = (
+            whole_body
+            if applies
+            else "\n".join(
+                _strip_shell_comment(command)
+                for command in _commands_in(step)
+                if command.startswith(_SWEPT_ROOTS)
+            )
+        )
+        operator = _CONTROL_OPERATOR.search(
+            _REDIRECTION.sub(" ", _QUOTED.sub('""', operator_text))
+        )
         assert operator is None, (
             f"{where} composes its invocation with the shell control operator "
             f"{operator.group(0)!r}: that is how a failure is turned into a green run — `|| true`, "
@@ -1384,6 +1423,66 @@ def test_an_untargeted_mutating_step_still_owes_the_apply_contract(monkeypatch) 
         assert [n for n, _ in _applier_jobs()] == ["deploy"], "premise: not the applier job"
         assert any(n == name for n, _j, _s in _mutating_steps_with_job()), "premise: swept anyway"
         with pytest.raises(AssertionError, match="continue-on-error"):
+            test_the_apply_and_function_steps_pass_yes()
+
+
+def test_a_local_by_default_mutation_is_not_a_production_apply(monkeypatch) -> None:
+    """`db reset` / `migration up|down|squash|repair` are LOCAL unless a remote selector is passed.
+
+    Measured against the pinned CLI's own help (#11135, fifth review): "Resets the local database to
+    current migrations", "Apply pending migrations to local database", and each root's REMOTE form is
+    `--linked` / `--project-ref` / `--db-url`. Treating those as production would put the applier's
+    body-IS-its-invocation rule on a local harness step — `supabase db reset` then `supabase start`,
+    the shape `_applier_jobs`' docstring anticipates for #11100 — and red a correct workflow, which
+    is the false-RED class this file spent four cycles removing.
+
+    The remote form must still be production: `db reset --linked` mutates the hosted database, so a
+    swallow on it has to red.
+    """
+    doc = copy.deepcopy(_workflow_doc())
+    doc["jobs"]["local-harness"] = {
+        "runs-on": "ubuntu-latest",
+        "steps": [
+            {
+                "name": "Reset the local stack and start it",
+                "run": "supabase db reset --yes\nsupabase start",
+            }
+        ],
+    }
+    monkeypatch.setattr(sys.modules[__name__], "_workflow_doc", lambda: doc)
+    assert _mutates_production({"run": "supabase db reset --yes"}) is False
+    assert _mutates_production({"run": "supabase db reset --linked --yes"}) is True
+    assert _mutates_production({"run": "supabase db push --include-all --yes"}) is True
+    test_the_apply_and_function_steps_pass_yes()
+
+    doc["jobs"]["deploy"]["steps"].append(
+        {"name": "Reset the linked project", "run": "supabase db reset --linked --yes || true"}
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_workflow_doc", lambda: doc)
+    with pytest.raises(AssertionError, match="control operator"):
+        test_the_apply_and_function_steps_pass_yes()
+
+
+def test_a_read_only_step_is_still_scanned_for_noexec_and_the_exit_zero_trap(monkeypatch) -> None:
+    """`set -n` and `trap … exit 0` are scanned on the WHOLE body, on BOTH halves.
+
+    Measured (#11135, fifth review): narrowing the read-half scan to the swept invocation made both
+    mechanisms structurally invisible there — neither can appear on a line that begins with
+    `supabase ` — so `set -n` + a pull, `set -en` + a pull and `trap 'exit 0' ERR` + a pull went from
+    RED (parent) to GREEN. Only the CONTROL-OPERATOR scan narrows; these two must not.
+    """
+    for name, body in (
+        ("read-noexec", "set -n\nsupabase db pull --linked --yes"),
+        ("read-noexec-flag", "set -en\nsupabase db pull --linked --yes"),
+        ("read-trap", "trap 'exit 0' ERR\nsupabase db pull --linked --yes"),
+    ):
+        doc = copy.deepcopy(_workflow_doc())
+        doc["jobs"][name] = {
+            "runs-on": "ubuntu-latest",
+            "steps": [{"name": f"{name} step", "run": body}],
+        }
+        monkeypatch.setattr(sys.modules[__name__], "_workflow_doc", lambda doc=doc: doc)
+        with pytest.raises(AssertionError, match=r"noexec|trap"):
             test_the_apply_and_function_steps_pass_yes()
 
 
