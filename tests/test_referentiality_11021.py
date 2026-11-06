@@ -1146,7 +1146,16 @@ def test_an_EVENT_whose_only_carrier_is_a_slot_is_held_and_its_slot_stripped():
     emitted entity`, an extraction-error warning for a decision the run made on
     purpose (review cycle 6, P3). Asserted on the ROUTED list for the same reason
     the point row is: Layer-1 also drops a dangling slot, so a payload-only
-    assertion stays green whether WE stripped it or Layer-1 reported it."""
+    assertion stays green whether WE stripped it or Layer-1 reported it.
+
+    ⚠️ This strips ``events[]`` reference sets, which #11021's decision **C4**
+    declined ("no stripping of `events[]`"). The departure is not introduced
+    here — #11211 already shipped it and pinned the ``about_entities`` half at
+    ``test_an_event_only_hold_names_the_record_it_cannot_write`` — and it is
+    relayed to #11021 as an ``OVERRIDES:`` record: C4's refusal would fail open
+    and MINT the very object #11021 exists to delete, whereas holding and
+    stripping keeps the no-mint guarantee and counts the unrecorded surface in
+    ``mention_carrier_is_event`` / ``mention_unrecorded_surfaces``."""
     el = {
         "entities": [{"name": "it", "kind": "core:other"}],
         "points": [],

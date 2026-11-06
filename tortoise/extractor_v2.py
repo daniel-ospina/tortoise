@@ -5231,8 +5231,9 @@ def _resolve_slot_refs(slots: dict | None, entity_keys: set,
     kind) — a stray slot must never sink the whole commit (the
     operator-drop pattern; Layer-1's (name, kind) gate then never fires on
     S5 output). event slots pass through untouched: they are event-as-
-    content (#1417 B2) and the #1370 write path resolves them against
-    events.
+    content (#1417 B2) and NOTHING resolves them against entities — that
+    binding belongs to the #1417 ``aboutEvent`` work, which
+    ``subject_binding._ROLE_TARGET`` deliberately excludes (#11021 P3-a).
     """
     if not slots:
         return slots
