@@ -3858,8 +3858,7 @@ def test_a_required_set_config_error_is_a_FAIL_not_a_retryable_read_failure(
 
     def diverged(cwd: Any, ref: Any = None, **kw: Any) -> Any:
         raise rfo_required.RequiredSetConfigError(
-            "required-contexts record names 'python-ci-gate' and .mergify.yml no longer "
-            "derives it"
+            "required-contexts record names 'python-ci-gate' and .mergify.yml no longer derives it"
         )
 
     probe, _ = _collect(monkeypatch, _gh_payloads(), derive=diverged)
@@ -3906,3 +3905,87 @@ def test_an_unreadable_required_set_still_reads_FAIL_unreadable(
     assert gates.unreadable is True, gates.status
     assert gates.status == "FAIL(unreadable)", gates.status
     assert not gates.reason.startswith("required-set-config-error:"), gates.reason
+
+
+# ── an entry WITHOUT `path` is not a readable run (#10991 review, P2 fail-open) ─
+
+
+def test_a_run_entry_without_a_path_is_unattributable_not_a_deferral() -> None:
+    """★ P2 fail-open measured at `b45af8abd`: a run entry lacking `path` graded DEFERRED.
+
+    `_run_file` maps a missing `path` to `""`, which matches no emitter — so an entry that
+    merely OMITTED the field fell through to "no run of the emitter exists", the DEFERRED
+    (PASS) arm, on a listing nobody could actually read. The `event` field already fails
+    closed this way (`_run_emits`); `path` is the other half of the same attribution and
+    did not.
+
+    Measured on the pre-fix code at that head: `head_runs=({"event": "pull_request"},)` →
+    `python-ci-gate=DEFERRED(merge-time)` and the gate **PASSed**, while the same entry
+    WITH its `path` → `MISSING` / FAIL. Reverting `_readable_run` to
+    `isinstance(run, Mapping)` reds every shape below, at both doors.
+    """
+    shapes = (
+        {"event": "pull_request"},  # the field is simply absent
+        {"path": "", "event": "pull_request"},  # present and empty
+        {"path": None, "event": "pull_request"},  # present and null
+        {"path": 7, "event": "pull_request"},  # present and not a string
+        {"path": "   ", "event": "pull_request"},  # present and blank
+    )
+    for shape in shapes:
+        # Door 1 — the fixture: an unreadable entry is not a reading, so the listing is
+        # "not read" and the absence lands on UNATTRIBUTABLE.
+        via_fixture = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": [shape]}))
+        assert via_fixture.head_runs is None, (shape, via_fixture.head_runs)
+        gates = next(c for c in rfo.evaluate(via_fixture).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+        # Door 2 — a hand-built Probe, which this module documents as supported.
+        hand_built = dataclasses.replace(
+            rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+            head_runs=(shape,),  # type: ignore[arg-type]
+        )
+        gates = next(c for c in rfo.evaluate(hand_built).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+def test_a_run_entry_that_carries_its_path_still_attributes() -> None:
+    """The counterpart: the guard must not reject the WELL-FORMED listing.
+
+    Without this, the pin above could be satisfied by refusing every listing — which would
+    trade the fail-open for a permanent FAIL on every merge-time context.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": ran}))
+    assert probe.head_runs is not None
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+
+# ── `--repo` does not scope the DERIVATION, and the raw says so ─────────────
+
+
+def test_the_required_sets_raw_discloses_which_repo_it_was_derived_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ `--repo` parameterises the GitHub reads, NOT the required-set derivation.
+
+    Both inputs (`.mergify.yml`, the committed record) come from `origin/main` of the
+    checkout the tool runs in, so a foreign `--repo` is judged against THIS repo's
+    contract. The mismatch cannot produce a false READY — `_read_tree` fetches
+    `refs/pull/<n>/head` from the local `origin` and refuses when the fetched sha ≠ the live
+    head of the named repo — but a residual that lives only in prose is one nobody reads,
+    and the required set's provenance is supposed to be on every arm. So the raw names it.
+    """
+    monkeypatch.setattr(
+        rfo,
+        "derive_from_ref",
+        lambda cwd, ref=None, **kw: rfo_required.derive_from_config(REPO_ROOT),
+    )
+    _, same = rfo._read_required_contexts(REPO_ROOT, REPO)
+    assert "repo-scope=origin(" in same, same
+    _, foreign = rfo._read_required_contexts(REPO_ROOT, "someone-else/another-repo")
+    assert "repo-scope=MISMATCH" in foreign, foreign
+    assert "someone-else/another-repo" in foreign, foreign

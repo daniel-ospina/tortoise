@@ -151,7 +151,17 @@ def test_a_merge_time_check_is_not_an_entry_check(tmp_path: Path) -> None:
     """The whole point: `merge_conditions` names must not be reported as entry gates.
 
     A consumer that treats them as entry reports NOT-READY on every PR head, because
-    Mergify has not run them there (measured 2026-11-04: 0 of 6 open PR heads).
+    Mergify evaluates them on `mergify/merge-queue/<sha>` — not at the author's head.
+
+    ⛔ THE EVIDENCE FOR THIS SPLIT IS NOT "python-ci-gate is never seen at a PR head".
+    That datum ("0 of 6 open PR heads", 2026-11-04) was measured while the matrix was
+    still running and is RETRACTED — the aggregate DOES report on author heads
+    (`queued` 11097, `success` 11100, `failure` 11096). The split stands on a different
+    and stronger ground: the check's ABSENCE at an author head is not self-explanatory,
+    which is why `ready_for_owner._merge_time_absence` attributes it (a PR-triggered run
+    of the emitting workflow on the head ⇒ FAIL; no such run ⇒ DEFERRED). Quoting the
+    retracted count here would hand the next reader the one datum this PR exists to
+    correct — see `tools/required_set`'s own docstring retraction.
     """
     required = derive_from_config(_tree(tmp_path))
     assert required.queue_names == ENTRY
@@ -731,3 +741,52 @@ def test_emit_files_are_read_from_the_protected_ref(tmp_path: Path) -> None:
 
     assert derive_from_config(tmp_path).emit_workflows(HEAVY) == ("never-runs.yml",)
     assert derive_from_ref(tmp_path, "HEAD").emit_workflows(HEAVY) == ("python-ci.yml",)
+
+
+# ── the SECOND derivation in this repo, and the pin between them ────────────
+#
+# `.github/scripts/check-required-set.py` (#6144) already parses `.mergify.yml` for the
+# queue's two condition lists, and `tools/required_set.py` now parses the same file for the
+# same purpose. Two independent parsers of one config is a drift surface: nothing about the
+# first makes the second right, and a divergence would answer "what is required?" two ways
+# with no test to say which. This pin compares them on THIS REPO's own config — the one
+# tree where both are known to have a verdict.
+
+GUARD_SCRIPT = REPO_ROOT / ".github" / "scripts" / "check-required-set.py"
+
+
+def _load_required_set_guard() -> Any:
+    """The #6144 guard module, imported by path — it is a script, not an importable module."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_required_set_pin", GUARD_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_two_derivations_of_the_required_set_agree_on_this_repo() -> None:
+    """★ TWO PARSERS OF `.mergify.yml` must answer the same question the same way.
+
+    `tools.required_set` (this PR) and `.github/scripts/check-required-set.py` (#6144) each
+    read `queue_rules[].queue_conditions` / `merge_conditions` for the `check-success=`
+    names, and neither is derived from the other. Agreement is therefore a MEASUREMENT, not
+    a tautology — and it is the measurement the PR body cited while no test made it.
+
+    ⛔ NOT VACUOUS: this reds if either parser's notion of "a check-success condition"
+    diverges — e.g. `required_set` de-duplicating, dropping a rule's second list, or
+    matching the prefix differently from the guard. It compares the two parsers, not one
+    parser against itself.
+    """
+    guard = _load_required_set_guard()
+    ours = derive_from_config(REPO_ROOT)
+    theirs = guard.load_mergify()
+    # `derive_from_config` FOLDS `merge` into `entry` under mode `queue`, so state the mode
+    # the comparison is valid under rather than assuming one.
+    assert ours.mode == "merge", (
+        "this pin compares the two flat lists, which is only the derived shape under "
+        f"mode=merge; this repo is now mode={ours.mode!r} — extend the pin, do not delete it"
+    )
+    assert set(ours.queue_names) == theirs["queue"]
+    assert set(ours.merge_names) == theirs["merge"]

@@ -1407,10 +1407,11 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
     # the fixture door enforces (`_fixture_head_runs`). "No run matched" is a MEASUREMENT
     # only when every entry was readable, so a hand-built `Probe` carrying a malformed
     # entry must land on the same FAIL, never on the DEFERRED (PASS) arm.
-    if not all(isinstance(run, Mapping) for run in probe.head_runs):
+    if not all(_readable_run(run) for run in probe.head_runs):
         return "unattributable", (
             f"{context}=UNATTRIBUTABLE(the head's run listing carries an entry that is not "
-            "a run, so 'no run of the emitter' is not a measurement)"
+            "a READABLE run — not a mapping, or carrying no workflow `path` — so 'no run "
+            "of the emitter' is not a measurement)"
         )
     matched = [_run_file(run) for run in probe.head_runs if _run_emits(run, files)]
     if matched:
@@ -1421,9 +1422,35 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
     return "", f"{context}={DEFERRED}(no {'/'.join(files)} run on this head)"
 
 
+def _run_path(run: Mapping[str, Any]) -> str:
+    """The workflow FILE PATH a run entry carries, or ``""`` when it carries none.
+
+    ``path`` is the handle ``emitters`` is matched against, so an entry that does not
+    carry a non-empty one is not attributable at all — see `_readable_run`.
+    """
+    path = run.get("path")
+    return path.strip() if isinstance(path, str) else ""
+
+
 def _run_file(run: Mapping[str, Any]) -> str:
     """`.github/workflows/python-ci.yml` -> `python-ci.yml` (what `emitters` records)."""
-    return str(run.get("path") or "").rsplit("/", 1)[-1]
+    return _run_path(run).rsplit("/", 1)[-1]
+
+
+def _readable_run(run: Any) -> bool:
+    """Is this entry a run attribution can READ — a mapping carrying a workflow path?
+
+    ⛔ ``path`` IS LOAD-BEARING, exactly like ``event`` in `_run_emits`. `_run_file` maps a
+    missing ``path`` to ``""``, which matches no emitter, so an entry that merely OMITS the
+    field falls through to "no run of the emitter exists" — the DEFERRED (PASS) arm — on a
+    listing nobody could actually read. Measured at `b45af8abd`: a hand-built
+    ``head_runs=({"event": "pull_request"},)`` graded ``python-ci-gate=DEFERRED(merge-time)``
+    and the gate **PASSed**, while the same entry WITH its ``path`` graded ``MISSING``
+    (a FAIL). Both doors that can produce a listing must land such an entry on
+    UNATTRIBUTABLE: ``_fixture_head_runs`` (a fixture) and `_merge_time_absence`' own guard
+    (a hand-built ``Probe``, which this module documents as supported).
+    """
+    return isinstance(run, Mapping) and bool(_run_path(run))
 
 
 def _run_emits(run: Mapping[str, Any], files: tuple[str, ...]) -> bool:
@@ -2286,7 +2313,49 @@ def _read_head_commit_date(gh: Gh, head: str) -> str:
     raise ReadError(f"commits/{head}: no committer date")
 
 
-def _read_required_contexts(workdir: Path) -> tuple[RequiredSet, str]:
+def _origin_slug(workdir: Path) -> str:
+    """``owner/name`` of the workdir's ``origin`` remote, or ``""`` when undeterminable.
+
+    Used only to DISCLOSE that the required set was derived from this checkout rather than
+    from the repo being judged — never to gate on it.
+    """
+    try:
+        proc = _run(["git", "remote", "get-url", "origin"], GIT_TIMEOUT, cwd=workdir)
+    except ReadError:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    url = proc.stdout.strip().removesuffix(".git").rstrip("/")
+    # `git@github.com:owner/name` (scp-like) and `https://host/owner/name`.
+    slug = url.rsplit(":", 1)[-1] if "://" not in url else "/".join(url.split("/")[-2:])
+    return slug if slug.count("/") == 1 else ""
+
+
+def _repo_scope_note(workdir: Path, repo: str) -> str:
+    """One token saying WHICH REPO the required set was derived from.
+
+    ⛔ `--repo` parameterises the GitHub reads but NOT the derivation: both inputs
+    (``.mergify.yml`` and the committed record) come from ``origin/main`` of the checkout the
+    tool runs in, so a genuinely foreign ``--repo`` is judged against the LOCAL repo's
+    contract. The mismatch is not reachable as a false READY in practice — `_read_tree`
+    fetches ``refs/pull/<n>/head`` from the LOCAL ``origin`` and refuses when the fetched sha
+    ≠ the live head of the named repo, so the ``tree`` condition fails closed first — but a
+    residual that only exists in a comment is one nobody reads, and the required set's
+    provenance is supposed to be on every arm. So it is stated in the raw instead: a
+    mismatch is VISIBLE in the same line that discloses the sha.
+    """
+    origin = _origin_slug(workdir)
+    if not origin:
+        return f"repo-scope=UNDETERMINED(required set read from {workdir}'s origin/main)"
+    if origin.lower() == repo.lower():
+        return f"repo-scope=origin({origin})"
+    return (
+        f"repo-scope=MISMATCH(required set read from {origin}'s origin/main, judging "
+        f"{repo}; `--repo` does not scope the derivation)"
+    )
+
+
+def _read_required_contexts(workdir: Path, repo: str) -> tuple[RequiredSet, str]:
     """The required set, DERIVED from the repo — never read from the protection API.
 
     ``gh api repos/<o>/<r>/branches/main/protection`` needs repository **Administration:
@@ -2343,6 +2412,7 @@ def _read_required_contexts(workdir: Path) -> tuple[RequiredSet, str]:
         f"merge-time={len(required.merge_names)} mode={required.mode} "
         f"snapshot_agrees={required.snapshot_agrees}"
     )
+    raw = f"{raw} {_repo_scope_note(workdir, repo)}"
     return required, raw
 
 
@@ -2809,7 +2879,7 @@ def collect_probe(
     # `check_gates` puts that source in its raw on every arm.
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     try:
-        required, probe.required_raw = _read_required_contexts(workdir)
+        required, probe.required_raw = _read_required_contexts(workdir, repo)
     except RequiredConfigReadError as exc:
         # A CONFIGURATION verdict, not a read failure: the set is still unread (so the
         # gate still REFUSES), but the class is carried through so `check_gates` can label
@@ -3120,17 +3190,18 @@ def _fixture_head_runs(data: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]
     DEFERRED is spelled ``"head_runs": []``.
 
     The SHAPE is validated, not just presence: only a sequence whose every entry is a mapping
-    is a listing. ``"python-ci.yml"`` (a string, which would become a tuple of characters), a
-    bare mapping, and a listing with unreadable entries are all type-confused or partially-read
-    surfaces; the live path refuses each of them, so the fixture door must not turn any of them
-    into "read it, no run of the emitter exists".
+    THAT CARRIES a workflow ``path`` is a listing. ``"python-ci.yml"`` (a string, which would
+    become a tuple of characters), a bare mapping, a listing with unreadable entries, and an
+    entry without ``path`` (which ``_run_file`` maps to ``""``, matching no emitter) are all
+    type-confused or partially-read surfaces; the live path refuses each of them, so the
+    fixture door must not turn any of them into "read it, no run of the emitter exists".
     """
     if "head_runs" not in data or data["head_runs"] is None:
         return None
     raw = data["head_runs"]
     if not isinstance(raw, (list, tuple)):
         return None
-    if not all(isinstance(run, Mapping) for run in raw):
+    if not all(_readable_run(run) for run in raw):
         return None
     return tuple(raw)
 
