@@ -199,10 +199,25 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # emphasis/whitespace that may sit around a list separator; `_GLOSS` is the ONE balanced
 # parenthetical that may sit between a reference and its separator (`#100 (the parent), #200 (the
 # child)`) and which holds no `#`, so it can neither smuggle a reference into a list it is not part
-# of nor run past the clause it belongs to. ONE definition, read by `CLAIM_RE`, `_REF_LIST` and
-# `_REF_RUN_GAP_RE`: a token admitted in one reader and not the others is exactly the drift this
-# module keeps re-discovering — the list a claim CONTINUES, the list a decline NAMES, and the run a
-# plural decline CLEARS have to be the same list.
+# of nor run past the clause it belongs to. A token admitted in one reader and not the others is
+# exactly the drift this module keeps re-discovering — the list a claim CONTINUES, the list a decline
+# NAMES, and the run a plural decline CLEARS have to be the same list.
+#
+# ⛔ WHICH TOKEN EACH READER USES, SPELLED OUT (review round 26, P2). The sentence above said "ONE
+# definition, read by `CLAIM_RE`, `_REF_LIST` and `_REF_RUN_GAP_RE`", and that was FALSE of
+# `CLAIM_RE`: its continuation separator was `_SOFT_GAP`, which admits no emphasis, so the claim arm
+# silently dropped an emphasised continuation the decline arm correctly consumed:
+#     `Closes #100, #200`          -> closing=[100], weak=[200]                (correct)
+#     `Closes #100, **#200**`      -> `#200` never even claimed, rc 0          (false PASS)
+#     `Part of **#100**, #200`     -> weak=[100]          (the ref AFTER the list is dropped)
+#     `Refs #100, #200 — deliberately not closing #100, **#200**.` -> declined=[100, 200] (same list)
+# Emphasis around references is prose this repo writes (`#11116`: `Also closes the gap tracked by
+# **#5114**`), so the claim arm's separator is the EMPHASIS-TOLERANT soft gap. It is deliberately NOT
+# `_LIST_SEP` itself: `_LIST_SEP` admits unlimited newlines, and the claim arm must not continue a
+# list across a BLANK line (round 22, `test_a_list_does_not_continue_across_a_blank_line`);
+# `_SOFT_EMPH` admits at most ONE line break, which is exactly the wrapped-list rule. The decline's
+# `_REF_LIST`/`_REF_RUN_GAP_RE` keep `_LIST_SEP` — widening a decline only widens REFUSALS, while
+# widening a claim admits references, so the two arms want opposite widths here ON PURPOSE.
 _LIST_SEP = r"[\s*_`]*"
 # ⛔ `_GLOSS`'S LEADING GAP IS THE SOFT ONE, NOT `_LIST_SEP` (review round 23, P3). `_LIST_SEP`
 # contains `\s`, so one parenthetical ahead of a conjunction quietly restored the cross-paragraph claim
@@ -292,7 +307,14 @@ CLAIM_RE = re.compile(
     rf"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{{1,7}})\b"
     rf"(?P<more>(?:"
     rf"{_GLOSS}"
-    rf"(?:{_SOFT_GAP},{_SOFT_GAP}(?:(?:and|or|&)[ \t]+)?|{_SOFT_GAP}(?:and|or|&)[ \t]+)"
+    # ⛔ `_SOFT_EMPH`, NOT `_SOFT_GAP` (review round 26, P2 — see the `_LIST_SEP` note above): the
+    # emphasis a DECLINE list accepts made the CLAIM list lose the reference. The CONJUNCTION TAIL is
+    # emphasis-tolerant too, for the same reason and in the same commit: `and **#200**` is the same
+    # list as `, **#200**`, and fixing one half of the statement while leaving the other is this
+    # file's recurring failure (rounds 13–18). `[ \t*_`]+` still requires a separator character, so
+    # `and#200` is not a list, and the prose control (`Part of #100 and the fix is …`) still claims
+    # only `#100` because a `#N` must follow immediately.
+    rf"(?:{_SOFT_EMPH},{_SOFT_EMPH}(?:(?:and|or|&)[ \t*_`]+)?|{_SOFT_EMPH}(?:and|or|&)[ \t*_`]+)"
     rf"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{{1,7}}\b)*)",
     re.IGNORECASE,
 )
@@ -553,9 +575,11 @@ SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNO
 # scoping). Not imported verbatim because that pattern also requires trailing whitespace after the
 # bracket, which would miss a bare `- [ ]` at end of line.
 CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULTILINE)
-# The TICKED subset, for the follow-up comment that proves a criterion. Derived from the same marker
-# class on purpose: a second spelling of "is this a task item" is how the two readers drift.
-TICKED_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[xX]\]", re.MULTILINE)
+# ⛔ `TICKED_RE` USED TO SIT HERE and is deliberately NOT replaced (review round 26, P2). Its only
+# reader was `has_satisfies_checklist`'s "tick in a LATER comment" arm, which is where the false PASS
+# was: any finished task list anywhere after the heading cleared a `## Satisfies` with no criteria.
+# A constant kept "just in case" reads as a live second spelling of "is this a task item", which is
+# the drift this module keeps re-discovering — so it is removed with its reader, not parked.
 IN_FLIGHT_RE = re.compile(
     r"^[ \t]*(?:[-*+][ \t]+)?[\s*_`]*IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE
 )
@@ -923,11 +947,24 @@ def has_satisfies_checklist(comment_bodies: list[str]) -> bool:
     the defect it exists to report ("work started before the completion criteria existed"), which is
     the false-PASS direction this module ranks worst.
 
-    The predicate is now: a box in the HEADING's own comment, OR a TICKED box in a LATER comment.
-    The second arm is the original justification for not requiring co-location and it survives intact
-    — criteria are ticked in a follow-up comment once proved, and that must not re-flag a finished
-    issue (`test_a_tick_in_a_later_comment_still_counts`). An UNticked box after the heading is some
-    other checklist, not this one.
+    ⛔ THE "TICKED BOX IN A LATER COMMENT" ARM IS GONE (review round 26, P2). It was justified as
+    "criteria are ticked in a follow-up comment once proved, and that must not re-flag a finished
+    issue" — and that justification is measurably false: a finished issue's criteria are `[x]` boxes
+    in the HEADING's own comment, which the first arm already accepts. The arm only ever fired on the
+    case its comment does not describe — a heading with NO criteria at all plus any later tick:
+
+        [INV, "## Satisfies\n\nTo be derived.", "## Verification\n\n- [x] x"]  -> rc 0  (false PASS)
+        [INV, "## Satisfies\n\nTo be derived.", "- [ ] unrelated"]           -> wip-no-satisfies
+
+    i.e. a finished `## Verification` list cleared the exact defect this arm exists to report, which
+    is the same false PASS round 25 closed one layer up. Both cases that motivate co-location-tolerance
+    (`test_a_tick_in_a_later_comment_still_counts`,
+    `test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts`) keep their heading
+    comment's own `- [ ]` boxes, so they stay green with the arm removed — verified by disabling the
+    arm and re-running the file.
+
+    The predicate is now: a box in the HEADING's own comment. An UNticked box after the heading is
+    some other checklist, not this one — and so is a TICKED one.
     """
     # Read through `strip_code`, exactly as `in_flight_markers` does. A comment that SHOWS the
     # format inside a fence is an example, not a checklist: matched against the raw bodies it
@@ -935,13 +972,10 @@ def has_satisfies_checklist(comment_bodies: list[str]) -> bool:
     stripped = [strip_code(b)[0] for b in comment_bodies]
     headings = [bool(SATISFIES_HEADING_RE.search(s)) for s in stripped]
     boxes = [bool(CHECKBOX_RE.search(s)) for s in stripped]
-    ticked = [bool(TICKED_RE.search(s)) for s in stripped]
     for i, has_heading in enumerate(headings):
         if not has_heading:
             continue
         if boxes[i]:
-            return True
-        if any(ticked[i + 1:]):
             return True
     return False
 

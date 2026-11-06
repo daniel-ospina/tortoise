@@ -761,9 +761,19 @@ def test_a_satisfies_heading_with_no_checkbox_is_not_a_checklist():
 
 
 def test_a_tick_in_a_later_comment_still_counts():
-    """Criteria are ticked once proved; requiring heading+boxes in ONE comment re-flags a finished issue."""
+    """A finished issue stays clear — but NOT because of the later tick (review round 26, P2).
+
+    This test's name and docstring used to credit the `- [x] a` in the follow-up comment for clearing
+    the arm. It never did: the heading's OWN comment carries `- [ ] a` / `- [ ] b`, so the first arm
+    already returns True. Kept (and relabelled) as the control it actually is — the affordance this
+    test was believed to justify is the one that was a false PASS, and it is pinned against below in
+    `test_a_ticked_list_after_the_heading_is_not_this_headings_criteria`.
+    """
     findings, _ = L.classify_issue([IN_FLIGHT, "## Satisfies\n\n- [ ] a\n- [ ] b\n", "- [x] a\n"], 1)
     assert findings == []
+    # …and it clears on the heading's own UNticked boxes alone, with no follow-up comment at all —
+    # which is the whole demonstration that the later tick is not load-bearing.
+    assert L.classify_issue([IN_FLIGHT, "## Satisfies\n\n- [ ] a\n- [ ] b\n"], 1)[0] == []
 
 
 def test_an_injected_wip_verdict_is_honoured_and_attributed():
@@ -2513,8 +2523,15 @@ def test_a_task_list_SOMEWHERE_is_not_a_satisfies_checklist():
 
 def test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts():
     """The two sides the fix must keep apart: a box in the HEADING's own comment clears the arm, and
-    a TICK in a follow-up comment still does (criteria are ticked once proved — requiring
-    co-location would re-flag every finished issue, which is why the original predicate was loose)."""
+    an UNticked list in a later comment does not.
+
+    ⛔ THE NAME AND THE THIRD ASSERTION ARE NOW THE WHOLE STORY (review round 26, P2): the "a TICK in
+    a follow-up comment still does" half was removed because it was a false PASS — a finished list
+    anywhere after the heading cleared a `## Satisfies` with no criteria. This test's second
+    assertion still holds, but it holds on the heading's own `- [ ]` boxes, not on the later tick;
+    the ticked/unrelated pair is pinned in
+    `test_a_ticked_list_after_the_heading_is_not_this_headings_criteria`.
+    """
     inv = "IN FLIGHT: 3.2c — branch feat/census"
     assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n"], 1)[0] == []
     assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n", "- [x] a\n"], 1)[0] == []
@@ -2622,3 +2639,82 @@ def test_the_default_limit_is_not_refused_offline(tmp_path):
     body.write_text("Refs #100\n", encoding="utf-8")
     for argv in (("--body-file", str(body)), ("--issue-body-file", str(body))):
         assert _run(*argv).returncode in (L.RC_CLEAN, L.RC_FINDINGS), argv
+
+# --- review round 26: two false PASSes, in the two arms this file's pairs exist to pin ------------
+
+
+def test_an_emphasised_continuation_is_the_same_list():
+    """Measured at `afd6de51` (review round 26, P2) — the FALSE PASS direction, arm 1.
+
+    `CLAIM_RE`'s continuation separator was `_SOFT_GAP` — whitespace only — while the DECLINE list
+    (`_REF_LIST`), the plural run (`_REF_RUN_GAP_RE`) and this module's own comment all admitted
+    Markdown emphasis (`_LIST_SEP`'s `*`, `_`, `` ` ``). So the emphasis a decline list ACCEPTS made
+    the claim list lose the reference, and `#200` was never even evaluated:
+
+        `Closes #100, #200`            -> closing=[100], weak=[200]                     (correct)
+        `Closes #100, **#200**`        -> `#200` absent, rc 0                           (false PASS)
+        `Part of **#100**, #200`       -> weak=[100], `#200` absent, rc 0               (false PASS)
+        `Part of #100 and **#200**`    -> weak=[100], `#200` absent, rc 0               (false PASS)
+
+    Emphasised references are prose this repo writes (`#11116`: `Also closes the gap tracked by
+    **#5114**`), so this is not a theoretical spelling. Each shape is pinned as a PAIR — the
+    emphasised body must read exactly like its unemphasised twin — and the round-22 blank-line rule
+    and the conjunction prose control are re-run here so the widening cannot buy its green by
+    re-opening either.
+    """
+    for plain, emph in (("Closes #100, #200\n", "Closes #100, **#200**\n"),
+                        ("Refs #100, #200\n", "Refs #100, *#200*\n"),
+                        ("Part of #100 and #200\n", "Part of #100 and **#200**\n"),
+                        ("Part of #10085,\n#10063\n", "Part of #10085,\n**#10063**\n")):
+        assert L.claims(emph, 1) == L.claims(plain, 1), emph
+        assert [f.evidence["unresolved"] for f in L.classify_pr(emph, 1)] == \
+            [f.evidence["unresolved"] for f in L.classify_pr(plain, 1)], emph
+    # The emphasis may also close the ref the list starts FROM (`**#100**`), not just the continuation.
+    assert L.claims("Part of **#100**, #200\n", 1) == L.claims("Part of #100, #200\n", 1)
+    # ⛔ THE WIDENING MUST NOT RE-OPEN EITHER NARROWING. A blank line still ends the list, so the
+    # `#N` after it is a MENTION and is never claimed (`Closes` claims #100 alone → clean;
+    # `Part of` claims #100 alone → #100 flagged, #200 not).
+    assert L.claims("Closes #100\n\nand **#200** is tracked separately.\n", 1)["weak"] == []
+    assert L.claims("Closes #100\n\nand **#200** is tracked separately.\n", 1)["closing"] == [100]
+    assert L.claims("Part of #100,\n\n**#200**\n", 1)["weak"] == [100]
+    # …and a `#N` still has to follow the separator, so prose is not a list (`#200` in inline code,
+    # and the no-separator spelling, both claim only `#100`).
+    assert L.claims("Part of #100 and the fix is `#200`.\n", 1)["weak"] == [100]
+    assert L.claims("Part of #100 and#200\n", 1)["weak"] == [100]
+
+
+def test_a_ticked_list_after_the_heading_is_not_this_headings_criteria():
+    """Measured at `afd6de51` (review round 26, P2) — the FALSE PASS direction, arm 2.
+
+    `has_satisfies_checklist`'s second arm returned True on a TICKED box in ANY later comment, so a
+    finished list cleared a `## Satisfies` that has no criteria at all:
+
+        [INV, "## Satisfies\\n\\nTo be derived.", "## Verification\\n\\n- [x] x"]  -> rc 0   (false PASS)
+        [INV, "## Satisfies\\n\\nTo be derived.", "- [ ] unrelated"]             -> wip-no-satisfies
+
+    That is the same shape round 25 closed one layer up (a task list SOMEWHERE is not this heading's
+    checklist) — the only difference being whether the unrelated list happens to be finished. The
+    arm's stated justification ("criteria are ticked in a follow-up comment once proved, and that
+    must not re-flag a finished issue") is measurably false: a finished issue's criteria are `[x]`
+    boxes in the HEADING's own comment, which the first arm already accepts.
+
+    The pairs: a TICKED and an UNticked unrelated list must get the SAME verdict (red-first — the
+    ticked one read rc 0 before this fix), and every shape that legitimately clears still clears.
+    """
+    inv = "IN FLIGHT: 3.2c — branch feat/census"
+    unrelated = ("- [ ] a\n",
+                 "- [x] a\n",
+                 "## Verification\n\n- [x] the guard holds\n",
+                 "## Verification\n\n- [ ] the guard holds\n")
+    for later in unrelated:
+        assert [f.arm for f in L.classify_issue(
+            [inv, "## Satisfies\n\nTo be derived.\n", later], 1)[0]] == [L.ARM_ISSUE], later
+        assert L.has_satisfies_checklist(
+            ["## Satisfies\n\nTo be derived.\n", later]) is False, later
+    # ⛔ THE AFFORDANCE IS NOT LOST. A real checklist clears whether its boxes are unticked (scoping
+    # happened) or ticked (the criteria were proved), with or without a follow-up comment.
+    for satisfies in ("## Satisfies\n\n- [ ] a\n- [ ] b\n",
+                      "## Satisfies\n\n- [x] a\n- [x] b\n"):
+        assert L.classify_issue([inv, satisfies], 1)[0] == [], satisfies
+        assert L.classify_issue([inv, satisfies, "- [x] a\n"], 1)[0] == [], satisfies
+    assert L.has_satisfies_checklist(["## Satisfies\n\n- [x] a\n"]) is True
