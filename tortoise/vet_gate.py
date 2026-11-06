@@ -647,7 +647,8 @@ def vet_candidates(embed_list: object, *,
 # ── Applying the verdicts — the removal, and the Layer-1 guard ─────────────
 
 def _referenced_entity_names(embed_list: object,
-                             discarded_ids: set[str]) -> set[str]:
+                             discarded_ids: set[str], *,
+                             relation_endpoints: bool = True) -> set[str]:
     """Entity names referenced by any candidate that is NOT being discarded.
 
     This is the P0 guard's input. Only *surviving* items are scanned: an
@@ -658,6 +659,16 @@ def _referenced_entity_names(embed_list: object,
     :func:`apply_vet` handles the removed-entity-endpoint case separately. A
     shape we do not recognise contributes nothing, which is safe because the
     guard's only failure mode is keeping too much.
+
+    ``relation_endpoints`` (#10999) decides which of the TWO questions the
+    entity↔entity channel's endpoints answer. For the DISCARD guard (default
+    ``True``) an endpoint is a reference and must protect its entity. For the
+    Rule-4 RESTORE leg it is not, because the channel is **result-level**: an
+    endpoint naming an entity no pass emitted leaves ``execute_embed``'s
+    ``relations`` unresolved — dropped and named, the declared fail-open — and
+    the Layer-1 payload never carries it, so it cannot 422. Counting it there
+    asserted the opposite ("the payload will fail Layer-1 unless the extractor
+    emits it") on the routine case.
     """
     names: set[str] = set()
     for section, index, item in _iter_items(embed_list):
@@ -681,13 +692,36 @@ def _referenced_entity_names(embed_list: object,
     # whose sole tie to the emission is a relation's endpoint looked
     # unreferenced and could be DISCARDed — and S5 would then drop the
     # relation as unresolvable, one stage after this guard authorised it.
-    for rel in embed_list.get("relations") or []:
+    #
+    # ⚠️ `_norm(ref)` ALONE leaves this arm half-closed. S5 resolves the
+    # endpoint by ``.casefold()`` (``extractor_v2._resolve_relation_endpoint``)
+    # while this module normalises by ``.lower()`` — the very pair the
+    # ``_norm`` docstring above names as DIVERGENT on ('Straße', 'İ'). For a
+    # spelling variant the two folds disagree on, S5 resolves "STRASSE" →
+    # "Straße" and ``_norm("STRASSE")`` is "strasse" ≠ "straße", so the
+    # entity whose ONLY tie is that relation is still DISCARDed — the gap this
+    # arm exists to close, one spelling variant in. Carry every emitted entity
+    # the endpoint could resolve to instead; keeping too much is this guard's
+    # only safe failure mode.
+    if not relation_endpoints:
+        return names
+    emitted: dict[str, set[str]] = {}
+    for entity in _section_items(embed_list, "entities"):
+        if isinstance(entity, Mapping):
+            key = _norm(entity.get("name"))
+            if key:
+                emitted.setdefault(key.casefold(), set()).add(key)
+    for rel in _section_items(embed_list, "relations"):
         if not isinstance(rel, Mapping):
             continue
         for side in ("src", "dst"):
             ref = rel.get(side)
-            if isinstance(ref, str) and ref.strip():
-                names.add(_norm(ref))
+            if not (isinstance(ref, str) and ref.strip()):
+                continue
+            names.add(_norm(ref))
+            # both folds, because the emitter's own key may carry either
+            for probe in (ref.strip().casefold(), _norm(ref).casefold()):
+                names |= emitted.get(probe, set())
     return names
 
 
@@ -1068,7 +1102,8 @@ def apply_vet(embed_list: Mapping[str, Any],
     # prune: a restored name is present again, so it must not be pruned as if
     # it were discarded.
     present = set(_entity_map(out))
-    to_restore = _referenced_entity_names(out, set()) - present
+    to_restore = _referenced_entity_names(out, set(),
+                                          relation_endpoints=False) - present
     for name in sorted(to_restore):
         original = prior_entities.get(name)
         if original is not None and str(original.get("name") or ""):

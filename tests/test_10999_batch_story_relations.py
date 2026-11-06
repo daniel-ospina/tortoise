@@ -33,6 +33,7 @@ import copy
 import pytest
 
 from tortoise import extractor_v2 as v2
+from tortoise import vet_gate as vg
 
 #: A two-entity emission plus ONE relation the narrative states. Deliberately
 #: minimal: the relation's endpoints are the two entities the same emission
@@ -336,3 +337,93 @@ def test_core_predicates_are_accepted(predicate):
                               "predicate": predicate}]
     result = _run(emission)
     assert [r["predicate"] for r in result["relations"]] == [predicate]
+
+
+# ── 8. the S2.2 VET guard reads the same emission, in the same fold ───────
+#
+# The channel's endpoints are the entity's ONLY tie to the emission whenever
+# the narrative is the sole place the entity is mentioned, so the VET guard
+# must count them or it DISCARDs the entity and S5 then drops the relation —
+# the same gap one stage earlier. Both arms below are load-bearing: the ASCII
+# arm alone passes while a `.lower()`-vs-`.casefold()` spelling variant is
+# still missed, because the two normalisers live on opposite sides of these
+# two modules (see `vet_gate._norm` and `test_norm_matches_extractor_norm`).
+
+
+def _discard_entity(emission, index):
+    """A verdict map DISCARDing `entities[index]` — the shape `apply_vet`
+    expects, keyed exactly as `vet_candidates` mints it."""
+    return {vg._item_id("entities", index, emission["entities"][index]):
+            {"outcome": "DISCARD"}}
+
+
+def test_the_vet_guard_protects_an_entity_named_only_by_a_relation_endpoint():
+    """The P2 this pins: an entity whose ONLY tie to the emission is a
+    relation endpoint is REFERENCED, so a DISCARD is downgraded to KEEP.
+
+    Nothing else names "Retry Storm" here — drop the guard arm and the entity
+    goes, taking the relation with it.
+    """
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"},
+                     {"name": "Deadline Rule", "kind": "core:rule"}],
+        "relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
+                       "predicate": "IMPL"}],
+    }
+    out, warns = vg.apply_vet(emission, _discard_entity(emission, 0),
+                              prior=None)
+    assert [e["name"] for e in out["entities"]] == ["Retry Storm",
+                                                    "Deadline Rule"]
+    assert any("referenced by a surviving candidate" in w for w in warns), warns
+    # ...and the relation still lands, so the guard's protection is not
+    # academic — the edge survives the whole S2.2 → S5 path.
+    assert _run(out)["relations"] == [
+        {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL"}]
+
+
+def test_the_vet_guard_protects_a_casefold_only_endpoint():
+    """S5 resolves an endpoint by ``.casefold()``; this guard normalises by
+    ``.lower()``. A spelling variant the two folds disagree on ("STRASSE" for
+    "Straße") is resolvable to S5 and was still MISSED here, so the entity was
+    discarded and the relation dropped — the arm half-closed.
+    """
+    emission = {
+        "entities": [{"name": "Straße", "kind": "core:object"},
+                     {"name": "Deadline Rule", "kind": "core:rule"}],
+        "relations": [{"src": "STRASSE", "dst": "Deadline Rule",
+                       "predicate": "IMPL"}],
+    }
+    # the premise: S5 DOES resolve this spelling, so the guard must not miss it
+    assert v2._resolve_relation_endpoint(
+        "STRASSE", {"Straße", "Deadline Rule"},
+        {"strasse": ["Straße"], "deadline rule": ["Deadline Rule"]},
+    ) == "Straße"
+    out, _warns = vg.apply_vet(emission, _discard_entity(emission, 0),
+                               prior=None)
+    assert [e["name"] for e in out["entities"]] == ["Straße", "Deadline Rule"]
+    assert [r["src"] for r in _run(out)["relations"]] == ["Straße"]
+
+
+def test_a_dangling_endpoint_does_not_claim_the_payload_will_fail_layer1():
+    """The channel is RESULT-level, so an endpoint naming an entity no pass
+    emitted leaves the relation unresolved (dropped and named) and never
+    reaches the Layer-1 payload — it CANNOT 422.
+
+    The Rule-4 restore leg is about references that would 422, so counting
+    endpoints there asserted the opposite on the routine case.
+    """
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"},
+                     {"name": "Noise Entity", "kind": "core:object"}],
+        "points": [{"content": "the retry storm tripped",
+                    "pointKind": "core:fact",
+                    "about_entities": ["Retry Storm"]}],
+        "relations": [{"src": "Retry Storm", "dst": "Ghost Rule",
+                       "predicate": "IMPL"}],
+    }
+    out, warns = vg.apply_vet(emission, _discard_entity(emission, 1),
+                              prior=None)
+    assert any("discarded entities 'Noise Entity'" in w for w in warns), warns
+    assert not [w for w in warns if "Layer-1" in w], warns
+    # the dangling endpoint is still REPORTED — by S5, where the drop happens
+    assert any("Ghost Rule" in w for w in _run(out)["warnings"])
