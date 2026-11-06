@@ -583,8 +583,9 @@ class TestCliRender:
 
         Mutation this pins: export `sys.path` verbatim (the pre-fix `_child_env`). A child
         given a root carrying `types.py` cannot use the stdlib `types`, and which failure it
-        reports depends on the child: the editable-install interpreter this test spawns (what
-        every `python-ci` job has) dies AT STARTUP (`init_import_site: Failed to import the
+        reports depends on the child: the editable-install interpreter this test spawns (the
+        shape a `python-ci` job that installs the package editable has) dies AT STARTUP
+        (`init_import_site: Failed to import the
         site module`, `ImportError: cannot import name 'MappingProxyType' from partially
         initialized module 'types'`), while a bare interpreter exits 0 from `-c "pass"` and
         dies later on the first import chain that reaches `types` (`import yaml` -> ... ->
