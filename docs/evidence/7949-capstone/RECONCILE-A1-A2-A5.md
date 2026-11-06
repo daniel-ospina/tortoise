@@ -161,7 +161,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
 **Exact remaining gap for `#10984`** (states its own scope, writes no producer):
 (a) invoke the `#11213` planner at a real call site, or declare that `#11083`/`#11237` own the invocation
 and re-scope to measurement-only — ⚠️ **not `#10999`**, which this record named before that issue closed:
-`#10999` is **CLOSED** (2026-11-06T22:40:34Z, `closingIssuesReferences` empty) and its remainder, the
+`#10999` is **CLOSED** (2026-11-06T22:40:34Z, `closedByPullRequestsReferences` empty — the issue field, not
+`closingIssuesReferences`, which is a PR field and cannot be read on an issue) and its remainder, the
 Object→Object **write** path, is **`#11237`** (OPEN). Naming a closed issue as an owner is the same
 orphaning this section warns about for the `v4-mechanisms.yml` row;
 (b) add the declared-edge leg to the census so `0 → N` is observable at
