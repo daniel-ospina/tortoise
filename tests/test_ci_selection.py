@@ -6463,7 +6463,11 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
         f"{sorted(matrix_jobs)}, but this test only pins the caps on "
         f"{sorted(counts)} — a new matrix must be added here (with its shard "
         "count) so it cannot ship unbounded (#6744)")
-    measured_pool = 12          # `gh api .../actions/runners` — 12 online
+    measured_pool = 12          # `gh api .../actions/runners` — 12 online AT THE MEASUREMENT
+    # (2026-10-31, the read `docs/ops/ci-wall-clock.md` §7 dates its `12 / 12` row to). ⚠ Not a live
+    # figure: re-read it on any re-tune rather than trusting this line. The invariant below is
+    # one-sided (`sum(caps) <= measured_pool - 3`), so a POOL THAT GREW keeps the shipped caps
+    # conservative and reds nothing — which is exactly why an undated read here is easy to miss.
     reserved_for_others = 3     # MATRIX headroom kept free, not a total guarantee:
     # a PR's eligible non-matrix jobs can still take these runners (see the
     # SCOPE note above and `docs/ops/ci-wall-clock.md` §7).

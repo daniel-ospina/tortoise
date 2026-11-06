@@ -3749,7 +3749,11 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 #: drift shipped green: a reader (or a fixer) sent to `:1891` lands one job earlier on the `test`
 #: job's FalkorDB-teardown comment and never finds the refusal it was sent to read. (`origin/main`
 #: moved it once more during the #11032 rebase, to `:1967`; the numbers below are re-derived at THIS
-#: head, and the citation that accompanies them is read from the file rather than from this note.)
+#: head, and the citation that accompanies them is read from the file rather than from this note.
+#: ⚠ The `:1891` half of that sentence is now off by the rebase's own inserts: at this head `:1891`
+#: is the `test` job's `orphan-bound.sh --count` invocation and the teardown comment it used to
+#: point at is `:1896-1898` — the same drift, one layer out, and unpinned prose is why it is note
+#: rather than assertion.)
 _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
 
 #: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
@@ -3766,8 +3770,9 @@ _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 #: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
-#: DIFFERENT step since: they were ALREADY stale on `main` (the workflow went 4071 -> 4789 lines, of
-#: which #6744's own three inserts are ~97), which is why nothing read them. The pin catches drift
+#: DIFFERENT step since: they were ALREADY stale on `main` (the workflow went 4071 -> 4789 lines at
+#: the pre-rebase head, of which #6744's own three inserts are ~97 — it is 4833 after the #11032
+#: rebase merged main's five further commits), which is why nothing read them. The pin catches drift
 #: from ANY insert above the cited step, not from this branch's.
 _WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", "python-ci.yml:3624-3631")
 
@@ -3946,7 +3951,8 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # to make a required leg schedulable.
     #
     # Mutation: revert either number to its pre-#6744 value (`:1891`) -> RED naming the line it
-    # actually hit, which at this head is the `test` job's FalkorDB-teardown comment.
+    # actually hit, which at THIS head is the `test` job's `orphan-bound.sh --count` invocation
+    # (`:1891`); the FalkorDB-teardown comment that `:1891` used to land on is now `:1896-1898`.
     workflow_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
     for rel in _REFUSAL_CITATION_SITES:
         text = (REPO_ROOT / rel).read_text()
