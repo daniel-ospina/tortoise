@@ -685,24 +685,29 @@ def test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention():
     explained by nothing — the decline is scoped by the node's identity, so
     blanket-explaining the pair here would decouple this arm from that scoping.
 
-    ⚠️ DEFENSIVE for the SANCTIONED shape, and ⛔ THIS PIN DOES NOT EXERCISE THE
-    DENY — both MEASURED (#11224's review, P2/P3). Emptying
-    `cache_projection.CACHE_FORBIDDEN_COLUMNS` leaves every assertion below
-    green, because this pin's record side carries the DECLINE pair only (the
-    deny's mirror direction has its own pin,
-    `test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention`). And it
-    is not defensive for the decline AS A WHOLE either: `summary` is absent from
-    `read_node`'s map by construction, but `_searchText` is NOT, because a
-    post-#10000 row projects it (`#10965`) — so on that population this arm
-    FORGIVES a real gap (a cache that lost the field the Source FTS index is
-    declared on reads `clean`), and the fix is `#11233`'s, not this pin's. The
-    mirror is the right SHAPE for a caller that hands the record side RAW (an
-    audit that opened the record with its own SQL), exactly as the sibling arm
-    ABOVE is for the deny; this pin does not feed that shape — its record side is
-    the projection's own vocabulary (`{**served, …}`), whereas a raw row would
-    additionally red on the record's COLUMN spellings (`source_kind` vs
-    `sourceKind`, measured) — so the arm pins the decline MIRROR, not the
-    raw-row contract.
+    ⚠️ DEFENSIVE for the `summary` spelling only — and MEASURED twice over
+    (#11224's review, P2/P3). (1) ⛔ THIS PIN DOES NOT EXERCISE THE DENY:
+    emptying `cache_projection.CACHE_FORBIDDEN_COLUMNS` leaves every assertion
+    below green (MEASURED), because this pin's record side carries the DECLINE
+    pair only; the deny's mirror direction has its own pin,
+    `test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention` (ABOVE).
+    (2) ⛔ And the mirror BRANCH it pins is NOT "defensive for the sanctioned
+    shape" either: `summary` is absent from `read_node`'s map by construction,
+    but `_searchText` is NOT — a post-#10000 row derives it from the topic
+    lexicon, so `node_from_row` PROJECTS it (`#10965`; MEASURED: props
+    `['_searchText', 'sourceKind', 'topics', 'url']`). On that population the
+    SANCTIONED path reaches this branch and it FORGIVES a real gap: a cache
+    answer that lost `_searchText` — the one field the Source FTS index is
+    declared on — reads `clean` with `explained_missing {'_searchText'}`
+    (MEASURED). That false GREEN is `#11233`'s, not this pin's; the pin's job is
+    the `summary` half, where the record keeps the prose and the projection
+    declines it. ⚠️ The mirror is the right SHAPE for a caller that hands the
+    record side RAW (an audit that opened the record with its own SQL), exactly
+    as the sibling arm ABOVE is for the deny; this pin does not feed that shape —
+    its record side is the projection's own vocabulary (`{**served, …}`),
+    whereas a raw row would additionally red on the record's COLUMN spellings
+    (`source_kind` vs `sourceKind`, measured) — so the arm pins the decline
+    MIRROR, not the raw-row contract.
     """
     from tortoise.cache_projection import episodic_source_declined_properties, node_from_row
 
