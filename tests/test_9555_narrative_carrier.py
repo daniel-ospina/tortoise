@@ -3375,13 +3375,21 @@ def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
     for _case_id, why, replacement in _SUMMARY_NEGATION_REWORDINGS:
         _lead = re.match(r"(?:\band\b|\bbut\b|\bwhich\b)\s+", replacement,
                          re.IGNORECASE)
-        if _lead and re.search(r"(?:\band\b|\bbut\b)\s*$", _before, re.IGNORECASE):
+        #: ⛔ THE SAME ALTERNATION ON BOTH SIDES. `_lead` accepted `which` while
+        #: this guard did not, so a document re-worded to `which must not be
+        #:` `:Source.summary`` substituted `which must which must not be …`
+        #: (measured at `82e061f35`, review cycle 22).
+        if _lead and re.search(r"(?:\band\b|\bbut\b|\bwhich\b)\s*$", _before,
+                               re.IGNORECASE):
             replacement = replacement[_lead.end():]
         if replacement == head_clause:
             continue
         mutated = deciding.replace(head_clause, replacement)
-        assert mutated != deciding, (
-            f"the mutation for {why!r} changed nothing in the deciding sentence")
+        #: ⛔ NO `assert mutated != deciding` HERE. It could never fire: the
+        #: `continue` above removes the only case where replacement ==
+        #: head_clause, and `str.replace` with a different needle always changes
+        #: the string. Deleted for the reason the §9.4 assert at :3361 was — an
+        #: assert that cannot fail is worse than none (review cycle 22 measured it).
         assert _negates_the_summary(mutated), (
             f"re-wording the negation ({why}): {replacement!r} still states the "
             f"claim, but `_negates_the_summary` refused the sentence: {mutated!r}")
@@ -3712,6 +3720,21 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "§12.1b's `:Source` footnote no longer states §9.4 ③'s identity rule — "
         "the footnote's two halves are *what the vector reads* and *how identity "
         "is decided*; dropping the second re-opens `#3998`")
+    #: ⛔ THE PREDICATE ALONE IS NOT ENOUGH: a NEW clause can re-open identity
+    #: around it. Cycle 21 closed `… or a random id` appended INSIDE the quoted
+    #: rule; cycle 22 measured `is **already implemented**. ⛔ Identity is
+    #: therefore **not** URL + content hash.` — GREEN, because the asserted
+    #: substring still precedes it. So a negation bound to the identity RULE,
+    #: anywhere in the footnote, is refused too (fail-CLOSED: over-blocking here
+    #: is declared, under-blocking shipped an un-decided identity).
+    assert not _negation_bound_to(footnote, r"URL \+ content hash", read_verb=False), (
+        "§12.1b's `:Source` footnote NEGATES §9.4 ③'s identity rule somewhere on "
+        "the line — the rule is asserted present above, and a later clause that "
+        "says identity is NOT URL + content hash re-opens `#3998` while the "
+        "presence assert stays green. Fail-CLOSED: a correct sentence whose "
+        "SEPARATE clause negates something else near those words would red here, "
+        "and that over-block is declared rather than paid for by shipping the "
+        "fail-open")
     #: ...and the THIRD claim the footnote makes is WHICH ontology section a
     #: `summary` is filed under — the one this branch's pre-rebase wording got
     #: WRONG (§4.4, which is `Document`). `summary_section` is DERIVED from the
@@ -3745,7 +3768,14 @@ _UNLANDED_STATUS_CUES = (
     "remains open",
     "not yet landed",
     "has not landed",
-    "is open",
+    #: ⛔ NOT the bare `"is open"`. It was in this set and it over-blocked: a line
+    #: that names `#10852` and says a DIFFERENT question "is open" (*"… the V2
+    #: question it does not settle is still open"*, or a row recording that the
+    #: non-session `:Source` embedding case "is open", which §9.4 itself says)
+    #: was reported as *"the record calls `#10852` unlanded"* — a false RED on a
+    #: correct line in a `tier1` module (measured at `82e061f35`, review cycle
+    #: 22). The removed phrase is the one that cannot be bound to the issue; the
+    #: rest name the ISSUE's own status closely enough to read as a claim about it.
 )
 
 
@@ -3760,9 +3790,13 @@ def _lines_claiming_unlanded(text: str, issue: str) -> list[str]:
     The trade is stated rather than hidden, the same way `_RETIRED_SUMMARY_BLUR`'s
     is: the cue set is a SPELLING set, so a third spelling (*"awaiting"*,
     *"unmerged"*) would evade it — a fail-OPEN residual, filed with the rest of
-    this file's. It cannot over-block, because the claim it refuses can never be
-    true of a merged PR: the only cost of the exact set is a false NEGATIVE, and
-    the accept cases below pin that the corrected wording is not among them.
+    this file's. ⚠️ And it CAN over-block, which the previous draft of this
+    docstring denied: the cues are matched LINE-wide against a line that merely
+    names the issue, so a correct line mentioning an unrelated still-open
+    question is reported as calling THIS issue unlanded. The bare `"is open"`
+    cue was removed for exactly that (measured); the remaining ones are narrower
+    but the shape is the same, and it is DECLARED rather than claimed away. The
+    accept cases below pin that the corrected wording is not among them.
     """
     lowered = text.lower()
     return [
