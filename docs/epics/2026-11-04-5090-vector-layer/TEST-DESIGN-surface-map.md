@@ -219,11 +219,15 @@ shrinking the checklist.
 ## 9. Findings recorded while building this map
 
 **F1 — the epic docs' line cites have drifted at this head, and two of the differences a first
-pass read as drift are NOT.** Spread across three artifacts: `04-plan.md` §5 cites
-`projection/__init__.py:18491`, `:18570`, `:18577` and `embeddings.py:1268`; `03-scope.md:66` (S4) cites
-`:18570`, `:18577`, `:18582`; `05-decompose.md:112` (C4) cites `:18570` and `:18577`. At `af864a42a` the
-`projection/__init__.py` cites resolve to **`:18556`, `:18635`, `:18642` and `:18647`** — a real move,
-because the docs were cut at `641e5f1b37` and `main` moved. **Not silently corrected in the plan** (it is
+pass read as drift are NOT.** The stale `projection/__init__.py` cites live in **five** artifacts, not
+three — the full inventory, so a later lane can tell whether it is looking at a new one:
+`01-align.md:33` (`:18491`), `02-research.md:61` (`:18570`), `03-scope.md:66` (`:18570`, `:18577`,
+`:18582`), `04-plan.md:138` (`:18491`, `:18570`, `:18577`), and `05-decompose.md:104` (`:18491`),
+`:105` (`:18577`), `:112` (`:18570`, `:18577`) — plus `embeddings.py:1268` in `04-plan.md` §5. At
+`af864a42a` the `projection/__init__.py` cites resolve to **`:18556`, `:18635`, `:18642` and `:18647`**
+— a real move, because the docs were cut at `641e5f1b37` and `main` moved. Enumerate with
+`grep -rn ':18491\|:18570\|:18577\|:18582' docs/epics/2026-11-04-5090-vector-layer/*.md | grep -v
+TEST-DESIGN`; re-run it before adding a six. **Not silently corrected in the plan** (it is
 a record of a head): this map cites the live lines and names the delta. But the distinction between a
 move and a **citation choice** is the point of saying any of it, and two files are byte-identical between
 the two heads, so a difference in their numbers is never drift:
