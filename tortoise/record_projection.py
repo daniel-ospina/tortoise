@@ -743,6 +743,21 @@ class RecordStatementError(RecordProjectionError):
     raised from the reporter itself — the "lost row nobody can attribute"
     failure this class exists to end. Both arms keep the fault clause, so no
     call shape is a trap.
+
+    ⛔ AND BOTH ARMS COMPOSE THE FAULT CLAUSE THE SAME WAY — ``_driver_fault``
+    (#11121). This one composed it as ``type(cause).__name__: {cause}``, i.e.
+    ``str(cause)``, which on a driver error is the protocol's fields
+    CONCATENATED: the ``DETAIL``/``CONTEXT`` clause quotes the refused row or a
+    prefix of its values, so the withhold documented above was true of the
+    message arm and false of the cause arm, and every value
+    :func:`_column_pair` names-by-length came back verbatim through the one
+    line a caller logs. ``record_writer._bounded_cause`` cannot repair it either
+    — it narrows on the OUTER exception's ``diag``/``pgcode``, and a
+    ``RecordStatementError`` carries neither, so it takes its ``str(exc)``
+    branch with the driver's ``DETAIL`` already embedded here. No in-tree caller
+    builds this form today (only :func:`replay` raises the class, via the
+    message form), which is exactly why it is pinned by a test rather than left
+    as a trap for the repair script or backfill the form is documented for.
     """
 
     def __init__(self, statement: Statement | str,
@@ -756,7 +771,7 @@ class RecordStatementError(RecordProjectionError):
         detail = (statement.attribution()
                   if isinstance(statement, Statement) else str(statement))
         super().__init__(
-            f"{where} failed ({type(cause).__name__}: {cause}) — {detail}"
+            f"{where} failed ({_driver_fault(cause)}) — {detail}"
         )
 
 
