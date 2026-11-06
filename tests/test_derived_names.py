@@ -1187,7 +1187,17 @@ def _const_str(node, _depth: int = 0) -> str | None:
         if left is None:
             return None
         right = _const_str(node.right, _depth + 1)
-        return left + right if right is not None else left
+        if right is None:
+            # ── #11217 review round 12 (P1): a concatenation with ONE undecidable
+            # operand is a HEAD, never a value. Returning `left` folded a PARTIAL
+            # that every transform above then computed on, so
+            # `("test_" + os.urandom(4).hex())[-6:]` folded to the OWNED literal
+            # `"test_"` while the real handle is the six hex characters — an
+            # UNOWNED name certified as owned. `_prefix_of` reads a concat's head
+            # structurally off `.left`, so head resolution never needed the
+            # partial; only a VALUE did, and a partial is not one.
+            return None
+        return left + right
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
         template, right = _const_str(node.left, _depth + 1), _const_str(node.right, _depth + 1)
         if template is None or right is None:
@@ -2053,6 +2063,43 @@ def test_a_present_but_undecidable_slice_bound_fails_CLOSED(tmp_path):
         assert "UNDECIDABLE" in bad[0], (
             f"`{assignment}` is NOT decidable, so the violation must say so "
             f"rather than claim a resolved prefix: {bad}")
+
+
+def test_a_PARTIAL_concat_fold_is_not_a_decidable_VALUE(tmp_path):
+    """A concatenation with ONE undecidable operand is a HEAD, not a value.
+
+    #11217 review round 12 (P1). `_const_str`'s `Add` branch returned the left
+    operand alone when the right one could not be folded
+    (`return left + right if right is not None else left`). Reading a HEAD, that
+    is right — and `_prefix_of` reads the head structurally off `.left`, so it
+    never needed the partial. Reading a VALUE, it is wrong, and every transform
+    above it in the same function then computes on the partial:
+    `("test_" + os.urandom(4).hex())[-6:]` folded to the OWNED literal
+    `"test_"` while the real handle is the last six of the hex — an UNOWNED
+    name certified as owned, i.e. an inert journal the sweep PRESERVES. Same
+    class as round 11 one field over and round 5 one node over: a transform
+    classified off an argument it cannot fold.
+
+    Pinned as BEHAVIOUR: reverting the fix turns this GREEN, which is the
+    regression class rounds 5, 11 and 12 each closed.
+    """
+    site = tmp_path / "test_partial_concat_value.py"
+    # The journaled handle is the LAST SIX characters of `"test_" + <12 hex>`,
+    # i.e. an UNOWNED name; the leading `"test_"` is not part of it at all.
+    site.write_text(
+        _raw_client_site(
+            '    name = ("test_" + os.urandom(4).hex())[-6:]',
+            "    _journal_append(name)"),
+        encoding="utf-8",
+    )
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad, (
+        "`(\"test_\" + <undecidable>)[-6:]` is NOT a decidable value: folding it "
+        "to the left operand `\"test_\"` certifies an UNOWNED handle as owned, "
+        "so the census must fail CLOSED instead of reading GREEN")
+    assert "UNDECIDABLE" in bad[0], (
+        f"the slice bound is resolvable but its BASE is not, so the violation "
+        f"must say UNDECIDABLE rather than claim a resolved prefix: {bad}")
 
 
 def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_path):
