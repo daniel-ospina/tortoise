@@ -1456,12 +1456,6 @@ assert set(RECORD_MUTATIONS) == set(JOURNAL_EVENT_TYPES), (
 # the journal carries it" — the projection is where that becomes executable.)
 # ════════════════════════════════════════════════════════════════════════════
 
-#: `table_columns()`'s column matcher — an ALIAS of `_COLUMN_TYPE_RE` below, not
-#: a second list (#11075 review P2). It used to carry its own seven-term type
-#: alternation, so widening the vocabulary for the declared-type pin would have
-#: left the PLACEMENT reader unable to see a `numeric`/`uuid`/`date` column: the
-#: column would be typed and closure-enforced by the pin while `_split_properties`
-#: still pushed its value into the `props` tail. One list, two readers.
 _DERIVED_CHECK_RE = re.compile(
     r"chk_[a-z_]+_props_no_derived\s+CHECK\s*\(\s*NOT\s*\(\s*props\s*\?\|"
     r"\s*ARRAY\[(.*?)\]\s*::text\[\]\s*\)\s*\)",
@@ -1643,7 +1637,7 @@ _COLUMN_RE = _COLUMN_TYPE_RE
 #: matches NONE of this repo's own forward migrations (measured).
 _ADDED_COLUMN_TYPED_RE = re.compile(
     r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?\s+"
-    r"(" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?",
+    r"((?:" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?)",
     re.I | re.S)
 
 #: A forward migration that NARROWS or WIDENS an existing column's type:
@@ -1660,7 +1654,7 @@ _ADDED_COLUMN_TYPED_RE = re.compile(
 _ALTER_COLUMN_TYPE_RE = re.compile(
     r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.([a-z_]+)\s+"
     r"ALTER\s+COLUMN\s+\"?([a-z_][a-z0-9_]*)\"?\s+TYPE\s+"
-    r"(" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?",
+    r"((?:" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?)",
     re.S | re.I)
 
 

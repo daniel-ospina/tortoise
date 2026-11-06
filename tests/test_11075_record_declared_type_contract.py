@@ -338,10 +338,15 @@ def _is_json_text(value: str) -> bool:
     return True
 
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_UUID_RE = re.compile(r"^[0-9a-f]{32}$", re.I)
 _INT_LITERAL_RE = re.compile(r"^-?\d+$")
+
+
+def _parse_date(value: str) -> object:
+    """`value` as a date, or raise `ValueError` — Postgres's own verdict."""
+    from datetime import datetime
+
+    return datetime.strptime(value.strip(), "%Y-%m-%d")
 
 
 def _parse_iso(value: str) -> object:
@@ -379,13 +384,26 @@ def _accepts(declared: str, value: Any) -> bool:
     if declared == "uuid":
         # Parsed, like the timestamp arm: `uuid` is in the widened vocabulary, so
         # this arm is what greets the first such column, and "any string" would
-        # certify a value Postgres refuses with `22P02`.
-        return isinstance(value, str) and bool(_UUID_RE.match(value))
+        # certify a value Postgres refuses with `22P02`. The COMPACT and BRACED
+        # spellings are accepted too — `uuid_in` takes them, so refusing them
+        # would be a false red on a correct tree.
+        if not isinstance(value, str):
+            return False
+        return bool(_UUID_RE.match(value.strip().strip("{}").replace("-", "")))
     if declared == "date":
         if isinstance(value, datetime):
             return True  # a datetime carries a date; Postgres accepts the cast
-        return isinstance(value, date) or (
-            isinstance(value, str) and bool(_DATE_RE.match(value)))
+        if isinstance(value, date):
+            return True
+        if not isinstance(value, str):
+            return False
+        # VALUE, not shape: `2026-02-30` matches any reasonable pattern and is
+        # refused by Postgres (`22008`).
+        try:
+            _parse_date(value)
+        except ValueError:
+            return False
+        return True
     if declared in ("jsonb", "json"):
         if isinstance(value, str):
             # sent as `text`; `text → jsonb` PARSES it (#10593's 22P02)
@@ -400,12 +418,14 @@ def _accepts(declared: str, value: Any) -> bool:
             return False
         if isinstance(value, int):
             return True
-        # `float8 → int4` is an ASSIGNMENT cast, and an integral float is what a
-        # JSON producer hands over (`json.loads("3.0")`) for the #9264 column —
-        # refusing it would be a FALSE red, whose obvious repair is the
-        # exemption this file exists to make unreachable.
+        # `float8 → int4` is an ASSIGNMENT cast, so Postgres ACCEPTS any
+        # in-range float and ROUNDS it. Refusing a non-integral float here would
+        # be a false red on a correct tree — the direction this file calls the
+        # worse error, because its obvious repair is the exemption the file
+        # exists to make unreachable. (A lossy value is the producer's problem,
+        # not a refusal.)
         if isinstance(value, float):
-            return value.is_integer()
+            return True
         # A string literal is coerced by the assigned column type (`'3'` into an
         # `integer` column IS accepted), so the arm matches that rather than
         # claiming a refusal that does not happen.
@@ -771,26 +791,51 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
                     continue
                 if column not in declared.get(table, {}):
                     missed.append(f"{table}.{column} ({name})")
-        for table, alter_body in rp._ALTER_ADD_COLUMN_RE.findall(sql):
+        # ⚠️ The dumb forward-shape reader, INDEPENDENT of `_ALTER_ADD_COLUMN_RE`:
+        # inheriting the reader's own prefix regex would make this arm blind to
+        # any spelling the reader misses — `ALTER TABLE ONLY public.point …`
+        # (pg_dump's canonical form) and `ALTER TABLE "public"."point" …` both
+        # reproduce the "green with nothing known" hole (#11075 review round 3).
+        dumb_alter = re.compile(
+            r'ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?'
+            r'(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?(.*?);', re.S | re.I)
+        rewrites: dict[tuple[str, str], tuple[int, str]] = {}
+        for found_alter in dumb_alter.finditer(sql):
+            table = found_alter.group(1)
             if table not in rp.THE_RECORD_TABLES:
                 continue
-            for pattern in (added, retyped):
-                for found in pattern.finditer(alter_body):
-                    column = found.group(1)
-                    type_token = re.sub(
-                        r"\s+", " ", found.group(2).strip().lower()
-                    ) + (found.group(3) or "")
-                    here = declared.get(table, {})
-                    if column not in here:
-                        missed.append(
-                            f"{table}.{column} (forward shape in {name}, "
-                            f"type {type_token!r} — the column is not "
-                            "captured at all)")
-                    elif here[column] != type_token and pattern is retyped:
-                        missed.append(
-                            f"{table}.{column} (forward REWRITE in {name} to "
-                            f"{type_token!r}, but the reader reports "
-                            f"{here[column]!r} — the rewrite is not applied)")
+            alter_body = found_alter.group(2)
+            for found in added.finditer(alter_body):
+                column = found.group(1)
+                type_token = re.sub(
+                    r"\s+", " ", found.group(2).strip().lower()
+                ) + (found.group(3) or "")
+                if column not in declared.get(table, {}):
+                    missed.append(
+                        f"{table}.{column} (forward ADD COLUMN in {name}, "
+                        f"type {type_token!r} — the column is not captured "
+                        "at all)")
+            for found in retyped.finditer(alter_body):
+                column = found.group(1)
+                type_token = re.sub(
+                    r"\s+", " ", found.group(2).strip().lower()
+                ) + (found.group(3) or "")
+                if column not in declared.get(table, {}):
+                    missed.append(
+                        f"{table}.{column} (forward REWRITE in {name} to "
+                        f"{type_token!r} — the column is not captured at all)")
+                    continue
+                # LAST rewrite wins (`_declared_types_for_dir`'s documented
+                # rule), so only the final one is asserted APPLIED: a column
+                # retyped twice would otherwise red on its first rewrite — a
+                # FALSE red on a correct tree.
+                rewrites[(table, column)] = (found.start(), type_token)
+        for (table, column), (_at, type_token) in rewrites.items():
+            if declared[table][column] != type_token:
+                missed.append(
+                    f"{table}.{column} (forward REWRITE to {type_token!r}, but "
+                    f"the reader reports {declared[table][column]!r} — the "
+                    "rewrite is not applied)")
     assert missed == [], (
         "these columns are DECLARED in a migration and were not captured by "
         "`_DECLARED_TYPE_ALTERNATION`, so they are outside every pin -- widen "
@@ -825,10 +870,16 @@ def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     # breaks the `\s+` joins the statement regexes need.)
     assert "not a comment inside the body" in stripped
     assert "EXECUTE 'x'; END $$;" in stripped
-    # An escaped quote does not desynchronise the scanner: everything after it
-    # still parses, which is the property that keeps a later DOWN comment out.
+    # An E-literal's escaped quote does not desynchronise the scanner.
     escaped = "COMMENT ON COLUMN public.t.c IS E'it\\'s';\n-- ALTER COLUMN x TYPE jsonb\n"
     assert "ALTER COLUMN x TYPE jsonb" not in rp._strip_sql_comments(escaped)
+    # ⚠️ A PLAIN literal ending in a backslash is COMPLETE under
+    # `standard_conforming_strings=on`, so the scanner must leave quote mode and
+    # strip what follows. This is the case the always-armed escape got wrong
+    # (#11075 review round 2), and without this assertion the bug is unpinned.
+    plain = ("COMMENT ON COLUMN public.point.id IS 'C:" + chr(92) + "';\n"
+             "/* ALTER COLUMN search_keys TYPE jsonb */\n")
+    assert "TYPE jsonb" not in rp._strip_sql_comments(plain)
 
 
 def test_the_stripper_is_load_bearing_at_the_PARSE_level(tmp_path):
@@ -846,7 +897,10 @@ def test_the_stripper_is_load_bearing_at_the_PARSE_level(tmp_path):
     target = copy / "20261102000002_record_point_search_keys_text.sql"
     target.write_text(
         target.read_text(encoding="utf-8")
-        + "\n/*\n  ALTER TABLE public.point\n"
+        # A PLAIN literal ending in a backslash, so the fixture exercises the
+        # escape rule as well as the block comment.
+        + "\nCOMMENT ON COLUMN public.point.id IS 'C:" + chr(92) + "';\n"
+        + "/*\n  ALTER TABLE public.point\n"
           "      ALTER COLUMN search_keys TYPE jsonb;\n*/\n",
         encoding="utf-8",
     )
