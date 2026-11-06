@@ -3563,7 +3563,7 @@ def test_a_record_that_ALREADY_EXITED_is_not_live_whatever_its_pid_answers(
     """`_record_is_live` must honour `EXIT=` before it consults `PID=`/`CHILD_PID=`.
 
     ⛔ Deleting `if _attempt_exits(text): return False` left this whole suite green
-    (measured at `06ba8c8c5`: arm present → 98 passed, arm DELETED → 98 passed), so
+    (measured at `06ba8c8c5^`: arm present → 98 passed, arm DELETED → 98 passed), so
     the arm had no
     regression detector. The consequence is the ordering it exists for: during the
     window where a finished attempt's carrier is still exiting, its pid (possibly
