@@ -140,6 +140,36 @@ def _walk(fname: str, node: yaml.Node, path: str, problems: list[str]) -> None:
             _walk(fname, item, f"{path}[]", problems)
 
 
+def check_registry_text(text: str, shown: str) -> list[str]:
+    """Every integrity problem in one registry TEXT. Empty list means clean.
+
+    The TEXT entry point exists because one caller holds the document in hand
+    rather than on disk: `tools/ci_timing.py::integrity_problems` validates the
+    REFRESHED manifest BEFORE `refresh_durations` writes it, so grading the text
+    keeps that gate's question ("is the document I am about to write valid?")
+    the one it answers. Measured (#10726 review): with a duplicated TOP-LEVEL
+    `durations:` key — the shape that actually reaches that writer, which the
+    renderer emits twice and `validate_refreshed_manifest` does not report — the
+    duplicate-key walk catches it and no other composed validator does. (A
+    duplicated `.durations:` ROW is already refused earlier, by
+    `_locate_durations_block`, so it cannot reach the write at all.)
+
+    Same fail-closed rule as the path form: text that cannot be parsed returns
+    a problem, never an empty list.
+    """
+    try:
+        node = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        return [f"{shown}: MALFORMED YAML ({exc})"]
+    if node is None:
+        return [f"{shown}: empty document"]
+    if not isinstance(node, yaml.MappingNode):
+        return [f"{shown}: top level is {type(node).__name__}, expected a mapping"]
+    problems: list[str] = []
+    _walk(shown, node, "", problems)
+    return problems
+
+
 def check_registry(path: Path | str) -> list[str]:
     """Every integrity problem in one registry file. Empty list means clean.
 
@@ -152,17 +182,7 @@ def check_registry(path: Path | str) -> list[str]:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         return [f"{shown}: unreadable ({exc}) — a registry that cannot be read is not clean"]
-    try:
-        node = yaml.compose(text)
-    except yaml.YAMLError as exc:
-        return [f"{shown}: MALFORMED YAML ({exc})"]
-    if node is None:
-        return [f"{shown}: empty document"]
-    if not isinstance(node, yaml.MappingNode):
-        return [f"{shown}: top level is {type(node).__name__}, expected a mapping"]
-    problems: list[str] = []
-    _walk(shown, node, "", problems)
-    return problems
+    return check_registry_text(text, shown)
 
 
 def check(paths: list[Path] | None = None) -> list[str]:

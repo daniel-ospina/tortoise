@@ -9,6 +9,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import contextvars
+import datetime
 import json
 import logging
 import math
@@ -39,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 _start = time.monotonic()
 _last_ingest: float | None = None
+
+#: Instant (``time.time()``) of the last record write this process COMMITTED, or
+#: ``None`` if it has never committed one. Read through
+#: :func:`record_last_write_at`; see ``RECORD_WRITE_APPLIED_COUNT`` for why the
+#: positive channel needs a second field and not just a count.
+_last_record_write_at: float | None = None
 _sdk = None  # set by register()
 
 # Per-ATTEMPT bound on the deep DB probe (#1384): a stopped FalkorDB (incident
@@ -770,6 +777,94 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
     "(#9231 review P2)",
     ["reason"],
 )
+# ── #10602: the transport wait bound's OWN breach channel ───────────────────
+#: Requests REFUSED because the transport wait bound expired — the `-32009`
+#: "the server's wait budget for this request was exceeded" refusal, which is
+#: the entire symptom `#10602` is filed about.
+#:
+#: WHY A COUNTER AND NOT JUST THE ANALYTICS EVENT. `-32009` breaches were
+#: emitted to exactly one place: `hosted_api._emit_wait_bound_breach`, a
+#: BEST-EFFORT write to the external analytics sink, scheduled on the telemetry
+#: pool and swallowed on any failure (``logger.debug``). Two consequences, both
+#: measured on `#10602` itself:
+#:
+#: * The health surface could not report the class. On 2026-11-02T15:44Z
+#:   `tortoise_health` answered ``status: "ok"`` while 6/6 single-agent
+#:   `tortoise_search` calls were being refused with `-32009`. Finding the P0
+#:   therefore required an agent to hand-measure six sequential calls — the
+#:   exact work this counter makes unnecessary.
+#: * With no analytics sink reachable, a breach left NO in-process trace at all.
+#:   A channel that is a no-op when its writer is absent is not an observation.
+#:
+#: ``status`` itself is deliberately NOT derived from this counter. The rule
+#: that ``degraded`` means an OBSERVED probe FAILURE — and that a cumulative
+#: counter must never pin a deployment degraded for the life of the process —
+#: is recorded at `metrics`'s own `status` mapping and at `hosted_api.health`'s
+#: docstring (which cites #10185/#10620 for it). This is an ADDITIVE field
+#: beside that verdict, never a rewrite of it.
+#:
+#: ``surface`` is the SURFACE the refused request was SERVED ON — ``mcp`` for
+#: anything under the mounted MCP app, ``rest`` otherwise — NOT the arm that
+#: detected it. The distinction is load-bearing: `WaitBoundMiddleware` owns the
+#: `/mcp` refusal for a request that stalls BEFORE its SSE response begins, and
+#: that pre-SSE stall is served with the JSON-RPC `-32009` body — the exact
+#: shape #10602 recorded. Labelling it by ARM would report the P0's own refusal
+#: class as `rest`, sending an operator to the REST routes while the failing
+#: operation is an MCP tool call. So `WaitBoundMiddleware` classifies with
+#: ``_is_jsonrpc_surface`` on the path it serves (label and response body decided
+#: by the same predicate), while the MCP dispatch seam passes
+#: ``WAIT_BOUND_SURFACE_MCP`` UNCONDITIONALLY — it only ever runs inside the
+#: mounted MCP app, so it has no route to classify, and it deliberately cannot
+#: import ``hosted_api`` on that path (see its own docstring).
+#:
+#: Two values, both literals — a FIXED label set by construction. The
+#: client-supplied route path and tool name stay where they already were (the
+#: analytics prop and the warning log line); putting either on a metric label
+#: would let a caller grow this process's label set without bound.
+#:
+#: The single writer is ``record_wait_bound_breach``, called from each detector's
+#: OWN breach decision point BEFORE any telemetry is scheduled — never from
+#: inside a scheduled closure, which the pool may drop under exactly the
+#: overload that causes breaches (the inert-enforcer shape `#10602` must not
+#: recreate).
+#: The two surfaces the wait bound is enforced on, spelled ONCE as importable
+#: constants. Every writer imports these rather than re-typing the literal, and
+#: `record_wait_bound_breach` REFUSES anything else — the docstring's "cannot
+#: drift apart" claim is only true if it is enforced, and a writer that spelled
+#: its own third literal would otherwise be counted while `/health` kept
+#: zero-padding the two it knows, reporting a correct `total` beside a
+#: per-surface map that silently omits it (the absent-vs-zero reading this whole
+#: channel exists to remove, reproduced one layer down). Both call sites wrap
+#: the write in `try/except`, so the refusal below cannot become a new failure
+#: mode of the request it measures — the same rule the count write follows.
+WAIT_BOUND_SURFACE_MCP = "mcp"
+WAIT_BOUND_SURFACE_REST = "rest"
+_WAIT_BOUND_SURFACES = (WAIT_BOUND_SURFACE_MCP, WAIT_BOUND_SURFACE_REST)
+WAIT_BOUND_BREACH_COUNT = Counter(
+    "tortoise_wait_bound_breaches_total",
+    "Requests refused because the transport wait bound expired (#10602)",
+    ["surface"],
+)
+# ⛔ INITIALISE BOTH CHILDREN AT IMPORT, so `/metrics` carries the same
+# absent-vs-zero guarantee the JSON body gets from `wait_bound_breach_counts`'
+# padding — the rule the whole channel is built on (#3253). A labelled counter
+# creates a child lazily, on first `.labels()`, so without these two lines
+# `generate_latest()` exports NO `{surface="mcp"}` / `{surface="rest"}` series
+# until a breach happens, and an operator scraping the exposition cannot tell
+# "no breach was measured" from "this build cannot see breaches" — the second
+# reading is exactly the false reassurance #10602 exists to remove. Measured on
+# the pre-init head in a fresh interpreter: the family's HELP/TYPE lines are
+# present and there are ZERO `surface` samples.
+#
+# The bounded set is what makes this legal: `surface` has two literal values, so
+# this declares the entire (finite) child set once instead of guessing at
+# unbounded label values. That is the Prometheus client's own guidance —
+# "labeled metrics … should provide a way to initialize a child with its default
+# value—typically by calling `.labels()`" (client_python/instrumenting/labels/,
+# writing_clientlibs/) and the Zen of Prometheus' "export zero-valued series you
+# know exist".
+for _surface in _WAIT_BOUND_SURFACES:      # bounded by construction
+    WAIT_BOUND_BREACH_COUNT.labels(surface=_surface)
 # #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
 #
 # The arm itself is #10119's and is correct: an id absent from the live graph at
@@ -841,6 +936,38 @@ RECORD_POSITION_UNPROVEN_COUNT = Counter(
     "tortoise_record_position_unproven_total",
     "Armed record writes whose journal append could not prove its position, so "
     "layer 1 got no row until a replay (#9307 review F1)",
+)
+# #9548: the record's POSITIVE channel — writes that actually reached Postgres.
+#
+# WHY a fourth record counter (#9548 review, measured on the deployment): the
+# three above are ALL failure/decline channels, so every read of the record's
+# health was `{}` whether it was writing fine or had never been reached. That is
+# not a cosmetic gap: `{}` was the evidence offered for indicator (b) of #9548
+# (`record_write_failures` = 0) while indicator (a) — "a captured session writes
+# `journal_event` + `point` rows" — had no reader at all, so the P0 was closed on
+# an empty object and reopened when `{}` turned out to mean "no write was
+# attempted". A zero-failure counter is an ABSENCE, and absence is not evidence
+# of success (#9307's own lesson, one channel over; the same reason a monitoring
+# read that could not answer is published as ``None``, never as ``0``).
+#
+# The count is the number of live writes whose transaction this process
+# COMMITTED. It is deliberately NOT `RecordWriteOutcome.APPLIED`: that value says
+# "the plan materialized and every statement ran on the caller's connection" —
+# the seam has not committed at that point, so an APPLIED-but-uncommitted write
+# counted here would report the record working from a transaction that was later
+# rolled back. Single writer: ``record_write_applied`` (the #501/#3677 house
+# shape), called by ``record_writer.write_live_record`` immediately after its own
+# ``commit()`` returns.
+#
+# It is a COUNTER, not a gauge, so the surface answers "has this process ever
+# written, and how many" — which is what a capture-then-read check needs — and
+# it resets with the process, like every other counter here. The companion
+# instant (:func:`record_last_write_at`) is what makes an OLD write
+# distinguishable from a live one, since a counter alone cannot say WHEN.
+RECORD_WRITE_APPLIED_COUNT = Counter(
+    "tortoise_record_writes_applied_total",
+    "Armed record writes whose transaction this process COMMITTED to the record "
+    "(#9548) — the positive channel beside the three failure/decline counters",
 )
 # #4095: an allowlist-dropped telemetry key — the same loss class as the audit
 # drop above, and the exact defect #3821 fixed half-way. #3821's choke point
@@ -1541,6 +1668,83 @@ def record_non_journal_skip_counts() -> dict[str, int]:
     return _collect_by_label(RECORD_NON_JOURNAL_SKIP_COUNT, "reason")
 
 
+def record_wait_bound_breach(surface: str) -> None:
+    """Count one request the transport wait bound REFUSED (#10602).
+
+    ``surface`` is one of :data:`WAIT_BOUND_SURFACE_MCP` /
+    :data:`WAIT_BOUND_SURFACE_REST`. Called from each arm's breach
+    decision point BEFORE its analytics emit is scheduled: the emit is
+    best-effort and may be dropped by the telemetry pool's bounded backlog, and
+    a breach counter that goes quiet precisely during a breach storm would be
+    the opposite of what it is for.
+
+    An unrecognised surface raises ``ValueError`` rather than minting a new
+    label. The label set is what makes the import-time child initialisation
+    legal, so an unknown value is a PROGRAMMING error, not data: counting it
+    would grow the label set without bound and leave `/health` zero-padding a
+    map that no longer covers the counter. Raising is safe by construction
+    here — both call sites (``hosted_api.WaitBoundMiddleware`` and
+    ``mcp_server``) invoke this inside ``try/except``, and
+    ``test_a_failing_counter_write_does_not_replace_the_refusal`` pins that a
+    raise from this family cannot replace the legible ``-32009`` refusal.
+
+    Cheap and synchronous on purpose (a single labelled counter increment, no
+    I/O), so the refusal path does not pay for its own observation.
+    """
+    if surface not in _WAIT_BOUND_SURFACES:
+        raise ValueError(
+            f"#10602: unknown wait-bound surface {surface!r}; the label set is "
+            f"bounded to {_WAIT_BOUND_SURFACES} so the health report's "
+            f"zero-padding cannot omit a counted surface")
+    WAIT_BOUND_BREACH_COUNT.labels(surface=surface).inc()
+
+
+def wait_bound_breach_counts() -> dict:
+    """In-process snapshot of ``WAIT_BOUND_BREACH_COUNT`` (#10602).
+
+    On a successful read:
+    ``{"total": N, "by_surface": {"mcp": n, "rest": n}, "error": None}``.
+
+    ⛔ NEVER RAISES, and that is a CONTRACT rather than a convenience: this is
+    read by ``hosted_api.health()``, whose docstring promises "it never 5xxes"
+    and whose every other read is wrapped for exactly that reason (#10648
+    review P2, #2850). A monitoring read that can throw turns the change that
+    makes an outage visible into a 500 on the endpoint Fly probes.
+
+    On a SUCCESSFUL read every known surface is present even at 0 — a missing
+    key and a measured zero must not read the same (``#3253``'s rule for
+    ``graph_size_error``). When the read FAILS both fields are ``None``, so the
+    zero-padding is a success-path guarantee only (see below).
+
+    ⛔ A FAILED READ IS NOT A ZERO — and it is not a zero in ANY field, so the
+    failure shape is ``None``, not padded counts: when the counter family
+    cannot be collected this returns
+    ``{"total": None, "by_surface": None, "error": "…unreadable: …"}``.
+
+    The stricter shape is the rule this very payload already records three keys
+    away: ``hosted_api.health``'s ``record`` counters are ``None`` when they
+    could not be READ, "never ``{}``: an unread counter and a zero are different
+    facts, and the obvious consumer (``counts.get(\"write_failed\", 0)``) would
+    read the second from the first" (``#9548`` review P2). Padding the failure
+    to ``0`` leaves exactly that consumer reading a healthy zero out of a failed
+    read, and only a reader who happens to check the sibling ``error`` field is
+    safe — a scrape or alert rule keyed on ``total`` is not. ``None`` cannot be
+    misread as "no breach was measured", which is the whole point of the
+    channel (#10602).
+    """
+    by_surface = dict.fromkeys(_WAIT_BOUND_SURFACES, 0)
+    try:
+        by_surface.update(_collect_by_label(WAIT_BOUND_BREACH_COUNT, "surface"))
+    except Exception as exc:
+        logger.warning(
+            "#10602: wait-bound breach counts unreadable: %r", exc)
+        return {"total": None, "by_surface": None,
+                "error": f"wait_bound_breaches unreadable: "
+                         f"{type(exc).__name__}"}
+    return {"total": sum(by_surface.values()), "by_surface": by_surface,
+            "error": None}
+
+
 def record_silent_revision_loss(reason: str) -> None:
     """Count one LEGITIMATE revision refused by ``update_point``'s ABSENT arm.
 
@@ -1578,6 +1782,44 @@ def record_position_unproven() -> None:
 def record_position_unproven_count() -> int:
     """In-process snapshot of ``RECORD_POSITION_UNPROVEN_COUNT``."""
     return _counter_val(RECORD_POSITION_UNPROVEN_COUNT)
+
+
+def record_write_applied() -> None:
+    """Count one record write this process COMMITTED, and stamp its instant.
+
+    The POSITIVE channel (#9548): before it, every record counter was a
+    failure/decline channel, so an armed-and-writing deployment and one that had
+    never been reached both read ``{}`` — which is how indicator (b) of #9548
+    was "evidenced" on an empty object while indicator (a) (does a capture
+    actually write rows?) had no reader anywhere on the deployment.
+
+    Single writer: ``record_writer.write_live_record``, immediately after ITS OWN
+    ``commit()`` returns — not at ``RecordWriteOutcome.APPLIED``, which is
+    "the statements ran on the caller's connection" and precedes the commit.
+    Counted on the same swallow-proof path as the failures (it must never be
+    able to break a write that already persisted).
+    """
+    global _last_record_write_at
+    RECORD_WRITE_APPLIED_COUNT.inc()
+    _last_record_write_at = time.time()
+
+
+def record_write_applied_count() -> int:
+    """In-process snapshot of ``RECORD_WRITE_APPLIED_COUNT`` (committed writes)."""
+    return _counter_val(RECORD_WRITE_APPLIED_COUNT)
+
+
+def record_last_write_at() -> str | None:
+    """When this process last COMMITTED a record write — ISO-8601 UTC, or ``None``.
+
+    ``None`` means "this process has not written since it started", which is a
+    fact and not a zero: paired with ``record_write_applied_count`` it separates
+    a deployment that writes from one that has only ever been armed.
+    """
+    stamp = _last_record_write_at
+    if stamp is None:
+        return None
+    return datetime.datetime.fromtimestamp(stamp, datetime.UTC).isoformat()
 
 
 def record_write_failure_counts() -> dict[str, int]:
@@ -5682,12 +5924,32 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # not be confirmed). Zero on a healthy lane means "no revision was lost in
         # silence" — the typo path does not touch it, by design.
         "silent_revision_losses": silent_revision_loss_counts(),
+        # #10602: the transport wait bound's OWN breach channel. `-32009`
+        # "wait budget exceeded" refusals were emitted only to a best-effort
+        # external analytics writer, so the health surface could report
+        # `status: "ok"` while every search was being refused — measured
+        # 2026-11-02T15:44Z. This is the in-process, always-present count.
+        # It does NOT feed `status`: `degraded` stays reserved for an observed
+        # probe failure (see `metrics`'s own note), so this is additive only.
+        "wait_bound_breaches": wait_bound_breach_counts(),
         # #9307 review F1: a DURABLE journal whose append could not prove the
         # record's position writes no layer-1 row (a replay heals it). Its own
         # key, so neither the failure counter nor the non-journal skip counter
         # has to over-claim: this one is the one that says "layer 1 is behind
         # the journal by N records".
         "record_position_unproven": record_position_unproven_count(),
+        # #9548: the POSITIVE pair beside the three failure/decline keys above.
+        # Without it `record_write_failures: {}` is equally consistent with "the
+        # record is writing" and "no write was ever attempted" — the ambiguity
+        # this P0 was closed on and reopened from. ⚠️ `metrics()` builds this dict
+        # inline and has no snapshot read, so the ``None``-on-unread rule is NOT
+        # implemented here: ``record_writes_applied`` is always an int, and
+        # ``record_last_write_at`` is ``None`` only until this process's first
+        # committed write. The all-or-``None`` snapshot lives in
+        # ``hosted_api._record_health`` and is the surface to read when an unread
+        # counter must not be mistaken for a zero.
+        "record_writes_applied": record_write_applied_count(),
+        "record_last_write_at": record_last_write_at(),
         # #7924 review P2: an audit event that reached no durable sink is
         # the same class of failure as a journal write, so it rides THIS
         # payload alongside ``journal_write_failures`` rather than a log line

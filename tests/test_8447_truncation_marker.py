@@ -56,6 +56,26 @@ from tortoise.truncation import (
 
 # ── the marker's own contract ────────────────────────────────────────────
 
+#: A line coordinate in a census cell, in EITHER spelling the doc has used:
+#: contiguous (``hosted_api.py:10209``) and split across two code spans
+#: (`` `config/surface-manifest.yml` (`:121-143`) ``). The filename must be
+#: followed by the coordinate, allowing only the punctuation that separates
+#: them — a closing backtick, whitespace, and the opening paren/bracket.
+#:
+#: MODULE level, not a class attribute, because it is not this class's private
+#: business: `tests/test_8447_c3_ingest_door.py` asks the SAME question of its
+#: own docstrings and imports this predicate rather than re-spelling it. Two
+#: predicates for one question drift, and the drift is invisible in the worst
+#: direction — a citation one matches and the other misses is RED here and GREEN
+#: there.
+_LINE_CITATION = re.compile(
+    r"[\w./-]+\.(?:py|ya?ml)"
+    r"[\s`'\"]*"          # a closing code span and/or whitespace
+    r"[(\[]?"             # the split form's opening paren/bracket
+    r"[\s`'\"]*"
+    r":\d[\w-]*")        # the coordinate itself
+
+
 class TestMarkerVocabulary:
     def test_field_names_are_their_own_and_not_a_status_term(self):
         """Truncation is NOT a fifth read-status term (#8447 / #7952 §17.2)."""
@@ -984,18 +1004,6 @@ class TestTheCensusNamesItsEvidenceHome:
         return text.split("## 2. The census", 1)[1].split(
             "## 3. `OVERRIDES:`", 1)[0]
 
-    #: A line coordinate in a census cell, in EITHER spelling the doc has used:
-    #: contiguous (``hosted_api.py:10209``) and split across two code spans
-    #: (```config/surface-manifest.yml` (`:121-143`)```). The filename must be
-    #: followed by the coordinate, allowing only the punctuation that separates
-    #: them — a closing backtick, whitespace, and the opening paren/bracket.
-    _LINE_CITATION = re.compile(
-        r"[\w./-]+\.(?:py|ya?ml)"
-        r"[\s`'\"]*"          # a closing code span and/or whitespace
-        r"[(\[]?"             # the split form's opening paren/bracket
-        r"[\s`'\"]*"
-        r":\d[\w-]*")        # the coordinate itself
-
     def test_the_pin_sees_the_split_form_too(self):
         """Positive control: the split spelling is a line coordinate TOO.
 
@@ -1008,12 +1016,12 @@ class TestTheCensusNamesItsEvidenceHome:
         against the symbol form that replaced it, which must NOT match), so
         narrowing the pattern reds here instead of silently reopening the hole.
         """
-        assert self._LINE_CITATION.findall(
+        assert _LINE_CITATION.findall(
             "a row in\n`config/surface-manifest.yml` (`:121-143`), **not** as an"), (
             "the census pin no longer sees the split spelling of a line "
             "coordinate, so it can pass over exactly the drift it exists to "
             "catch")
-        assert not self._LINE_CITATION.findall(
+        assert not _LINE_CITATION.findall(
             "a row in `config/surface-manifest.yml` → "
             "`response_fields[tortoise_search].truncated`, **not** as an"), (
             "the census pin reds on the SYMBOL form it recommends — a pin its "
@@ -1041,7 +1049,7 @@ class TestTheCensusNamesItsEvidenceHome:
         carried it. :meth:`test_the_pin_sees_the_split_form_too` is the
         positive control: it reds if this pattern narrows back to contiguous.
         """
-        stale = sorted(self._LINE_CITATION.findall(self._census_section()))
+        stale = sorted(_LINE_CITATION.findall(self._census_section()))
         assert not stale, (
             "the census cites absolute line numbers, which go stale on every "
             "unrelated edit to the file they point into — cite "
