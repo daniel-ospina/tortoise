@@ -5218,8 +5218,9 @@ surfaces:
   # ⛔ ONE ROW ONLY — a second same-surface row is a GATE FAILURE (#5373), never a
   # note, and NOTHING collapses it for you. Measured on real merges: the SAME row
   # appended at two DIFFERENT positions survives as TWO rows, whether or not the
-  # `merge=union` driver is in play (`f.yml merge=union` and `f.yml merge=unspecified`
-  # both yield 2); only the SAME change made in the SAME place collapses to one, and
+  # `merge=union` attribute is set on the path (`git check-attr merge -- f.yml` ->
+  # `f.yml: merge: union` and `f.yml: merge: unspecified` both yield 2); only the SAME
+  # change made in the SAME place collapses to one, and
   # that is git's ordinary identical-change resolution, not a union property (it
   # collapses with the attribute too and without it). So an independent registration is
   # never reconciled — which is what happened here: on 2026-11-06 three lanes each
