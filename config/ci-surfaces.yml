@@ -7599,17 +7599,23 @@ tier1:
 # (`:2725`). `docs/` is in NON_PYTHON_PREFIXES and neither path matches a
 # SOURCE_PATTERNS row, so a runbook-only OR 09-only diff filters to
 # `changed == []` and takes the docs-only early return: tier1 ONLY. Measured on
-# this tree (`tools.ci_selection.select`): `[docs/infra-runbook.md]` →
-# `surfaces=[]`, 73 tier1 files, pin NOT selected; same for the 09 path. So its
+# this tree BEFORE this entry (`tools.ci_selection.select`): `[docs/infra-runbook.md]` →
+# `surfaces=[]`, 73 tier1 files, pin NOT selected; same for the 09 path. (74 and
+# pin SELECTED once the entry below is in — re-measure, do not read 73 as now.) So its
 # runbook pin (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which
 # requires the §9 drill row to still name a `captured` session and a `direct`
 # DSN) and its 09 anchor were ASLEEP on the only diffs that can break them —
 # delete `captured`/`direct` from that row, or drop the 09 arming anchor, and the
 # PR merges green while 08 §R8 silently stops agreeing with the runbook it is
 # derived from (#4309 silent-drop class; the #8614 / #9548 shape one file over).
-# A `core` registration cannot help: a surface's test files only run once that
-# surface is already selected, which a docs-only diff never does
-# (`tools/ci_selection.py:2039-2041`). Hermetic — doc + migration scans, no graph,
+# A `core` registration cannot help: `select()` emits a surface's test files
+# only for a surface it MATCHED, and a docs-only diff matches none — it takes the
+# `if not changed:` early return, whose `test_files` is the tier-1 set and
+# nothing else, so no surface's `test_files` is ever reached. (Named by its
+# mechanism, not a line number: this parenthetical used to pin
+# `tools/ci_selection.py:2039-2041`, a range that had since moved onto an
+# unrelated comment — the decay mode `3443ce66c` corrected across this PR.)
+# Hermetic — doc + migration scans, no graph,
 # no DB, measured weight 0.2 in the durations map — so tier1 is the correct lane.
 # Pinned by tests/test_ci_selection.py::
 # test_the_record_schema_placement_pins_run_on_a_doc_only_diff.
