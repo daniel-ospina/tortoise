@@ -210,12 +210,48 @@ _LITERAL_VERSION_LINE = re.compile(
 
 
 def _literal_version_lines(workflow_text: str) -> list[str]:
-    """Every literal `version:` value inside the setup-cli step, in source order."""
-    return [
-        match.group(1)
-        for line in _setup_cli_block(workflow_text)
-        if (match := _LITERAL_VERSION_LINE.match(line))
-    ]
+    """Every literal `version:` value of the setup-cli step's `with:`, in source order.
+
+    ⛔ SCOPED TO THE PIN'S OWN KEY, NOT TO EVERY `version:` IN THE STEP BLOCK. The text scan this
+    replaces counted any matching line inside the step's byte span, so a CORRECTLY pinned step that
+    merely declared an env var named `version` was refused:
+
+        with:
+          version: 2.122.1
+        env:
+          version: 1.0.0
+        -> REFUSED: "carries 2 literal `version:` lines (2.122.1, 1.0.0) — a duplicate key's
+           tie-break is not measured … Pin exactly once."
+
+    That diagnostic names a mechanism `_structural_duplicate_keys` reports as ABSENT (there is no
+    duplicate key — `env.version` and `with.version` are different mappings), and prescribes a remedy
+    the file already satisfies. It also contradicted this file's own rule, stated in
+    `_alias_supplies_the_pin`: "A `version:` under `env:`/`secrets:` is a different key that happens
+    to share a name." Measured before this fix.
+
+    The key node's line is taken from the COMPOSED tree, so a legal spelling (`version :`,
+    `'version':`) still resolves, and only lines that belong to the pin are considered. A FLOW
+    mapping (`with: {version: …}`) is still refused, for the right reason: its `version:` key sits on
+    the `with:` line, which is not a `version:` line of its own.
+    """
+    step_node = _setup_cli_step_node(workflow_text)
+    pin_lines: set[int] = set()
+    for key_node, value_node in step_node.value:
+        if not (isinstance(key_node, yaml.ScalarNode) and key_node.value == "with"):
+            continue
+        if not isinstance(value_node, yaml.MappingNode):
+            continue
+        for pin_key, _pin_value in value_node.value:
+            if isinstance(pin_key, yaml.ScalarNode) and pin_key.value == "version":
+                pin_lines.add(pin_key.start_mark.line)
+    lines = workflow_text.splitlines()
+    found: list[str] = []
+    for line_no in sorted(pin_lines):
+        if line_no >= len(lines):
+            continue
+        if match := _LITERAL_VERSION_LINE.match(lines[line_no]):
+            found.append(match.group(1))
+    return found
 
 
 def _structural_duplicate_keys(text: str) -> list[str]:
@@ -1037,6 +1073,53 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
     assert _alias_supplies_the_pin(env_aliased) is False, (
         "an alias on `env:` was read as supplying the pin — the detector is wider than its "
         "justification, and it would disable the literal-line arm for an unrelated alias"
+    )
+
+    # (a1) a step whose pin is a plain literal and which ALSO declares an env var literally named
+    #      `version` → ACCEPTED, and only the PIN counts as a literal `version:` line.
+    #      ⛔ Measured before this arm existed: `_literal_version_lines` scanned the whole step BLOCK,
+    #      so this correctly pinned workflow was REFUSED with "carries 2 literal `version:` lines
+    #      (…, 1.0.0) — a duplicate key's tie-break is not measured … Pin exactly once." That names a
+    #      mechanism `_structural_duplicate_keys` reports as ABSENT and prescribes a remedy the file
+    #      already satisfies — and it contradicted this file's own rule, quoted in
+    #      `_alias_supplies_the_pin`: "A `version:` under `env:`/`secrets:` is a different key that
+    #      happens to share a name." The reader now takes the pin's key node from the composed tree.
+    env_same_name = workflow.replace(
+        env_anchor,
+        f"          version: {pin}\n        env:\n          version: 1.0.0\n",
+        1,
+    )
+    assert "          version: 1.0.0" in env_same_name, "mutation (a1) did not apply — vacuous"
+    assert _literal_version_lines(env_same_name) == [pin], (
+        "an unrelated `env: version:` was counted as a second literal pin — "
+        f"{_literal_version_lines(env_same_name)!r}"
+    )
+    assert _requested_version(env_same_name) == pin, (
+        "a correctly pinned step that also sets an env var named `version` was refused"
+    )
+    assert _violations(env_same_name, CONFIG.read_text(encoding="utf-8")) == [], (
+        "the guard refused a legal workflow over an env var that merely shares the pin's name"
+    )
+
+    # (a2) the same shape with the `env:` value supplied by an ALIAS → the detector is still FALSE.
+    #      ⛔ This is the shape the narrowing was measured on, and it was asserted NOWHERE: reverting
+    #      the structural detector to the previous textual-prefix-window implementation left the whole
+    #      file GREEN, because the only `is False` shapes asserted (arm (a)'s `env: *shared`, arm (c)'s
+    #      next-step `with:`) are not `version:`-VALUED keys, so both implementations agreed on them.
+    #      A wide detector here switches OFF the literal-line arm for a step whose pin is a plain
+    #      literal — the exact regression the narrowing was written for.
+    aliased_env_value = "x-pin: &xpin 1.0.0\n" + workflow.replace(
+        env_anchor,
+        f"          version: {pin}\n        env:\n          version: *xpin\n",
+        1,
+    )
+    assert "*xpin" in aliased_env_value, "mutation (a2) did not apply — vacuous"
+    assert _alias_supplies_the_pin(aliased_env_value) is False, (
+        "an ALIASED `version:` under `env:` was read as supplying the pin — the detector is wider "
+        "than its justification, and it would disable the literal-line arm for a plain literal pin"
+    )
+    assert _requested_version(aliased_env_value) == pin, (
+        "an aliased `env:` value refused a step whose pin is a plain literal"
     )
 
     # (b) the pin ITSELF supplied by an alias → ACCEPTED, and the RESOLVED value is what is checked.
