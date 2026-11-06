@@ -1538,15 +1538,33 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
     the E2a<->gate-drops pair. The ON run's own `# graph:` line was parsed for
     nothing, so an after share from graph A beside E2a counts from graph B passed
     every check: the head is equal, and both before graphs still name it.
+
+    ⛔ THE GRAPH MUST DIFFER BY ITS EPOCH, NOT BY A NON-NUMERIC TAIL (`#10996`
+    review). The fixture used `capstone_on_54922a800_other`, whose HEAD TOKEN is
+    still the right one — but `_names_head` requires the last segment to be a
+    numeric epoch, so `other` fails the shape test and `score()`'s
+    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1322`) refused it
+    FIRST. With `pass` in place of that guard the earlier mutation runs showed
+    it, and with the guard live the assertion below was satisfied by ITS message
+    — which also contains the graph string. So this pin was measuring the wrong
+    guard, and deleting the identity check it is named for left the suite green.
+    An epoch-differing graph (`…_1793378319` vs the log's `…_1793378318`) passes
+    the head guard and can ONLY be refused by the identity check, which is what
+    the assertion now keys on.
     """
     repo = _copied_bundle(tmp_path)
     log = repo / "docs/evidence/9889/on-arm.log"
-    log.write_text(re.sub(r"^# graph: \S+", "# graph: capstone_on_54922a800_other",
+    other = "capstone_on_54922a800_1793378319"
+    log.write_text(re.sub(r"^# graph: \S+", f"# graph: {other}",
                           log.read_text(), count=1, flags=re.MULTILINE))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
-    assert "capstone_on_54922a800_other" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert other in err, err
+    assert "come from different runs" in err, (
+        "the refusal came from another guard — this pin is about the graph "
+        f"IDENTITY check (`after[\"graph\"] != e2a_record[\"graph\"]`): {err}")
 
 
 def test_the_scores_probe_refuses_a_record_that_does_not_name_the_on_head(
@@ -9117,6 +9135,38 @@ def test_the_after_arm_at_another_head_cannot_express_the_value_gate_by_absence(
     assert refused.value.code == 2, refused.value
     err = capsys.readouterr().err
     assert "arm readback records TORTOISE_VALUE_GATE as ABSENT" in err, err
+
+
+def test_the_on_log_graph_must_name_its_own_head(tmp_path, capsys):
+    """The legacy licence reads the LOG's head, so the log's graph must agree.
+
+    ⛔ `#10996` review (blocking finding on the first cut): the licence, the
+    before-arm graph check and the after arm's own `# graph:`/`# head:` pair all
+    key off the log's `# head:` line, so a log whose `# graph:` named a DIFFERENT
+    run would sail through every later check on a head it merely shares — the
+    head would be `54922a800` while the after share came from another graph. That
+    is the same class of hole `_names_head` was hardened for at `#10610`
+    (`75bfd9c6`), one level out.
+
+    The guard had no pin when it landed: deleting it left this file green. This
+    is that pin, and it is one defect per fixture — the head is untouched, only
+    the graph moves.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert "# head: 54922a800" in text, text[:400]
+    other = "9152448d"
+    text = re.sub(r"^# graph: capstone_on_(\w+)_",
+                  f"# graph: capstone_on_{other}_", text, count=1,
+                  flags=re.MULTILINE)
+    log.write_text(text)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "does not name its own `# head:` line" in err, err
+    assert other in err, err
 
 
 def test_the_committed_legacy_absence_is_disclosed_in_the_record(tmp_path):
