@@ -1711,20 +1711,27 @@ def test_a_run_restores_the_logging_state_it_found():
         "a WARNING emitted after the run is no longer even created")
 
 
-# ── 8. the scored arm is described as a WHAT-IF, never as production ──────
+# ── 8. the arm table says WHICH arm production runs, and only one of them ──
 #
 # #9110 review P2 (claim precision). The arm table called ``before`` "the shipped
 # DEFAULT arm" AND ``after-vet-shipped`` "exactly what production wires today" —
-# two arms cannot both be the deploy. The tree says ``before``:
-# ``_vet_enabled()`` / ``_value_gate_enabled()`` are
-# ``is_truthy(os.environ.get(...))`` and neither deploy surface sets the variables.
+# two arms cannot both be the deploy.
+#
+# ⛔ `#10996` MOVED THE ANSWER, so the section's premise is restated rather than
+# left at the version the pins were first written under: ``TORTOISE_VALUE_GATE``
+# now defaults ON, so "neither deploy surface sets the variables" no longer means
+# "nothing is armed". Production runs the GATE-ARMED half by default; ``before``
+# is the explicit ``=0`` kill-switch counterfactual. The old text here said the
+# tree makes ``before`` the deploy — true before the flip, false after it, and it
+# sat directly above the pins that now assert the opposite.
 #
 # It is worth pinning rather than leaving as prose because the sentence decides the
-# INFERENCE, not the number: "E1 does not move" is true of both arms (60.0% either
-# way), but the cause a reader takes away differs — an armed gate defeated by
-# referential integrity (flags-ON) versus nothing armed at all (deployed). Those
-# point #7949 at opposite next steps, so the audit trail must not claim the second
-# while describing the first.
+# INFERENCE, not the number: "E1 does not move" is true of both arms, but the
+# cause a reader takes away differs — an armed gate defeated by referential
+# integrity (flags-ON) versus nothing armed at all (deployed). Those point #7949
+# at opposite next steps, so the audit trail must not claim the second while
+# describing the first. Since `#10996` the "nothing armed" arm is a WHAT-IF, and
+# re-taking it is what #7949's next step actually is.
 
 _EVIDENCE_DIR = _REPO_ROOT / "docs" / "evidence" / "7949-capstone"
 
