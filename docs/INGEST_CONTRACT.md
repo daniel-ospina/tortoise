@@ -528,9 +528,10 @@ the `{error}`-only shape whose retry action is different.
   every point/operator/supersession (three for a superseding point, three for
   a `MITIGATES` bridge-attack) plus the fixed record/session/source/event
   chain; on the capture lane the `:Session`, the `sessionCaptured` `:Event`,
-  the transcript `:Source`, and one turn `:Point` per conversation entry
-  (`:GraphEvent` records are a COMMIT-lane cost — a capture turn goes through
-  the record carrier and leaves no per-turn event node, so its rate is 1). Exceeding the allowance answers **429** with a
+  the transcript `:Source`, and TWO nodes per conversation entry — the turn
+  `:Point` and its `PointAdded` `:GraphEvent` (the journal-configured lane
+  writes both; the count takes the worst shape, so a deployment with no journal
+  is over-charged rather than under-charged). Exceeding the allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
   is always **your** spend in the window, and `detail.scope` says which
   allowance refused you — `"org"` (your team's own budget) or `"process"` (the

@@ -3470,16 +3470,20 @@ class TestCaptureOrgIngestBound:
         """A tiny capture is charged the chain it leaves behind, not its body.
 
         3 fixed nodes (``:Session`` + ``sessionCaptured`` ``:Event`` +
-        transcript ``:Source``), plus one turn ``:Point`` per conversation entry,
-        at the pricing-tied 1024 B/node. The body of a two-word turn is far
-        smaller than that, which is why a byte-only charge would leave this
-        loop nearly free (the `OVERRIDES:` recorded on #4051).
+        transcript ``:Source``), plus TWO nodes per conversation entry (the turn
+        ``:Point`` and its ``PointAdded`` ``:GraphEvent`` — the rate the shipped
+        journal-configured lane writes), at the pricing-tied 1024 B/node. The
+        body of a two-word turn is far smaller than that, which is why a
+        byte-only charge would leave this loop nearly free (the `OVERRIDES:`
+        recorded on #4051).
         """
-        assert self._charge(1) == 4 * 1024
-        assert self._charge(3) == 6 * 1024
-        assert self._charge(3) - self._charge(1) == 2 * 1024, (
-            "the charge does not grow one node per turn — a long transcript "
-            "would be charged like a short one")
+        assert self._charge(1) == 5 * 1024
+        assert self._charge(3) == 9 * 1024
+        assert self._charge(3) - self._charge(1) == 4 * 1024, (
+            "the charge does not grow two nodes per turn (the turn Point and "
+            "its `PointAdded` durability record) — a long transcript would be "
+            "charged half its node growth on the shipped journal-configured "
+            "lane, the fail-open direction for a throttle")
 
     def test_a_fat_transcript_is_charged_its_bytes_not_its_node_floor(self):
         """The payload term binds once the text outweighs the chain.
@@ -3504,13 +3508,20 @@ class TestCaptureOrgIngestBound:
         formula that produced it.
 
         A bound stated as a formula is only a bound if the GRAPH agrees, and an
-        arithmetic test reading the same constant cannot tell. This leg measures
-        the marginal growth per turn (it is 1 on this lane: a capture turn goes
-        through the record carrier and writes no per-turn ``:GraphEvent``, which
-        a reviewer argued it did) and asserts the declared count covers the
-        whole request — so a lane that starts minting per-turn durability
-        records reds here instead of silently under-charging (the fail-OPEN
-        direction, #4051).
+        arithmetic test reading the same constant cannot tell.
+
+        ⛔ SCOPE OF THIS MEASUREMENT, stated so it is not over-read: the HTTP
+        fixture builds a JOURNAL-LESS SDK (``tests/_http_fixtures.py`` drops
+        ``event_log_path``), where the turn write returns before the emit loop
+        and a turn is 1 node. The SHIPPED shape — ``TORTOISE_EVENT_LOG_BASE_DIR``
+        set (docker-compose, fly.toml) with the record unarmed — runs the emit
+        loop and also writes each turn's ``PointAdded`` ``:GraphEvent``: 2 nodes
+        per turn, measured 21 nodes for a 10-turn capture. The charge therefore
+        takes the WORST shape (``_CAPTURE_TURN_NODES = 2``), which is exactly
+        what this leg checks: the declared count must cover the journal-less
+        request here AND carry the second node the production lane adds, so a
+        future lane that lowers the constant reds this test rather than
+        silently under-charging (the fail-OPEN direction, #4051).
         """
         from tortoise.hosted_api import SessionRequest, declared_capture_write_count
 
@@ -3544,11 +3555,17 @@ class TestCaptureOrgIngestBound:
         marginal = (m10 - m2) / 8
         declared, minted = d10, m10
         assert marginal == 1, (
-            f"the capture's marginal growth is {marginal:.2f} nodes/turn "
-            f"(short=({d2},{m2}), long=({d10},{m10})) but the charge declares "
-            f"{declared} nodes for {minted} minted — a turn that now mints a "
-            "durability record changes the constant this charge is built on, "
-            "and one node per turn under-charges it (#4051, fail-open)")
+            f"the journal-less fixture's marginal growth is {marginal:.2f} "
+            f"nodes/turn (short=({d2},{m2}), long=({d10},{m10})) — it must be "
+            "1 here, because this fixture drops the journal; a different value "
+            "means the fixture started writing one and the shipped 2-node rate "
+            "needs re-measuring")
+
+        from tortoise.hosted_api import _CAPTURE_TURN_NODES
+        assert _CAPTURE_TURN_NODES >= 2, (
+            "the charge declares fewer than 2 nodes per turn, so it under-"
+            "charges every capture on the shipped journal-configured lane "
+            "(Point + PointAdded :GraphEvent) — the fail-open direction")
         assert declared >= minted, (
             f"the charge declared {declared} nodes but the capture minted "
             f"{minted} (marginal {marginal:.2f} nodes/turn) — the throttle "

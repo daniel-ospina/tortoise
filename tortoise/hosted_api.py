@@ -17110,20 +17110,29 @@ class SessionRequest(BaseModel):
 # window can be shorter than the posted conversation — all three over-charge.
 # Under-charging would remove the bound; over-charging delays a request.
 #
-# ⛔ ONE NODE PER TURN — MEASURED, not assumed. A reviewer of the rescued branch
-# argued for 2 (the turn ``:Point`` plus a ``PointAdded`` ``:GraphEvent``, by
-# analogy with ``commit_schema._COMMIT_POINT_ENTRY_NODES``). The graph says
-# otherwise for THIS lane: the capture turn write goes through the RECORD
-# CARRIER, so no per-turn ``:GraphEvent`` node is written — measured on the
-# lane's own test graph, 2 turns mint 5 nodes and 10 turns mint 13, i.e.
-# exactly ``3 fixed + 1 per turn``. Charging 2 would over-state every long
-# transcript by 100% (over-charging is the safe direction, but a bound nobody
-# can explain is not). ``test_the_capture_charge_is_never_cheaper_than_the_write``
-# measures this against the graph, so the day a lane starts emitting per-turn
-# durability records the declared count is caught rather than silently
-# under-charging (the fail-OPEN direction).
+# ⛔ TWO NODES PER TURN — the SHIPPED shape mints the Point AND its durability
+# record. This constant was argued down to 1 twice during review and both
+# arguments were wrong in the same way: they measured the TEST FIXTURE.
+#
+#   * no journal (``_get_event_log() is None``, which is what
+#     ``tests/_http_fixtures.py`` builds — it drops ``event_log_path``):
+#     ``sdk._write_capture_turns`` returns before the emit loop and a turn is
+#     1 node (the ``:Point``). Measured here: 2 turns -> 5 nodes, 10 -> 13.
+#   * JOURNAL CONFIGURED and the record unarmed (``record_holds_turns`` false):
+#     the emit loop runs and each turn also appends ``PointAdded``, which
+#     ``event_store`` CREATEs as its own ``:GraphEvent`` — 2 nodes per turn.
+#     Measured: 2 turns -> 5... i.e. marginal 2.0/turn, 10 turns -> 21 nodes.
+#
+# The second shape is what ships: ``docker-compose.yml`` and ``fly.toml`` both
+# set ``TORTOISE_EVENT_LOG_BASE_DIR`` and neither sets ``TORTOISE_RECORD_DSN``,
+# so the record is unarmed and the graph lane with a journal is the default —
+# and even an armed record falls back to this lane whenever its connect breaker
+# trips. A request-pure charge cannot know which shape it is in, so it takes the
+# WORST one: charging 1 would under-charge 50% of the node growth on every
+# production capture, which is the fail-OPEN direction for a throttle.
+# Reference: ``docs/INGEST_CONTRACT.md`` §9 states the same 2-node rate.
 _CAPTURE_FIXED_NODES = 3   # :Session + sessionCaptured :Event + transcript :Source
-_CAPTURE_TURN_NODES = 1    # one episodic turn :Point per conversation entry
+_CAPTURE_TURN_NODES = 2    # turn :Point + its ``PointAdded`` ``:GraphEvent``
 
 
 def declared_capture_write_count(body: SessionRequest) -> int:
