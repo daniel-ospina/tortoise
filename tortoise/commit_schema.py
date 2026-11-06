@@ -94,7 +94,7 @@ __all__ = [  # noqa: RUF022
     "canonical_payload", "compute_client_commit_id", "point_content_id",
     # ingest budget (#4051 §3.1)
     "declared_commit_write_count", "commit_ingest_charge_bytes",
-    "COMMIT_INGEST_BYTES_PER_NODE",
+    "payload_envelope_bytes", "COMMIT_INGEST_BYTES_PER_NODE",
     # reconciliation
     "GraphState", "PointReconcile", "EntityReconcile", "OperatorReconcile",
     "ReconcileResult", "reconcile_payload",
@@ -1077,13 +1077,47 @@ def commit_ingest_charge_bytes(payload) -> int:
     charge deliberately measures the full body instead. It runs on the
     endpoint's worker thread (``asyncio.to_thread(_commit_sync)``), never on
     the event loop.
+
+    ⛔ THE PAYLOAD TERM CAN NEVER BE ``0``. ``model_dump_json`` RAISES on a value
+    it cannot render as UTF-8 — a lone surrogate (``"\ud800"``, carried as a
+    JSON escape by any body and accepted by the schema) does it, and the field
+    carrying it need not be one the request is charged for: ``telemetry``'s
+    free-form strings are excluded from ``canonical_payload`` and are never
+    METERED, so a 500 KB ``summary`` used to write while the charge collapsed to
+    the node floor — the fail-OPEN direction for a throttle, one endpoint away
+    from the capture lane's identical hole (#4051 §3.1, found by review of
+    PR #11214). ``payload_envelope_bytes`` renders the same model through
+    ``json.dumps`` with ``ensure_ascii``, which ESCAPES a lone surrogate instead
+    of raising, and encodes with ``surrogatepass``, which cannot fail on any
+    ``str`` a JSON body can produce.
+    """
+    return max(payload_envelope_bytes(payload),
+               declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE)
+
+
+def payload_envelope_bytes(model) -> int:
+    """Bytes of a validated request model — and it can never come out ``0``.
+
+    Shared by BOTH session write lanes' charges (commit: this module; capture:
+    ``hosted_api.capture_ingest_charge_bytes``), because they spend ONE per-org
+    window: an under-count on either is a free write on both.
+
+    The fast path is ``model_dump_json`` (the canonical re-serialization). Its
+    fallback must never be ``0``: a body the fast path cannot render is still a
+    body that gets stored, so returning ``0`` charges the node floor only and
+    removes the bound. ``json.dumps`` with ``ensure_ascii`` ESCAPES a lone
+    surrogate instead of raising, and ``surrogatepass`` cannot fail on any
+    ``str`` a JSON body can carry — so the fallback OVER-counts the escape
+    rather than under-counting the write.
     """
     try:
-        payload_bytes = len(payload.model_dump_json().encode("utf-8"))
-    except Exception:  # a charge must never fail a commit
-        payload_bytes = 0
-    return max(payload_bytes,
-               declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE)
+        return len(model.model_dump_json().encode("utf-8"))
+    except Exception:  # never shrink to 0; model_dump() is the only branch
+        # that can still raise (the docstring scopes the guarantee to any ``str``
+        # a JSON body can carry, not to the model itself)
+        return len(json.dumps(model.model_dump(), default=str,
+                              ensure_ascii=True)
+                   .encode("utf-8", "surrogatepass"))
 
 
 # ── Layer-1 validation (deterministic) ────────────────────────────────────
