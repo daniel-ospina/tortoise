@@ -686,17 +686,17 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 # `_VECTOR_INDEX_GAP_WARNED` cannot express this (a set of keys with no value),
 # which is why it is a separate register rather than a reuse.
 #
-# ⛔ THE REGISTER'S KEY IS *NOT* THE WARNING'S KEY, and that is deliberate. The
-# warning's key comes from `_falkordb_version_cache_key() or id(self)`, and on a
-# redis-py that hides the endpoint behind `connection_pool.connection_kwargs`
-# that helper returns None — so the warning's key is an OBJECT ADDRESS on the
-# very per-request path this register exists for. Keyed that way the register
-# would hold one entry per live request slot (address recycling, not store
-# identity), so a per-request rebuild would still repeat the line, and every
-# entry would be pinned to a dead object. `_pair_report_key` therefore prefers
-# the cache key, then the projection's own `_host` (set on every server
-# projection), and only then the address — for a bare unit mock, which is the
-# one shape with no endpoint identity at all.
+# ⛔ THE KEY IS A STORE IDENTITY, NOT AN OBJECT ADDRESS, AND BOTH THIS REGISTER
+# AND THE WARNING LATCH USE IT. The key once came from
+# `_falkordb_version_cache_key() or id(self)`, and on a redis-py that hides the
+# endpoint behind `connection_pool.connection_kwargs` that helper answers None —
+# so on the per-request path both the warning and this report were keyed on the
+# ADDRESS of a projection object: one entry (and one WARNING) per live request
+# slot, never evicted, with dedup depending on allocator address recycling
+# rather than on store identity. `_stable_endpoint()` resolves the endpoint from
+# the cache key, then the projection's own `_host` + the client's port (set on
+# every server projection), and only then the address — that last case is a bare
+# unit mock, the one shape with no endpoint identity at all.
 _VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
 _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
@@ -18603,25 +18603,28 @@ class FalkorProjection(
             return ("embedded", str(path))
         return None
 
-    def _pair_report_key(self, key: tuple) -> tuple:
-        """The key the #11087 pair register is stored under — STABLE across
-        projections of the same store, which the warning's key is not.
+    def _stable_endpoint(self):
+        """The STORE identity both the `#4997` warning latch and the `#11087`
+        pair register key on — stable across projections of one store.
 
         `_falkordb_version_cache_key()` answers `None` when the redis client
         hides its endpoint (redis-py exposes it at
-        `connection_pool.connection_kwargs`, not as `_host`/`host`), so the
-        warning's `endpoint or id(self)` key becomes an OBJECT ADDRESS on
-        exactly the per-request path the pair register exists to quiet. Keyed
-        that way the register would collect one entry per live request slot and
-        a rebuild would still repeat the line. So: the cache key when it
-        resolves, else the projection's own `_host`, else — for a bare unit
-        mock, the only shape with no endpoint identity — the address.
+        `connection_pool.connection_kwargs`, not as `_host`/`host`), which used
+        to collapse the key to `id(self)` on exactly the hosted per-request
+        path these registers exist for: one latch entry — and one WARNING — per
+        live request slot, never evicted. So: the cache key when it resolves,
+        else `_host` plus the client's port (both carried by every server
+        projection), else the address, which is a bare unit mock and the one
+        shape with no endpoint identity at all.
         """
         endpoint = self._falkordb_version_cache_key()
-        if endpoint is None:
-            host = getattr(self, "_host", None)
-            endpoint = ("host", str(host)) if host else key[0]
-        return (endpoint, self._graph_name)
+        if endpoint is not None:
+            return endpoint
+        host = getattr(self, "_host", None)
+        if host is None:
+            return ("instance", id(self))
+        conn = getattr(getattr(self, "db", None), "connection", None)
+        return ("host", str(host), str(getattr(conn, "port", None)))
 
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
@@ -18659,7 +18662,10 @@ class FalkorProjection(
           SHAPE of the response, not by whether anything in it parsed: a
           response that is not a row list at all (a bare string, a mapping, a
           reshaped catalogue after an engine change) also lands here, because
-          the per-row walk skips what it cannot read — see the ⛔ below.
+          the per-row walk skips what it cannot read — see the ⛔ below. A
+          response that is not iterable at all (an `int`, a `bool`) is NOT this
+          lane: it raises in the walk, so it reaches the fail-open lane below
+          and both halves are `None`.
         * **NOT MEASURED** — the catalogue could not be read (the call raised, or
           it answered ``None``): BOTH halves are ``None``, so the pair is never
           half-populated. ``None`` never means "serves nothing".
@@ -18732,11 +18738,11 @@ class FalkorProjection(
             # Everything that can throw lives inside this guard — including
             # the latch-key computation, because `_falkordb_version_cache_key`
             # reads `self.db`, which is absent on a bare projection.
-            endpoint = self._falkordb_version_cache_key() or id(self)
+            endpoint = self._stable_endpoint()
             key = (endpoint, self._graph_name)
-            # #11087/#11311 review P1: the register gets its OWN, stable key —
-            # see `_pair_report_key` for why the warning's key is unusable here.
-            pair_key = self._pair_report_key(key)
+            # Both registers key on the STORE (`_stable_endpoint`), never on the
+            # object address — see that method for why.
+            pair_key = key
 
             # #5434: reuse the rows `_schema_is_current` already read when the
             # caller supplied them (the fast path); otherwise probe HERE (the
