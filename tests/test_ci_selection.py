@@ -3093,9 +3093,13 @@ def test_issue_process_lint_tool_change_selects_core_not_tier1():
     return and falls back to the tier-1 smoke set, which does not contain the file. Widening the
     claiming-word window would then be the one PR that never ran the negatives it must not break.
 
-    Mutation check: removing the CORE_ALSO entry fails the SECOND assert
-    (`test_issue_process_lint.py in r["test_files"]`), because the docs-only early return yields
-    `full: False` with no pin.
+    Mutation check: removing the CORE_ALSO entry fails the first TWO asserts
+    (`"core" in r["surfaces"]` and `test_issue_process_lint.py in r["test_files"]`); the third
+    (`r["full"] is False`) survives, unexercised, because the docs-only early return also yields
+    `full: False`. Measured with the entry removed: `surfaces=[]`, `full=False`, file ABSENT —
+    so the first assert fails FIRST and the second fails too. Stated as the pair because the
+    sibling `test_gh_read_cache_tool_change_selects_core_not_tier1` says the same thing, and a
+    reader re-deriving this pin by hand should not get a different answer from each test.
     """
     r = _sel(["tools/issue_process_lint.py"])
     assert "core" in r["surfaces"], r
