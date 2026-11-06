@@ -2104,16 +2104,23 @@ nothing is lost. `record-reconcile` treats a legacy cache node still carrying th
 occurrence (one property the projection declines to write), NOT as a `field_mismatches` against a record
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
-a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too. ⛔ The classes that lack a repair that RESTORES the value are the NOT-PROJECTABLE one (nothing writes
-the column, so there is nothing to re-derive it from — `#10017`'s purge is itself IN PLACE, it just clears
-the value) **and the `status` residues the carrier mint cannot CARRY**: a NON-STRING value (the state-op leg
+a DESTRUCTIVE CLEAR — a full `record-restore`, whose wipe is
+whole-graph and therefore clears a legacy copy too (and the targeted alternative, a graph-side `REMOVE n.story_arc`, is
+in place in principle but shipped by no instrument — `#10017`'s purge is the precedent on a DIFFERENT population, legacy
+episodic turn `:Point`s, and names no `story_arc`). ⛔ The classes that lack a repair that RESTORES the value are the NOT-PROJECTABLE one (nothing writes
+the column, so there is nothing to re-derive it from) **and the `status` residues the carrier mint cannot CARRY**: a NON-STRING value (the state-op leg
 folds only `jsonb_typeof(… ) = 'string'`) and a `:Subject` value outside `SUBJECT_STATUS_VALUES`
 (`#11296`); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. ⚠️ **CORRECTED (`#10394` follow-up)**: this entry said **only** the NOT-PROJECTABLE class
 lacked one, and earlier still said an uncorroborated `status` had "NO non-destructive repair" — the mint
-above is that route wherever the value is a string the door will write. The classes differ in both why and which lane.
+above is that route wherever the value is a string the door will write. ⚠️ **CORRECTED (review)**: this entry
+named `#10017`'s purge as the repair for THIS class; that tool deletes legacy episodic `:Point`s and names no
+`story_arc`, so it leaves a `:Source`/`:Event` copy in place — the whole-graph wipe clears it, and the targeted
+`REMOVE n.story_arc` is shipped by no instrument. ⚠️ This stamp scopes itself to the REPAIR claim; the
+entry's earlier durability sentences ("the purge was undone by the next routine recovery", "what makes the purge
+durable") describe the legacy turn population and are left as recorded — the acceptance they assert (`sum(size(n.story_arc))`
+= 0 after a restore) holds via the restore's whole-graph wipe. The classes differ in both why and which lane.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED
