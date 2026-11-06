@@ -10530,11 +10530,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     def _refs_of(step: dict) -> str:
         """Everything this step's `with:` block says on a key axis.
 
-        A cache step names keys on TWO axes: `key` (the exact key it wants) and
-        `restore-keys` (the prefixes it will settle for on a miss). A reference
-        question — "does anything still point at the retired key?" — has to read
-        both, because a migrated `key:` carrying `restore-keys: uv-pip-` restores
-        exactly the archive the retirement is supposed to have removed.
+        A cache step points at entries on TWO axes: `key` (the exact key it
+        wants) and `restore-keys` (the prefixes it will settle for on a miss).
+        A reference question — "does anything still point at the retired key?" —
+        has to read both, because a `key:` already migrated to `uv-cache-…` can
+        still reach a retired entry through `restore-keys`.
 
         Do NOT use this for a WRITE question: what a writer saves is its `key`
         alone, so `_key_of` is the right accessor there.
@@ -10889,29 +10889,72 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "`uv cache prune` must run BEFORE the save, or it bounds nothing")
 
     # The legacy shared key must be fully retired: no reader, no writer, on
-    # EITHER key axis. A step left behind on `uv-pip-` would restore 3.6 GB of
-    # another job's pip archive into this job's uv leg and re-open the payload
-    # this change splits — and `restore-keys` is a reference like any other, so a
-    # `key:` migrated to `uv-cache-` with `restore-keys: uv-pip-` still restores
-    # the retired archive. Reading `_key_of` alone left that axis unexamined and
-    # the arm green over exactly the defect it exists to catch (measured: the
-    # mutated workflow passed before this line read `_refs_of`).
-    # A `restore-keys`-only reference is the silent one, and it is invisible to
-    # any future refactor that reads `key` alone — so pin the axis itself rather
-    # than relying on the live workflow happening not to carry one today.
-    _probe = {"with": {"key": "uv-cache-Linux-abc",
-                       "restore-keys": "uv-pip-Linux-"}}
-    assert "uv-pip-" in _refs_of(_probe), (
-        "the retirement arm cannot see a `restore-keys` reference: a migrated "
-        "`key:` with `restore-keys: uv-pip-` restores the retired 3.88 GB "
-        "archive while the pin reads green (#11063)")
-    assert "uv-pip-" not in _key_of(_probe), (
-        "this probe must be invisible on the `key` axis, or it does not "
-        "demonstrate the axis `_refs_of` adds")
+    # EITHER key axis — `key` and `restore-keys` both point a step at a cache
+    # entry, and reading `key` alone left the second axis unexamined (measured:
+    # a workflow carrying `restore-keys: uv-pip-` passed this arm before it read
+    # `_refs_of`).
+    #
+    # What that costs depends on `path`, and the two shapes are NOT equivalent:
+    # `@actions/toolkit` derives ONE cache `version` from the resolved `path`
+    # list and applies it to the primary key and every `restore-key` alike
+    # (`getCacheEntry(keys, paths)` → `version = getCacheVersion(paths)`), which
+    # is the same reason this function's PATH-IDENTITY arm above can state that
+    # "a restore pointed one directory off can never match". So:
+    #   · a step that KEEPS the combined `path:` list (both trees) behind a
+    #     migrated `key:` still reaches the retired combined entry — the damaging
+    #     shape, and the one this arm exists for;
+    #   · a step narrowed to `path: ~/.cache/uv` misses the combined entry anyway
+    #     — safe by accident, not by anything this arm guarantees.
+    # The arm therefore enforces the rule ("nothing references a retired key"),
+    # which is the property that stays true regardless of which `path` a later
+    # edit happens to carry.
+    def _legacy_uv_pip_refs(jobs: dict) -> list:
+        """Every step in `jobs` that still points at the retired `uv-pip-` key.
 
-    legacy = [(jid, s.get("name")) for jid, jd in wf["jobs"].items()
-              for s in (jd.get("steps") or [])
-              if "uv-pip-" in _refs_of(s)]
+        Extracted from the assertion below so the CALL SITE can be pinned: a
+        probe that only exercises `_refs_of` directly stays green if this scan
+        is later narrowed back to `_key_of`, which is the actual regression
+        (measured — see the synthetic-arm check).
+        """
+        return [(jid, s.get("name")) for jid, jd in jobs.items()
+                for s in (jd.get("steps") or [])
+                if "uv-pip-" in _refs_of(s)]
+
+    # ⛔ PIN THE CALL SITE, not just the accessor. Reverting the scan above from
+    # `_refs_of` to `_key_of` while leaving an accessor-only probe in place was
+    # measured GREEN both on the clean workflow and on the mutated one — i.e. the
+    # silent regression the probe was supposed to catch survived it.
+    _combined_path_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv\n~/.cache/pip",
+                 "key": "uv-cache-Linux-abc",
+                 "restore-keys": "uv-pip-Linux-"}}
+    _narrowed_path_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv",
+                 "key": "uv-cache-Linux-abc",
+                 "restore-keys": "uv-pip-Linux-"}}
+    _clean_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv",
+                 "key": "uv-cache-Linux-abc",
+                 "restore-keys": "uv-cache-Linux-"}}
+
+    assert _legacy_uv_pip_refs({"test": {"steps": [_combined_path_step]}}), (
+        "the retirement scan cannot see a `restore-keys` reference while the "
+        "step keeps the combined `path:` list — that step still reaches the "
+        "retired 3.88 GB combined entry (same `path` list ⇒ same cache "
+        "version) and the pin would read green (#11063)")
+    assert _legacy_uv_pip_refs({"test": {"steps": [_narrowed_path_step]}}), (
+        "the retirement scan cannot see a `restore-keys` reference at all — "
+        "`restore-keys` is a key axis like `key`, and the rule this arm "
+        "enforces is that NOTHING references a retired key, whichever `path` "
+        "a later edit happens to carry")
+    assert not _legacy_uv_pip_refs({"test": {"steps": [_clean_step]}}), (
+        "the retirement scan flags a step that references nothing retired — a "
+        "false red here would push the next editor to drop the axis again")
+
+    legacy = _legacy_uv_pip_refs(wf["jobs"])
     assert not legacy, (
         f"`uv-pip-` is still referenced {legacy} (on `key` or `restore-keys`). "
         "The key is retired: pip is read "
