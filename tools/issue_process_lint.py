@@ -214,7 +214,12 @@ CLAIM_RE = re.compile(
     # claimed nothing once comments were blanked instead of deleted, a silent drop).
     rf"(?P<mid>[^\n#]{{0,16}}?|[ \t]+)"
     rf"|(?P<ckw>satisf(?:y|ies|ied)|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b"
-    rf"(?P<cmid>[\s:]*))"
+    # ⚠️ The spelling is the SEPARATOR ITSELF (`\s*:?\s*`), not a character class that happens to
+    # admit the same characters: a class also admits `::` (and `: :`), so `Closes:: #100`
+    # manufactured a resolution `tools/closes_landing.py` does not credit — 33 divergences across
+    # a keyword × separator sweep, ALL doubled-colon, ALL in the class-A direction (round 22, P3).
+    # A class cannot express "at most one colon", so it is written the way the other grammar does.
+    rf"(?P<cmid>\s*:?\s*))"
     # A COMMA-CONTINUED list is claimed in full: `Part of #10085, #10063` claims BOTH, and
     # reading only the first dropped every subject after it (F3) — measured on three open PRs
     # (#11038, #11065, #11093). A CONJUNCTION / OXFORD-comma list is the SAME list: admitting only
@@ -300,7 +305,10 @@ _CLOSING_STEM = (r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]?|ing)?"
 # (`deliberately not closing it.`, `deliberately not closing #1234.`) — measured as FLAGGED by the
 # round-12 grammar, i.e. a false positive on exactly the honesty the block asks for.
 _REF_NOUN = (r"(?:one|ones|ref|refs|reference|references|issue|issues|keyword|keywords"
-             r"|commit|commits|pr|prs|it|them|this|that)\b")
+             r"|commit|commits|it|them|this|that)\b")
+# ⛔ `pr` IS NOT AN OBJECT NOUN (round 22, P3) — the mirror of round 20's subject fix. `the PR` names
+# the PULL REQUEST, so `Refs #100 — not closing the PR.` cleared `#100` while saying nothing about it
+# (`declined=[100]`, rc 0). The honest forms (`this issue`, `this ref`, `#100`) are all admitted.
 _REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
 # A decline may name a LIST — `#100, #200`, `#100 and #200`. Captured as ONE group so every named
 # ref is visible to the target logic; the continuation requires a `#N` right after the separator, so
@@ -349,6 +357,17 @@ _CLOSING_OBJ = rf"{_DET}{_CLOSING_STEM}{_EMPH}{_REF_LIST}"
 #     `Refs #100 — deliberately not closing this issue because #300 must land.`  -> FLAGGED
 # which is correct: that sentence names a live claim in the same breath as the decline.
 _REASON_TAIL = rf"(?:{_EMPH}(?:because|since|as|intended)\b|[ \t]*\()[^#\n]*$"
+# ⛔ THE NEGATION HAS CONTRACTED FORMS TOO (round 22, P2). Alternative (b) admitted `does not` / `not`
+# / `no ` / `non-` and no contraction, so the most natural spelling of the honest decline was flagged
+# while its uncontracted twin declined — a false positive on exactly the honesty the block asks for:
+#     `Refs #100 — it isn't closed.`        -> FLAGGED   (`it is not closed.`      -> clean)
+#     `Refs #100 — this doesn't close it.`  -> FLAGGED   (`this does not close it.` -> clean)
+#     `Refs #100 — we can't close it.` / `cannot` / `won't` / `wasn't` / `never`  -> FLAGGED
+# The bridge and the object grammar are unchanged, so a contracted sentence about ANOTHER subject is
+# still prose (`the sprint isn't closed.` stays flagged — pinned). These are ALTERNATIONS of the
+# negation, not a wider tail: the clause-end and reference-naming rules still apply to each.
+_CONTRACTION = (r"(?:(?:is|was|are|were|does|do|did|ca|wo|has|have|had|could|would|should|must"
+                r"|need)n[’']?t|cannot|never)")
 DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
@@ -358,7 +377,7 @@ DECLINE_RE = re.compile(
     rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}"
     rf"|(?P<reason_a>{_REASON_TAIL})))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
-    rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}(?P<stem_b>{_CLOSING_STEM})"
+    rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-|{_CONTRACTION})(?:{_EMPH})?{_DET}(?P<stem_b>{_CLOSING_STEM})"
     rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}(?:$|[.;])|(?P<reason_b>{_REASON_TAIL}))",
     re.IGNORECASE,
 )
