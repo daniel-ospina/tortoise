@@ -160,7 +160,8 @@ body:
         7. PR body: `Satisfies #<N>: <ids>` for partial work · `Closes #<N>` ONLY on the last unchecked criterion · no-issue PRs write neither.
         8. REVIEW skills/code-review/SKILL.md (fresh context), findings fixed before the record; six ENTRY checks; rail from a linked worktree.
         9. CLOSE: tick proved criteria in the `## Satisfies` comment; close only when all ticked; read the closure back.
-        ### Claim: `IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>` appended to the issue's `<!-- p01-status -->` comment.
+        ### Claim: append this line to the issue's `<!-- p01-status -->` comment
+        IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>
     validations:
       required: false
 
