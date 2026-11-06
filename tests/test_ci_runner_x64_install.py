@@ -3748,7 +3748,7 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 #: `test` job's `strategy` block moved the paragraph to `:1961` — and NOTHING read either file, so the
 #: drift shipped green: a reader (or a fixer) sent to `:1891` lands one job earlier on the `test`
 #: job's FalkorDB-teardown comment and never finds the refusal it was sent to read. (`origin/main`
-#: moved it once more during the #11032 rebase, to `:1967`; the numbers below are re-derived at THIS
+#: moved it once more during the #11032 rebase, to `:1966`; the numbers below are re-derived at THIS
 #: head, and the citation that accompanies them is read from the file rather than from this note.
 #: ⚠ The `:1891` half of that sentence is now off by the rebase's own inserts: at this head `:1891`
 #: is the `test` job's `orphan-bound.sh --count` invocation and the teardown comment it used to
@@ -3776,11 +3776,14 @@ _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: from ANY insert above the cited step, not from this branch's.
 _WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", "python-ci.yml:3624-3631")
 
-#: The sentence such a citation must land on — the opener of the `test-slow` header's cost paragraph
-#: (`# the fallback label is attached. During a real GitHub-hosted outage these two …`), which is
-#: where the refusal is stated. Pinned by SENTENCE, like the refs in the runbook pin below, so a
-#: number that keeps passing `1 <= n <= EOF` while landing elsewhere reds instead.
-_REFUSAL_ANCHOR = "the fallback label is attached"
+#: The sentence such a citation must land on — the FIRST line of the `test-slow` header's cost
+#: paragraph (`# Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while`). The
+#: paragraph's own body states the outage consequence, and the refusal this pin ultimately serves is
+#: the `test-slow` header's `Do NOT change it back to ubuntu-latest` line 30 further down; anchoring
+#: the OPENER is deliberate, so a fixer who re-derives the number lands on the paragraph they mean
+#: rather than on a line in the middle of it. Pinned by SENTENCE, like the refs in the runbook pin
+#: below, so a number that keeps passing `1 <= n <= EOF` while landing elsewhere reds instead.
+_REFUSAL_ANCHOR = "Cost when GitHub-hosted is healthy"
 
 
 def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
