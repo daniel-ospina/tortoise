@@ -304,6 +304,53 @@ def _construct_refusals(workflow_text: str) -> list[str]:
     # byte-precisely; this is the same rule for the token scan.
     step_first, step_last = step_node.start_mark.index, step_node.end_mark.index
 
+    # ⛔ The walk below starts at the node `_setup_cli_step_node` RETURNS. When the step's own `uses:`
+    # (and `with:`) arrive from a step-level merge key, that node is the merge TARGET — the `<<:` sits
+    # on the step mapping, which is the target's PARENT and is therefore never walked — so the merge
+    # key itself escaped. Measured: that shape returned `[]` here AND from `_violations`, while the
+    # docstring above claims merge keys are refused at EVERY depth. Blast radius is bounded (GitHub
+    # reads no `uses:` at all, so the workflow cannot run, and the major-3 ceiling still refuses a v3
+    # pin in the same shape) — but a silent `[]` is exactly what a later reader trusts, so it is
+    # closed rather than recorded as a residual.
+    #
+    # The merge key is found from the DOCUMENT, by locating the node whose `start_mark.index` is our
+    # step's: node identity does not survive a second `compose()`, and matching on the mark does.
+    # This cannot be replaced by "does the returned node declare `uses:` literally?" — it does, which
+    # is precisely why the merge key was invisible.
+    step_start = step_node.start_mark.index
+    seen: set[int] = set()
+
+    def merge_supplies_this_step(node: object) -> bool:
+        if id(node) in seen:  # an alias can point back at an ancestor
+            return False
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key_node, value_node in node.value:
+                if getattr(key_node, "tag", None) == _MERGE_TAG:
+                    targets = (
+                        value_node.value
+                        if isinstance(value_node, yaml.SequenceNode)
+                        else [value_node]
+                    )
+                    if any(
+                        getattr(getattr(target, "start_mark", None), "index", None) == step_start
+                        for target in targets
+                    ):
+                        return True
+                if merge_supplies_this_step(value_node):
+                    return True
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                if merge_supplies_this_step(item):
+                    return True
+        return False
+
+    if merge_supplies_this_step(yaml.compose(workflow_text)):
+        found.append(
+            "the step's `uses:` arrives through a merge key (`<<:`) — GitHub Actions does not "
+            "implement merge keys, so the job would see no action here at all"
+        )
+
     def walk(node: object) -> None:
         if isinstance(node, yaml.MappingNode):
             for key_node, value_node in node.value:
@@ -647,50 +694,36 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
     with pytest.raises(AssertionError, match=r"does not implement: an alias"):
         _requested_version(aliased)
 
-    # (d) ⛔ THE INDEX BOUND, proven (#11134 review P2). `end_mark.line` is the line of the first
-    # token AFTER the step — i.e. the NEXT step's first line — so a LINE range counts that whole
-    # neighbouring line as ours. `end_mark.index` does not. The shape below is LEGITIMATE: this
-    # step's pin is a plain literal, and the alias `*base` belongs to the step that FOLLOWS, whose
-    # first key is the `with:`-before-`uses:` shape this reader accepts elsewhere.
-    #
-    # Measured on this tree: the real index bound returns `_construct_refusals == []`; reverting the
-    # bound to `start.line <= key.line <= end.line` reports `an alias (`*base`) as the value of
-    # `with:` at line 247` and REFUSES the legitimate workflow while naming the wrong step. Without
-    # this case that reversion leaves the whole file green, so this is the only thing holding it.
-    STEP_HEAD = (
-        "      - uses: supabase/setup-cli@v1\n"
-        "        with:\n"
-        f"          version: {pin}\n"
-        "        env:\n"
-        "          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}\n"
+    # (d) a merge key that supplies the step's OWN `uses:` as well as its `with:`. The returned node
+    #     is then the merge TARGET, so the `<<:` sits on that node's PARENT and the depth walk above
+    #     never sees it. Measured before this case existed: `_construct_refusals` returned `[]` and
+    #     `_violations` returned `[]`, while the docstring promised refusal "at EVERY depth".
+    merged_step = (
+        "      - <<: &m\n"
+        "          uses: supabase/setup-cli@v1\n"
+        "          with:\n"
+        f"            version: {pin}\n"
+        "        name: merged step\n"
     )
-    assert STEP_HEAD in workflow, (
-        "the setup-cli step's canonical shape changed — update this mutation rather than "
-        "deleting the case"
+    # Two substitutions, because a long comment block sits between the step's `- uses:` line and its
+    # `with:` — so the step head is NOT contiguous text. Replacing only the `- uses:` line leaves the
+    # original `with:` block behind, which then becomes a DUPLICATE `with:` key and makes the
+    # structural-key arm fire instead of this one.
+    merged = workflow.replace(
+        "      - uses: supabase/setup-cli@v1", merged_step.rstrip("\n"), 1
     )
-    neighbour = workflow.replace(
-        STEP_HEAD,
-        "      - uses: actions/checkout@v9\n"
-        "        with: &base\n"
-        "          version: 9.9.9\n"
-        + STEP_HEAD
-        + "      - with: *base\n"
-        "        uses: actions/setup-node@v4\n",
-        1,
+    merged = canonical.sub("", merged, count=1)
+    assert "<<: &m" in merged and merged != workflow, "mutation (d) did not apply — vacuous"
+    assert not canonical.search(merged), (
+        "a canonical literal `with:`/`version:` block survived mutation (d) — the arm would be "
+        "testing the literals check, not the merge key"
     )
-    assert "      - with: *base" in neighbour, "mutation (d) did not apply — vacuous"
-    assert f"          version: {pin}\n" in neighbour, (
-        "mutation (d) removed this step's own literal pin — the alias would then be the pin and "
-        "the case would be testing the hazard instead of the false block"
+    assert any("merge key" in refusal for refusal in _construct_refusals(merged)), (
+        "the step-level merge that supplies `uses:` reached no arm — `_construct_refusals` "
+        f"returned {_construct_refusals(merged)!r}"
     )
-    assert _construct_refusals(neighbour) == [], (
-        "an alias in the step that FOLLOWS the setup-cli step was refused: the bound is counting "
-        f"the neighbour's line — got {_construct_refusals(neighbour)!r}"
-    )
-    assert _violations(neighbour, CONFIG.read_text(encoding="utf-8")) == [], (
-        "a legitimate workflow with a literal pin was refused because of the next step's shape"
-    )
-    assert _requested_version(neighbour) == pin
+    with pytest.raises(AssertionError, match=r"does not implement: the step's `uses:` arrives"):
+        _requested_version(merged)
 
 
 def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
@@ -916,6 +949,30 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
     # appears in the construct refusal and nowhere else (the sibling case (c) uses the same key).
     with pytest.raises(AssertionError, match=r"does not implement: an alias"):
         _requested_version(aliased_pin)
+
+    # (c) an alias on the FOLLOWING step's own first key → ACCEPTED. The token scan's upper bound
+    #     was `end_mark.line`, which is the line of the token AFTER this step — i.e. the next step's
+    #     `- ` line — so an inclusive bound attributed the NEIGHBOUR's alias to this step and refused
+    #     a legal workflow, naming a line this step does not own. Measured: a following step written
+    #     `- with: *shared` produced "an alias (`*shared`) … at line 243" and `_requested_version`
+    #     raised on a step carrying no construct at all. `_setup_cli_block` already slices this bound
+    #     exclusively; the two readers must agree about where the step STOPS.
+    after = workflow.replace(
+        "      - name: Link project",
+        "      - with: *shared\n        name: Link project",
+        1,
+    )
+    assert "      - with: *shared" in after, "mutation (c) did not apply — vacuous"
+    after = "x-shared: &shared\n  a: 1\n" + after
+    assert _construct_refusals(after) == [], (
+        "an alias on the NEXT step's first key was attributed to the setup-cli step — a false "
+        f"block: {_construct_refusals(after)!r}"
+    )
+    assert _requested_version(after) == pin, "a construct on the following step refused the guard"
+    assert _violations(after, CONFIG.read_text(encoding="utf-8")) == [], (
+        "a legitimate workflow with a literal pin was refused at the GUARD level too, because the "
+        "NEXT step's first key is an alias — the whole point is that this step carries no construct"
+    )
 
 
 def test_a_case_variant_second_step_cannot_pin_a_different_major() -> None:
