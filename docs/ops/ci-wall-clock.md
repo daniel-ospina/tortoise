@@ -159,7 +159,7 @@ exact primary-key match, so anything else falls through to `cache.saveCache(…)
 everything the restore just put there. On a `uv.lock` bump every pip site gets a new primary key
 at once, and this job — p50 1.62 m, the fastest of them — is the likely payer: it restores the
 shared 3.6 GB archive and re-saves it, its own `.[test,postgres]` downloads
-(`python-ci.yml:3635`; `[embeddings]`/torch deliberately absent) being a rounding error beside it.
+(`python-ci.yml:4312`; `[embeddings]`/torch deliberately absent) being a rounding error beside it.
 Its exposure is therefore 12 m in-step + ~1 m setup + ~9 m save ≈ 22 m against 20 → `cancelled` →
 red (#5219), on an event rather than on every run. Moved only from a measurement — nothing has
 measured it cancelled — but the number to move it TO follows the arm-2 rule, not arm 1: 22 × 1.5 →
@@ -191,7 +191,7 @@ cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at
 30). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
-because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so
+because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2734-2739`) and so
 writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
 move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
 
@@ -233,7 +233,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:3624-3631`) and is therefore NOT an arm-1 row — on a key bump
+  writable shared key (`python-ci.yml:4304-4306`) and is therefore NOT an arm-1 row — on a key bump
   its save IS the archive (see the note under the table). Arm 1 applies to a job whose save is
   small because nothing restores an archive into its cache path, not because its `pip install`
   line omits torch.
@@ -590,5 +590,9 @@ fills it with `created_at`. Measured on the same run: `test (e)`–`test (i)` we
 and every one reported `created_at == started_at == 15:38:51Z`, i.e. a wait of **0**, while the
 true wait on them was already ~2 h and counting (`test (d)` read 0 in the same snapshot and 118 m
 once it actually started). This biases a matrix's per-job wait the WRONG way — the legs
-contributing the most wait contribute zero — so filter on `status == "completed"` (or discard a
-`started_at` equal to `created_at`) before averaging, and do not read a low average as relief.
+contributing the most wait contribute zero — so keep `conclusion` `success`/`failure` (§2's own
+population, and the one `test (e)`–`test (i)` failed) or discard a `started_at` equal to
+`created_at` before averaging, and do not read a low average as relief. ⛔ `status` alone does NOT
+filter them: once the run ends those legs read `status: completed`, `conclusion: cancelled`, 0
+steps and `started_at == created_at`, so a `status == "completed"` filter keeps exactly the
+population this paragraph is warning about.

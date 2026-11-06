@@ -3750,6 +3750,20 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 #: job's FalkorDB-teardown comment and never finds the refusal it was sent to read.
 _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
 
+#: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
+#: sentence is about. Separate from `_REFUSAL_CITATION_SITES` because the anchor differs: these
+#: point at install/cache STEPS, not at the `test-slow` refusal paragraph, so one anchor cannot
+#: serve both. (§1's postgres row, §1's falkor install row, §6's arm-1 cache-key row.)
+_WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("python-ci.yml:4312", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2734-2739", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4304-4306", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+)
+
+#: The numbers those three carried before this round — the non-vacuity population. Each resolved to
+#: a DIFFERENT step after #6744's inserts, which is the drift the pin above exists to catch.
+_WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", "python-ci.yml:3624-3631")
+
 #: The sentence such a citation must land on — the opener of the `test-slow` header's cost paragraph
 #: (`# the fallback label is attached. During a real GitHub-hosted outage these two …`), which is
 #: where the refusal is stated. Pinned by SENTENCE, like the refs in the runbook pin below, so a
@@ -3942,6 +3956,38 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     assert _refusal_citation_problems(
         "The required legs CANNOT be routed here: `python-ci.yml:1891` — refused.", workflow_lines
     ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
+
+    # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
+    # This doc cites `python-ci.yml:<n>` for three cost arguments (§1's postgres cache row, §1's
+    # falkor install row, §6's arm-1 exemption). All three were correct when written and had
+    # drifted since — and `_REFUSAL_CITATION_SITES` above cannot cover them, because its anchor is
+    # the `test-slow` refusal paragraph and these cite other steps. Nothing read this file either,
+    # so its drift shipped green exactly like ci.yml's and actionlint.yaml's did. Pinned by
+    # SENTENCE inside the cited range, so a number that lands elsewhere reds here.
+    wall_clock = (REPO_ROOT / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    for citation, anchors in _WALL_CLOCK_CITATION_ANCHORS:
+        assert citation in wall_clock, (
+            f"ci-wall-clock.md no longer cites `{citation}` — re-anchor this pin rather than "
+            "deleting it, so the sentence it points at stays checkable"
+        )
+        lo, _, hi = citation.split(":", 1)[1].partition("-")
+        span = workflow_lines[int(lo) - 1: int(hi or lo)]
+        for anchor in anchors:
+            assert any(anchor in line for line in span), (
+                f"ci-wall-clock.md cites `{citation}` for {anchor!r}, and that text is not in "
+                f"python-ci.yml:{lo}-{hi or lo} (which reads {span[0].strip()!r} …)"
+            )
+    # Non-vacuity, executable: the checker must reject the three citations this round corrected, so
+    # a pass on the real file cannot be it matching nothing (each of those numbers is what the doc
+    # carried before, measured — `:3635` is a `ps`-residue comment, not a pip install).
+    for stale in _WALL_CLOCK_STALE_CITATIONS:
+        lo, _, hi = stale.split(":", 1)[1].partition("-")
+        assert not any(
+            anchor in line
+            for line in workflow_lines[int(lo) - 1: int(hi or lo)]
+            for _, anchors in _WALL_CLOCK_CITATION_ANCHORS
+            for anchor in anchors
+        ), f"the stale citation `{stale}` still resolves — the non-vacuity control is matching nothing"
 
 
 # ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
