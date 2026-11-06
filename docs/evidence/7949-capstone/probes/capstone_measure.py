@@ -342,8 +342,9 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
 # rerouted all seven acceptance captures to the OTHER extractor while the log
 # still printed an ``arm:`` line that said nothing about it — the silent seam
-# #10983 exists to close. The lane, and the two switches that change the
-# rendered prompts rather than the pipeline, are pinned here and READ BACK like
+# #10983 exists to close. The lane, plus the switches that change what the same
+# run MEASURES through that lane (``TORTOISE_EXTRACTOR`` the commit dispatch,
+# ``TORTOISE_LABEL_ORDER`` the render order), are pinned here and READ BACK like
 # every other switch (the ``arm:`` rule, applied to the door).
 
 #: The env var that selects the extraction lane.
