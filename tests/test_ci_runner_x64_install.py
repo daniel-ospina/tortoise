@@ -3988,11 +3988,15 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
     # This doc cites `python-ci.yml:<n>` for four cost arguments (the postgres-extra install row,
     # the falkor/torch install row, the save-arm note, the arm-1 cache-key row — all four in §2;
-    # named by row rather than by section, see the note on `_WALL_CLOCK_CITATION_ANCHORS`). THREE of
-    # them were correct when written and had drifted since; the save-arm note was born WRONG — it was
-    # written as `:3015` in the commit that added it, and `cache: pip` was already at `:3036` in that
-    # same tree, so no insert above it can account for the gap. Drift alone does not explain this
-    # pin's population, which is exactly why the pin is not optional. `_REFUSAL_CITATION_SITES` above
+    # named by row rather than by section, see the note on `_WALL_CLOCK_CITATION_ANCHORS`). ⛔ NOT ONE
+    # of the four was correct in the commit that wrote it, so "they drifted" is the wrong diagnosis:
+    # in `cd2835e59` the postgres row's `:4312` was 21 lines above the install (`:4355`), the falkor
+    # row's `:2734-2739` 21 above `install-cpu-torch` (`:2755`), and the arm-1 row's `:4304-4306`
+    # pointed at the `test-record-postgres:` JOB HEADER, 43 lines above its cache step (`:4347`); in
+    # `fea87bf88e` the save-arm note's `:3015` was 21 above `cache: pip` (`:3036`). All four were
+    # carried over from an earlier head instead of derived — a citation written from a remembered
+    # measurement is stale on arrival — and they drifted further before anything read them. That is
+    # why the pin resolves the line instead of trusting the number. `_REFUSAL_CITATION_SITES` above
     # cannot cover them, because its anchor is the `test-slow` cost paragraph's opener and these cite
     # other steps.
     # Nothing read this file either, so its drift shipped green exactly like ci.yml's and
