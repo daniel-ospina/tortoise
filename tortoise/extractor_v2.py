@@ -156,6 +156,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
+from . import identity_hold as _identity_hold  # #10997: S3's HOLD
 from . import referentiality as _referentiality  # #11021: the referentiality test
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
@@ -3097,6 +3098,53 @@ def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
         return _failure_policy.lookup_state(search) == _failure_policy.LOOKUP_RESOLVED
     ran = results.get("ran")
     return isinstance(ran, list) and key in ran
+
+
+def _hold_endpoint(hold_store: object | None, held: list[dict], *,
+                   content: str, where: str, session_ref: str,
+                   operator: dict | None, ref: str | None = None) -> dict:
+    """Record ONE unresolved operator endpoint as HELD — with its edge (#10997).
+
+    The record keeps the OPERATOR, not just the endpoint, because `#2552` says the
+    disposition must hold *the edge together with its endpoint*: an endpoint held
+    alone would trade a duplicate for a lost operator edge, and I2 forbids that
+    trade. The record is appended to the run's `held` list **before** any store
+    is written, so a store that cannot be written still reports the hold instead
+    of losing it (`persisted: False`) — the run's own report is the floor.
+
+    ⛔ The store is OPTIONAL, and its absence is stated rather than smoothed over:
+    a held item nobody persists cannot be carried forward, which is a real
+    (loudly reported) limitation of the caller, never a silent drop.
+    """
+    rec: dict = {
+        "kind": _identity_hold.HOLD_ENDPOINT,
+        "content": content,
+        # ⛔ The ORIGINAL ref, kept beside the clamped `content` (#10997 review
+        # P1). `_write_span` truncates at `_MAX_CONTENT`, but the operator that
+        # travels with the record still names the FULL ref — a drain that
+        # re-minted from `content` would register a key the restored operator
+        # cannot resolve, so the prune would discard the Point and the item
+        # would be resolved into nothing. `content` stays the KEY (it is what the
+        # entity/value guards were evaluated against); `ref` is what gets minted.
+        "ref": str(ref or content),
+        "where": where,
+        "session_ref": session_ref,
+        "operator": dict(operator or {}),
+        "persisted": False,
+    }
+    held.append(rec)
+    if hold_store is None:
+        return rec
+    try:
+        rec["key"] = _identity_hold.hold_key(_identity_hold.HOLD_ENDPOINT, content)
+        stored = hold_store.hold(
+            _identity_hold.HOLD_ENDPOINT, content, where=where,
+            session_ref=session_ref, operator=rec["operator"], ref=rec["ref"])
+        rec["persisted"] = True
+        rec["reopened"] = bool(stored.get("reopened"))
+    except Exception as exc:  # a store failure must not lose the hold itself
+        rec["persist_error"] = f"{type(exc).__name__}: {exc}"
+    return rec
 
 
 def _identity_report(search: dict, candidates: dict) -> dict:
@@ -8653,7 +8701,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   master: dict | None = None,
                   session_date: str | None = None,
                   edus: list[dict] | None = None,
-                  merge_flagged: frozenset[str] | set[str] = frozenset()) -> dict:
+                  merge_flagged: frozenset[str] | set[str] = frozenset(),
+                  hold_store: object | None = None) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -8681,12 +8730,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         instruction being skipped by the model. A minted endpoint no
         surviving operator references is pruned again.
 
+    ⛔ #10997 (§4.4 I1, the MINT half): the mint is an identity ASSERTION, so it
+    is licensed only by a lookup that RESOLVED. On an `unresolved`/`partial`
+    lookup the pre-pass *holds* the edge WITH its endpoint (#2552) instead — no
+    Point is fabricated from a ref nothing checked — and the held set is
+    reported in ``held``. A ``hold_store`` (``identity_hold.open_store``)
+    carries it to a later run against the same graph, where a resolved lookup
+    commits it exactly once.
+
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
-             "minted_kinds", "stats"}.
+             "minted_kinds", "stats", "held", "held_drained", "hold"}.
     """
     master = master or build_master_list()
     idx = _index_search(search)
     warnings: list[str] = []
+    # #10997: the run-level identity state the mint gate reads, and the two
+    # populations it reports. `held` is what this run did NOT mint and did NOT
+    # drop (I2); `held_drained` is what a PREVIOUS run held and this one
+    # committed, exactly once.
+    _lookup = _failure_policy.lookup_state(search)
+    held: list[dict] = []
+    held_drained: list[dict] = []
 
     # ── entities (dependency order 1) ─────────────────────────────────────
     payload_entities: list[dict] = []
@@ -9398,7 +9462,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # still report ``operator_endpoints_minted == 0``.
     minted_endpoints: list[str] = []
 
-    def _mint_endpoint(ref: str, where: str) -> str:
+    def _mint_endpoint(ref: str, where: str, operator: dict | None = None) -> str:
         # ⛔ `_write_span`, never a bare `[:cap]` (review cycle 15, measured): a
         # HARD cut stores the truncated prefix of a split token, so
         # `_mint_endpoint` fabricated the value `… p95 hit 4` out of
@@ -9504,6 +9568,34 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"{where} named the ENTITY {content[:60]!r} — the "
                 "OPERATOR REFERENCING rule forbids entity endpoints, so no "
                 "claim Point is fabricated for it")
+            return ""
+        # ── #10997 (§4.4 I1): THE MINT IS AN IDENTITY ASSERTION ─────────────
+        # It is licensed by a lookup that RESOLVED, and by nothing else. On an
+        # `unresolved`/`partial` run this ref's own query never ran (a minted
+        # endpoint is by definition NOT one of the model's emitted points, so
+        # `_derive_queries` derived no query for it), and fabricating a
+        # `statement` Point from it asserts `new` about a check that did not
+        # happen — the fail-open §4.4 names as the DUPLICATE MANUFACTURER.
+        # ⛔ The disposition is HOLD, and it holds the EDGE WITH ITS ENDPOINT
+        # (#2552): the operator travels in the record, so the drain re-emits
+        # both and the edge is not traded for the duplicate. ⛔ NOT a drop: I2
+        # forbids trading a duplicate for memory loss, and the held set is
+        # reported on every run (`held`) whether or not it could be persisted.
+        if _lookup != _failure_policy.LOOKUP_RESOLVED:
+            rec = _hold_endpoint(hold_store, held, content=content, where=where,
+                                 session_ref=session_id, operator=operator, ref=ref)
+            if rec.get("persist_error"):
+                _carried = (", and the hold store write FAILED ("
+                            f"{rec['persist_error']}) so it is NOT carried forward")
+            elif rec["persisted"]:
+                _carried = " in the hold store"
+            else:
+                _carried = ", NOT persisted (no hold store was supplied)"
+            warnings.append(
+                f"operator endpoint HELD not minted (#10997 S3 HOLD): {where} "
+                f"named {content[:60]!r} but the identity lookup was {_lookup}, "
+                "so whether this endpoint already exists was never established "
+                "— held with its edge" + _carried)
             return ""
         # ── #4716 Part 2 (Defect A): the mint is not a side door around the
         # consolidation rule the ordinary point path already implements ~100
@@ -9722,14 +9814,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         for _side in ("src", "dst"):
             _ref = str(_op.get(_side, "") or "")
             if _ref and not _resolve(_ref):
-                _mint_endpoint(_ref, f"{_op_type} {_side}")
+                _mint_endpoint(_ref, f"{_op_type} {_side}", _op)
         if _op_type == "MITIGATES":
             _target = _op.get("target") or _op.get("target_edge") or {}
             if isinstance(_target, dict):
                 for _side in ("src", "dst"):
                     _ref = str(_target.get(_side, "") or "")
                     if _ref and not _resolve(_ref):
-                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
+                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}", _target)
 
     # source-turn map over the emitted payload points — the NAND-direction
     # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
@@ -9743,10 +9835,81 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if type(t) is int:
             turn_by_point[_pt["id"]] = t
 
+    # ── #10997 DRAIN: held edges whose identity THIS run resolved ──────────
+    # The named path out of the hold: a later run against the same graph whose
+    # lookup RESOLVED. `claim` makes it exactly-once in both directions (a second
+    # run, or a second pass here, cannot mint the same identity twice) and
+    # `confirm` binds the key to the id it minted. The endpoint goes through the
+    # SAME `_mint_endpoint` the ordinary pre-pass uses — one mint, so the
+    # consolidation fold (#4716), the identity window and the dedup cannot
+    # diverge between a fresh mint and a drained one.
+    _held_operators: list[dict] = []
+    #: (key, point id) pairs a drain has CLAIMED and minted but NOT yet
+    #: confirmed. ⛔ #10997 review P0: a mint is PROVISIONAL until the payload
+    #: knows it survived — the mint-before-wire prune below drops an endpoint no
+    #: surviving operator references. Confirming in the drain loop marked an item
+    #: `resolved` that the payload had already discarded: the hold's own store
+    #: leaking the memory I2 forbids leaking, while printing "COMMITTED".
+    _pending_confirm: list[tuple[str, str, str]] = []
+    if hold_store is not None and _lookup == _failure_policy.LOOKUP_RESOLVED:
+        try:
+            _drainable = hold_store.pending()
+        except Exception as exc:  # a store read must not sink the whole run
+            _drainable = []
+            warnings.append(
+                "hold store UNREADABLE (#10997): the drain was skipped because "
+                f"reading the held set failed ({type(exc).__name__}: {exc}); "
+                "the run's own candidates are unaffected")
+        for _rec in _drainable:
+            try:
+                if not hold_store.claim(_rec["key"]):
+                    continue
+                # ⛔ The ORIGINAL ref, not the truncated `content` (review P1):
+                # `_write_span` clamps the content to `_MAX_CONTENT`, while the
+                # restored operator still carries the untruncated ref — draining
+                # from `content` would mint a key the operator cannot resolve and
+                # the prune would then discard it.
+                _pid = _mint_endpoint(
+                    _rec.get("ref") or _rec["content"],
+                    f"drained {_rec.get('where') or 'held endpoint'}")
+                if not _pid:
+                    # The mint produced nothing (refused / an entity / empty) —
+                    # the item goes back to PENDING rather than leaking out of
+                    # the drainable set on a claim that minted nothing.
+                    hold_store.release(_rec["key"])
+                    continue
+            except Exception as exc:  # a store write must not sink the run
+                warnings.append(
+                    "hold store WRITE FAILED (#10997): the drain could not take "
+                    f"{_clip(_rec.get('content'), 60)!r} ({type(exc).__name__}: "
+                    f"{exc}) — it stays held for a later run")
+                continue
+            _pending_confirm.append((_rec["key"], _pid, _rec.get("where") or ""))
+            held_drained.append({"key": _rec["key"], "content": _rec["content"],
+                                 "point_id": _pid, "where": _rec.get("where") or "",
+                                 "committed": False})
+            if _rec.get("operator"):
+                _held_operators.append(dict(_rec["operator"]))
+
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
     mitigates_pending: list[dict] = []
-    for op in embed_list.get("operators", []) or []:
+    # #10997: the run's OWN operators first, then the edges the drain above
+    # restored — deduplicated on (src, dst, op_type), because run 2 usually
+    # re-emits the operator it held in run 1 and ONE edge must not be emitted
+    # twice for it.
+    _run_ops = list(embed_list.get("operators", []) or [])
+
+    def _op_identity(o: object) -> tuple[str, str, str]:
+        if not isinstance(o, dict):
+            return ("", "", "")
+        return (_norm(str(o.get("src", ""))), _norm(str(o.get("dst", ""))),
+                str(o.get("op_type", "")).upper())
+
+    _run_op_ids = {_op_identity(o) for o in _run_ops}
+    _all_ops = _run_ops + [o for o in _held_operators
+                           if _op_identity(o) not in _run_op_ids]
+    for op in _all_ops:
         if not isinstance(op, dict):
             warnings.append(f"non-dict operator entry {op!r} skipped")
             continue
@@ -9866,6 +10029,45 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "surviving operator — dropped rather than committing an "
                 "unsupported claim Point")
 
+    # ── #10997 SETTLE the drained claims (review P0) ───────────────────────
+    # ⛔ A drained item is confirmed ONLY if its Point survived the prune above,
+    # and every other claim is RELEASED back to `pending` — otherwise the store
+    # marks an identity resolved that the payload threw away, and the item is
+    # lost for good (the exact I2 loss this module exists to prevent).
+    if _pending_confirm and hold_store is not None:
+        _surviving = {str(p.get("id")) for p in payload_points}
+        for _key, _pid, _where in _pending_confirm:
+            _entry = next((e for e in held_drained if e["key"] == _key), None)
+            if _pid in _surviving:
+                try:
+                    hold_store.confirm(_key, _pid)
+                except Exception as exc:
+                    warnings.append(
+                        "hold store WRITE FAILED (#10997): the drain minted "
+                        f"{_pid} but could not confirm it ({type(exc).__name__}: "
+                        f"{exc}) — the key stays claimed and the next drain will "
+                        "find it already held")
+                    continue
+                if _entry is not None:
+                    _entry["committed"] = True
+                warnings.append(
+                    f"held endpoint COMMITTED (#10997 drain): {_where} held in an "
+                    f"earlier run is now resolved and was minted as {_pid} "
+                    "(exactly once — a resolved key is never re-held or re-minted)")
+                continue
+            # ⛔ Its edge did not survive, so the Point was pruned: the item goes
+            # BACK to the hold rather than being confirmed into a resolution the
+            # payload does not contain.
+            with contextlib.suppress(Exception):
+                hold_store.release(_key)
+            if _entry is not None:
+                _entry["committed"] = False
+            warnings.append(
+                f"held endpoint NOT committed (#10997 drain): {_where} was "
+                f"drained and minted as {_pid}, but no surviving operator "
+                "references it, so the Point was pruned and the item is HELD "
+                "again for a later run")
+
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
     # refs (resolved with the never-guess discipline) produce deletions.
@@ -9969,6 +10171,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             f"emit (a NOOP/duplicate/MERGE folded it away): "
             + ", ".join(sorted({str(m.get("surface")) for m in unresolved})[:8]))
 
+    if held:
+        _held_ids = {r.get("key") or (r["content"], r["where"]) for r in held}
+        warnings.append(
+            f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held because their "
+            f"identity lookup was {_lookup} — not minted (I1) and not dropped "
+            "(I2)" + ("; carried in the hold store for the next run against "
+                      "this graph" if hold_store is not None else
+                      "; NOT carried forward — no hold store was supplied"))
+
     return {
         "payload": payload,
         "noops": noops,                # E7 (D4): result-level, NOT in the payload
@@ -9979,10 +10190,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "link_before_create": link_before_create,
         "warnings": warnings,
         "minted_kinds": minted,
+        "held": held,                  # #10997: HELD — never minted (I1), never dropped (I2)
+        "held_drained": held_drained,  # held items THIS run committed, exactly once
+        "hold": {"store_supplied": hold_store is not None,
+                 "store": hold_store.summary() if hold_store is not None else None},
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
             "operator_endpoints_minted": len(minted_endpoints),
+            # #10997 review P2: an IDENTITY count, not an occurrence count — one
+            # ref named by two operators is ONE held item (one store key).
+            "held": len({r.get("key") or (r["content"], r["where"])
+                         for r in held}),
+            "held_drained": len(held_drained),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
             "merges": len(merges),
@@ -11742,7 +11962,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                   "supersessions": [], "noops": [], "deletions": [],
                   "merges": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
-                  "minted_kinds": [], "stats": {}}
+                  "minted_kinds": [], "stats": {},
+                  "held": [], "held_drained": [],
+                  "hold": {"store_supplied": False, "store": None}}
     result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
         "notes": chain_enforcer_notes,
         "stats": chain_enforcer_stats,

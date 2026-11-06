@@ -1,0 +1,379 @@
+"""#10997 — S3's HOLD: an unresolved identity is HELD, never minted, never dropped.
+
+THE DEFECT THIS PINS
+--------------------
+§4.4's invariant **I1** (*"An unresolved identity is NEVER asserted `new`"*) and
+its failure policy for S3 RESOLVE (*"a candidate whose identity is unresolved is
+`HOLD`-ed"*) were, until this change, a SPEC with **no** enforcing code: `#5095`
+made the run *honest* (the lookup's state, the `link_before_create` polarity, the
+`identity` block) and deliberately suppressed nothing.
+
+The one place the run still **asserted `new`** was `execute_embed`'s
+mint-before-wire pre-pass (`_mint_endpoint`, `#2552`): an operator endpoint the
+model did not also emit was materialised as a `statement` Point **from the
+model's ref**. When the identity lookup had not resolved, nothing had checked
+whether that endpoint already existed — so the fabrication was the natural
+fail-open §4.4 names as *"the exact failure S3 exists to prevent"*: the duplicate
+manufacturer.
+
+WHAT THIS PINS
+--------------
+1. **Held, not minted.** On an `unresolved`/`partial` lookup no Point and no
+   operator are fabricated for the ref.
+2. **Not dropped (I2).** The candidate is in the run's `held` list, with its
+   EDGE (#2552: the operator travels with the endpoint), and the run warns.
+3. **Observable and drainable.** With a `HoldStore` the held set persists; a
+   later run against the same graph whose lookup RESOLVED commits it.
+4. **Exactly once, both directions.** A held identity is not re-held after it
+   resolves (`hold` never reopens a RESOLVED key), and two drains mint ONE item
+   (`claim` is the guard, `confirm` binds the id).
+5. **Non-vacuity.** The red-first test is re-run with the predicate FLIPPED (a
+   resolved lookup) and the mint comes back — so the assertion is reading the
+   gate, not a coincidence of the fixture.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import ClassVar
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
+from tortoise import failure_policy as fp  # noqa: E402, RUF100
+from tortoise import identity_hold as hold  # noqa: E402, RUF100
+
+#: One emitted point (`dst`) and one ref the model never emitted (`src`) — the
+#: exact shape the mint-before-wire pre-pass exists for.
+_EMBED = {
+    "entities": [],
+    "events": [],
+    "points": [{"content": "the budget is 40k", "pointKind": "statement"}],
+    "operators": [{"src": "the launch slips to Q3",
+                   "dst": "the budget is 40k", "op_type": "IMPL"}],
+    "chain_notes": [],
+    "link_before_create": [],
+}
+
+_REF = "the launch slips to Q3"
+
+
+def _search(resolved: bool) -> dict:
+    """A COMPLETE lookup (`resolved`) or a lookup that did not run (`unresolved`).
+
+    The only difference is the coverage report `search_graph` emits — which is
+    what `failure_policy.lookup_state` reads (never `degraded` alone).
+    """
+    if not resolved:
+        return {}
+    return {
+        "mode": "real", "degraded": False, "reason": None,
+        "entities": [], "points": [], "events": [], "queries_run": 4,
+        "query_coverage": {"derived": {"object": 1, "event": 1, "point": 2},
+                           "ran": {"object": 1, "event": 1, "point": 2},
+                           "failed": {"object": 0, "event": 0, "point": 0}},
+    }
+
+
+def _minted_contents(result: dict) -> list[str]:
+    return [p["content"] for p in result["payload"]["points"]]
+
+
+class TestTheGate:
+    def test_an_unresolved_lookup_holds_the_endpoint_and_its_edge(self):
+        """The red-first assertion: nothing is minted, and nothing is lost."""
+        result = v2.execute_embed(_EMBED, {}, session_id="s1")
+        assert _REF not in _minted_contents(result), (
+            "a Point was fabricated from a ref whose identity was never checked "
+            "— the duplicate manufacturer §4.4 I1 exists to prevent")
+        assert result["payload"]["operators"] == [], (
+            "an operator wired an endpoint that does not exist")
+        # …and it is HELD, with the edge that referenced it (#2552).
+        assert len(result["held"]) == 1, result["held"]
+        rec = result["held"][0]
+        assert rec["content"] == _REF
+        assert rec["operator"]["src"] == _REF, (
+            "the hold must carry the EDGE, not the endpoint alone — dropping it "
+            "trades a duplicate for a lost operator edge (#2552, I2)")
+        assert rec["persisted"] is False, (
+            "no store was supplied, so the record must SAY it was not persisted")
+        assert any("S3 HOLD" in w and "not minted" in w for w in result["warnings"]), \
+            result["warnings"]
+        assert result["stats"]["held"] == 1
+        assert result["stats"]["operator_endpoints_minted"] == 0
+
+    def test_a_partial_lookup_holds_too(self):
+        """`partial` is the measured common shape (a bounded lookup), and a miss in
+        an unrun leg is not evidence of absence — the same rule `#5095` applies to
+        the RECORD applies to the MINT."""
+        partial = _search(True)
+        partial["query_coverage"]["ran"]["point"] = 0
+        assert fp.lookup_state(partial) == fp.LOOKUP_PARTIAL
+        result = v2.execute_embed(_EMBED, partial, session_id="s1")
+        assert _REF not in _minted_contents(result), result["held"]
+        assert len(result["held"]) == 1, result["held"]
+
+    def test_the_predicate_flipped_mints_again(self):
+        """NON-VACUITY (mutation): flip the predicate — a RESOLVED lookup — and the
+        SAME fixture mints. Without this the test above could be passing for a
+        reason unrelated to the gate."""
+        result = v2.execute_embed(_EMBED, _search(True), session_id="s1")
+        assert _REF in _minted_contents(result), (
+            "a resolved lookup must still mint (#2552's mint-before-wire is NOT "
+            "replaced by the hold — only licensed by a check that ran)")
+        assert result["held"] == []
+        assert result["stats"]["operator_endpoints_minted"] == 1
+        assert len(result["payload"]["operators"]) == 1
+
+    def test_the_gate_reads_the_lookup_state_and_nothing_else(self, monkeypatch):
+        """The gate must consult `failure_policy.lookup_state` — the ONE predicate
+        `#5095` built — rather than growing a second classifier of identity."""
+        monkeypatch.setattr(fp, "lookup_state",
+                            lambda search: fp.LOOKUP_UNRESOLVED)
+        result = v2.execute_embed(_EMBED, _search(True), session_id="s1")
+        assert len(result["held"]) == 1, (
+            "a resolved `search` still minted because something other than "
+            "`lookup_state` decided")
+
+    def test_the_mutation_is_observable_from_the_other_side(self, monkeypatch):
+        """MUTATION, the other direction: force the predicate to `resolved` on an
+        UNRESOLVED search and the red-first test above goes red.
+
+        That is what proves the hold is produced by the GATE and not by the
+        fixture: the same embed list, the same `{}` search, one flipped predicate.
+        """
+        monkeypatch.setattr(fp, "lookup_state",
+                            lambda search: fp.LOOKUP_RESOLVED)
+        result = v2.execute_embed(_EMBED, {}, session_id="s1")
+        assert _REF in _minted_contents(result), (
+            "flipping the predicate did not change the outcome — the assertion "
+            "this mutant exists to falsify is not reading the gate")
+        assert result["held"] == []
+
+
+class TestTheHoldIsDrainable:
+    def test_run_1_holds_and_run_2_commits_it_exactly_once(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        first = v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
+        assert first["held_drained"] == []
+        assert len(store.pending()) == 1, store.summary()
+        key = first["held"][0]["key"]
+
+        # run 2: the lookup RESOLVES against the same graph.
+        second = v2.execute_embed(_EMBED, _search(True), session_id="s2",
+                                  hold_store=store)
+        assert len(second["held_drained"]) == 1, second["held_drained"]
+        assert second["held_drained"][0]["key"] == key
+        assert second["held_drained"][0]["committed"] is True, (
+            "the drained item is only COMMITTED if its Point survived the "
+            "#2552 prune — a confirmed-but-pruned item is memory the hold "
+            "thinks it resolved")
+        assert store.get(key)["state"] == hold.HOLD_RESOLVED
+        minted = [p for p in second["payload"]["points"] if p["content"] == _REF]
+        assert len(minted) == 1, "the held endpoint was not committed exactly once"
+        assert minted[0]["id"] == store.get(key)["minted_id"]
+        # the EDGE came back with it (#2552)
+        assert len(second["payload"]["operators"]) == 1, second["payload"]["operators"]
+        assert second["payload"]["operators"][0]["src"] == minted[0]["id"]
+        assert second["held"] == [], "run 2 re-held what it had just drained"
+
+        # run 3: same store, same resolved lookup — NOTHING is minted twice.
+        third = v2.execute_embed(_EMBED, _search(True), session_id="s3",
+                                 hold_store=store)
+        assert third["held_drained"] == [], (
+            "a resolved held identity was drained a second time")
+        # The model re-emits the operator, so the pre-pass mints the endpoint again
+        # — and it MUST land on the same content-addressed id it had when the drain
+        # committed it. That is what "exactly once" means at the graph: one
+        # identity, one id, an upsert rather than a second node.
+        third_pts = [p for p in third["payload"]["points"] if p["content"] == _REF]
+        assert len(third_pts) == 1, third_pts
+        assert third_pts[0]["id"] == minted[0]["id"], (
+            "one identity produced two different ids — two nodes, which is the "
+            "duplicate this whole mechanism exists to prevent")
+        assert store.summary()["by_state"][hold.HOLD_RESOLVED] == 1
+
+    def test_a_resolved_identity_is_never_re_held(self, tmp_path):
+        """The other half of idempotency: an ambiguous run AFTER a resolution must
+        not re-arm the key, or the next drain would mint a second copy."""
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
+        key = store.pending()[0]["key"]
+        store.claim(key)
+        store.confirm(key, "pt_canonical")
+        again = v2.execute_embed(_EMBED, {}, session_id="s2", hold_store=store)
+        assert again["held"][0]["reopened"] is False, again["held"][0]
+        assert store.get(key)["state"] == hold.HOLD_RESOLVED
+        assert store.pending() == [], (
+            "a resolved identity came back into the drainable population")
+
+
+class TestTheDrainCarriesTheEdge:
+    """⛔ Review P0/P1: the drain must carry the EDGE, and must not resolve an
+    item the #2552 prune then discards.
+
+    Both arms were MISSING before the review and both were real: run 2 in the
+    round-trip test re-emits the operator, so the run's OWN operator satisfied
+    every assertion and the held edge could be deleted without a red; and a
+    drained item whose operator did not survive was confirmed into a resolution
+    the payload did not contain — the hold store leaking the memory it exists to
+    protect.
+    """
+
+    #: run 2's embed: the same point, and NO operator — the held edge is the only
+    #: thing that can reconstruct the IMPL.
+    _EMBED_NO_OPERATOR: ClassVar[dict] = {**_EMBED, "operators": []}
+
+    def test_a_resolved_run_that_does_not_re_emit_the_operator_still_wires_it(
+            self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
+        assert len(store.pending()) == 1
+
+        second = v2.execute_embed(self._EMBED_NO_OPERATOR, _search(True),
+                                  session_id="s2", hold_store=store)
+        assert len(second["held_drained"]) == 1, second["held_drained"]
+        assert second["held_drained"][0]["committed"] is True
+        # the endpoint AND the edge came back from the hold
+        minted = [p for p in second["payload"]["points"] if p["content"] == _REF]
+        assert len(minted) == 1, second["payload"]["points"]
+        ops = second["payload"]["operators"]
+        assert len(ops) == 1, (
+            "the held EDGE was not reconstructed — carrying only the endpoint is "
+            f"the loss #2552 forbids: {ops}")
+        assert ops[0]["src"] == minted[0]["id"]
+        assert ops[0]["op_type"] == "IMPL"
+
+    def test_a_drained_item_whose_edge_dies_is_HELD_again_not_resolved(self, tmp_path):
+        """A MITIGATES with no target edge still drops (its own guard); the
+        pre-pass mint, the operator, and now the DRAIN's claim must not turn that
+        into a 'resolved' identity the payload does not hold."""
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        held_embed = {
+            "entities": [], "events": [], "points": [], "chain_notes": [],
+            "link_before_create": [],
+            "operators": [{"src": "orphan claim alpha", "dst": "orphan claim beta",
+                           "op_type": "MITIGATES", "strength": 0.3}],
+        }
+        first = v2.execute_embed(held_embed, {}, session_id="s1", hold_store=store)
+        assert first["held"], "the unresolved endpoints were not held"
+        pending_before = {r["key"] for r in store.pending()}
+        assert len(pending_before) == 2, store.summary()
+
+        second = v2.execute_embed(
+            {"entities": [], "events": [], "points": [], "chain_notes": [],
+             "link_before_create": [], "operators": []},
+            _search(True), session_id="s2", hold_store=store)
+        assert all(e["committed"] is False for e in second["held_drained"]), \
+            second["held_drained"]
+        assert {r["key"] for r in store.pending()} == pending_before, (
+            "a drained identity was marked RESOLVED while the payload discarded "
+            "it — the item is now unrecoverable")
+        assert any("NOT committed" in w for w in second["warnings"]), \
+            second["warnings"]
+
+    def test_a_held_ref_longer_than_the_content_cap_still_drains(self, tmp_path):
+        """⛔ Review P1: the record stores the CLAMPED content, but the operator
+        names the FULL ref — draining from the clamped text mints a key the
+        restored operator cannot resolve, so the item is minted and pruned."""
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        long_ref = "long endpoint claim " + ("x" * 1500)
+        embed = {"entities": [], "events": [], "chain_notes": [],
+                 "points": [{"content": "the budget is 40k",
+                             "pointKind": "statement"}],
+                 "link_before_create": [],
+                 "operators": [{"src": long_ref, "dst": "the budget is 40k",
+                                "op_type": "IMPL"}]}
+        v2.execute_embed(embed, {}, session_id="s1", hold_store=store)
+        assert len(store.pending()) == 1, store.summary()
+        assert len(store.pending()[0]["content"]) == v2._MAX_CONTENT, (
+            "the fixture needs a CLAMPED content for this to test anything")
+
+        second = v2.execute_embed(
+            {"entities": [], "events": [], "chain_notes": [],
+             "points": [{"content": "the budget is 40k",
+                         "pointKind": "statement"}],
+             "link_before_create": [], "operators": []},
+            _search(True), session_id="s2", hold_store=store)
+        assert second["held_drained"][0]["committed"] is True, second["held_drained"]
+        assert len(second["payload"]["operators"]) == 1, (
+            "the restored operator could not resolve the drained endpoint — the "
+            "record kept the clamped content instead of the ref")
+        assert store.pending() == []
+
+
+class TestTheStoreExactlyOnce:
+    def test_claim_is_the_only_way_in_and_it_is_once(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        store.hold(hold.HOLD_ENDPOINT, "a ref")
+        key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
+        assert store.claim(key) is True
+        assert store.claim(key) is False, "two drains could mint one identity twice"
+        store.confirm(key, "pt_1")
+        assert store.claim(key) is False
+
+    def test_a_second_different_id_for_one_identity_raises(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        store.hold(hold.HOLD_ENDPOINT, "a ref")
+        key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
+        store.claim(key)
+        store.confirm(key, "pt_1")
+        with pytest.raises(ValueError):
+            store.confirm(key, "pt_2")
+
+    def test_confirming_the_same_id_twice_is_a_noop(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        store.hold(hold.HOLD_ENDPOINT, "a ref")
+        key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
+        store.claim(key)
+        store.confirm(key, "pt_1")
+        assert store.confirm(key, "pt_1")["minted_id"] == "pt_1"
+
+    def test_hold_is_idempotent_and_counts_the_runs(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        store.hold(hold.HOLD_ENDPOINT, "a ref", where="IMPL src")
+        store.hold(hold.HOLD_ENDPOINT, "a  ref", where="IMPL src")  # same identity
+        assert len(store.pending()) == 1
+        assert store.pending()[0]["runs_held"] == 2
+
+    def test_release_returns_a_claim_that_minted_nothing(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        store.hold(hold.HOLD_ENDPOINT, "a ref")
+        key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
+        assert store.claim(key) is True
+        assert store.release(key) is True
+        assert [r["key"] for r in store.pending()] == [key], (
+            "a claim whose mint produced nothing leaked the item out of the "
+            "drainable population — a hold with no way out is a leak")
+
+    def test_the_log_survives_a_reload(self, tmp_path):
+        path = tmp_path / "hold.jsonl"
+        store = hold.HoldStore(path)
+        store.hold(hold.HOLD_ENDPOINT, "a ref", where="IMPL src")
+        key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
+        store.claim(key)
+        store.confirm(key, "pt_1")
+        reloaded = hold.HoldStore(path)
+        assert reloaded.get(key)["state"] == hold.HOLD_RESOLVED
+        assert reloaded.get(key)["minted_id"] == "pt_1"
+        assert reloaded.summary()["by_state"][hold.HOLD_RESOLVED] == 1
+
+    def test_a_torn_line_does_not_lose_the_rest(self, tmp_path):
+        path = tmp_path / "hold.jsonl"
+        store = hold.HoldStore(path)
+        store.hold(hold.HOLD_ENDPOINT, "a ref")
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{"key": "torn", "kind"')  # a crash mid-append
+        assert len(hold.HoldStore(path).pending()) == 1
+
+    def test_open_store_is_per_graph_and_env_overridable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TORTOISE_IDENTITY_HOLD_DIR", str(tmp_path))
+        a = hold.open_store("graph-a")
+        b = hold.open_store("graph-b")
+        assert a.path != b.path
+        a.hold(hold.HOLD_ENDPOINT, "a ref")
+        assert hold.open_store("graph-a").pending()[0]["content"] == "a ref"
+        assert b.pending() == [], "two graphs must not share one hold set"

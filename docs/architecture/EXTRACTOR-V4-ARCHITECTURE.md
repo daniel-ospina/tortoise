@@ -621,7 +621,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:10434-10437`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:10654-10657`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -745,7 +745,7 @@ unfirable (block at the top of §10).
 | **A closed vocabulary** — the stats counter `closed_vocab_rejects` exists | `kind_classifier.py:200` |
 | **A mechanical kNN fast path** → margin gate → `nearMisses` rerank → **batched LLM only for the low-margin tail** | `#1695` |
 | **The deferred pass** — `_collect_classify_items(embed_list)` → `classify_items` → `_apply_classify_kinds` | `extractor_v2.py:4467` / `:4492`, called at `:4803` and `:4888` |
-| **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:512`, `:4656` |
+| **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:513`, `:4656` |
 | **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser — ✅ **now built, OFF by default: `s2_decision_seam.classify_decider` replaces the tail's DECISION SOURCE via `KindClassifier(tail_decider=…)`** | `kind_classifier.py:93`, `:309`; `s2_decision_seam.py` (`#5087`) |
 
 **⇒ The step is `TORTOISE_CLASSIFY_LATER=1`, off by default.** Three things are wrong with its current placement, and they are the actual work:
@@ -1159,7 +1159,7 @@ A carve-out scoped only to **user-personal state** (personal bests, schedules, p
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out — **`#1534`**) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | **RETAINED** | retained |
 
-**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-171`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:230`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:299`), and `_granularity_text()` (`:732-744`) appends `STATE_VALUE_CARVE_OUT` to S1.
+**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-172`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:230`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:299`), and `_granularity_text()` (`:732-744`) appends `STATE_VALUE_CARVE_OUT` to S1.
 
 **⇒ The design requires ENFORCEMENT BY DEFAULT — the mechanism is not the gap.** The **S2.2b** identifier-only predicate is the rule in `tortoise/value_gate.py`: `value_gate._REFERENCE` (`#\d{1,6}(?!\d)`) with `identifier_only()` as a whole-residue test, imported by `extractor_v2.py:72`, toggle `_value_gate_enabled()` (`:724`). ⛔ **THE GATE SITE IS `S2.2b`, NOT `E7`** — the `^#\d{3,}$`-style anchored pattern is not the rule. **Enforcement by default is required**, and the predicate is **subordinate to VET** (`_value_gate_enabled()` folds into `vet_enabled`). ⛔ **This is a default and a subordination — not a missing mechanism. Do not build `valueGate`.**
 

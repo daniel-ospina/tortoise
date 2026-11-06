@@ -54,7 +54,21 @@ def _embed(content: str, quote: str) -> dict:
 
 
 def _write(content: str, quote: str) -> dict:
-    return v2.execute_embed(_embed(content, quote), {}, session_id="s_10360")
+    # #10997: a COMPLETE lookup. `#2552`'s mint is an identity assertion and is
+    # licensed only by a lookup that resolved (`{}` = "the lookup did not run"
+    # now HOLDS the edge), and the mint cases in this file must reach the code
+    # they pin.
+    return v2.execute_embed(_embed(content, quote), _RESOLVED_SEARCH,
+                            session_id="s_10360")
+
+
+_RESOLVED_SEARCH = {
+    "mode": "real", "degraded": False, "reason": None,
+    "entities": [], "points": [], "events": [], "queries_run": 5,
+    "query_coverage": {"derived": {"object": 1, "event": 1, "point": 1},
+                       "ran": {"object": 1, "event": 1, "point": 1},
+                       "failed": {"object": 0, "event": 0, "point": 0}},
+}
 
 
 # ── 1. the rule + its tolerance bound ───────────────────────────────────────
@@ -808,7 +822,7 @@ def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant)
     embed["operators"] = [{
         "src": variant,
         "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
-    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
     contents = [p["content"] for p in result["payload"]["points"]]
     assert variant not in contents, contents
     # positive control: an endpoint with no value in it is still minted, so the
@@ -817,7 +831,7 @@ def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant)
     embed["operators"] = [{
         "src": "the nightly rebuild window",
         "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
-    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
     contents = [p["content"] for p in result["payload"]["points"]]
     assert "the nightly rebuild window" in contents, contents
 
@@ -854,7 +868,7 @@ def test_the_mint_guard_matches_the_SLOT_TUPLE_exactly_so_a_WIDER_variant_mints(
         embed["operators"] = [{
             "src": variant,
             "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
-        result = v2.execute_embed(embed, {}, session_id="s_10360")
+        result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
         contents = [p["content"] for p in result["payload"]["points"]]
         assert variant in contents, (name, contents)
 
@@ -900,7 +914,7 @@ def test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too():
     control["operators"] = [{
         "src": "the cache TTL is 20 minutes",
         "dst": "the nightly rebuild window", "op_type": "IMPL"}]
-    result = v2.execute_embed(control, {}, session_id="s_10360")
+    result = v2.execute_embed(control, _RESOLVED_SEARCH, session_id="s_10360")
     contents = [p["content"] for p in result["payload"]["points"]]
     assert "the cache TTL is 20 minutes" in contents, contents
 
@@ -1640,7 +1654,7 @@ def test_the_MINT_stores_the_refs_OWN_identity_prefix_so_the_5069_loop_closes():
         "operators": [{"src": ref, "dst": "the cache TTL is 20 minutes",
                        "op_type": "IMPL"}],
     }
-    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
     minted = [p["content"] for p in result["payload"]["points"]]
     assert hard in minted, ([len(c) for c in minted], result["warnings"])
 
@@ -2106,7 +2120,7 @@ def test_the_S5_mint_leaves_a_single_token_ref_UNQUOTED_rather_than_misquoting_i
         "operators": [{"src": ref, "dst": "the quota is 20 requests",
                        "op_type": "IMPL"}],
     }
-    result = v2.execute_embed(embed, {}, session_id="s_10360", edus=[
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360", edus=[
         {"index": 0, "role": "user", "text": "maybe try intervals for speed"}])
     minted = [p for p in result["payload"]["points"] if p["id"].startswith("pt")]
     single = [p for p in minted if "storage/" in p.get("content", "")]
