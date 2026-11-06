@@ -63,31 +63,36 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``supersededBy``/``supersededAt`` can still be corroborated (measured: a
   carrier-less ``:Object`` with a birth record folds ``status='draft'`` and a
   disagreeing cache is a ``field_mismatches`` entry, not a bucket occurrence).
-  ⛔ Its repair is to MINT THE CARRIER, not to clear: re-assert the value
-  through the write door — ``update_entity(…, status=<the value>)`` — which
-  journals an ``EntityMutated`` whose applied map carries it
-  (``classify_entity_mutation_op`` labels a status write ``restatus``, and
-  ``_journal_entity_mutation`` records the map in ``state``), the leg
-  ``EVENT_STREAM_FOLDS`` folds; the record side then DERIVES the name, the
-  ``graph_only`` count for that name drops by one per minted node — to zero once
-  every node carrying an uncorroborated ``status`` has a carrier — and the value
-  is PRESERVED.
-  ⚠️ That door is label- AND value-dependent: it writes any ``:Object`` value but,
-  on a ``:Subject``, only the words in ``sdk._SUBJECT_STATUS_VALUES`` — and
-  ``retracted`` is in the READ set (``SUBJECT_TERMINAL_STATUSES``) while being
-  deliberately absent from the writable one, so a ``:Subject`` carrying it can
-  neither mint nor clear through the SDK and has NO non-destructive door at all
-  (the same gap, `#11271`). A CLEAR is the route only where the value is NOT
-  TRUSTWORTHY, and clearing is LABEL-DEPENDENT: on an ``:Object``
-  ``update_entity(…, status=None)`` is applied as ``SET n += {status: null}``, a
-  REMOVAL; on a ``:Subject`` the SAME call is REFUSED — ``sdk._update_entity``'s
-  Subject status door validates against ``_SUBJECT_STATUS_VALUES``, and ``None``
-  is not one of them (measured, `#11252`'s review; the missing SDK door is
-  `#11271`) — so a ``:Subject``'s clear is the graph-side ``REMOVE n.status`` or
-  the wipe below, and either clear makes a TERMINAL entity read LIVE. ⛔ Never a
-  record-sourced re-projection, which is ADDITIVE
+  ⛔ Its repair is to MINT the carrier, and that is NOT a clear: re-assert the
+  value through the write door — ``update_entity(id, status=<the value>)`` —
+  which journals the ``EntityMutated`` state op this census just named as the
+  fold's third leg (``sdk._update_entity`` journals the write's own keys;
+  ``cache_projection._LIFECYCLE_EVENTS_SQL`` reads ``state ->> 'status'``), so
+  the record then DERIVES the value, the name is COMPARED, and the bucket
+  empties with the value PRESERVED. The mint needs a value the label's door
+  accepts AND the record's state-op leg can CARRY — a STRING: the SQL requires
+  ``jsonb_typeof(payload -> 'state' -> 'status') = 'string'`` and a non-string
+  ``restatus`` is skipped when the event is built. So TWO residues have no mint,
+  not one: a NON-STRING value (the ``:Object`` door validates nothing, so
+  ``update_entity(id, status=5)`` is ACCEPTED, journals ``state.status: 5``, and
+  the name stays bucketed — measured, review round 6), and a ``:Subject`` value
+  outside ``SUBJECT_STATUS_VALUES`` (``#11296``). Both take the clear door
+  below, which is why that door's fail-open consequence matters.
+  A CLEAR is the door only where the value is NOT trustworthy, and it is
+  LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
+  as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
+  REFUSED — ``sdk._update_entity``'s Subject status door validates against
+  ``_SUBJECT_STATUS_VALUES``, and ``None`` is not one of them (measured,
+  `#11252`'s review; the missing SDK door is `#11271`) — so a ``:Subject``'s
+  clear is the graph-side ``REMOVE n.status`` or the wipe below. ⛔ A clear is
+  FAIL-OPEN, which is why it is not the first-line repair:
+  ``live._terminal_excluded`` reads an ABSENT status as LIVE, so clearing a
+  ``superseded``/``archived`` value makes a TERMINAL entity answer on the live
+  read (#9974's window, and the harm this section exists to prevent).
+  ⛔ Never a record-sourced re-projection, which is ADDITIVE
   (``MERGE … SET n += $props``, no REMOVE pass) and would leave the value in
-  place;
+  place — true, but it is not the reason there is no non-destructive route: the
+  mint above IS one;
   (b) any property a
   SECOND WRITER put on a placed node, OR on a node the record does not own at
   all (``scan_cache_view`` fills ``placed`` for every cache node it reads, so
@@ -116,12 +121,9 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair — bar ``status``, which the record's own derivation makes
   COMPARABLE wherever the record DERIVES one, and a ``status`` the record derives
-  NOWHERE is the form whose carrier is MINTED by re-asserting the value through
-  the write door (its ``graph_only`` count for that name falls by one per node
-  minted), and a CLEAR is only for
-  a value that is not trustworthy — except on a ``:Subject`` whose value the door
-  cannot write (``retracted``), which has no non-destructive door at all — see (a)
-  above); the
+  NOWHERE is repaired by MINTING its carrier — a clear only where the value is
+  untrustworthy OR no mint exists (a non-string, or a ``:Subject`` value outside
+  the writable set), see (a) above); the
   projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record's
@@ -137,9 +139,11 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
   legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
-  who does not want the wipe — and it has NO non-destructive route: nothing
-  writes the column any more, so no in-place repair can exist. That is WHERE IT
-  DIFFERS from the declined pair, which does have one, shipped:
+  who does not want the wipe — and it has NO repair that RESTORES the value:
+  nothing writes the column any more, so there is nothing to re-derive it from.
+  ⛔ Not "no IN-PLACE repair": ``#10017``'s purge IS in place, and so is a
+  targeted clear — what is missing is a route that KEEPS the value. That is
+  WHERE IT DIFFERS from the declined pair, which does have one, shipped:
   ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
   ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
   node's other properties untouched. So the three classes differ in which lane
@@ -572,24 +576,26 @@ def reconcile_record_and_cache(
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
     a ``graph_only`` name has one repair per population: none (schema-refused —
-    bar ``status``: where the record DERIVES one the name is COMPARED, and its
-    uncorroborated form — a value the record derives nowhere — is repaired by
-    MINTING that carrier, ``update_entity(…, status=<the value>)``, which
-    journals an ``EntityMutated`` whose ``state`` carries the value — the leg
-    folds by PAYLOAD, not by the op label — so the value is PRESERVED
-    and the count for that name falls by one per node minted; a CLEAR is only for
-    a value that is not trustworthy, and it is LABEL-DEPENDENT: ``update_entity(…,
-    status=None)``, ``SET n += {status: null}``, a REMOVAL, on an ``:Object``;
-    on a ``:Subject`` that call is REFUSED (#1423's status door accepts only
-    ``SUBJECT_STATUS_VALUES``, and ``None`` is not one of them), so a Subject's
-    clear is the graph-side ``REMOVE n.status`` — and either clear makes a
-    TERMINAL entity read LIVE (``live.status_as_reported``). ⚠️ The MINT is
-    refused by that
-    same door for a Subject value outside the writable set — ``retracted`` is in
-    the READ set (``SUBJECT_TERMINAL_STATUSES``) yet not writable, so it has no
-    non-destructive door at all (the same gap, #11271) — ⛔ NOT a record-sourced
-    re-projection, which is ADDITIVE and leaves the value in place — measured,
-    see the module docstring's (5)),
+    bar ``status``: where the record DERIVES one the name is COMPARED, and
+    its uncorroborated form — a value the record cannot place — is repaired by
+    MINTING the carrier: re-assert the value through the write door
+    (``update_entity(id, status=<value>)``), whose journaled ``EntityMutated``
+    state op ``EVENT_STREAM_FOLDS`` folds, after which the name is COMPARED and
+    the bucket loses ONE occurrence per node minted (`graph_only` counts a name
+    across the population, not once per node), with the value PRESERVED — where
+    the value is a STRING the
+    record's state-op leg can carry (a non-string is skipped: the SQL requires
+    ``jsonb_typeof(... 'status') = 'string'``), and on a ``:Subject`` where the
+    value is inside ``SUBJECT_STATUS_VALUES``. Both exceptions have no mint
+    (``#11296`` and the non-string class), and take the clear below. A CLEAR — on an
+    ``:Object`` ``update_entity(…, status=None)``, ``SET n += {status: null}``, a
+    REMOVAL; on a ``:Subject`` that call is REFUSED (#1423's status door accepts
+    only ``SUBJECT_STATUS_VALUES``, and ``None`` is not one of them), so a
+    Subject's clear is the graph-side ``REMOVE n.status`` — is the route only
+    where the value is NOT trustworthy, and it is FAIL-OPEN: ``live`` reads an
+    ABSENT status as LIVE, so a cleared terminal entity answers on the live read.
+    ⛔ NOT a record-sourced re-projection, which is ADDITIVE and leaves the value
+    in place — measured, see the module docstring's (5)),
     a record-sourced clear IN PLACE for the declined pair —
     ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
     ⛔ NOT a re-projection, which is additive and leaves an existing pair on the

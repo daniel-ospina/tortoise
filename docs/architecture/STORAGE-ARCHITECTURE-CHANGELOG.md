@@ -2105,15 +2105,15 @@ occurrence (one property the projection declines to write), NOT as a `field_mism
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
 a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too. ⛔ The classes that lack a non-destructive repair are the NOT-PROJECTABLE one (nothing writes
-the column, so no in-place route can exist) **and a `:Subject` whose `status` its own write door refuses** —
-`retracted` is read-terminal (`SUBJECT_TERMINAL_STATUSES`) yet absent from the writable `SUBJECT_STATUS_VALUES`,
-so neither the carrier mint nor a clear goes through the SDK and its only routes are the graph-side `REMOVE n.status`
-and the wipe (the missing door is `#11271`) ⚠️ **CORRECTED `#11253`**: this entry said **only** the NOT-PROJECTABLE
-class lacked one; the `status` family's mint-first repair, and this Subject restriction, are `#11253`'s, measured at
-that PR's head. The declined pair has one, shipped —
+whole-graph and therefore clears a legacy copy too. ⛔ The classes that lack a repair that RESTORES the value are the NOT-PROJECTABLE one (nothing writes
+the column, so there is nothing to re-derive it from — `#10017`'s purge is itself IN PLACE, it just clears
+the value) **and the `status` residues the carrier mint cannot CARRY**: a NON-STRING value (the state-op leg
+folds only `jsonb_typeof(… ) = 'string'`) and a `:Subject` value outside `SUBJECT_STATUS_VALUES`
+(`#11296`); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
-repairs it in place. The classes differ in both why and which lane.
+repairs it in place. ⚠️ **CORRECTED (`#10394` follow-up)**: this entry said **only** the NOT-PROJECTABLE class
+lacked one, and earlier still said an uncorroborated `status` had "NO non-destructive repair" — the mint
+above is that route wherever the value is a string the door will write. The classes differ in both why and which lane.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED
