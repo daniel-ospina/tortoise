@@ -3128,12 +3128,19 @@ whole reason this path exists.
 #    parses to zero rows) — a fault in the INSTALL, not in the record, and since
 #    #10663 the verb names it as such INSTEAD of collapsing it into "the record
 #    is unreadable". No DSN or credential change clears it, and the remedy
-#    depends on WHICH arm it names: regenerate/ship the carrier
-#    (`uv run python tools/gen_placement_table.py`) when the CARRIER is the
-#    fault — but ⛔ if the message names the DOC (`The DOC is the fault here`),
-#    restore the doc's table FIRST: the generator parses the doc, so over an
-#    empty doc it writes an empty carrier, prints `wrote … (0 rows)`, exits 0,
-#    and `--check` then agrees — two green reports over a still-broken install.
+#    depends on which of FOUR shapes the message names:
+#      • CARRIER absent / stale / malformed (wrong `_generated_by`, a bad row, an
+#        undeclared table, a `_row_count` mismatch) → regenerate and ship it
+#        (`uv run python tools/gen_placement_table.py`);
+#      • CARRIER or DOC "EMPTY" / "ZERO rows" → ⛔ check the DOC FIRST, whatever
+#        the message quotes. The generator parses the doc, so over a doc with no
+#        table it writes an empty carrier, prints `wrote … (0 rows)`, exits 0,
+#        and `--check` then agrees — two green reports over a still-broken
+#        install. Restore the doc's table first; regenerate only once the doc
+#        yields rows again;
+#      • DOC unreadable / absent in a checkout → restore the doc, then
+#        regenerate;
+#      • neither present (an image) → the image lost its package data; ship it.
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \

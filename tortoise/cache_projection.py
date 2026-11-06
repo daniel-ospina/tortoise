@@ -1061,10 +1061,18 @@ class PlacementTableUnavailable(CacheProjectionError):
        table projected every record property as unmapped with no error at all.
        ⚠️ The doc arm is NOT at full parity: a doc has no `_row_count` and no
        per-row provenance, so a row LINE the parser cannot match is dropped
-       silently (`parse_placement_rows` skips it) — a PARTIAL doc is caught by
-       the placement pins in `tests/test_cache_projection.py`, not here. Stated
-       because an unqualified "refuses exactly like the carrier" is how the next
-       reader concludes this arm is closed.
+       silently (`parse_placement_rows` skips it). What catches that is
+       `tests/test_record_schema_placement.py`'s ABSOLUTE count
+       (`EXPECTED_TOTALS`: 192/29/0, 221 names) — NOT `test_cache_projection.py`,
+       which derives from the same doc through the same regex and so shrinks with
+       it (its unclassified-column pin catches a lost PRIMARY row only, via the
+       migrations). Stated because an unqualified "refuses exactly like the
+       carrier" is how the next reader concludes this arm is closed;
+    6. **an explicitly named doc that is not on disk** — the `doc=` arm. NOT arm
+       1 and NOT a broken install: arm 1 is the no-arg read ("neither
+       location"), while a caller-supplied path that does not exist is a BAD
+       PATH. It raises this type only so a public accessor cannot leak a class
+       no out-of-module handler can name.
 
     It is a distinct type because the message it replaces — *"the record is
     unreadable"* — sent an operator to Postgres credentials for a file that was
@@ -1199,8 +1207,10 @@ def _placement_rows_from_doc(path: Path) -> list[tuple[str, str]]:
 
     NOT at full parity with the carrier, and the difference is named rather than
     implied: a doc declares no row count and carries no per-row provenance, so a
-    single row LINE the parser cannot match is dropped silently. A partial doc is
-    caught by the placement pins in `tests/test_cache_projection.py`, not here.
+    single row LINE the parser cannot match is dropped silently. The pin that
+    catches that is `tests/test_record_schema_placement.py`'s ABSOLUTE count
+    (`EXPECTED_TOTALS`), not `test_cache_projection.py` — that file derives from
+    the same doc through the same regex, so it shrinks with a lost row.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -1266,13 +1276,18 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
       (`UnicodeDecodeError` is a `ValueError`, so it needs its own arm);
     * **from another generator** — `_generated_by` is not
       :data:`PLACEMENT_TABLE_GENERATOR`, so its SHAPE is unknown here;
-    * **shape-wrong** — a row that is not exactly two strings. The old
+    * **shape-wrong** — a row that is not exactly two strings, or that names a
+      table outside :data:`_DECLARED_TABLES`. The old
       ``[(str(a), str(b)) for a, b in rows]`` was the silent one: iterating a
       DICT row yields its **keys**, so ``{"table": "point", …}`` became
       ``("table", "property")`` for every row and every record column then
-      projected as unmapped, with no exception anywhere;
+      projected as unmapped, with no exception anywhere. A row under an
+      undeclared table is the same silence one step quieter: it parses, the
+      count can still match, and the property lands under a key no accessor
+      asks for;
     * **EMPTY** — zero rows. An empty namespace is never legitimate;
-    * **truncated** — fewer rows than its own `_row_count` declares.
+    * **row-count mismatch** — `_row_count` != the rows held (fewer: truncated by
+      a bad merge; more: hand-edited). `!=`, not `<`.
 
     `_source_sha256` is deliberately NOT enforced here: it can only be checked
     against the doc, and the deployed image ships no `docs/` tree — the whole
