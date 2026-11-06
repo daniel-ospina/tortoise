@@ -87,6 +87,39 @@ def _setup_cli_step(workflow_text: str) -> dict:
     return steps[0]
 
 
+def _setup_cli_block(workflow_text: str) -> list[str]:
+    """The setup-cli step's own source lines, from its `uses:` line to the end of that step.
+
+    The pin check must be scoped to THIS step. A file-wide search is satisfied by a decoy literal —
+    review demonstrated a green path through an `actions/setup-node` step's `with: version: 2.122.1`
+    while the setup-cli step itself carried none — so "a matching line exists somewhere" is not the
+    claim the guard needs to make.
+    """
+    lines = workflow_text.splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if "supabase/setup-cli" in line and "uses" in line),
+        None,
+    )
+    assert start is not None, "no `uses: supabase/setup-cli` line found — the migration door moved"
+    step_indent = len(lines[start]) - len(lines[start].lstrip())
+    block = [lines[start]]
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped and stripped.startswith("- ") and len(line) - len(line.lstrip()) <= step_indent:
+            break  # the next step starts here
+        block.append(line)
+    return block
+
+
+def _literal_version_lines(workflow_text: str) -> list[str]:
+    """Every literal `version:` value inside the setup-cli step, in source order."""
+    return [
+        match.group(1)
+        for line in _setup_cli_block(workflow_text)
+        if (match := re.match(r"^\s*version:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$", line))
+    ]
+
+
 def _requested_version(workflow_text: str) -> str:
     """The CLI version the workflow pins, and proof that CI resolves the same value.
 
@@ -94,8 +127,9 @@ def _requested_version(workflow_text: str) -> str:
     implements the YAML MERGE KEY (`<<: {version: 2.122.1}`), which GitHub Actions does NOT — so a
     step could carry no `version:` line at all, PyYAML would synthesize one, and the
     `version is None` arm below would never fire while the action fell back to `latest` (3.x). The
-    same class covers a duplicate `version:` key, where PyYAML takes the last one. So the resolved
-    value must also be present as a LITERAL `version:` line, and merge keys are refused outright.
+    same class covers a duplicate `version:` key, where PyYAML takes the last one and GitHub's
+    tie-break is not measured. So the step must carry EXACTLY ONE literal `version:` line, and it
+    must be the resolved value. Merge keys are refused outright.
     """
     step = _setup_cli_step(workflow_text)
     with_ = step.get("with") or {}
@@ -112,12 +146,20 @@ def _requested_version(workflow_text: str) -> str:
         "to remove"
     )
     resolved = str(version).strip()
-    assert re.search(
-        rf"(?m)^\s*version:\s*['\"]?{re.escape(resolved)}['\"]?\s*(?:#.*)?$", workflow_text
-    ), (
-        f"the pin `{resolved}` was not read from a literal `version:` line — PyYAML resolved it "
-        "from a construct (merge key, duplicate key, alias) that GitHub reads differently, so the "
+    literals = _literal_version_lines(workflow_text)
+    assert literals, (
+        f"the pin `{resolved}` is not a literal `version:` line in the setup-cli step — PyYAML "
+        "resolved it from a construct (merge key, alias) that GitHub reads differently, so the "
         "value asserted here is not necessarily the CLI CI installs"
+    )
+    assert len(literals) == 1, (
+        f"the setup-cli step carries {len(literals)} literal `version:` lines ({', '.join(literals)}) "
+        "— a duplicate key's tie-break is not measured against GitHub's parser, so the value read "
+        "here is not provably the one installed. Pin exactly once."
+    )
+    assert literals[0] == resolved, (
+        f"the setup-cli step's literal pin is `{literals[0]}` but this reader resolved `{resolved}` "
+        "— the two disagree, so a construct is being resolved differently than CI would"
     )
     return resolved
 
@@ -136,7 +178,7 @@ def _config_declares_inbucket(config_text: str) -> bool:
 
 
 def _violations(workflow_text: str, config_text: str) -> list[str]:
-    r"""Every way the workflow PINS a CLI this repo cannot safely run in production.
+    r"""Every way the workflow's `supabase/setup-cli` step pins a CLI this repo cannot safely run.
 
     DECLARED THREAT SURFACE — in scope, each covered by an arm below:
       (1) a floating pin (`latest`, `v2`, `^2.122.1`, …) — any shape that is not an exact x.y.z;
@@ -147,8 +189,9 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
 
     DECLARED OUT OF SCOPE (not silently assumed covered): a `run:` step that installs or invokes a
     v3 CLI by itself (`npx supabase@3.0.0 …`, `npm i -g supabase@…`). That is a code change, and it
-    is reviewed as code; the mutating-command argument checks are open PR #11104's own suite. A
-    reader of this file must not take its title as a claim about that surface.
+    is reviewed as code; the mutating-command argument checks are open PR #11104's own suite. The
+    title above is scoped to the setup-cli STEP for exactly this reason — do not read it as a claim
+    about `run:` bodies.
 
     ⛔ The ceiling is deliberately a MAJOR comparison rather than a scan of the workflow's arguments.
     An earlier draft decided v3-readiness by looking for `--yes` in the mutating commands, and review
@@ -270,6 +313,46 @@ def test_a_pin_this_reader_cannot_see_literally_is_refused() -> None:
     )
     with pytest.raises(AssertionError, match="merge key"):
         _requested_version(merged)
+
+
+def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
+    """The pin must be the step's OWN single literal line.
+
+    Review demonstrated two green paths through the file-wide search this arm replaces: a decoy
+    literal in an unrelated step (`actions/setup-node`'s `with: version: 2.122.1`) satisfied the
+    search while the setup-cli step carried none, and a duplicated `version:` key left two values
+    where the reader takes one and GitHub's tie-break is unmeasured. "Some matching line exists in
+    the file" was never the claim the guard needed to make.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    # (a) the step pins via a flow mapping (no `version:` LINE inside it) while a decoy literal sits
+    #     in an unrelated step. A file-wide search is satisfied by the decoy; the step-scoped check is
+    #     not. This is the exact shape review used to turn the old search green.
+    flow = re.sub(
+        r"(?m)^(\s*)with:\n\s*version:\s*2\.122\.1\s*$",
+        r"\1with: {version: 2.122.1}",
+        workflow,
+        count=1,
+    )
+    assert "with: {version: 2.122.1}" in flow, "mutation did not apply — this test would be vacuous"
+    assert not re.search(r"(?m)^\s*version:\s*2\.122\.1\s*$", flow), (
+        "a literal pin line survived the mutation — the arm would not test the scope"
+    )
+    flow += "\n      - uses: actions/setup-node@v4\n        with:\n          version: 2.122.1\n"
+    with pytest.raises(AssertionError, match="not a literal"):
+        _requested_version(flow)
+
+    # (b) two literal pins in the step must be refused, not silently resolved to one.
+    duplicated = re.sub(
+        r"(?m)^(\s*)version:\s*2\.122\.1\s*$",
+        r"\1version: latest\n\1version: 2.122.1",
+        workflow,
+        count=1,
+    )
+    assert duplicated.count("version: latest") == 1, "mutation did not apply — vacuous"
+    with pytest.raises(AssertionError, match="literal `version:` lines"):
+        _requested_version(duplicated)
 
 
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
