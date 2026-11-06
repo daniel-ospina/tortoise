@@ -152,6 +152,11 @@
 #  78o. #10234: a 2-minute-old stamp is USABLE — pins the skew grace's lower side
 #  78p. #10234: a stamp 120s AHEAD is usable (the grace's tolerated band), and the
 #      run reports 0m instead of an impossible negative age
+#  78s. #11116: the HELD-LOCK arm classifies a future-dated last_sweep_at as
+#      corruption and reds — it read the same field as 78f's arm but had no
+#      guard, so `already_running` + a skewed stamp exited 0 as "healthy";
+#      s-ii pins the grace's tolerated band on that arm, s-iii that the red does
+#      not depend on the pool
 #  78i. #10234: a MIXED pool (one stale team AND one unparseable timestamp) files
 #      a POOL_STALE whose body names the corrupt stamp and whose title covers both
 #      causes — the placeholder bullet must not be gated on the stale count
@@ -2026,8 +2031,12 @@ assert_file_match "$SCRIPT_DIR/../workflows/registry-backup-cron.yml" 'timeout-m
 
 # ── 78d-ii. #10234 review P2: a non-numeric knob must not go green ─────────
 # It is passed straight to `curl -m`; a bad value makes curl reject the option
-# (rc=2) with NO request sent, which the shape classifier would read as an empty
-# body — i.e. a green run whose sweep was never posted.
+# (rc=2) with NO request sent. That rc is NOT 28, so the shape classifier reads
+# it as `transport_error` and the run is RED — the empty-body/green shape an
+# earlier cut of this PR would have produced is gone (#11116 review P3: the
+# justification here described that earlier cut). The refusal is still worth
+# keeping: a legible "must be whole seconds" beats a confusing transport fault
+# that names curl's rc instead of the variable.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -2345,6 +2354,57 @@ assert_contains "$OUT" "inside the 300s skew grace" "78p. it names the skew inst
 assert_not_match "$OUT" '-[0-9]+s AHEAD' "78p. the magnitude is never NEGATIVE (a flipped sign would print -120s AHEAD)"
 assert_match "$OUT" '[1-9][0-9]*s AHEAD' "78p. the magnitude is a positive count"
 assert_contains "$OUT" "0m ago" "78p. the age is clamped to 0m"
+
+# ── 78s. #11116 review P2: the HELD-LOCK arm must not read a FUTURE stamp as healthy ──
+# The `already_running` arm gates on the same `last_sweep_at` field as the
+# timeout arm above, but shipped without its future-stamp guard: a negative age
+# is never `> DRIVER_DOWN_MIN`, so a skewed/corrupt ops/state.json logged
+# "healthy", left NO_COVERAGE=0 and exited 0 forever — while publishing "last
+# real sweep -360m ago — healthy". Cases 14/15 drive this arm with TS_STALE and
+# TS_RECENT only, so FUTURE_TS + already_running was unreachable and deleting
+# the guard would leave the suite green.
+reset_case
+FUTURE_LOCK_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=6)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FUTURE_LOCK_TS")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "78s. held lock + a future-dated stamp fails CLOSED (1), not healthy (0)"
+assert_contains "$OUT" "dated in the FUTURE" "78s. the held-lock arm names the corruption"
+assert_not_contains "$OUT" "— healthy" "78s. it never calls the corrupt lock healthy"
+assert_not_match "$OUT" 'last real sweep -[0-9]+m ago' "78s. it does not publish an impossible negative age"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78s. the corrupt held lock FILED SWEEP_NO_COVERAGE"
+assert_contains "$(cat "$LOG")" 'sweep lock held and last_sweep_at is in the future' "78s. the TITLE names the future stamp, and the held lock"
+
+# ── 78s-ii. #11116: the grace's TOLERATED band on the HELD-LOCK arm ────────
+# Same band as 78p, one arm over: a stamp 120s AHEAD is ordinary app<->runner
+# skew, so it must stay green — and must report 0m, not "-2m ago".
+reset_case
+AHEAD_LOCK_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=120)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$AHEAD_LOCK_TS")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 0 "78s-ii. a held lock + a stamp 120s AHEAD (inside the grace) stays green"
+assert_not_contains "$(cat "$LOG")" 'in the future' "78s-ii. it does NOT file a future-stamp incident"
+assert_not_match "$OUT" 'last real sweep -[0-9]+m ago' "78s-ii. the held-lock line never carries a negative age"
+assert_contains "$OUT" "inside the 300s skew grace" "78s-ii. it names the skew instead"
+assert_contains "$OUT" "last real sweep 0m ago" "78s-ii. the age is clamped to 0m"
+
+# ── 78s-iii. #11116: the held-lock corruption red does NOT depend on the pool ──
+# 78f-ii pins this for the timeout arm (round 1 swallowed corruption into the
+# benign pre-beta envelope). The held-lock arm's new guard must not inherit
+# that shape either: a measured-EMPTY pool must not silence it.
+reset_case
+export R2_TEAMS=""
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FUTURE_LOCK_TS")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "78s-iii. held lock + future stamp reds even when the pool is measured empty"
+assert_contains "$OUT" "dated in the FUTURE" "78s-iii. the corruption is named, not swallowed as pre-beta"
 
 # ── 78q. #10234 review P2 (round 18): the published value is SCRUBBED and BOUND ──
 # Round 13 added `redact_truncate "$newest" 80` because that value is app-controlled
