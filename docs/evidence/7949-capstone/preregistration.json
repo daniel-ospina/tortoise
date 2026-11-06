@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:cc91956659ad97b8b92903ab7fed04e8d7bce0ff9b0853385e502d9bdc37deba",
+  "document_sha256": "sha256:6b6c730a16f94b92c90e1f85327a4b8dd497884d321768538c964b37e6ff461a",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -255,13 +255,16 @@
         "TORTOISE_LABEL_ORDER",
         "TORTOISE_SESSION_LLM_MOCK",
         "TORTOISE_EXTRACTOR_PROMPT",
-        "TORTOISE_EXTRACT_MODEL"
+        "TORTOISE_EXTRACT_MODEL",
+        "TORTOISE_LABEL_ORDER_SEED",
+        "TORTOISE_EXTRACTOR_MAX_TOKENS",
+        "TORTOISE_EXTRACTOR_ESCALATION_TOKENS"
       ],
       "pinned_to": {
         "TORTOISE_S4_DELTA": "1"
       },
       "why_value_gate_off": "its default flipped ON in #10996; an arm that declares itself OFF must pin the explicit 0 or it measures the predicate's population",
-      "read_back": "every value is re-read from os.environ after setting and a mismatch REFUSES the run; the set includes the three measurement switches the #10983 review found unpinned (TORTOISE_SESSION_LLM_MOCK, TORTOISE_EXTRACTOR_PROMPT, TORTOISE_EXTRACT_MODEL)"
+      "read_back": "every value is re-read from os.environ after setting and a mismatch REFUSES the run; the set is CLOSED over what the capture path reads — the arm seams (TORTOISE_VET, TORTOISE_CLASSIFY_LATER, TORTOISE_S4_DELTA), the lane and commit dispatch, the render switches, the model selector, the offline mock and the two truncation budgets (#10983 review rounds 1-2)"
     },
     "negative_control": {
       "arms": [

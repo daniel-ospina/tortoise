@@ -420,9 +420,22 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
         "(explicitly not byte-identical since #9733) — pinned off or two runs "
         "of the arm differ for a non-arm reason")
     assert "TORTOISE_EXTRACT_MODEL" in probe.DOOR_PINNED_OFF, (
-        "TORTOISE_EXTRACT_MODEL selects the extractor's model AND the legacy "
-        "4000-token bound — pinned off so the acceptance runs the default "
-        "producer and its truncation contract")
+        "TORTOISE_EXTRACT_MODEL selects the extractor's model — pinned off so "
+        "the acceptance runs the default producer")
+    # Review round 2: the set must be CLOSED over what `extractor_v2` reads, or
+    # the header's "every switch that changes what the run measures" is a claim
+    # nothing checks. These two decide how much of each stage survives
+    # truncation, and they are read at CALL time (`_stage_cap`,
+    # `_extractor_escalation_tokens`), so an ambient value shrinks the measured
+    # population under a door the log says is pinned.
+    for key in ("TORTOISE_EXTRACTOR_MAX_TOKENS",
+                "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+                "TORTOISE_LABEL_ORDER_SEED"):
+        assert key in probe.DOOR_PINNED_OFF, (
+            f"{key} is read on the capture path and changes what the run "
+            f"measures (or can, if its sibling switch moves), and is not "
+            f"pinned: an inherited value would be measured under a door whose "
+            f"log claims it was pinned (#10983 review round 2)")
 
 
 def test_the_probe_refuses_a_leaked_lane(monkeypatch):
@@ -505,6 +518,60 @@ def test_an_unmeasured_door_never_claims_a_read_back():
                  probe.DOOR_PINNED_OFF + tuple(k for k, _ in probe.DOOR_PINNED_ON)}
     assert probe.door_record(all_unset)["measured"] is True
     assert "read back from os.environ" in probe.door_header(all_unset)
+
+
+def test_every_env_var_the_capture_path_reads_is_accounted_for():
+    """The comment's "the set is CLOSED" claim, MECHANISED.
+
+    Two review rounds in a row found one more measurement switch that the pin
+    set did not cover (`TORTOISE_SESSION_LLM_MOCK`, then the two truncation
+    budgets), because "every switch that changes what the run measures" was
+    prose. This derives the list from the module instead: every
+    ``TORTOISE_*`` variable ``extractor_v2`` reads must be EXACTLY ONE OF
+
+      * an arm seam in ``SEAM_LEDGER`` (the VET/CLASSIFY_LATER/S4_DELTA flags),
+      * a member of ``DOOR_PINNED_OFF`` / ``DOOR_PINNED_ON``, or
+      * a declared INPUT (the graph it writes, the backend label it resolves) —
+        things the run needs a value FOR, not settings that change what it
+        measures.
+
+    A new ``os.environ.get("TORTOISE_...")`` in the extractor therefore reds
+    this suite until someone classifies it, which is the only form of this rule
+    that cannot be re-opened by the next switch.
+    """
+    #: The two reads that are INPUTS, not measurement settings. Both must be set
+    #: for a run to happen at all (`backend_ready` gates on the first), so
+    #: pinning them would pin the target rather than the seam.
+    acknowledged_inputs = {"TORTOISE_DB_URI", "TORTOISE_API_URL"}
+
+    src = EXTRACTOR.read_text(encoding="utf-8")
+    read = set(re.findall(r'os\.environ\.get\(\s*"([A-Z_0-9]+)"', src))
+    read |= set(re.findall(r'env_flag\(\s*"([A-Z_0-9]+)"', src))
+    assert read, (
+        "no TORTOISE_* reads resolved from extractor_v2.py — the derivation "
+        "itself is broken, so this pin would pass over anything")
+
+    probe = _load_probe()
+    accounted = ({env for env, _w, _d, _s in probe.SEAM_LEDGER}
+                 | set(probe.DOOR_PINNED_OFF)
+                 | {env for env, _v in probe.DOOR_PINNED_ON}
+                 | acknowledged_inputs)
+    unaccounted = sorted(read - accounted)
+    assert not unaccounted, (
+        f"extractor_v2.py reads {unaccounted} and the door accounts for none of "
+        f"them: either pin it (pop + refuse, like the rest) or declare it an "
+        f"INPUT in this test with the reason. An unclassified read is how an "
+        f"inherited shell changes the measured population under a door the log "
+        f"says is pinned (#10983 reviews)")
+    # And the reverse: a pinned switch nothing on the path reads is a
+    # declaration, not a control.
+    path_src = src + _source(SDK) + _source(HOSTED)
+    dead = sorted(env for env in (set(probe.DOOR_PINNED_OFF)
+                                  | {e for e, _v in probe.DOOR_PINNED_ON})
+                  if env not in path_src)
+    assert not dead, (
+        f"{dead} are pinned but read nowhere on the capture path — a pin that "
+        f"cannot matter is the declaration this module refuses elsewhere")
 
 
 def test_the_probe_records_the_door_in_the_log_and_the_machine_record():
