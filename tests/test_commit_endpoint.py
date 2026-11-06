@@ -3721,8 +3721,10 @@ class TestPayloadEnvelopeBytes:
         ``telemetry``'s free-form strings are excluded from ``canonical_payload``
         (so ``client_commit_id`` is unaffected) and are never metered, so a lone
         surrogate there used to make a 500 KB ``summary`` free: measured
-        pre-fix, ``commit_ingest_charge_bytes`` returned 4,096 (the floor) for a
-        body whose clean twin returned 500,696.
+        pre-fix on this test's own payload (which declares 6 nodes — 4 fixed,
+        the ``session:<id>`` source and the one ``entities`` entry — so its
+        floor is 6,144), ``commit_ingest_charge_bytes`` returned 6,144 for a
+        body whose clean twin returned 501,001.
         """
         from tortoise.commit_schema import (
             CommitPayload,

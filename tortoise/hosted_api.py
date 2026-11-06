@@ -17216,10 +17216,11 @@ def capture_ingest_charge_bytes(body: SessionRequest) -> int:
     was the fail-OPEN direction #4051 names: ``model_dump_json`` raises on a lone
     surrogate (``"\ud800"``, which any JSON body can carry as an escape), that
     state is reachable through ``metadata`` — a field this lane never stores —
-    and it collapsed the charge to the node floor. Measured at the pre-fix head:
-    a 200 KB capture was charged 4,096 B instead of 200,220 B, and the endpoint
-    ADMITTED it on a window that refused the identical capture without the
-    surrogate (200 vs 429).
+    and it collapsed the charge to the node floor. Measured at the pre-fix head
+    with the body the test now posts (a 200 KB turn, ``session_id`` included):
+    charged 5,120 B (the 5-node floor: 3 fixed + 2 per turn) instead of
+    200,266 B, and the endpoint ADMITTED it on a window that refused the
+    identical capture without the surrogate (200 vs 429).
     """
     from tortoise.commit_schema import COMMIT_INGEST_BYTES_PER_NODE
     payload_bytes = _capture_payload_envelope_bytes(body)
