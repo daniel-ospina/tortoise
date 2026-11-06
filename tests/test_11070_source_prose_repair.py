@@ -96,7 +96,7 @@ class _RecordingGraph:
     #: The columns the census read projects (it must NOT pull `embedding`, so the
     #: graph is asked for these by name and the fake answers in the same order).
     COLUMNS = ("url", "sourceKind", "summary", "_searchText", "topics",
-               "sessionId", "turn_max_index")
+               "sessionId", "turn_max_index", "node_id")
 
     #: The server's ``TIMEOUT_MAX`` for this fake, in ms. ``0`` = uncapped, which
     #: is FalkorDB's own default. A NON-ZERO value makes the fake REFUSE an
@@ -146,6 +146,7 @@ class _RecordingGraph:
 
 def _session_node(**overrides):
     props = {
+        "node_id": 1,
         "url": "session:s-11070",
         "sourceKind": "agentSession",
         "sessionId": "s-11070",
@@ -1595,3 +1596,253 @@ def test_EACH_replay_file_calls_THIS_hook_exactly_once_with_its_own_label():
         assert sorted(found) == sorted(literals), (
             f"{rel}: the #11070 hook is called as {found!r}, expected {literals!r} "
             f"— a deleted call site or a wrong engine label")
+
+
+# ── the write is a COMPARE-AND-SET, not a url lookup (PR #11152 review F1) ──
+#
+# `:Source` declares NO uniqueness constraint on `url` — the repo's own
+# reconciler names that state as REACHABLE (`record_reconcile.py`: "the graph
+# declares no uniqueness constraint, so a second writer's CREATE can leave TWO
+# nodes at one (label, key)"). A bare `MATCH (s:Source {url:$url})` is therefore
+# a POPULATION match: with a HEALTHY sibling at the same url (a `record-restore`d
+# node — no `summary`, `_searchText` = the lexicon) the write landed on the
+# sibling too, and the CLEAR arm removed that node's only index entry while no
+# bucket named it. Measured on a real FalkorDB: the census selected ONE node,
+# the write hit TWO, `census_after` still said 0.
+#
+# Two legs, because either alone is defeatable: the first pins the GUARD and its
+# wiring (a constant string cannot be "tested" by reading it), the second proves
+# the CYPHER actually holds on the engine the repair runs against.
+
+
+def test_the_write_is_a_compare_and_set_on_the_pair_the_census_read():
+    """The guard, and that it compares against the READ values.
+
+    (1) FAILS if the `WHERE` pair is dropped from `_REPAIR_PAIR` — the original
+        defect — and FAILS if the parameters are not the pair the census row
+        carried (an empty/absent `old_sum`/`old_st` matched NOTHING and silently
+        repaired nothing: measured, after the guard was added and before the
+        census started carrying the pair).
+    (2) REACHABLE: an ordinary pre-fix candidate, cleared by name.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=lambda sid, tmi=None: None, dry_run=False,
+        clear_without_record=True)
+
+    assert len(graph.writes) == 1, "the by-name clear arm did not write once"
+    cypher, params = graph.writes[0]
+    assert "coalesce(s.summary,'')=$old_sum" in cypher, (
+        "the write is addressed by url alone again — a healthy sibling at the "
+        "same url receives it (PR #11152 review F1)")
+    assert "coalesce(s._searchText,'')=$old_st" in cypher
+    assert params["old_sum"] == PROSE, (
+        "the compare-and-set values must be the pair the CENSUS read, not a "
+        "re-read: an empty `old_sum` matches no node, so every write becomes a "
+        "silent no-op that reports `written` (measured)")
+    assert params["old_st"] == PROSE
+    assert report["written"] == ["session:s-11070"], (
+        "a write that matched its node must still be reported as written — the "
+        "guard must not turn the whole repair into a no-op")
+
+
+class _WriteMatchesNothing(_RecordingGraph):
+    """A graph whose WRITE matches no node (the node changed under the run).
+
+    Reads answer normally, so the re-measured census still sees the candidate —
+    which is the pair of facts the report must not contradict.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        if any(m in cypher for m in self.WRITE_MARKERS):
+            self.statements.append((cypher, dict(params or {})))
+            return _Result([])
+        return super().query(cypher, params=params, timeout=timeout)
+
+
+def test_a_write_that_matches_nothing_is_not_reported_as_repaired():
+    """A compare-and-set miss must read as a MISS, not as a repair.
+
+    (1) FAILS if `written` is appended unconditionally: the report then claims
+        the pair was written while `census_after` has not moved — the same
+        "report contradicts its own writes" class this module has fixed twice
+        (`_add_note` on the dry run, and `written` from the write rather than
+        from arithmetic over the buckets).
+    (2) REACHABLE: a node that changed between the census read and the write.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _WriteMatchesNothing([(_session_node(),)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=lambda sid, tmi=None: None, dry_run=False,
+        clear_without_record=True)
+
+    assert len(graph.writes) == 1, "the guard must still issue the write"
+    assert report["written"] == [], (
+        "a write that matched no node was counted as repaired")
+    assert report["census_after"] == report["census_before"] == 1, (
+        "the census was decremented (or not re-measured) over a write that "
+        "matched nothing")
+    assert "NOTHING was written" in report["notes"]["session:s-11070"], (
+        "the miss is not reported anywhere")
+
+
+def test_a_candidate_with_no_node_id_or_a_non_string_pair_is_NAMED():
+    """A candidate the write cannot compare must land in `unaddressable`.
+
+    (1) FAILS if such a row is written anyway (a raw float reaches
+        `_guard_numeric_params` and raises mid-run) or normalized to "" (which
+        the Cypher-side `coalesce` cannot match: `12 = ''` is false), silently
+        pinning `census_after` above zero under a note that blames a concurrent
+        change — an unreachable zero, the class #11070 exists to close.
+    (2) REACHABLE: a candidate holding an int `summary` (the census normalizes
+        non-strings to "" and takes the blank-`summary` arm).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(summary=12, _searchText=PROSE),)])
+    assert m.census(graph) == 1, "precondition: the census selects this node"
+
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=lambda sid, tmi=None: None, dry_run=False,
+        clear_without_record=True)
+
+    assert graph.writes == [], "the write must not be issued for this node"
+    assert report["unaddressable"] == ["session:s-11070"]
+    assert report["written"] == []
+    assert "cannot be addressed" in report["notes"]["session:s-11070"]
+
+
+def test_a_HEALTHY_SIBLING_at_the_same_url_is_never_written():
+    """Both arms, against a real FalkorDB: the sibling at the same url survives.
+
+    (1) FAILS on the bare `{url:$url}` match: the clear arm blanks the healthy
+        node's `_searchText` (its only index entry) and the repair arm writes it
+        a `summary` the record door never writes — neither reported in any
+        bucket, because the census never selected that node.
+    (2) REACHABLE: two `:Source` nodes at one url, one PRE-FIX candidate, one
+        HEALTHY `record-restore`d node (no `summary`, lexicon `_searchText`
+        its `topics` prove).
+    """
+    from types import SimpleNamespace
+
+    from tests import _live_utils
+
+    _live_utils._skip_unless_live_uri()
+    import os
+
+    from falkordb import FalkorDB
+
+    from tortoise import session_source_prose_migration as m
+    from tortoise.projection import resolve_db_endpoint
+
+    # PER-RUN name (`_<8+ hex>` suffix): `drop_test_graph` refuses any other
+    # shape, and a fixed name would sit on the shared instance for the whole
+    # session (the #8746 cache-churn leak) — refused, it warned and left it.
+    graph_name = f"test_11070_dupurl_{os.urandom(4).hex()}"
+    endpoint = resolve_db_endpoint(os.environ["TORTOISE_DB_URI"], graph_name)
+    client = FalkorDB(host=endpoint.host, port=endpoint.port,
+                      username=endpoint.username, password=endpoint.password,
+                      ssl=endpoint.ssl)
+    proj = SimpleNamespace(graph_name=endpoint.graph_name, db=client)
+    g = client.select_graph(endpoint.graph_name)
+    url = "session:dup-11152"
+
+    def seed():
+        g.query("MATCH (n) DETACH DELETE n")
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'dup',"
+            " summary:$p, _searchText:$p, topics:['friday','rebuild']})",
+            {"u": url, "p": PROSE})
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'dup',"
+            " _searchText:'friday, rebuild', topics:['friday','rebuild']})",
+            {"u": url})
+
+    def pairs():
+        return sorted(map(tuple, g.query(
+            "MATCH (s:Source {url:$u}) RETURN coalesce(s.summary,''),"
+            " coalesce(s._searchText,'')", {"u": url}).result_set))
+
+    try:
+        # ── the CLEAR arm: the sibling's index entry must survive ──────────
+        seed()
+        assert m.census(g) == 1
+        report = m.reconcile_session_source_prose(
+            g, read_transcript=lambda sid, tmi=None: None, dry_run=False,
+            clear_without_record=True)
+        assert report["written"] == [url], report
+        assert report["census_after"] == 0, (
+            "the candidate was not cleared — the compare-and-set matched nothing")
+        assert pairs() == sorted([("", ""), ("", "friday, rebuild")]), (
+            "the CLEAR arm wrote a node the census never selected: a healthy "
+            "sibling at the same url lost its only index entry (PR #11152 "
+            "review F1)")
+
+        # ── the pair ALONE is not an identity ─────────────────────────────
+        # The blank-`summary` candidate arm exists for a residue whose
+        # `_searchText` is the lexicon while its `topics` do not prove it, and
+        # its HEALTHY twin (same url, same lexicon, topics that DO prove it)
+        # carries a BYTE-IDENTICAL pair. A value-only compare-and-set matches
+        # both, so this is the one duplicate class a pair guard cannot close.
+        g.query("MATCH (n) DETACH DELETE n")
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'dup',"
+            " _searchText:'friday, rebuild', topics:['friday']})", {"u": url})
+        g.query(
+            "CREATE (:Source {url:$u, sourceKind:'agentSession', sessionId:'dup',"
+            " _searchText:'friday, rebuild', topics:['friday','rebuild']})",
+            {"u": url})
+        assert m.census(g) == 1, "precondition: exactly one of the twins is a candidate"
+        report = m.reconcile_session_source_prose(
+            g, read_transcript=lambda sid, tmi=None: None, dry_run=False,
+            clear_without_record=True)
+        assert report["census_after"] == 0, report
+        assert pairs() == sorted([("", ""), ("", "friday, rebuild")]), (
+            "the CLEAR arm blanked the healthy twin (identical pair, different "
+            "`topics`): the match is not a node match — the census must carry "
+            "`id(s)`")
+
+        # ── the REPAIR arm: the sibling must not gain a `summary` ──────────
+        seed()
+        report = m.reconcile_session_source_prose(
+            g, read_transcript=lambda sid, tmi=None: "We chose the Friday rebuild.",
+            dry_run=False)
+        assert report["written"] == [url], report
+        after = pairs()
+        assert ("", "friday, rebuild") in after, (
+            "the REPAIR arm wrote the healthy sibling — it now carries a "
+            "`summary` the record door never writes")
+        assert len(after) == 2 and report["census_after"] == 0, after
+    finally:
+        _live_utils.drop_test_graph(proj)
+
+
+def test_the_printed_and_json_detail_never_carries_the_utterance(monkeypatch,
+                                                                 capsys):
+    """The census carries the pair for the write; the REPORT must not print it.
+
+    (1) FAILS if `candidate_detail` is built from the census dict wholesale (the
+        natural shape when the pair is added to it), and would ALSO fail if the
+        pair were dropped from the census instead — the write would then compare
+        against values no census read, and `written` would be empty (pinned by
+        `test_the_write_is_a_compare_and_set_on_the_pair_the_census_read`).
+    (2) REACHABLE: a dry run over one pre-fix candidate, `--json`.
+    """
+    graph = _RecordingGraph([(_session_node(),)])
+    _install_cli(monkeypatch, graph, ["--dry-run", "--json"])
+
+    assert _cli.main() == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+
+    assert PROSE not in out, (
+        "the user's own utterance reached stdout — `candidate_detail` is "
+        "printed and serialised, and this population's `summary` IS a "
+        "transcript")
+    detail = payload["candidate_detail"][0]
+    assert set(detail) == {"url", "session_id", "turn_max_index",
+                           "summary_bytes", "search_text_bytes"}, detail
+    assert detail["summary_bytes"] == len(PROSE)

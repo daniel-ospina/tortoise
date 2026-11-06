@@ -171,6 +171,9 @@ _KIND = "sourceKind"
 _SUMMARY = "summary"
 _SEARCH_TEXT = "_searchText"
 _TOPICS = "topics"
+#: The census's per-row node identity (`id(s)`). The write addresses ONE node by
+#: it; see `_REPAIR_PAIR`'s ⛔.
+_NODE_ID = "node_id"
 
 #: Only the properties the predicate READS. `properties(s)` would drag every
 #: Source's dense `embedding` across the wire — one vector per document on a
@@ -179,7 +182,7 @@ _SOURCE_ROWS = (
     "MATCH (s:Source) "
     "OPTIONAL MATCH (sess:Session {id: s.sessionId}) "
     "RETURN s.url, s.sourceKind, s.summary, s._searchText, s.topics, "
-    "       s.sessionId, sess.turn_max_index"
+    "       s.sessionId, sess.turn_max_index, id(s)"
 )
 #: THE ONE WRITE — the pair, and nothing else, in both arms.
 #:
@@ -194,10 +197,50 @@ _SOURCE_ROWS = (
 #: repair heals — one door over from the "signal indistinguishable from noise"
 #: failure ``record_reconcile``'s docstring grades P1. Leaving it untouched also
 #: keeps this route inside its declared bound, which is the pair.
+
+# ⛔ THE MATCH IS A NODE MATCH — by the census's own `id(s)` — AND a
+# COMPARE-AND-SET, and BOTH are load-bearing.
+#
+# * `:Source` declares NO uniqueness constraint on `url` — the repo's own
+#   reconciler names that state as REACHABLE (``record_reconcile.py``: "the
+#   graph declares no uniqueness constraint, so a second writer's ``CREATE``
+#   can leave TWO nodes at one (label, key)"). A bare
+#   ``MATCH (s:Source {url:$url})`` is therefore a POPULATION match, not a node
+#   match: with a HEALTHY sibling at the same url (a ``record-restore``d node —
+#   no ``summary``, ``_searchText`` = the lexicon) BOTH arms wrote that sibling,
+#   and the CLEAR arm removed its only index entry while no bucket named it.
+#   Measured on a real FalkorDB: the census selected ONE node, the write landed
+#   on two (PR #11152 review F1).
+# * The PAIR ALONE IS NOT AN IDENTITY. Two url-mates can carry an IDENTICAL pair
+#   — the most likely duplicate shape, and the only one that matters: the
+#   blank-`summary` candidate arm exists for a residue whose ``_searchText`` is
+#   the lexicon while its ``topics`` do not prove it, and its HEALTHY twin (same
+#   url, same absent ``summary``, same lexicon, topics that DO prove it) has a
+#   byte-identical pair. So a value-only guard leaves the F1 symptom intact for
+#   exactly that class, and two identical CANDIDATES make the second row's write
+#   match nothing and report "NOTHING was written" about a url the same report
+#   lists as written (PR #11152 review round 2, P2). The census therefore
+#   carries ``id(s)`` and this write addresses ONE node.
+# * The pair stays as the SECOND guard: it is what the census decided on, so a
+#   node that changed between the read and the write is NOT written, and
+#   ``census_after`` (RE-MEASURED, never decremented) shows the miss.
+#
+# ``{url:$url}`` is kept in the ``MATCH`` on purpose: it is the indexed seek,
+# and ``id(s)`` is the filter over the handful of nodes it returns.
+#
+# ⚠️ The pair comparison is STRING-NORMALIZED (``coalesce(...)=''``), because a
+# raw non-string param can trip ``_guard_numeric_params`` mid-run. A candidate
+# holding a non-string pair value therefore cannot be compared at all and is
+# reported as ``unaddressable`` BY NAME (a pinned census, never a silent one).
+
+
 _REPAIR_PAIR = (
     "MATCH (s:Source {url:$url}) "
+    "WHERE id(s)=$nid "
+    "AND coalesce(s.summary,'')=$old_sum "
+    "AND coalesce(s._searchText,'')=$old_st "
     "SET s.summary=$sum, s._searchText=$st "
-    "RETURN s.url"
+    "RETURN id(s)"
 )
 
 
@@ -399,9 +442,15 @@ def _read_source_rows(g, timeout_ms: int) -> list[dict]:
         if not row:
             continue
         tmi = row[6] if len(row) > 6 else None
+        # `id(s)` — the node identity the write addresses by (`_REPAIR_PAIR`'s
+        # ⛔). `None` when the row is short (a seam/fake that projects seven
+        # columns): such a row cannot be addressed and is reported, never
+        # guessed at.
+        nid = row[7] if len(row) > 7 else None
         props = {"url": row[0], _KIND: row[1], _SUMMARY: row[2],
                  _SEARCH_TEXT: row[3], _TOPICS: row[4], "sessionId": row[5],
-                 "turn_max_index": tmi if isinstance(tmi, int) else None}
+                 "turn_max_index": tmi if isinstance(tmi, int) else None,
+                 _NODE_ID: nid if isinstance(nid, int) else None}
         out.append(props)
     return out
 
@@ -431,6 +480,22 @@ def find_session_sources_carrying_prose(
             "summary_bytes": len(summary.encode("utf-8")) if isinstance(summary, str) else 0,
             "search_text_bytes": (len(search_text.encode("utf-8"))
                                   if isinstance(search_text, str) else 0),
+            # ⛔ THE NODE IDENTITY (`id(s)`) AND THE PAIR THE CENSUS DECIDED ON.
+            # Carried because the write must addres ONE node (`_REPAIR_PAIR`'s
+            # ⛔): the pair alone is not an identity — two url-mates can carry a
+            # byte-identical pair, and then a value-only match writes a node
+            # this row never selected. A re-read at write time would compare
+            # against values no census vouched for; omitting them made every
+            # write match nothing (measured).
+            # ⚠️ `summary`/`_searchText` are the transcript's own TEXT. They
+            # exist for the write, not for the report: the CLI REDACTES them
+            # (with `node_id`) out of `candidate_detail`, which is what gets
+            # printed and serialised (`--json`), because this population's
+            # `summary` IS a user utterance. Deleting them here — instead of
+            # redacting there — is what would silently disarm the write.
+            _NODE_ID: props.get(_NODE_ID),
+            _SUMMARY: summary,
+            _SEARCH_TEXT: search_text,
         })
     out.sort(key=lambda n: str(n["url"]))
     return out
@@ -642,6 +707,12 @@ def reconcile_session_source_prose(
                       second run (the second run finds no candidate), so it is
                       taken only when ASKED FOR BY NAME — the same rule #4125's
                       operator CLI states for its own destructive arm,
+      ``unaddressable``  urls a CANDIDATE that the write cannot address, and
+                      therefore urls that pin ``census_after`` above zero while
+                      they exist: no usable url, or no census node id / a
+                      non-string pair value (the write compares the pair as
+                      text). Named on every arm, never silent — repair the node
+                      by hand or delete it,
       ``notes``       url -> why a candidate was handled the way it was,
       ``census_before``  the population, measured,
       ``census_after``   the population re-MEASURED after the writes; equal to
@@ -774,14 +845,59 @@ def reconcile_session_source_prose(
         #
         # The PAIR only, in both arms — `topics` is left exactly as it was (see
         # `_REPAIR_PAIR`'s ⛔).
-        g.query(_REPAIR_PAIR,
-                params={"url": url, "sum": values["sum"], "st": values["st"]})
+        # ⛔ THE WRITE ADDRESSES ONE NODE: the census's own `id(s)`, with the
+        # pair it READ on that row as the second guard (see `_REPAIR_PAIR`'s ⛔).
+        # The pair alone is not an identity — two url-mates can carry a
+        # byte-identical pair — and a MATCH on `{url:$url}` alone writes
+        # whatever else lives at that url.
+        #
+        # The pair comparison is string-normalized on the Cypher side, so a row
+        # whose pair value is not a string cannot be compared AT ALL. Passing the
+        # raw value would let a float into `_guard_numeric_params` mid-run, and
+        # normalizing it to "" would compare `12 = ''` — a write that can never
+        # match, silently pinning `census_after` above zero under a note that
+        # blames a concurrent change (PR #11152 review round 2, P2). Such a node
+        # is NAMED in `unaddressable` instead: a pinned census, never a silent
+        # one.
+        old_summary = node.get(_SUMMARY)
+        old_search_text = node.get(_SEARCH_TEXT)
+        node_id = node.get(_NODE_ID)
+        if (not isinstance(node_id, int)
+                or not isinstance(old_summary, (str, type(None)))
+                or not isinstance(old_search_text, (str, type(None)))):
+            report["unaddressable"].append(url)
+            _add_note(report, url,
+                      "this candidate cannot be addressed by the write: its "
+                      "census row carries no node id, or a pair value that is "
+                      "not a string (the write compares the pair as text). It "
+                      "counts in the census and cannot be repaired here — "
+                      "repair the node by hand or delete it (#11070)")
+            continue
+        wrote = g.query(_REPAIR_PAIR, params={
+            "url": url,
+            "nid": node_id,
+            "old_sum": old_summary if isinstance(old_summary, str) else "",
+            "old_st": (old_search_text if isinstance(old_search_text, str)
+                       else ""),
+            "sum": values["sum"], "st": values["st"]})
         # ⛔ The count the hook reports must come from the WRITE, not from
         # arithmetic over the buckets: `no_record` and `left_alone` overlap
         # (`left_alone` also holds `no_session_id`/`no_reader` nodes), so
         # subtracting one from the other reported fewer repairs than were made
         # and contradicted its own parenthetical (#11152 review round 5, P2).
-        report["written"].append(url)
+        # And a write that matched NOTHING is not a write: since the match is a
+        # compare-and-set, an empty result is a node that changed under the run
+        # (or whose only url-mates are healthy siblings). Counting it as
+        # repaired is the same contradiction one layer down.
+        if getattr(wrote, "result_set", None):
+            report["written"].append(url)
+        else:
+            _add_note(report, url,
+                      "the write matched NO :Source at this url whose current "
+                      "pair is the one the census read — the node changed "
+                      "between the census and the write (or every node at this "
+                      "url is a different, healthy one), so NOTHING was "
+                      "written; re-run")
     if not dry_run and found:
         # Re-MEASURED, never decremented — see the docstring's `census_after`.
         # Only when something was written: on an empty candidate set the value is

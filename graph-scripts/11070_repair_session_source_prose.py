@@ -311,12 +311,22 @@ def main() -> int:
                 clear_without_record=args.clear_without_record)
         else:
             # ONE census read: hand the reconciler what the detail print needs,
-            # instead of scanning every Source twice.
+            # instead of scanning every Source twice. ⛔ REDACTED BY WHITELIST,
+            # not by blacklist: the census carries `id(s)` and the pair it
+            # decided on so the write can address ONE node and compare-and-set
+            # against it, and that pair is the user's own utterance — it must
+            # not reach stdout or `--json` (`candidate_detail` is printed). A
+            # whitelist is what keeps a FUTURE internal key from leaking by
+            # default; a blacklist of today's two names does not.
             found = find_session_sources_carrying_prose(proj.g)
             report = reconcile_session_source_prose(
                 proj.g, read_transcript=read_transcript, dry_run=True,
                 found=found, clear_without_record=args.clear_without_record)
-            report["candidate_detail"] = found
+            report["candidate_detail"] = [
+                {key: node.get(key) for key in (
+                    "url", "session_id", "turn_max_index",
+                    "summary_bytes", "search_text_bytes")}
+                for node in found]
     finally:
         if proj is not None:
             proj.close()
