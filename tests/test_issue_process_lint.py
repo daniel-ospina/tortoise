@@ -761,9 +761,19 @@ def test_a_satisfies_heading_with_no_checkbox_is_not_a_checklist():
 
 
 def test_a_tick_in_a_later_comment_still_counts():
-    """Criteria are ticked once proved; requiring heading+boxes in ONE comment re-flags a finished issue."""
+    """A finished issue stays clear — but NOT because of the later tick (review round 26, P2).
+
+    This test's name and docstring used to credit the `- [x] a` in the follow-up comment for clearing
+    the arm. It never did: the heading's OWN comment carries `- [ ] a` / `- [ ] b`, so the first arm
+    already returns True. Kept (and relabelled) as the control it actually is — the affordance this
+    test was believed to justify is the one that was a false PASS, and it is pinned against below in
+    `test_a_ticked_list_after_the_heading_is_not_this_headings_criteria`.
+    """
     findings, _ = L.classify_issue([IN_FLIGHT, "## Satisfies\n\n- [ ] a\n- [ ] b\n", "- [x] a\n"], 1)
     assert findings == []
+    # …and it clears on the heading's own UNticked boxes alone, with no follow-up comment at all —
+    # which is the whole demonstration that the later tick is not load-bearing.
+    assert L.classify_issue([IN_FLIGHT, "## Satisfies\n\n- [ ] a\n- [ ] b\n"], 1)[0] == []
 
 
 def test_an_injected_wip_verdict_is_honoured_and_attributed():
@@ -2382,6 +2392,78 @@ def test_a_gloss_ending_on_an_auxiliary_cannot_carry_a_clause_subject_past_the_b
         "Refs #100 (a) — not closing it.\n",
     ):
         assert L.classify_pr(honest, 1) == [], honest
+
+
+def test_a_gloss_with_a_MID_CLAUSE_auxiliary_cannot_carry_the_subject_either():
+    r"""Round 27, P2 — the SAME class-A silent drop as the case above, one word over.
+
+    The discriminator was END-anchored (`[\W_]*\)` after the auxiliary), so a gloss whose auxiliary
+    sat mid-clause slipped past it and still carried the clause subject past the bridge:
+
+        Refs #1234 (the sprint is, apparently) — not closed.   -> declined=[1234], CLEAN  # #1234 dropped
+        Refs #1234 — the sprint is not closed.                 -> flagged                  # the control
+
+    The residual was DECLARED in the code and nowhere else, so the merge record certified a residual
+    set that did not contain it. `\b{_AUX_TAIL}\b` now refuses the auxiliary anywhere in the gloss.
+    """
+    for dropped in (
+        "Refs #1234 (the sprint is, apparently) — not closed.\n",
+        "Refs #1234 (the outage is, as far as i can tell) — not closed.\n",
+        "Refs #1234 (it did, eventually) — not closed.\n",
+    ):
+        assert L.claims(dropped, 1)["declined"] == [], dropped
+        assert [f.evidence["unresolved"] for f in L.classify_pr(dropped, 1)] == [[1234]], dropped
+
+    # the controls: a gloss naming NO auxiliary still declines, so the narrowing did not delete the
+    # feature — `(2026-11-05.)` is why the tail is anchored on the auxiliary and not on punctuation.
+    for honest in (
+        "Refs #1234 (blind spot) — not closed.\n",
+        "Refs #100 (the parent.) — not closed.\n",
+        "Refs #100 (P3.) — not closed.\n",
+        "Refs #100 (2026-11-05.) — not closed.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+
+
+def test_a_STATE_copula_after_an_agent_subject_is_a_DECLARED_residual():
+    """Round 27, P3 — a CLASS-B false positive, declared rather than fixed, and pinned so the state
+    is a recorded decision instead of a silence the next round can "discover".
+
+    The bridge admits an ACT (`does`/`do`/modals) after a human-agent subject but not a STATE
+    (`is`/`am`/`are`/`was`/`were`), so the same honest decline flips verdict on the auxiliary alone:
+
+        Refs #100 — we do not close it.              -> declines
+        Refs #100 — we are not closing it.           -> FLAGGED
+        Refs #100 — the author does not close the issue.  -> declines
+        Refs #100 — the author is not closing the issue.  -> FLAGGED
+
+    Admitting the state copula after those subjects is NOT a one-line widening: `we are not closed`
+    would then decline too, and that sentence says nothing about #100 — the round-13/round-20
+    class-A hole this narrowing exists to close. Closing it needs the object to be proven to name
+    the reference, which is a change to the target RESOLUTION, not to the bridge; the honest author
+    has spellings that decline (`does not close it`, `not closing #100`). Declared, not guessed at.
+    """
+    # the false-positive direction, pinned as the current (declared) behaviour
+    for flagged in (
+        "Refs #100 — we are not closing it.\n",
+        "Refs #100 — the author is not closing the issue.\n",
+        "Refs #100 — I am not closing it.\n",
+    ):
+        assert L.claims(flagged, 1)["declined"] == [], flagged
+
+    # the ACT spelling of each is the working form, and the class-A hole stays closed
+    for honest in (
+        "Refs #100 — we do not close it.\n",
+        "Refs #100 — the author does not close the issue.\n",
+        "Refs #100 — I do not close it.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+    for about_something_else in (
+        "Refs #100 — we are not closed.\n",
+        "Refs #100 — the PR is not closed.\n",
+        "Refs #100 — the sprint is not closed.\n",
+    ):
+        assert [f.evidence["unresolved"] for f in L.classify_pr(about_something_else, 1)] == [[100]]
 # --- review round 24: one list grammar read by three readers, and one object slot -------------------
 
 
@@ -2513,8 +2595,15 @@ def test_a_task_list_SOMEWHERE_is_not_a_satisfies_checklist():
 
 def test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts():
     """The two sides the fix must keep apart: a box in the HEADING's own comment clears the arm, and
-    a TICK in a follow-up comment still does (criteria are ticked once proved — requiring
-    co-location would re-flag every finished issue, which is why the original predicate was loose)."""
+    an UNticked list in a later comment does not.
+
+    ⛔ THE NAME AND THE THIRD ASSERTION ARE NOW THE WHOLE STORY (review round 26, P2): the "a TICK in
+    a follow-up comment still does" half was removed because it was a false PASS — a finished list
+    anywhere after the heading cleared a `## Satisfies` with no criteria. This test's second
+    assertion still holds, but it holds on the heading's own `- [ ]` boxes, not on the later tick;
+    the ticked/unrelated pair is pinned in
+    `test_a_ticked_list_after_the_heading_is_not_this_headings_criteria`.
+    """
     inv = "IN FLIGHT: 3.2c — branch feat/census"
     assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n"], 1)[0] == []
     assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n", "- [x] a\n"], 1)[0] == []
@@ -2595,8 +2684,14 @@ def test_the_checklist_belongs_to_the_satisfies_SECTION_not_the_whole_comment():
                  "## Satisfies\n\n* [ ] a\n\n### a sub-heading inside the section\n\n+ [ ] b\n"):
         assert L.has_satisfies_checklist([real]) is True, real
         assert L.classify_issue([real, inv], 1)[0] == [], real
-    # …and the cross-comment arm round 25 added is untouched.
-    assert L.has_satisfies_checklist(["## Satisfies\n\nTo be derived.\n", "- [x] a\n"]) is True
+    # ⛔ THE CROSS-COMMENT TICK DOES **NOT** CLEAR IT (the parallel lane's round-26 finding, kept).
+    # The arm round 25 tolerated was itself a false PASS — a finished `## Verification` list in ANY
+    # later comment cleared a criteria-less heading. The two narrowings compose: a box must be in the
+    # heading's own SECTION, and a tick in some later comment is not this heading's criteria.
+    assert L.has_satisfies_checklist(["## Satisfies\n\nTo be derived.\n", "- [x] a\n"]) is False
+    assert [f.arm for f in L.classify_issue(
+        [inv, "## Satisfies\n\nTo be derived.\n", "## Verification\n\n- [x] x\n"], 1)[0]] \
+        == [L.ARM_ISSUE]
 
 
 def test_an_honest_decline_may_carry_its_reason_as_an_APPOSITIVE():
@@ -2684,3 +2779,182 @@ def test_the_marker_spelling_the_block_ships_is_the_one_the_lint_reads():
     assert L.in_flight_markers(["```\nIN FLIGHT: 4282 — branch fix/x\n```"]) == []
     # …and the unsubstituted template is still not a claim.
     assert L.in_flight_markers(["IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>"]) == []
+
+# --- review round 25: `commit` is not the reference, and two flags that could not be honoured -----
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — does not close the commit.", "a COMMIT is the closing verb's object"),
+    ("Refs #100 — this PR does not close the commit.", "…same, behind a two-word subject"),
+    ("Refs #100 — no closing commit.", "`no closing commit` names a commit, not `#100`"),
+    ("Refs #100 — does not close commits.", "the plural spelling, same object"),
+    ("Refs #100 — deliberately not closing the commit.", "the convention word does not change the object"),
+])
+def test_the_commit_is_not_the_object_of_a_decline(body, why):
+    """Measured at `afd6de51d` (review round 25, P2) — the FALSE PASS direction, class A.
+
+    `commit|commits` sat in `_REF_NOUN`, the object list a decline may name, so a sentence about a
+    COMMIT cleared the reference on the line while saying nothing about it (declined=[100], rc 0):
+
+        Refs #100 — does not close the commit.    -> CLEAN, declined=[100]   (#100 dropped)
+
+    A closing keyword closes an ISSUE (GitHub's own "Linking a pull request to an issue"), so a
+    commit is not the reference — the same ruling round 22 made for `pr`/`prs`, one noun over. The
+    constant's own comment already said the list admits "the reference, and nothing else".
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[100]], why
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — this commit does not close it.", "the commit as SUBJECT, the reference as object"),
+    ("Refs #100 — these commits do not close it.", "the plural demonstrative form"),
+])
+def test_the_commit_that_does_not_close_it_is_still_an_honest_decline(body, why):
+    """The mirror half of the removal above, pinned so the fix cannot be made green by deleting the
+    noun outright: deleting `commit` from the OBJECT list alone left the honest sentence FLAGGED
+    (`declined=[]` at `afd6de51d`), a class-B false positive on exactly the honesty the block asks
+    for. `commit` is now admitted where `pr` is — as the two-word subject whose demonstrative makes
+    it the reference — so both spellings of the same sentence agree."""
+    assert L.claims(body + "\n", 1)["declined"] == [100], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
+def test_the_commit_subject_narrowing_keeps_the_bare_and_the_forms_out():
+    """`commit` is admitted ONLY behind `this`/`these`, exactly as `pr` is (round 20's narrowing) —
+    so the forms that say nothing about the reference still take the object route and still flag."""
+    for body in ("Refs #100 — the commit is not closed.\n",
+                 "Refs #100 — commit is not closed.\n"):
+        assert L.claims(body, 1)["declined"] == [], body
+        assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]], body
+    # …and the objects that genuinely ARE the reference keep declining, so the grammar is not
+    # narrowed shut.
+    for body in ("Refs #100 — not closing this issue.\n",
+                 "Refs #100 — does not close #100.\n",
+                 "Refs #100 — this PR does not close the issue.\n"):
+        assert L.claims(body, 1)["declined"] == [100], body
+        assert L.classify_pr(body, 1) == [], body
+
+
+def test_json_and_annotate_are_refused_together(tmp_path):
+    """Measured at `afd6de51d` (review round 25, P4): `main()` dispatches `if args.json: … elif
+    args.annotate: …`, so both flags together ran the JSON mode and emitted NO `::warning`/`::notice`
+    line at all — a workflow step that asked for annotations silently produced none. There is no
+    union of one JSON document and a stream of annotations, so the pair is refused rather than
+    resolved in silence, the same doctrine as `--label` / `--comments-file` above it."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    r = _run("--body-file", str(body), "--json", "--annotate")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "--json and --annotate are mutually exclusive" in r.stderr
+    # the controls: each flag alone still runs its own surface
+    assert _run("--body-file", str(body), "--json").returncode == L.RC_FINDINGS
+    assert "::warning title=issue-process-lint" in _run("--body-file", str(body), "--annotate").stdout
+
+
+@pytest.mark.parametrize("argv", [
+    ("--pr", "1"),
+    ("--issue", "1"),
+    ("--body-file", "{body}"),
+    ("--issue-body-file", "{body}"),
+])
+def test_limit_is_refused_on_every_mode_that_reads_a_fixed_subject(argv, tmp_path):
+    """Measured at `afd6de51d` (review round 25, P4): `--limit` is read by the two sweeps and by
+    nothing else, so on every other mode it was accepted and silently ignored while the caller
+    believed the run had been narrowed. Refused here for the same reason `--label` is — and the
+    sweeps stay the control, so the refusal cannot be made green by refusing the flag everywhere."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    r = _run(*(a.format(body=str(body)) for a in argv), "--limit", "3")
+    assert r.returncode == 2, (argv, r.returncode, r.stderr)
+    assert "--limit applies to --sweep/--sweep-issues only" in r.stderr
+
+
+def test_the_default_limit_is_not_refused_offline(tmp_path):
+    """The control for the refusal above: `--limit`'s default must not read as an explicit flag, or
+    every offline run would be refused for a cap it never asked for. Only the OFFLINE modes are run
+    here — the live ones would reach `gh`, and this file is on the required `core` surface, which is
+    hermetic (no network, modelled by the `fetch_*`/`sweep_*` monkeypatch seam elsewhere)."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    for argv in (("--body-file", str(body)), ("--issue-body-file", str(body))):
+        assert _run(*argv).returncode in (L.RC_CLEAN, L.RC_FINDINGS), argv
+
+# --- review round 26: two false PASSes, in the two arms this file's pairs exist to pin ------------
+
+
+def test_an_emphasised_continuation_is_the_same_list():
+    """Measured at `afd6de51` (review round 26, P2) — the FALSE PASS direction, arm 1.
+
+    `CLAIM_RE`'s continuation separator was `_SOFT_GAP` — whitespace only — while the DECLINE list
+    (`_REF_LIST`), the plural run (`_REF_RUN_GAP_RE`) and this module's own comment all admitted
+    Markdown emphasis (`_LIST_SEP`'s `*`, `_`, `` ` ``). So the emphasis a decline list ACCEPTS made
+    the claim list lose the reference, and `#200` was never even evaluated:
+
+        `Closes #100, #200`            -> closing=[100], weak=[200]                     (correct)
+        `Closes #100, **#200**`        -> `#200` absent, rc 0                           (false PASS)
+        `Part of **#100**, #200`       -> weak=[100], `#200` absent, rc 0               (false PASS)
+        `Part of #100 and **#200**`    -> weak=[100], `#200` absent, rc 0               (false PASS)
+
+    Emphasised references are prose this repo writes (`#11116`: `Also closes the gap tracked by
+    **#5114**`), so this is not a theoretical spelling. Each shape is pinned as a PAIR — the
+    emphasised body must read exactly like its unemphasised twin — and the round-22 blank-line rule
+    and the conjunction prose control are re-run here so the widening cannot buy its green by
+    re-opening either.
+    """
+    for plain, emph in (("Closes #100, #200\n", "Closes #100, **#200**\n"),
+                        ("Refs #100, #200\n", "Refs #100, *#200*\n"),
+                        ("Part of #100 and #200\n", "Part of #100 and **#200**\n"),
+                        ("Part of #10085,\n#10063\n", "Part of #10085,\n**#10063**\n")):
+        assert L.claims(emph, 1) == L.claims(plain, 1), emph
+        assert [f.evidence["unresolved"] for f in L.classify_pr(emph, 1)] == \
+            [f.evidence["unresolved"] for f in L.classify_pr(plain, 1)], emph
+    # The emphasis may also close the ref the list starts FROM (`**#100**`), not just the continuation.
+    assert L.claims("Part of **#100**, #200\n", 1) == L.claims("Part of #100, #200\n", 1)
+    # ⛔ THE WIDENING MUST NOT RE-OPEN EITHER NARROWING. A blank line still ends the list, so the
+    # `#N` after it is a MENTION and is never claimed (`Closes` claims #100 alone → clean;
+    # `Part of` claims #100 alone → #100 flagged, #200 not).
+    assert L.claims("Closes #100\n\nand **#200** is tracked separately.\n", 1)["weak"] == []
+    assert L.claims("Closes #100\n\nand **#200** is tracked separately.\n", 1)["closing"] == [100]
+    assert L.claims("Part of #100,\n\n**#200**\n", 1)["weak"] == [100]
+    # …and a `#N` still has to follow the separator, so prose is not a list (`#200` in inline code,
+    # and the no-separator spelling, both claim only `#100`).
+    assert L.claims("Part of #100 and the fix is `#200`.\n", 1)["weak"] == [100]
+    assert L.claims("Part of #100 and#200\n", 1)["weak"] == [100]
+
+
+def test_a_ticked_list_after_the_heading_is_not_this_headings_criteria():
+    """Measured at `afd6de51` (review round 26, P2) — the FALSE PASS direction, arm 2.
+
+    `has_satisfies_checklist`'s second arm returned True on a TICKED box in ANY later comment, so a
+    finished list cleared a `## Satisfies` that has no criteria at all:
+
+        [INV, "## Satisfies\\n\\nTo be derived.", "## Verification\\n\\n- [x] x"]  -> rc 0   (false PASS)
+        [INV, "## Satisfies\\n\\nTo be derived.", "- [ ] unrelated"]             -> wip-no-satisfies
+
+    That is the same shape round 25 closed one layer up (a task list SOMEWHERE is not this heading's
+    checklist) — the only difference being whether the unrelated list happens to be finished. The
+    arm's stated justification ("criteria are ticked in a follow-up comment once proved, and that
+    must not re-flag a finished issue") is measurably false: a finished issue's criteria are `[x]`
+    boxes in the HEADING's own comment, which the first arm already accepts.
+
+    The pairs: a TICKED and an UNticked unrelated list must get the SAME verdict (red-first — the
+    ticked one read rc 0 before this fix), and every shape that legitimately clears still clears.
+    """
+    inv = "IN FLIGHT: 3.2c — branch feat/census"
+    unrelated = ("- [ ] a\n",
+                 "- [x] a\n",
+                 "## Verification\n\n- [x] the guard holds\n",
+                 "## Verification\n\n- [ ] the guard holds\n")
+    for later in unrelated:
+        assert [f.arm for f in L.classify_issue(
+            [inv, "## Satisfies\n\nTo be derived.\n", later], 1)[0]] == [L.ARM_ISSUE], later
+        assert L.has_satisfies_checklist(
+            ["## Satisfies\n\nTo be derived.\n", later]) is False, later
+    # ⛔ THE AFFORDANCE IS NOT LOST. A real checklist clears whether its boxes are unticked (scoping
+    # happened) or ticked (the criteria were proved), with or without a follow-up comment.
+    for satisfies in ("## Satisfies\n\n- [ ] a\n- [ ] b\n",
+                      "## Satisfies\n\n- [x] a\n- [x] b\n"):
+        assert L.classify_issue([inv, satisfies], 1)[0] == [], satisfies
+        assert L.classify_issue([inv, satisfies, "- [x] a\n"], 1)[0] == [], satisfies
+    assert L.has_satisfies_checklist(["## Satisfies\n\n- [x] a\n"]) is True

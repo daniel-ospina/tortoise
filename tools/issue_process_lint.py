@@ -199,10 +199,25 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # emphasis/whitespace that may sit around a list separator; `_GLOSS` is the ONE balanced
 # parenthetical that may sit between a reference and its separator (`#100 (the parent), #200 (the
 # child)`) and which holds no `#`, so it can neither smuggle a reference into a list it is not part
-# of nor run past the clause it belongs to. ONE definition, read by `CLAIM_RE`, `_REF_LIST` and
-# `_REF_RUN_GAP_RE`: a token admitted in one reader and not the others is exactly the drift this
-# module keeps re-discovering — the list a claim CONTINUES, the list a decline NAMES, and the run a
-# plural decline CLEARS have to be the same list.
+# of nor run past the clause it belongs to. A token admitted in one reader and not the others is
+# exactly the drift this module keeps re-discovering — the list a claim CONTINUES, the list a decline
+# NAMES, and the run a plural decline CLEARS have to be the same list.
+#
+# ⛔ WHICH TOKEN EACH READER USES, SPELLED OUT (review round 26, P2). The sentence above said "ONE
+# definition, read by `CLAIM_RE`, `_REF_LIST` and `_REF_RUN_GAP_RE`", and that was FALSE of
+# `CLAIM_RE`: its continuation separator was `_SOFT_GAP`, which admits no emphasis, so the claim arm
+# silently dropped an emphasised continuation the decline arm correctly consumed:
+#     `Closes #100, #200`          -> closing=[100], weak=[200]                (correct)
+#     `Closes #100, **#200**`      -> `#200` never even claimed, rc 0          (false PASS)
+#     `Part of **#100**, #200`     -> weak=[100]          (the ref AFTER the list is dropped)
+#     `Refs #100, #200 — deliberately not closing #100, **#200**.` -> declined=[100, 200] (same list)
+# Emphasis around references is prose this repo writes (`#11116`: `Also closes the gap tracked by
+# **#5114**`), so the claim arm's separator is the EMPHASIS-TOLERANT soft gap. It is deliberately NOT
+# `_LIST_SEP` itself: `_LIST_SEP` admits unlimited newlines, and the claim arm must not continue a
+# list across a BLANK line (round 22, `test_a_list_does_not_continue_across_a_blank_line`);
+# `_SOFT_EMPH` admits at most ONE line break, which is exactly the wrapped-list rule. The decline's
+# `_REF_LIST`/`_REF_RUN_GAP_RE` keep `_LIST_SEP` — widening a decline only widens REFUSALS, while
+# widening a claim admits references, so the two arms want opposite widths here ON PURPOSE.
 _LIST_SEP = r"[\s*_`]*"
 # ⛔ `_GLOSS`'S LEADING GAP IS THE SOFT ONE, NOT `_LIST_SEP` (review round 23, P3). `_LIST_SEP`
 # contains `\s`, so one parenthetical ahead of a conjunction quietly restored the cross-paragraph claim
@@ -226,7 +241,7 @@ _GLOSS = rf"(?:{_SOFT_EMPH}\([^)\n#]{{0,80}}\))?"
 # fixed-width look-behind is not expressible across a variable-length body).
 _AUX_TAIL = (r"(?:is|was|are|were|does|do|did|has|have|had|will|would|should|must|could|can"
              r"|may|might)")
-_GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}[\W_]*\))"
+_GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}(?:[\W_]|$))"
                  rf"[^)\n#]{{0,80}}\))?")
 # ⛔ THE TAIL AFTER THE AUXILIARY IS NOT JUST WHITESPACE (review rounds 23 and 24, P3). `is)` was
 # refused, so `is,)`, `*is*`, `_is_`, `` `is` ``, `is;` and `is.` — the same subject with one
@@ -239,10 +254,18 @@ _GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}[\W_]*\))"
 # in punctuation after a NOUN (`(the parent.)`, `(P3.)`, `(2026-11-05.)`) still decline, because the
 # lookahead is anchored on the auxiliary, not on the punctuation. Widening this only widens
 # REFUSALS, so it cannot cost a claim.
-# ⚠️ DECLARED RESIDUAL, not fixed: an auxiliary in mid-clause (`(the outage is, as far as i can
-# tell)`) still declines. That content does not END on an auxiliary, so it sits outside this
-# discriminator; closing it needs a different mechanism and belongs in its own round, not a patch
-# here.
+# ⛔ THE AUXILIARY IS REFUSED ANYWHERE IN THE GLOSS, NOT ONLY AT ITS END (review round 27, P2). The
+# residual this block used to declare — "an auxiliary in mid-clause still declines" — was the SAME
+# class-A silent drop one word over, and it was live: `(the sprint is, apparently)` does not END on
+# the auxiliary, so it sat outside the end-anchored discriminator and the gloss carried the subject
+# past the bridge:
+#     Refs #1234 (the sprint is, apparently) — not closed.     -> CLEAN, declined=[1234], rc 0
+# A gloss whose content contains an auxiliary ANYWHERE is a clause subject with its verb parked
+# somewhere, so `\b{_AUX_TAIL}(?:[\W_]|$)` now refuses it wherever it appears — the same
+# `[\W_]` tail as below, so the two discriminators agree. `(blind spot)`,
+# `(the parent.)` and `(2026-11-05.)` name no auxiliary and still decline. Like every other change in
+# this block this only widens REFUSALS, so it cannot cost a claim — the worst case is an honest gloss
+# flagged, which is the direction this module prefers.
 # ⛔ A LIST DOES NOT CONTINUE ACROSS A BLANK LINE (review round 22, P3-1). The continuation's separator
 # was `\s`, which includes `\n`, so a conjunction or comma in a FOLLOWING PARAGRAPH continued the
 # list and a legitimate mention was claimed and flagged:
@@ -303,7 +326,14 @@ CLAIM_RE = re.compile(
     rf"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{{1,7}})\b"
     rf"(?P<more>(?:"
     rf"{_GLOSS}"
-    rf"(?:{_SOFT_GAP},{_SOFT_GAP}(?:(?:and|or|&)[ \t]+)?|{_SOFT_GAP}(?:and|or|&)[ \t]+)"
+    # ⛔ `_SOFT_EMPH`, NOT `_SOFT_GAP` (review round 26, P2 — see the `_LIST_SEP` note above): the
+    # emphasis a DECLINE list accepts made the CLAIM list lose the reference. The CONJUNCTION TAIL is
+    # emphasis-tolerant too, for the same reason and in the same commit: `and **#200**` is the same
+    # list as `, **#200**`, and fixing one half of the statement while leaving the other is this
+    # file's recurring failure (rounds 13–18). `[ \t*_`]+` still requires a separator character, so
+    # `and#200` is not a list, and the prose control (`Part of #100 and the fix is …`) still claims
+    # only `#100` because a `#N` must follow immediately.
+    rf"(?:{_SOFT_EMPH},{_SOFT_EMPH}(?:(?:and|or|&)[ \t*_`]+)?|{_SOFT_EMPH}(?:and|or|&)[ \t*_`]+)"
     rf"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{{1,7}}\b)*)",
     re.IGNORECASE,
 )
@@ -365,10 +395,25 @@ _CLOSING_STEM = (r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]?|ing)?"
 # (`deliberately not closing it.`, `deliberately not closing #1234.`) — measured as FLAGGED by the
 # round-12 grammar, i.e. a false positive on exactly the honesty the block asks for.
 _REF_NOUN = (r"(?:one|ones|ref|refs|reference|references|issue|issues|keyword|keywords"
-             r"|commit|commits|it|them|this|that)\b")
+             r"|it|them|this|that)\b")
 # ⛔ `pr` IS NOT AN OBJECT NOUN (round 22, P3) — the mirror of round 20's subject fix. `the PR` names
 # the PULL REQUEST, so `Refs #100 — not closing the PR.` cleared `#100` while saying nothing about it
 # (`declined=[100]`, rc 0). The honest forms (`this issue`, `this ref`, `#100`) are all admitted.
+#
+# ⛔ `commit` IS NOT AN OBJECT NOUN EITHER (review round 25, P2) — round 22's ruling one noun over.
+# A closing keyword closes an ISSUE (GitHub's own "Linking a pull request to an issue": the object
+# of `close/fix/resolve` is an issue), so `does not close the commit` says nothing about `#100` and
+# must not clear it. Left in the object list it was a class-A FALSE PASS, measured at `afd6de51d`:
+#     Refs #100 — does not close the commit.          -> declined=[100]  (rc 0, #100 dropped)
+#     Refs #100 — this PR does not close the commit.  -> declined=[100]  (rc 0)
+#     Refs #100 — no closing commit.                  -> declined=[100]  (rc 0)
+# while the mirror spelling `this commit does not close it` — the honest sentence, whose object IS
+# the reference — was FLAGGED, because `commit` was in neither subject vocabulary. Removing it from
+# the OBJECT list alone fixes the false PASS and leaves that false positive, so it is admitted where
+# `pr` is: as the two-word subject whose demonstrative makes it the reference (`this commit does not
+# close it` declines). Bare `commit` and `the commit` stay refused, so `does not close the commit`
+# has no route. The invariant either way is this module's own: the object list, the subject
+# vocabulary and the bridge must give the SAME answer to "is this sentence about the reference".
 _REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
 # A decline may name a LIST — `#100, #200`, `#100 and #200`. Captured as ONE group so every named
 # ref is visible to the target logic; the continuation requires a `#N` right after the separator, so
@@ -519,7 +564,11 @@ _DECLINE_TAIL_BRIDGE = _DECLINE_TAIL
 _SUBJECT_WORD = r"(?:this|it|that|which|we|i|they|author)"
 # `pr` is NOT a subject word: it is admitted only in the two-word form whose demonstrative makes it
 # the reference (`this PR`), so `the PR is not closed` cannot reach the decline.
-_SUBJECT_PHRASE = rf"(?:this|these){_EMPH}(?:pr|prs)"
+# `commit` is admitted the same way, and for the mirror reason (review round 25): it left the OBJECT
+# list because a closing keyword's object is an issue, and the demonstrative form is how an author
+# says the honest decline about the reference — `this commit does not close it`. Bare and
+# `the`-prefixed `commit` remain refused, so `does not close the commit` stays prose.
+_SUBJECT_PHRASE = rf"(?:this|these){_EMPH}(?:pr|prs|commit|commits)"
 # An ACT (do-support or a modal): the subject may be a human agent and the verb takes an object.
 _COPULA = (r"(?:does|do|did|has|have|had|will|would|should|must|could|can"
            r"|may|might)")
@@ -568,9 +617,11 @@ SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNO
 # scoping). Not imported verbatim because that pattern also requires trailing whitespace after the
 # bracket, which would miss a bare `- [ ]` at end of line.
 CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULTILINE)
-# The TICKED subset, for the follow-up comment that proves a criterion. Derived from the same marker
-# class on purpose: a second spelling of "is this a task item" is how the two readers drift.
-TICKED_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[xX]\]", re.MULTILINE)
+# ⛔ `TICKED_RE` USED TO SIT HERE and is deliberately NOT replaced (review round 26, P2). Its only
+# reader was `has_satisfies_checklist`'s "tick in a LATER comment" arm, which is where the false PASS
+# was: any finished task list anywhere after the heading cleared a `## Satisfies` with no criteria.
+# A constant kept "just in case" reads as a live second spelling of "is this a task item", which is
+# the drift this module keeps re-discovering — so it is removed with its reader, not parked.
 # Any ATX heading at line start — the terminator of a `## Satisfies` SECTION (see
 # `_satisfies_sections`). Deliberately ANY level, not only `<= 2`: a `### criteria` or a later
 # `### Claim` opens a new section, and a box under it is that section's list.
@@ -740,12 +791,17 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # `#11000` was silently dropped and arm 1 read CLEAN. A named object is the strongest
             # possible statement of what the sentence is about, so it OVERRIDES the proximity rule.
             #
-            # EVERY object the clause names, not just the first: the capture groups hold one `#N`,
-            # so a written-out list (`deliberately not closing #100, #200.`) put only `#100` in
-            # `obj` and the region scan below had to be added — without it the SECOND named ref was
-            # flagged as un-declined, and `Part of #100 — deliberately not closing #200, #100.`
-            # (rc 0 at `e7dd41058`) became rc 3 (review P2). The region stops at the clause end
-            # (`.`/`;`), so a following sentence's refs are never swept in.
+            # EVERY object the clause names, not just the first, and by the GRAMMAR: `obj` is
+            # captured through `_REF_LIST`, whose continuation must be a `#N` right after `,`,
+            # `and`, `or` or `&`, so (`deliberately not closing #100, #200.`) names BOTH refs.
+            # ⛔ DO NOT REINTRODUCE A "REGION"/"ZONE" SCAN. Two rounds measured it failing in both
+            # directions, which is why what runs here is a captured list and not a text scan:
+            #   * a scan to the CLAUSE END swept a LATER clause's refs into the decline and moved a
+            #     claim from `weak` to `declined` (`Closes #100 — deliberately not closing #200 and
+            #     Refs #300 for the follow-up.` read NOTHING FLAGGED, measured at `2219dfe86`, P2);
+            #   * making the separator the clause-end class swept a FOLLOWING sentence's refs in
+            #     (`… deliberately not closing #100. #300` lost `#300`, measured at `0e785300b`, P2).
+            # The list therefore stops at its own last `, #N` / `and #N` / `or #N` / `& #N`.
             named = [int(x) for x in _REF_POS_RE.findall(obj)]
             if named:
                 targets.update(named)
@@ -783,11 +839,6 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # Both directions are pinned as a pair, so neither half can be "fixed" by tweaking the
             # other; without the run test the reason reading wins in both and the blanked-object
             # silent drop comes back through a new door.
-            #
-            # ⛔ THE TEST IS ON THE CAPTURED OBJECT, NOT ON THE REST OF THE LINE (measured at
-            # `2219dfe86`): searching `_REF_NOUN` over `after_stem` matched `one\b` inside `none`,
-            # `pr\b` inside `PR` and `it\b` inside `commit`, so appending any ordinary clause
-            # (`… `#11078`, the review issue.`) re-opened the drop.
             stem_end = (m.end("stem_a") if m.group("stem_a") is not None
                         else m.end("stem_b") if m.group("stem_b") is not None
                         else None)
@@ -942,24 +993,47 @@ def has_satisfies_checklist(comment_bodies: list[str]) -> bool:
     the defect it exists to report ("work started before the completion criteria existed"), which is
     the false-PASS direction this module ranks worst.
 
-    The predicate is now: a box in the HEADING's own comment, OR a TICKED box in a LATER comment.
-    The second arm is the original justification for not requiring co-location and it survives intact
-    — criteria are ticked in a follow-up comment once proved, and that must not re-flag a finished
-    issue (`test_a_tick_in_a_later_comment_still_counts`). An UNticked box after the heading is some
-    other checklist, not this one.
+    ⛔ THE "TICKED BOX IN A LATER COMMENT" ARM IS GONE (review round 26, P2). It was justified as
+    "criteria are ticked in a follow-up comment once proved, and that must not re-flag a finished
+    issue" — and that justification is measurably false: a finished issue's criteria are `[x]` boxes
+    in the HEADING's own comment, which the first arm already accepts. The arm only ever fired on the
+    case its comment does not describe — a heading with NO criteria at all plus any later tick:
+
+        [INV, "## Satisfies\n\nTo be derived.", "## Verification\n\n- [x] x"]  -> rc 0  (false PASS)
+        [INV, "## Satisfies\n\nTo be derived.", "- [ ] unrelated"]           -> wip-no-satisfies
+
+    i.e. a finished `## Verification` list cleared the exact defect this arm exists to report, which
+    is the same false PASS round 25 closed one layer up. Both cases that motivate co-location-tolerance
+    (`test_a_tick_in_a_later_comment_still_counts`,
+    `test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts`) keep their heading
+    comment's own `- [ ]` boxes, so they stay green with the arm removed — verified by disabling the
+    arm and re-running the file.
+
+    The predicate is now: a box in the HEADING's own **SECTION**. An UNticked box after the heading
+    is some other checklist, not this one — and so is a TICKED one.
+
+    ⛔ AND "THE HEADING'S OWN COMMENT" IS STILL TOO COARSE (round 26, P2, measured in a parallel
+    lane against the same head). `classify_issue` passes the issue's OWN BODY as ONE comment, so a
+    body carrying an unrelated task list AND a criteria-less `## Satisfies` heading is a single
+    element and `boxes[i]` was TRUE for it — the same false PASS one layer down, on round 25's own
+    stated population ("most often a `## Verification` check-list in the issue's own BODY, which 8
+    of the 40 newest open issue bodies carry"):
+
+        ONE comment: `## Verification` + `- [ ]`s + `## Satisfies` + `To be derived.`  -> rc 0
+
+    So the box must belong to the `## Satisfies` SECTION — the heading to the next ATX heading of
+    any level (`_satisfies_sections`). The two narrowings compose: the later-tick arm is gone, and
+    the co-located box must be in the heading's own section rather than anywhere in its comment.
     """
     # Read through `strip_code`, exactly as `in_flight_markers` does. A comment that SHOWS the
     # format inside a fence is an example, not a checklist: matched against the raw bodies it
     # silently cleared the arm it exists to raise, on an issue with WIP and no real criteria (F2).
     stripped = [strip_code(b)[0] for b in comment_bodies]
-    ticked = [bool(TICKED_RE.search(s)) for s in stripped]
-    for i, text in enumerate(stripped):
+    for text in stripped:
         sections = _satisfies_sections(text)
         if not sections:
             continue
         if any(CHECKBOX_RE.search(section) for section in sections):
-            return True
-        if any(ticked[i + 1:]):
             return True
     return False
 
@@ -1265,14 +1339,24 @@ def main(argv: list[str] | None = None) -> int:
                          "single-issue modes only")
     ap.add_argument("--no-wip", action="store_true", help="inject the opposite verdict")
     ap.add_argument("--label", default=None, help="--sweep-issues only: restrict the population")
-    ap.add_argument("--limit", type=int, default=50,
+    ap.add_argument("--limit", type=int, default=None,
                     help="--sweep/--sweep-issues: how many open subjects to read, newest-first "
                          "(one `gh` list call — a CAP, not a page count, and a run that hits it "
-                         "says so)")
+                         "says so). Refused elsewhere: no other mode has a population to cap "
+                         "(default 50)")
     ap.add_argument("--annotate", action="store_true",
-                    help="emit GitHub Actions ::warning lines (for a warn-only workflow step)")
-    ap.add_argument("--json", action="store_true", help="emit JSON")
+                    help="emit GitHub Actions ::warning lines (for a warn-only workflow step) "
+                         "— mutually exclusive with --json")
+    ap.add_argument("--json", action="store_true", help="emit JSON (mutually exclusive with --annotate)")
     args = ap.parse_args(argv)
+    # `--limit` is read by the two sweeps and by NOTHING else, so on every other mode it used to be
+    # accepted and silently ignored — the caller read the output as a capped population it never
+    # asked for (review round 25, P4). The refusal below tests `args.limit` — the RAW flag — and
+    # never `limit`: refusing on the RESOLVED value would fire on every run, because the default
+    # 50 makes every run look explicit. (An earlier cut of this comment claimed the resolution
+    # happened "AFTER the refusal below"; it happens here, and a comment that states what the code
+    # does not do is the exact defect class this module's own rails call out.)
+    limit = 50 if args.limit is None else args.limit
 
     wip: bool | None = None
     if args.wip and args.no_wip:
@@ -1310,6 +1394,23 @@ def main(argv: list[str] | None = None) -> int:
         # a flag that cannot be honoured is refused, never read as a smaller population.
         ap.error("--comments-file supplies the comment bodies of --issue-body-file only; "
                  "the other modes read their comments themselves (or have none)")
+    if args.limit is not None and not (args.sweep or args.sweep_issues):
+        # `--limit` caps a SWEEP, and the two sweeps are the only modes with a population to cap —
+        # every other mode reads one subject (or one file), so a `--limit 3` there was accepted and
+        # dropped without a word while the caller believed the run had been narrowed. Same doctrine
+        # as `--label` above: a flag that cannot be honoured is refused, never read as a population
+        # the caller did not ask for.
+        ap.error("--limit applies to --sweep/--sweep-issues only; the other modes read a fixed "
+                 "subject, so the cap would be dropped in silence")
+    if args.json and args.annotate:
+        # `--annotate` is the mode a workflow step uses, and `--json` the machine mode; `main()`
+        # dispatches `if args.json: … elif args.annotate: …`, so BOTH flags together ran the JSON
+        # mode and the requested ::warning/::notice lines were never emitted — a step that asked
+        # for annotations silently emitted none (review round 25, P4). There is no meaningful union
+        # of the two surfaces, so they are refused together rather than resolved in silence.
+        ap.error("--json and --annotate are mutually exclusive: --json emits one JSON document, "
+                 "--annotate emits ::warning/::notice lines — passing both silently dropped the "
+                 "annotations")
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
@@ -1356,19 +1457,19 @@ def main(argv: list[str] | None = None) -> int:
             measured_rows.append(measured)
             population = f"1 issue ({len(bodies)} comment(s) + body)"
         elif args.sweep:
-            rows = sweep_prs(repo, args.limit)
+            rows = sweep_prs(repo, limit)
             for number, body, labels in rows:
                 findings += classify_pr(body, number, repo, labels, notes=notes, repo_unknown=repo_unknown)
             population = f"{len(rows)} open PR(s)"
-            _note_truncation(notes, rows, args.limit, "open PR")
+            _note_truncation(notes, rows, limit, "open PR")
         else:  # --sweep-issues
-            rows = sweep_issues(repo, args.limit, args.label)
+            rows = sweep_issues(repo, limit, args.label)
             for number, bodies in rows:
                 found, measured = classify_issue(bodies, number, wip, notes)
                 findings += found
                 measured_rows.append(measured)
             population = f"{len(rows)} open issue(s)"
-            _note_truncation(notes, rows, args.limit, "open issue")
+            _note_truncation(notes, rows, limit, "open issue")
     except Unmeasurable as exc:
         print(f"issue_process_lint: UNMEASURED — {exc}", file=sys.stderr)
         return RC_UNMEASURABLE
