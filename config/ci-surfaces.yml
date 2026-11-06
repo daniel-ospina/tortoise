@@ -103,6 +103,33 @@ slow_shards: 5
 
 surfaces:
   api:
+  # #10060 review N1: MULTI-REGISTERED with EVERY surface, on purpose. The
+  # guard's subject is `tests/**` — no module or package under it may shadow a
+  # stdlib top-level name — so the change that breaks it can be confined to any
+  # one surface's tree, and a named-surface match REPLACES the `core` fallback
+  # (#2938/#7951 idiom), so a `core`-only registration leaves the guard asleep on
+  # any diff that resolves to ONE surface. MEASURED with the shipped selector
+  # (`tools/ci_selection.py::select(paths, 'pull_request', manifest)`) —
+  # `['tests/eval/ask/corpus.py']` -> surfaces `['eval']`, this guard not among
+  # them — so `tests/eval/ask/json.py` could land with the guard asleep.
+  #
+  # ⛔ NOT every `tests/<surface>/x.py` path resolves alone, and an earlier
+  # telling of this comment said they all did. The same measurement gives
+  # `['tests/api/json.py']`, `['tests/battery/foo.py']` and
+  # `['tests/eval/json.py']` -> surfaces `['core']` — the `tests/` fallback in
+  # `select()` claims any path no SOURCE_PATTERNS entry matches, so the `core`
+  # registration alone DOES cover those. The surface-only shape needs a path
+  # under a prefix that resolves without `core` (`tests/eval/ask/` is the measured
+  # one here), and one such diff is enough to justify the registration below.
+  # Pinned by
+  # tests/test_stdlib_shadow_guard.py::test_the_guard_is_selected_on_every_surface_that_can_shadow.
+  #
+  # SCOPE of that pin, stated exactly: it covers the six `SOURCE_PATTERNS`
+  # surfaces plus the `core` fallback. `classify` has no `SOURCE_PATTERNS` entry,
+  # so a classify-owned diff already resolves `['classify','core']` and the `core`
+  # registration co-selects this guard — the entry below is redundant belt-and-
+  # braces there, and deleting it would red nothing.
+  - test_stdlib_shadow_guard.py
   - test_11092_sentry_loop_stall.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
@@ -1812,6 +1839,7 @@ surfaces:
   # `tests/test_ci_selection.py::test_9664_capstone_runs_on_the_middleware_diff_that_can_break_it`.
   - test_9664_capstone_connector_to_record.py
   battery:
+  - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
   # #3039 merge: the branch registered it as a main-side drift unblock before
@@ -1909,6 +1937,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   - test_8447_c3_ingest_door.py
   # #10668 review P1: the `core` arm of the #9567 D11/D12 allowance-gate
   # evidence. `tortoise/allowance_gate.py` matches NO `SOURCE_PATTERNS` entry,
@@ -6169,6 +6198,7 @@ surfaces:
   # #1349/#3332/#3616 silent-drop class.
   - test_gh_read_cache.py
   ep:
+  - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
   # `tortoise/**`, and `tortoise/analyze.py` / `dream.py` / `ranking.py` select
@@ -6380,6 +6410,7 @@ surfaces:
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
   onboarding:
+  - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `api`, for the
   # same reason as the `api` arm — `test_selfhost_seed_surface_does_not_fabricate_a_kind`
   # pins `_SdkSeedSurface` in `tortoise/onboarding/selfhost.py`, an `onboarding`
@@ -6817,6 +6848,7 @@ surfaces:
   # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
+  - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #5140 finding 12 (the `sdk` arm; the `core` row is in that block). NOT
   # because of `tortoise/sdk.py`: that module is a `SHARED_MODULES` entry, so a
   # `sdk.py`-only diff selects the FULL matrix anyway (the same NOTE sits above
@@ -7269,6 +7301,7 @@ surfaces:
   # `tests/test_ci_selection.py::test_the_2684_census_is_selected_on_every_surface_that_moves_it`.
   - eval/write_path/test_value_span_census_2684.py
   classify:
+  - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
   # fixtures) are lane-agnostic — no carve-out, TEST_NO_REDIRECT_STEMS
@@ -7285,6 +7318,7 @@ surfaces:
   - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
+  - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #10465 (review P1): the `eval` arm of the #5090 DoD instrument. Its §12.2a
   # predicate pin and its `encode_for_row` seam enumeration guard
   # `tortoise/embeddings.py`, which selects `eval` — and a named-surface match

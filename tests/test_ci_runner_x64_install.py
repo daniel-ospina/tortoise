@@ -3819,6 +3819,49 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         f"line is {at('tools/runner_autoscale.py', n)!r}"
     )
 
+    # The required aggregate whose `needs:` the runbook argues `repo-harnesses` is ABSENT from.
+    # It USED to be cited by line — `python-ci.yml:4525` — which is exactly the coordinate this PR's
+    # ~45 net lines above it moved (`:4525` landed inside `ci-introduced-failure`'s run block and
+    # still passed the only check the arms above make, `1 <= n <= EOF`). It is cited by JOB NAME now,
+    # and a name is only better than a number if something RESOLVES it — otherwise the next rename
+    # leaves the sentence pointing at nothing, which is the same silent drift one shape over. So the
+    # name is resolved here, AND the absence the sentence asserts is asserted rather than assumed
+    # (`repo-harnesses` really is not in that list; the day it is, the sentence's landing-cost
+    # argument is false and this reds instead of quietly misleading the next lane).
+    m = re.search(
+        r"Absence from the required aggregate's `needs:` \(`([a-z0-9-]+)`'s own `needs:` list",
+        runbook)
+    assert m is not None, (
+        "the runbook no longer cites the required aggregate's `needs:` BY JOB NAME — re-anchor "
+        "this pin rather than reverting it to a line number, which is the form that rotted"
+    )
+    jobs_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    starts = [i for i, line in enumerate(jobs_lines) if line == f"  {m.group(1)}:"]
+    assert len(starts) == 1, (
+        f"the runbook names `{m.group(1)}` as the required aggregate, but python-ci.yml declares it "
+        f"{len(starts)} times — re-anchor this arm"
+    )
+    end = next(
+        (i for i in range(starts[0] + 1, len(jobs_lines))
+         if re.match(r"^  [a-z0-9][a-z0-9-]*:$", jobs_lines[i])),
+        len(jobs_lines),
+    )
+    needs_line = next(
+        (line for line in jobs_lines[starts[0]:end] if re.match(r"^    needs: \[", line)), None)
+    assert needs_line is not None, (
+        f"`{m.group(1)}` in python-ci.yml no longer declares the aggregate `needs:` list the "
+        "runbook points at — re-anchor this arm against whatever replaced it"
+    )
+    needs = [dep.strip() for dep in needs_line.split("[", 1)[1].rstrip("]").split(",")]
+    assert "test-carve-out" in needs and "test-record-postgres" in needs, (
+        f"`{m.group(1)}`'s `needs:` is not the aggregate list the runbook means — got {needs}"
+    )
+    assert "repo-harnesses" not in needs, (
+        "the runbook's claim — `repo-harnesses` is ABSENT from the required aggregate's `needs:`, "
+        f"which is why a red on it still costs a re-run — is now FALSE: {needs}. Rewrite the "
+        "sentence (the landing cost it records has changed) rather than deleting this arm"
+    )
+
 
 # ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
 def test_the_inventory_pattern_carries_every_documented_runs_on_form():

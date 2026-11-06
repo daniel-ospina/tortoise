@@ -932,9 +932,9 @@ jobs:
       # so the pip half is #7612's own payload — the torch wheel set, installed in
       # this job by `.github/actions/install-cpu-torch` with `pip` — and pip alone
       # accounts for 93% of the 3,882,423,064 B payload that was uploaded (that
-      # row is 3,616,385,308 B on its own). FOUR other jobs write
+      # row is 3,616,385,308 B on its own). THREE other jobs write
       # `pip-<os>-<hash uv.lock>` — `test-slow`, `test-concurrency-falkor`,
-      # `test-d14-hosted-api`, `test-record-postgres` — so THIS job only ever
+      # `test-d14-hosted-api` — so THIS job only ever
       # needed to READ that key: restore-only costs it nothing. The uv half has no
       # other writer, so it keeps one, explicitly and bounded.
       #
@@ -2001,7 +2001,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           # ⛔ `~/.cache/uv` ALONE. Adding `~/.cache/pip` here is what made the
-          # payload 3.88 GB; that half is written by FOUR other jobs and is read
+          # payload 3.88 GB; that half is written by THREE other jobs and is read
           # above, so a second writer would only re-upload 3.6 GB per miss shard.
           path: ~/.cache/uv
           key: uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -3366,16 +3366,26 @@ jobs:
         # This job cannot amortize that save, and no cap can make it able to.
         # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
         # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
-        # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
-        # (floor-clamped, `carve_shards: 3`) + ~1.5m setup/provision, i.e. ~9m
-        # of headroom against a ~9m COLD save and none at all against a slow
-        # one. Raising the cap instead would re-open #3239's stale-head
+        # work_without_dwarfing_it`), and the SHIPPED 30m does not clear it:
+        # 10m embedder cap + 19m shard watchdog (floor-clamped, `carve_shards: 3`)
+        # + ~1m setup/provision + ~1.6m for the ~90 MB HF embedding cache this
+        # job still saves ≈ 31.6m against 30.
+        #
+        # ⛔ Do NOT restate that sum HERE. `docs/ops/ci-wall-clock.md` §2 is its
+        # single source (graded by
+        # `test_the_carve_out_wall_clock_row_counts_its_embedder_cap`), and a
+        # revision of THIS comment that kept its own copy was wrong twice: it
+        # dropped the 10m embedder provision (a CAP the row must count) and it
+        # counted the ~9m pip-cache save, which has been RESTORE-ONLY in this job
+        # since `a204c2cb3` — not a term this job pays at all.
+        # Raising the cap instead would re-open #3239's stale-head
         # exposure (the cap IS that exposure) and buy finite headroom under an
         # UNBOUNDED term — the save has no timeout of its own.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`), and it is written on EVERY run by
-        # `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`.
+        # (`pip-<os>-<hash uv.lock>`), and it is written by `test-d14-hosted-api`
+        # whenever it MISSES (unconditional, PR + push — on a warm exact hit
+        # `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run.
         # This job only ever READ it.
         #
         # `continue-on-error`: a cache-SERVICE error (transport/503) must never
@@ -4400,13 +4410,32 @@ jobs:
     needs: changes
     if: always() && needs.changes.result == 'success'
     runs-on: ubuntu-latest
-    # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
-    # against a warm database, and ~100s when the container first applies the
-    # record migrations. The arm-gate tests this PR adds (they run the gate over
-    # fixture XMLs) take the collection to 70 — measured 2026-10-23 on a fresh
-    # container: 70 passed / 0 skipped in ~194s, migrations included. 20m is a
-    # runaway bound, not a measurement-thin one.
-    timeout-minutes: 20
+    # ── HISTORICAL (the arming tree, 2026-10-23): the collection was 70 and the
+    # leg ran `70 passed / 0 skipped in ~194s` on a fresh container, migrations
+    # included. ⛔ Do NOT read this as the population the `20 → 30` cap below is
+    # derived from — the collection has since grown and the leg now reports
+    # `191 passed, 1 xfailed`. The two figures below are dated on purpose; this
+    # paragraph records where the job came from, and the block under it records
+    # what it costs now.
+    #
+    # 20 → 30 (arm 1 of `docs/ops/ci-wall-clock.md` §2: cap = 2 × measured max,
+    # rounded to the nearest 5m — 2 × 15.43m = 30.86 → 30). The 20 it replaces was
+    # never a runaway bound in practice: MEASURED (run 41976819920, job
+    # 127112823868, PR #11029 head `d3b239410`) the legs PASSED — `191 passed, 1
+    # xfailed`, `skipped=0`, arm gate green — at 08:17:16, and then the cache SAVE
+    # post-step held the job to `Sent 2818572288 of 3616385196 (77.9%)` and the
+    # 20m ceiling elapsed at 20m25s. GitHub reported `cancelled`, which
+    # `python-ci-gate` reads as red BY DESIGN (#5219: a cancelled leg certifies
+    # nothing), so a green job blocked a REQUIRED check.
+    #
+    # The SAVE is gone (the cache step below is restore-only), so what this cap
+    # bounds is only the job's own bounded work: the 12m in-step watchdog + ~3m
+    # setup/install. 30 is `docs/ops/ci-wall-clock.md`'s arm-1 number for that
+    # shape; it is deliberately NOT the 40 the doc's pre-restore-only arm-2 note
+    # prescribed, because a cap bump amortizes a BOUNDED cost and the save had no
+    # timeout of its own — the same reasoning that made `test-carve-out`
+    # restore-only (#10182/#5219).
+    timeout-minutes: 30
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
       # no `TORTOISE_DB_URI`, so `tests/conftest.py`'s epic #1647 P4 gate needs
@@ -4422,7 +4451,32 @@ jobs:
         # Same key shape as the other pip-only sites, so it SHARES their cache
         # and a warm restore is a no-op. Coverage-neutral: pip's cache is
         # content-addressed, so it cannot substitute a different version.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY (`actions/cache/restore@v4`), like `test-carve-out`
+        # already is. `actions/cache@v4` saves in a POST step, and (#10182) that
+        # post step is charged against this job's `timeout-minutes` like any
+        # other step — and it has no timeout of its own, so it is UNBOUNDED, not
+        # merely large. MEASURED (run 41976819920, job 127112823868, 2026-11-05):
+        # the legs passed (`191 passed, 1 xfailed`, arm gate green) in 1m34s,
+        # then the save tarred the shared 3.6 GB `~/.cache/pip` archive and was
+        # still uploading it — `Sent 2818572288 of 3616385196 (77.9%)` — when the
+        # 20m ceiling elapsed at 20m25s. `cancelled` reds the REQUIRED
+        # `python-ci-gate` (#5219), on a diff that never touched this job.
+        #
+        # Nothing is lost by not saving here: the key is SHARED
+        # (`pip-<os>-<hash uv.lock>`) and is written by `test-d14-hosted-api`
+        # whenever it MISSES (unconditional, PR + push — on a warm exact hit
+        # `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run.
+        # This job — the fastest of the pip sites on a warm key (p50 1.62m) —
+        # only ever READ it, and what it adds on top is its own `.[test,postgres]`
+        # wheels, a rounding error beside the torch/embeddings archive it would
+        # re-tar. Raising the cap instead would buy finite headroom under that
+        # unbounded term and double #3239's stale-head exposure.
+        #
+        # `continue-on-error`: a cache-SERVICE error (transport/503) must never
+        # red this leg — a miss is the fail-open case and pip downloads cold.
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}

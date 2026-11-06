@@ -1862,7 +1862,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:309`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 342-344 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 376-378 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
     population rather than on it"). The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
@@ -1881,9 +1881,14 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
 
     Commit `a7436214f` ("cite the floor's calibration as it is written") ships three
     coordinates for the 5400 s floor — and two of them had already drifted by this
-    head: `tools/ci_queue_health.py:304` is the trailing COMMENT (the assignment is
-    one line below, at `:305`), and `docs/ops/ci-wall-clock.md` §6 "lines 326-332"
-    is §5's `timeout-minutes` kill table (the quoted derivation is at `342-344`). The
+    head: `tools/ci_queue_health.py:304` was given as "the trailing COMMENT (the
+    assignment is one line below, at `:305`)", but `:304` and `:305` are BOTH
+    comment lines of the `#:` block, and the assignment
+    (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`) is at `:309` — which is what
+    `tools/ci_check_repair.py` cites; and `docs/ops/ci-wall-clock.md` §6
+    "lines 326-332" is §5's `timeout-minutes` kill table (the quoted derivation is
+    at `376-378` — it was `360-362` when that paragraph was written, and `main`'s
+    #11063 insert above §6 moved it again: re-measure, never re-copy). The
     docstring names the reader who will follow these numbers and warns that whoever
     mis-locates the derivation "discards the one section that supports this floor" —
     so a stale coordinate sends the next lane to exactly the misreading the paragraph

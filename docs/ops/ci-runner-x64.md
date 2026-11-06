@@ -948,7 +948,9 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:4702`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci-gate`'s own `needs:` list in
+  `python-ci.yml` — cited by NAME, not by a line number: on the branch that wrote it, the earlier
+  `:4525` had already rotted when an unrelated change inserted ~45 lines above it) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a

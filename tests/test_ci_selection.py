@@ -10666,6 +10666,208 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
         f"this work is exactly the defect #3239 reports")
 
 
+def test_the_carve_out_wall_clock_row_counts_its_embedder_cap():
+    """P3 (review, #11029): the §2 row is what a lane reads before moving a cap.
+
+    `docs/ops/ci-wall-clock.md` §2 states the method it grades every row by —
+    "read the cap against the SUM of the job's caps, not against its median" —
+    and `test` (6 m embedder), `test-slow` (10 m embedder) are graded that way.
+    The `test-carve-out` row was not: one revision of it substituted a `~1.5 m`
+    WARM-path setup/provision MEASUREMENT for the 10 m cap the job's own embedder
+    step carries (the `Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense
+    retrieval leg` step's `timeout-minutes: 10` — cited by step NAME, because
+    prose line numbers here have drifted under this docstring once already), and
+    reported the row as "≈ 22 m of work, about three quarters of its own 30 m
+    ceiling".
+
+    Measured at this head, the two in-step CAPS alone consume almost all of the
+    ceiling, and the save the job still carries takes it over:
+
+        10 m embedder provision + 19 m shard watchdog = 29 m against a 30 m cap
+        + ~1 m setup/install/orphan gate + ~1.6 m HF cache save ≈ 31.6 m
+
+    so the row does NOT clear — and the term that CARRIES that verdict is the
+    ~1.6 m HF save, not the two caps (which sit a hair UNDER). That is why this
+    pin asserts the stated TOTAL exceeds the cap rather than only that the two
+    caps sum near it: an edit that dropped the HF term, or restated the row as
+    "29 m against 30 — it does NOT clear", would keep a caps-only assertion
+    green while removing the row's actual reason. The consequence is
+    the false-red class this PR already fixed once (#5219): a `test-carve-out`
+    kill (cold embedder provision + shard watchdog + HF save under one 30 m
+    ceiling) read as an unexplained anomaly instead of the predicted event.
+
+    Discriminating, and the DIRECTIONS are measured rather than claimed — an earlier
+    revision of this paragraph asserted the wrong one, and `a22db800c5`'s merge kept
+    the wrong version over the correction:
+
+    * against the BASE (`origin/main`) `assert row` fires FIRST, and not for a wording
+      reason: the base row lists `test-slow` sits BEFORE `test-carve-out` (measured:
+      `test-slow` sits at char 13259, `test-carve-out` is 9 m past at 13379), so the
+      anchor's ORDER cannot match it however the opening verb is spelled — a
+      `(?:is|was)` relaxation does NOT rescue it, verified against the base text. The
+      base also already carries `10 m embedder` and has no `~1.5 m` at all, so the two
+      content arms would not have red against it either.
+    * what the two content arms DO catch is an INTERMEDIATE revision of this branch —
+      the one that replaced the 10 m cap with a `~1.5 m` warm-path measurement and
+      restated the verdict as "about three quarters of its own 30 m ceiling", keeping
+      the row's opening so the anchor still matched. They are the pin against a row
+      that keeps its shape and loses its terms, not the pin against the base.
+
+    The assertion is about the terms COUNTED, not about the wording of the paragraph's
+    opening. (Wording-agnostic where it can be: the row may call the term a "10 m
+    embedder cap" or a "10 m embedder provision"; what it may not do is omit it.)
+
+    ⚠️ That "row is still found" half is a PROPERTY OF THE ANCHOR, so the anchor
+    has to carry it: the pre-fix row opens "`test-carve-out` WAS THE FOURTH", and a
+    pin anchored on the word "third" alone died at its own `assert row` with the
+    message "§2 no longer carries the carve-out row" — i.e. it reported the ROW
+    DELETED when the row was present and only its opening had changed. That is
+    the same false signal this pin's anchor was moved to stop producing (review
+    finding, #11029). Both openings are therefore accepted, and the ordinal is
+    the only thing left that may vary: the arms below still assert the terms.
+
+    """
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+    cap = job["timeout-minutes"]
+    embedder_caps = [
+        step["timeout-minutes"] for step in job["steps"]
+        if isinstance(step.get("timeout-minutes"), int)
+        and "Embedding model REQUIRED" in str(step.get("name", ""))
+    ]
+    assert embedder_caps == [10], (
+        "the carve-out job's own embedder provision step must keep its literal "
+        f"10 m cap (found {embedder_caps}) — it is the term the §2 row has to "
+        "count, and it is the in-step cap `TORTOISE_EMBEDDER_WATCHDOG_S` on the "
+        "`Embedding model REQUIRED (BAAI/bge-small-en-v1.5) — dense retrieval "
+        "leg` step (cited by step NAME — no line number, for the reason in the "
+        "docstring above)"
+    )
+    watchdog = min(e["watchdog_minutes"] for e in _carve_matrix()["include"])
+    assert embedder_caps[0] + watchdog >= cap - 1, (
+        f"the carve-out in-step caps ({embedder_caps[0]}m embedder + {watchdog}m "
+        f"shard watchdog) no longer consume its {cap}m ceiling — if a cap moved, "
+        "re-derive the §2 row AND this pin from the new numbers; do not silence "
+        "either to make the row read clean")
+
+    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    # The anchor is the SUBJECT (`test-carve-out`, the row this pin grades), not
+    # the opening of the neighbouring `test-record-postgres` paragraph it used to
+    # key on: that paragraph is a different row, so rewording it red'd a carve-out
+    # test whose failure message asserted the CARVE-OUT row was gone — a false
+    # signal pointing the next lane at the wrong paragraph.
+    # ⛔ The ordinal alternation is load-bearing, and it is why the "row is still
+    # found" claim above is TRUE: the pre-fix row opens "`test-carve-out` WAS THE
+    # FOURTH" (measured at f6817b2786), so an anchor that accepts only "is the
+    # third" reds on the pre-fix doc at `assert row` — reporting the row as GONE
+    # rather than as wrong, which is the false signal this anchor was moved here
+    # to stop. Both openings are accepted; the CONTENT arms below still do the
+    # discriminating.
+    row = re.search(
+        r"`test-carve-out` (?:is the third|was the fourth).*?`test-slow` sits",
+        doc, re.S)
+    assert row, (
+        "docs/ops/ci-wall-clock.md §2 no longer carries the carve-out row in the "
+        "shape this pin reads — carry this pin with the row rather than deleting "
+        "it: the row is the authority a lane consults before moving a cap")
+    text = " ".join(row.group(0).split())
+    assert re.search(r"\b10 m embedder\b", text), (
+        f"the carve-out §2 row drops the embedder provision's 10 m CAP from its "
+        f"sum: {text!r} — a ~1.5 m warm-path measurement is not that cap, and "
+        "§2's own rule is caps")
+    assert "does NOT clear" in text, (
+        f"the carve-out §2 row must record that it does NOT clear its ceiling "
+        f"({embedder_caps[0]} m embedder + {watchdog} m watchdog = "
+        f"{embedder_caps[0] + watchdog} m against {cap} m): {text!r}")
+
+    # ⛔ The two-cap sum is NOT what makes this row fail — it lands a hair under.
+    # The verdict is carried by the ~1.6 m HF cache save the job still pays, so
+    # THAT term and the stated TOTAL are the things to pin. Without these two
+    # arms, dropping the HF term (or restating the row as "29 m against 30 — it
+    # does NOT clear") leaves both assertions above green while the row's actual
+    # justification is gone.
+    # ⛔ The negative lookbehind is load-bearing: a bare `~?1\.6 m` also matches
+    # INSIDE the row's stated total `31.6 m`, so deleting the HF term while keeping
+    # the total would satisfy this arm — measured (`re.findall`): the bare pattern
+    # on the real row yields ['~1.6 m', '1.6 m'], the second from `31.6 m`.
+    assert re.search(r"(?<![\d.])~?1\.6 m", text), (
+        f"the carve-out §2 row drops the ~1.6 m HF cache save it still carries — "
+        f"that saving is the term that takes the row OVER its {cap} m ceiling, "
+        f"so a caps-only sum understates it: {text!r}")
+    total = re.search(r"≈\s*([\d.]+)\s*m against\s*([\d.]+)", text)
+    assert total, (
+        f"the carve-out §2 row no longer states an '≈ <total> m against <cap>' "
+        f"figure, so neither this pin nor a lane reading it can check the "
+        f"arithmetic: {text!r}")
+    stated, stated_cap = float(total.group(1)), float(total.group(2))
+    # ⛔ `stated_cap` is parsed above only as a comparison base; on its own that
+    # lets the row name the WRONG ceiling and stay green (measured: `≈ 31.6 m
+    # against 20` satisfies both `31.6 > 20` and `31.6 >= 29`). The ceiling a lane
+    # reads here must be the one the job actually ships.
+    assert stated_cap == cap, (
+        f"the carve-out §2 row states its ceiling as {stated_cap:g} m but the job "
+        f"ships `timeout-minutes: {cap}` — a lane reading this row to move a cap "
+        f"would be told the wrong ceiling: {text!r}")
+    assert stated > stated_cap, (
+        f"the carve-out §2 row must state a total that EXCEEDS its ceiling "
+        f"(stated {stated} m against {stated_cap} m) — the row's own verdict is "
+        f"'does NOT clear', and a total at or under the cap contradicts it: {text!r}")
+    assert stated >= embedder_caps[0] + watchdog, (
+        f"the carve-out §2 row's stated total ({stated} m) is BELOW the two "
+        f"in-step caps it counts ({embedder_caps[0]} m embedder + {watchdog} m "
+        f"watchdog = {embedder_caps[0] + watchdog} m) — the sum dropped a term "
+        f"it still pays: {text!r}")
+
+
+def test_the_carve_out_ceiling_citation_names_the_job_that_owns_the_sentence():
+    """P1 (review, #11029): the cap-PIN citation named the WRONG JOB.
+
+    `docs/ops/ci-wall-clock.md` cites the 48 m ceiling by NAME rather than by a line
+    number — "cited by NAME, not by a line number, because an insertion anywhere
+    above it moves the line". But the name it gave was `test-record-postgres`, and
+    the sentence it points at (`pytest step = 48m (`test_carve_out_shard_bounds_
+    clear_the_committed_work_without_dwarfing_it`)`) lives in **`test-carve-out`**'s
+    step comment. Measured at head `3db1cbbc2`: `test-record-postgres` contains no
+    `48` anywhere in its job body.
+
+    That is the same "a lane following the coordinate lands in the wrong place"
+    defect the name form was introduced to remove, reintroduced AS a name — and
+    nothing reddened, because a name has no `1 <= n <= EOF` to fail. Its sibling pin
+    grades the WORKFLOW COMMENT; this one grades the DOC's own name, so the two cannot
+    drift apart again. The name is resolved against the workflow it cites: the
+    sentence the doc quotes must be inside THAT job's block, determined from the job
+    declarations above it.
+
+    Mutation: restore `test-record-postgres` (or name any job that does not own the
+    sentence) and this reds naming both the cited job and the one that actually
+    holds it.
+    """
+    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    m = re.search(
+        r"= 48 m at the ceiling \(the `([a-z0-9-]+)` [a-z-]*step comment in `python-ci\.yml`", doc)
+    assert m is not None, (
+        "docs/ops/ci-wall-clock.md no longer cites the 48 m ceiling by JOB NAME — re-anchor this "
+        "pin rather than deleting it: a line number here rots under any insertion above it"
+    )
+    cited = m.group(1)
+
+    lines = (REPO / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    sentence_at = next(
+        (i for i, line in enumerate(lines, 1) if "= 48m" in line), None)
+    assert sentence_at is not None, (
+        "python-ci.yml no longer carries the `= 48m ... / _CAP_CEILING_FACTOR` cap-PIN sentence "
+        "the wall-clock doc cites — re-derive the citation (and the doc) from what replaced it"
+    )
+    owners = [(i, name) for i, line in enumerate(lines, 1)
+              if (mm := re.match(r"^  ([a-z0-9][a-z0-9-]*):$", line))
+              and (name := mm.group(1))]
+    owner = [name for i, name in owners if i <= sentence_at][-1]
+    assert owner == cited, (
+        f"docs/ops/ci-wall-clock.md cites the ~48 m cap-PIN sentence as `{cited}`'s step comment, "
+        f"but python-ci.yml:{sentence_at} is inside `{owner}` — a lane following that name edits "
+        "the wrong job's cap"
+    )
+
+
 def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     """#10182/#5219: the carve-out job must be RESTORE-ONLY on the pip cache.
 
@@ -10674,9 +10876,12 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     amortize such a save, and no cap it is allowed to carry can: the cap above
     is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
     at the ceiling), while ONE shard already spends its 19m floor-clamped
-    watchdog plus ~1.5m of setup/provision — and the SAVE has no timeout of its
-    own, so a slow one is unbounded, not merely large. Headroom amortizes a
-    bounded cost; it cannot amortize an unbounded one.
+    watchdog plus the 10m embedder cap plus ~1m of setup/provision plus the
+    ~1.6m HF cache save — ≈ 31.6m against 30, i.e. the cap does NOT clear (the
+    §2 row's own figures; do not restate them here, see the workflow comment) —
+    and the SAVE has no timeout of its own, so a slow one is unbounded, not
+    merely large. Headroom amortizes a bounded cost; it cannot amortize an
+    unbounded one.
 
     MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008): the
     restore was a PARTIAL hit, so the post step reserved the exact key and began
@@ -10689,9 +10894,10 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     check on a diff that never touched this job.
 
     Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`) and is still written on EVERY run by
-    `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`, so this
-    job only ever READ it. The ~90 MB HF embedding cache in the same job is
+    (`pip-<os>-<hash uv.lock>`) and is still written by `test-d14-hosted-api`
+    whenever it MISSES (unconditional, PR + push — on a warm exact hit
+    `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run, so
+    this job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
     the pip cache is the ~3.6 GB term that does not fit.
@@ -10702,15 +10908,16 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     """
     job = _load_python_ci()["jobs"]["test-carve-out"]
 
-    def _path_of(step: dict) -> object:
-        return (step.get("with") or {}).get("path")
-
-    pip_caches = [s for s in job.get("steps", []) if _path_of(s) == "~/.cache/pip"]
+    # ONE path predicate for both cache tests (#10060 review): this test used to
+    # carry its own exact `with.path == "~/.cache/pip"` compare, so a legitimate
+    # restore step re-spelled as a `|` block or with a trailing slash red-ed here
+    # with a FALSE message ("no longer restores the shared pip cache at all") —
+    # and the two tests disagreed about what the same archive is called.
+    pip_caches = _pip_cache_steps(job)
     assert pip_caches, (
         "the carve-out job no longer restores the shared pip cache at all — every "
         "shard would then download torch (140 wheels, ~3.2 GB) cold")
-    saving = [s.get("uses") for s in pip_caches
-              if str(s.get("uses") or "").startswith("actions/cache@")]
+    saving = _saving_pip_cache_steps(job)
     assert not saving, (
         f"the carve-out job carries an implicit post-step cache SAVE {saving} on "
         "~/.cache/pip — that save is charged against the job's `timeout-minutes` "
@@ -10728,6 +10935,177 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
         "cache-SERVICE error (transport/503) must never red the leg; a miss is "
         "the fail-open case and install-cpu-torch downloads the pinned CPU "
         "wheel either way")
+
+
+def test_the_carve_out_cache_comment_defers_to_the_wall_clock_row():
+    """P2 (review, #11029): the workflow comment carried its OWN copy of the
+    §2 arithmetic, and the two had already drifted apart.
+
+    `docs/ops/ci-wall-clock.md` §2 is the authority for a cap's arithmetic and
+    `test_the_carve_out_wall_clock_row_counts_its_embedder_cap` grades the ROW.
+    The same sum hand-maintained a second time in the workflow comment is how
+    the comment came to read "19m of shard watchdog + ~1.5m setup/provision,
+    i.e. ~9m of headroom against a ~9m COLD save": it omitted the 10 m embedder
+    provision (a CAP the row must count) and counted the pip-cache save, which
+    has been RESTORE-ONLY in this job since `a204c2cb3` and is therefore not a
+    term the job pays. A lane reads this comment before moving the cap, so a
+    comment that disagrees with the row is the false-signal class this PR
+    exists to remove.
+
+    One source, one pin: the comment DEFERS to the row. Non-vacuous in three
+    arms — the pre-fix comment names no `docs/ops/ci-wall-clock.md`, carries no
+    `embedder` term, and does still say `COLD save`, so it reds.
+    """
+    raw = (REPO / ".github" / "workflows" / "python-ci.yml").read_text()
+    block = re.search(
+        r"# This job cannot amortize that save.*?"
+        r"the save has no timeout of its own", raw, re.S)
+    assert block, (
+        "the carve-out pip-cache comment block is gone or restructured — carry "
+        "this pin with it: it is the comment a lane reads before moving the cap")
+    text = " ".join(block.group(0).split())
+    assert "docs/ops/ci-wall-clock.md" in text, (
+        "the carve-out cache comment must DEFER to the §2 row it summarises "
+        "(`docs/ops/ci-wall-clock.md`) instead of keeping its own copy of the "
+        f"sum, which is what drifted: {text!r}")
+    assert "10m embedder" in text, (
+        "the carve-out cache comment must count the 10 m embedder provision as "
+        f"the CAP it is (the §2 row's own first term): {text!r}")
+    assert "COLD save" not in text, (
+        "the carve-out cache comment still counts a COLD pip-cache SAVE as a "
+        "term this job pays — its pip step has been `actions/cache/restore@v4` "
+        f"(restore-only) since `a204c2cb3`: {text!r}")
+
+
+def _cache_paths(step: dict) -> list[str]:
+    """The `with.path` entries of a cache step, normalised for comparison.
+
+    `path` may be the single line `~/.cache/pip`, or a `|` block whose lines each
+    carry their own indentation; either form may spell a trailing slash, and the
+    action also documents a WILDCARD spelling (`~/.cache/pip/**`). Comparing the
+    RAW string lets a re-spelled step stay invisible to the assertions below —
+    which is half the hole this helper closes. A trailing `/*…` is folded onto the
+    directory it selects: `~/.cache/pip/**` IS the same archive as `~/.cache/pip`.
+    """
+    raw = (step.get("with") or {}).get("path")
+    if not isinstance(raw, str):
+        return []
+    normalised = []
+    for line in raw.splitlines():
+        entry = line.strip()
+        if not entry:
+            continue
+        entry = re.sub(r"/\*+$", "", entry)  # `~/.cache/pip/**` -> `~/.cache/pip`
+        normalised.append(entry.rstrip("/"))
+    return normalised
+
+
+def _pip_cache_steps(job: dict) -> list:
+    """The job's steps that mount the shared `~/.cache/pip` archive."""
+    return [s for s in job.get("steps", [])
+            if "~/.cache/pip" in _cache_paths(s)]
+
+
+def _saving_pip_cache_steps(job: dict) -> list[str]:
+    """The `uses:` of every step that would WRITE the shared pip archive.
+
+    ⛔ Deliberately not `startswith("actions/cache@")`. That matches only the
+    combined form, and misses the SPLIT form upstream recommends
+    (`actions/cache/restore` + a separate `actions/cache/save`), which
+    reinstates the exact unbounded POST-step these guards exist to prevent: a
+    green job that eats its budget inside the save and is reported `cancelled`,
+    which reds the REQUIRED `python-ci-gate` (#5219/#10182). Anything under
+    `actions/cache` that is not a `restore` is a writer, and reds.
+    """
+    writers: list[str] = []
+    for step in _pip_cache_steps(job):
+        uses = str(step.get("uses") or "").strip()
+        if uses.startswith("actions/cache/restore"):
+            continue
+        if uses.startswith("actions/cache"):
+            writers.append(uses)
+    return writers
+
+
+def test_the_record_postgres_job_restores_the_pip_cache_without_saving_it():
+    """#5219/#10182: the record-postgres job must be RESTORE-ONLY on the pip cache.
+
+    Same class as `test_the_carve_out_job_restores_the_pip_cache_without_saving_it`,
+    one job later: `actions/cache` saves in a POST step, that post step is charged
+    against the job's `timeout-minutes` (#10182), and the save has **no timeout of
+    its own** — so it is UNBOUNDED, and no cap amortizes an unbounded term.
+
+    MEASURED (run 41976819920, job 127112823868, PR #11029 head `d3b239410`): the
+    legs PASSED — `191 passed, 1 xfailed`, `skipped=0`, arm gate green — 1 m 49 s
+    after the job's checkout began, and the job was then `cancelled` at 20 m 25 s
+    with the save POST-step still uploading
+    `Sent 2818572288 of 3616385196 (77.9%)`. `python-ci-gate` reads `cancelled` as
+    red BY DESIGN (#5219: a cancelled leg certifies nothing), so a green job
+    blocked a REQUIRED check on a diff that never touched it.
+
+    Nothing is lost by not saving: the key is SHARED
+    (`pip-<os>-<hash uv.lock>`) and is written by `test-d14-hosted-api`
+    whenever it MISSES (unconditional, PR + push — on a warm exact hit
+    `actions/cache@v4` POSTs no save) and by `test-slow` when its legs run, so
+    this job — p50 1.62 m, the fastest pip site — only ever READ it, and what it adds
+    (`.[test,postgres]` wheels) is a rounding error beside the 3.6 GB
+    torch/embeddings archive it would re-tar.
+
+    Non-vacuous in both directions: the pre-fix step is a bare `actions/cache@v4`
+    on this path, which reds the first assertion; and the presence + shape of the
+    restore is asserted too, so DELETING the cache step cannot pass.
+    """
+    job = _load_python_ci()["jobs"]["test-record-postgres"]
+    pip_caches = _pip_cache_steps(job)
+    assert pip_caches, (
+        "the record-postgres job no longer restores the shared pip cache at all — "
+        "it would then resolve `.[test,postgres]` cold on every run (#7612)")
+    saving = _saving_pip_cache_steps(job)
+    assert not saving, (
+        f"the record-postgres job carries an implicit post-step cache SAVE {saving} "
+        "on ~/.cache/pip — that save is charged against the job's "
+        "`timeout-minutes` (#10182) and has no timeout of its own, so it is "
+        "UNBOUNDED: measured 2026-11-05 it held a green job from 1 m 49 s to "
+        "20 m 25 s and GitHub reported `cancelled`, which reds the REQUIRED "
+        "`python-ci-gate` (#5219). Use `actions/cache/restore@v4` here — the key "
+        "is shared and still written by `test-d14-hosted-api` and `test-slow`.")
+    restores = [s for s in pip_caches
+                if s.get("uses") == "actions/cache/restore@v4"]
+    assert len(restores) == 1, (
+        "the record-postgres pip cache step must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(restores)} of {len(pip_caches)} "
+        "pip-cache steps in that shape)")
+    assert restores[0].get("continue-on-error") is True, (
+        "the record-postgres pip-cache restore must be `continue-on-error: true` — "
+        "a cache-SERVICE error (transport/503) must never red the leg; a miss is "
+        "the fail-open case and pip downloads cold either way")
+    # The cap that the save used to eat must still clear the job's OWN bounded
+    # work: the in-step 12m watchdog + ~3m setup/install. Arm 1 of
+    # `docs/ops/ci-wall-clock.md` §2 derives it from the measured max
+    # (15.43m → 30), so 2x that max is the floor this pins.
+    watchdog = _literal_pytest_watchdog(job)
+    assert watchdog is not None, (
+        "test-record-postgres must keep a LITERAL in-step watchdog — it is the "
+        "bound this cap is derived against")
+    cap = job.get("timeout-minutes")
+    # Arm 1's arithmetic, spelled out: 2 x the measured max, rounded to the
+    # NEAREST 5 minutes (docs/ops/ci-wall-clock.md §2) — 2 x 15.43 = 30.86 → 30.
+    measured_max_min = 15.43
+    min_cap = round(2 * measured_max_min / 5.0) * 5
+    assert isinstance(cap, int) and cap >= min_cap, (
+        f"the record-postgres cap ({cap}m) no longer clears the measured max "
+        f"whole-job time ({measured_max_min}m) by arm 1 (2x, rounded to the "
+        f"nearest 5 → {min_cap}m) — with the save gone the only terms left are "
+        f"the {watchdog}m in-step watchdog plus setup/install, so a thin cap "
+        "here false-kills a green job (#5219)")
+    # The FLOOR alone would pass a cap raised to 90 on suspicion, which is
+    # #3239's stale-head exposure — the same upper bound the sibling carve-out
+    # pin carries. A bump must come from a re-measured max, not a guess.
+    assert cap <= _CAP_CEILING_FACTOR * measured_max_min, (
+        f"the record-postgres cap ({cap}m) dwarfs the measured max whole-job time "
+        f"({measured_max_min}m) by more than {_CAP_CEILING_FACTOR}x — the cap IS "
+        "the stale-head exposure (#3239), so move it from a fresh measurement "
+        "rather than buying headroom under it")
 
 
 def test_the_test_job_carries_no_unbounded_cache_post_step():
@@ -10750,7 +11128,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     3,616,385,308 B in a PR scope and 397,897,273 B in `refs/heads/main`, while
     `uv-pip-Linux-8755d72f…` is 662,393,744 B in `refs/heads/main` — so pip (the
     torch wheel set, #7612's own payload, installed by `install-cpu-torch` with
-    `pip`) is 93% of the uploaded payload on its own, and FOUR other jobs write
+    `pip`) is 93% of the uploaded payload on its own, and THREE other jobs write
     `pip-<os>-<hash uv.lock>`, so this job reads it and writes nothing. The uv
     half has no other writer (`refs/heads/main` puts it at 252 MiB, an order of
     magnitude rather than a bound — scope variance is large), so this job keeps
@@ -11072,10 +11450,10 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "Use `actions/cache/restore@` plus an explicit, BOUNDED "
         "`actions/cache/save@` — for a NEW key. The two keys this job already "
         "carries are pinned separately and a save is REJECTED for both: `pip-` "
-        "because four other jobs write it, and `uv-cache-` because it must keep "
+        "because three other jobs write it, and `uv-cache-` because it must keep "
         "exactly one bounded writer (the next two arms).")
 
-    # ── The pip half: READ ONLY, because FOUR other jobs write it ──────────────
+    # ── The pip half: READ ONLY, because THREE other jobs write it ──────────────
     pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
     assert pip_steps, (
         "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
@@ -11108,14 +11486,14 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert pip_key_root == "pip-", (
         f"the pip cache key is {pip_key!r}; the SHARED key other jobs write is "
         "`pip-<os>-<hash uv.lock>` — any other spelling silently unships it from "
-        "the four writers that populate it")
+        "the three writers that populate it")
     pip_writers_here = [s.get("name") for s in steps
                         if _is_writer(s) and pip_key_root in _key_of(s)]
     assert not pip_writers_here, (
         f"the `test` job WRITES the shared pip cache again {pip_writers_here}. "
         "That archive measured 3,616,385,308 B in a PR scope — restoring it and "
         "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
-        "and it buys nothing: FOUR other jobs already write the key (#10327's "
+        "and it buys nothing: THREE other jobs already write the key (#10327's "
         "argument, applied to the bigger half).")
     pip_writer_rows = [(jid, s.get("name"), _key_of(s))
                        for jid, jd in wf["jobs"].items() if jid != "test"
@@ -11246,7 +11624,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert save_paths == ["~/.cache/uv"], (
         f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
-        "measured 3,616,385,308 B and is written by FOUR other jobs.")
+        "measured 3,616,385,308 B and is written by THREE other jobs.")
     gate = str(uv_save.get("if") or "").strip()
     # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
     # finding 3). The literal let a rename or a deletion read GREEN — and a
@@ -11810,7 +12188,7 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
     # ── A1 — the same decoy above, and a FALSE attribution inside the REAL block ───
     banned = "      # #7612's payload is in `~/.cache/uv`."
     arm_at = next(i for i, ln in enumerate(decoyed) if re.match(r"\s*#\s*ARM 2", ln))
-    degraded = decoyed[:arm_at] + [banned] + decoyed[arm_at:]
+    degraded = [*decoyed[:arm_at], banned, *decoyed[arm_at:]]
     # Pre-fix: reads the decoy, sees no claim -> GREEN while the real block asserts the
     # exact falsehood that reddens a payload-SHRINKING change. That is the fail-open.
     assert _overrides_payload_misattribution(_pre_fix_locator(degraded)) is None, (
@@ -11831,9 +12209,9 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
     # on "this block" and a pin on "whatever marker came first".
     real_marker = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
     jobs_at = next(i for i, ln in enumerate(wf_lines) if ln.rstrip() == "jobs:")
-    dropped = (wf_lines[:real_marker]
-               + [wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)")]
-               + wf_lines[real_marker + 1:])
+    dropped = [*wf_lines[:real_marker],
+               wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)"),
+               *wf_lines[real_marker + 1:]]
     detached = dropped[:jobs_at] + decoy + dropped[jobs_at:]
     with pytest.raises(AssertionError, match="different block"):
         _test_job_cache_overrides_block(detached, prune_name)
