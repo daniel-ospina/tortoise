@@ -9762,7 +9762,7 @@ def test_gate_drops_total_is_a_count_or_a_refusal(value, tmp_path, capsys):
     `gate_drops_total` and renders it into the scored E1 note as
     `reports value_gate drops <N> of <M> Objects with its positive controls alive`
     — a mechanism claim nothing measured. The ceiling is the same run's `objects`
-    (`e1_gate_drops.py:84` writes `len(drops)` over a dict keyed by object name).
+    (`e1_gate_drops.py`'s `measure` writes `drops_total` as `len(drops)` over a dict keyed by object name).
 
     Non-vacuity, measured rather than assumed: ALL NINE arms exit 0 at this head's
     predecessor and exit 2 here. The two JSON-literal arms are `true`/`null` and NOT
@@ -9845,7 +9845,7 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
 
     `_count(..., ceiling=gate_objects)` refuses a total above the 61-Object
     population, which is necessary and not sufficient: the SAME record carries the
-    drop census itself (`e1_gate_drops.py:83` writes `value_gate_drops` as a
+    drop census itself (`e1_gate_drops.py`'s `measure` writes `value_gate_drops` as a
     name-keyed dict, `:84` writes `len(drops)` beside it) and nothing read it — so
     the field was a trusted integer anywhere inside `[0, objects]`.
 

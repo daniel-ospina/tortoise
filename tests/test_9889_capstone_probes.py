@@ -364,6 +364,22 @@ def test_the_mechanical_predicate_drops_a_claim_and_its_entity_together(monkeypa
         "the downgrade must be recorded, not silent")
 
 
+def test_the_points_census_excludes_the_classes_the_pass_never_saw():
+    """A `:Point` is not automatically a VET candidate — the query must say so.
+
+    Turn rows (`is_episodic`) and operator Points (`is_operator`) are written
+    outside selection, so without the filter a graph whose extraction produced
+    NO claims still stamps `points.measured: true` and `coverage_complete: true`
+    — a completeness claim over a section the pass never populated. Pinned at the
+    query, because that is where the composition decision lives.
+    """
+    point_cypher = e1_gate_drops.CANDIDATE_CYPHER["Point"]
+
+    assert "is_episodic" in point_cypher
+    assert "is_operator" in point_cypher
+    assert "NOT" in point_cypher
+
+
 def test_the_probe_reads_the_candidate_text_per_node_class():
     """`_text_of` is the probe's own MIRROR rule, and it had no pin at all.
 

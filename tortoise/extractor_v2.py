@@ -10261,9 +10261,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
     decision-only model that answers *"should this candidate exist at all?"*.
     Off-path only when ``vet_arbiter`` is ``None`` **and** ``TORTOISE_VET`` is off **and**
-    ``TORTOISE_S2_DECISION_SEAM`` is unarmed **and** ``TORTOISE_VALUE_GATE`` reads an explicit
-    ``0``/false — that switch's leaf reader DEFAULTS ON (#10996), so *unsetting* it is the ON arm
-    and only an explicit ``0`` takes this pass off-path (``TORTOISE_S2_DECISION_SEAM`` arms it anyway).
+    ``TORTOISE_S2_DECISION_SEAM`` is unarmed **and** ``TORTOISE_VALUE_GATE`` reads falsy (``0``,
+    ``false``, and — per ``env_truthy`` — blank or garbage): its leaf reader DEFAULTS ON (#10996), so
+    *unsetting* it is the ON arm and only an explicit falsy value takes this pass off-path.
     A supplied ``vet_arbiter`` arms both passes on its own (``vet_enabled``'s
     FIRST term), so with every switch off an injected arbiter still runs them —
     the state the capstone probes and the seam's armed tests drive.

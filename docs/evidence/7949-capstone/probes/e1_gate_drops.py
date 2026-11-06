@@ -73,11 +73,12 @@ discard whose Object is still REFERENCED by a statement, and every audited Objec
 in the frozen corpus is wired to the statement it was minted from — so this
 driver measures the PREDICATE, not the pass's net effect (the control that
 separates the two is `e1_e2_probe.discriminating_control`, `E1-E2.md` limit 6).
-It also does not separate MINTED points: `extractor_v2._mint_endpoint` writes an
-unresolved operator endpoint as a `pointKind: statement` Point carrying the
-model's own reference text, with no distinguishing property, so an
-identifier-only minted ref appears in the `points` population as a drop the pass
-never made. That is an OVER-count (it can block the flip, never falsely pass
+It also does not separate every population member from a pass candidate: the
+census excludes turn rows (`is_episodic`) and operator Points (`is_operator`), but
+`extractor_v2._mint_endpoint` writes an unresolved operator endpoint as a
+`pointKind: statement` Point carrying the model's own reference text with NO
+distinguishing property — so an identifier-only minted ref still appears in the
+`points` population as a drop the pass never made. That is an OVER-count (it can block the flip, never falsely pass
 it), and it cannot be removed post hoc.
 """
 from __future__ import annotations
@@ -136,6 +137,20 @@ PASS_SECTION_OF: dict[str, str] = {
 DEFAULT_SECTIONS: tuple[str, ...] = tuple(PASS_SECTION_OF)
 
 
+#: Per-label Cypher for the candidate population. ⛔ `:Point` is FILTERED: turn
+#: rows (`is_episodic`) and operator Points (`is_operator`) are written outside
+#: selection, so counting them would inflate the denominator AND let a graph whose
+#: extraction produced no claims stamp `points.measured: true` — the same
+#: composition `capstone_measure.census` partitions on. Pinned by
+#: `tests/test_9889_capstone_probes.py::test_the_points_census_excludes_the_classes_the_pass_never_saw`.
+CANDIDATE_CYPHER: dict[str, str] = {
+    "Point": ("MATCH (n:Point) "
+              "WHERE NOT coalesce(n.is_episodic, false) "
+              "AND NOT coalesce(n.is_operator, false) "
+              "RETURN n.name, n.content"),
+}
+
+
 def _text_of(label: str, name: object, content: object) -> str:
     """The CANDIDATE text of one graph node — a mirror rule, stated per class.
 
@@ -153,8 +168,8 @@ def _text_of(label: str, name: object, content: object) -> str:
     counted here. Extraction names its entities in practice, so this is a
     disclosed residual rather than a measured class.
     """
-    first, second = ((name, None) if label == "Object" else (content, None))
-    return str(first or second or "").strip()
+    first = name if label == "Object" else content
+    return str(first or "").strip()
 
 
 def section_population(uri: str) -> dict[str, list[str]]:
@@ -172,7 +187,9 @@ def section_population(uri: str) -> dict[str, list[str]]:
         texts: list[str] = []
         for label in labels:
             rows = projection.g.query(
-                f"MATCH (n:{label}) RETURN n.name, n.content").result_set
+                CANDIDATE_CYPHER.get(
+                    label, f"MATCH (n:{label}) RETURN n.name, n.content")
+            ).result_set
             for name, content in rows:
                 text = _text_of(label, name, content)
                 if text:
@@ -212,8 +229,11 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
         per_section[section] = {
             "candidates": len(texts),
             "measured": bool(texts),
-            "drops": drops,
-            "drops_total": len(drops),
+            # NO zero for an unmeasured section — not on the console and not in
+            # the artifact: a `drops_total: 0` here is a number a consumer can
+            # pick up, which is the false PASS this probe exists to prevent.
+            "drops": drops if texts else None,
+            "drops_total": len(drops) if texts else None,
         }
 
     # The Objects half is read even when it is not requested: `object_names` /
@@ -235,8 +255,13 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
     # this invocation asked for: `--sections objects` must not be able to stamp
     # `coverage_complete: true` on the very Objects-only reading #11201 condemns.
     pass_sections = list(PASS_SECTION_OF)
+    # `objects` is censused UNCONDITIONALLY (the legacy keys), so it is measured
+    # whether or not it was requested — otherwise `--sections points,events`
+    # publishes an objects measurement AND calls objects unmeasured.
+    measured = {s: bool(b["measured"]) for s, b in per_section.items()}
+    measured.setdefault("objects", bool(names))
     unmeasured = [section for section in pass_sections
-                  if not (per_section.get(section) or {}).get("measured")]
+                  if not measured.get(section)]
     return {
         "graph": graph,
         "arm_precondition": (
@@ -260,7 +285,7 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
         "predicate_alive": alive,
         "object_names": names,
         "candidates_total": sum(b["candidates"] for b in per_section.values()),
-        "drops_across_sections": sum(b["drops_total"]
+        "drops_across_sections": sum((b["drops_total"] or 0)
                                      for b in per_section.values()),
     }
 
