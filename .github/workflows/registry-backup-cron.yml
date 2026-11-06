@@ -31,7 +31,18 @@ concurrency:
 jobs:
   drive:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # #10234: 45, not 30. The timing arithmetic that actually holds, worst case:
+    # sweep 1500s (SWEEP_TIMEOUT_S) + purge 300s + reconcile 120s + status 20s
+    # + listing 20s ≈ 1960s ≈ 33 min, plus checkout and runner overhead. The job
+    # ceiling has to be ABOVE that or the runner kills the driver mid-leg and
+    # the run reports a timeout for work the runner never let finish. NOTE the
+    # ceiling does NOT remove `driver_timeout`: the server-side sweep takes
+    # ≈19-34 min (a later run's `last_sweep_at` records the posting run's START, and
+    # the delta between consecutive runs' stamps is one interval, so the duration is
+    # inferred from the gap between a POST and the next stamped value), so a 1500s
+    # client will still occasionally give up. That is WHY the script gates
+    # a timeout on completion age instead of reding on it.
+    timeout-minutes: 45
     env:
       INTERNAL_API_URL: ${{ secrets.INTERNAL_API_URL }}
       FASTAPI_INTERNAL_KEY: ${{ secrets.FASTAPI_INTERNAL_KEY }}
@@ -62,6 +73,12 @@ jobs:
       ALERT_RECOVERY_STREAK: ${{ vars.ALERT_RECOVERY_STREAK }}
       ALERT_RECOVERY_STREAKS: ${{ vars.ALERT_RECOVERY_STREAKS }}
       BACKUP_POOL_RESOLVE_STREAK: ${{ vars.BACKUP_POOL_RESOLVE_STREAK }}
+      # #10234 review P2: bind the sweep ceiling, or the knob is unreachable from
+      # its only caller (Actions passes ONLY what is enumerated here — the same
+      # lesson as the recovery-window knobs above, #3146). An unset variable
+      # expands to the empty string, which the script's `:-1500` default
+      # handles, so leaving it unset keeps the derived value.
+      SWEEP_TIMEOUT_S: ${{ vars.SWEEP_TIMEOUT_S }}
     steps:
       - uses: actions/checkout@v4
       - name: Run backup driver
