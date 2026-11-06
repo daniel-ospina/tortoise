@@ -9502,6 +9502,55 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
         lambda: _check_org_limit(carried, resource, sdk=sdk), op=op)
 
 
+def _ingest_rate_limited(admission, *, resource: str) -> HTTPException:
+    """The ONE ``429 ingest_rate_limited`` refusal for BOTH session write lanes.
+
+    #4051 §3.1: the per-org ingest window (``quota.commit_ingest_admit``) is
+    shared by ``POST /v1/sessions/commit`` and ``POST /v1/sessions``, so the
+    refusal SHAPE has to be one construction — a second copy is how the two
+    lanes drift on the contract a client branches on (``detail.code``,
+    ``scope``, ``used``/``limit``, the ``Retry-After`` header).
+
+    ``resource`` names WHICH charge spent the window (``commit_ingest_bytes`` /
+    ``capture_ingest_bytes``). It must not be read as "which allowance": there
+    is ONE window per org, which is why alternating lanes cannot buy a second
+    one.
+
+    The prose follows ``scope``: in the shared-overflow regime the caller's own
+    ``used`` can be 0 (the INSTANCE's shared capacity is spent), so saying "by
+    this team" would blame a tenant that wrote nothing. ``with_limit_contact``
+    is #5425's seam — it terminates the sentence and appends the one contact
+    path — not a hand-appended suffix.
+    """
+    retry_after = max(1, math.ceil(admission.retry_after))
+    message = (
+        "The shared ingest allowance for this instance is saturated "
+        "— retry shortly"
+        if admission.scope == "process" else
+        "Too much data is being written by this team right now — "
+        "retry shortly")
+    return HTTPException(
+        status_code=429,
+        detail={
+            "code": "ingest_rate_limited",
+            "message": with_limit_contact(message),
+            # "org" = the caller's own allowance; "process" = the ONE shared
+            # overflow bucket an instance falls back to when its owned store is
+            # full of active orgs (bounded flood regime). `used` is the
+            # caller's own spend in either case, so `used: 0` with
+            # `scope: "process"` is a refusal about the instance, never about
+            # the caller's traffic.
+            "scope": admission.scope,
+            "resource": resource,
+            "used": admission.used,
+            "limit": admission.limit,
+            "unit": "bytes/60s",
+            "retry_after": retry_after,
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 def _alert_unmetered(lane: str, org_id: str | None,
                      error: BaseException) -> None:
     """Emit the #3981 operator alert for a dropped increment, never raising.
@@ -17017,6 +17066,173 @@ class SessionRequest(BaseModel):
         return v
 
 
+# ── #4051 §3.1 — the CAPTURE lane's charge against the per-org ingest window ─
+#
+# The commit lane's bound landed with #9798; §3.1 asks for it on BOTH session
+# write lanes — "per-org, per-window ingest rate on ``/v1/sessions/commit`` and
+# ``/v1/sessions``" — and the capture lane kept only the per-KEY bucket
+# (100/min — the general bucket; the 300/min bucket is the COMMIT lane's,
+# R-13 — times up to 20 keys on Team) plus the instance-wide in-flight cap.
+# MEASURED
+# before this charge existed: a free-tier key looping ``POST /v1/sessions``
+# with a fresh ``session_id`` writes ``:Session`` + ``sessionCaptured``
+# ``:Event`` + the transcript ``:Source`` + one episodic ``:Point`` per turn,
+# and ``_count_resource("points")`` matches NONE of them — so the pre-write
+# points gate (#5637) cannot trip and no quota counted the growth. The triage
+# comment on #4051 names §3.1 the only slice that needs no owner ruling; it was
+# recorded as "done" when only the commit half had shipped.
+#
+# ONE WINDOW, NOT A SECOND ALLOWANCE. This charge is admitted against the SAME
+# per-org 60 s window as the commit charge (``quota.commit_ingest_admit``).
+# That function's name predates its second caller and follows the documented
+# ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` knob — renaming the constant would
+# break the operator contract ``docs/capacity.md`` §3 states — so the name
+# stays and the shared scope is stated here and in its docstring. A lane that
+# alternates endpoints therefore cannot buy a second allowance, which is what
+# "per-org, per-window" means.
+#
+# THE UNIT IS THE ONE ALREADY RULED: bytes (#4495 "the node cap is replaced,
+# not extended"; #5331 "any node count × a per-node constant is not the
+# model"), with the node-count FLOOR #4051 records in its own ``OVERRIDES:``
+# comment — a ~500-byte one-turn capture still leaves ~5 KB of CHARGE behind
+# (the 5-node declared floor), and ~3 KB of graph nodes on the armed-record
+# shape, so a byte-only charge would make the cheapest iteration of the loop
+# nearly free.
+# ``COMMIT_INGEST_BYTES_PER_NODE`` is that floor's per-node figure and is tied
+# to ``product/pricing.json`` → ``billing.cost_basis.bytes_per_node`` by a test,
+# so an owner retune cannot leave this rate charging a stale number.
+#
+# THE EXTRACTED SET IS NOT CHARGED HERE, deliberately: the non-episodic
+# Points/entities/operators a capture extracts ARE counted by
+# ``_count_resource("points")`` and are therefore already bounded by the
+# ``max_points`` gate above. This charge covers only the chain that quota does
+# not see, so the two bounds compose instead of double-charging.
+#
+# UPPER, deliberately (the same fail-closed direction the commit charge
+# documents): a pure replay MERGEs nodes that already exist, a store-only
+# capture skips the ``sessionCaptured`` ``:Event`` mint, and the stored turn
+# window can be shorter than the posted conversation — all three over-charge.
+# Under-charging would remove the bound; over-charging delays a request.
+#
+# ⛔ TWO NODES PER TURN — the WORST of the three shapes a capture turn can take.
+# A turn's graph cost depends on where it is stored, and this charge is a pure
+# function of the REQUEST, so it cannot know which shape it is in. There are
+# three, and the rate is the maximum:
+#
+#   * RECORD ARMED (what production runs — ``TORTOISE_RECORD_DSN`` is a Fly
+#     secret, armed since at least 2026-10-26; ``docs/infra-runbook.md`` records
+#     ``"record":{"armed":true,…}``): ``record_holds_turns`` is true, the graph
+#     turn batch write is SKIPPED and the turns ride the ``TurnsRecorded`` record
+#     carrier, which is not a ``:GraphEvent``. **0 graph nodes per turn.**
+#   * JOURNAL CONFIGURED, record UNARMED (``docker-compose.yml``: it sets
+#     ``TORTOISE_EVENT_LOG_BASE_DIR`` and no DSN; also Fly while the record's
+#     connect breaker is open): the graph lane runs and each turn also appends
+#     ``PointAdded``, which ``event_store`` CREATEs as its own ``:GraphEvent``.
+#     **2 nodes per turn** (measured marginal on that shape: 2.0/turn).
+#   * NO JOURNAL at all (the HTTP test fixture — ``tests/_http_fixtures.py``
+#     drops ``event_log_path``): the emit loop returns early, so a turn is its
+#     ``:Point`` only. **1 node per turn** (measured: 2 turns -> 5 new nodes,
+#     10 -> 13).
+#
+# Charging 0 (the armed shape) would leave the THROTTLE fail-open on both
+# fallback shapes, and neither needs a deploy to reach: a record connect-breaker
+# trip puts Fly on the 2-node lane for its window, and docker-compose is always
+# on it. Charging 1 (this constant's first value) under-charged those by half.
+# So the declared rate is 2 — over-charging an armed-record capture is the
+# accepted direction, and it still admits ~1,460 two-turn captures per minute at
+# the 10 MiB/60 s allowance. ``docs/INGEST_CONTRACT.md`` §9 states the same rate.
+_CAPTURE_FIXED_NODES = 3   # :Session + sessionCaptured :Event + transcript :Source
+_CAPTURE_TURN_NODES = 2    # worst shape: turn :Point + its ``PointAdded`` ``:GraphEvent``
+
+
+def declared_capture_write_count(body: SessionRequest) -> int:
+    """Upper bound on the CAPTURE CHAIN one request leaves behind.
+
+    The chain — ``:Session``, the ``sessionCaptured`` ``:Event``, the transcript
+    ``:Source`` and the turns — is the part no other quota counts; the
+    non-episodic Points/entities/operators a capture also extracts are bounded
+    separately by the ``max_points`` gate and are deliberately NOT charged here
+    (see the block above), so this is an upper bound on the chain, not on every
+    node the request can leave behind.
+
+    A pure function of the REQUEST, like ``commit_schema.
+    declared_commit_write_count``: it never reads the graph (a replay is
+    charged as if fresh — see the UPPER note above), so the same payload is
+    charged the same way whatever the tenant already stored.
+    """
+    return (_CAPTURE_FIXED_NODES
+            + _CAPTURE_TURN_NODES * len(body.conversation or ()))
+
+
+def _capture_payload_envelope_bytes(body: SessionRequest) -> int:
+    """Bytes of the posted capture request — and it can never come out ``0``.
+
+    Delegates to ``commit_schema.payload_envelope_bytes``, the ONE implementation
+    both session write lanes' charges use: they spend one per-org window, so an
+    under-count on either lane is a free write on both. The fast path is
+    ``model_dump_json``; a value it cannot render (a lone surrogate, carried as a
+    JSON escape by any body and accepted by the schema) falls back to
+    ``json.dumps(ensure_ascii=True)`` + ``surrogatepass``, which ESCAPES the
+    surrogate instead of raising and cannot fail on any ``str`` a JSON body can
+    produce. That over-counts the escape rather than under-counting the write —
+    before it, a 200 KB capture was charged the node floor (5,120 B) instead of
+    200,270 B and slipped a window that refused its surrogate-free twin, the
+    fail-OPEN direction #4051 names.
+    """
+    from tortoise.commit_schema import payload_envelope_bytes
+    return payload_envelope_bytes(body)
+
+
+def capture_ingest_charge_bytes(body: SessionRequest) -> int:
+    """The stored BYTES one capture is charged against its org's ingest window.
+
+    ``max(re-serialized request body, declared_capture_write_count(body) × 1024)``
+    — the node term is the CAPTURE CHAIN the request leaves behind, not every
+    node it can write: the extracted non-episodic Points/entities/operators are
+    bounded by the ``max_points`` gate, not by this charge (see the block above).
+
+    * the **payload term** is the whole ``SessionRequest`` as serialized
+      (``model_dump_json()``), i.e. the transcript text plus metadata — the
+      bytes the capture stores. It matters MORE here than on the commit lane,
+      because the per-turn content is schema-unbounded: the route's body cap is
+      ``body_limits.CAPTURE_SESSION_MAX_BYTES`` (16 MiB), so a byte-only loop is
+      already a real write, and a handful of max-size captures must not fit
+      inside a minute by accident;
+    * the **node floor** stops the reverse — a tiny conversation whose body is
+      smaller than the chain it mints (the ``points: []`` analogue on this
+      lane).
+
+    ⛔ THE CALLER MUST AWAIT THIS OFF THE LOOP (``asyncio.to_thread``, the same
+    seam the cohort gate beside it uses). ``model_dump_json`` on a body up to
+    the route's 16 MiB cap is a pure-CPU pass on the SINGLE uvicorn worker, and
+    ``_capture_session_impl`` is awaited directly on the event loop — the
+    ``#2988``/``#3498`` class this file offloads at its other request doors.
+    The commit lane's twin (``commit_schema.commit_ingest_charge_bytes``) is
+    safe without this because it runs inside ``asyncio.to_thread(_commit_sync)``;
+    this lane's charge sits in the async handler, where the same paragraph would
+    be a FALSE claim (review of the rescued branch caught exactly that). The
+    ``commit_ingest_admit`` call itself stays inline: it is a lock plus a short
+    list scan over the org's in-window charges, no I/O and no serialization.
+
+    ⛔ A SERIALIZATION FAILURE MUST NOT BE FREE (measured, review round 2). The
+    payload term is rendered by ``_capture_payload_envelope_bytes`` above, whose
+    fallback is the SAME request rendered another way — never ``0``. Zeroing it
+    was the fail-OPEN direction #4051 names: ``model_dump_json`` raises on a lone
+    surrogate (``"\ud800"``, which any JSON body can carry as an escape), that
+    state is reachable through ``metadata`` — a field this lane never stores —
+    and it collapsed the charge to the node floor. Measured at the pre-fix head
+    with the body the test now posts (a 200 KB turn, ``session_id`` included):
+    charged 5,120 B (the 5-node floor: 3 fixed + 2 per turn) instead of
+    200,270 B, and the endpoint ADMITTED it on a window that refused the
+    identical capture without the surrogate (200 vs 429).
+    """
+    from tortoise.commit_schema import COMMIT_INGEST_BYTES_PER_NODE
+    payload_bytes = _capture_payload_envelope_bytes(body)
+    return max(payload_bytes,
+               declared_capture_write_count(body)
+               * COMMIT_INGEST_BYTES_PER_NODE)
+
+
 # ── POST /v1/context request model (#2103 — phase-1 delivery contract) ─────
 # Contract fields mirror §3.2.1: window (1..1000 turns, ≤ 15 KB), session_id?
 # prior_context?, min_confidence?=0.7, max_pointers?=3 (cap 5), why?=true.
@@ -17819,6 +18035,40 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # override). Filed rather than absorbed: #10949.
     await _check_org_limit_off_loop(org, "sessions",
                                     op="check_org_limit.sessions", sdk=sdk)
+
+    # #4051 §3.1 — the per-org ingest allowance, on the CAPTURE lane too.
+    #
+    # WHY HERE. This is the same site the commit lane uses: after every refusal
+    # that mints nothing (the 409/400/422 boundary gates and the 402
+    # points/cohort gates above) and BEFORE any write. "Before any write" is
+    # load-bearing here for the same reason it is there: the ``:Session`` MERGE
+    # below runs for EVERY request — a replay re-MERGEs an existing node, and a
+    # re-capture of a GROWN transcript mints NEW turn Points (the code below
+    # says so: "the turn write below runs for EVERY request") — so there is no
+    # zero-write replay path to exempt, unlike the commit lane's
+    # ``duplicate: true`` return.
+    #
+    # WHAT THE REFUSAL LEAVES BEHIND: nothing of this request's own. The
+    # ``_reserve_capture_slot`` admission taken in the REST wrapper is released
+    # in its ``finally`` and no graph state is touched above this point, so a
+    # throttled capture is retryable verbatim after the ``Retry-After`` — which
+    # is the whole contract of a throttle (#5425: a rate limit, not a cap on the
+    # customer's data).
+    #
+    # ⛔ THE CHARGE IS SERIALIZED OFF THE LOOP. ``model_dump_json`` of a body up
+    # to the route's 16 MiB cap is a pure-CPU pass, and this handler runs on the
+    # single uvicorn worker — so the serialization rides ``asyncio.to_thread``
+    # (the seam the cohort gate above already uses) and only the admission
+    # itself, a lock and a short list scan, runs inline. The commit lane needs
+    # no such split because its charge runs inside
+    # ``asyncio.to_thread(_commit_sync)``.
+    from tortoise.quota import commit_ingest_admit
+
+    charge_bytes = await asyncio.to_thread(capture_ingest_charge_bytes, body)
+    admission = commit_ingest_admit(org.get("org_id"), charge_bytes)
+    if not admission.allowed:
+        raise _ingest_rate_limited(admission, resource="capture_ingest_bytes")
+
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a
@@ -21386,7 +21636,6 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         admission = commit_ingest_admit(org.get("org_id"),
                                        commit_ingest_charge_bytes(payload))
         if not admission.allowed:
-            retry_after = max(1, math.ceil(admission.retry_after))
             # #4051 — the refusal must not change the RETRY's adjudication.
             # `store.acquire` above merged this attempt's `:CommitRecord`, and
             # `plan_commit`/`is_first_adjudication` read ANY existing record as
@@ -21399,39 +21648,12 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
             # first attempt and a real mid-write `partial` is untouched.
             if created:
                 store.discard_attempt(payload.client_commit_id)
-            # #5425's seam, not a hand-appended sentence: it terminates the
-            # prose and appends the ONE contact path. A throttle is not a
-            # ceiling to buy out of — it names its own next step ("retry
-            # shortly") and the header says how long. The SENTENCE follows
-            # `scope`: in the shared-overflow regime the caller's own `used`
-            # can be 0 (the instance's shared capacity is what is spent), so
-            # saying "by this team" would blame a tenant that wrote nothing.
-            message = (
-                "The shared ingest allowance for this instance is saturated "
-                "— retry shortly"
-                if admission.scope == "process" else
-                "Too much data is being written by this team right now — "
-                "retry shortly")
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "code": "ingest_rate_limited",
-                    "message": with_limit_contact(message),
-                    # "org" = the caller's own allowance; "process" = the ONE
-                    # shared overflow bucket an instance falls back to when its
-                    # owned store is full of active orgs (bounded flood
-                    # regime). `used` is the caller's own spend in either case,
-                    # so `used: 0` with `scope: "process"` is a refusal about
-                    # the instance, never about the caller's traffic.
-                    "scope": admission.scope,
-                    "resource": "commit_ingest_bytes",
-                    "used": admission.used,
-                    "limit": admission.limit,
-                    "unit": "bytes/60s",
-                    "retry_after": retry_after,
-                },
-                headers={"Retry-After": str(retry_after)},
-            )
+            # The 429 itself is ONE construction for both session write lanes
+            # (`_ingest_rate_limited`, #4051 §3.1) — the capture lane charges
+            # the SAME per-org window, so a second copy of this payload is how
+            # the two lanes would drift on the contract a client branches on.
+            raise _ingest_rate_limited(
+                admission, resource="commit_ingest_bytes")
 
         # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
         if plan.budget.outcome == "fail":
