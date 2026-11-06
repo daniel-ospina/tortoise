@@ -336,6 +336,39 @@ def test_in_flight_rerun_does_not_hide_the_measured_red_behind_it() -> None:
     assert "in-flight:ai-review-gate" in check.reason, check.reason
 
 
+def test_an_unrecognised_group_state_cannot_fall_through_to_success() -> None:
+    """★ `_gate_token`'s STATE whitelist is a fail-closed arm, and NOTHING pinned it.
+
+    `probe_from_dict` copies a group's `state` verbatim, so a value outside
+    `ci_verdict`'s four groups reaches `_gate_token` carrying whatever string the caller
+    wrote — and this PR makes the arm load-bearing for a SECOND call site, the
+    merge-time contexts, which previously never routed through it. If the arm is
+    deleted, an unknown state falls through to the `conclusion` check below and PASSES
+    on `conclusion=success` — the unrecognised-value-falls-through-the-gap defect the
+    polarity rule forbids, and the module's own comment asserts it is closed.
+
+    Measured on a `/tmp` copy: reverting the arm (returning `""` for every `state:`
+    token) left all 320 tests green. So the guard the comment describes was pinned by
+    nothing, and this test is that pin — for BOTH call sites.
+    """
+    # ENTRY context.
+    groups = [_group(job, check_id=1000 + i) for i, job in enumerate(REQUIRED)]
+    groups[0] = _group(REQUIRED[0], state="greenish", conclusion="success", check_id=2000)
+    check = _assert_fails("gates", f"state:greenish:{REQUIRED[0]}", groups=groups)
+    assert f"state:greenish:{REQUIRED[0]}" in check.reason, check.reason
+
+    # MERGE-TIME context — the call site this PR adds. A green-looking aggregate whose
+    # state this module has never seen is not a pass just because `conclusion` is green.
+    fixture = _fixture_with_head_runs({"head_runs": []})
+    fixture["groups"] = [
+        *fixture["groups"],  # type: ignore[misc]
+        _group(MERGE_TIME_REQUIRED[0], state="greenish", conclusion="success", check_id=9000),
+    ]
+    gates = next(c for c in rfo.evaluate(rfo.probe_from_dict(fixture)).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"state:greenish:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
+
+
 # ── condition 1: the tree (merge-tree, never the flag) ──────────────────────
 
 

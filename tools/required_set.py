@@ -49,7 +49,7 @@ THE CONTRACT THIS IMPLEMENTS — `.mergify.yml`'s own header, clause 1
     "never runs at a head" from "not scheduled/created YET". Re-measured 2026-11-05,
     `python-ci-gate` DOES report on author PR heads — as `queued` (PR 11097) and
     `completed` with BOTH `success` (PR 11100) and `failure` (PR 11096). An Actions job
-    with unmet `needs` (and this one has `if: always()` + a 14-way `needs:`) has NO
+    with unmet `needs` (and this one has `if: always()` + a 13-way `needs:`) has NO
     check-run at all, so absence is also exactly what a PENDING aggregate looks like.
 
     The two states need different verdicts — a pending aggregate is IN FLIGHT (the gate's
