@@ -1775,8 +1775,14 @@ def test_the_two_flags_are_unset_on_every_deploy_surface():
                 "must say which arm production actually runs")
 
 
-def test_the_flags_are_off_when_unset(monkeypatch):
+def test_the_three_switches_resolve_from_their_own_defaults(monkeypatch):
     """The arm's switches, measured off the resolvers instead of asserted.
+
+    ⛔ Renamed for `#10996` (review P3): the old name was
+    ``test_the_flags_are_off_when_unset``, and the body now asserts the OPPOSITE
+    for one of them — ``_value_gate_enabled() is True`` when unset. A name that
+    contradicts its own assertion is read by grep and by the failure list, never
+    by the body it sits above.
 
     All THREE S2.2 switches are deleted, not the two the arm table names: #5087
     added ``TORTOISE_S2_DECISION_SEAM`` as a second contributor to

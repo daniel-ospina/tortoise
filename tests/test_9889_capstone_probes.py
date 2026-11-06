@@ -45,6 +45,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
@@ -215,6 +217,39 @@ def test_the_off_arm_accepts_an_explicit_zero(monkeypatch):
     arm = e1_paired_arm.off_arm_readback()
 
     assert set(arm.values()) == {"0"}
+
+
+def test_the_off_arm_accepts_every_OFF_spelling_the_pipeline_honours(monkeypatch):
+    """The refusal is an ALLOW-LIST, not a deny-list of the spellings I typed.
+
+    Pre-fix, `off_arm_readback` computed "is this switch armed?" as
+    ``v not in (None, "", "0")``, so every OTHER OFF spelling the pipeline
+    honours — `false`, `no`, `off`, `FALSE` — was REFUSED as "the shell armed
+    this arm" and the run could not be taken at all. That is the deny-list class
+    `#10610` removed from the scorer (`_ARM_OFF_STATES` -> `_TRUTHY`), surviving
+    in the driver that PRODUCES the arm the scorer reads.
+
+    Asserted on the RESOLVED predicate as well as the spelling: the claim is that
+    these values are the OFF arm, and only `value_gate` can confirm it.
+    """
+    from tortoise import value_gate
+
+    off_spellings = ("0", "false", "no", "off", "FALSE", "Off", " ", "")
+    for spelled in off_spellings:
+        for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+            monkeypatch.setenv(key, spelled)
+        arm = e1_paired_arm.off_arm_readback()
+        assert value_gate.value_gate_enabled() is False, (
+            f"{spelled!r} is an OFF spelling the pipeline honours, so the arm is "
+            f"OFF and the driver must not refuse it: {arm}")
+
+    # …and the other direction still fires: a truthy value IS refused.
+    for truthy in ("1", "true", "yes", "on", "TRUE"):
+        for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+            monkeypatch.setenv(key, "0")
+        monkeypatch.setenv("TORTOISE_VALUE_GATE", truthy)
+        with pytest.raises(SystemExit, match="REFUSED"):
+            e1_paired_arm.off_arm_readback()
 
 
 # ── e1_paired_arm: the before-share is refused when E1's own record refuses it ─

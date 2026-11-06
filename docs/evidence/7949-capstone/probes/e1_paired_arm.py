@@ -95,6 +95,21 @@ ARM_KEYS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE")
 #: OFF — i.e. the pre-registered CONTROL was scored with the predicate armed.
 DEFAULT_ON_KEYS = ("TORTOISE_VALUE_GATE",)
 
+#: The repo's declared env-truthiness vocabulary, MIRRORED rather than imported.
+#:
+#: `tortoise/env_truthy.py` is the ONE contract ("unset/blank/falsy/garbage ->
+#: False"), and `e1_e2_scores.py` carries the same mirror for the same reason: this
+#: driver runs before any DB is up and must stay stdlib-only. The pipeline decides
+#: with an ALLOW-LIST, so the readback below must too — a hand-typed list of OFF
+#: spellings is how `off`/`no`/`false` came to be refused as ON (see
+#: `off_arm_readback`).
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _is_truthy(raw) -> bool:
+    """`tortoise.env_truthy.is_truthy`, mirrored: unset/blank/falsy/garbage -> False."""
+    return ("" if raw is None else str(raw).strip().lower()) in _TRUTHY
+
 #: A FOURTH switch for the same pass, and the reason it is checked beside the
 #: three: `TORTOISE_S2_DECISION_SEAM` arms S2.2 *through the arbiter*, so
 #: `_vet_enabled` reads True even against an explicit `TORTOISE_VET=0`
@@ -116,7 +131,14 @@ def off_arm_readback() -> dict[str, str | None]:
     spellings: the first is the operator's to fix, the second is this file's.
     """
     held = {key: os.environ.get(key) for key in (*ARM_KEYS, SEAM_KEY)}
-    on = {k: v for k, v in held.items() if v not in (None, "", "0")}
+    # ⛔ AN ALLOW-LIST, not a deny-list of OFF spellings (`#10610` fixed the same
+    # class in `e1_e2_scores._ARM_OFF_STATES`). The old form here was
+    # `v not in (None, "", "0")`, which REFUSED four values the pipeline honours
+    # as OFF — `false`, `no`, `off`, `FALSE` — as "the shell armed this arm", so a
+    # genuine before arm spelled that way could not be measured at all. Truthy is
+    # `tortoise.env_truthy.is_truthy`'s rule, mirrored here for the same reason
+    # `e1_e2_scores.py` mirrors it: this driver is stdlib-only by design.
+    on = {k: v for k, v in held.items() if _is_truthy(v)}
     if on:
         raise SystemExit(
             f"REFUSED: {on!r} is set — this driver measures the OFF arm; a run "

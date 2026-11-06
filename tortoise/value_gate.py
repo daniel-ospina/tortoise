@@ -45,8 +45,11 @@ from .env_truthy import is_truthy
 
 #: The call-time kill-switch. **The predicate is ON unless this says otherwise**
 #: (`#10996`): ``0``/``false``/``no``/``off`` — and, deliberately, blank or a
-#: typo — turn it off, and the only result delta is a zeroed ``mechanical``
-#: stats key. `#4899` shipped the instrument off by default *"so its rate effect
+#: typo — turn it off. The delta is a zeroed ``mechanical`` stats key when some
+#: other switch still arms the pass, and ``vet.enabled``/``vet.s2`` when none
+#: does (with nothing else arming S2.2 the pass never runs, so there is no
+#: ``mechanical`` block to zero). `#4899` shipped the instrument off by default
+#: *"so its rate effect
 #: is measurable before it is trusted"*; that rate is now measured and committed
 #: (``docs/evidence/9889/e1-gate-drops.json``: 0 drops of 61 Objects, 0 of 13
 #: bare-definite rows, positive controls firing), and

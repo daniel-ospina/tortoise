@@ -10099,3 +10099,44 @@ def test_the_rules_block_states_the_boundary_the_code_enforces():
         "the E1 bullet argues BOTH sides of the boundary — it still carries the "
         "pre-fix window `0 < m < 1` beside the guard it justifies "
         f"(inclusive_at_zero={inclusive_at_zero}): {bullet!r}")
+
+
+# ── the bundle's re-run recipe states the arm the PROBE now sets ──────────────
+#
+# `#10996` changed what `capstone_measure.measured_arm()` writes: the two OFF
+# switches are set to an EXPLICIT `"0"` instead of being popped, because an unset
+# `TORTOISE_VALUE_GATE` is now the ON arm. `docs/evidence/9889/README.md` was
+# updated with its producer; this bundle's README was not, so the two bundles
+# taught opposite contracts and this one still said the probe pins the switches
+# "unset" — the exact pre-fix behaviour, and an invitation for the next lane to
+# restore the pop. The committed log's `<unset>` is HISTORY (it predates the
+# flip); the RECIPE must not reproduce it.
+
+_RE_RUN_RECIPE_STALE_ARM = (
+    "`TORTOISE_VALUE_GATE` **and** `TORTOISE_S2_DECISION_SEAM` unset",
+    "pins TORTOISE_VALUE_GATE and TORTOISE_S2_DECISION_SEAM unset",
+    "TORTOISE_VALUE_GATE=<unset> TORTOISE_S2_DECISION_SEAM=<unset>",
+)
+
+
+def test_the_re_run_recipe_states_the_arm_the_probe_actually_sets():
+    """One contract for both bundles: OFF means `"0"`, not absence (#10996).
+
+    Red-first by construction — all three phrases were present when this pin was
+    written — and the failure it exists to catch is a READER following the recipe
+    and measuring the ON arm under a log that declares OFF.
+    """
+    readme = README_DOC.read_text()
+
+    for phrase in _RE_RUN_RECIPE_STALE_ARM:
+        assert phrase not in readme, (
+            f"the bundle's re-run recipe still says the probe pins the switches "
+            f"UNSET ({phrase!r}) — since #10996 absence is the ON arm, so a "
+            "reader following this recipe measures the treatment under the "
+            "control's label. The committed log's `<unset>` is history; the "
+            "recipe must say `=0`")
+
+    assert 'to an EXPLICIT `"0"`' in readme, (
+        "the README must STATE that capstone_measure pins the two OFF switches "
+        "to an explicit \"0\" — a corrected recipe whose reason is not written "
+        "down is the one the next lane reverts")
