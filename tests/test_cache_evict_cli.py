@@ -182,15 +182,50 @@ def test_execute_without_the_token_refuses_before_any_connection(monkeypatch, ca
     assert "--confirm-graph" in capsys.readouterr().err
 
 
-def test_a_token_naming_another_graph_is_not_a_confirmation(wired):
-    """`--confirm-graph other` proves the operator authorized a DIFFERENT cache."""
+def test_a_token_naming_another_graph_is_not_a_confirmation(wired, tmp_path):
+    """`--confirm-graph other` proves the operator authorized a DIFFERENT cache.
+
+    ⛔ EVERY UPSTREAM ARM MUST BE SATISFIED, or this passes for the wrong reason. Its
+    earlier form carried no `--parity-report`, so `main` returned at the parity guard
+    BEFORE the token arm was reached — the assertion was met by a different refusal, and
+    `if False:` in place of the token check left the whole CLI suite green (measured: 94
+    passed) while a fully valid invocation issued the `DETACH DELETE` for a cache the
+    operator's token explicitly did not name. That is the gate the file itself calls
+    "the token proves the OPERATOR authorized THIS graph".
+    """
     client, graph = wired
-    code = cache_evict.main(_argv("--population", "turn", "--max-nodes", "10",
-                                  "--selector", "m:f", "--record-probe", "m:g",
-                                  "--execute", "--confirm-graph", "not-tortoise"))
+    report = _parity_report(tmp_path, instrument="tools/turn_parity_census.py")
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "10", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(report), "--parity-graph", "tortoise",
+        "--execute", "--confirm-graph", "not-tortoise"))
     assert code == 1
     assert client.statements == [], "the store was touched after a refused token"
-    assert graph.statements == []
+    assert graph.mutations == [], f"a refused token mutated: {graph.mutations}"
+
+
+def test_a_graph_that_disagrees_with_the_URI_refuses_before_any_statement(
+        wired, tmp_path, monkeypatch):
+    """`--graph` names one cache and the URI another: refuse, do not sweep either.
+
+    Unpinned before this test (`if False:` left 16 passing), and the clearer refusal is
+    what it buys — `_connection` would hand back a handle for the URI's graph, which the
+    executor's gate 5 then refuses. Two layers is fine; one of them being untested is not.
+    """
+    _client, graph = wired
+    import tools.cache_eviction_census as census
+
+    monkeypatch.setattr(census, "_endpoint",
+                        lambda uri: type("E", (), {"graph_name": "other"})())
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "10", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise"))
+    assert code == 1
+    assert graph.mutations == [], f"a URI/graph disagreement mutated: {graph.mutations}"
 
 
 # ── the licence ───────────────────────────────────────────────────────────────
