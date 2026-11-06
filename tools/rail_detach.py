@@ -391,6 +391,20 @@ def _gh(argv: list[str], cwd: Path) -> subprocess.CompletedProcess:
     a missing command, so the callers' `returncode != 0` arms handle it — the
     same shape `tools/who_is_on.py` already uses for `git`
     (`except FileNotFoundError: return 127, "", "<bin>: command not found"`).
+
+    ⛔ A SECOND, INDEPENDENT MEASUREMENT OF THE SAME DEFECT, kept from the other
+    side of this merge (#10622): `test (h)` on `pi-runner-vm-6`/Linux-ARM64, run
+    41732583553, killed all 20 cases in `tests/test_rail_detach.py` at this
+    call. Two pool boxes, one root — the missing binary, not a rail defect.
+
+    The `-> subprocess.CompletedProcess` annotation above is a CONTRACT, not a
+    hint: this function NEVER returns `None` (the `except` arm fabricates a
+    process with rc=127), so neither caller may carry an `out is not None`
+    guard. Two of them did for a while — inherited from the branch side of the
+    #10622 merge, where `_gh` was allowed to return `None` — and they were
+    unreachable branches contradicting their own annotation. Dropped rather
+    than kept: a guard that cannot fire is not defence in depth, it is a
+    second, wrong description of what this function returns.
     """
     try:
         return subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
@@ -416,10 +430,15 @@ def _resolve_repo(cwd: Path) -> str:
             )
         return repo
     detail = (out.stderr or "").strip().splitlines()
+    # ⛔ BOTH SIDES' WORDING (#10622 merge): this branch's test asserts the message
+    # says WHAT to fix ("installed", `test_a_missing_gh_is_a_REFUSAL_not_a_traceback`),
+    # and main's carries the stderr detail plus the two remedies. Taking either side
+    # alone fails the other's assertion or drops the operator's remedy.
     raise Refused(
         "could not resolve the repo from this checkout (`gh repo view` failed"
         + (f": {detail[-1]}" if detail else "")
-        + ") — pass `--repo owner/name`, or install the `gh` CLI"
+        + ") — is `gh` installed and authenticated? pass `--repo owner/name` to name "
+        "the artifact yourself, or install the `gh` CLI"
     )
 
 

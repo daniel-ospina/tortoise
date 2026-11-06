@@ -13627,3 +13627,180 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/sessions answered" in message
+
+
+# ── #8447 (C2): the four boundary cases, per bounded surface ──────────────
+#
+# The contract (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1):
+#
+#   A bounded operation must either return complete results, or mark the
+#   result as incomplete and say why. It must never return a silently
+#   truncated result that is indistinguishable from a complete one.
+#
+# ⛔ EVERY TEST BELOW ASSERTS THE MARKER, not merely the row count: "returned
+# 3" passes on a silent truncation, which is the defect. The four cases the
+# issue names — exactly-at-limit, limit+1, page 2 of 2, cursor exhaustion —
+# are asserted per surface, and where a surface HAS no cursor the test says so
+# and asserts the positive-complete marker instead (a missing instrument must
+# be a recorded fact, never an untested absence).
+
+
+class TestBoundedPointsListBoundaries:
+    """`GET /v1/points` — limit-capped list, NO offset and NO cursor.
+
+    Rows past the cap are unreachable by any follow-up call, so the marker is
+    the ONLY completeness instrument this surface can have (#8447).
+    """
+
+    def _seed(self, client, n):
+        for i in range(n):
+            r = client.post("/v1/points", json={"content": f"bounded {i}"})
+            assert r.status_code == 200, r.text
+
+    def test_exactly_at_limit_is_marked_complete(self, client):
+        """Boundary 1 — `limit == matches` is COMPLETE, and says so.
+
+        The opposite failure is just as damaging: a marker that fires at
+        exactly-at-limit trains every caller to ignore it (contract §4.3).
+        """
+        self._seed(client, 3)
+        body = client.get("/v1/points", params={"limit": 3}).json()
+        assert body["count"] == 3
+        assert body["truncated"] is False
+        assert "total_available" not in body
+
+    def test_limit_plus_one_is_marked_incomplete(self, client):
+        """Boundary 2 — one row past the cap must flip the marker, visibly."""
+        self._seed(client, 4)
+        body = client.get("/v1/points", params={"limit": 3}).json()
+        assert body["truncated"] is True
+        # The delivered page is still exactly the caller's bound ...
+        assert body["count"] == 3
+        assert len(body["points"]) == 3
+        # ... and `count` keeps its prior meaning (rows delivered), so a caller
+        # that ignores the new field is unaffected; the marker is the instrument.
+        # A total would need a second COUNT over the whole graph, and publishing
+        # the probe's own limit+1 would be a lower bound wearing a total's
+        # clothes, so the third state (incomplete, total unknown) is the honest one.
+        assert "total_available" not in body
+
+    def test_there_is_no_page_two_so_the_marker_is_the_only_instrument(self, client):
+        """Boundary 3 — "page 2 of 2" CANNOT exist here, and that is the point.
+
+        A caller asking again gets the same three rows: the fourth is
+        unreachable forever. So the response must carry the marker rather than a
+        pagination field, and it must NOT pretend to carry a cursor (#8447's
+        "does an exhausted cursor return an empty page, or signal completion?").
+        """
+        self._seed(client, 4)
+        body = client.get("/v1/points", params={"limit": 3}).json()
+        for absent in ("next_cursor", "cursor", "offset", "has_more", "hasMore"):
+            assert absent not in body, (
+                f"{absent!r} would promise a page 2 this route does not have")
+        again = client.get("/v1/points", params={"limit": 3}).json()
+        assert [p["id"] for p in again["points"]] == \
+            [p["id"] for p in body["points"]], "the dropped row is unreachable"
+        assert body["truncated"] is True
+
+    def test_a_complete_page_says_complete_because_no_cursor_can_drain(self, client):
+        """Boundary 4 — cursor exhaustion is N/A: completeness is POSITIVE.
+
+        With no cursor there is nothing to exhaust, so "no more rows" cannot be
+        expressed by an empty follow-up page. That makes the positive
+        `truncated: false` load-bearing: silence would be indistinguishable
+        from a truncation nobody marked.
+        """
+        self._seed(client, 2)
+        body = client.get("/v1/points", params={"limit": 50}).json()
+        assert body["truncated"] is False
+        assert body["count"] == 2
+
+
+class TestBoundedEventCursorBoundaries:
+    """`GET /v1/events` — a real cursor (`next_cursor`), the AIP-158 case.
+
+    ⚠️ MEASURED PROPERTY, pinned here rather than assumed: `next_cursor` is
+    NEVER empty — not even on the page after the last event. So on this seam
+    the completion instrument is the EMPTY `events` list, not a drained cursor.
+    That is a deliberate departure from AIP-158's *"next_page_token must be
+    empty at end-of-collection"* (recorded in the contract doc §3), and a
+    client that loops on `while next_cursor` never terminates — which is why
+    the empty-page case is asserted below instead of being left to inference.
+    """
+
+    # Every poll passes ``types=PointAdded``: the population these tests bound is
+    # "the events one point-create emits", declared rather than assumed. Without
+    # it a second event type on a point create would change what "exactly at
+    # limit" measures, and the failure would blame the cursor.
+    def _seed(self, client, n):
+        for i in range(n):
+            r = client.post("/v1/points", json={"content": f"event {i}"})
+            assert r.status_code == 200, r.text
+            assert r.json().get("id")
+
+    def test_exactly_at_limit_is_indistinguishable_until_the_next_page(self, client):
+        """Boundary 1 — a full page proves nothing; the follow-up page does."""
+        self._seed(client, 3)
+        page = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
+        assert len(page["events"]) == 3          # full page — could be more
+        assert page["next_cursor"]                # cursor never empties here
+        beyond = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": page["next_cursor"]}).json()
+        assert beyond["events"] == [], "at-limit must be PROVED by an empty page"
+        assert beyond["next_cursor"], "the cursor is non-empty even when drained"
+
+    def test_limit_plus_one_needs_and_gets_a_page_two(self, client):
+        """Boundary 2 — the row past the cap is REACHABLE (this is not truncation)."""
+        self._seed(client, 4)
+        first = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
+        assert len(first["events"]) == 3
+        second = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": first["next_cursor"]}).json()
+        assert len(second["events"]) == 1
+        assert second["events"][0]["event_id"] not in {
+            e["event_id"] for e in first["events"]}
+
+    def test_page_two_of_two_is_short_and_that_is_the_signal(self, client):
+        """Boundary 3 — page 2 of 2: short in THIS population, and PROVED complete.
+
+        Scoped to the population these tests declare (four `PointAdded` events,
+        no duplicate ids). A short page is NOT in general a completion signal —
+        `tortoise/event_store.py::read_after` says so explicitly: a duplicate
+        `event_id` is dropped AFTER the query's `LIMIT`, so a page of `limit`
+        rows can legitimately come back with fewer distinct rows while more
+        remain beyond it. What makes completion a claim HERE is the follow-up
+        page, not the row count.
+        """
+        self._seed(client, 4)
+        first = client.get("/v1/events", params={"limit": 3, "types": "PointAdded"}).json()
+        second = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": first["next_cursor"]}).json()
+        assert len(second["events"]) < 3
+        # The completion instrument is the EMPTY follow-up page, not the short
+        # count: one more poll must find nothing rather than a row the short
+        # page silently dropped. A short page alone proves nothing about a
+        # drained stream (`read_after`'s duplicate-drop window).
+        third = client.get(
+            "/v1/events", params={"limit": 3, "types": "PointAdded", "after": second["next_cursor"]}).json()
+        assert third["events"] == []
+
+    def test_cursor_exhaustion_returns_an_empty_page_not_a_completion_signal(
+            self, client):
+        """Boundary 4 — exhausted cursor: empty page, cursor still non-empty.
+
+        Pinned as a DEPARTURE, not a fix: emptying `next_cursor` at
+        end-of-collection is AIP-158's shape and would change the value of a
+        documented response field, so it needs a design decision (recorded as
+        REMAINING on #8447). What is enforced here is that the empty page is a
+        STABLE, idempotent answer — polling the same exhausted cursor forever
+        returns nothing rather than replaying or erroring.
+        """
+        self._seed(client, 2)
+        page = client.get("/v1/events", params={"limit": 2, "types": "PointAdded"}).json()
+        drained = client.get(
+            "/v1/events", params={"limit": 2, "types": "PointAdded", "after": page["next_cursor"]}).json()
+        assert drained["events"] == []
+        again = client.get(
+            "/v1/events", params={"limit": 2, "types": "PointAdded", "after": drained["next_cursor"]}).json()
+        assert again["events"] == []
+        assert again["next_cursor"] == drained["next_cursor"]

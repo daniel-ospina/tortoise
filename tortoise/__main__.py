@@ -3125,6 +3125,19 @@ def _mask_display_target(value: str) -> str:
     return masked[:min(cuts)] + "…"
 
 
+def _endpoint_is_readable(value: object) -> bool:
+    """Does ONE side's api_url parse as an endpoint at all? (the pair's question)
+
+    `_same_endpoint` answers for a PAIR, so it folds "the CLI's value is not a URL"
+    and "the harness's value is not a URL" into the same `None`. The `host-unknown`
+    message has to name WHICH side is unreadable (or that both are), so the
+    per-side question is asked through the SAME parser rather than re-deriving
+    parseability a second way: `x` vs `x` is `True` for a parseable endpoint and
+    `None` for an unparseable one.
+    """
+    return _same_endpoint(value, value) is not None
+
+
 def _same_endpoint(a: object, b: object) -> bool | None:
     """Do two configured api_urls name the SAME endpoint?
 
@@ -3333,7 +3346,7 @@ def _cmd_config(args) -> int:
     import shlex as _shlex
     import sys as _sys
 
-    from tortoise.config import is_db_uri
+    from tortoise.config import is_db_uri, looks_like_uri_userinfo
 
     json_mode = bool(getattr(args, "json", False))
     payload: dict = {"status": "ok", "credential": {}, "graph_store": {},
@@ -3553,6 +3566,11 @@ def _cmd_config(args) -> int:
                 "the resolved store carries " + ", ".join(unusable_fields)
                 + " — not a NON-EMPTY string, so it cannot be used. Fix the field "
                 "in the store; nothing here can repair it")
+            # The machine-readable half of the same distinction, so `--json`
+            # cannot say "the field is there" in one key while saying nothing
+            # beside the missing one. Names only — the warning carries the types.
+            cred["org_fields_unusable"] = [entry.split(" (", 1)[0]
+                                           for entry in unusable_fields]
         # `recover` does NOT read the token from the winning store — it scans
         # `<cwd>/.tortoise` then `~/.tor…/credentials.json` regardless of which
         # store supplied the KEY (#1752's divergence case). Asking the winner
@@ -3596,9 +3614,9 @@ def _cmd_config(args) -> int:
                 "an env-supplied key carries no coordinates. `tortoise team "
                 "info` with an org-wide key, or the dashboard, reports it"
                 if source.startswith("env:") else
-                "the resolved store carries no org_id (`init --api-key` writes "
-                "only the key). `tortoise team info` with an org-wide key, or "
-                "the dashboard, reports it"
+                "the resolved store has no USABLE org_id — absent, or present "
+                "but blank (`init --api-key` writes only the key). `tortoise "
+                "team info` with an org-wide key, or the dashboard, reports it"
             )
         if isinstance(org_id, str) and len(org_id) < 6:
             # Neither id can be this short: a hosted org_id is
@@ -3671,16 +3689,30 @@ def _cmd_config(args) -> int:
         if db_source == "default":
             graph_store["note_default"] = (
                 "nothing is configured — this is the resolved default")
-        # AUTHORITY FORM, not "contains a colon": `//token@host/x.db` carries a
-        # token as the user with no `:` at all. A filesystem path (`/tmp/me@work/…`)
-        # does not start with `//`, so it stays legible — which is why the
-        # predicate is written this way rather than as "any `@`".
-        userinfoish = (uri.startswith("//")
-                       and "@" in uri.split("/", 2)[-1].split("/", 1)[0])
+        # AUTHORITY FORM **or** USERINFO COLLAPSED INTO A PATH — one shared
+        # predicate (`looks_like_uri_userinfo` in `tortoise/config.py`), because this
+        # report and that module's log line were two hand-written copies of a
+        # `startswith("//")` test and BOTH leaked `/user:pw@host/x.db`: the value is
+        # ABSOLUTE here, and `os.path.abspath` collapses a leading `///` to `/`, so
+        # the `//` test never fired and the password was printed as a plain path.
+        # The predicate is now the MASKER's own rule (any `@` in a scheme-less
+        # value, #2987/#5267) rather than a narrower second definition — see its
+        # docstring for the three shapes every narrowing leaked.
+        userinfoish = looks_like_uri_userinfo(uri)
         if is_db_uri(uri) or "://" in uri or userinfoish:
             graph_store["target"] = _mask_display_target(uri)
             if graph_store["target"].startswith("<"):
-                graph_store["target_kind"] = "unrecognised (redacted)"
+                if userinfoish and not (is_db_uri(uri) or "://" in uri):
+                    # Scheme-less, so `resolve_db_path` really does treat this as an
+                    # embedded file path ("treating as embedded DB path (backward
+                    # compat)") — the value is masked, the STORE is not inscrutable.
+                    # Calling it "unrecognised" was the same false claim this block
+                    # refuses to make for a plain `/tmp/a:b.db`, and it hid which file
+                    # the CLI will open.
+                    graph_store["target_kind"] = (
+                        "embedded file path (redacted — userinfo-shaped)")
+                else:
+                    graph_store["target_kind"] = "unrecognised (redacted)"
             elif is_db_uri(uri):
                 graph_store["target_kind"] = "database URI"
             else:
@@ -3940,8 +3972,27 @@ def _cmd_config(args) -> int:
     if api_key:
         print("Identity")
         print(f"  api_url       {_printable(cred['api_url'])}   (masked)")
-        print(f"  org_id        {_printable(cred.get('org_id') or '(absent)')}")
-        print(f"  org_name      {_printable(cred.get('org_name') or '(absent)')}")
+
+        def _coord_label(field: str) -> str:
+            """Render ONE coordinate, without claiming a present field is gone.
+
+            A field can be PRESENT and still missing from `cred` — it is only
+            copied there when it is a non-empty string (`org_field_warning`
+            covers the rest). So `cred.get(field) or '(absent)'` printed
+            "org_id (absent)" directly above a warning saying the store carries
+            it: two lines of one report disagreeing about one file (#10655
+            review P2). The hint suppression already drew this distinction; the
+            value line now draws it too.
+            """
+            value = cred.get(field)
+            if value:
+                return _printable(value)
+            if field in (cred.get("org_fields_unusable") or ()):
+                return "(present but unusable)"
+            return "(absent)"
+
+        print(f"  org_id        {_coord_label('org_id')}")
+        print(f"  org_name      {_coord_label('org_name')}")
         fp = (f"  (sha256:{cred['api_key_fingerprint']})"
               if cred.get("api_key_fingerprint")
               else "  (digest withheld — short key)")
@@ -4082,12 +4133,27 @@ def _cmd_config(args) -> int:
               " both api_url values are not URLs (or are empty). Check the two"
               " api_url lines above — a missing scheme (`https://host`) is the usual"
               " cause.")
-        if isinstance(api_url, str) and api_url == harness_url_raw:
-            # Only when the two RAW values are identical is a joint failure real.
-            print("     Both surfaces carry that same value, so BOTH fail the same"
-                  " way.")
+        if _endpoint_is_readable(api_url):
+            if _endpoint_is_readable(harness_url_raw):
+                # Unreachable through `same-key-host-unknown` (that relation
+                # means at least one side is unparseable), kept so a future
+                # relation change cannot silently print neither branch.
+                print("     Both surfaces carry a parseable api_url.")
+            else:
+                print("     Only one side is affected — the HARNESS's api_url does"
+                      " not parse, so the CLI's endpoint above is the one in use.")
+        elif _endpoint_is_readable(harness_url_raw):
+            print("     Only one side is affected — the CLI's api_url does not"
+                  " parse, so the harness's endpoint above is the one in use.")
         else:
-            print("     Only one side is affected — see the api_url lines above.")
+            # BOTH raw values are unparseable, so BOTH sides fail the same way.
+            # Equality of the two raw strings was used as a proxy for this and is
+            # only SUFFICIENT, never necessary: two DIFFERENT non-URLs
+            # (`host-one.example`, `host-two.example`) are a joint failure too, and
+            # the old branch told the reader "Only one side is affected" there —
+            # the false statement this test now pins against.
+            print("     BOTH api_url values are unreadable, so BOTH fail the same"
+                  " way — a refusal on one is reproduced on the other.")
     elif relation == "same-key-different-host":
         print("  → the SAME key as the CLI but a DIFFERENT endpoint — a refusal on"
               " one says nothing about the other")

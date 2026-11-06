@@ -21335,15 +21335,36 @@ class TortoiseSDK:
                 _q, params={"id": point_id}).result_set)
         promoted = []
         for (oid,) in rows:
+            # ⛔ #10828: the endpoint read carries the ``outdated`` FLAG as well
+            # as the status. Liveness is NOT the status alone: ``invalidate_point``
+            # sets ``outdated = true`` and deliberately leaves ``status`` alone
+            # (``live.py`` says so in as many words), and ``ep.py``'s selection
+            # already strips a flag-dead input (``status in
+            # TERMINAL_EXCLUDED_STATUSES or bool(outdated)``). A gate that read
+            # only the status admitted an operator over a flag-dead endpoint, so
+            # the operator flipped ``live``, EP then dropped the input, the
+            # factor degenerated, and the operator was left permanently live
+            # over a dead endpoint — the exact pollution the draft lifecycle
+            # exists to prevent.
             eps = proj.g.query(
                 "MATCH (o:Point {id:$oid})-[r]->(s) "
                 f"WHERE {epistemic_disjunction('s')} "
-                "RETURN s.id, s.status",
+                "RETURN s.id, s.status, coalesce(s.outdated, false)",
                 params={"oid": oid},
             ).result_set
             if not eps:
                 continue  # no endpoints — nothing to gate on
-            all_live = all((st or "live") == "live" for _, st in eps)
+            # TWO arms, and BOTH are needed (``live.is_terminal_status`` alone is
+            # NOT the gate): the terminal predicate is the canonical mirror of
+            # the flag + terminal-status exclusion, and ``draft`` is not in
+            # ``TERMINAL_EXCLUDED_STATUSES`` — a draft endpoint is un-promoted,
+            # not dead, and admitting it here would re-open the pollution #944
+            # closed. Unset status stays LIVE (the legacy-node rule), which is
+            # what ``(st or "live")`` preserves.
+            all_live = all(
+                (st or "live") == "live" and not is_terminal_status(st, bool(od))
+                for _, st, od in eps
+            )
             if not all_live:
                 continue  # keep draft until every endpoint is live
             # CAS-guarded SET: only an explicitly-draft operator may flip,

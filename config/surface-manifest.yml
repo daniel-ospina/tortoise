@@ -120,7 +120,10 @@ response_fields:
     byte-identical
 - response: tortoise_search
   field: truncated
-  emitted_when: 'ALWAYS on the hosted GET /v1/search body — the #8447 truncation marker: true when the
+  emitted_when: 'ALWAYS on the hosted GET /v1/search body, and (since #8447 C2 / PR #10622) ALWAYS on
+    the hosted `GET /v1/points` body too — where `total_available` is NEVER emitted: the cut there is
+    proved by an internal `limit+1` probe row, so `exact` is false and only `truncated` is published.
+    On /v1/search it is the #8447 truncation marker: true when the
     delivered set is NOT the whole set this read matched (the `limit` cap cut rows, a downstream stage
     dropped them — a `min_confidence` floor, a hit whose entity read came back empty — or a retrieval leg that
     was ASKED and never answered: it raised, missed the collective deadline, or its circuit breaker refused);

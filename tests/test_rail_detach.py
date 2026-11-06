@@ -351,6 +351,108 @@ def test_refuses_when_the_rail_script_is_absent(tmp_path):
         rd.launch(3, cwd=bare, state_dir=tmp_path / "state", repo="o/r")
 
 
+# ── a box with NO `gh` on PATH ──────────────────────────────────────────────
+#
+# `subprocess.run(["gh", …])` raises `FileNotFoundError` when the BINARY is
+# absent, and that killed every case in this module on the fleet's self-hosted
+# pool (measured 2026-11-03: `test (h)` on pi-runner-vm-6/Linux-ARM64, run
+# 41732583553 — 20 of 20 here, `FileNotFoundError: [Errno 2] … 'gh'`). The two
+# callers already have a documented degradation for "this checkout cannot tell
+# me" (`Refused` for the repo, `unreadable` for the head) — a missing binary is
+# that case, not a different one — so these pin both arms on a PATH that has the
+# shell tools the child needs and no `gh` at all.
+#
+# ⚠️ `main` landed the SAME fix independently at `f422799c` (`_gh` returns
+# `CompletedProcess(argv, 127, "", "gh: command not found")`, never `None`) and
+# its own CLI-level pair for the same defect — see `_path_without_gh` below and
+# `test_launch_without_the_gh_cli_starts_and_stamps_an_unreadable_head` /
+# `test_collect_without_the_gh_cli_refuses_by_name_instead_of_tracebacking`. The
+# two arms here are therefore kept as the UNIT-level pair the merge kept from
+# the other side (`_resolve_repo`'s refusal text, and `Launch.head`); the CLI
+# pair below is the end-to-end one. Five tests, one root, three layers — recorded
+# rather than deduplicated, because each layer asserts something the other does
+# not (the `_gh` return contract is `None`-never with rc=127; the "installed"
+# remedy in the refusal text; `HEAD=unreadable` stamped in the artifact).
+#
+# ⛔ The CONTRACT layer is not redundant with either: `test_gh_never_returns_None_for_a_missing_binary`
+# is the only arm that reds when `_gh` is changed to return `None` — the state in
+# which BOTH callers crash at `out.returncode`. It is what makes dropping the two
+# `out is not None` guards the merge kept safe (#10622 round 9), instead of tidy.
+
+def no_gh_on_path(tmp_path, monkeypatch):
+    """A PATH with the child's shell tools but NOT `gh`."""
+    d = tmp_path / "bin-nogh"
+    d.mkdir()
+    for name in ("bash", "date", "env", "sh", "sleep"):
+        real = shutil.which(name)
+        assert real, f"{name} is missing from this test box"
+        (d / name).symlink_to(real)
+    monkeypatch.setenv("PATH", str(d))
+    return d
+
+
+def test_gh_never_returns_None_for_a_missing_binary(tmp_path, monkeypatch):
+    """`_gh`'s annotation is a CONTRACT the callers may rely on, not a hint.
+
+    `-> subprocess.CompletedProcess` means the missing-binary case is ANSWERED
+    (`rc=127`), never signalled by `None` — so a caller needs no
+    `out is not None` guard, and one that carries a guard is describing a
+    return type this function does not have. Two such guards arrived on the
+    branch side of the #10622 merge (where `_gh` *could* return `None`) and sat
+    unreachable under main's `_gh` until a fresh-context review read the
+    annotation against them.
+
+    This arm is the invariant that keeps that deletion safe: a `None`-returning
+    `_gh` reds the assertion below, before a guard can rot into a second
+    description of the function. NON-VACUOUS — proved twice, because the two
+    senses differ and only one of them is a test against history:
+
+    * **Against a mutant of THIS tree** (`return None` in the `except` arm):
+      `1 failed` at the `out is not None` assertion, and both callers would
+      then crash at `out.returncode` — the guards were not protecting them.
+    * **Against the true pre-fix head** (`cbefdcbe^`, before #2148): `_gh` does
+      not exist there at all — the absent binary was an UNGUARDED
+      `subprocess.run(["gh", ...])` inside `_resolve_repo`/`_head_sha` — so
+      this arm reds with `AttributeError`, not with a behaviour claim. Said
+      plainly: the "before" side of this test is the function's absence, and
+      the invariant it pins is the one #2148 introduced.
+    """
+    co = make_checkout(tmp_path)
+    no_gh_on_path(tmp_path, monkeypatch)
+    out = rd._gh(["gh", "repo", "view"], co)
+    assert out is not None, "`_gh` returned None; its annotation says it cannot"
+    assert out.returncode == 127, out
+    assert "command not found" in (out.stderr or ""), out.stderr
+
+
+def test_a_missing_gh_is_a_REFUSAL_not_a_traceback(tmp_path, monkeypatch):
+    """`gh` absent is a precondition the launcher enforces, never a crash."""
+    co = make_checkout(tmp_path)
+    no_gh_on_path(tmp_path, monkeypatch)
+    with pytest.raises(rd.Refused) as exc:
+        rd._resolve_repo(co)
+    assert "gh repo view" in str(exc.value)
+    assert "installed" in str(exc.value), (
+        "the refusal does not say WHAT to fix — a lane reading it has to guess "
+        f"whether the checkout or the tool is wrong: {exc.value}")
+
+
+def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path, monkeypatch):
+    """The rail must outlive the lane on a box that has no `gh` too.
+
+    A caller that passes `repo=` has already settled the one thing `gh` was
+    needed for, and the head is recorded as `unreadable` — the same value
+    `_head_sha` returns when `gh` runs and fails. Neither may become a crash.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    no_gh_on_path(tmp_path, monkeypatch)
+    ln = launch(sd, co, pr=21)
+    assert ln.pid > 0, "the rail did not start without `gh`"
+    assert ln.head == "unreadable", ln.head
+    assert wait_state(sd, 21, rd.MERGED, timeout=20).state == rd.MERGED
+
+
 def test_child_invokes_only_the_one_lander(tmp_path):
     """#1178: no second lander. The child argv is `bash <rail> <pr> --repo <r>`."""
     co = make_checkout(tmp_path)
