@@ -14838,8 +14838,12 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
     # the counter note above exists to eliminate. Destructive, so it is out of
     # this change's scope and belongs to §9.1's residual (a) — a graph-side
-    # removal no instrument ships today, and NOT `#10017`, whose purge is the
-    # legacy turn population and never matches a `:Source` (`#11325`).
+    # removal no instrument ships today. ⛔ NOT `#10017`'s purge, though these
+    # ARE turn-shaped `:Point`s: the purge reaches one only where
+    # `t.is_episodic = true` (this seeder never set it) AND the record already
+    # holds that turn — a demo turn has no record row, so a stamped copy is
+    # `RECORD-BEHIND`, which `tools/purge_legacy_turns.py` REFUSES ("MUST NOT BE
+    # PURGED — deleting those destroys the only copy of the transcript"; #11325).
     # Blast radius: opt-in sample content that
     # `org.point_count` excludes — but the demo `:Session` is still returned by
     # the session reads, so the pre-existing nodes stay reachable there and in
