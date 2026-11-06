@@ -4277,9 +4277,11 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # (`.github/workflows/python-ci.yml:680` job header, `:898` the checkout) — the default
     # `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`
     # belongs to the separate `changes` job (`:279`), which does not share a working tree.
-    # `047c91f7a` is 386 commits behind `origin/main`, so a depth-1 checkout does not carry it
-    # and `git grep` exits 128 with EMPTY stdout — the un-guarded form then summed that to
-    # `measured == 0` and failed `measured == pre_count` on a CORRECT tree on every PR, a
+    # `047c91f7a` is far behind `origin/main` — `git rev-list --count 047c91f7a..origin/main`
+    # read 388 at 2026-11-06, and that figure only GROWS, so it is not the claim: the claim is
+    # that a depth-1 checkout does not carry it. `git grep` there exits 128 with EMPTY stdout,
+    # and the un-guarded form summed that to `measured == 0` and failed
+    # `measured == pre_count` on a CORRECT tree on every PR — a
     # false RED produced by a guard whose purpose is to stop false GREENs. The repo already
     # records this environment fact (`tests/test_capstone_preregistration_9075.py:550-566`:
     # "CI test jobs check out at `fetch-depth: 1`") and carries five `--is-shallow-repository`
