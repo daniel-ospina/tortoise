@@ -472,7 +472,7 @@ def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
     not all select the same surface. `08-hosted-prerequisites.md`, `docs/00_index.md`,
     `docs/architecture/STORAGE-ARCHITECTURE.md` and the capstone `README.md` are
     surface-selecting, so the pins on them run through those rows. But
-    `docs/infra-runbook.md` (§"Secrets Matrix", and the §9 drill row that
+    `docs/infra-runbook.md` (the §9 drill row that
     `test_the_epic_r8_drill_blocker_agrees_with_the_runbook` requires to keep
     naming a `captured` session and a `direct` DSN),
     `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
