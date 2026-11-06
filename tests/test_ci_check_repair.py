@@ -1862,9 +1862,11 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
     this floor defers to is `tools/ci_queue_health.py:309`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
-    and `ci-wall-clock.md` §6 lines 412-414 records the same derivation in its own
+    and `ci-wall-clock.md` §6 lines 440-442 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
-    population rather than on it"). The floor was
+    population rather than on it"; no line span quoted here on purpose — §6's offset moves
+    with any insert above it, and the mechanical pin below reads the ONE span out of
+    `tools/ci_check_repair.py`). The floor was
     1200 s, i.e. it selected the MEDIAN wait, and the repair for this class is
     cancel-then-rerun: at the median it makes the median run slower and adds one more
     run to the queue it is starved behind.
@@ -1900,11 +1902,17 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     back out of the docstrings and resolved against the files they cite, and the pin is
     PHRASING-AGNOSTIC (round 14's P2: pinning one literal phrasing left this file's own
     previous wording — and every new one — uncovered, so a re-introduced coordinate
-    stayed green). Three arms, each with its scope stated so the claim matches the code
-    (round 15's P2 caught an earlier sentence claiming file-wide reach while arm 3 read
-    only one function):
+    stayed green). FIVE arms, each with its scope stated so the claim matches the code
+    (round 15's P2 caught an earlier sentence claiming file-wide reach while the sweeping
+    arm read only one function):
 
     - **every** `ci_queue_health.py:<line>` cited by EITHER file must BE the assignment;
+    - the cited `§6 (lines A-B)` span must contain the sentence it is quoted for;
+    - the span is DERIVED from the document's own text (the sentence's first and last
+      line) and the citation must equal it — so a shift reds with the number to write
+      instead of leaving the next lane to re-derive the offset by hand, which is what
+      arms 1-2 cannot do: they accept any span WIDE ENOUGH to contain the measurement,
+      which is not the same thing as the span the sentence occupies;
     - the sibling's `§6 lines A-B` citation must be found EXACTLY once (as the liveness
       anchor, so the checked set cannot silently shrink) and must name the pin's span;
     - every line of this file containing one of the CITATION tokens below **and** an
@@ -1962,7 +1970,25 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
         "derived from this" in quoted), (
         "the cited span must open on the sentence the docstring quotes")
 
-    # 3. THIS test's own docstrings carry the third citation of the same span, and
+    # 3. The cited span must be the span the QUOTED SENTENCE actually occupies, derived
+    #    from the doc's own text — so a shift reds with the number to write instead of
+    #    leaving the next lane to re-derive it. Arms (1)-(2) cannot tell a wide-enough span
+    #    from the right one — the first version of this citation was four lines wide and
+    #    passed them — and this is a span that any insert above §6 moves.
+    opens = [i + 1 for i, line in enumerate(doc)
+             if "The budget's default is derived from this" in line]
+    closes = [i + 1 for i, line in enumerate(doc)
+              if "measured-normal population rather than on it." in line]
+    assert len(opens) == 1 and len(closes) == 1 and opens[0] <= closes[0], (
+        f"the sentence this citation quotes is no longer locatable in ci-wall-clock.md §6 "
+        f"(opening line {opens}, closing line {closes}) — re-quote the derivation the tool "
+        f"cites rather than deleting the span assertion")
+    assert (first, last) == (opens[0], closes[0]), (
+        f"ci-wall-clock.md §6 moved: the sentence tools/ci_check_repair.py quotes now "
+        f"occupies lines {opens[0]}-{closes[0]}, but the citation says {first}-{last}. "
+        f"Change it to `(lines {opens[0]}-{closes[0]})`.")
+
+    # 4. THIS test's own docstrings carry the third citation of the same span, and
     #    it is exactly what drifted when this PR grew `ci-wall-clock.md`:
     #    the other two citations were re-cut to the span of that head and this one was
     #    left behind
@@ -1990,7 +2016,7 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
             f"{first}-{last} — a stale coordinate sends the next lane to the "
             "misreading the paragraph exists to prevent")
 
-    # 4. PHRASING-AGNOSTIC backstop over the WHOLE FILE (round 14's P2, widened in
+    # 5. PHRASING-AGNOSTIC backstop over the WHOLE FILE (round 14's P2, widened in
     #    round 15 after its P2: the first version read one function, so a new citation
     #    appended to the SIBLING docstring — the very site that drifted in round 11 —
     #    stayed green). Keyed on the CITATION token list defined in this function's
