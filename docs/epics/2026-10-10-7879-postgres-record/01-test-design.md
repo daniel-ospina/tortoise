@@ -314,8 +314,11 @@ project's "a pin that outlives its defect" rule, applied at the LAST entry rathe
 difference that earns this one: a **derived** check cannot go empty, because it is closed over the migration set
 rather than over a hand-kept vocabulary. ⚠️ **`#11075`'s body states the ONE-STEP version** of that provenance
 today — *"records that `_SCHEMA_DISAGREEMENTS` was emptied and then made 'gone rather than parked' **when #9264
-closed**"* — a third live carrier in that body beside its `carve_out:` order and its `_COLUMN_RE` "**does**
-capture" claim; this section and §7.1 of the plan are authoritative until the body is corrected.
+closed**"* — **one of that body's four contradicted statements**, the other three being its `carve_out:` order,
+its `_COLUMN_RE` "**does** capture" claim and its `grep -rn jsonb_columns` "**zero code hits**" claim; this
+section and §7.1 of the plan are authoritative until the body is corrected. ⚠️ **The total is four, and it is
+the same four in §7.2 of the plan** — two documents that state different totals for one list are the defect this
+paragraph exists to remove, so both sites enumerate all four.
 
 **Layer:** `unit` + `contract` (DB-free; the declared types are read from the migration files). Registration is
 a **surface** entry plus a `durations:` row, exactly like the DB-free migration-reading precedent
