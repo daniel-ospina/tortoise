@@ -327,13 +327,22 @@ def test_e1_gate_drops_still_refuses_a_graph_with_no_objects(monkeypatch, tmp_pa
 
     The legacy census keys are published on EVERY run and `e1_e2_scores.py` reads
     them as a census, so a candidate-bearing graph with no `:Object` name would
-    publish "0 of 0 Objects" — the reading this probe has always refused.
+    publish "0 of 0 Objects" — the reading this probe has always refused. The
+    record is still written before the refusal, and it carries NO drop number for
+    the half it could not measure.
     """
     exit_code = _run_gate_drops(monkeypatch, tmp_path, population={
         "objects": [], "points": ["the lease fix"], "events": ["the retro"]})
 
     assert exit_code == 2
-    assert "no Object names" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "no Object names" in out
+    assert "value_gate drops: UNMEASURED" in out
+    record = json.loads((tmp_path / "o.json").read_text())
+    assert record["drops_total"] is None
+    assert record["value_gate_drops"] is None
+    assert record["drops_among_bare_definite"] is None
+    assert record["unmeasured_sections"] == ["objects"]
 
 
 def test_e1_gate_drops_point_drops_come_from_the_predicate_not_a_constant(

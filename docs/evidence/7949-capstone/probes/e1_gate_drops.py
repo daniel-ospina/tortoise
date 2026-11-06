@@ -32,11 +32,15 @@ instrument cannot silently cover less than the pass does.
 ⛔ **The graph must come from a run that pinned the predicate OFF.** `apply_vet`
 REMOVES what the predicate discards before the payload is written
 (`tortoise/extractor_v2.py`, the `_vet_gate.apply_vet(...)` call in
-`_run_vet_pass`), so a run with `TORTOISE_VALUE_GATE` ON writes only SURVIVORS:
-its graph cannot contain a drop, and a `0` read off it is vacuous rather than
-reassuring. Since `#10996` "unset" IS the ON arm, the OFF arm has to be pinned
-explicitly — that is what `capstone_measure.measured_arm()` does (`ARM_OFF` sets
-`TORTOISE_VALUE_GATE` and `TORTOISE_S2_DECISION_SEAM` to an explicit `"0"`). The
+`_run_vet_pass`), so a run with `TORTOISE_VALUE_GATE` ON removes the points and
+events it discards before the write — a census over such a graph under-counts
+drops, and any `0` read off it is vacuous rather than reassuring. (An `:Object`
+that `apply_vet` Rule 2 downgraded is the exception and DOES survive, so the
+objects half is not vacuous in the same way — it is still the wrong arm to
+measure, because the population is post-pass.) Since `#10996` "unset" IS the ON
+arm, the OFF arm has to be pinned explicitly — that is what
+`capstone_measure.measured_arm()` does (`ARM_OFF` sets `TORTOISE_VALUE_GATE` and
+`TORTOISE_S2_DECISION_SEAM` to an explicit `"0"`). The
 record carries this as `arm_precondition` so a reader cannot take the number for
 a different run shape.
 
@@ -275,9 +279,10 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
         "graph": graph,
         "arm_precondition": (
             "the graph must be written by a run that pinned the predicate OFF "
-            "(TORTOISE_VALUE_GATE=0): apply_vet removes what it discards before "
-            "the write, so an ON-arm graph cannot contain a drop and any 0 read "
-            "off it is vacuous (#11201)"),
+            "(TORTOISE_VALUE_GATE=0): apply_vet removes the points/events it "
+            "discards before the write, so such a graph under-counts drops and "
+            "any 0 read off it is vacuous (a Rule-2-downgraded Object survives, "
+            "so the objects half is post-pass rather than empty) (#11201)"),
         "sections_requested": list(sections),
         "sections": per_section,
         "coverage_complete": not unmeasured,
@@ -287,9 +292,14 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
         "objects": len(names),
         "bare_definite": len(bare),
         "bare_definite_share": (len(bare) / len(names)) if names else None,
-        "value_gate_drops": drops,
-        "drops_total": len(drops),
-        "drops_among_bare_definite": [n for n in bare if n in drops],
+        # The LEGACY objects keys follow the same rule as the per-section blocks:
+        # an empty objects census is a zero denominator, so it publishes NO drop
+        # number. Leaving `0` here while the record says `unmeasured_sections:
+        # ["objects"]` was the last place a zero could be picked up.
+        "value_gate_drops": drops if names else None,
+        "drops_total": len(drops) if names else None,
+        "drops_among_bare_definite": ([n for n in bare if n in drops]
+                                       if names else None),
         "controls": controls,
         "predicate_alive": alive,
         "object_names": names,
@@ -352,12 +362,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"objects={record['objects']} bare_definite={record['bare_definite']} "
           f"share={record['bare_definite_share']}")
     print(_sections_line(record))
-    print(f"value_gate drops: {record['drops_total']} "
-          f"(among bare_definite: {len(record['drops_among_bare_definite'])}) "
-          f"controls alive={record['predicate_alive']} "
-          f"STEP-4 (points+events) drops: {record['step4_points_events_drops']} "
-          f"across sections: {record['drops_across_sections']} "
-          f"coverage_complete={record['coverage_complete']}")
+    if record["drops_total"] is None:
+        print("value_gate drops: UNMEASURED (the objects census is empty — a 0 "
+              "here would be a zero-denominator reading); "
+              f"STEP-4 (points+events) drops: "
+              f"{record['step4_points_events_drops']} "
+              f"coverage_complete={record['coverage_complete']}")
+    else:
+        print(f"value_gate drops: {record['drops_total']} "
+              f"(among bare_definite: {len(record['drops_among_bare_definite'])}) "
+              f"controls alive={record['predicate_alive']} "
+              f"STEP-4 (points+events) drops: "
+              f"{record['step4_points_events_drops']} "
+              f"across sections: {record['drops_across_sections']} "
+              f"coverage_complete={record['coverage_complete']}")
     if not any(block["candidates"] for block in record["sections"].values()):
         print("REFUSED: no selected section yields candidate text — 0 drops "
               "would be a zero-denominator reading, not a result")
