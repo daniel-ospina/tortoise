@@ -143,12 +143,20 @@ def main() -> int:
 
     read_transcript = None
     # `args.record_dsn is not None` (not truthiness) so `--record-dsn ""` can
-    # suppress an exported DSN, and `--clear-without-record` WINS over the env —
-    # otherwise the arm the operator asked for is unreachable on a box that
-    # exports `TORTOISE_RECORD_DSN`, which is most of them.
-    record_dsn = (args.record_dsn if args.record_dsn is not None
+    # suppress an exported DSN.
+    explicit_dsn = args.record_dsn is not None
+    record_dsn = (args.record_dsn if explicit_dsn
                   else os.environ.get("TORTOISE_RECORD_DSN", ""))
-    if args.clear_without_record:
+    if args.clear_without_record and not explicit_dsn:
+        # ⛔ ONLY THE INHERITED DSN IS DROPPED. `--clear-without-record` exists so
+        # the clear arm is reachable on a box that EXPORTS a `TORTOISE_RECORD_DSN`
+        # the operator did not mean to use — it must never discard a `--record-dsn`
+        # the operator TYPED. Zeroing that too made the safe combination
+        # unreachable from the CLI ("re-derive where the record answers, clear
+        # where it does not"), so a run with a real DSN and the flag cleared every
+        # node with NO lexicon, including ones the record could have re-derived —
+        # measured with a bogus DSN that could never be dialled (#11152 review
+        # round 2, P2).
         record_dsn = ""
     org_id = args.org_id or os.environ.get("TORTOISE_ORG_ID", "")
     graph_id = args.graph_id
@@ -236,6 +244,7 @@ def main() -> int:
           f"re-derived from the record: {len(report['repaired'])}  "
           f"record spoke, 0 turns: {len(report.get('empty_sessions') or [])}  "
           f"record did not answer: {len(report['no_record'])}  "
+          f"no session id: {len(report.get('no_session_id') or [])}  "
           f"never asked (no reader): {len(report.get('no_reader') or [])}  "
           f"LEFT ALONE: {len(report.get('left_alone') or [])}")
     if report.get("left_alone"):

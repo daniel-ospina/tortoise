@@ -65,6 +65,19 @@ class _Result:
         self.result_set = rows
 
 
+class _FakeClient:
+    """The CLIENT handle — where ``config_get`` actually lives."""
+
+    def __init__(self, graph):
+        self._graph = graph
+
+    def config_get(self, name):
+        if self._graph.config_get_raises:
+            raise RuntimeError("this server cannot be asked")
+        assert name == "TIMEOUT_MAX"
+        return self._graph.timeout_cap
+
+
 class _RecordingGraph:
     """A graph that RECORDS every write, so ``dry_run`` can be proven.
 
@@ -95,13 +108,21 @@ class _RecordingGraph:
         self.config_get_raises = config_get_raises
         self.statements: list[tuple[str, dict]] = []
         self.requested_timeouts: list[int | None] = []
+        # ⛔ THE VERB LIVES ON THE CLIENT, NOT THE GRAPH. A real
+        # `falkordb.Graph` has NO `config_get` and NO `connection` — measured
+        # `hasattr(Graph,'config_get') is False`, `hasattr(Graph,'client') is
+        # True` — and the projection's `_GuardedGraph` forwards to the same
+        # object. An earlier version of this fake put `config_get` ON THE GRAPH,
+        # which made a dead clamp look alive: the module never found the cap on a
+        # real handle, so it never clamped (#11152 review round 2, P1).
+        self.client = _FakeClient(self)
 
-    def config_get(self, name):
-        """The server's own answer — the module asks before it guesses."""
-        if self.config_get_raises:
-            raise RuntimeError("this server cannot be asked")
-        assert name == "TIMEOUT_MAX"
-        return self.timeout_cap
+    #: Deliberately ABSENT: `config_get` is not an attribute of this object, and
+    #: neither is `connection` — a regression that goes back to probing the bare
+    #: graph handle now fails here instead of passing quietly.
+    @property
+    def connection(self):
+        raise AttributeError("a real falkordb Graph has no `.connection`")
 
     def query(self, cypher, params=None, timeout=None):
         if any(m in cypher for m in self.WRITE_MARKERS):
@@ -696,3 +717,95 @@ def test_a_reader_that_takes_one_argument_is_tolerated_and_SAID_SO():
     assert report["repaired"] == ["session:s-11070"]
     assert "turn_max_index" in report["notes"]["session:s-11070"], (
         "a one-argument reader silently drops the tail witness")
+
+
+def test_the_clamp_finds_the_cap_on_the_CLIENT_not_the_graph():
+    """⛔ The verb is on the CLIENT — probing the graph alone was dead code.
+
+    A real `falkordb.Graph` has no `config_get` and no `connection`, so an
+    implementation that probes the graph handle never finds the cap and never
+    clamps: the 60 000 ms request goes out, the server refuses it, and the read
+    only survives on the retry. The fake above models that shape (verb on
+    `.client`, and `.connection` raises), so this test fails if the probe regresses
+    (#11152 review round 2, P1).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)], timeout_cap=30_000)
+    assert m._server_timeout_cap(graph) == 30_000
+    assert m._effective_timeout_ms(graph, 60_000) == 30_000
+    assert m._effective_timeout_ms(graph, 5_000) == 5_000
+
+
+def test_the_clear_arm_says_CLEARED_and_the_default_says_LEFT_ALONE():
+    """The note must state what HAPPENED, not what the default would have done.
+
+    Emitting "left alone unless clear_without_record is set" on the very run that
+    cleared the node is a report contradicting its own writes (#11152 review
+    round 2, P2).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    kept = m.reconcile_session_source_prose(
+        _RecordingGraph([(_session_node(),)]), read_transcript=_reader(None))
+    assert "left alone unless clear_without_record is set" in kept["notes"]["session:s-11070"]
+    assert "CLEARED" not in kept["notes"]["session:s-11070"]
+
+    cleared_graph = _RecordingGraph([(_session_node(),)])
+    cleared = m.reconcile_session_source_prose(
+        cleared_graph, read_transcript=_reader(None), dry_run=False,
+        clear_without_record=True)
+    assert "CLEARED" in cleared["notes"]["session:s-11070"]
+    assert len(cleared_graph.writes) == 1
+
+
+def test_a_node_with_no_session_id_is_COUNTED_when_a_reader_is_supplied():
+    """⛔ The fourth state must have a counter on the production path.
+
+    With a reader supplied, a pre-#4005 bare-filename node satisfies neither
+    `no_reader` (a reader WAS supplied) nor `no_record` (the record was never
+    asked), so it landed in NO bucket — and on the clear arm that made a
+    destructive write reportable as nothing (#11152 review round 2, P2).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    legacy = {"url": "session.md", "sourceKind": "agentSession",
+              "summary": PROSE, "_searchText": PROSE}
+    graph = _RecordingGraph([(legacy,)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=_reader("User: friday plan"))
+
+    assert report["candidates"] == ["session.md"]
+    assert report["no_session_id"] == ["session.md"]
+    assert report["left_alone"] == ["session.md"]
+    assert graph.writes == []
+
+
+def test_a_PARTIAL_answer_caused_by_the_CACHE_mark_is_named_as_such():
+    """The tail witness is the CACHE's, so `no_record` may be the wrong diagnosis.
+
+    `record_turn_reader` forwards the `:Session.turn_max_index` read off the
+    cache; a mark ahead of the record's live end makes a fully-answered session
+    read as PARTIAL. Refusing to write is the safe direction and stays — but the
+    note must name the suspect instead of blaming the record (#11152 review
+    round 2, P2).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    def read(session_id, turn_max_index=None):
+        # The production reader (`record_turn_reader`) records WHY it refused; a
+        # bare None would force the caller to guess, and the guesses differ.
+        read.reasons[session_id] = (
+            "PARTIAL", "the record stops below the session's turn_max_index=99")
+        return None
+
+    read.reasons = {}
+    graph = _RecordingGraph([(_session_node(turn_max_index=99),)])
+    report = m.reconcile_session_source_prose(graph, read_transcript=read)
+
+    note = report["notes"]["session:s-11070"]
+    assert "record did not ANSWER" in note
+    assert "MAY BE THE CACHE'S FAULT" in note, (
+        "a bare `no_record` tells the operator to hunt a record problem that may "
+        "not exist")
+    assert "turn_max_index=99" in note, "the record's own reason must survive"

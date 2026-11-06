@@ -152,6 +152,14 @@ CACHE_READ_TIMEOUT_MS = 60_000
 #: message is the server's, and it is the only signal that separates the two.
 _TIMEOUT_CAP_ERR = "TIMEOUT parameter value cannot exceed"
 
+#: A cut of ``record_read.session_turns``'s PARTIAL reason that names the TAIL
+#: witness. Used only to word the operator note (see :func:`reconcile_session_
+#: source_prose`): when a ``:Session.turn_max_index`` read off the CACHE is ahead
+#: of the record, a fully-answered session is refused as PARTIAL — and this
+#: module exists precisely because the cache diverges from the record, so the
+#: mark is the one datum here that may be the LIE rather than the witness.
+_TAIL_WITNESS_HINT = "turn_max_index"
+
 #: The property names this repair reads. ⛔ It WRITES only the pair — see
 #: :data:`_REPAIR_PAIR`.
 _KIND = "sourceKind"
@@ -305,13 +313,26 @@ def _server_timeout_cap(g) -> int | None:
     ``0`` means UNCAPPED, which FalkorDB reports as such — it is not "a cap of
     zero milliseconds", so it is folded into ``None`` here.
 
-    ⛔ Asking beats guessing: the cap is a deployment setting (the docker test
-    lane runs 30000, a self-host may run anything), and a module constant that
-    only holds on one of them is the defect this function exists to close. A
-    server that cannot answer is NOT an error — the retry in
-    :func:`_read_source_rows` is the second line of defence.
+    ⛔ ASKING BEATS GUESSING, AND THE VERB IS ON THE **CLIENT**, NOT THE GRAPH.
+    A ``falkordb.Graph`` has NO ``config_get`` and NO ``connection`` attribute
+    (measured: ``hasattr(Graph, 'config_get') is False``,
+    ``hasattr(Graph, 'client') is True``) — the projection's ``_GuardedGraph``
+    forwards to the same thing. Probing the graph handle itself therefore found
+    nothing and the clamp silently never ran: the 60 000 ms request went out
+    unclamped and every read took the ResponseError path below. That is how a
+    "fix" can be dead code on every real deployment while its unit test, which
+    put ``config_get`` on the fake graph, passes (#11152 review round 2, P1).
+    The handles are tried CLIENT-FIRST for that reason, and the test fake models
+    the client shape rather than this one.
+
+    A server that cannot answer is NOT an error — the retry in
+    :func:`_read_source_rows` is the last resort.
     """
-    for handle in (getattr(g, "connection", None), g):
+    candidates = (getattr(g, "client", None),
+                  getattr(g, "connection", None),
+                  getattr(getattr(g, "_g", None), "client", None),
+                  g)
+    for handle in candidates:
         getter = getattr(handle, "config_get", None)
         if getter is None:
             continue
@@ -330,9 +351,14 @@ def _server_timeout_cap(g) -> int | None:
 def _effective_timeout_ms(g, requested_ms: int) -> int:
     """*requested_ms*, clamped DOWN to the server's own ``TIMEOUT_MAX``.
 
-    Clamped, never dropped: the bound this module promises stays a bound. On an
-    uncapped server (``TIMEOUT_MAX 0``, the FalkorDB default) the request is
-    honoured as written.
+    Clamped, never dropped: the bound this module promises stays a bound on a
+    server that will state its cap. On an uncapped server (``TIMEOUT_MAX 0``, the
+    FalkorDB default) the request is honoured as written.
+
+    ⚠️ A server that will NOT state its cap may still refuse the request (see
+    :func:`_read_source_rows`); this function cannot know that, so it returns the
+    request it would issue — it is the REQUEST, not a claim about what the read
+    carried.
     """
     cap = _server_timeout_cap(g)
     if cap is None or requested_ms <= cap:
@@ -346,13 +372,17 @@ def _read_source_rows(g, timeout_ms: int) -> list[dict]:
     try:
         rows = g.query(_SOURCE_ROWS, timeout=effective).result_set
     except Exception as exc:  # discriminated immediately below
-        # ⛔ SECOND LINE OF DEFENCE, and only for the CAP class. A server that
-        # will not answer `config_get` (an older build, a proxy, a seam in a
-        # test) still REFUSES an over-cap request, and "the census cannot run
-        # anywhere" is the defect being fixed — so on exactly that message the
-        # read is retried with NO explicit timeout, which is bounded by the
-        # server's own policy instead of by ours. Any other exception is the
-        # query's, and belongs to the caller.
+        # ⛔ LAST RESORT, and only for the CAP class. A server that will not
+        # answer `config_get` (an older build, a proxy, a seam in a test) can
+        # still REFUSE an over-cap request, and "the census cannot run anywhere"
+        # is the defect being fixed — so on exactly that message the read is
+        # retried with NO explicit timeout, which is bounded by the server's own
+        # policy instead of by ours. ⚠️ Declared cost: on a server whose default
+        # `TIMEOUT` is non-zero (FalkorDB's own default is 1000 ms) and whose cap
+        # is below our request, that retry can itself time out — and a timeout is
+        # NOT the cap class, so it PROPAGATES rather than being retried again. The
+        # caller sees a hard failure, never a short read reported as a census.
+        # Any other exception is the query's, and belongs to the caller.
         if _TIMEOUT_CAP_ERR not in str(exc):
             raise
         rows = g.query(_SOURCE_ROWS).result_set
@@ -436,6 +466,13 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
         answer = session_turns(conn, org_id=org_id, graph_id=graph_id,
                               session_id=session_id,
                               turn_max_index=turn_max_index)
+        # ⛔ The REASON travels with the answer. A bare ``None`` forces the caller
+        # to guess WHY, and the guesses are not interchangeable: a PARTIAL caused
+        # by the CACHE's ``turn_max_index`` being ahead of the record is not a
+        # missing or mis-scoped record at all (see the module note on
+        # ``_TAIL_WITNESS_HINT``). Recorded on the closure so the caller can name
+        # it without changing the ``str | None`` contract.
+        read.reasons[session_id] = (answer.kind, answer.reason)  # type: ignore[attr-defined]
         if not answer.answered:
             # NO_ACCOUNT, CONTRADICTION, or a PARTIAL set — the record did not
             # answer for the WHOLE session, and a lexicon built from half a
@@ -451,7 +488,40 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
         # through it cannot drift from the writer's frame.
         return "\n".join(t.line for t in answer.turns)
 
+    read.reasons = {}  # type: ignore[attr-defined]
     return read
+
+
+def _no_record_note(read_transcript, session_id: str | None) -> str:
+    """WHY the record did not answer — named, because the guesses differ.
+
+    ⛔ THE TAIL WITNESS IS THE CACHE'S. ``record_turn_reader`` forwards the
+    ``:Session.turn_max_index`` it was handed, and this repair exists because the
+    CACHE has diverged from the record — so a mark that is AHEAD of the record's
+    live end makes ``record_read``'s ``_shortfall`` refuse a session the record
+    answered COMPLETELY, and the node is then reported under ``no_record``, whose
+    own name says the record was at fault. Measured shape (#11152 review round 2,
+    P2): the diagnosis is wrong and the repair under-heals silently. Refusing is
+    still the SAFE direction (a lexicon from a possibly-truncated transcript is
+    the fabricated descriptor this module refuses), so the behaviour stays and
+    the note names the suspect — and the operator can compare the mark with the
+    record's live end before concluding the record is missing data.
+    """
+    reasons = getattr(read_transcript, "reasons", None)
+    kind, reason = ("", "")
+    if isinstance(reasons, dict):
+        kind, reason = reasons.get(session_id, ("", ""))
+    note = ("the record did not ANSWER for this session, so no lexicon is "
+            "invented")
+    if reason:
+        note += f" ({kind}: {reason})"
+    if _TAIL_WITNESS_HINT in str(reason or ""):
+        note += (". ⚠️ THIS MAY BE THE CACHE'S FAULT, NOT THE RECORD'S: the tail "
+                 "witness handed to the record read is the CACHE's "
+                 "`:Session.turn_max_index`, and a mark AHEAD of the record's "
+                 "live end makes a complete answer read as PARTIAL — compare the "
+                 "mark with the record before concluding the record is short")
+    return note
 
 
 def _derive(transcript: str | None) -> dict:
@@ -533,6 +603,7 @@ def reconcile_session_source_prose(
         "empty_sessions": [],
         "no_record": [],
         "no_reader": [],
+        "no_session_id": [],
         "left_alone": [],
         "notes": {},
         "census_before": len(found),
@@ -569,18 +640,31 @@ def reconcile_session_source_prose(
                     "stops below the id-space end cannot be detected by it")
         elif read_transcript is None:
             report["no_reader"].append(url)
-            report["notes"].setdefault(
-                url, "no transcript reader was supplied, so the record was "
-                     "never asked; the pair is left alone unless "
-                     "clear_without_record is set")
         else:
-            report["notes"][url] = (
-                "no session id is derivable from this node (a pre-#4005 "
-                "bare-filename url, or none), so the record cannot be read BY "
-                "session — the pair is left alone unless clear_without_record "
-                "is set")
+            # ⛔ A FOURTH BUCKET, and it needs its own counter: with a reader
+            # supplied, a node carrying no derivable session id satisfies
+            # neither `no_reader` (a reader WAS supplied) nor `no_record` (the
+            # record was never asked), so it landed in no bucket at all — and on
+            # the clear arm that made a DESTRUCTIVE write reported as nothing
+            # (#11152 review round 2, P2).
+            report["no_session_id"].append(url)
         if asked and transcript is None:
             report["no_record"].append(url)
+            why = _no_record_note(read_transcript, sid)
+        elif transcript is None:
+            why = ("no session id is derivable from this node (a pre-#4005 "
+                   "bare-filename url, or none), so the record cannot be read "
+                   "BY session" if sid is None else
+                   "no transcript reader was supplied, so the record was never "
+                   "asked")
+        if transcript is None:
+            # ⛔ The note must state what HAPPENED, not what the default would
+            # have done: emitting "left alone" on the run that cleared the node
+            # is a report contradicting its own writes.
+            report["notes"][url] = why + (
+                " — the pair is CLEARED, because clear_without_record is set"
+                if clear_without_record else
+                " — the pair is left alone unless clear_without_record is set")
         if transcript is None:
             # ⛔ THE ARM THAT CANNOT BE UNDONE BY A SECOND RUN. A clear is not
             # self-correcting: the damaged node no longer matches the census, so
