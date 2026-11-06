@@ -5185,6 +5185,36 @@ surfaces:
   # (PR #11213) WITHOUT a manifest row; that is the breakage these rows repair,
   # and repair is not a reason to append a duplicate. If you are here to register
   # this file, check with `grep -c '^  - test_pack_hierarchy_11001.py'` FIRST.
+  # #11001 landed `tests/test_pack_hierarchy_11001.py` WITH NO registration, so from
+  # that merge (`e918f3d6dd`, PR #11213) `--integrity` reported `manifest drift:
+  # ['test_pack_hierarchy_11001.py']` on `main` — the #3153/#2876 main-side drift class.
+  # (That bare-filename shape is the 0-row case. Once a second row exists, the SAME job's
+  # `registry_integrity` step reports `duplicate entry ... at .surfaces.core[]`
+  # (`tools/registry_integrity.py`), while `--integrity` itself — a separate step of the
+  # same job (`python-ci.yml`) — reports `manifest drift: ['core: <name>']`. Both are the
+  # same red; do not grep for only one of the two strings.) `manifest-integrity` is a
+  # `python-ci-gate.needs` entry, so the drift reddened the REQUIRED aggregate. Three
+  # lanes then repaired it independently on divergent bases and `merge=union` kept every
+  # copy: measured 1 row at `7bfbc4669` (#11210's merge), 2 at `aa414b4d5` (#11211),
+  # 3 at `eee753b48` (#11222). Two appended beside the pack suites (lines 5136, 5168);
+  # #11222 appended at the FIRST line of `core` (line 1965).
+  # Registered here, beside the pack suites it belongs with: the subject modules
+  # (`tortoise/pack_hierarchy.py` and `tortoise/pack_registry.py`, which carries
+  # `ontology.hierarchies` — the declaration is READ, never inferred, because an
+  # invented edge is a structure nobody asserted) match no `SOURCE_PATTERNS` row, so
+  # they fall through to the `core` fallback. Measured:
+  # `select(['tortoise/pack_hierarchy.py']) -> ['core']`, this file selected.
+  # Hermetic — manifest YAML plus the two modules, no DB, no graph, no network, no model.
+  # ⛔ NOT #11021's file — the suite, its module and its change are #11001's. (#11211,
+  # which is #11021's PR, carried one of the two redundant repair rows that #11212
+  # later removed, and the `durations` row below; that is a repair, not an ownership
+  # claim.)
+  # ⛔ ONE ROW ONLY — a second same-surface row is a GATE FAILURE (#5373), never a
+  # note: `config/ci-surfaces.yml` is `merge=union` (`.gitattributes`), which keeps
+  # BOTH sides of a conflicting hunk. On 2026-11-06 three lanes repaired this same
+  # drift on divergent bases and all three rows survived the merge, reddening `main`'s
+  # manifest-integrity again (#3153). Do not re-add it; before hand-registering any file,
+  # check it is absent from THIS list.
   - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
@@ -5212,7 +5242,7 @@ surfaces:
   # merged minutes before this branch integrated it (`e918f3d6dd`, PR #11213, landed
   # the test file with no manifest row — measured: `tools/ci_selection.py --integrity`
   # at `origin/main` `9732106fdc` reports `manifest drift:
-  # ['test_pack_hierarchy_11001.py']`, so the REQUIRED `manifest-integrity` leg is
+  # ['test_pack_hierarchy_11001.py']`, so the REQUIRED `manifest-integrity` leg was
   # red on main and no leg runs the suite). `core` because its subjects
   # (`tortoise/pack_hierarchy.py`, `tortoise/pack_registry.py`) match no
   # `SOURCE_PATTERNS` row and fall through to the `core` fallback; hermetic —
