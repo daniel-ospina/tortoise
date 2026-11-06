@@ -499,6 +499,43 @@ def _embedded_retry():
     )
 
 
+def _client_pool(db):
+    """``(pool, connection_kwargs)`` behind a client, or ``(None, None)``.
+
+    The redis-py client carries NO ``.host``/``.port`` of its own (measured on
+    the pinned ``redis 7.4.1``): the configured endpoint lives in
+    ``connection_pool.connection_kwargs``. Every in-repo reader of a store's
+    endpoint resolves it from that seam — see
+    ``tortoise/event_store.py::_store_identity`` and
+    ``tortoise/cypher_guard.py::_client_store_key`` — and so do the two callers
+    here. The pool may hang off the client itself or off ``client.connection``:
+    a vendor ``FalkorDB`` keeps the redis client under ``.connection``, a raw
+    redis-like client is the holder itself, and the embedded lane reaches this
+    with either.
+
+    Both are returned because the two callers need different halves: the
+    embedded connect-bound writer must ``disconnect()``/``reset()`` the POOL,
+    while the store-identity resolver only reads the KEYWORD ARGS.
+
+    ``(None, None)`` for a duck-typed or mock handle with no pool. That is the
+    one shape with no endpoint identity at all, and callers must treat it as
+    such rather than as an empty endpoint (a shared ``None`` bucket would
+    silence one store with another's verdict).
+    """
+    for holder in (getattr(db, "client", None),
+                   getattr(db, "connection", None), db):
+        pool = getattr(holder, "connection_pool", None)
+        kwargs = getattr(pool, "connection_kwargs", None)
+        if isinstance(kwargs, dict):
+            return pool, kwargs
+    return None, None
+
+
+def _client_pool_kwargs(db) -> dict | None:
+    """Just the keyword-args half of :func:`_client_pool`."""
+    return _client_pool(db)[1]
+
+
 def _apply_embedded_connect_timeout(db, connect_to: float | None) -> bool:
     """Deliver a socket CONNECT bound to an EMBEDDED client's pool (#3421).
 
@@ -547,13 +584,8 @@ def _apply_embedded_connect_timeout(db, connect_to: float | None) -> bool:
     per-lane ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` knob, which this lane does
     not consult.
     """
-    for holder in (getattr(db, "client", None),
-                   getattr(db, "connection", None), db):
-        pool = getattr(holder, "connection_pool", None)
-        kwargs = getattr(pool, "connection_kwargs", None)
-        if isinstance(kwargs, dict):
-            break
-    else:
+    pool, kwargs = _client_pool(db)
+    if pool is None:
         return False
     kwargs["socket_connect_timeout"] = connect_to
     # Close the pre-bound connections (fds), then forget them so the next
@@ -686,6 +718,13 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 # `_VECTOR_INDEX_GAP_WARNED` cannot express this (a set of keys with no value),
 # which is why it is a separate register rather than a reuse.
 #
+# ⛔ THE KEY CARRIES THE PORT. "host" alone is not a store: this repo's own
+# environment runs `localhost:6379` and `localhost:16379` side by side on the
+# default graph name `tortoise` (`tortoise/event_store.py::_store_identity`).
+# The port is NOT on the projection and NOT on the redis client — it is in
+# `connection_pool.connection_kwargs`, which is where `_stable_endpoint` reads
+# it. See that method.
+#
 # ⛔ THE KEY IS A STORE IDENTITY, NOT AN OBJECT ADDRESS, AND BOTH THIS REGISTER
 # AND THE WARNING LATCH USE IT. The key once came from
 # `_falkordb_version_cache_key() or id(self)`, and on a redis-py that hides the
@@ -694,9 +733,10 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 # ADDRESS of a projection object: one entry (and one WARNING) per live request
 # slot, never evicted, with dedup depending on allocator address recycling
 # rather than on store identity. `_stable_endpoint()` resolves the endpoint from
-# the cache key, then the projection's own `_host` + the client's port (set on
-# every server projection), and only then the address — that last case is a bare
-# unit mock, the one shape with no endpoint identity at all.
+# the cache key, then the projection's own `_host` together with the client's
+# port out of `connection_pool.connection_kwargs`, and only then the address —
+# that last case is a bare unit mock, the one shape with no endpoint identity at
+# all.
 _VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
 _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
@@ -18612,19 +18652,43 @@ class FalkorProjection(
         `connection_pool.connection_kwargs`, not as `_host`/`host`), which used
         to collapse the key to `id(self)` on exactly the hosted per-request
         path these registers exist for: one latch entry — and one WARNING — per
-        live request slot, never evicted. So: the cache key when it resolves,
-        else `_host` plus the client's port (both carried by every server
-        projection), else the address, which is a bare unit mock and the one
-        shape with no endpoint identity at all.
+        live request slot, never evicted.
+
+        So, in order: the cache key when it resolves; else the projection's
+        `_host` (set by `__init__` on every server projection) together with the
+        client's PORT, read from `connection_pool.connection_kwargs` (⛔ the port
+        is NOT a projection attribute and NOT a client attribute — the pool is
+        the seam `event_store._store_identity` and
+        `cypher_guard._client_store_key` already resolve it from); else the
+        address, which is a bare unit mock and the one shape with no endpoint
+        identity at all.
+
+        ⛔ THE PORT IS PART OF THE IDENTITY, and keying on the host alone is a
+        defect rather than a graceful degradation
+        (`tortoise/event_store.py::_store_identity`): one host can carry several
+        FalkorDB servers, and this repo's own environment runs TWO on loopback —
+        `localhost:6379` (the test matrix) and `localhost:16379` (canonical/dev)
+        — both on the default graph name `tortoise`. Host-keyed, one store's
+        `pop` clears the other's register entry, its report suppresses the
+        other's, and its `#4997` WARNING latch silences a genuine full-scan gap
+        on a genuinely different store. The server shape here is
+        `("server", host, port)` — the SAME tuple `_falkordb_version_cache_key`
+        answers — so one store cannot land in two buckets depending on which of
+        the two lanes resolved its endpoint.
         """
         endpoint = self._falkordb_version_cache_key()
         if endpoint is not None:
             return endpoint
-        host = getattr(self, "_host", None)
+        kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
+        host = getattr(self, "_host", None) or kwargs.get("host")
         if host is None:
             return ("instance", id(self))
-        conn = getattr(getattr(self, "db", None), "connection", None)
-        return ("host", str(host), str(getattr(conn, "port", None)))
+        raw_port = kwargs.get("port")
+        try:
+            port = int(raw_port) if raw_port is not None else None
+        except (TypeError, ValueError):  # an unparseable port is no port
+            port = None
+        return ("server", str(host), port)
 
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
@@ -19573,8 +19637,14 @@ class FalkorProjection(
           * the VECTOR index on ``Point.embedding`` ONLY, resolved or created by
             ``_ensure_vector_index_api``, which then MEASURES the engine's
             vector-index inventory against the labels the vector leg SERVES
-            (``ENTITY_TYPE_LABELS.values()``), REPORTS THE PAIR at INFO on every
-            setup and warns on the gap (#4997, #11087).
+            (``ENTITY_TYPE_LABELS.values()``), REPORTS THE PAIR at INFO whenever
+            it CHANGES for this ``(endpoint, graph)``, and warns on the gap
+            (#4997, #11087). ⛔ "On every setup" is NOT the contract: the pair
+            is value-latched (``_VECTOR_INDEX_PAIR_REPORTED``) because this
+            function is reached from the hosted PER-REQUEST path, where a line
+            per setup would put two label lists on the INFO stream at full
+            request rate. An unchanged pair reports once; a pair that CHANGES —
+            a repaired store, a label that lost its index — is always news.
 
         ⛔ The vector index stays ``Point``-only ON PURPOSE. Whether the other
         served labels (``Object`` / ``Event`` / ``Subject`` / ``Source``) should

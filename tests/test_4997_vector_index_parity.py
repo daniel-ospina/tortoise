@@ -241,6 +241,7 @@ def test_run_vector_query_emits_exactly_one_vector_call(recording_graph):
 
 import logging  # noqa: E402
 import threading  # noqa: E402
+from types import SimpleNamespace as _SimpleNamespace  # noqa: E402
 
 from tortoise.projection import (  # noqa: E402
     FalkorProjection,
@@ -266,11 +267,32 @@ def _fulltext_row(label, field="content"):
     return (label, {field: ["FULLTEXT"]})
 
 
+class _ServerClient:
+    """A redis-py client in the shape the PRODUCTION server lane has.
+
+    ⛔ No `.host`, `.port` or `._host` of its own: the endpoint lives in
+    `connection_pool.connection_kwargs` (measured on the pinned `redis 7.4.1`,
+    and the reason `FalkorProjection.__init__` records `_host` on the
+    PROJECTION instead of reading it off the client). That is also why
+    `_falkordb_version_cache_key()` answers `None` here, so every hosted
+    per-request projection takes `_stable_endpoint()`'s fallback lane.
+
+    A fake that carried `.port` directly would pin a client that does not
+    exist and would stay green through the port-dropping defect (#11311).
+    """
+
+    def __init__(self, host, port):
+        self.connection_pool = _SimpleNamespace(
+            connection_kwargs={"host": host, "port": port})
+
+
 def _bare(index_rows=None, raise_on_indexes=False, *, ver=(4, 18, 3),
-          embedded=False, graph="test_4997_bare"):
+          embedded=False, graph="test_4997_bare", port=None):
     """A projection shaped like tests/test_falkordb_compat.py's _bare_projection
     — deliberately WITHOUT `.db`, which is the AttributeError hazard the latch
-    key must tolerate."""
+    key must tolerate — unless `port` is given, which installs the PRODUCTION
+    server client (`_ServerClient`) so the store-identity key is exercised on
+    the shape a hosted request actually builds."""
     proj = object.__new__(FalkorProjection)
     proj._is_embedded = embedded
     proj._graph_name = graph
@@ -280,6 +302,9 @@ def _bare(index_rows=None, raise_on_indexes=False, *, ver=(4, 18, 3),
     # key is the PRODUCTION shape — stable across two projections of one store —
     # instead of falling back to the instance address (#11311 review P1/P2).
     proj._host = "test-host"
+    if port is not None:
+        proj.db = _SimpleNamespace(
+            connection=_ServerClient(proj._host, port))
     proj._falkordb_version = ver
     proj._vector_index_api = None
     proj._vector_indexed_labels = None
@@ -707,7 +732,7 @@ def test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty(caplog
     )
 
 
-def test_the_pair_is_reported_on_every_setup_and_a_repaired_store_announces_it(caplog):
+def test_a_changed_pair_is_reported_and_a_repaired_store_announces_it(caplog):
     """#11087: the report is latched on the pair VALUE, so a CHANGE is always news.
 
     Deduplication is the obvious "dedupe this log spam" refactor (setup runs
@@ -784,22 +809,66 @@ def test_a_second_projection_of_the_same_store_does_not_repeat_the_pair(caplog):
     "an unchanged pair reports once" is a claim about two DIFFERENT objects for
     one (endpoint, graph).
 
-    ⛔ Falsifiable only because `_bare()` carries a `_host`: keyed on
-    `id(self)` — which is what `_falkordb_version_cache_key() or id(self)`
-    yields once the redis client hides its endpoint — the two projections get
-    two keys and this records 2 (measured on #11311's first cut).
+    ⛔ Falsifiable only because `_bare()` carries a `_host` and (with `port=`) a
+    pool-backed server client: keyed on `id(self)` — which is what
+    `_falkordb_version_cache_key() or id(self)` yields once the redis client
+    hides its endpoint — the two projections get two keys and this records 2
+    (measured on #11311's first cut). `port=` puts the two projections on the
+    PRODUCTION client shape, so this pin covers the fallback lane that the
+    hosted path actually takes rather than the no-pool mock lane.
     """
     rows_for_both = [_vector_row("Point")]
-    first = _bare(rows_for_both, graph="test_11087_pair_stable")
+    first = _bare(rows_for_both, graph="test_11087_pair_stable", port=6379)
     with caplog.at_level(logging.INFO):
         first._ensure_indexes()
-        second = _bare(rows_for_both, graph="test_11087_pair_stable")
+        second = _bare(rows_for_both, graph="test_11087_pair_stable", port=6379)
         second._ensure_indexes()      # a per-request rebuild, same catalogue
 
     pairs = _pair_records(caplog)
     assert len(pairs) == 1, (
         "one store, one contract: a rebuild must not re-report the same pair "
         f"(got {len(pairs)} record(s) from two projections)"
+    )
+
+
+def test_two_ports_on_one_host_are_two_stores(caplog):
+    """#11311: the store identity carries the PORT, not just the host.
+
+    This repo's own environment runs two FalkorDB servers on loopback —
+    `localhost:6379` (the test matrix) and `localhost:16379` (canonical/dev) —
+    both on the default graph name `tortoise`, which is exactly why
+    `tortoise/event_store.py::_store_identity` records that *"the PORT is part
+    of the identity, not decoration"*. The endpoint is not on the projection and
+    not on the redis client: it is
+    `connection_pool.connection_kwargs['port']`.
+
+    ⛔ Falsifiable: keyed on the host alone — the shape this PR shipped at
+    `b8f74e4aff`, where the fallback read `connection.port` off a client that
+    has none, degrading to `("host", host, "None")` — both projections land in
+    ONE bucket. The second store's report is then suppressed AND its gap
+    WARNING is latched away, so a full-scan gap on a genuinely different store
+    goes unreported: 1 record and 1 warning instead of 2 and 2.
+    """
+    rows = [_vector_row("Point")]            # a GAPPED store, so both must warn
+    first = _bare(rows, graph="tortoise", port=6379)
+    second = _bare(rows, graph="tortoise", port=16379)
+    assert first._stable_endpoint() != second._stable_endpoint(), (
+        "two ports on one host are two stores"
+    )
+    with caplog.at_level(logging.INFO):
+        first._ensure_indexes()
+        second._ensure_indexes()
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 2, (
+        "each store reports its own contract; a host-only key collapses them "
+        f"(got {len(pairs)} record(s))"
+    )
+    warnings = [r for r in caplog.records
+                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
+    assert len(warnings) == 2, (
+        "a full-scan gap on a DIFFERENT store must not be latched away "
+        f"(got {len(warnings)} warning(s))"
     )
 
 
