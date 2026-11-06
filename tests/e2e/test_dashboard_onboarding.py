@@ -62,6 +62,9 @@ from playwright.sync_api import Page, expect
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
+# #11057: the browser-free half of "which tile did that dialog open" — importable
+# and testable without this module's opt-in (see the module's own docstring).
+from tests.e2e.dialog_tile_key import tile_key_for_dialog_name
 from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
@@ -774,15 +777,97 @@ def _open_coming_soon(page: Page, key: str | None = None, index: int = 0):
     comes through here keeps that path exercised (the alternative, four
     hand-inlined copies of this walk, is what #8975's review P3 flagged: two of
     them were dead code).
+
+    THE TWO DEFECTS THAT REDDED `dashboard-e2e` AT `6962fe46f` (#11057), both in
+    THIS helper rather than in the app:
+
+    1. `closeComingSoon` restores focus to the invoking tile ONE ANIMATION FRAME
+       later (`requestAnimationFrame` → `dialogFocus.restoreFocus` — the
+       deliberate deferral `test_coming_soon_modal_dialog_contract_and_skip_reaches_done`
+       already waits for, and pins). A `focus()` issued before that frame is
+       therefore UNDONE by it, and the Enter below activates the PREVIOUS tile.
+       Settle that frame, then PROVE the focus state with a retrying assertion
+       before sending the key.
+    2. `tile_key` used to be `key or <the locator's own data attribute>`, i.e. the
+       request echoed back to itself, so `assert opened_key == key` in the
+       callers could NEVER red. With (1) live, the loop in
+       `test_every_coming_soon_tile_captures_its_click` re-opened an already
+       RECORDED tile, the equality still passed, and the spec went on to spend
+       30 s waiting for a `Register interest` primary a recorded tile does not
+       render — the CI failure was `Locator.click: Timeout 30000ms exceeded`
+       with no primary in the DOM. The key now comes from the dialog's OWN body,
+       so a wrong dialog reds HERE, immediately, naming the tile that opened.
     """
     tile = (page.locator(f'.integration-tile[data-integration-key="{key}"]') if key
             else page.locator(".integration-tile.coming-soon").nth(index))
-    tile_key = key or tile.get_attribute("data-integration-key")
+    wanted = key or tile.get_attribute("data-integration-key")
+    # (1) Let a previous dialog's deferred focus restore land BEFORE taking focus.
+    # Two frames: the restore is itself scheduled in one, so the second is the
+    # first in which its effect is guaranteed visible to this read.
+    page.evaluate(
+        "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
     tile.focus()
+    # A RETRYING, web-first assertion — not a one-shot read. `focus()` and
+    # `press()` are not actionability-checked, so a stale restore can land a
+    # frame later under load; the convergent practice is to prove the focus
+    # state with an assertion that re-polls before the key is sent, never a
+    # fixed sleep (Playwright's own writing-tests guidance, and every flake
+    # playbook: `focus()` + `press()` race rendering). The two frames above
+    # settle the app's KNOWN one-frame deferral; this proves the outcome.
+    try:
+        expect(tile).to_be_focused(timeout=5_000)
+    except AssertionError as error:
+        raise AssertionError(
+            f"focus is not on tile {wanted!r} before Enter — a deferred restore stole it"
+        ) from error
     page.keyboard.press("Enter")
     dialog = page.locator("[role='dialog']")
     expect(dialog).to_be_visible(timeout=5_000)
-    return dialog, tile_key
+    # (2) The returned key is OBSERVED from the dialog, never the request echoed.
+    return dialog, _dialog_tile_key(page, dialog)
+
+
+def _tile_key_for_dialog_name(name: str, rendered: list) -> str:
+    """Map the tile NAME a dialog renders to its integration key.
+
+    Kept as a module-level alias so a spec reads as one walk; the body (and its
+    own docstring) live in `tests/e2e/dialog_tile_key.py` (#10305's split,
+    applied to this observation), and that body's browser-free TEST lives in
+    `tests/test_dialog_tile_key.py`.
+
+    ⛔ Deliberately NOT re-tested here. A test in THIS module runs only under
+    `RUN_DASHBOARD_E2E=1`, so a copy below the opt-in would be the exact
+    claim/reality mismatch #11057 review ISSUE-1 found — a "cheap arm" that only
+    ever executes inside the expensive dashboard-e2e job it was extracted from.
+    """
+    return tile_key_for_dialog_name(name, rendered)
+
+
+def _dialog_tile_key(page: Page, dialog) -> str:
+    """The integration key of the tile the OPENED dialog describes."""
+    name = dialog.locator("#integration-modal-body strong").first.inner_text()
+    rendered = page.locator(".integration-tile.coming-soon").evaluate_all(
+        "els => els.map(e => [e.dataset.integrationKey, e.getAttribute('aria-label') || ''])")
+    return _tile_key_for_dialog_name(name, rendered)
+
+
+def test_the_dialog_tile_key_alias_delegates_to_the_shared_mapping() -> None:
+    """The module-level alias is the shared mapping — nothing more.
+
+    The CASES that pin `tile_key_for_dialog_name` (the dialog decides the key,
+    an unnameable name raises, whitespace/punctuation, the em-dash separator)
+    live in `tests/test_dialog_tile_key.py`, which runs in every default python
+    lane. They used to live HERE, below this module's `RUN_DASHBOARD_E2E`
+    opt-in, where they reported `1 skipped` and executed nothing — the "cheap
+    arm" only ever ran in this expensive job (#11057 review ISSUE-1).
+
+    This module keeps the path exercised (the grid walk that calls the alias)
+    without duplicating the mapping's suite in a place that cannot run it.
+    """
+    rendered = [("supabase_org", "Supabase \u2014 coming soon"),
+                ("slack", "Slack \u2014 coming soon"),
+                ("linear", "Linear \u2014 coming soon")]
+    assert _tile_key_for_dialog_name("Slack.", rendered) == "slack"
 
 
 def _hold_demand_response(page: Page, delay_ms: int = 900) -> None:
@@ -931,6 +1016,17 @@ def test_every_coming_soon_tile_captures_its_click(page: Page) -> None:
     The bound's reveal path is unit-tested (`visibleComingSoon` in
     integrationsGrid.test.js) — a 3-tile inventory cannot exercise it in a
     browser.
+
+    THIS SPEC IS WHAT REDDED `dashboard-e2e` AT `6962fe46f` (#11057) — and the
+    defect was in its own walk, not in the app. `closeComingSoon` restores focus
+    to the invoking tile one animation frame after a close (#3514/#8670, pinned
+    by `test_coming_soon_modal_dialog_contract_and_skip_reaches_done`), so a
+    `focus()` issued inside that window is undone and the next Enter re-opens the
+    PREVIOUS tile — which this loop has already recorded, so its dialog renders
+    `Dismiss` and NEVER a primary: `Locator.click: Timeout 30000ms exceeded`
+    waiting for `Register interest`. `_open_coming_soon` now settles that frame
+    and proves it holds focus, and it reports the key the DIALOG names, so a
+    wrong dialog reds at `assert opened_key == key` instead of timing out.
     """
     cap = _open_grid(page)
 

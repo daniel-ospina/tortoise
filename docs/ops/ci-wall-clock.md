@@ -167,7 +167,7 @@ the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.t
 matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
 exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
 everything the restore just put there. This job — p50 1.62 m, the fastest of them — is the likely
-payer: its own `.[test,postgres]` downloads (`python-ci.yml:4623` — the
+payer: its own `.[test,postgres]` downloads (`python-ci.yml:4674` — the
 `Install package + the postgres extra` step in `test-record-postgres`; `[embeddings]`/torch
 deliberately absent) are a rounding error beside the shared archive it restores and re-saves.
 
@@ -326,7 +326,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:4615-4617` — the `Cache pip dependency caches (#7612)` step's
+  writable shared key (`python-ci.yml:4666-4668` — the `Cache pip dependency caches (#7612)` step's
   `with:` block in `test-record-postgres`) and is therefore NOT an arm-1 row — on a key
   change its save IS the archive, measured at 3.6 GB / 15.9 m on 2026-11-05 (see the note under the
   table, and the cap it moved to). Arm 1 applies to a job whose save is

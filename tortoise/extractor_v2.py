@@ -10361,9 +10361,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             classify_later = False
             errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_later_init_failed")
-    # #5005: S2.2 VET — off unless TORTOISE_VET, an injected arbiter, or the
-    # #4899 mechanical predicate's flag (default ON since `#10996`; it lives
-    # inside that pass, so its flag must switch the pass on too or it is inert).
+    # #5005: S2.2 VET — armed by TORTOISE_VET, an injected arbiter, or #4899's value gate (ON by default since #10996).
+    # #4899: the mechanical predicate lives inside that pass, so its flag must
+    # switch the pass on too or it would be inert (see `_value_gate_enabled`).
     vet_enabled = (vet_arbiter is not None or _vet_enabled()
                    or _value_gate_enabled())
     vet_warnings: list[str] = []
@@ -10747,9 +10747,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         "restamp_overrides": restamp_overrides,
         "slot_rekeys": slot_rekeys,
     }
-    # #5005: the S2.2 VET evidence surface (additive — an empty block when the
-    # flag is off). The off-path delta is exactly this key: the embed list and
-    # every downstream payload byte are unchanged when the flag is off.
+    # #5005: the S2.2 VET evidence surface (additive — an empty block only when
+    # no switch arms the pass: `TORTOISE_VALUE_GATE=0` with no arbiter, #10996).
+    # The off-path delta is this key alone: embed list and payloads unchanged.
     result["vet"] = {
         "enabled": vet_enabled,
         "s2": vet_s2_stats,

@@ -364,7 +364,10 @@ sdk.query("statement")                       # all statement points
 sdk.query(kind=None, status="draft")         # everything still gated
 ```
 
-MCP: `tortoise_query(kind="statement")`, `tortoise_search(q="…")`.
+MCP: `tortoise_query(kind="statement")` — ⚠️ **bounded**: the structural read returns at most
+`limit` rows (default 100), so it is NOT "all statement points" on a graph larger than one page.
+Walk `tortoise_query(kind="statement", offset=N, limit=100)` until `hasMore` is false for the whole
+population; `sdk.query(kind)` remains the unbounded SDK accessor. `tortoise_search(q="…")`.
 
 **Audit what a bundle added:** `batch_id` round-trips through the whole
 bundle's artifacts — see [§16](#16-batch_id--audit). **planned:** a batch
