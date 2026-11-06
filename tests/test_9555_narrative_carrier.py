@@ -2629,8 +2629,8 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 
 def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
         why: str, clause: str):
-    """*What value makes this test fail?* The phrase lock this replaced, on four
-    of the five cases.
+    """*What value makes this test fail?* The phrase lock this replaced, on two
+    of the three cases.
 
     §12.1b's footnote negated the narrative with a literal —
     ``assert "never the narrative" in footnote`` — while the comment above it
@@ -2642,8 +2642,9 @@ def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
     forbids ("rendering-agnostic over merged prose").
 
     The first case is the head's own wording and is the control: it is the
-    literal's operand, so it passed BEFORE and after. The other four are the
-    measured reds.
+    literal's operand, so it passed BEFORE and after. The other two are the
+    measured reds (the list was longer when it carried two subject forms; those
+    were inversions, not re-wordings, and moved to the inversions list).
     """
     line = _NARRATIVE_CARRIER.format(clause)
     assert _negates_the_narrative(line), (
@@ -2686,38 +2687,42 @@ def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
 #: pin reding a correct re-wording and reporting a drift the document does not
 #: contain.
 #:
-#: ⛔ Anchored on the SUBJECT, never on the conjunction. `and` was the first cut
-#: and it is the same false-drift bug one word over: `, never the narrative` and
-#: `; never the narrative` are legal renderings of the same claim, and both made
-#: the controls report *"no `and … narrative` clause at all"* on a document whose
-#: level assertion was GREEN (measured). The separators `; : —` are excluded so
-#: the match cannot run out of its clause, and the `narrative` requirement keeps
-#: it from matching the footnote's earlier, unrelated `` `summary` `` mention.
-#: ⛔ `;` and `:` are allowed: they are legal renderings of the same join, and
-#: excluding them made the controls report drift on *"…metadata; never the
-#: narrative"* (measured) — the same false-drift bug one separator over. `—` and
-#: the line end are what actually bound this clause.
-_FOOTNOTE_CLAUSE_RE = re.compile(r"`summary`[^\n—]*\bnarrative\b")
-
-#: The clause's fixed prefix, so every mutation below changes ONLY the negation.
-_FOOTNOTE_CLAUSE_HEAD = "`summary` is §4.6 metadata and {}"
+#: ⛔ It is the JOIN + CUE + OBJECT, and every part of that was paid for:
+#:
+#: • **the join was `and` only.** `, never the narrative`, `; never the
+#:   narrative`, `but never the narrative` and `— never the narrative` are legal
+#:   renderings of the same claim, and each one made the controls report *"no
+#:   `and … narrative` clause at all"* on a document whose level assertion was
+#:   GREEN (measured, one separator at a time). The footnote's own line uses an
+#:   em dash as the separator immediately before this clause, so `—` is not
+#:   hypothetical.
+#: • **anchoring on the SUBJECT (`summary`) instead over-corrected.** It ran
+#:   across the clause boundary, so a second `summary`/`narrative` mention turned
+#:   into an "ambiguous" refusal on a document the pin certified — the same false
+#:   drift with a different operand (measured).
+#: • **the span is BOUNDED** (`;`, `—`, the line end) and non-greedy, so it stops
+#:   at the negation's own object instead of swallowing the next clause.
+_FOOTNOTE_CLAUSE_RE = re.compile(
+    rf"(?:\band\b|[,;—]|\bbut\b)\s*{_NEGATION_CUE}"
+    rf"[^;—\n]*?\bnarrative\b",
+    re.IGNORECASE)
 
 
 def _footnote_negation_clause(footnote: str) -> str:
-    """The footnote's own `<summary> is … metadata and <negation> the narrative`.
+    """The footnote's own `<join> <cue> … the narrative` clause.
 
-    Refuses an absent AND an ambiguous clause: taking the LAST match (the first
-    cut) let a later correct `and … narrative` sentence be selected, so both
-    controls mutated the wrong clause and blamed the guard (measured: appending
-    *"… and the narrative lives in the §9.1 record."* red both with *"the
-    negation was DROPPED … and `_negates_the_narrative` still accepted it"* on a
-    document the level assertion passed).
+    Refuses an absent clause, and an AMBIGUOUS one. Taking the LAST match (an
+    earlier cut) let a later correct `and … narrative` sentence be selected, so
+    both controls mutated the wrong clause and blamed the guard (measured:
+    appending *"… and the narrative lives in the §9.1 record."* red both with
+    *"the negation was DROPPED … and `_negates_the_narrative` still accepted it"*
+    on a document the level assertion passed).
     """
     matches = _FOOTNOTE_CLAUSE_RE.findall(footnote)
     assert len(matches) == 1, (
-        f"§12.1b's footnote carries {len(matches)} `summary` … `narrative` "
-        f"clause(s), so the controls cannot tell which one states the negation "
-        f"— that ambiguity IS the drift they exist to catch: {matches!r}")
+        f"§12.1b's footnote carries {len(matches)} `<join> <negation> the "
+        f"narrative` clause(s), so the controls cannot tell which one states the "
+        f"negation — that ambiguity IS the drift they exist to catch: {matches!r}")
     return matches[0]
 
 
@@ -3151,8 +3156,7 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "bound to the OBJECT `narrative` in the LEADING word order only — a "
         "cue placed AFTER the narrative states its INVERSE (see "
         "`_DECLARED_OVER_BLOCK_NARRATIVE`) — so a re-wording that keeps the "
-        "claim with the cue before `narrative` is the form this pin accepts, "
-        "a re-wording that keeps the claim passes; `_NARRATIVE_NEGATION_"
+        "claim with the cue before `narrative` passes; `_NARRATIVE_NEGATION_"
         "REWORDINGS` / `_INVERSIONS` pin both directions")
     assert s121b.count(_SUMMARY_OBJECT) == 0, (
         f"§12.1b (the SECTION, not just the footnote line) now names "
