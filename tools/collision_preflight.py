@@ -177,13 +177,13 @@ Surfaces (9 rows, ALL hit-capable)
                                                            ahead, #6108)
   live lane processes       ps -Ao pid=,ppid=,command= for   (a RUNNING lane:
                             `pi` + its cwd (/proc on Linux,  attributed by a
-                            lsof on macOS) + the harness    boundary-exact
-                            queue                          #N in its command
-                            $ORCHESTRATOR/bg/prd-<owner>-  line or in a cwd
-                            <repo>-<PR>.pid                INSIDE this repo,
-                                                           or a live queue
-                                                           entry for a PR this
-                                                           run attributed to
+                            lsof on macOS) + EVERY harness  boundary-exact
+                            queue root that exists, from     #N in its command
+                            `$O/bg`, `~/orchestrator/bg`,   line or in a cwd
+                            `$CELL_HOME/orchestrator/bg`    INSIDE this repo,
+                            and the fleet literal           or a live queue
+                            /home/cmux/orchestrator/bg      entry for a PR this
+                            (`prd-<owner>-<repo>-<PR>.pid`) run attributed to
                                                            #N — #1233)
   issue assignee/holder     gh issue view N (assignee) +  (a lane MECHANICALLY
                             the FLEET BOARD's lane->issue  attributed to #N whose
@@ -193,11 +193,11 @@ Surfaces (9 rows, ALL hit-capable)
                                                            #8175)
 
 The `issue keywords` row was removed with the lexical arm (#3504): a row that
-can only report a guess does not become honest by being listed. The eighth row
-today is a DIFFERENT one — `merged PRs naming an OPEN issue` (#8625), the
+can only report a guess does not become honest by being listed. The row that
+replaced it is a DIFFERENT one — `merged PRs naming an OPEN issue` (#8625), the
 advisory home of the title-reference arm that used to be an authoritative source
-of `LANDED` — so do not read "8 rows" as the deleted keyword row returning, and
-do not read this ADVISORY row as a landing.
+of `LANDED` — so do not read the count above as the deleted keyword row
+returning, and do not read this ADVISORY row as a landing.
 
 NOT PRESENT: a fleet-session surface that matches SESSION TEXT. #1233 asked for
 one wired to `map-sessions.py`, and it was built and measured for this change —
@@ -294,9 +294,12 @@ STOPPED; the *rule* is pinned by the synthetic test
 `test_a_terminal_holder_whose_process_is_alive_still_blocks`, not by that
 observation, which is evidence of the shape rather than a current reading.
 
-Fail-closed, and NO dismissal switch. A board that cannot be read, rebuilt, or
-attributed marks this surface INCOMPLETE — never CLEAN, and never a downgrade of
-a blocking holder. Six unmeasured cases in particular: the board's live-session
+Fail-closed, and NO dismissal switch in prose or issue text. (Self-identity is
+the one declared input: the caller's own pid/ancestors are exempt unfalsifiably,
+while `--self-pid` is a caller DECLARATION with the same trust model as
+`--self-branch` — see `Identity.self_pids`.) A board that cannot be read,
+rebuilt, or attributed marks this surface INCOMPLETE — never CLEAN, and never a
+downgrade of a blocking holder. Six unmeasured cases in particular: the board's live-session
 store could not be read (its `liveness-unmeasured` orphan); a lane carries no
 `pid_alive` reading at all; a lane carries `pid_alive: false` **as a default**,
 because the board keeps no session record for it (`liveness_measured` is False —
@@ -7418,8 +7421,8 @@ def _process_cwd(pid: int, timeout: float) -> tuple[str | None, str]:
                   + (f": {_one_line(err)}" if err.strip() else ""))
 
 
-def _lane_queue_candidates() -> list[str]:
-    """Every root the FLEET could have written the queue to, in writer order.
+def _lane_queue_candidates() -> list[tuple[str, bool]]:
+    """Every root the FLEET could have written the queue to, as `(path, OPTIONAL)`.
 
     ⛔ A LITERAL PATH IS A FALSE MEASUREMENT (cycle-6 review, HIGH). Every writer
     of this queue derives the root from the environment —
@@ -7443,20 +7446,42 @@ def _lane_queue_candidates() -> list[str]:
     """
     explicit = os.environ.get(LANE_QUEUE_ENV)
     if explicit:
-        return [explicit]
-    candidates: list[str] = []
+        # The explicit seam is ALWAYS required: a caller that named a root meant
+        # it, so a refusal there is a blind spot by definition.
+        return [(explicit, False)]
+    candidates: list[tuple[str, bool]] = []
     o_root = os.environ.get("O")
     if o_root:
-        candidates.append(os.path.join(o_root, "bg"))
-    candidates.append(os.path.join(os.path.expanduser("~"), "orchestrator", "bg"))
+        candidates.append((os.path.join(o_root, "bg"), False))
+    candidates.append(
+        (os.path.join(os.path.expanduser("~"), "orchestrator", "bg"), False)
+    )
     cell_home = os.environ.get("CELL_HOME")
     if cell_home:
-        candidates.append(os.path.join(cell_home, "orchestrator", "bg"))
-    candidates.append(DEFAULT_LANE_QUEUE)
-    ordered: list[str] = []
-    for cand in candidates:
-        if cand not in ordered:
-            ordered.append(cand)
+        candidates.append((os.path.join(cell_home, "orchestrator", "bg"), False))
+    # ⛔ THE FLEET LITERAL IS OPTIONAL, AND THAT IS A VERDICT-CLASS DISTINCTION
+    # (review, P2). It is the ONLY candidate here derived from a hardcoded
+    # string rather than from this caller's own environment, so it is the only
+    # one whose refusal may say nothing about the caller's own lanes: a box
+    # where `/home/cmux` is another user's `0750` home answers EACCES to a
+    # caller who is not `cmux`. Once an unstatable candidate became INCOMPLETE
+    # (the fail-OPEN fix above), that made the gate PERMANENTLY INCOMPLETE for
+    # every such uid — blocked by a stranger's home directory, on every run.
+    # `_lane_queue_entries` therefore reports an unusable OPTIONAL candidate by
+    # name instead of treating it as a blind spot.
+    candidates.append((DEFAULT_LANE_QUEUE, True))
+    ordered: list[tuple[str, bool]] = []
+    for cand, optional in candidates:
+        for idx, (seen, seen_optional) in enumerate(ordered):
+            if seen != cand:
+                continue
+            # The same path reached through the caller's OWN environment is not
+            # optional, whichever spelling got there first: REQUIRED wins.
+            if not optional and seen_optional:
+                ordered[idx] = (seen, False)
+            break
+        else:
+            ordered.append((cand, optional))
     return ordered
 
 
@@ -7467,10 +7492,10 @@ def _lane_queue_root() -> str:
     narrow what is actually checked.
     """
     candidates = _lane_queue_candidates()
-    for cand in candidates:
+    for cand, _optional in candidates:
         if os.path.isdir(cand):
             return cand
-    return candidates[0]
+    return candidates[0][0]
 
 
 def _lane_queue_entries(slug: str | None
@@ -7504,24 +7529,46 @@ def _lane_queue_entries(slug: str | None
     existing_roots: list[str] = []
     not_dirs: list[str] = []
     unreadable: list[str] = []
-    for cand in candidates:
+    # An OPTIONAL candidate that cannot be examined (see _lane_queue_candidates):
+    # named in the report, but never a blind spot for THIS caller's lanes.
+    optional_unusable: list[str] = []
+    optional_not_dirs: list[str] = []
+    for cand, optional in candidates:
         try:
             mode = os.stat(cand).st_mode
         except (FileNotFoundError, NotADirectoryError):
             continue          # a MEASURED absence of this candidate
         except OSError as exc:
-            unreadable.append(f"{cand} could not be examined ({exc})")
+            reason = f"{cand} could not be examined ({exc})"
+            (optional_unusable if optional else unreadable).append(reason)
             continue
-        (existing_roots if stat.S_ISDIR(mode) else not_dirs).append(cand)
+        if stat.S_ISDIR(mode):
+            existing_roots.append(cand)
+        elif optional:
+            optional_not_dirs.append(f"{cand} exists but is not a directory")
+        else:
+            not_dirs.append(cand)
     if unreadable:
         # Any candidate we could not examine could be hiding the holder, so the
         # whole surface is undecidable — never CLEAN, even if another candidate
         # was read successfully.
-        return None, False, "; ".join(unreadable)
+        return None, False, "; ".join(unreadable + optional_unusable)
     if not existing_roots:
         if not_dirs:
             return None, False, f"{not_dirs[0]} exists but is not a directory"
-        return [], True, "checked " + ", ".join(candidates)
+        why = "checked " + ", ".join(cand for cand, _o in candidates)
+        if optional_unusable or optional_not_dirs:
+            # ⛔ THE ONE THING "queried and absent" MUST NOT SWALLOW: a fallback
+            # root the caller could not examine. It is still a CLEAN-eligible
+            # absence for the caller's OWN queue (every candidate derived from
+            # that environment was measured), but the report has to say where
+            # it could not look — silently dropping it is the "a row must say
+            # where it looked" rule.
+            why += ("; " + "; ".join(optional_unusable + optional_not_dirs)
+                    + " — a FLEET FALLBACK, not a root derived from this "
+                      "caller's environment, so it is not a blind spot for "
+                      "the caller's own lanes")
+        return [], True, why
     pairs: list[tuple[str, str]] = []
     for root in existing_roots:
         try:
@@ -7587,6 +7634,15 @@ def _lane_queue_entries(slug: str | None
             "ended": os.path.exists(os.path.join(root, stem + ".end")),
             "path": os.path.join(root, stem + ".log"),
         })
+    if optional_unusable or optional_not_dirs:
+        # Reported, not fatal: the caller's OWN candidates were readable, so a
+        # fleet-fallback root it cannot examine is disclosed rather than turned
+        # into a verdict. Never silent — see the absent arm above.
+        return entries, False, (
+            "; ".join(optional_unusable + optional_not_dirs)
+            + " — a FLEET FALLBACK, not a root derived from this caller's "
+              "environment; the roots that were read are named on this row"
+        )
     return entries, False, ""
 
 
@@ -7913,6 +7969,14 @@ def scan_process_surface(
             "to read here, not an unread one"
         )
         return
+    if qwhy:
+        # ⛔ A FLEET-FALLBACK ROOT THE CALLER COULD NOT EXAMINE IS DISCLOSED, not
+        # swallowed (review, P2). It does not make the surface undecidable — every
+        # candidate derived from this caller's own environment WAS read — but the
+        # row has to say where it could not look, or "CLEAN" would read as "all
+        # roots read" when one was not.
+        surface.note = (surface.note + "; " if surface.note else "") + (
+            f"lane queue: {qwhy}")
     live_entries = 0
     attributed = 0
     own_entries = 0
@@ -9543,12 +9607,21 @@ def format_report(
         # The remedy belongs at the POINT OF REFUSAL, and it names only the
         # HOLDER hits: a refusal can also be forced by a non-holder hit (an open
         # PR, a branch), so it must not read as "clearing this holder clears the
-        # refusal". There is NO dismissal switch (no `--ignore`, no env var, no
-        # human input) — the holder read is mechanical, so the honest remedy is
-        # to name the lane and say it must be coordinated with (or verified as
-        # stopped) before dispatching. Worth stating because the OLD remedy named
-        # a comment a human could hand-edit to clear the block; that escape is
-        # deliberately gone.
+        # refusal". There is NO dismissal switch in TEXT (no `--ignore`, no env
+        # var, no human input); the holder read is mechanical, so the honest
+        # remedy is to name the lane and say it must be coordinated with (or
+        # verified as stopped) before dispatching. Worth stating because the OLD
+        # remedy named a comment a human could hand-edit to clear the block; that
+        # escape is deliberately gone.
+        # ⛔ BUT "NO DISMISSAL SWITCH" IS TRUE OF THE PROSE PATH ONLY (review,
+        # P1). Self-identity is a declared input and its `--self-pid` half is a
+        # DECLARATION with the same trust model as `--self-branch` (#3504): it
+        # can name a pid that is not the caller's, and nothing here can tell
+        # that apart from an ancestry chain it could not read. The refusal must
+        # SAY that instead of claiming a total absence of dismissal — a remedy
+        # that misdescribes the mechanism is the same "report misdescribes what
+        # it measured" class as a wrong row. Narrowing the declared half is a
+        # question for #8175/#11102, not a silent edit here.
         holder_hits = [
             h for h in strong if h.ref.startswith("holder:")
         ]
@@ -9560,12 +9633,20 @@ def format_report(
                 named += f"; … +{len(holder_hits) - MAX_HITS_SHOWN} more"
             lines.append(
                 "  REMEDY: live HOLDER(s) on the fleet board: "
-                f"{named}. There is NO dismissal switch — a lane the board "
-                "attributes to this issue and reports as still holding it blocks "
-                "by design (a missed duplicate is worse than a false alarm), and "
-                "nothing here can be hand-edited to clear it. Coordinate on the "
-                "issue with each named lane, or confirm the board's reading "
-                "(`uv run python tools/fleet_state.py who "
+                f"{named}. There is NO dismissal switch in TEXT — a lane the "
+                "board attributes to this issue and reports as still holding "
+                "it blocks by design (a missed duplicate is worse than a false "
+                "alarm), and no issue or comment body can be edited to clear "
+                "it. Self-identity is the one declared input, and it has two "
+                "halves with DIFFERENT trust models: the caller's own pid and "
+                "its ANCESTORS are exempt automatically and cannot hide a "
+                "peer, while an explicit `--self-pid PID` is a caller "
+                "DECLARATION with the same trust model as `--self-branch` — "
+                "naming a pid that is not your own is you asserting an "
+                "ownership you do not have, and this tool cannot tell that "
+                "apart from a lane whose ancestry chain it could not read. "
+                "Coordinate on the issue with each named lane, or confirm the "
+                "board's reading (`uv run python tools/fleet_state.py who "
                 f"{issue}`). This line names only the holder hits; the refusal "
                 "may also be forced by a non-holder hit above."
             )
@@ -9984,12 +10065,15 @@ def main(argv: list[str] | None = None) -> int:
                              f"`ps -ww -Ao pid=,ppid=,command=` (env {PS_ENV})")
     parser.add_argument(
         "--self-pid", action="append", default=[], metavar="PID", type=int,
-        help="a process id this session OWNS (repeatable) — a DECLARATION with "
-             "the same trust model as --self-branch, so name only your own. A "
+        help="a process id this session OWNS (repeatable). It is a "
+             "DECLARATION with the same trust model as --self-branch: the "
+             "value is NOT verified, so a pid that is not yours is you "
+             "asserting an ownership you do not have — name only your own. A "
              "board lane whose `session.pi_pid` is in the set is reported as "
-             "your own work and cannot block (#10684/#9251). The caller's own "
-             "pid and its ANCESTORS are added automatically and cannot hide a "
-             "peer lane.",
+             "your own work and cannot block (#10684/#9251). SEPARATELY, the "
+             "caller's own pid and its ANCESTORS are added automatically, and "
+             "THAT half is unfalsifiable — the automatic half cannot hide a "
+             "peer lane; a declared one can, by construction.",
     )
     # Deliberately NO `type=` on --timeout / --pr-limit / --closed-pr-limit, and
     # each env default is passed through RAW. A bad value must be EXIT_USAGE, and

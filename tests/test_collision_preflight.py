@@ -9509,6 +9509,46 @@ exec {real} "$@"
         self.assertIn("holder:lane-peer", out)
         self.assertIn("LIVE pi process", out)
 
+    def test_the_DECLARED_self_pid_half_CAN_name_a_peer_by_its_published_pid(self):
+        """The pin the review asked for: the declared half has NO verification.
+
+        ⛔ THIS ASSERTS A LIMIT, NOT A FEATURE, and it is deliberately the
+        UNCOMFORTABLE direction — do not "fix" it into the reassuring one
+        without reopening #8175/#11102. `--self-pid` is a DECLARATION with the
+        same trust model as `--self-branch` (#3504): the tool cannot tell a pid
+        the caller owns from one it merely names, and the value it would name is
+        PUBLISHED (`fleet_state.py who <N>` prints every lane's `session.pi_pid`).
+        So declaring the peer's own `pi_pid` suppresses that peer, here 424242 —
+        the exact pid the sibling polarity test shows BLOCKING when it is not
+        declared.
+
+        Why pin a bypass: the automatic ancestry half is unfalsifiable (it is
+        the half the #10684 fix rests on) and the declared half is not, and BOTH
+        now exist on the deciding surface. Without an arm that states the
+        declared half's reach, a later lane can read the docstring's "cannot
+        hide a peer" as covering the whole flag, tighten the print to match,
+        and re-introduce the false claim the review found — or "harden" the
+        flag by making it verify a pid, which silently breaks the case it exists
+        for (a lane whose ancestry chain the tool cannot read). The two sibling
+        tests together are the contract: undeclared peer BLOCKS, declared peer
+        DOES NOT.
+        """
+        self.fleet_board(
+            issues={ISSUE: [("lane-peer", "branch slug fix/3061-peer")]},
+            lanes=[{"label": "lane-peer", "live": True, "pi_pid": 424242}],
+        )
+        rc, out = self.run_tool(extra_args=["--self-pid", "424242"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own work", out)
+        # The remedy cannot claim a total absence of dismissal: the printed
+        # refusal states the two halves' trust models instead.
+        refusal = self.run_tool(extra_args=["--self-pid", "999999"])[1]
+        self.assertIn("NO dismissal switch in TEXT", refusal)
+        self.assertIn("DECLARATION with the same trust model as `--self-branch`",
+                      refusal)
+        self.assertNotIn("nothing here can be hand-edited to clear it", refusal)
+
     # ── #1233: the LIVE-LANE surface ─────────────────────────────────────────
 
     def test_a_live_pi_process_naming_the_issue_blocks(self):
@@ -10448,6 +10488,143 @@ exec {real} "$@"
         self.assertIsNone(entries, why)
         self.assertFalse(absent, why)
         self.assertIn("could not be listed", why)
+
+    # ── the FLEET LITERAL is OPTIONAL; a caller's own roots are NOT ────────
+
+    def _queue_env_without_seam(self, home: Path) -> dict:
+        """An env where the candidate LADDER is actually walked.
+
+        `run_tool`/`tool_env` always pin `COLLISION_PREFLIGHT_LANE_QUEUE`, which
+        short-circuits the ladder to one candidate — so the ladder's own
+        classification can only be reached with the seam UNSET and `O` /
+        `CELL_HOME` removed (both are ambient on a cell and would add real,
+        live roots to a hermetic assertion).
+        """
+        return {
+            k: v for k, v in os.environ.items()
+            if k not in ("O", "CELL_HOME", "COLLISION_PREFLIGHT_LANE_QUEUE")
+        } | {"HOME": str(home)}
+
+    def test_an_unreadable_FLEET_FALLBACK_queue_is_not_a_blind_spot(self):
+        """Review P2: an unusable hardcoded literal must not block EVERY run.
+
+        The literal `/home/cmux/orchestrator/bg` is the one candidate that is not
+        derived from the caller's environment. On a box where `/home/cmux` is
+        another user's `0750` home, a caller who is not `cmux` gets EACCES on it
+        — and once an unstatable candidate became INCOMPLETE (the fail-OPEN fix
+        this bundle ships), that made the gate PERMANENTLY INCOMPLETE for every
+        such uid, blocked by a stranger's home directory.
+
+        Pre-fix: `_lane_queue_entries` returns `(None, False, why)` here — the
+        run is INCOMPLETE with nothing about the caller's own work in it. The
+        assert on `entries == []` is what goes red on the old code.
+        """
+        cp = _tool_module()
+        home = self.tmp / "fallback-home"
+        home.mkdir()
+        real_stat = os.stat
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(cp.DEFAULT_LANE_QUEUE):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *a, **k)
+
+        with mock.patch.dict(os.environ, self._queue_env_without_seam(home),
+                            clear=True), \
+                mock.patch.object(cp.os, "stat", side_effect=_refuse):
+            entries, absent, why = cp._lane_queue_entries("test-owner/test-repo")
+        self.assertEqual(entries, [], why)
+        self.assertTrue(absent, why)
+        self.assertIn("could not be examined", why)
+        self.assertIn(cp.DEFAULT_LANE_QUEUE, why)
+        # Not silent: the disclosure is what keeps "queried and absent" honest.
+        self.assertIn("FLEET FALLBACK", why)
+
+    def test_an_unreadable_CALLERS_OWN_queue_is_STILL_incomplete(self):
+        """The narrowing above must not leak into a caller's OWN root.
+
+        `~/orchestrator/bg` is derived from this caller's environment, so an
+        EACCES there CAN hide this caller's lane. That stays INCOMPLETE — the
+        optional/required split is exactly the difference between "a stranger's
+        directory I cannot read" and "my own queue I could not read".
+        """
+        cp = _tool_module()
+        home = self.tmp / "own-home"
+        home.mkdir()
+        own_queue = os.path.join(str(home), "orchestrator", "bg")
+        real_stat = os.stat
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(own_queue):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *a, **k)
+
+        with mock.patch.dict(os.environ, self._queue_env_without_seam(home),
+                            clear=True), \
+                mock.patch.object(cp.os, "stat", side_effect=_refuse):
+            entries, absent, why = cp._lane_queue_entries("test-owner/test-repo")
+        self.assertIsNone(entries, why)
+        self.assertFalse(absent, why)
+        self.assertIn("could not be examined", why)
+
+    def test_the_fleet_literal_is_REQUIRED_when_it_is_the_callers_own_home(self):
+        """A cmux-box caller gains NO blind spot from the optional classification.
+
+        When `$HOME` IS the fleet home, `~/orchestrator/bg` and the literal are
+        the SAME path — deduplicated, and REQUIRED wins. So the EACCES
+        suppression above cannot be reached by a caller whose own queue is that
+        directory: the failing test is the one thing that would make the fix a
+        fail-open.
+        """
+        cp = _tool_module()
+        fleet_home = os.path.dirname(os.path.dirname(cp.DEFAULT_LANE_QUEUE))
+        with mock.patch.dict(os.environ, self._queue_env_without_seam(Path(fleet_home)),
+                            clear=True):
+            specs = cp._lane_queue_candidates()
+        literal = [opt for path, opt in specs if path == cp.DEFAULT_LANE_QUEUE]
+        self.assertEqual(literal, [False], specs)   # required, exactly once
+
+    def test_the_row_DISCLOSES_an_unreadable_fallback_root(self):
+        """The consumer half: the disclosure reaches the SURFACE ROW.
+
+        `_lane_queue_entries` returning the note is not enough — a note nobody
+        prints is the "a row must say where it looked" rule failing at the other
+        end. Driven through `run_preflight` in-process (the same shape the
+        budget-remedy tests use) so the assertion is on the REAL report.
+        """
+        cp = _tool_module()
+        home = self.home                      # has the fresh "no holders" board
+        board = self.fleet_board()
+        real_stat = os.stat
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(cp.DEFAULT_LANE_QUEUE):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *a, **k)
+
+        env = self._queue_env_without_seam(home)
+        env["GH_STUB_DIR"] = str(self.gh_dir)
+        env["COLLISION_PREFLIGHT_PROCESS_TABLE"] = str(self.ps_rows)
+        target = cp.RepoTarget(
+            slug=SLUG, path=str(self.repo), source="explicit", requested=True,
+        )
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cp.fleet_state, "DEFAULT_OUT", board), \
+                mock.patch.object(
+                    cp.fleet_state, "build_state",
+                    side_effect=RuntimeError("no live read in this test"),
+                ), \
+                mock.patch.object(cp.os, "stat", side_effect=_refuse):
+            ordered, title, number = cp.run_preflight(
+                ISSUE, target, str(self.gh), "git", 10.0,
+            )
+            report, code = cp.format_report(ordered, number, target, title)
+        # A stranger's unreadable fallback is NOT this run's verdict …
+        self.assertEqual(code, 0, report)
+        self.assertIn("VERDICT: CLEAN", report)
+        # … and the row still says where it could not look.
+        self.assertIn("could not be examined", report)
+        self.assertIn(cp.DEFAULT_LANE_QUEUE, report)
 
     def test_a_unicode_digit_ppid_from_ps_cannot_crash_into_a_collision(self):
         """`isdigit()` is not a promise that `int()` succeeds — the `ps` leg too.
