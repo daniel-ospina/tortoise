@@ -79,8 +79,8 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   state-op leg keeps only a row whose ``payload -> 'state' -> 'status'`` is
   ``jsonb_typeof`` ``'string'``, so a minted ``5`` is DROPPED — the fold derives
   nothing, the name STAYS in ``graph_only``, and the pair still reads ``clean``.
-  A non-string mint is a NO-OP for this comparison (R4's declared bound,
-  `#9974`), not a red, so the value remains cache-only.
+  A non-string mint is a NO-OP for this comparison (``cache_projection``'s R4
+  bound, `#9974`), not a red, so the value remains cache-only.
   ⛔ A CLEAR is the route only where the value is not trustworthy, and it is
   LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
   as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
@@ -91,10 +91,11 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``live._terminal_excluded`` reads an absent ``status`` as live). ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
-  ``state.status = null`` into the record, and the state-op leg's
-  ``jsonb_typeof(…) = 'string'`` filter DROPS that row as it drops any
-  non-string, so the record cannot re-derive the ABSENCE today (R4's declared
-  bound, `#9974`).
+  ``state.status = null`` into the record, which the state-op leg's
+  ``jsonb_typeof(…) = 'string'`` filter DROPS (a JSON ``null`` is not
+  ``'string'``); a ``:Subject``'s graph-side ``REMOVE`` journals no record row
+  at all. Either way the record cannot re-derive the ABSENCE today
+  (``cache_projection``'s R4 bound, `#9974`).
   (b) any property a SECOND WRITER put on a placed node, OR on a node the
   record does not own at all (``scan_cache_view`` fills ``placed`` for every
   cache node it reads, so such a node's out-of-placement names are bucketed
