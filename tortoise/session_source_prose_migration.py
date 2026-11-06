@@ -494,7 +494,16 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
         # (#11152 review round 3, P2). ``Turn.index`` is on the answer already, so
         # the exact condition `_shortfall` refuses on is recomputed here.
         turns = getattr(answer, "turns", ()) or ()
-        held = [t.index for t in turns if isinstance(getattr(t, "index", None), int)]
+        # ⛔ A **SET**, because `record_read._shortfall` uses one
+        # (`held = {turn.index for turn in turns}`). A LIST disagrees with it
+        # exactly when an index REPEATS — reachable: `_turn_index` accepts any
+        # `int()`-parsable suffix, so a backfilled `s_t01` and `s_t1` both yield
+        # 1 — and `[0, 1, 3, 3]` is contiguous to a list-based check while it is a
+        # GAP to `_shortfall`. That re-opened the round-5 misdiagnosis: the note
+        # named the record's own hole and then blamed the cache mark in the next
+        # sentence (#11152 review P2).
+        held = {t.index for t in turns
+                if isinstance(getattr(t, "index", None), int)}
         # ⛔ THE TAIL ARM IS EVALUATED **LAST** BY `_shortfall`, so only claim it
         # when the two arms that run BEFORE it cannot explain the refusal. A bare
         # `max(held) < turn_max_index` is a SUPERSET: the record's own short-count
