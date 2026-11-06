@@ -17142,7 +17142,14 @@ _CAPTURE_TURN_NODES = 2    # worst shape: turn :Point + its ``PointAdded`` ``:Gr
 
 
 def declared_capture_write_count(body: SessionRequest) -> int:
-    """Upper bound on the nodes ONE capture request leaves behind.
+    """Upper bound on the CAPTURE CHAIN one request leaves behind.
+
+    The chain — ``:Session``, the ``sessionCaptured`` ``:Event``, the transcript
+    ``:Source`` and the turns — is the part no other quota counts; the
+    non-episodic Points/entities/operators a capture also extracts are bounded
+    separately by the ``max_points`` gate and are deliberately NOT charged here
+    (see the block above), so this is an upper bound on the chain, not on every
+    node the request can leave behind.
 
     A pure function of the REQUEST, like ``commit_schema.
     declared_commit_write_count``: it never reads the graph (a replay is

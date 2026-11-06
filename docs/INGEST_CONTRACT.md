@@ -523,8 +523,9 @@ the `{error}`-only shape whose retry action is different.
   `provenance_refs` and `telemetry`, so it is never less than the canonical
   form used for `client_commit_id`; on the capture lane the whole posted
   capture request (`conversation` turns plus metadata) — and (b) the nodes it will
-  leave behind × 1024, where (b) is a declared **upper bound**, never an
-  under-count: on the commit lane a node plus its `:GraphEvent` record for
+  leave behind × 1024, where (b) is a declared upper bound on **the chain this
+  budget is responsible for**, never an under-count: on the commit lane a node
+  plus its `:GraphEvent` record for
   every point/operator/supersession (three for a superseding point, three for
   a `MITIGATES` bridge-attack) plus the fixed record/session/source/event
   chain; on the capture lane the `:Session`, the `sessionCaptured` `:Event`,
@@ -533,7 +534,12 @@ the `{error}`-only shape whose retry action is different.
   journal-configured/record-unarmed lane. The charge is computed from the
   request, so it cannot know where the turn lands: an armed-record deployment
   (production) stores turns in the record and is charged those two nodes anyway,
-  and the no-journal lane costs one. The worst shape is the one charged. Exceeding the allowance answers **429** with a
+  and the no-journal lane costs one. The worst shape is the one charged.
+  ⚠️ Scope of that node term: it covers the **capture chain** — the part no
+  other quota counts. The non-episodic Points, entities and operators a capture
+  extracts are bounded separately by the `max_points` gate and are deliberately
+  NOT charged here, so (b) is an upper bound on the chain, not on every node the
+  request can leave behind. Exceeding the allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
   is always **your** spend in the window, and `detail.scope` says which
   allowance refused you — `"org"` (your team's own budget) or `"process"` (the
