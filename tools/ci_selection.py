@@ -2893,6 +2893,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `core`. Pinned by
              # tests/test_ci_selection.py::test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it.
              "tools/cache_eviction_census.py",
+             # #10976: the egress EXECUTOR's operator verb, the same shape one level
+             # further out. `tools/cache_evict.py` is a flat NON_PYTHON_PREFIXES entry
+             # with no SOURCE_PATTERNS row, so a tools-only change filtered to
+             # `changed == []` and took the docs-only early return: MEASURED at the head
+             # that added it, `select(["tools/cache_evict.py"], "pull_request",
+             # load_manifest())` -> surfaces=[], zero egress files. That is the ONE file
+             # in this PR that can issue a `DETACH DELETE` against the cache, and a
+             # weakened gate there (the `--confirm-graph` token, the `deleted or
+             # delete_unverified` exit split, the refusal arms) would merge with every
+             # pin green-by-omission. CORE_ALSO for the same reason as the census entry
+             # directly above: the suite is hermetic (a statement-recording fake, no
+             # network) and `core` is where it is registered. Pinned by
+             # tests/test_ci_selection.py::test_cache_evict_runs_on_a_tools_only_change.
+             "tools/cache_evict.py",
              # #10920: the CI runner-label coverage gate. `tools/` is a flat
              # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
              # `tools/ci_runner_labels.py`, so a TOOL-ONLY change filtered to
@@ -3359,6 +3373,25 @@ TOOL_CARVEOUTS = (
     # not of the tool. Pinned by
     # test_ci_selection.test_ready_for_owner_tool_change_fails_closed_to_full.
     "tools/ready_for_owner.py",
+    # #10991: tools/required_set.py DECIDES WHAT COUNTS AS REQUIRED, so it is the same
+    # fail-OPEN class as ready_for_owner.py above — arguably closer to the decision, since
+    # every readiness verdict is a statement about the set this module derives. Unregistered
+    # it took its own version of the silent-drop: MEASURED before this entry,
+    # `echo tools/required_set.py | ci_selection.py --changed-files -` -> `surfaces: []`,
+    # `full: false`, `test_required_set.py` ABSENT from the 73 tier-1 files — so a change
+    # that dropped the protected-ref read, or widened what counts as green, would merge with
+    # none of its pins running. That was not hypothetical: before this entry the ONLY thing
+    # that ran the pins was the accident of a diff also touching `ready_for_owner.py`.
+    # ⛔ THIS TUPLE MEANS FULL MATRIX, NOT `core` (see the comment block above: a path here
+    # is "unknown to every SOURCE_PATTERN" and takes the fail-closed `_full_selection()`).
+    # That is deliberate and matches the sibling: `ready_for_owner.py` is registered here for
+    # the same reason (`test_ready_for_owner_tool_change_fails_closed_to_full`), and the
+    # deciding code is worth the whole matrix. Do NOT "optimise" this into `CORE_ALSO` —
+    # that tells `_keep_changed` the path maps to one surface while this tuple says unknown,
+    # and the two registrations pin OPPOSITE values (`full is True` vs `full is False`), the
+    # contradiction the gh_write_preflight note above records.
+    # Pinned by test_ci_selection.test_required_set_tool_change_fails_closed_to_full.
+    "tools/required_set.py",
 )
 
 
