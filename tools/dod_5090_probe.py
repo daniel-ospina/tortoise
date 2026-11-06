@@ -740,9 +740,12 @@ def _write_seams_that_embed() -> dict[str, str]:
 
 
 #: Where a "shipped default" for a flag would live. Searched, not assumed:
-#: `measure()` clears the ambient env so a lane's own shell cannot make a
-#: default-off gate read as enforced, which also means the ambient value can
-#: NEVER answer "is this shipped on" (review round 3, P2).
+#: `measure()` clears the ambient env so a lane's own shell cannot make a gate
+#: read as enforced, which also means the ambient value can NEVER answer "is
+#: this shipped on" (review round 3, P2). `#10996`: the clearing now writes the
+#: explicit OFF value instead of unsetting, because `TORTOISE_VALUE_GATE`
+#: defaults ON — a distinction this surface has to make, since "unset" is no
+#: longer an OFF spelling.
 CONFIG_SURFACES: tuple[str, ...] = (
     ".env.example",
     "docker-compose.yml",
@@ -2200,12 +2203,22 @@ def _connect(uri: str):
 
 def measure() -> dict:
     """Run the whole instrument. Clears the gate flags first — a lane's own env
-    must not be able to make a default-off gate read as enforced."""
+    must not be able to make a gate read as enforced or as idle.
+
+    ⛔ Both switches are set EXPLICITLY to their OFF value (`#10996`). Popping
+    them cleared the ambient value but produced an "off" reading only while the
+    flags were default-OFF; `TORTOISE_VALUE_GATE` now defaults ON (the S2.2
+    mechanical half, `EXTRACTOR-V4-ARCHITECTURE.md` §S2.2), so an unset value
+    would have made every row of this instrument read a DIFFERENT configuration
+    than the one it declares.
+    """
     # Snapshot and RESTORE: an import of a "read-only" instrument must not
     # leave the rest of the caller's process with both gates disabled.
     _flags = {v: os.environ.get(v) for v in ("TORTOISE_EMBED_GATE", "TORTOISE_VALUE_GATE")}
     for var in _flags:
         os.environ.pop(var, None)
+    for var in _flags:
+        os.environ[var] = "0"
     try:
         rows = _measure_rows()
     finally:

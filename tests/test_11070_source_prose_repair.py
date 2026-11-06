@@ -1913,6 +1913,19 @@ def test_a_HEALTHY_SIBLING_at_the_same_url_is_never_written():
                       username=endpoint.username, password=endpoint.password,
                       ssl=endpoint.ssl)
     proj = SimpleNamespace(graph_name=endpoint.graph_name, db=client)
+    # Epic #1647 (T7, cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope. The `test_`-prefixed
+    # per-run name above makes the handle UNIQUE and OWNED; `_journal_append` is
+    # the third half of that one contract — the record that tells a live PEER's
+    # `scope=None` sweep this graph is in use. Without it the graph is UNOWNED and
+    # a peer session may `GRAPH.DELETE` it MID-TEST (the cross-session flake
+    # #3074/#3214); the `finally: drop_test_graph` below covers only this lane's
+    # own teardown. Pinned by
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
+    # (which reds on main — #11182 — while this half is missing).
+    from tests._embedded import _journal_append
+
+    _journal_append(endpoint.graph_name)
     g = client.select_graph(endpoint.graph_name)
     url = "session:dup-11152"
 

@@ -489,6 +489,13 @@ def vet_candidates(embed_list: object, *,
 
     # #4899 — the mechanical Level-2 predicate: identifier-only DISCARD.
     #
+    # ⛔ This guard is WHY the default lives in ``value_gate.value_gate_enabled``
+    # and not in the pipeline wrapper (`#10996` Claim 4): a default flipped one
+    # file over would arm ``extractor_v2``'s pass while this line still read
+    # ``False``, giving ``enabled: False, fired: 0`` — the pass running with the
+    # predicate inert. The leaf reader is the effecting read, so the default sits
+    # there. ``TORTOISE_VALUE_GATE=0`` (or blank/garbage) is the kill-switch.
+    #
     # It runs BEFORE the arbiter, deliberately: with ``TORTOISE_VET`` alone no
     # arbiter is supplied (``extractor_v2._s2_seam_arbiter`` supplies one only
     # when ``TORTOISE_S2_DECISION_SEAM`` is armed, #5087), so an arbiter-only
@@ -614,8 +621,10 @@ def vet_candidates(embed_list: object, *,
         "by_outcome": by_outcome,
         "discarded": by_outcome.get(DISCARD, 0),
         "arbiter": "present" if arbiter is not None else "none",
-        # #4899: additive. ``enabled=False`` on every default run, so the flag
-        # is observable in the evidence surface without changing the rate.
+        # #4899: additive. ``enabled`` reports the RESOLVED value, so the
+        # evidence surface says whether the predicate ran — it is ``True`` on a
+        # default run since #10996 (the mechanical half defaults ON) and ``False``
+        # only under the explicit ``TORTOISE_VALUE_GATE=0`` kill-switch.
         "mechanical": {
             "enabled": value_gate.value_gate_enabled(),
             "fired": len(mechanical),

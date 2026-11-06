@@ -6066,6 +6066,60 @@ def test_the_unmeasured_note_repair_is_not_vacuous() -> None:
         f"the legitimate counterfactual was cut with the stale claim: {flat}")
 
 
+# ── the SAME claim, spelled with the constant's NAME ──────────────────────────
+# Review P3 on #11057 (`4727c013a`) found two rows on the REAL map carrying a
+# measured value beside a note asserting the flat default, in this spelling:
+# `The weight stays the flat `DEFAULT_FAST_WEIGHT` declaration …`
+# (`test_10602_query_limit_bound.py: 2.3`) and `it takes the header's flat
+# `DEFAULT_FAST_WEIGHT`` (`test_5095_s3_identity_policy.py: 0.4`). Neither the
+# writer's cutter nor `tests/test_ci_selection.py::_FLAT_DEFAULT_CLAIM_RE` could
+# match it — the verb list was `takes|carries|holds` and the first alternation
+# requires the literal `2.0s` — so those rows would have asserted the default
+# through every future refresh. The fixture below is the pre-fix row verbatim.
+_NAMED_CONSTANT_CLAIM_MANIFEST = """\
+surfaces:
+  core:
+    - test_weight.py
+    - test_packs.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+surfaces_x: []
+durations:
+  test_weight.py: 2.0  # #10602: new file. The weight stays the flat `DEFAULT_FAST_WEIGHT` declaration the #3400/#4348 trap requires for a file a PR ADDS. `tools/ci_selection.py --integrity` is the authority.
+  test_packs.py: 2.0  # #10602: new file. Its absence packs it at the flat `DEFAULT_FAST_WEIGHT`, and `--integrity` is the authority.
+"""
+
+
+def test_a_refresh_cuts_the_flat_default_claim_spelled_with_the_CONSTANT_NAME() -> None:
+    """The claim is not always spelled `flat 2.0s default`, so the cut must not be either.
+
+    Two arms: the CLAIM spelling goes with the adopted reading, and the
+    COUNTERFACTUAL spelling of the same name survives — it states what the row
+    buys, not what its value is, so cutting it would delete a record.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _NAMED_CONSTANT_CLAIM_MANIFEST,
+        {"test_weight.py": 0.9, "test_packs.py": 0.7},
+        "2026-11-05T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-05 (run 1)")
+
+    weight = _rendered_note(text, "test_weight.py")
+    assert weight.startswith("  test_weight.py: 0.9"), weight
+    assert "stays the flat `DEFAULT_FAST_WEIGHT`" not in weight, (
+        "the row carries a 0.9 s reading and still states the flat default as its "
+        f"basis — the #2818 claim/value disagreement the cutter exists to remove: {weight}")
+    assert "`tools/ci_selection.py --integrity` is the authority" in weight, (
+        f"the repair cut the surviving authority instruction: {weight}")
+    assert "was 2.0" in weight, f"the adopted value did not record its basis: {weight}"
+
+    packs = _rendered_note(text, "test_packs.py")
+    assert packs.startswith("  test_packs.py: 0.7"), packs
+    assert "Its absence packs it at the flat `DEFAULT_FAST_WEIGHT`" in packs, (
+        f"the legitimate COUNTERFACTUAL was cut with the stale claim: {packs}")
+
+
 def test_a_durations_note_states_ONE_count_for_the_head_it_was_read_at() -> None:
     """#10021 review P3: one row, one file, ONE count for ONE head.
 

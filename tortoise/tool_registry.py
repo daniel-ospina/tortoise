@@ -296,13 +296,31 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.query",
         description="Query points by pointKind and/or property filters — structural exact-match "
                     "retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag "
-                    "merged in). Pagination via offset=/limit= (or 1-based page=); tag= filters "
-                    "Points by TAGGED edge; include_retracted=True surfaces tombstones. For "
+                    "merged in). BOTH the structural read and the `tag=` arm return at most `limit` "
+                    "rows — default 100, or 20 when you page (`offset=`/`page=`) without an explicit "
+                    "`limit`. The RESPONSE is what is bounded (and a truncated answer is not "
+                    "distinguishable from a complete one): on the structural read, walk "
+                    "offset=/limit= — or 1-based page= — until hasMore is false when you need "
+                    "every row; a bare `limit=` bounds the answer but gives you no "
+                    "hasMore/total. On the `tag=` arm that walk is NOT lossless yet — its "
+                    "accessor has no total order (#5346/#11062) — so treat a walked tag as "
+                    "approximate, not as the complete set. The `tag=` read itself "
+                    "still scans the whole tagged population before slicing, so a very large tag "
+                    "can still be slow. "
+                    "include_retracted=True surfaces tombstones. For "
                     "semantic relevance use tortoise_search; for a single known ID use "
                     "tortoise_get_point.",
         risk="read",
         http_policy=True,
-        sdk_method="query",
+        # #10602: `query` → `paginated_query`. The un-paginated path used to call
+        # `sdk.query`, which has no LIMIT in its Cypher (`MATCH (n:Point) WHERE …
+        # RETURN properties(n)`), so `tortoise_query(kind="statement", limit=3)`
+        # returned the whole 15,708-row label and blew the 10 s transport wait
+        # bound with `-32009`. The bound now reaches the accessor that APPLIES a
+        # limit; `sdk.query` is no longer on this tool's path. No tool was
+        # added, removed or renamed — this is the declared binding corrected to
+        # match the handler the AST guard reads.
+        sdk_method="paginated_query",
     ),
     ToolDefinition(
         name="tortoise_paginated_query",
@@ -452,6 +470,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_query_points_by_tag",
         id="surface.query_points_by_tag",
         description="DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). "
+                    "Returns the raw tag result set (incl. tombstones). It takes no "
+                    "offset/page, so a truncated answer cannot be walked — keep that in mind "
+                    "above 10000 tagged rows, where it truncates. "
                     "Kept for one release; will be removed in the next release — migrate now.",
         risk="read",
         http_policy=True,
@@ -2103,7 +2124,13 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
     # Tier 2 — the entry's own description already named its replacement.
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
-    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    # #11057 review F3: the walk, not the bare read. `tortoise_query(tag=...)`
+    # caps its RESPONSE at the un-paginated default and answers a plain list with
+    # no `hasMore`/`total`, so pointing a retired-tool caller at it lands them on a
+    # truncated answer they cannot distinguish from a complete one — the #8447 §1
+    # shape the alias's own `Migrate to:` text repudiates 1000 lines away. The
+    # paged form is the only destination that can be walked to the whole population.
+    "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
     "tortoise_index_sessions": "tortoise_index_files(directory)",
     "tortoise_ingest_corpus": "tortoise_index_files(directory)",
     # #3540 ruling B (owner, 2026-10-12): ONE consolidated source-management
