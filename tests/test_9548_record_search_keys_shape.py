@@ -779,11 +779,14 @@ def test_the_cause_form_withholds_the_drivers_detail_and_context():
     the withhold
     documented for the line was true of one arm and false of the other.
 
-    ⛔ AND NOTHING DOWNSTREAM REPAIRS IT. `record_writer._bounded_cause` narrows
-    only when the OUTER exception carries `diag`/`pgcode`; a
-    `RecordStatementError` carries neither, so it takes its `str(exc)` branch
-    with the driver's ``DETAIL`` already embedded here — which is what makes a
-    leak in this class a leak all the way to the log.
+    ⛔ AND NOTHING DOWNSTREAM REPAIRED IT — which is why the fix belongs HERE.
+    `record_writer._bounded_cause` narrows only when the OUTER exception carries
+    `diag`/`pgcode`; a `RecordStatementError` carries neither, so pre-fix it took
+    its `str(exc)` branch with the driver's ``DETAIL`` already embedded here —
+    which is what made a leak in this class a leak all the way to the log. The
+    narrowing still runs (those two facts are unchanged); it no longer has a
+    driver ``DETAIL`` to find, because the clause this test pins is composed by
+    `_driver_fault` (#11124 review cycle 4: the tense is the claim).
 
     This is not a live exposure (no in-tree PRODUCTION caller builds this form:
     only :func:`replay` raises the class, via the message form; the cause form

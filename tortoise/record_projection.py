@@ -758,9 +758,14 @@ class RecordStatementError(RecordProjectionError):
     reappears while the ``content`` value, withheld by the same
     :func:`_column_pair` on the message arm, does not. ``RecordStatementError``
     carries neither ``diag`` nor ``pgcode``, and ``record_writer._bounded_cause``
-    narrows only on the OUTER exception's own ``diag``/``pgcode``, so it cannot
-    repair this either — it takes its ``str(exc)`` branch with the driver's
-    ``DETAIL`` already embedded here.
+    narrows only on the OUTER exception's own ``diag``/``pgcode``, so it could
+    not repair this either — before this change it took its ``str(exc)`` branch
+    with the driver's ``DETAIL`` already embedded here. Those are two permanent
+    facts and one PRE-FIX consequence, and the tense is load-bearing (#11124
+    review cycle 4): the facts are unchanged, which is why this layer is the
+    only place the leak can be closed, but the consequence is not — the
+    narrowing still runs on every one of these errors and no longer has a driver
+    ``DETAIL`` to find.
 
     ⚠️ AND THE NARROWING IS NOW SHAPE-BLIND, which is the one thing this fix
     costs (#11124 review P3). :func:`_primary_message` falls back to the FIRST
