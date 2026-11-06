@@ -7835,6 +7835,80 @@ def test_the_un_cached_fallback_INSTALLS_nothing_and_LEAVES_a_pre_existing_entry
         ha._reset_registry_probe_sdk()
 
 
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_a_reset_DURING_the_build_is_not_undone_by_the_builder(monkeypatch):
+    """#10962 review finding 1 — the reset is an INVALIDATION BARRIER for a build
+    already in flight, not only a clear of what is cached.
+
+    Construction runs OUTSIDE `_KEEPALIVE_LOCK` (#8867 finding 2) and lasts the
+    whole `_get_proj()` (a connect plus nine `CREATE INDEX` statements), so a
+    reset can COMPLETE while a builder is inside `_make_sdk`. The identity then
+    still holds still (nothing rebound the env), so the stability rule passes and
+    the builder's only remaining question was "does an entry match my identity?"
+    — never "was the cache invalidated since I started?". On the pre-fix arm it
+    therefore INSTALLS the handle it began before the reset and the cache is
+    repopulated behind a teardown hook that already returned: the #5049 rule-4
+    order-dependence the reset exists to prevent, on the BUILDER side.
+
+    The reset here finds an EMPTY cache on purpose — that is the shape the old
+    lock-free "nothing to close" fast path returned from, and it is exactly the
+    case where a builder has installed nothing yet, so a reset that skipped the
+    invalidation would leave the contract open. Discrimination: this reds on
+    pre-fix `hosted_api.py` at BOTH the rebuild count and the close count.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/reset-mid-build")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "")
+    ha._reset_registry_probe_sdk()  # empty cache: nothing for the reset to clear
+    built = []
+    armed = {"on": True}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        handle = _Handle()
+        if armed["on"]:
+            armed["on"] = False
+            # The autouse per-test teardown (`tests/conftest.py`
+            # `_process_global_isolation` -> `_reset_registry_probe_sdk`) lands
+            # while we are INSIDE the build. It does not wait for us: the build
+            # holds no lock, which is the whole reason the in-lock mutual
+            # exclusion that used to guarantee #5049 rule 4 is gone.
+            ha._reset_registry_probe_sdk()
+        return handle
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    try:
+        hand = ha._registry_probe_sdk()
+        assert len(built) == 2, (
+            "the builder INSTALLED the handle it began before the reset instead "
+            f"of discarding it and rebuilding: built={built}, "
+            f"cache={ha._REGISTRY_PROBE_CACHE}")
+        assert built[0].closed == 1, (
+            "the pre-reset handle was not closed un-installed — the reset "
+            "returned and its effect was undone behind it (#5049 rule 4)")
+        assert hand is built[1], (
+            "the caller was handed a handle built BEFORE the reset returned")
+        assert hand.closed == 0, "the served handle was closed before use"
+        assert ha._REGISTRY_PROBE_CACHE == (
+            ha._registry_probe_identity(), built[1]), (
+            "the cache holds a handle built before the reset returned: "
+            f"cache={ha._REGISTRY_PROBE_CACHE}, built={built}")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
 def test_the_reset_clears_the_atomic_tuple_BEFORE_the_scalars():
     """The ORDER of the reset's stores is the fix, and it is not observable at
     close time — every ordering clears before `sdk.close()` — so a post-
