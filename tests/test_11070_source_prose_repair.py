@@ -751,10 +751,14 @@ def test_the_clear_arm_says_CLEARED_and_the_default_says_LEFT_ALONE():
     """
     from tortoise import session_source_prose_migration as m
 
+    # The dry run is asserted separately (a dry run writes NOTHING, so it must not
+    # claim a clear); this test is about the WRITING arm's two outcomes.
+    kept_graph = _RecordingGraph([(_session_node(),)])
     kept = m.reconcile_session_source_prose(
-        _RecordingGraph([(_session_node(),)]), read_transcript=_reader(None))
+        kept_graph, read_transcript=_reader(None), dry_run=False)
     assert "left alone unless clear_without_record is set" in kept["notes"]["session:s-11070"]
     assert "CLEARED" not in kept["notes"]["session:s-11070"]
+    assert kept_graph.writes == []
 
     cleared_graph = _RecordingGraph([(_session_node(),)])
     cleared = m.reconcile_session_source_prose(
@@ -798,20 +802,20 @@ def test_a_PARTIAL_answer_caused_by_the_CACHE_mark_is_named_as_such():
     from tortoise import record_read
     from tortoise import session_source_prose_migration as m
 
-    # ⛔ THE REAL READER, THE REAL REASON. An earlier version of this test
-    # hand-wrote the reason string it fed the reader — a string no production path
-    # produces — so the diagnostic branch it was supposed to pin was never
-    # exercised and the assertion passed over dead code (#11152 review round 3).
-    turns = (record_read.Turn(turn_id="t1", index=0, content="[user] hi"),
+    # ⛔ A REASON THAT DOES **NOT** CONTAIN THE FALLBACK WORDING, so only the
+    # STRUCTURAL condition can produce the warning. An earlier version of this
+    # test used the real tail wording, which also satisfied the string fallback —
+    # deleting the structural computation left the suite green
+    # (#11152 review round 4).
+    tails = (record_read.Turn(turn_id="t1", index=0, content="[user] hi"),
              record_read.Turn(turn_id="t2", index=1, content="[user] plan"))
-    answer = record_read.TurnAnswer(
-        answered=False, turns=turns, turn_count=2,
-        reason=record_read._shortfall(turns, 2, 99),
-        kind=record_read.TurnAnswer.PARTIAL)
 
     def fake_session_turns(conn, *, org_id, graph_id, session_id,
                            turn_max_index=None):
-        return answer
+        return record_read.TurnAnswer(
+            answered=False, turns=tails, turn_count=2,
+            reason="the record answered for part of this session",
+            kind=record_read.TurnAnswer.PARTIAL)
 
     reader = m.record_turn_reader(object(), org_id="o", graph_id="g")
 
@@ -834,7 +838,6 @@ def test_a_PARTIAL_answer_caused_by_the_CACHE_mark_is_named_as_such():
     assert "MAY BE THE CACHE'S FAULT" in note, (
         "a bare `no_record` tells the operator to hunt a record problem that may "
         "not exist")
-    assert "tail is missing" in note, "the record's own reason must survive"
 # ══════════════════════════════════════════════════════════════════════════
 # The operator CLI's SCOPE contract (#11152 review: presence is not proof, and
 # the requirement belongs on the arm that can destroy something)
@@ -1115,3 +1118,104 @@ def test_an_unproven_scope_is_not_reported_over_the_by_name_clear_arm(
     assert code != 3, err
     assert len(graph.writes) == 1
     assert graph.writes[0][1]["sum"] == "", "the by-name arm did not clear"
+
+
+def test_a_SHORT_COUNT_PARTIAL_is_not_blamed_on_the_cache_mark():
+    """⛔ The tail arm runs LAST; the record's own arms must win the diagnosis.
+
+    `record_read._shortfall` refuses a short-count (`len(turns) < turn_count`) or
+    a gap BEFORE it ever compares against `turn_max_index`, so a bare
+    `max(held) < turn_max_index` test is a SUPERSET: it blamed the cache's mark
+    for refusals the record itself declared, sending the operator to compare a
+    datum that is irrelevant (#11152 review round 4).
+    """
+    from tortoise import record_read
+    from tortoise import session_source_prose_migration as m
+
+    # The record declares 2 turns and holds 1 — the SHORT-COUNT arm, which
+    # `_shortfall` returns before the tail is examined.
+    held = (record_read.Turn(turn_id="t1", index=0, content="[user] hi"),)
+    answer = record_read.TurnAnswer(
+        answered=False, turns=held, turn_count=2,
+        reason=record_read._shortfall(held, 2, 99),
+        kind=record_read.TurnAnswer.PARTIAL)
+    assert "turn(s) but holds only" in answer.reason, (
+        "this test is vacuous unless the reason is the SHORT-COUNT arm")
+
+    def fake(conn, *, org_id, graph_id, session_id, turn_max_index=None):
+        return answer
+
+    reader = m.record_turn_reader(object(), org_id="o", graph_id="g")
+
+    class _Patch:
+        def __enter__(s):
+            s._real = record_read.session_turns
+            record_read.session_turns = fake
+
+        def __exit__(s, *exc):
+            record_read.session_turns = s._real
+
+    graph = _RecordingGraph([(_session_node(turn_max_index=99),)])
+    with _Patch():
+        report = m.reconcile_session_source_prose(
+            graph, read_transcript=reader, dry_run=True)
+
+    note = report["notes"]["session:s-11070"]
+    assert "record did not ANSWER" in note
+    assert "MAY BE THE CACHE'S FAULT" not in note, (
+        "the record declared this shortfall itself — the cache's mark is "
+        "irrelevant and naming it sends the operator to the wrong datum")
+
+
+def test_a_dry_run_never_says_the_pair_WAS_cleared():
+    """A report must not assert a write the run did not make."""
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=_reader(None), dry_run=True,
+        clear_without_record=True)
+
+    note = report["notes"]["session:s-11070"]
+    assert "writes NOTHING" in note
+    assert "the pair is CLEARED" not in note, (
+        "a dry run claimed the pair was cleared while writing nothing")
+    assert graph.writes == []
+
+
+def test_a_one_argument_reader_keeps_its_warning_when_the_read_also_fails():
+    """Two defects on one node must both be reported — notes ACCUMULATE."""
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(turn_max_index=7),)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=lambda sid: None)
+
+    note = report["notes"]["session:s-11070"]
+    assert "takes one argument" in note, (
+        "the degraded-read warning was overwritten exactly when the read also "
+        "failed, i.e. when the diagnosis is least reliable")
+    assert "did not ANSWER" in note
+
+
+def test_a_candidate_with_no_usable_url_is_REPORTED_not_silently_dropped():
+    """Otherwise it pins the census above zero forever with no reason given.
+
+    `is_episodic_source_node`'s bare-filename arm accepts an empty url, so such a
+    node counts as a candidate; it cannot be written, so `census_after` can never
+    reach 0 — an unreachable zero with no reported cause, the exact class #11070
+    exists to close (#11152 review round 4).
+    """
+    from tortoise import session_source_prose_migration as m
+
+    empty = {"url": "", "sourceKind": "agentSession", "is_episodic": True,
+             "summary": PROSE, "_searchText": PROSE}
+    graph = _RecordingGraph([(empty,)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=_reader("User: friday plan"), dry_run=True)
+
+    assert report["candidates"] == [""]
+    assert report["unaddressable"] == [""]
+    assert any("no usable url" in n for n in report["notes"].values()), (
+        "the run exits 1 forever with no explanation of the pinning candidate")
+    assert graph.writes == []

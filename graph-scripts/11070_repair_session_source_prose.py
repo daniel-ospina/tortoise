@@ -30,14 +30,23 @@ Usage:
   uv run python graph-scripts/11070_repair_session_source_prose.py --dry-run
 
   # 2) repair, re-deriving each lexicon FROM THE RECORD (the only arm that
-  #    needs the scope)
+  #    needs the scope). ⛔ PASS --graph: without it the CACHE graph is
+  #    `derive_uri_graph($TORTOISE_DB_URI)`, which on a hosted/multi-graph box is
+  #    NOT the graph `--graph-id` names — the run reads one graph, usually finds
+  #    0 candidates, prints `Repair complete.` and exits 0, over the tenant graph
+  #    that still holds the population (#11152 review round 4). `--graph` is the
+  #    CACHE graph; `--org-id`/`--graph-id` are the RECORD scope. On a
+  #    single-graph self-host they often share a name — never assume it, and
+  #    read the `graph:` line every run prints.
   uv run python graph-scripts/11070_repair_session_source_prose.py \\
-      --repair --record-dsn "$TORTOISE_RECORD_DSN" \\
+      --repair --graph org_acme_tortoise \\
+      --record-dsn "$TORTOISE_RECORD_DSN" \\
       --org-id org_acme --graph-id org_acme_tortoise
 
   # 3) verify: the census must be 0 — `--assert-clean` is what can FAIL
-  uv run python graph-scripts/11070_repair_session_source_prose.py \
-      --dry-run --assert-clean || exit 1
+  #    (same `--graph` as the repair, or it verifies a DIFFERENT graph)
+  uv run python graph-scripts/11070_repair_session_source_prose.py \\
+      --graph org_acme_tortoise --dry-run --assert-clean || exit 1
 
 ⚠️ THE RECORD SCOPE IS NEVER GUESSED. ``--record-dsn`` on the WRITING arm
 (``--repair``) requires ``--org-id`` and ``--graph-id``: a wrong (or defaulted)
@@ -326,6 +335,7 @@ def main() -> int:
           f"record spoke, 0 turns: {len(report.get('empty_sessions') or [])}  "
           f"record did not answer: {len(report['no_record'])}  "
           f"no session id: {len(report.get('no_session_id') or [])}  "
+          f"UNADDRESSABLE (no url): {len(report.get('unaddressable') or [])}  "
           f"never asked (no reader): {len(report.get('no_reader') or [])}  "
           f"LEFT ALONE: {len(report.get('left_alone') or [])}")
     if report.get("left_alone"):

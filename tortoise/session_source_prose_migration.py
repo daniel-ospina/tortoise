@@ -487,9 +487,20 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
         # the exact condition `_shortfall` refuses on is recomputed here.
         turns = getattr(answer, "turns", ()) or ()
         held = [t.index for t in turns if isinstance(getattr(t, "index", None), int)]
+        # ⛔ THE TAIL ARM IS EVALUATED **LAST** BY `_shortfall`, so only claim it
+        # when the two arms that run BEFORE it cannot explain the refusal. A bare
+        # `max(held) < turn_max_index` is a SUPERSET: the record's own short-count
+        # arm (`len(turns) < turn_count`) and gap arm (a hole in `0 .. max`) are
+        # refused before the tail is ever looked at, and blaming the cache for
+        # those sends the operator to compare a mark that is irrelevant
+        # (#11152 review round 4).
+        count = getattr(answer, "turn_count", None)
+        short_count = isinstance(count, int) and len(turns) < count
+        gap = bool(held) and sorted(held) != list(range(min(held), max(held) + 1))
         tail_suspect = bool(
             not getattr(answer, "answered", False) and turn_max_index is not None
-            and held and max(held) < int(turn_max_index))
+            and held and max(held) < int(turn_max_index)
+            and not short_count and not gap)
         read.reasons[session_id] = (getattr(answer, "kind", ""),  # type: ignore[attr-defined]
                                     getattr(answer, "reason", ""), tail_suspect)
         if not answer.answered:
@@ -542,6 +553,19 @@ def _no_record_note(read_transcript, session_id: str | None) -> str:
                  "live end makes a complete answer read as PARTIAL — compare the "
                  "mark with the record before concluding the record is short")
     return note
+
+
+def _add_note(report: dict, url: str, text: str) -> None:
+    """ACCUMULATE a note — never replace one.
+
+    ⛔ A node can have more than one thing wrong with it, and the second write
+    used to erase the first: a one-argument reader's "the tail witness was
+    dropped" note was destroyed by the not-answered note written right after it —
+    exactly when the operator most needs to know the diagnosis is unreliable
+    (#11152 review round 4).
+    """
+    previous = report["notes"].get(url)
+    report["notes"][url] = f"{previous}; {text}" if previous else text
 
 
 def _derive(transcript: str | None) -> dict:
@@ -624,6 +648,7 @@ def reconcile_session_source_prose(
         "no_record": [],
         "no_reader": [],
         "no_session_id": [],
+        "unaddressable": [],
         "left_alone": [],
         "notes": {},
         "census_before": len(found),
@@ -634,6 +659,19 @@ def reconcile_session_source_prose(
     for node in found:
         url = node["url"]
         if not isinstance(url, str) or not url:
+            # ⛔ A CANDIDATE THAT CANNOT BE ADDRESSED. `carries_pre_lexicon_prose`
+            # accepts an empty-`url` `agentSession` Source (the bare-filename arm
+            # needs only "no `://` and no `/`"), and the census counts it — but it
+            # cannot be written, so it pinned `census_after` above zero FOREVER
+            # with `--repair` exiting 1 and no reason given anywhere in the
+            # report: an unreachable zero, which is the class #11070 exists to
+            # close (#11152 review round 4).
+            report["unaddressable"].append(node.get("url"))
+            _add_note(report, "<empty url>",
+                      "a candidate with no usable url: it carries the prose pair "
+                      "and counts in the census, but cannot be addressed by a "
+                      "write, so `census_after` cannot reach 0 while it exists — "
+                      "repair the node by hand or delete it (#11070)")
             continue
         sid = node["session_id"]
         # FOUR answers, and they are not three. "" is the record SAYING the
@@ -654,10 +692,10 @@ def reconcile_session_source_prose(
                 # shape. Degraded (no turn-end witness), and said so in the
                 # notes rather than crashing the run.
                 transcript = read_transcript(sid)  # type: ignore[call-arg]
-                report["notes"][url] = (
-                    "the reader takes one argument, so the session's "
-                    "turn_max_index was not supplied — a PARTIAL set that "
-                    "stops below the id-space end cannot be detected by it")
+                _add_note(report, url,
+                          "the reader takes one argument, so the session's "
+                          "turn_max_index was not supplied — a PARTIAL set that "
+                          "stops below the id-space end cannot be detected by it")
         elif read_transcript is None:
             report["no_reader"].append(url)
         else:
@@ -678,13 +716,22 @@ def reconcile_session_source_prose(
                    "no transcript reader was supplied, so the record was never "
                    "asked")
         if transcript is None:
-            # ⛔ The note must state what HAPPENED, not what the default would
-            # have done: emitting "left alone" on the run that cleared the node
-            # is a report contradicting its own writes.
-            report["notes"][url] = why + (
-                " — the pair is CLEARED, because clear_without_record is set"
-                if clear_without_record else
-                " — the pair is left alone unless clear_without_record is set")
+            # ⛔ The note must state what HAPPENED, not what the arm would have
+            # done: emitting "left alone" on the run that cleared the node — or
+            # "the pair is CLEARED" on a DRY RUN that wrote nothing — is a report
+            # contradicting its own writes (#11152 review rounds 2 and 4).
+            if dry_run:
+                outcome = (" — a dry run writes NOTHING; --repair with "
+                           "clear_without_record set would CLEAR it"
+                           if clear_without_record else
+                           " — a dry run writes NOTHING; --repair would leave it "
+                           "alone unless clear_without_record is set")
+            else:
+                outcome = (" — the pair is CLEARED, because clear_without_record "
+                           "is set" if clear_without_record else
+                           " — the pair is left alone unless clear_without_record "
+                           "is set")
+            _add_note(report, url, why + outcome)
         if transcript is None:
             # ⛔ THE ARM THAT CANNOT BE UNDONE BY A SECOND RUN. A clear is not
             # self-correcting: the damaged node no longer matches the census, so
