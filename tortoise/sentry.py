@@ -38,13 +38,14 @@ _service = "tortoise-hosted-api"
 # credited the subset pin to the wrong test).
 BENIGN_EXCEPTION_NAMES = frozenset({"ClientDisconnect", "BrokenResourceError"})
 
-#: ⛔ REQUEST-LAYER ONLY — names whose MEANING depends on which end hung up.
-#: `ConnectionResetError` / `BrokenPipeError` mean "the peer left" only when the
-#: peer is the CALLER. In an outbound call — the oauth token exchange, a
-#: connector, any dependency — the identical class means "the UPSTREAM we called
-#: reset us", i.e. a real dependency outage (sentry review round 4, P2).
+#: ⛔ REQUEST-LAYER ONLY — names that are direction-AMBIGUOUS in this class, and
+#: that the framework never raises on a caller's behalf. `ConnectionResetError` /
+#: `BrokenPipeError` are what an app or upstream failure surfaces as when it
+#: escapes a route — `session_verify._api` catches only `HTTPError`/`URLError`,
+#: and `URLError` does not catch a bare reset — and in an OUTBOUND call they mean
+#: "the upstream we called reset us" (sentry review round 4, P2).
 #:
-#: They are therefore NOT in `ignore_errors`/`BENIGN_EXCEPTION_NAMES`, which is a
+#: They are NOT in `ignore_errors`/`BENIGN_EXCEPTION_NAMES`, which is a
 #: CLIENT-GLOBAL filter (`Client._should_capture` runs for EVERY event from every
 #: path): a global entry would silence a real upstream reset everywhere in the
 #: process, including `oauth._log_and_capture`'s "single capture" for the token

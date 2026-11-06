@@ -208,10 +208,14 @@ def test_benign_matching_is_exact_by_name_not_by_mro() -> None:
 
 
 def test_direction_ambiguous_names_are_benign_only_on_the_inbound_layer() -> None:
-    """Review round 4 (P2): `ConnectionResetError` means two different things.
+    """Review round 4 (P2) + round 9 (P2): these names are direction-ambiguous.
 
-    Inbound (the handler): the CALLER reset on us → benign.
-    Anywhere else (oauth token exchange, a connector): the UPSTREAM we called
+    At the request layer they are admitted as benign (`inbound_request=True`), and
+    that is an ACCEPTED ATTRIBUTION COST, not a claim about which end reset: an
+    exact-named reset arriving at the handler is evidence of an app/upstream
+    failure, because the caller-hang-up shape arrives as `ClientDisconnect` —
+    which the global set already covers. Anywhere else (oauth token exchange, a
+    connector): the UPSTREAM we called
     reset us → a real dependency outage that must be captured.
 
     So the name is benign ONLY with `inbound_request=True`, and it is NOT in the
@@ -229,7 +233,8 @@ def test_direction_ambiguous_names_are_benign_only_on_the_inbound_layer() -> Non
             "it is the whole point"
         )
         assert tsentry.is_benign_exception(cls(), inbound_request=True) is True, (
-            f"{name} while SERVING an inbound request means the caller hung up"
+            f"{name} at the request layer is admitted as benign — an accepted "
+            "attribution cost, not a claim about which end reset"
         )
     # The global set is a strict subset, so the request-layer set can never fall
     # behind it (a name added globally but not inbound would be a silent gap).
