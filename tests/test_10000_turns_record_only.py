@@ -2523,10 +2523,12 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     and the scan below finds it. So it is searched because a caller-named
     property can carry prose, not because a writer does. A writer that carried
     turn text under a SEVENTH name (`body`, `summary`, `raw`…) would be outside
-    this population. That is not hypothetical: this tree derives the session's first
-    substantive utterance into a `summary` (`sdk._session_source_metadata`) and
-    writes it on the session `:Source` (`s.summary=$sum`), so a `:Source.summary`
-    hit is a route this scan cannot see. The scan therefore guards against a
+    this population. The session `:Source`'s ``summary`` used to be exactly that
+    (`sdk._session_source_metadata` derived the transcript's first substantive
+    utterance into it, `s.summary=$sum`) — a route this scan could not see;
+    #10000 removed it, that field now carries a descriptor over the session's
+    TOPIC lexicon, and `tests/test_10000_source_prose.py` scans the graph for a
+    capture's own text for that reason. The scan here therefore guards against a
     changed label, id space or wiring — the shapes the sibling id-space
     assertions cannot see — and not against a renamed property. Read the claim no
     wider than that.
