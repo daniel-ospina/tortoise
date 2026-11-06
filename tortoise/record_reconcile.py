@@ -391,7 +391,14 @@ class RecordReconcileResult:
 
     @property
     def graph_only_total(self) -> int:
-        """Cache-owned property occurrences the comparison did not judge."""
+        """Properties the CACHE holds that the comparison did not judge.
+
+        ⛔ NOT "cache-owned": `graph_only` carries THREE omission classes
+        (`:375-390`), and `owned` is §17.5's term for only ONE of them — naming
+        the total `owned` sends the operator to the wrong repair for the other
+        two, which is why the rendered label says `cache-held` (`:611`). This
+        docstring must not keep the term the label retracted.
+        """
         return sum(count for _, count in self.graph_only)
 
     @property

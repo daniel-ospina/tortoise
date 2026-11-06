@@ -1010,8 +1010,10 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
     ``with_source`` adds a SYNTHETIC `SourceCreated` record carrying
     `story_arc`: it stands for **door 2 (`#10394`)**, the RECORD → CACHE
     restore, and for nothing else. The record's `public.source.story_arc` column
-    is classed PRIMARY in the placement table
-    (`docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md:368`),
+    is classed PRIMARY in the placement table — named by the ROW
+    `public.source.story_arc` rather than by a line in it, because a line in a
+    Markdown table rots exactly as a line in a module does —
+    (`docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md`),
     and it is the column `#10394` closed the CACHE side of: the projection used
     to keep it (`projected_columns("source")`) and
     `record_restore.restore_from_record_view` wrote it back onto `:Source`; since

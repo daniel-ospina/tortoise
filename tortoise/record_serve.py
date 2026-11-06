@@ -1065,15 +1065,16 @@ class ParityDiff:
     ``changed``              fields both stores answer, with different values.
                              Non-empty = RED.
     ``explained_missing``    a DECLARED asymmetry at work. Every member comes
-                             from one of the FOUR declarations
-                             :func:`parity_difference` enumerates, and the
-                             member's NAME (not this dict) says which by
-                             resolving against it: the schema's carve-out
-                             (`confidence`, `content_hash`, `ep_*`, …), a fold
-                             `ON CREATE` default (#9634 — `objectKind`, `title`),
-                             §9.1/D1's declined turn prose for an episodic
-                             Source (`summary`, `_searchText`), or a
-                             **not-projectable** column
+                             from one of FOUR declarations, and the member's
+                             NAME (not this dict) says which by resolving
+                             against it: the schema's carve-out (`confidence`,
+                             `content_hash`, `ep_*`, …), a fold `ON CREATE`
+                             default (`cache_projection.FOLD_ON_CREATE_DEFAULTS`,
+                             #9634 — the field is one the record row is SILENT
+                             about, so the column exists and only its VALUE is
+                             supplied), §9.1/D1's declined
+                             turn prose for an episodic Source (`summary`,
+                             `_searchText`), or a **not-projectable** column
                              (`cache_projection.CACHE_FORBIDDEN_COLUMNS` —
                              §9.1/D1's narrative on `source`/`event`, #10394).
                              Enumerated, never silently tolerated.
