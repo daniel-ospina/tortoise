@@ -211,16 +211,19 @@ never built the consistent shrink its own label claimed.
 
 **The width case is load-bearing, and that is measured, not asserted.** The arm that matters most is
 the one covering the rule added *last*: with `parse_surface_rows` monkeypatched back to the previous
-`< 7` floor — the exact false PASS the exact-7 rule closes — `--self-test` reports **10/10 refused and
-exits 0** without this case (ten, not eleven: the case is the one removed), so a quietly relaxed width
-rule would have kept the REQUIRED `docs` job green. With the case present, the same relaxation exits
-**1**. ⚠️ State the mechanism rather than overclaiming it: on this input the relaxed rule is caught
-because the shifted row parks a one-word value in the failure column and **R3** fires, so what the
-case proves is that a relaxed width rule **reds the arm** — not that the exact-7 refusal is the only
-rule that could notice. `cells()` is escape-*parity* aware (a pipe delimits only after an **even** run
-of backslashes, matching CommonMark), so an escaped `\|` stays inside its cell and R2/R3 read the
-column they name, while a raw extra `|` — or an escaped backslash before a real `|` — is refused as an
-unreadable row.
+`< 7` floor — the exact false PASS the exact-7 rule closes — and `MIN_SELF_TEST_MUTATIONS` lowered to
+match, `--self-test` withdraws this one case and reports **10/10 refused, exit 0** (ten, not eleven:
+the case is the one removed), so a quietly relaxed width rule would have kept the REQUIRED `docs` job
+green. With the case present, the same relaxation exits **1**. ⚠️ The floor is why the reproduction now
+costs TWO edits: at the shipped floor, simply deleting the case is red on its own
+(`self-test: 10 mutation(s) registered, at least 11 required`, exit 1), so the false PASS cannot be
+re-opened by removing the case alone. ⚠️ And state the mechanism rather than overclaiming it: on this
+input the relaxed rule is caught because the shifted row parks a one-word value in the failure column
+and **R3** fires, so what the case proves is that a relaxed width rule **reds the arm** — not that the
+exact-7 refusal is the only rule that could notice. `cells()` is escape-*parity* aware (a pipe
+delimits only after an **even** run of backslashes, matching CommonMark), so an escaped `\|` stays
+inside its cell and R2/R3 read the column they name, while a raw extra `|` — or an escaped backslash
+before a real `|` — is refused as an unreadable row.
 
 **It runs on every edit, not only when someone remembers.** Both arms are wired into CI's `docs` job
 (`.github/workflows/ci.yml`, beside `tools/substrate_map_check.py`): the check, **and** `--self-test` —

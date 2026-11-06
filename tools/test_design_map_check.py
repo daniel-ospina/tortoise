@@ -480,7 +480,11 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         # The width rule must be covered by the arm that is supposed to catch a
         # quietly weakened rule. Without this case, reverting `!= 7` to the old
         # `< 7` floor left --self-test green at 10/10 — the false PASS this rule
-        # closes, re-opened with the REQUIRED `docs` job fully green.
+        # closes, re-opened with the REQUIRED `docs` job fully green. Since
+        # MIN_SELF_TEST_MUTATIONS exists, re-opening it costs TWO edits: at the
+        # shipped floor, deleting this case alone is red ("10 mutation(s)
+        # registered, at least 11 required", exit 1) before the relaxed rule is
+        # ever exercised.
         "splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns)",
         lambda t: _rewrite_row(t, "SF2", 5, "live-docker | unit"),
         "refusal",
