@@ -1919,6 +1919,7 @@ assert_contains "$OUT" "sweep skipped (status=driver_timeout)" "78. a timeout na
 assert_not_contains "$OUT" "lock held" "78. a timeout is NOT reported as a held lock"
 assert_match "$OUT" "curl rc=28, took [0-9]+s" "78. the timeout reports rc 28 and the elapsed seconds"
 assert_contains "$OUT" "the driver's own ceiling was hit" "78. the verdict names the driver's patience, not a coverage outage"
+assert_contains "$OUT" "this says nothing about whether the pipeline stopped" "78. the verdict does NOT claim the pipeline is fine"
 assert_contains "$OUT" "the last COMPLETED sweep was" "78. the verdict carries the completion age it gated on"
 assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78. no SWEEP_NO_COVERAGE incident is filed"
 assert_not_contains "$OUT" "ride-along OK" "78. a timeout still skips the purge/reconcile ride-along"
@@ -1985,6 +1986,7 @@ assert_eq "$RC" 1 "78c-ii. an empty body with no completion evidence stays RED"
 assert_contains "$OUT" "no usable last_sweep_at" "78c-ii. the fail-closed branch is the one that ran"
 assert_not_contains "$(cat "$LOG")" 'sweep timed out' "78c-ii. the incident TITLE does not claim a budget timeout for an rc=0 completion"
 assert_contains "$(cat "$LOG")" 'returned no report body' "78c-ii. the title names the real shape"
+assert_contains "$OUT" "no sweep report was read (status=empty_response)" "78c-ii. the exit line names the missing report for THIS shape too"
 
 # ── 78d. #10234: the ceiling knob exists and its default exceeds the 600s ──
 # The 600s literal WAS the defect: the sweep needs longer than its client was
@@ -2170,6 +2172,34 @@ run_driver
 assert_eq "$RC" 1 "78f-ii. a future-dated stamp reds even when the pool is measured empty"
 assert_contains "$OUT" "dated in the FUTURE" "78f-ii. the corruption is named, not swallowed as pre-beta"
 
+# ── 78j. #10234 review P2 (round 12): the PRE-BETA envelope must stay silent ──
+# A no-report shape with an ABSENT stamp AND a measured-EMPTY pool is the
+# documented chronic pre-beta envelope. Nothing tested it, so an edit that made
+# it RED (filing SWEEP_NO_COVERAGE every hour for a pre-beta deployment) shipped
+# green — the #10234 defect one layer down.
+reset_case
+export R2_TEAMS=""
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78j. no report + absent stamp + measured-empty pool is the pre-beta envelope, not a red"
+assert_contains "$OUT" "chronic pre-beta envelope" "78j. the run names the envelope it used"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78j. it files nothing"
+
+# ── 78k. #10234 review P3 (round 12): the unparseable COUNT, not a hardcoded 1 ──
+# Both existing fixtures have exactly ONE unparseable team, so `1` could be
+# hardcoded and the title would then contradict the body's own tenant bullets.
+reset_case
+export R2_TEAMS=$'backups/teamA/\tbackups/teamZ/'
+export R2_DEFAULT_LIST_A="not-a-timestamp"
+export R2_DEFAULT_LIST_Z="also-not-a-timestamp"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78k. two unparseable teams red"
+assert_file_match "$LOG" 'pool age UNMEASURABLE, 2 team\(s\)' "78k. the TITLE counts BOTH unparseable teams"
+
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
 export R2_TEAMS=$'backups/teamA/'
@@ -2184,6 +2214,7 @@ assert_not_contains "$OUT" "lock held" "79. an empty response is NOT reported as
 # cause the leg never observed, and on a green run this line is the only record.
 assert_contains "$OUT" "the exchange COMPLETED (curl rc=0) but carried no report body" "79. an empty body names the REAL cause (no report), not a budget expiry"
 assert_not_contains "$OUT" "ceiling was hit" "79. (control) no budget claim on a completed exchange"
+assert_contains "$OUT" "not a budget artifact" "79. the verdict says the shape is NOT a budget artifact"
 assert_contains "$OUT" "ride-alongs are SKIPPED for this run" "79. the green line WARNS that erasure/revocation were not attempted"
 
 # ── 80. #5028: the sweep OUTCOME is never truncated away ───────────────────
