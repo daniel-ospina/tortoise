@@ -1288,6 +1288,34 @@ def test_the_mention_record_is_payload_only_and_says_so():
     assert "mentions" not in inspect.getsource(hosted_api._execute_commit_writes), (
         "the commit route now writes `mentions`: the payload-only deferral is "
         "over — see #11239 and turn this row into a persistence assertion")
+    # ⛔ THE SELF-HOST MIRROR IS ITS OWN DOOR. `#4032` frames
+    # `hosted_api.CreatePointRequest`/`create_point` and
+    # `selfhost_api.CreatePointRequest`/`create_point` as parity mirrors, so a
+    # mention field added on the hosted side alone re-opens the divergence — and
+    # pinning only the hosted pair left this door asserting nothing (review at
+    # `40a0a81e6`, P3; the docstring said "three" doors while the tree had four).
+    from tortoise import selfhost_api
+
+    assert "mentions" not in selfhost_api.CreatePointRequest.model_fields, (
+        "the self-host REST door now accepts `mentions`: the payload-only "
+        "deferral is over on the mirror too — update Mention's docstring and "
+        "#11239")
+    assert "mentions" not in inspect.getsource(selfhost_api.create_point), (
+        "selfhost_api.create_point now writes `mentions`, so the payload-only "
+        "deferral is over on the self-host mirror — see #11239")
+    # …and the docstring's enumeration NAMES that door, because a count a reader
+    # cannot check is how "three" survived beside four real doors. ⛔ BOTH
+    # docstrings: the reviewer's own file had already been corrected while
+    # `route_mentions`' still said THREE, so one reader got "four" and the next
+    # got "three" in the same round (review at `0c15ad04d`, P3).
+    from tortoise.extractor_v2 import route_mentions
+
+    for doc in (Mention.__doc__ or "", route_mentions.__doc__ or ""):
+        assert "selfhost_api.CreatePointRequest" in doc, (
+            "a mention docstring does not name the self-host write door, so its "
+            "enumeration of the doors that DROP `mentions` is incomplete (the "
+            "tree has four; `#4032`'s parity mirror is the one most likely to be "
+            f"missed): {doc[:200]!r}")
     assert "11239" in (Mention.__doc__ or ""), (
         "Mention's docstring no longer names the slice that owns persistence, so "
         "the model reads as graph state")
@@ -1778,3 +1806,124 @@ def test_the_fail_open_path_dedupes_BOTH_publishing_surfaces(monkeypatch):
         f"the emitted claim was reported unresolved: {stats!r}")
     assert not [w for w in out.get("warnings") or [] if "did not emit" in w], (
         f"the fail-open warning counted a hold twice: {out.get('warnings')!r}")
+
+
+# ── ONE RUN, ONE ANSWER: the record may not credit the MODEL for the CUE's hold ──
+# The rows below close the two-answers class at its last two sources. A run
+# publishes the same hold on `stats["by_rule"]`, `mention_held[]` and the
+# `mentions[]` records; plan R1's arming measurement reads the RECORDS, so a
+# record that names a different rule is not a cosmetic mismatch — it counts a cue
+# hold as a model assertion. Both were reported at `40a0a81e6` and re-verified at
+# `0c15ad04d` (a peer lane's CLEAN verdict did not cover them).
+
+def test_a_cue_held_mention_records_the_CUE_rule_not_the_model_silence():
+    """⛔ The model-channel record loop stamped `entry.rule_id or RULE_CHANNEL`,
+    ignoring the `(rule_id, reason)` the CHANNEL had just written into `hold` for
+    that same surface. On the shape the armed prompt actually asks for — a mention
+    whose claim does not also NAME it in `about_entities` — no hold-driven record
+    exists, so the only record the run publishes said `referentiality.channel`
+    ("the model said so") while `by_rule` and `mention_held` said
+    `referentiality.pronoun`. One run, two answers to "what did this hold", on the
+    surface plan R1's arming gate READS (review at `40a0a81e6`, P2; still present
+    at `0c15ad04d`).
+
+    Mutant: restoring `rule_id=str(entry.get("rule_id") or RULE_CHANNEL)` reddens
+    this row and its payload half, and nothing else."""
+    el = _embed_list("the admin-merge rail", point_about=[])
+    el["mentions"] = [{
+        "surface": "it",
+        "claim_ref": el["points"][0]["content"],
+        "quote": "it",
+    }]
+    del el["entities"]                      # the mention-only response
+
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["by_rule"] == {ref.RULE_PRONOUN: 1}, (
+        f"the cue did not hold the surface: {held['mention_stats']!r}")
+    assert held["mention_held"] == [{"surface": "it",
+                                     "rule_id": ref.RULE_PRONOUN}], (
+        f"the carried decision disagrees: {held.get('mention_held')!r}")
+
+    records = held["mentions"]
+    assert [m["surface"] for m in records] == ["it"], (
+        f"the mention-only response dropped its record: {records!r}")
+    assert records[0]["rule_id"] == ref.RULE_PRONOUN, (
+        "the record credits the MODEL for a hold the CUE decided — the same run "
+        f"reports by_rule={held['mention_stats']['by_rule']!r} but the record "
+        f"plan R1 reads says {records[0]['rule_id']!r}: {records[0]!r}")
+
+    # …and the payload's copy of the same record says the same thing.
+    payload, _ = _mint(el)
+    stored = _mentions_of(payload)
+    assert [m["surface"] for m in stored] == ["it"], (
+        f"the payload dropped its record: {stored!r}")
+    assert stored[0]["rule_id"] == ref.RULE_PRONOUN, (
+        f"the payload copy disagrees with the evidence copy: {stored[0]!r}")
+
+
+def test_the_clamp_always_publishes_a_RULE_for_a_record():
+    """⛔ `_clamped_mention`'s field loop SKIPS empty values before the `rule_id`
+    branch, so an entry that OMITS the key shipped with no `rule_id` at all and
+    `Mention.rule_id` defaulted to `""` — a value outside `referentiality.RULES`,
+    i.e. the "no silent hold" field saying nothing. Reachable on the one path that
+    matters: `_MENTION_CONTRACT_LINE` does not ask the model for a `rule_id`, and
+    the fail-open path (the only route into this clamp that never passes
+    `_mention_record`) is precisely where such an entry arrives (review at
+    `40a0a81e6`, P2; still present at `0c15ad04d`).
+
+    The value an ABSENT rule must become is `referentiality.channel` — "the model
+    asserted it", nothing verified — NOT a cue rule: on the fail-open path the
+    selection raised, so no cue verdict was reached for this record."""
+    from tortoise.commit_schema import Mention
+    from tortoise.extractor_v2 import _clamped_mention
+
+    rec = _clamped_mention({"surface": "it", "claim_ref": "c"}, narrative="")
+    assert rec is not None
+    assert rec.get("rule_id") == ref.RULE_CHANNEL, (
+        "an entry that omits `rule_id` — the shape the prompt asks for — was "
+        f"published with rule_id={rec.get('rule_id')!r}, which is outside "
+        f"{sorted(ref.RULES)}: {rec!r}")
+    assert Mention(**rec).rule_id in ref.RULES, (
+        "the record reaches the model with a rule the vocabulary does not hold")
+
+    # …and the unconditional write is not a flattening: a cue rule the cue AGREES
+    # with still survives, which is the whole point of the field.
+    cue = _clamped_mention({"surface": "it", "claim_ref": "c",
+                            "rule_id": ref.RULE_PRONOUN}, narrative="")
+    assert cue.get("rule_id") == ref.RULE_PRONOUN, (
+        f"the clamp flattened a cue rule it could verify: {cue!r}")
+
+
+def test_the_record_builder_agrees_with_the_clamp_on_an_ABSENT_narrative():
+    """⛔ TWO BUILDERS, ONE RECORD. `_clamped_mention` states — and pins — that an
+    absent `narrative` is an UNKNOWABLE haystack, so a declared `narrative` space
+    stands unchecked. `_mention_record` still ran `_mention_span("")` and demoted
+    the same declaration to `"model"`, so the record published on
+    `result["mentions"]["records"]` and the record published on the payload
+    disagreed about WHICH TEXT the offsets address — for the same hold, in the same
+    run (review at `40a0a81e6`, P2; still present at `0c15ad04d`). The clamp's rule
+    is the correct side: relabelling to `model` asserts the model invented offsets
+    the cue derived."""
+    from tortoise.extractor_v2 import _mention_record
+
+    span = {"span_start": 6, "span_end": 8, "span_source": "narrative"}
+    absent = _mention_record(surface="it", claim={"content": "c"}, kind_guess=None,
+                             rule_id=ref.RULE_PRONOUN, reason="r", narrative="",
+                             quote="", span=dict(span))
+    assert absent["span_source"] == "narrative", (
+        "the record builder demoted a declared space on an ABSENT haystack, which "
+        f"`_clamped_mention` keeps: {absent!r}")
+
+    # …and the guard is not a blanket amnesty: a supplied haystack that DISAGREES
+    # still demotes, exactly as the clamp does.
+    disagree = _mention_record(surface="it", claim={"content": "c"},
+                              kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                              reason="r", narrative="no pronoun here or there",
+                              quote="", span=dict(span))
+    assert disagree["span_source"] == "model", (
+        f"an unverifiable declaration shipped as verified: {disagree!r}")
+    agree = _mention_record(surface="it", claim={"content": "c"}, kind_guess=None,
+                            rule_id=ref.RULE_PRONOUN, reason="r",
+                            narrative="alpha it beta", quote="", span=dict(span))
+    assert agree["span_source"] == "narrative", (
+        f"a verifiable declaration was demoted: {agree!r}")

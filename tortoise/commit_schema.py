@@ -583,27 +583,34 @@ class Mention(BaseModel):
     - the run's evidence block — ``result["mentions"]["records"]``, assembled in
       ``extract_session_v2``;
     - **the producer channel** — ``result["embed_list"]["mentions"]`` and
-      ``result["s2_embed"]["mentions"]``. ``s2_embed`` is S2's raw list by
-      definition and ``embed_list`` is ``route_mentions``' own output, so on the
-      fail-open path (``route_mentions`` raised) BOTH carry the model's entry
-      verbatim — an unverified ``rule_id`` and span included. Those two are
-      inputs, never a claim about what was held.
+      ``result["s2_embed"]["mentions"]``. Both are assigned from the list
+      ``route_mentions`` rewrote, so on the SUCCESS path they carry the derived
+      records (cue ``rule_id``, verified address) and on the **fail-open** path
+      (``route_mentions`` raised) they carry the model's entry verbatim — an
+      unverified ``rule_id`` and span included. Either way they are inputs to the
+      record, never the run's "what was held" claim.
 
     Only the first two go through ``extractor_v2._clamped_mention``, which
     re-derives ``rule_id`` against ``referentiality.judge`` and ships a declared
     ``quote``/``narrative`` address only where that text still puts the surface at
-    those offsets. ``span_source`` ``model`` is not a verification: it is the
+    those offsets — with ONE stated exception, applied by BOTH builders: an
+    ABSENT ``narrative`` is an unknowable haystack, so that declaration ships
+    UNCHECKED rather than demoted (an absent ``quote`` is a definite mismatch).
+    ``span_source`` ``model`` is not a verification: it is the
     honest label for "the model asserted these bytes" (an unverified offset pair
     survives under it — it is demoted, never droppped).
 
-    No declared write door carries it, and there are **three** of them: the REST
+    No declared write door carries it, and there are **four** of them: the REST
     ``CreatePointRequest`` (no ``mentions`` field at all), the SDK capture
     whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s response-parity
     surface: ``quote/when/search_keys/source_turn_id/span_start/span_end`` only),
-    and — the door the v2 payload actually uses —
-    ``hosted_api._execute_commit_writes``, which enumerates its ``sdk.create_point``
-    kwargs (``#11239``). So a capture's ``stats["mentions_recorded"]`` counts
-    records the write DISCARDS.
+    ``hosted_api._execute_commit_writes`` — the door the v2 payload actually
+    uses, which enumerates its ``sdk.create_point`` kwargs (``#11239``) — and the
+    SELF-HOST mirror ``selfhost_api.CreatePointRequest`` / ``selfhost_api.create_point``, which is a separate model and route that
+    enumerates its ``sdk.create_point`` kwargs the same way (``#4032`` frames the
+    two as parity mirrors, so a hosted-only addition re-opens the divergence).
+    So a capture's ``stats["mentions_recorded"]`` counts records the write
+    DISCARDS — on either deployment.
     DM1's home on the Point is declared but unfulfilled; persisting it (a
     flat/scalar projection, or an explicit session-evidence-only ruling) is
     **#11239**, deliberately not this slice. ``tests/test_referentiality_11021.py
