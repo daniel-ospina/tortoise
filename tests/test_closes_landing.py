@@ -4832,14 +4832,17 @@ def test_a_WIDE_GAP_marker_in_a_NEW_blockquote_after_an_HTML_block_is_CODE():
             renderer: `<blockquote><span></blockquote><pre><code>x</code></pre><blockquote>
             <ol start="2">…<pre><code>Closes #100`  -> the keyword is CODE, so every arm owes `[]`.
 
-    The round-46..51 heads credited it in ALL FOUR arms; `origin/main` refused it in `strict` and
-    `indented_code` and credited it in `lenient` (the pre-existing #11156 direction), and round 52
-    (`cc8f7baf02`, merged as #11186) closed both. Round 52's term is `_html_rest` — §4.6's opener
-    allowance measured from the containing block's CONTENT column — which ends the phantom paragraph
-    the wide-gap marker used to ride as a continuation. ⚠️ `_html_here` is NOT the term: it is
-    `False` on the marker line at BOTH trees, and its "this line's own answer" comment predates
-    round 52. This test reds on the round-51 tree (`1bbc16ce57`) — that is the property it exists to
-    keep.
+    The round-49..51 heads (from `282644682d`, the round-48 resolution) credited it in ALL FOUR
+    arms; the round-48 head (`4ef23920a5`) and `origin/main` refused it in `strict` and
+    `indented_code` and credited it in `lenient` (the pre-existing #11156 direction). Round 52
+    (`cc8f7baf02`, merged as #11186) closed both, and its term is `_html_leaf_text` — "a leaf block's
+    own raw text leaves no paragraph" — measured NECESSARY AND SUFFICIENT on these rows: clearing
+    that flag on the fixed tree restores `[100]` in all four arms, and nothing else is needed.
+    ⚠️ NOT `_html_here` (it is `False` on the marker line at every tree here, and its "this line's own
+    answer" comment predates round 52), and NOT `_html_rest` (round 52's §4.6 content-column
+    allowance, an IDENTITY on these rows because `container is None`; it is the term for the
+    lost-close family, which is control 2 below). This test reds on the round-51 tree (`1bbc16ce57`)
+    — that is the property it exists to keep.
 
     ⚠️ Not #11268 (the `indented_code` arm crediting inside a DEEPER blockquote) and not #11156
     (`strip_code` never blanks raw-HTML content): what is measured here is the HTML block's END,
