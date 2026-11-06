@@ -342,10 +342,10 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
 # rerouted all seven acceptance captures to the OTHER extractor while the log
 # still printed an ``arm:`` line that said nothing about it — the silent seam
-# #10983 exists to close. The lane, and EVERY switch on this path that changes
-# what the run MEASURES (the render/diagnostic switches, the model selector and
-# the offline model mock), are pinned here and READ BACK like every other switch
-# (the ``arm:`` rule, applied to the door).
+# #10983 exists to close. The lane, plus EVERY switch on this path that changes
+# what the run MEASURES through it (the commit-dispatch and render switches, the
+# model selector and the offline model mock), are pinned here and READ BACK like
+# every other switch (the ``arm:`` rule, applied to the door).
 #
 # ⚠️ The set below is what the #10983 review widened. The first revision pinned
 # the lane and the two render switches and called that "the seam set"; three

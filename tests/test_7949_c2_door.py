@@ -136,12 +136,48 @@ def test_the_lane_selector_defaults_to_v2_and_m2_is_the_opt_in():
     assert re.search(r'== "m2"', body) or re.search(r"== 'm2'", body), (
         f"the selector no longer compares against 'm2' at "
         f"{_cite(HOSTED, '_capture_lane')}: {body!r}")
-    # The polarity is the SPECIFIC form: m2 is the opt-in, v2 the fall-through.
-    # (A bare `"v2" in body` was near-tautological — the previous revision of
-    # this test accepted three alternatives, one of which matched the docstring.)
-    assert re.search(r'<\s*"m2"\s*\n?\s*else\s+"v2"|m2.\s+if\s+', body), (
-        f"the selector's polarity changed — v2 must be the FALL-THROUGH, not a "
-        f"listed alternative (#10983): {body!r}")
+    # The polarity is the SPECIFIC form: m2 is the opt-in, v2 the FALL-THROUGH.
+    #
+    # ⛔ Read off the AST, not out of the text. A regex with a `m2... if `
+    # alternative stayed green with the fall-through rewritten to `else "v3"`
+    # (the #10983 review ran that mutation): the `if` clause matched and nobody
+    # read the `else`. The IfExp's own `orelse` IS the fall-through, so it is
+    # asserted directly — and the probe's DOOR_LANE is bound to it, because that
+    # literal is what every acceptance log prints.
+    node = _funcs(HOSTED)["_capture_lane"]
+    rets = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+    assert len(rets) == 1, (
+        f"_capture_lane at {_cite(HOSTED, '_capture_lane')} no longer a single "
+        f"return — the lane predicate is now a branch, so this pin must be "
+        f"re-derived (#10983)")
+    expr = rets[0].value
+    assert isinstance(expr, ast.IfExp), (
+        f"the selector's return is no longer an inline `m2 if … else …` "
+        f"expression (#10983): {body!r}")
+    assert isinstance(expr.body, ast.Constant) and expr.body.value == "m2", (
+        f"the selector's OPT-IN branch is no longer the literal 'm2' at "
+        f"{_cite(HOSTED, '_capture_lane')}: {body!r}")
+    assert isinstance(expr.orelse, ast.Constant) and expr.orelse.value == "v2", (
+        f"the selector's FALL-THROUGH is {ast.unparse(expr.orelse)!r}, not 'v2' "
+        f"— v2 must be the default lane (#10983): {body!r}")
+    assert isinstance(expr.test, ast.Compare), (
+        f"the selector's test is no longer a comparison (#10983): "
+        f"{ast.unparse(expr.test)!r}")
+    # Compared STRUCTURALLY: ``ast.unparse`` normalises quotes (it renders 'm2'),
+    # so a substring test on the rendered text is a trap — read the Constant.
+    assert any(isinstance(c, ast.Constant) and c.value == "m2"
+               for c in expr.test.comparators), (
+        f"the selector's test no longer compares against 'm2' (#10983): "
+        f"{ast.unparse(expr.test)!r}")
+    assert "TORTOISE_SESSION_EXTRACTOR" in ast.unparse(expr.test), (
+        f"the selector's test no longer reads TORTOISE_SESSION_EXTRACTOR "
+        f"(#10983): {ast.unparse(expr.test)!r}")
+
+    probe = _load_probe()
+    assert probe.DOOR_LANE == expr.orelse.value, (
+        f"the probe pins DOOR_LANE={probe.DOOR_LANE!r} but the selector's "
+        f"fall-through is {expr.orelse.value!r} — every acceptance log would "
+        f"declare a lane the code does not run (#10983)")
 
 
 def test_the_v2_arm_calls_the_sdk_extractor_entry():
@@ -222,7 +258,12 @@ def _default_of(resolver_module: str, resolver: str) -> bool | None:
                 os.environ[key] = prior
     if isinstance(value, bool):
         return value
-    return None if value is None else True
+    # A non-bool is 'on' only if it is TRUTHY: `return None if value is None
+    # else True` published 'on' for `0`, `''` and `'off'` alike, so a resolver
+    # returning a falsy non-None would have made this gate DEMAND a false ledger
+    # (found in the #10983 review). `_label_order_rng` returns None when unset,
+    # which stays None.
+    return None if value is None else bool(value)
 
 
 def test_the_seam_ledger_is_the_codes_not_the_issues():
@@ -538,6 +579,22 @@ def test_the_registration_records_the_door_and_the_corpus_attribution():
     assert isinstance(rows, dict) and rows, (
         "preregistration.json carries no corpus-row attribution — 'which "
         "corpus carries which row' is the decision #10983 exists to write down")
+    # The ROW SET is required, not merely 'some rows exist': deleting E4 (the row
+    # this PR got wrong twice) left the previous revision of this test green.
+    assert set(rows) == {"E1", "E1b", "E2a", "E2b", "E3", "E4", "E5",
+                         "fleet-claim"}, (
+        f"the registered rows moved: {sorted(rows)} — every acceptance row must "
+        f"carry its own corpus attribution, or a row silently loses one (#10983)")
+    # …and each row's LANE is a statement about which extractor measured it, so
+    # it is pinned rather than left to prose. E4 was published as an m2 row and
+    # is not one: the receipt the probe selects records extract_session_v2.
+    assert rows["E4"]["lane"] == "v2", (
+        f"E4's lane is {rows['E4'].get('lane')!r}; the receipt select_e4_receipt "
+        f"picks on the frozen corpus_hash records extract_session_v2 (#10983 "
+        f"review): {rows['E4']}")
+    assert rows["E1b"]["lane"] == "m2", (
+        f"E1b's lane is {rows['E1b'].get('lane')!r}; it is the m2 anti-gaming "
+        f"control (#10983)")
     for crit, entry in rows.items():
         assert entry["corpus"] in {
             "tests/eval/write_path",         # the registered fixture corpus
@@ -622,6 +679,38 @@ def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE():
                 os.environ[key] = prior
 
     door, other = measured["v2"], measured["m2"]
+    # The PUBLISHED counts, pinned exactly. §1.6.4 of the registration and this
+    # record's door.negative_control state these numbers; until the #10983 review
+    # they appeared in the DOCUMENTS and in this docstring only, while the
+    # assertions below compared the two arms to EACH OTHER — so both published
+    # copies could drift from the measurement with the suite green. They are
+    # deterministic under the offline mock seam, so exact equality is a fact,
+    # not a flake.
+    assert door["counts"] == {"Object": 1, "Point": 27, "Event": 2,
+                              "Session": 1, "Operator": 0}, (
+        f"the door's census moved: {door['counts']} — §1.6.4 and "
+        f"door.negative_control publish Object=1 Point=27 Event=2 (#10983)")
+    assert other["counts"] == {"Object": 0, "Point": 149, "Event": 1,
+                               "Session": 1, "Operator": 0}, (
+        f"the m2 lane's census moved: {other['counts']} — door.negative_control "
+        f"publishes Object=0 Point=149 Event=1 (#10983)")
+    assert door["objects"] == ["the strategy"], (
+        f"the door's :Object names moved: {door['objects']} — the published "
+        f"control says ['the strategy'] (#10983)")
+    assert other["objects"] == [], (
+        f"the m2 lane now mints :Object names: {other['objects']} — the "
+        f"published control says it mints none (#10983)")
+    # …and the PUBLISHED string must carry those exact cells, or the record can
+    # state a census this suite never measured. The numbers below were in the
+    # documents and in the docstring only until the #10983 review.
+    published = json.loads(REGISTRATION.read_text(encoding="utf-8"))[
+        "door"]["negative_control"]["measured"]
+    for arm, census in (("v2 (the door)", door), ("m2 (the other lane)", other)):
+        cells = " ".join(f"{k}={v}" for k, v in census["counts"].items())
+        assert cells in published, (
+            f"door.negative_control does not publish the {arm} census this run "
+            f"measured ({cells!r}) — the record and the control have drifted "
+            f"apart (#10983): {published!r}")
     assert door["counts"]["Object"] >= 1, (
         "the door wrote no Objects at all, so the control compares two empty "
         f"graphs and proves nothing: {door}")

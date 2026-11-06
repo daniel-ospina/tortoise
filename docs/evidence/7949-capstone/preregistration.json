@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:8bfbb811912822e5295476b0c08dec25aa0099741875f5cf03a3929c01694ebc",
+  "document_sha256": "sha256:cc91956659ad97b8b92903ab7fed04e8d7bce0ff9b0853385e502d9bdc37deba",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -89,7 +89,7 @@
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "the measurement RAN at 2026-10-19T01:39:26Z (the receipt's own `date`), BEFORE this record's add-commit a6085af84 (2026-10-21T21:49:11Z) — but its ARTIFACT, tests/eval/write_path/receipts/w2b-operator-2026-10-19.json, was not in the tree: it landed at d50217273 (2026-10-22T05:34Z), AFTER the registration. So this `false` is a claim about VISIBILITY, not about existence: nothing measured by this row was in the tree its author wrote. That distinction is stated in PRE-REGISTRATION.md section 0's row and section 10.3 — leaving it unstated is what let the row be read as 'no measurement existed', a claim the measurement's own date refutes (#10525 review).",
       "threshold_basis": "the 15 edge gold replaced a 4-edge denominator that swung 0-2 of 4 on identical code; no rate may ever be reported against 4",
-      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3."
+      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3. ⚠️ THE ROW'S FIGURE AT THIS HEAD IS 5 OF 15, read from the FROZEN-corpus receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json, extractor extract_session_v2); the 2/15 above is the OTHER, non-frozen receipt's number, kept as a historical disclosure. See §1.6.3 and corpus_rows.E4.reconciles_with."
     },
     {
       "id": "E5",
@@ -272,7 +272,8 @@
       "measured": "v2 (the door): Object=1 Point=27 Event=2 Session=1 Operator=0, objects=['the strategy']; m2 (the other lane): Object=0 Point=149 Event=1 Session=1 Operator=0, objects=[] — same corpus session wp01_quarry_debug, same offline model seam, one embedded graph each",
       "verdict": "MEASURED DIFFERENCE (structural)",
       "why": "it is a different EXTRACTOR, not a different seam of the same one: the m2 lane mints no :Object at all on this session and 5.5x the Points, so a number measured on one lane is not a number about the other",
-      "consequence": "rows whose corpus is the m2 lane (E1b, E4) are not fleet facts; the door is ALSO pinned structurally so the control cannot be the only guard"
+      "consequence": "rows whose corpus is the m2 lane (E1b) are not fleet facts; the door is ALSO pinned structurally so the control cannot be the only guard",
+      "structural_in_kind_not_only_in_size": "the m2 lane mints no :Object at all — that is a difference in KIND, not a matter of degree — and the 5.5x Point count is the SIZE of the same difference, not the reason it matters"
     },
     "pinned_by": "tests/test_7949_c2_door.py"
   },
@@ -307,7 +308,8 @@
       "corpus": "tests/eval/write_path",
       "claim": "5 of 15 planted operator edges are wired and persisted against the registered bar (15), read from the receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json)",
       "not_a_proof_of": "the fleet's graph: this is the fixture corpus, and the row is graded through the v2 door on it (not on the m2 lane) — a fleet claim needs a captured corpus",
-      "lane": "v2"
+      "lane": "v2",
+      "reconciles_with": "§10.3 and criteria.E4's post_registration_measurement record 2/15 from receipt w2b-operator-2026-10-19.json, whose corpus_hash (943a99ec…) is NOT the frozen fixtures_hash (dd7e8520…): that figure measures a different corpus revision and stays as the historical disclosure it is. The FROZEN-corpus receipt the probe SELECTS reads 5/15, and 5/15 is this row's figure at this head."
     },
     "E5": {
       "corpus": "tests/eval/write_path",

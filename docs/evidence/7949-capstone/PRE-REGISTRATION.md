@@ -263,6 +263,15 @@ never made.
 | **E5** | `tests/eval/write_path` (fixture, §10) | the raw-vs-narrative premise, measured on this corpus | a fleet-corpus premise: a different corpus is a different measurement |
 | **any fleet-graph claim** | **`fleet-capture`** — a real capture through the door | what the fleet's write path actually produces | nothing yet: this registration pins no fleet-capture corpus, and one must be registered **before** such a number is scored |
 
+⚠️ **E4's figure, reconciled.** §10.3 and the record's `criteria.E4` `post_registration_measurement`
+state **2 of 15**, measured on receipt `w2b-operator-2026-10-19.json` — whose `corpus_hash`
+(`943a99ec…`) is **not** the frozen `fixtures_hash` (`dd7e8520…`), so that figure measures a different
+corpus revision. The probe now SELECTS E4's receipt by `corpus_hash` against the frozen pin, and the
+receipt that matches (`w2b-operator-2026-10-24-8503-b.json`) reads **5 of 15** on
+`extract_session_v2`. **5 of 15 is this row's figure at this head**; 2 of 15 is kept above as the
+historical disclosure it is, not as the row's current number. The denominator (**15**) and the
+threshold (`= 15 of 15`) are untouched by either figure, so the row is RED either way.
+
 #### 1.6.4 The negative control, MEASURED
 
 Same corpus session (`wp01_quarry_debug`), same offline model seam, both lanes, one embedded
@@ -273,9 +282,10 @@ graph each:
 | **v2 — the door** | **1** | **27** | **2** | 1 | 0 | `['the strategy']` |
 | **m2 — the other lane** | **0** | **149** | **1** | 1 | 0 | `[]` |
 
-The difference is measured, and it is **structural, not a matter of degree**: the `m2` lane mints
-**no `:Object` at all** on this session and **5.5×** the `:Point`s, because it is a *different
-extractor*, not a different seam of the same one.
+The difference is measured, and it is **structural IN KIND, not a matter of degree**: the `m2` lane mints
+**no `:Object` at all** on this session, and it also writes **5.5×** the `:Point`s — the ratio is the
+*size* of a difference whose nature (a different extractor, not a different seam of the same one) is
+what makes a number measured on one lane not a number about the other.
 
 ⇒ **A number measured on one lane is not a number about the other.** That is exactly why the `m2` column in §1.6.3 (E1b) must not be read as a fleet fact, and why the door is pinned structurally (§1.6.1)
 as well as measured here — a control measures the two lanes *as they are today*, while the pin is
