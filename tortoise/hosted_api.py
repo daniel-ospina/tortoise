@@ -17071,7 +17071,9 @@ class SessionRequest(BaseModel):
 # The commit lane's bound landed with #9798; §3.1 asks for it on BOTH session
 # write lanes — "per-org, per-window ingest rate on ``/v1/sessions/commit`` and
 # ``/v1/sessions``" — and the capture lane kept only the per-KEY bucket
-# (300/min × up to 20 keys) plus the instance-wide in-flight cap. MEASURED
+# (100/min — the general bucket; the 300/min bucket is the COMMIT lane's,
+# R-13 — times up to 20 keys on Team) plus the instance-wide in-flight cap.
+# MEASURED
 # before this charge existed: a free-tier key looping ``POST /v1/sessions``
 # with a fresh ``session_id`` writes ``:Session`` + ``sessionCaptured``
 # ``:Event`` + the transcript ``:Source`` + one episodic ``:Point`` per turn,
