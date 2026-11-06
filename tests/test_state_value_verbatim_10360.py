@@ -1332,11 +1332,13 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
 #: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
 #: a reopening phrased with none of these words passes — MEASURED, still GREEN at
 #: this revision: "the ADJACENCY half went back to being unjudged", "`minute` is
-#: once more outside the closed set", "adjacency is unjudged again", and
-#: "`minute` is back in the open set" (which the PREVIOUS revision DID catch, via a
-#: free `[^.;]{0,25}` filler window; that window also read the row's own honest
-#: "the pair is unjudgeable and fails open" as a claim, and the window won on
-#: measured evidence — a false block is how a pin gets deleted). The pin's job is
+#: once more outside the closed set" and "adjacency is unjudged again". ⛔ EVERY
+#: ENTRY HERE IS A CLAIM LIKE ANY OTHER and must be re-measured when the arms
+#: change: "`minute` is back in the open set" sat on this list for one revision
+#: and is RED again (it is mutation #28), because the anchored arm reads an object
+#: complement. A stale entry here is worse than no entry — a lane reads it as
+#: uncovered and deletes the mutation as unfalsifiable, shrinking coverage
+#: silently. The pin's job is
 #: to catch the shapes a lane actually writes, not to be a semantic reader of
 #: English; closing that needs a human or a different instrument, not a longer
 #: regex.
@@ -1357,15 +1359,27 @@ _RESIDUAL_OPENNESS = (
 #: The ANCHORED arm: `<verb> … open` and the opening verb. ⛔ NO HYPHEN EXCEPTION —
 #: `fail-open` IS read, because failing open on the adjacency class is exactly the
 #: reopening this scan refuses (`the ADJACENCY half is fail-open.` stays GREEN with
-#: one, #11258 review `P2`). The filler is a CLOSED set of adverbs rather than an
-#: open `[^.;]{0,25}` window, so an unrelated second predicate inside the window
-#: cannot make the verb head a distant `open` (measured: the free window read
-#: "is unjudgeable and fails open" as a claim).
+#: one, #11258 review `P2`).
+_RESIDUAL_OPEN_VERBS = (
+    r"is|are|was|were|remain|remains|remained|stay|stays|stayed|"
+    r"keep|keeps|kept|hold|holds|held")
+
+#: The gap between the verb and `open` may hold an OBJECT ("keeps the gap open"),
+#: a participle ("is held open"), adverbs or a parenthetical ("remains, in
+#: practice, open"), and it may cross a coordinator that JOINS ADJECTIVES inside
+#: one predicate ("is unjudged and open") — but NOT one that introduces a NEW
+#: PREDICATE, which is how the row's own honest "the pair is unjudgeable and fails
+#: open" was read as an openness claim. Three attempts are recorded here because
+#: each one traded a leak for a different leak, measured: a CLOSED ADVERB LIST
+#: dropped every object (`keeps the gap open`, `is held open` GREEN — round 2
+#: `P1`); a BLANKET coordinator bound dropped coordinator-joined adjectives
+#: (`is unjudged and open` GREEN — round 3, measured); this bound blocks the
+#: coordinator only when a subject and a verb follow it.
 _RESIDUAL_ANCHORED_OPENNESS = (
-    r"\b(is|are|was|were|remain(s|ed)?|stay(s|ed)?|keep(s|t)?)\b"
-    r"(?:\s+(?:still|now|again|back|left|once\s+more|effectively|deliberately|"
-    r"only|already|fully|openly|so))*"
-    r"\s+(?:fail-)?open(?!\w)",
+    rf"\b({_RESIDUAL_OPEN_VERBS})\b"
+    r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
+    r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,30}?"
+    r"(?:fail-)?open(?!\w)",
     # ⛔ A NEGATED reopening is a DENIAL of one: `(d2) does not reopen (d)'s
     # ADJACENCY result` is the row's own truthful scope boundary (#11223 fix
     # direction 2), so the lookbehind is what keeps it out of the scan.
@@ -1441,19 +1455,51 @@ def _residual_reopening_claims(text: str) -> list[str]:
     claims: list[str] = []
     flat = " ".join(_residual_region(text).split()).lower()
     for sentence in re.split(r"(?<=[.!?;])\s+", flat):
-        honest_spelling = ("spelling" in sentence
-                           and not _UNIT_TOKEN.search(sentence)
-                           and not _RESIDUAL_CLASS_ANCHOR.search(sentence))
-        patterns = list(_SPELLING_FLOOR) if honest_spelling else list(
-            _RESIDUAL_OPENNESS)
-        if not honest_spelling and _RESIDUAL_CLASS_ANCHOR.search(sentence):
+        # ⛔ THE WAIVER IS CLAUSE-SCOPED EVEN THOUGH MATCHING IS PER SENTENCE. The
+        # two scopes answer two different failures, measured in opposite
+        # directions: matching must be per SENTENCE, or a `;`/`, and` split
+        # separates a class anchor from its openness phrase (round 1 `P2`); the
+        # WAIVER must be per CLAUSE, or one honest `spelling` clause waives a
+        # reopening in the NEXT one — "The SPELLING gap is open on purpose, but
+        # the remaining gap is not closed." stayed GREEN with a sentence-scoped
+        # waiver (round 2 `P2`). So the honest clauses are REMOVED and what is
+        # left is scanned.
+        clauses = re.split(r";|,?\s+(?:and|but)\s+", sentence)
+        honest = [c for c in clauses if _is_honest_spelling(c)]
+        if honest:
+            if len(honest) == len(clauses):
+                for pattern in _SPELLING_FLOOR:
+                    m = re.search(pattern, sentence)
+                    if m is not None:
+                        claims.append(
+                            f"{m.group(0)!r} in sentence {sentence.strip()!r}")
+                        break
+                continue
+            scan = ". ".join(c for c in clauses if not _is_honest_spelling(c))
+        else:
+            scan = sentence
+        patterns = list(_RESIDUAL_OPENNESS)
+        if _RESIDUAL_CLASS_ANCHOR.search(scan):
             patterns += _RESIDUAL_ANCHORED_OPENNESS
         for pattern in patterns:
-            m = re.search(pattern, sentence)
+            m = re.search(pattern, scan)
             if m is not None:
                 claims.append(f"{m.group(0)!r} in sentence {sentence.strip()!r}")
                 break
     return claims
+
+
+def _is_honest_spelling(text: str) -> bool:
+    """Does this TEXT disclose the still-open SPELLING class and nothing else?
+
+    That gap IS open, so saying so is the row's own honest disclosure — but the
+    waiver is only ever granted to a span that names no other class (a unit
+    token, `adjacency`, the carve-out, the guarantee), so it can never travel to
+    a claim about the adjacency class.
+    """
+    return ("spelling" in text
+            and not _UNIT_TOKEN.search(text)
+            and not _RESIDUAL_CLASS_ANCHOR.search(text))
 
 
 def test_the_registry_row_names_the_residual_that_still_stands():
@@ -1508,7 +1554,7 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # statement about some OTHER subject from tripping it, and the closed-claim
     # rule stays scoped to `(d)` where that claim lives.
     # The block's own structural half is asserted here; the reopening half lives
-    # in `_residual_reopening_claims`, whose proof list (24 reopenings that must
+    # in `_residual_reopening_claims`, whose proof list (39 reopenings that must
     # RED, 10 truthful statements that must stay GREEN) is
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` below — that test
     # is what makes the list above a checked claim rather than a docstring.
@@ -1595,6 +1641,26 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is now CLOSED, but the exception it carved is open again.",
     "the ADJACENCY half is not, and never was, closed.",
     "the ADJACENCY half is fail-open.",
+    # round 2: the object / participle / parenthetical complements the closed
+    # adverb list had dropped, and the filler tokens it left unpinned
+    "the ADJACENCY half keeps the gap open.",
+    "the ADJACENCY gap is kept open.",
+    "the ADJACENCY gap is held open.",
+    "the ADJACENCY half remains, in practice, open.",
+    "the ADJACENCY half is, in practice, open.",
+    "the ADJACENCY gap is left open.",
+    "the ADJACENCY gap is now open.",
+    "`minute` is back in the open set.",
+    # round 2: one honest `spelling` clause must not waive the NEXT clause
+    "The SPELLING gap is open on purpose, but the remaining gap is not closed.",
+    "The SPELLING gap is still open, and the remaining gap is open again.",
+    # round 3: a coordinator that JOINS two adjectives inside ONE predicate — the
+    # blanket coordinator bound missed these
+    "the ADJACENCY gap is unjudged and open.",
+    "the ADJACENCY half is unfused and open.",
+    "the ADJACENCY gap is unjudged, and open.",
+    "the ADJACENCY gap remains unjudged and open.",
+    "the ADJACENCY half is unjudged but open.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -1633,7 +1699,7 @@ def _with_appended(text: str, sentence: str) -> str:
 
 
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
-    """#11223: the pin's own proof list, executable — 24 REDs and 10 passes.
+    """#11223: the pin's own proof list, executable — 39 REDs and 10 passes.
 
     The pin above asserted a scan whose bounds were the `(d)` block; measured on
     the row at `af864a42a` that block is 10,019 chars and does NOT contain the
@@ -1651,7 +1717,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     # on `_residual_region`. Deriving it from the scanner is how the first version
     # of this test became self-referential: the mutations moved with the bound, so
     # narrowing the bound kept the suite GREEN (#11258 review P1, measured — with
-    # the literal anchor, narrowing it puts all 24 mutations outside the region and
+    # the literal anchor, narrowing it puts every mutation outside the region and
     # the fixture assertion below fires).
     region = _residual_region(text)
     old_bound = text.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
