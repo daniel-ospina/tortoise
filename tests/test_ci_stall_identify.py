@@ -897,6 +897,11 @@ def test_a_nested_pytest_child_cannot_be_HIJACKED_by_a_LEAKED_config_beside_its_
         capture_output=True,
         text=True,
         timeout=120,
+        # #11095: the same env scrub its four sibling spawns use. Without it an
+        # ambient PYTEST_ADDOPTS/PYTEST_PLUGINS decides what this child collects,
+        # so it could red for a reason unrelated to the leaked-conftest class it
+        # pins (recorded, not charged, in the reviewer's note on #11043).
+        env=_nested_pytest_env(),
     )
     output = proc.stdout + proc.stderr
     assert "ImportError" not in output and "conftest" not in output, (
