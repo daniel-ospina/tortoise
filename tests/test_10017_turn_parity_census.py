@@ -1628,16 +1628,90 @@ def test_a_SYMLINKED_log_is_still_replayable_because_recovery_follows_it(
 
 def test_an_OVERSIZED_log_is_treated_as_replayable_without_reading_it(
         tmp_path, monkeypatch):
-    """A huge log holds events, so the bounded arm must REFUSE, not skip.
+    """A huge log must REFUSE — and must do it WITHOUT reading the file.
 
-    The cap exists so a certification run cannot exhaust memory on an
-    operator-shared directory; the conservative direction is to refuse, because
-    `return None` here would certify a lost store `CLEAN` (fail-open).
+    #11113 review cycle 7, P2: the first version of this pin wrote a PARSABLE
+    40-byte file, so the non-capped path also returned `path` — the pin passed
+    on a mutant with the cap branch deleted, i.e. it did not measure its own
+    name. The file here is UNPARSABLE, so only the cap can produce a refusal;
+    and `os.fdopen` is spied to prove nothing was read.
     """
     db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
-    (tmp_path / "session-events.jsonl").write_text(
-        '{"event_type": "PointAdded", "id": "p1"}\n')
+    (tmp_path / "session-events.jsonl").write_bytes(b"x" * 4096)  # unparsable
     monkeypatch.setattr(tpc, "_LOST_LOG_MAX_BYTES", 4)   # smaller than the file
+
+    opened = []
+    real_fdopen = __import__("os").fdopen
+
+    def spy(*a, **k):
+        opened.append(a)
+        return real_fdopen(*a, **k)
+
+    monkeypatch.setattr(os, "fdopen", spy)
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+    assert opened == [], f"the cap did not prevent a read: {opened}"
+
+
+def test_a_CR_separated_log_is_replayable_like_the_reader_treats_it(
+        tmp_path, monkeypatch):
+    """⛔ CR-only records: recovery replays them, so the arm must refuse.
+
+    #11113 review cycle 7, P2, measured: the arm split on `\n` only while
+    `EventLog.read_all` normalises a bare `\r`, so a 0-node store whose record
+    used CR separators certified `CLEAN` (rc 0) while `recover_from_log`
+    refilled it (`log_points: 2`). Same fail-open class as the symlink fix.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_bytes(
+        b'{"event_type": "PointAdded", "id": "p1"}\r'
+        b'{"event_type": "PointAdded", "id": "p2"}\r')
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+
+
+def test_a_BOM_log_does_not_refuse_where_the_reader_finds_nothing(
+        tmp_path, monkeypatch):
+    """The reader parses TEXT; `json.loads(bytes)` strips a BOM and it does not.
+
+    #11113 review cycle 7, P3: refusing there named a replay recovery would not
+    perform. Measured: `read_all` → 0 events → 'nothing to recover'.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_bytes(
+        b'\xef\xbb\xbf{"event_type": "PointAdded", "id": "p1"}\n')
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_a_pending_prewipe_SNAPSHOT_alone_is_the_LOST_shape_too(
+        tmp_path, monkeypatch):
+    """`recover_from_log` checks the sidecar before its 'no logs' return (#2943).
+
+    #11113 review cycle 7, P3, measured: with zero `.jsonl` files, a pending
+    snapshot is replayed by recovery (`recovered: True`), so a 0-node store whose
+    only record is that sidecar must not be certified `CLEAN` either.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    from tortoise.projection import prewipe_snapshot_path
+    import json as _json
+
+    # the loader's own section vocabulary (`_SNAPSHOT_SECTIONS`): an unknown
+    # key would make this an INVALID sidecar, i.e. a different refusal path.
+    # the loader validates shape AND value types, and the `type` must be one the
+    # replay dispatches on (`PointAdded`/`OperatorAdded`) — an unknown shape is a
+    # DIFFERENT refusal path, not the pending-sidecar this pin is about.
+    _json.dump(
+        {"synthetic_events": [{
+            "type": "PointAdded",
+            "point": {"id": "p-synthetic", "content": "x",
+                      "pointKind": "point", "is_episodic": False},
+        }]},
+        open(prewipe_snapshot_path(str(tmp_path)), "w"))
 
     with pytest.raises(tpc.CensusError) as exc:
         tpc.read_graph_turns(None, db_path, "tortoise")

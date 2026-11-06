@@ -1117,23 +1117,25 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
         lost its graph.
 
     Embedded leg only, decided BEFORE any query (#11113 review cycle 5, P3):
-    the resolved-log DIRECTORY is asked first, because on the URI leg
-    `_find_local_jsonl_dir` exists on the class but answers `None` (`self._path`
-    is None), and issuing the count first put an unbounded `MATCH (n)` scan on
-    every remote run. Answering "I could not ask" is NOT this arm's job: a
-    failed count is left to the read arm, which already refuses with its own
-    message.
+    the store's own DIRECTORY decides that, because a URI projection carries no
+    `_path`, and asking first is what keeps every remote run free of an
+    unbounded `MATCH (n)` scan. (Derived from `_path` rather than from
+    `_find_local_jsonl_dir`, which answers None when the directory holds no
+    `.jsonl` at all — exactly the pending-sidecar case below, #11113 review
+    cycle 7.) Answering "I could not ask" is NOT this arm's job: a failed count
+    is left to the read arm, which already refuses with its own message.
     """
-    finder = getattr(proj, "_find_local_jsonl_dir", None)
-    if finder is None:            # a URI leg: recovery never applies there
+    path = getattr(proj, "_path", None)
+    if not path:                  # a URI leg: recovery never applies there
         return
     try:
-        events_dir = finder()
-    except Exception:
+        events_dir = os.path.dirname(
+            os.path.abspath(os.path.expanduser(str(path))))
+    except (OSError, ValueError):
         return
-    if not events_dir:
-        return                    # no adjacent log: nothing would replay
     replayable = _one_replayable_log(events_dir)
+    if replayable is None:
+        replayable = _pending_prewipe_snapshot(events_dir)
     if replayable is None:
         return                    # recovery would refuse this log too
     try:
@@ -1203,19 +1205,49 @@ def _one_replayable_log(events_dir: str) -> str | None:
         if info.st_size > _LOST_LOG_MAX_BYTES:
             return path           # too big to read, but it certainly has events
         with os.fdopen(os.dup(fd), "rb") as fh:
-            for line in fh:
-                if not line.strip():
-                    continue
-                try:
-                    json.loads(line)
-                except ValueError:
-                    continue
-                return path
+            raw = fh.read()
     except OSError:
         return None
     finally:
         os.close(fd)
+    # Mirror `EventLog.read_all`'s READER, not only its event test (#11113 review
+    # cycle 7, P2/P3): it normalises a bare `\r` to `\n` (a CR-separated record
+    # is a record it replays — measured: the arm was silent, recovery refilled
+    # the store, and `--expect-empty` certified it CLEAN), and it parses TEXT, so
+    # `json.loads(bytes)`'s implicit BOM stripping must not make this arm refuse
+    # where the reader finds nothing.
+    text = (raw.decode("utf-8", "replace")
+            .replace("\r\n", "\n").replace("\r", "\n"))
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except ValueError:
+            continue
+        return path
     return None
+
+
+def _pending_prewipe_snapshot(events_dir: str) -> str | None:
+    """A pending pre-wipe snapshot — the OTHER record recovery replays.
+
+    `recover_from_log` checks the sidecar BEFORE its "no logs" return (#2943):
+    with zero `.jsonl` files the snapshot is the only record of a rebuild's
+    graph-only Points, and it is replayed. So a 0-node store whose sole record
+    is a pending sidecar is the LOST shape too (#11113 review cycle 7, P3), and
+    the loader — not `lexists` — is what decides presence.
+    """
+    try:
+        from tortoise.projection import prewipe_snapshot_path
+        from tortoise.consistency import _load_prewipe_snapshot
+    except Exception:             # pragma: no cover - import env problem
+        return None
+    try:
+        path = prewipe_snapshot_path(events_dir)
+        return path if _load_prewipe_snapshot(path) is not None else None
+    except Exception:
+        return None
 
 
 def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:
