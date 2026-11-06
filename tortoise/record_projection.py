@@ -1606,6 +1606,13 @@ _COLUMN_TYPE_RE = re.compile(
     r'((?:' + _DECLARED_TYPE_ALTERNATION + r')\b(?:\[\])?)',
     re.M | re.I)
 
+#: `table_columns()`'s column matcher — an ALIAS of `_COLUMN_TYPE_RE`, not a
+#: second list (#11075 review P2). It used to carry its own seven-term type
+#: alternation, so widening the vocabulary for the declared-type pin would have
+#: left the PLACEMENT reader (`_split_properties`) unable to see a
+#: `numeric`/`uuid`/`date` column: the column would be typed and
+#: closure-enforced by the pin while its value was still pushed into the `props`
+#: tail. One list, two readers — widening it widens both, which is the point.
 _COLUMN_RE = _COLUMN_TYPE_RE
 
 #: A `--` line comment or a `/* … */` block comment, stripped before a migration
@@ -1699,6 +1706,13 @@ def _strip_sql_comments(sql: str) -> str:
     out: list[str] = []
     i, n = 0, len(sql)
     quote = False
+    #: Is the OPEN literal an `E'…'` one, where a backslash escapes? A PLAIN
+    #: `'C:\'` is a COMPLETE literal under `standard_conforming_strings=on` (the
+    #: PG default), so treating every literal as backslash-escaped swallows the
+    #: closing quote, never leaves quote mode, and preserves every later comment
+    #: — including a narrowing migration's DOWN direction, which is the misread
+    #: this function exists to prevent (#11075 review P2, measured).
+    escapes = False
     dollar = ""  # an open `$$` / `$tag$` delimiter, "" when none
     while i < n:
         char = sql[i]
@@ -1713,11 +1727,8 @@ def _strip_sql_comments(sql: str) -> str:
             continue
         if quote:
             out.append(char)
-            if char == "\\" and i + 1 < n:
-                # A backslash escape (`E'it\'s'`) — WITHOUT this the scanner
-                # desynchronises for the rest of the file and every later `--`
-                # comment (the narrowing migrations' DOWN direction among them)
-                # is read as SQL (#11075 review P2).
+            if escapes and char == "\\" and i + 1 < n:
+                # A backslash escape, and ONLY where it IS one.
                 out.append(sql[i + 1])
                 i += 2
                 continue
@@ -1748,6 +1759,10 @@ def _strip_sql_comments(sql: str) -> str:
             continue
         if char == "'":
             quote = True
+            # `E'…'` / `e'…'` — set from the character just emitted, so an
+            # ordinary `EXECUTE '…'` literal (nor the `E` of a preceding word) is
+            # not misread as an escape-carrying one.
+            escapes = bool(out) and out[-1] in ("E", "e")
         out.append(char)
         i += 1
     return "".join(out)

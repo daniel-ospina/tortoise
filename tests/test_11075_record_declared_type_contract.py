@@ -338,10 +338,21 @@ def _is_json_text(value: str) -> bool:
     return True
 
 
-_ISO_LIKE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}"
-    r"([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}(:?\d{2})?)?)?$"
-)
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_INT_LITERAL_RE = re.compile(r"^-?\d+$")
+
+
+def _parse_iso(value: str) -> object:
+    """`value` as a datetime, or raise `ValueError` — Postgres's own verdict.
+
+    `Z` is normalised to `+00:00` because `datetime.fromisoformat` predates the
+    `Z` spelling on 3.11.
+    """
+    from datetime import datetime
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _accepts(declared: str, value: Any) -> bool:
@@ -363,10 +374,18 @@ def _accepts(declared: str, value: Any) -> bool:
     declared = declared.lower()
     if declared.endswith("[]"):
         return isinstance(value, (list, tuple))
-    if declared in ("text", "varchar", "character varying", "uuid"):
+    if declared in ("text", "varchar", "character varying"):
         return isinstance(value, str)
+    if declared == "uuid":
+        # Parsed, like the timestamp arm: `uuid` is in the widened vocabulary, so
+        # this arm is what greets the first such column, and "any string" would
+        # certify a value Postgres refuses with `22P02`.
+        return isinstance(value, str) and bool(_UUID_RE.match(value))
     if declared == "date":
-        return isinstance(value, (str, date)) and not isinstance(value, datetime)
+        if isinstance(value, datetime):
+            return True  # a datetime carries a date; Postgres accepts the cast
+        return isinstance(value, date) or (
+            isinstance(value, str) and bool(_DATE_RE.match(value)))
     if declared in ("jsonb", "json"):
         if isinstance(value, str):
             # sent as `text`; `text → jsonb` PARSES it (#10593's 22P02)
@@ -377,7 +396,20 @@ def _accepts(declared: str, value: Any) -> bool:
         return isinstance(value, (dict, list))
     if declared in ("integer", "bigint", "smallint", "serial", "bigserial",
                     "smallserial"):
-        return isinstance(value, int) and not isinstance(value, bool)
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return True
+        # `float8 → int4` is an ASSIGNMENT cast, and an integral float is what a
+        # JSON producer hands over (`json.loads("3.0")`) for the #9264 column —
+        # refusing it would be a FALSE red, whose obvious repair is the
+        # exemption this file exists to make unreachable.
+        if isinstance(value, float):
+            return value.is_integer()
+        # A string literal is coerced by the assigned column type (`'3'` into an
+        # `integer` column IS accepted), so the arm matches that rather than
+        # claiming a refusal that does not happen.
+        return isinstance(value, str) and bool(_INT_LITERAL_RE.match(value.strip()))
     if declared == "boolean":
         return isinstance(value, bool)
     if declared in ("double precision", "real", "numeric", "decimal"):
@@ -387,10 +419,17 @@ def _accepts(declared: str, value: Any) -> bool:
                     "timestamp without time zone"):
         if isinstance(value, datetime):
             return True
-        # A str is PARSED by the cast: a non-date string is `22007`, so the
-        # shape is checked rather than assumed (this is what reds on the
-        # corpus's placeholder `"ts": "T"`).
-        return isinstance(value, str) and bool(_ISO_LIKE.match(value))
+        if not isinstance(value, str):
+            return False
+        # A str is PARSED by the cast: a non-date string is `22007`, so the VALUE
+        # is checked rather than its shape alone — `2026-13-45` matches the shape
+        # and is refused by Postgres. This is what reds on the corpus's
+        # placeholder `"ts": "T"`.
+        try:
+            _parse_iso(value)
+        except ValueError:
+            return False
+        return True
     if declared == "bytea":
         return isinstance(value, (bytes, bytearray))
     return False
@@ -703,6 +742,20 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
     """
     declared = rp.column_types()
     loose = re.compile(r'^\s*"?([a-z_][a-z0-9_]*)"?\s+\S', re.M)
+    #: The two FORWARD shapes, read with the same deliberate dimness: a column
+    #: name, then whatever token follows. ⚠️ Without these the arm is blind to
+    #: the ONLY way a landed table gains (or re-types) a column — `ADD COLUMN` is
+    #: #2782's growth path and `ALTER COLUMN … TYPE` is #9264's reversal — so a
+    #: column of an unlisted type could join the schema with every test GREEN
+    #: (#11075 review round 2, measured with `int4range` / `citext`).
+    token = (r"(double\s+precision|character\s+varying"
+             r"|timestamp\s+(?:with|without)\s+time\s+zone|[a-z_][a-z0-9_]*)"
+             r"(\[\])?")
+    added = re.compile(
+        r'ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?'
+        r'\s+' + token, re.I)
+    retyped = re.compile(
+        r'ALTER\s+COLUMN\s+"?([a-z_][a-z0-9_]*)"?\s+TYPE\s+' + token, re.I)
     missed: list[str] = []
     for name in rp.RECORD_MIGRATIONS:
         path = MIGRATIONS / name
@@ -718,6 +771,26 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
                     continue
                 if column not in declared.get(table, {}):
                     missed.append(f"{table}.{column} ({name})")
+        for table, alter_body in rp._ALTER_ADD_COLUMN_RE.findall(sql):
+            if table not in rp.THE_RECORD_TABLES:
+                continue
+            for pattern in (added, retyped):
+                for found in pattern.finditer(alter_body):
+                    column = found.group(1)
+                    type_token = re.sub(
+                        r"\s+", " ", found.group(2).strip().lower()
+                    ) + (found.group(3) or "")
+                    here = declared.get(table, {})
+                    if column not in here:
+                        missed.append(
+                            f"{table}.{column} (forward shape in {name}, "
+                            f"type {type_token!r} — the column is not "
+                            "captured at all)")
+                    elif here[column] != type_token and pattern is retyped:
+                        missed.append(
+                            f"{table}.{column} (forward REWRITE in {name} to "
+                            f"{type_token!r}, but the reader reports "
+                            f"{here[column]!r} — the rewrite is not applied)")
     assert missed == [], (
         "these columns are DECLARED in a migration and were not captured by "
         "`_DECLARED_TYPE_ALTERNATION`, so they are outside every pin -- widen "
@@ -756,6 +829,35 @@ def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     # still parses, which is the property that keeps a later DOWN comment out.
     escaped = "COMMENT ON COLUMN public.t.c IS E'it\\'s';\n-- ALTER COLUMN x TYPE jsonb\n"
     assert "ALTER COLUMN x TYPE jsonb" not in rp._strip_sql_comments(escaped)
+
+
+def test_the_stripper_is_load_bearing_at_the_PARSE_level(tmp_path):
+    """Disabling the stripper must change what `column_types()` READS.
+
+    The synthetic cases above prove the scanner's own behaviour; this proves the
+    scanner matters to the READER, which is the claim that keeps it from being
+    deletable. A narrowing migration is copied with its own DOWN direction
+    re-attached as a BLOCK comment — the shape whose `--`-free formatting does
+    not happen to break the `\\s+` joins — and the reader must still report the
+    narrowed type.
+    """
+    copy = tmp_path / "migrations"
+    shutil.copytree(MIGRATIONS, copy)
+    target = copy / "20261102000002_record_point_search_keys_text.sql"
+    target.write_text(
+        target.read_text(encoding="utf-8")
+        + "\n/*\n  ALTER TABLE public.point\n"
+          "      ALTER COLUMN search_keys TYPE jsonb;\n*/\n",
+        encoding="utf-8",
+    )
+    assert rp.column_types(copy)["point"]["search_keys"] == "text", (
+        "a DOWN direction recorded as a block comment was read as the UP type "
+        "-- the stripper is not doing the one job it exists for"
+    )
+    # And the DOWN text really was present in the file, so the assertion above
+    # is not passing because the fixture never carried it.
+    assert "ALTER COLUMN search_keys TYPE jsonb" in target.read_text(
+        encoding="utf-8")
 
 
 def test_the_reader_sees_the_two_narrowings_that_broke_production():
@@ -867,12 +969,16 @@ def test_the_10593_arm_is_CLOSED_AT_THE_WRITER_and_that_is_pinned(tmp_path):
     assert _accepts("timestamptz", "2026-11-06T00:00:00Z")
     # And the `dict`/`list` arm, unchanged by #9548.
     assert _accepts("jsonb", rp._jsonb_or_scalar("props", {"a": 1}))
-    # (`'3'` bound to an `integer` column IS accepted by Postgres — an untyped
-    # literal is coerced by the assigned column type — so this predicate must
-    # not claim otherwise; the refusal class is the TYPED parameter OID.)
-    assert not _accepts("jsonb", 3), (
-        "an int carries a numeric OID, and there is no int → jsonb cast (#9264)"
-    )
+    # The refusal class is the TYPED parameter OID: an int/float/bool carries a
+    # numeric/bool OID and there is no such cast to `jsonb` (#9264's 42804) —
+    # while an untyped `'3'` literal IS coerced by an assigned `integer` column,
+    # so the predicate must not claim a refusal that does not happen.
+    assert not _accepts("jsonb", 3)
+    assert not _accepts("jsonb", 3.0)
+    assert not _accepts("jsonb", True)
+    assert _accepts("integer", 3), "an integral float is an assignment cast"
+    assert _accepts("integer", 3.0), "float8 → int4 is an assignment cast"
+    assert _accepts("integer", "3"), "an untyped literal is coerced"
 
 
 def test_a_column_of_an_unknown_type_is_not_silently_skipped():
