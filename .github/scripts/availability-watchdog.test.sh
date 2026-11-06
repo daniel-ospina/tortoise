@@ -2261,8 +2261,8 @@ assert_contains "$WORKFLOW_CODE" "ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CH
   "ESCALATION_CHAT_ID is exported to the probe steps (step env)"
 assert_not_contains "$JOB_ENV" "ESCALATION_CHAT_ID" \
   "ESCALATION_CHAT_ID is NOT job-level (step env only — otherwise the override escapes containment)"
-assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CHAT_ID }}')" "2" \
-  "ESCALATION_CHAT_ID is set on BOTH probe steps (the API step and the auth step fail independently)"
+assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CHAT_ID }}')" "3" \
+  "ESCALATION_CHAT_ID is set on ALL THREE probe steps (the API, auth and served-liveness steps fail independently, so each must be able to page and each must be containable)"
 # #3887 round 5: the KILL SWITCH joins the same containment surface. The runbook
 # documents ESCALATE_ENABLED as an operator control, so it must be wired — an
 # unwired knob is a documented control an operator cannot engage without editing
@@ -2278,8 +2278,8 @@ assert_contains "$WORKFLOW_CODE" "ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }
   "ESCALATE_ENABLED is wired to the probe steps from the repo variable (a documented operator control must be reachable)"
 assert_not_contains "$JOB_ENV" "ESCALATE_ENABLED" \
   "ESCALATE_ENABLED is NOT job-level (step env only — the same containment discipline as ESCALATION_CHAT_ID)"
-assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }}')" "2" \
-  "ESCALATE_ENABLED is set on BOTH probe steps (wiring only one leaves the other surface unkillable)"
+assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }}')" "3" \
+  "ESCALATE_ENABLED is set on ALL THREE probe steps (wiring only one leaves the other surfaces unkillable)"
 
 # ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
@@ -2337,6 +2337,51 @@ assert_eq "$(printf '%s\n' "$AUTH_STEP" | grep -c 'PROBE_HOST_LABEL:')" "1" \
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
+
+# ── 97: the workflow drives the SERVED-REQUEST liveness surface (#10892) ───
+# #10892's finding: `api.premiselabs.co` was unusable for ~2 h while BOTH Fly
+# checks read `passing`, because both are liveness-shaped — one is a kernel TCP
+# handshake, the other reads state the loop last wrote from another thread. The
+# missing instrument is a request that must RETURN, bounded by the client's
+# patience. Three things therefore have to move TOGETHER, and each one alone
+# fails silently:
+#   * the step's URL  — without it nothing probes the served path at all;
+#   * script membership in the production set — an unrecognised URL is a DRILL:
+#     [DRILL]-titled incident, NO page, self-heal disarmed. A step that looks
+#     exactly right in the diff can therefore alert nobody.;
+#   * the 5 s bound — a liveness probe that waits 25 s for an answer is the
+#     status-only probe this issue already had. The bound IS the instrument, so
+#     a later "harmonise the timeouts" tidy-up must red HERE rather than in the
+#     first outage nobody is paged for.
+LIVENESS_STEP="$(sed -n '/Probe the served-request liveness endpoint/,/availability-watchdog.sh/p' "$AUTH_WORKFLOW" | grep -v '^[[:space:]]*#' || true)"
+assert_not_empty "$LIVENESS_STEP" "the served-liveness step exists in the watchdog workflow"
+LIVENESS_PROBE_URL_STEP="$(printf '%s\n' "$LIVENESS_STEP" | sed -n "s|.*PROBE_URL:[[:space:]]*[\"']\{0,1\}\(https://[^ \"']*\)[\"']\{0,1\}.*|\1|p" | head -1)"
+LIVENESS_HOST="$(printf '%s' "$LIVENESS_PROBE_URL_STEP" | sed -n 's|https://\([^/]*\)/.*|\1|p')"
+assert_not_empty "$LIVENESS_PROBE_URL_STEP" "the liveness step's PROBE_URL is derivable (a quoted/folded value must not silently vacate the guards below)"
+assert_contains "$LIVENESS_PROBE_URL_STEP" "/liveness" "the liveness step probes the served-request path, not /health (the endpoint that answered from cached state)"
+# …the script must classify that same URL as PRODUCTION, or the step runs as a
+# DRILL and pages nobody.
+assert_contains "$(grep '^LIVENESS_PROBE_URL=' "$WATCHDOG" || true)" "$LIVENESS_PROBE_URL_STEP" \
+  "the watchdog script's LIVENESS_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
+assert_eq "$(prod_unit "$LIVENESS_PROBE_URL_STEP")" "PROD" \
+  "prod set: the served-liveness URL is PRODUCTION (files a PROD incident and PAGES)"
+# …and NOT restartable: it is the same Fly machine as the primary API probe, and
+# each probe's incident issue is its own restart ledger, so a second arm would
+# let one wedged machine spend MAX_RESTARTS_PER_HOUR twice.
+assert_eq "$(restartable_unit "$LIVENESS_PROBE_URL_STEP")" "NO" \
+  "restart set: the served-liveness probe NEVER restarts (the primary API probe owns that machine — two legs double the velocity cap)"
+assert_contains "$LIVENESS_STEP" "PROBE_TIMEOUT_S: '5'" \
+  "the liveness step keeps its 5 s per-request bound (the latency arm IS the fix; 25 s is the status-only probe it replaces)"
+assert_contains "$LIVENESS_STEP" "PROBE_EXPECT_STATUS: '200'" "the liveness step's healthy answer is 200 and nothing else"
+assert_contains "$LIVENESS_STEP" "HEARTBEAT_EMIT: '0'" \
+  "the liveness step does NOT write the rolling heartbeat (exactly ONE step per job emits, or two writes race the search index into a duplicate issue)"
+assert_contains "$LIVENESS_STEP" '!cancelled()' "the liveness step runs even when another probe failed (independent alerting)"
+assert_not_contains "$LIVENESS_STEP" "FLY_API_TOKEN" "the liveness step gets NO Fly token (no restart path)"
+assert_not_contains "$LIVENESS_STEP" "PROD_PROBE_URLS" "the liveness step does not set the production set (a second route to a silent DRILL)"
+assert_contains "$LIVENESS_STEP" "PROBE_HOST_LABEL: $LIVENESS_HOST" \
+  "the liveness step's host label matches the host it probes (its incident DEDUPE key)"
+assert_eq "$(printf '%s\n' "$LIVENESS_STEP" | grep -c 'PROBE_HOST_LABEL:')" "1" \
+  "the liveness step carries exactly ONE host label (a duplicate line is last-wins and could re-point the dedupe key)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # #3887 — the sustained-incident ESCALATION LEG (leaves GitHub: a thresholded,

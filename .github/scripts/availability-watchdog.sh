@@ -286,6 +286,25 @@ DEFAULT_PROBE_URL="https://api.premiselabs.co/v1/organizations"
 # 404 for /auth/start BY DESIGN, so probing it watched a route no user path
 # touches — the same blindness #3628 was filed to end, one host to the left.
 AUTH_PROBE_URL="https://app.premiselabs.co/auth/start"
+# The SERVED-REQUEST liveness surface (#10892): `GET /liveness` on the hosted
+# API (`tortoise/hosted_api.py`). During the 2026-11-04 outage (`api.`
+# unusable for ~2 h, 09:22Z-11:02Z and again 13:17Z-19:35Z) BOTH Fly checks read
+# `passing` the whole time, because both are liveness-shaped: `tcp_8000` is a
+# KERNEL handshake (a hung app passes it) and `loop_liveness` reads state the
+# loop last wrote from a listener on ANOTHER thread. `/health` itself cannot be
+# answered while the loop is blocked — but nothing we RAN had a bound on
+# absence, so a request that never returned was indistinguishable from a slow
+# one and no alarm existed.
+#
+# `PROBE_TIMEOUT_S` is overridden to 5 s for this URL in the workflow, which is
+# the whole point of a THIRD target rather than re-pointing the API probe: a
+# request that must return is bounded by the CLIENT's patience, not by the
+# server's eventual answer. The primary API probe keeps its generous 25 s (it
+# must not page on one slow origin fetch); this one pages when a health request
+# the app can serve in ~50 ms takes longer than 5 s, which is the latency arm
+# the incident measured missing (`loop_lag_p99_ms: 14871` alongside every check
+# green).
+LIVENESS_PROBE_URL="https://api.premiselabs.co/liveness"
 # The SET of production probe URLs. `is_prod` is decided by SET MEMBERSHIP, not
 # by a boolean flag: an unrecognised URL is ALWAYS a drill, so a typo'd or
 # forgotten flag can never arm self-heal against an unexpected host (fail
@@ -294,15 +313,21 @@ AUTH_PROBE_URL="https://app.premiselabs.co/auth/start"
 # operator who neutralises the set by setting it to "" gets the FAIL-CLOSED
 # direction (everything is a drill) rather than `:-`'s opposite — the default
 # set with self-heal ARMED. The default applies only when the variable is UNSET.
-PROD_PROBE_URLS="${PROD_PROBE_URLS-$DEFAULT_PROBE_URL $AUTH_PROBE_URL}"
+PROD_PROBE_URLS="${PROD_PROBE_URLS-$DEFAULT_PROBE_URL $AUTH_PROBE_URL $LIVENESS_PROBE_URL}"
 # Which production URLs have a Fly machine behind them and may therefore arm
 # the restart leg. The auth surface is PRODUCTION for alerting and incident
 # identity, but it is served by Cloudflare Pages: a 503 there means a missing
 # binding, and `flyctl machine restart` on the API app cannot repair it — it
-# would restart an unrelated service. Membership again (fail closed): a new
-# production URL is non-restartable until explicitly added here — and an
-# explicit EMPTY value stays empty (single-dash), so the kill-intent cannot
-# fail OPEN into an armed restart (the `:-` form substituted the default).
+# would restart an unrelated service. The liveness surface (#10892) IS the same
+# Fly machine as the primary API probe, so it is deliberately NOT restartable
+# either: its incident issue is its own rate-limit ledger, so a second restart
+# arm would let one wedged machine restart itself up to `MAX_RESTARTS_PER_HOUR`
+# on EACH issue — double the velocity cap the AWS-remediation guidance this file
+# follows is built to bound. The primary API probe owns restarting that machine.
+# Membership again (fail closed): a new production URL is non-restartable until
+# explicitly added here — and an explicit EMPTY value stays empty (single-dash),
+# so the kill-intent cannot fail OPEN into an armed restart (the `:-` form
+# substituted the default).
 RESTARTABLE_PROBE_URLS="${RESTARTABLE_PROBE_URLS-$DEFAULT_PROBE_URL}"
 PROBE_URL="${PROBE_URL:-$DEFAULT_PROBE_URL}"
 # Display name in titles/logs. Deliberately NOT derived from PROBE_URL: the

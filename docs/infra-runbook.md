@@ -1675,6 +1675,51 @@ before grace expires) ⇒ no clamp. `fly config show` only echoes the local
 config and cannot answer this. Nobody has run this test yet — it is listed in
 §6.9.
 
+#### 6.4.2 A check that can only pass by BEING SERVED — `/liveness` (#10892)
+
+The two checks in §6.4 are **liveness-shaped**: the TCP check's handshake is
+served by the kernel, and `9090 /healthz` answers from **state the loop last
+wrote**, with a verdict that errs to 200 by design. On 2026-11-04 `api.`
+was unusable for ~2 h (and again for ~6 h the same day) while **both reported
+`2 total, 2 passing`** — `loop_lag_max_ms: 483685` and `passing` in the same
+payload. Neither check can distinguish "answering" from "not answering at all",
+and nothing we RAN bounded the absence.
+
+Two halves close that, and neither is a health *reading*:
+
+1. **`GET /liveness`** (`hosted_api.liveness`) — the handler yields to the loop
+   once, then increments a per-process counter **for this request** and reports
+   the age of the last completed one. If the loop cannot run, the coroutine
+   never resumes, so there is no answer to mistake for health. Measured: it
+   serves in ~50 ms; with the loop blocked, `/health` and `/liveness` both
+   answer **nothing** inside a 5 s client budget
+   (`tests/test_10892_served_liveness.py`, which pins that shape and the
+   "handler must not become a state read" regression).
+2. **The prober that fails on absence** — `.github/workflows/availability-watchdog.yml`
+   probes it as a THIRD step with `PROBE_TIMEOUT_S='5'` (the API probe keeps its
+   generous 25 s), `PROBE_EXPECT_STATUS='200'`, its own incident label, and no
+   Fly token. `curl --max-time 5` is what turns *no answer* into a DOWN verdict
+   and a page — during the outage the app took 9–12 s to `000` from outside and
+   ~45 s to the eventual 504, so a 5 s bound alarms within one cycle. The URL is
+   in the script's production set (an unrecognised URL is a **DRILL**: no page)
+   and deliberately NOT restartable — the primary API probe owns restarting the
+   machine, and a second restart arm would spend `MAX_RESTARTS_PER_HOUR` twice.
+   Pinned by case 97 of `.github/scripts/availability-watchdog.test.sh`.
+
+**Blind spots, stated rather than implied.** It detects a loop that cannot
+serve; it does NOT detect a loop that serves slower than the bound, it says
+nothing about a deploy that never happened (`check-deploy-staleness.sh`), and it
+is not a substitute for the TCP check that catches a dead process. Do **not**
+replace it with `loop_stale_ms`: reading the loop's own tick to decide the loop
+is fine is the exact circularity that let this outage run unattended.
+
+Operator check, one line, from anywhere:
+
+```bash
+curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
+# {"status":"ok","served":<N>,"last_completed_age_ms":<ms|null>}   # N must GROW
+```
+
 ### 6.5 Cost reference (what "one machine warm" actually costs)
 
 > ⚠️ **LIST-PRICE ESTIMATES — not a quote — and DATED (snapshot 2026-09-10).**

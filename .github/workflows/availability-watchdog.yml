@@ -324,3 +324,61 @@ jobs:
           PROBE_EXPECT_STATUS: '302'
           PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'
         run: bash .github/scripts/availability-watchdog.sh
+      # THIRD TARGET (#10892): the SERVED-REQUEST liveness surface. This is the
+      # arm that closes "we have no probe that fails when a request cannot be
+      # served". On 2026-11-04 `api.premiselabs.co` was unusable for ~2 h across
+      # two windows while BOTH Fly checks read `passing`: `servicecheck-00-tcp-8000`
+      # is a kernel handshake (a hung app passes it) and `loop_liveness` reads the
+      # loop's own last tick from a listener on another thread. Neither can
+      # distinguish "answering" from "not answering at all".
+      #
+      # WHY A SEPARATE STEP rather than re-pointing the API probe: the BOUND is
+      # the instrument, and it is not the same bound. The primary API probe keeps
+      # its generous 25 s (it must not page on one slow origin fetch); this
+      # endpoint serves in ~50 ms, so 5 s is the latency arm the incident measured
+      # missing — measured at the same moment the checks were green:
+      # `loop_lag_p99_ms: 14871`, `loop_lag_max_ms: 483685`, `/health` answering
+      # `000` at 9-12 s from outside. A probe with a 5 s timeout alarms within one
+      # cycle; the 25 s one did not exist for this shape at all.
+      #
+      # `if: !cancelled()` like the auth step: the surfaces fail INDEPENDENTLY, so
+      # an API outage must not suppress this alert (and a red here must not be
+      # hidden by a green API probe — the job fails if EITHER step fails).
+      - name: Probe the served-request liveness endpoint (5s bound; never restartable)
+        if: ${{ !cancelled() }}
+        env:
+          # Same step-level credential containment as the two steps above.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
+          ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
+          # #4573: THIRD probe step of the same job — it must NOT write the rolling
+          # heartbeat either. Exactly one step per job emits (the primary API
+          # step), so this one opts out for the same reason the auth step does:
+          # two writes seconds apart could race GitHub's search index into a
+          # DUPLICATE rolling issue.
+          HEARTBEAT_EMIT: '0'
+          PROBE_URL: https://api.premiselabs.co/liveness
+          # Its OWN label: the incident TITLE is the dedupe key, so sharing the
+          # primary probe's label would make the two surfaces fight over one
+          # issue (and a green primary probe would then close a red liveness one).
+          PROBE_HOST_LABEL: api.premiselabs.co (served request)
+          # Healthy = 200 and nothing else. 000/5xx are DOWN (checked before the
+          # list, so a malformed list cannot disarm an outage arm); any other
+          # answered code — 404 after a deploy that lacks the route, a 3xx —
+          # is UNEXPECTED, i.e. a DEGRADED incident, which is the honest
+          # reading: the route this probe depends on is not there.
+          PROBE_EXPECT_STATUS: '200'
+          # THE LATENCY BOUND — the reason this step exists (see the header).
+          # 5 s is ~100x the endpoint's measured service time, so it cannot fire
+          # on a healthy origin; it fires on the outage shape, where the app
+          # genuinely could not answer (measured 9-12 s to `000`, 45 s to the
+          # eventual 504). curl's `--max-time` is what makes ABSENCE a verdict.
+          PROBE_TIMEOUT_S: '5'
+          PROBE_CONNECT_TIMEOUT_S: '3'
+          # Keep the attempt budget of the primary probe: three attempts ~10 s
+          # apart before DOWN, so a single lossy runner network blip cannot page.
+          PROBE_ATTEMPTS: '3'
+          PROBE_RETRY_SLEEP_S: '10'
+        run: bash .github/scripts/availability-watchdog.sh

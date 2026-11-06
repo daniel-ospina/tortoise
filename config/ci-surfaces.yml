@@ -131,6 +131,16 @@ surfaces:
   # braces there, and deleting it would red nothing.
   - test_stdlib_shadow_guard.py
   - test_11092_sentry_loop_stall.py
+  # #10892: the served-request liveness surface. Dual-registered for the reason
+  # the hosted_api.py guards above are — `GET /liveness` and its counter live in
+  # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES
+  # the `core` fallback, so without this row the endpoint's provenance pin
+  # (`test_handler_yields_to_the_loop_and_reads_no_cached_state`) is never
+  # selected on a hosted_api.py-only diff — the exact change class it guards.
+  # The prober half (`.github/workflows/availability-watchdog.yml`,
+  # `.github/scripts/availability-watchdog.sh`) matches no SOURCE_PATTERNS row
+  # and falls through to `core`, which is the row below.
+  - test_10892_served_liveness.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
   # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
@@ -3914,7 +3924,11 @@ surfaces:
   # `tests/test_sentry.py` carries none of those three, and it sits in the frozen
   # `_SELF_GUARD_DEBT` so a `sentry.py`-only diff does not run it either.
   - test_11092_sentry_loop_stall.py
-  - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  # #10892: the OTHER half of the served-liveness pair. `core` is the row that
+  # covers the prober (`.github/**` matches no SOURCE_PATTERNS entry), and it is
+  # also what a diff touching nothing but this test file falls through to.
+  - test_10892_served_liveness.py
+
   - test_context_confinement.py  # #10612: one fresh contextvars.Context per invocation (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   # #8920 (review P3): production pointers into `tests/` must resolve, and no

@@ -4156,7 +4156,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     consume nor are consumed by the general per-key budget.
     """
 
-    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}  # noqa: RUF012
+    # #10892: `/liveness` joins the exempt set for the same reason `/health` is
+    # in it — a monitoring probe must not spend a customer's budget, and it must
+    # not be refused for sharing an egress IP with anything else (GitHub Actions
+    # runners are a SHARED egress address, so an unauthenticated probe there
+    # would bucket against every other job on that runner). A 429 is classified
+    # UP by the watchdog, but a probe that is *supposed* to prove a request can
+    # be served should not depend on a bucket staying empty.
+    SKIP = {"/health", "/health/ready", "/liveness", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}  # noqa: RUF012
     # R-13: path → dedicated per-key limit. The commit endpoint's bucket is
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
     # general 100/min bucket.
@@ -6759,6 +6766,100 @@ def _record_health() -> dict:
         block["armed"] = True
         block["dsn"] = record_writer.dsn_fingerprint(dsn)
     return block
+
+
+# ── #10892: THE SERVED-REQUEST LIVENESS SURFACE ────────────────────────────
+#
+# A `~2 h` customer-visible outage (`api.premiselabs.co`, 2026-11-04) ran with
+# **2/2 Fly checks GREEN throughout**. Both of those checks are LIVENESS-shaped
+# in the sense this module now distinguishes:
+#
+#   * `servicecheck-00-tcp-8000` is a TCP connect check (`fly.toml`, #2850) —
+#     the handshake is served by the KERNEL, so a totally hung app passes it;
+#   * `[checks.loop_liveness]` points at the `9090 /healthz` listener, which
+#     runs on its OWN thread and answers from state the loop last wrote
+#     (`loop_heartbeat_info()`). A loop that never runs cannot update that
+#     state, and the verdict errs to 200 by design (`stale AND idle`), so a
+#     loop 8 minutes behind still reads `status: ok`.
+#
+# `/health` on THIS port is not the lied-about surface either — measured
+# (`tests/test_10892_served_liveness.py`): with the loop blocked, a request to
+# `/health` is not answered at all while the block holds (the client sees TCP
+# accept and zero bytes, then its own timeout). What was missing was therefore
+# not a stricter reading — it was an INSTRUMENT WITH A BOUND ON ABSENCE, pointed
+# at a request that has to be served.
+#
+# This endpoint is that request, and its answer is deliberately impossible to
+# produce from cached state: it increments a counter FOR THIS REQUEST and
+# reports the age of the last COMPLETED one. If the loop cannot run, this
+# handler never resumes, so no answer exists to be mistaken for health — the
+# prober's own timeout is the signal (`.github/workflows/availability-watchdog.yml`
+# probes it with a 5 s per-request bound, #10892).
+#
+# ⚠️ THE STALE ANSWER THIS PREVENTS IS THE WHOLE INCIDENT. `/health` and
+# `9090 /healthz` both answer from values written by something else (a
+# background thread's probe snapshot; the loop's own last tick). Those values
+# are honest evidence BESIDE a served request and worth nothing INSTEAD of one —
+# using `loop_stale_ms` to decide the loop is fine is the exact circularity
+# #10892 is about.
+#
+# BLIND SPOT, stated rather than implied (the `docs/ops/fleet-liveness.md`
+# discipline): this proves a request was SERVED just now. It does NOT measure a
+# loop that serves SLOWLY — a 4 s answer passes a 5 s prober, and the outage's
+# mean refusal was ~45 s only because the transport wait bound eventually fired.
+# It also says nothing about a deploy that never happened (that is
+# `check-deploy-staleness.sh`) or about a process that is dead (the TCP check
+# and Fly's own routing cover that). The latency arm that closes the first
+# blind spot is the prober's per-request bound, not this handler.
+_LIVENESS_SERVED_LOCK = threading.Lock()
+#: Requests to `/liveness` this PROCESS has answered. Monotonic, never reset
+#: (a restart starting again at 1 is itself the evidence of a restart).
+_LIVENESS_SERVED_COUNT = 0
+#: ``time.monotonic()`` of the last COMPLETED ``/liveness`` request, or None
+#: before the first one — "no sample" must be distinguishable from "a fast one".
+_LIVENESS_LAST_COMPLETED_AT: float | None = None
+
+
+@app.get("/liveness")
+async def liveness():
+    """A liveness answer that can only be produced BY BEING SERVED (#10892).
+
+    Contract, and why each part of it exists:
+
+    * **200 + JSON, always** — the body is not a health *reading*; it is proof
+      that the loop ran this coroutine. A refusal (503) would make a
+      genuinely-blocked process look like a WEDGED one at the transport layer
+      too, and the prober already distinguishes "answered 5xx" (DOWN) from
+      "answered nothing" (DOWN, different `failure=` class).
+    * ``served`` — this process's count of COMPLETED requests to this path,
+      incremented for THIS request before the response is built. A consumer can
+      therefore tell a fresh answer from a replayed/cached one: two probes must
+      never see the same number.
+    * ``last_completed_age_ms`` — wall age of the PREVIOUS completed request, or
+      ``null`` before the first. This is the "how long since the loop last ran
+      this" datum, computed here rather than stored by a background writer.
+
+    ⛔ The one thing this handler must never become: a reader of
+    ``loop_heartbeat_info()`` / ``_HEALTH_PROBE.snapshot()``. Those are written
+    by the loop's timer/threads, so they keep answering exactly the question
+    this endpoint exists to ask afresh — pinned by
+    ``test_handler_reads_no_cached_state_and_cannot_be_a_state_read``.
+    """
+    global _LIVENESS_SERVED_COUNT, _LIVENESS_LAST_COMPLETED_AT
+    # One real trip through the loop's ready queue: this coroutine suspends and
+    # resumes only when the loop RUNS, so the answer below cannot be produced by
+    # anything but a served request. `sleep(0)` is a bare yield to the loop's
+    # scheduler, not a sleep.
+    await asyncio.sleep(0)
+    now = time.monotonic()
+    with _LIVENESS_SERVED_LOCK:
+        previous = _LIVENESS_LAST_COMPLETED_AT
+        _LIVENESS_SERVED_COUNT += 1
+        served = _LIVENESS_SERVED_COUNT
+        _LIVENESS_LAST_COMPLETED_AT = now
+    return {"status": "ok", "served": served,
+            "last_completed_age_ms": None if previous is None
+            else round((now - previous) * 1000.0, 1)}
 
 
 @app.get("/health")
