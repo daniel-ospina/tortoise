@@ -1768,8 +1768,31 @@ def test_a_pending_sidecar_with_TWO_logs_says_RECOVERY_REFUSES_not_replays(
     with pytest.raises(tpc.CensusError) as exc:
         tpc.read_graph_turns(None, db_path, "tortoise")
     message = str(exc.value)
-    assert "REFUSES" in message, message
+    # 2 logs + pending snapshot: recovery declines ("ambiguous log set").
+    assert "ambiguous" in message, message
     assert "would REPLAY" not in message, message
+
+
+def test_a_HEALTHY_store_is_never_refused_over_a_sidecar_recovery_ignores(
+        tmp_path, monkeypatch):
+    """⛔ Order is part of the mirror: count FIRST (#11113 review cycle 9, P2).
+
+    `recover_from_log` returns early on `db_count > 0` — "graph already has
+    nodes, no rebuild" — so on a healthy store it never reads the records at
+    all. Probing (and raising about) an untrustworthy sidecar before the count
+    refused the #10017 PRE-purge census on a perfectly good store, and the
+    message invited the operator to delete a rescue file. Measured
+    `recover_from_log` on this exact state: `{'recovered': False, 'db_points':
+    2, 'reason': 'graph already has nodes — no rebuild'}`.
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    from tortoise.projection import prewipe_snapshot_path
+
+    with open(prewipe_snapshot_path(str(tmp_path)), "w") as fh:
+        fh.write("garbage, not a snapshot\n")
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "s1_t1" in graph["nodes"], graph["nodes"]
 
 
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(

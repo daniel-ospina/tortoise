@@ -1135,29 +1135,41 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
             os.path.abspath(os.path.expanduser(str(path))))
     except (OSError, ValueError):
         return
-    replayable = _one_replayable_log(events_dir)
-    kind = "log"
-    if replayable is None:
-        replayable = _pending_prewipe_snapshot(events_dir)
-        kind = "snapshot"
-    if replayable is None:
-        return                    # recovery would refuse this log too
+    # ⛔ ORDER IS PART OF THE MIRROR (#11113 review cycle 9, P2): the node count
+    # comes FIRST, because `recover_from_log` returns early on `db_count > 0`
+    # ("graph already has nodes — no rebuild") and therefore never looks at the
+    # records at all. Probing them first made an untrustworthy sidecar refuse a
+    # HEALTHY store — the #10017 pre-purge census — over a file recovery would
+    # not even read, and the message invited the operator to delete a rescue
+    # file. Only a 0-node graph asks what recovery would act on.
     try:
         if _graph_total_node_count(proj.g):
             return                # non-empty graph: drained, not lost
     except Exception:
         return                    # the read arm owns an unreadable graph
-    if kind == "snapshot":
-        why = ("tortoise's own recovery REFUSES to act while this pre-wipe "
-               "snapshot is pending — it may be the only surviving record of a "
-               "rebuild's graph-only Points (#2943) — and this gate does not "
-               "certify over a record it cannot replay")
+    # 0 nodes: ask what recovery would act on, in ITS order — the pending
+    # sidecar first (the loader can REFUSE it as untrustworthy, which recovery
+    # propagates), then the log.
+    snapshot = _pending_prewipe_snapshot(events_dir)   # may raise: untrustworthy
+    log = _one_replayable_log(events_dir)
+    if snapshot is None and log is None:
+        return                    # recovery would refuse this record set too
+    record = snapshot or log
+    if snapshot is not None and log is None:
+        why = ("tortoise's own recovery REBUILDS from that pending pre-wipe "
+               "snapshot — it is the only surviving record of a rebuild's "
+               "graph-only Points (#2943)")
+    elif snapshot is not None:
+        why = ("tortoise's own recovery would act on these records — it "
+               "rebuilds from the pending snapshot, and refuses when the "
+               "adjacent log set is ambiguous")
     else:
         why = ("these are the SAME conditions under which tortoise's own "
                "recovery would REPLAY that log and refill the graph")
+    kind = "pre-wipe snapshot" if snapshot is not None else "event log"
     raise CensusError(
-        "the graph EXISTS and holds ZERO nodes of ANY label, while "
-        f"{kind} {replayable!r} beside the store is a record it could be "
+        "the graph EXISTS and holds ZERO nodes of ANY label, while the "
+        f"{kind} {record!r} beside the store is a record it could be "
         "rebuilt from — that is the LOST-STORE shape (a fresh redislite "
         "daemon on a corrupt RDB, an interrupted restore, a manual delete), "
         f"not a drained graph: {why}. An empty graph with such a record is "
@@ -1194,6 +1206,10 @@ def _one_replayable_log(events_dir: str) -> str | None:
     without being read — the conservative direction, because a huge log does
     hold events and reading it on a shared directory is how a certification run
     exhausts memory.
+    text-lines are decoded STRICTLY, one line at a time, like `read_all` (#11113
+    review cycle 9, P3): a record carrying an invalid UTF-8 byte is "0 events,
+    torn tail" to the reader, so decoding the whole file with `errors=replace`
+    made this arm refuse where recovery does nothing.
     """
     import stat
 
@@ -1224,14 +1240,18 @@ def _one_replayable_log(events_dir: str) -> str | None:
     # Mirror `EventLog.read_all`'s READER, not only its event test (#11113 review
     # cycle 7, P2/P3): it normalises a bare `\r` to `\n` (a CR-separated record
     # is a record it replays — measured: the arm was silent, recovery refilled
-    # the store, and `--expect-empty` certified it CLEAN), and it parses TEXT, so
-    # `json.loads(bytes)`'s implicit BOM stripping must not make this arm refuse
-    # where the reader finds nothing.
-    text = (raw.decode("utf-8", "replace")
-            .replace("\r\n", "\n").replace("\r", "\n"))
-    for line in text.split("\n"):
-        if not line.strip():
+    # the store, and `--expect-empty` certified it CLEAN), and it parses TEXT,
+    # decoding each line STRICTLY (a line with an invalid byte is a torn tail to
+    # it, not an event), so `json.loads(bytes)`'s implicit BOM stripping must not
+    # make this arm refuse where the reader finds nothing.
+    raw = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    for chunk in raw.split(b"\n"):
+        if not chunk.strip():
             continue
+        try:
+            line = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            continue              # torn/noise tail: the reader sees no event
         try:
             json.loads(line)
         except ValueError:
