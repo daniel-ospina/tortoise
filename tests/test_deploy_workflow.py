@@ -32,6 +32,7 @@ and that no ``${{ secrets.X }}`` remains in any step's run text.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
@@ -44,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "deploy-hosted.yml"
+ROOT = Path(__file__).resolve().parent.parent
+_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 
 # Anchors inside the workflow (the #1197 blocks). Slicing between markers keeps
 # the scan scoped: RESEND_API_KEY etc. live in other blocks and must not leak in.
@@ -5348,4 +5350,139 @@ def test_any_workflow_line_citation_here_resolves_to_a_real_line_and_the_test_jo
         "the false-RED bound `test_the_census_git_guard_fails_closed_and_never_reds_a_shallow"
         "_checkout` guards against no longer exists, while the guard would keep passing "
         "(#11064 review P2):\n  " + "\n  ".join(ln for ln in step if "fetch-depth" in ln)
+    )
+
+
+# ── #11122 — the mitigation ledger is honoured at SYNC time ───────────────────
+#
+# The ledger (`.github/scripts/fly-secret-mitigations.txt`) records secrets an
+# operator removed ON PURPOSE. Two deploys put SENTRY_DSN back on 2026-11-05/06,
+# on builds that did not contain the fix, because the sync step asserts a desired
+# state and cannot tell "unconfigured" from "deliberately removed".
+#
+# THESE TESTS PIN THE WORKFLOW HALF ONLY. The gate's half (it proves the filter
+# actually suppressed the name, refuses an expired entry, and refuses a name the
+# manifest does not declare) is in `tests/test_fly_secret_drift.py`
+# (`TestTheMitigationLedger`). Both halves are needed: a filter without the gate's
+# reverse check can rot silently, and a gate without the filter only reports the
+# exception (the measured Argo CD trap — `ignoreDifferences` quiets comparison
+# while the sync still applies the desired value).
+
+_LEDGER_PATH = ".github/scripts/fly-secret-mitigations.txt"
+#: Builtins only. The provenance gate classifies the payload by EXECUTING it with
+#: a PATH that holds only fly/flyctl stubs, where every forkable utility
+#: (`grep`, `awk`, `sed`, `tr`, `jq`, `python`) is absent — one would abort the
+#: classification with `command not found`, which the gate correctly reports as
+#: exit 2, i.e. a blocked deploy on every run.
+_FORKABLE_IN_LEDGER_BLOCK = (
+    "grep", "egrep", "awk", "sed", "tr", "cut", "jq", "sort", "uniq", "xargs",
+    "python", "python3", "cat", "wc",
+)
+
+
+def _ledger_block(run: str) -> str:
+    """The run region between the ledger's own marker and the flyctl call."""
+    start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER")
+    end = run.index('flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq')
+    assert start < end, "marker drift: the ledger block moved after the flyctl call"
+    return run[start:end]
+
+
+def test_the_sync_step_honours_the_mitigation_ledger():
+    """The exception must be enforced where the WRITE happens, not where it is reported.
+
+    A gate that merely warns is the measured false exception: the sync applies the
+    declared value anyway and the exception exists only in the report.
+    """
+    run = _steps()[_SET_STEP]["run"]
+    block = _ledger_block(run)
+
+    # (1) it reads the ledger the manifest lives beside (#11122's file)
+    assert _LEDGER_PATH in block, (
+        "the secrets-set step does not read the mitigation ledger — a ledgered "
+        "secret would be re-staged on the next deploy"
+    )
+    assert "FLY_MITIGATION_LEDGER" in block, (
+        "the ledger path must stay overridable (the gate's stub harness seeds it "
+        "so the payload it classifies is filtered by the same file)"
+    )
+
+    # (2) it drops ledgered names from the argv
+    assert 'case "$MITIGATED" in' in block and 'continue' in block, (
+        "no filtering `case` over the ledger name set — the ledger is read but "
+        "never applied"
+    )
+    assert 'ARGS=("${STAGED_ARGS[@]}")' in block, (
+        "the filtered array must be assigned back to ARGS — otherwise the filter "
+        "computes a list and `flyctl` still receives the unfiltered one"
+    )
+
+    # (3) it does so BEFORE the call, and the call is unchanged (#4334)
+    assert run.index('ARGS=("${STAGED_ARGS[@]}")') < run.index(
+        'flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq'
+    )
+    assert 'flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq' in run
+
+    # (4) builtins only — see _FORKABLE_IN_LEDGER_BLOCK
+    code = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    for binary in _FORKABLE_IN_LEDGER_BLOCK:
+        assert not re.search(rf"(^|[|;&(\s]){binary}(\s|$)", code), (
+            f"`{binary}` appears in the ledger block — the provenance gate runs "
+            "this payload on a stub PATH holding only fly/flyctl, so a fork fails "
+            "the classification (`command not found` → exit 2 → every deploy "
+            "blocked). Use shell builtins: read/case/parameter expansion/arrays."
+        )
+
+
+def test_the_ledger_mandatory_set_matches_the_verify_gate():
+    """`MANDATORY_FLY_SECRETS` is a SECOND owner of the hard-fail set — pin it.
+
+    The checker refuses a ledger entry naming a secret the deploy cannot run
+    without (removing it is an outage, not a mitigation). That set lives in the
+    workflow's `Verify secrets exist` gate, and a hardcoded copy rots the moment
+    the gate grows a name — so this test derives the set from the workflow's own
+    `exit 1` branches and requires EQUALITY.
+    """
+    run = _steps()[_VERIFY_STEP]["run"]
+    hard_fail: set[str] = set()
+    for block in re.finditer(r"if\b(.*?)\bthen\b(.*?)\n\s*fi\b", run, re.S):
+        condition, body = block.group(1), block.group(2)
+        if "exit 1" not in body:
+            continue
+        hard_fail |= set(_SHELL_TEST.findall(condition))
+    assert hard_fail, (
+        "no `if … then … exit 1 … fi` block in the verify-secrets step — anchor "
+        "drift; the mandatory-set derivation must fail loudly, not pass vacuously"
+    )
+
+    system = importlib.util.spec_from_file_location(
+        "check_fly_secret_drift_mandatory",
+        ROOT / ".github" / "scripts" / "check-fly-secret-drift.py",
+    )
+    assert system is not None and system.loader is not None
+    module = importlib.util.module_from_spec(system)
+    system.loader.exec_module(module)
+
+    assert set(module.MANDATORY_FLY_SECRETS) == hard_fail, (
+        "the ledger's mandatory set drifted from the deploy's hard-fail list: "
+        f"checker-only={sorted(set(module.MANDATORY_FLY_SECRETS) - hard_fail)}, "
+        f"workflow-only={sorted(hard_fail - set(module.MANDATORY_FLY_SECRETS))}. "
+        "A ledger entry for a mandatory name must be REFUSED (removing it is an "
+        "outage); a name missing here could be 'mitigated' into a dead API."
+    )
+
+
+def test_the_shipped_ledger_is_a_tracked_contract_file():
+    """The ledger is not optional: the gate exits 2 (never bypassable) without it."""
+    path = ROOT / _LEDGER_PATH
+    assert path.is_file(), (
+        f"{_LEDGER_PATH} is missing — check-fly-secret-drift.py reads it and treats "
+        "its absence as unreadable state (exit 2), so every deploy would be blocked"
+    )
+    text = path.read_text()
+    assert "issue #11122" in text.lower() or "#11122" in text, (
+        "the ledger must name the issue whose contract it states — a silent file "
+        "cannot be reviewed by the operator who needs to add an entry mid-incident"
     )
