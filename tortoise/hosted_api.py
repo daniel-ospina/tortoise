@@ -3152,7 +3152,13 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     try:
         from tortoise.sentry import is_benign_exception as _is_benign
 
-        _benign = _is_benign(exc)
+        # `inbound_request=True` — this handler runs while serving an inbound
+        # request, so a reset/broken-pipe HERE means the CALLER hung up. That is
+        # the one place the direction-ambiguous names are safe to treat as
+        # benign; they are deliberately not in the client-global `ignore_errors`
+        # (review round 4, P2), where the same classes mean "the upstream we
+        # called reset us".
+        _benign = _is_benign(exc, inbound_request=True)
     except Exception:  # noqa: BLE001, RUF100 — classification never breaks the 500 response
         _benign = False
     # P2 (code review): sanitize the path before logging — Starlette's

@@ -88,6 +88,14 @@ def test_init_turns_source_context_off(enabled_sentry: dict[str, list]) -> None:
         "init()'s ignore_errors and BENIGN_EXCEPTION_NAMES must be the SAME set — "
         "init derives it, so a difference means one of them was re-typed by hand"
     )
+    # REVIEW ROUND 4 (P2): it must be the DIRECTION-UNAMBIGUOUS set. A global
+    # `ignore_errors` entry is applied to every event from every path, so adding
+    # `ConnectionResetError` here would silence a real upstream reset process-wide.
+    assert "ConnectionResetError" not in (kwargs.get("ignore_errors") or ()), (
+        "ignore_errors is CLIENT-GLOBAL — a direction-ambiguous name here blinds "
+        "the process to upstream resets; scope it to the request layer instead"
+    )
+    assert "BrokenPipeError" not in (kwargs.get("ignore_errors") or ())
 
 
 def test_capture_exception_refuses_a_client_disconnect(
@@ -148,9 +156,40 @@ def test_benign_matching_is_exact_by_name_not_by_mro() -> None:
         "a SUBCLASS of a benign name is not itself benign — that is how an "
         "upstream reset gets silenced as if the client had hung up"
     )
-    # The exact classes still match, by name, with no starlette import involved.
-    assert tsentry.is_benign_exception(ConnectionResetError()) is True
-    assert tsentry.is_benign_exception(BrokenPipeError()) is True
+    # An EXACT name in the global set still matches, with no library import — the
+    # point of the name arm. (BrokenPipeError/ConnectionResetError live in the
+    # REQUEST-LAYER set only, pinned by the direction test below.)
+    BrokenResourceError = type("BrokenResourceError", (Exception,), {})
+    assert tsentry.is_benign_exception(BrokenResourceError()) is True
+
+
+def test_direction_ambiguous_names_are_benign_only_on_the_inbound_layer() -> None:
+    """Review round 4 (P2): `ConnectionResetError` means two different things.
+
+    Inbound (the handler): the CALLER reset on us → benign.
+    Anywhere else (oauth token exchange, a connector): the UPSTREAM we called
+    reset us → a real dependency outage that must be captured.
+
+    So the name is benign ONLY with `inbound_request=True`, and it is NOT in the
+    client-global set — `ignore_errors` is applied by `Client._should_capture` to
+    every event from every path, so a global entry would blind the whole process
+    to upstream resets (including `oauth._capture`'s "single capture").
+    """
+    for name, cls in (("ConnectionResetError", ConnectionResetError),
+                      ("BrokenPipeError", BrokenPipeError)):
+        assert name not in tsentry.BENIGN_EXCEPTION_NAMES, (
+            f"{name} is direction-ambiguous and must not be a GLOBAL benign name"
+        )
+        assert tsentry.is_benign_exception(cls()) is False, (
+            f"{name} on an OUTBOUND path means the upstream hung up — capturing "
+            "it is the whole point"
+        )
+        assert tsentry.is_benign_exception(cls(), inbound_request=True) is True, (
+            f"{name} while SERVING an inbound request means the caller hung up"
+        )
+    # The global set is a strict subset, so the request-layer set can never fall
+    # behind it (a name added globally but not inbound would be a silent gap).
+    assert tsentry.BENIGN_EXCEPTION_NAMES <= tsentry.REQUEST_LAYER_DISCONNECT_NAMES
 
 
 def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
@@ -195,6 +234,44 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
     assert response.headers.get("access-control-allow-origin") is not None, (
         "#1591: the CORS headers must be on the response whatever the exception"
     )
+
+
+def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
+    enabled_sentry: dict[str, list], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review round 4 (P2): the handler is the ONE place the layer is known.
+
+    `ConnectionResetError` is direction-ambiguous, so it is benign only when the
+    peer is the CALLER. This drives the handler with it and asserts the inbound
+    wiring (`inbound_request=True`) is actually passed — without it, a reset
+    storm on the send path would log at ERROR and capture per abort again.
+    """
+    import tortoise.hosted_api as hapi
+    import tortoise.sentry as sentry_mod
+
+    captured: list = []
+    real_capture = sentry_mod.capture_exception
+    sentry_mod.capture_exception = lambda exc, tags=None: captured.append(exc)  # type: ignore[assignment]
+    try:
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/health"), method="GET", headers={}
+        )
+        caplog.set_level(logging.DEBUG, logger="tortoise.api")
+        response = asyncio.run(
+            hapi._unhandled_exception_handler(request, ConnectionResetError("reset"))
+        )
+    finally:
+        sentry_mod.capture_exception = real_capture  # type: ignore[assignment]
+
+    assert captured == [], (
+        "an inbound ConnectionResetError is the caller hanging up — the handler "
+        "passes inbound_request=True, so it must not be captured"
+    )
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == [], (
+        "and it must not be logged at ERROR — that is what feeds the Sentry "
+        "logging integration"
+    )
+    assert response.status_code == 500
 
 
 def test_unhandled_handler_still_reports_a_real_error_at_error_level(
@@ -328,4 +405,35 @@ def test_a_real_error_does_reach_a_real_sentry_client(live_sentry_client) -> Non
     assert live_sentry_client.events, (
         "a genuine unhandled exception must still be reported — a filter that "
         "swallows everything would pass the test above vacuously"
+    )
+
+
+def test_an_upstream_connection_reset_still_reaches_a_real_sentry_client(
+    live_sentry_client,
+) -> None:
+    """Review round 4 (P2) — the GLOBAL scope, driven through a REAL client.
+
+    `ignore_errors` is applied by `Client._should_capture` to every event from
+    every path, so it must not carry a direction-ambiguous name. Measured both
+    ways here: a bare `ConnectionResetError` captured straight through the SDK —
+    the shape an outbound call produces when the UPSTREAM resets us — must
+    deliver an event, while `ClientDisconnect` (unambiguous: only a caller can
+    produce it) must not. Putting `ConnectionResetError` back into
+    `BENIGN_EXCEPTION_NAMES` reddens this test and proves the regression it
+    guards: the oauth token boundary's "single capture" would go silent.
+    """
+    before = len(live_sentry_client.events)
+    sentry_sdk.capture_exception(ConnectionResetError("reset by peer (upstream)"))
+    sentry_sdk.get_client().flush(timeout=2.0)
+    assert len(live_sentry_client.events) > before, (
+        "an UPSTREAM ConnectionResetError must reach Sentry — a client-global "
+        "ignore_errors entry for it blinds the process to dependency outages"
+    )
+
+    after_upstream = len(live_sentry_client.events)
+    sentry_sdk.capture_exception(ClientDisconnect())
+    sentry_sdk.get_client().flush(timeout=2.0)
+    assert len(live_sentry_client.events) == after_upstream, (
+        "a ClientDisconnect is unambiguously the CALLER leaving — it must still "
+        "be filtered globally, otherwise the storm's fuel is back"
     )

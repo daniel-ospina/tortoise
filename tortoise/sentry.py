@@ -27,14 +27,36 @@ _service = "tortoise-hosted-api"
 # `include_source_context=False` now removes — for EVERY disconnect, and under a
 # probe storm that starved the event loop into a customer-visible outage.
 #
-# ⛔ THIS IS THE ONLY COPY OF THE SET. `init()` derives its `ignore_errors` from
-# it (review round 3, P2): the two used to be written out separately, which is
-# one silent drift away from re-opening the storm — shrink this and the SDK
+# ⛔ THIS IS THE ONLY COPY OF THE GLOBAL SET. `init()` derives its `ignore_errors`
+# from it (review round 3, P2): the two used to be written out separately, which
+# is one silent drift away from re-opening the storm — shrink this and the SDK
 # delivers an event the helper already called benign; grow only the SDK list and
-# the helper captures one the SDK drops. `test_ignore_errors_agrees_with_the_
-# benign_names` pins them equal.
-BENIGN_EXCEPTION_NAMES = frozenset(
-    {"ClientDisconnect", "BrokenResourceError", "BrokenPipeError", "ConnectionResetError"}
+# the helper captures one the SDK drops. `test_init_turns_source_context_off`
+# pins them equal, and pins this set as a SUBSET of
+# `REQUEST_LAYER_DISCONNECT_NAMES` so the request-layer set can never fall
+# behind it.
+BENIGN_EXCEPTION_NAMES = frozenset({"ClientDisconnect", "BrokenResourceError"})
+
+#: ⛔ REQUEST-LAYER ONLY — names whose MEANING depends on which end hung up.
+#: `ConnectionResetError` / `BrokenPipeError` mean "the peer left" only when the
+#: peer is the CALLER. In an outbound call — the oauth token exchange, a
+#: connector, any dependency — the identical class means "the UPSTREAM we called
+#: reset us", i.e. a real dependency outage (sentry review round 4, P2).
+#:
+#: They may therefore be treated as benign ONLY where the layer is known: inside
+#: `hosted_api._unhandled_exception_handler`, which by construction runs while
+#: serving an inbound request. They are deliberately NOT in
+#: `ignore_errors`/`BENIGN_EXCEPTION_NAMES`, because that is a CLIENT-GLOBAL
+#: filter (`Client._should_capture` runs for EVERY event from every path) and a
+#: global entry would silence a real upstream reset everywhere in the process,
+#: including `oauth._capture`'s "single capture" for the token boundary.
+#:
+#: The residual is bounded and measured: a reset on the ASGI send path still
+#: produces ONE event per abort via the re-raise, costing ~0.09 ms since
+#: `include_source_context=False` — versus blinding the whole process to
+#: upstream resets.
+REQUEST_LAYER_DISCONNECT_NAMES = BENIGN_EXCEPTION_NAMES | frozenset(
+    {"ConnectionResetError", "BrokenPipeError"}
 )
 
 
@@ -65,7 +87,7 @@ def init() -> bool:
             # the freshly minted `oat_`/`ort_` pair, so the default ships live
             # credentials to Sentry. The traceback itself is still sent.
             include_local_variables=False,
-            # #10892: source context is ON by default, and building an event then
+            # #11092: source context is ON by default, and building an event then
             # READS AND DECODES THE SOURCE FILE OF EVERY FRAME
             # (`sentry_sdk.utils.get_source_context` -> `SourceLoader.get_source`
             # -> `tokenize.detect_encoding`/`find_cookie`) in the thread that logged
@@ -125,7 +147,7 @@ def enabled() -> bool:
     return _enabled
 
 
-def is_benign_exception(exc: BaseException) -> bool:
+def is_benign_exception(exc: BaseException, *, inbound_request: bool = False) -> bool:
     """True for exception types that are client-side events, not server faults.
 
     Two checks, and the identity one is the load-bearing half:
@@ -133,9 +155,18 @@ def is_benign_exception(exc: BaseException) -> bool:
     * `isinstance` against starlette's own `ClientDisconnect`, imported lazily so
       this module stays importable without starlette. This is the half that
       covers SUBCLASSES (a server that re-wraps or re-exports the class);
-    * an EXACT type-name match against `BENIGN_EXCEPTION_NAMES`, which is the
-      fallback for a class that cannot be `isinstance`d here because its library
-      is absent, and which deliberately does NOT walk the MRO.
+    * an EXACT type-name match against the name set, which is the fallback for a
+      class that cannot be `isinstance`d here because its library is absent, and
+      which deliberately does NOT walk the MRO.
+
+    `inbound_request` selects WHICH name set (review round 4, P2). The default is
+    the direction-UNAMBIGUOUS set (`BENIGN_EXCEPTION_NAMES`), because that is
+    what `capture_exception` and the client-global `ignore_errors` filter can
+    safely use for the whole process. Only a caller that KNOWS the layer is an
+    inbound request — `hosted_api._unhandled_exception_handler` — passes
+    `inbound_request=True`, which admits `ConnectionResetError` and
+    `BrokenPipeError` as well: there the peer is the caller, so a reset means it
+    hung up. In an outbound call the same classes mean the UPSTREAM reset us.
 
     ⛔ The name match is EXACT on purpose (review round 3, P3). Walking the MRO
     makes this helper broader than the SDK's own `ignore_errors` — and broader is
@@ -145,6 +176,9 @@ def is_benign_exception(exc: BaseException) -> bool:
     outage as a client hang-up and the handler logged it at DEBUG and captured
     nothing. Subclass coverage is the `isinstance` arm's job, not this one's.
     """
+    names = (
+        REQUEST_LAYER_DISCONNECT_NAMES if inbound_request else BENIGN_EXCEPTION_NAMES
+    )
     try:
         from starlette.requests import ClientDisconnect as _ClientDisconnect
 
@@ -152,7 +186,7 @@ def is_benign_exception(exc: BaseException) -> bool:
             return True
     except Exception:  # noqa: BLE001, RUF100 — starlette absent is not a failure here
         pass
-    return type(exc).__name__ in BENIGN_EXCEPTION_NAMES
+    return type(exc).__name__ in names
 
 
 def capture_exception(exc: BaseException, tags: dict[str, Any] | None = None) -> None:
