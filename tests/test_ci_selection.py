@@ -10650,7 +10650,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # complete for this workflow's vocabulary, and it is EXACTLY the set of ids that
     # actually appear here plus their two neighbours, so an unrecognised cache-writing
     # action is still a gap. The gap is named in the message rather than implied away.
-    _CACHE_INPUTS = frozenset({"cache"})
+    _CACHE_INPUTS = frozenset({"cache"})  # the ONE input that arms a `setup-*` cache
     # OPT-IN, value-gated: the value names a package manager, and an action input is a
     # STRING, so the only values that INSTALL a save are the SUPPORTED ones —
     # `getCacheDistributor` is `default: throw`, and `setup-python`'s
@@ -10681,7 +10681,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # post-step save of `~/.cache/uv` — the payload this PR bounds — so PRESENCE is the
     # arming unless the step states an explicit off (#11065 cycle 8 review, P2).
     # ⚠️ `auto` resolves to OFF when `RUNNER_ENVIRONMENT !== "github-hosted"`
-    # (`src/utils/inputs.ts:171-176`), and `python-ci.yml:790-795` records that
+    # (`src/utils/inputs.ts:61-66`), and `python-ci.yml:790-795` records that
     # `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the SELF-HOSTED pool — which is
     # the runner class the measured incident ran on. So on this repo's own pool the bare
     # form is inert, and this arm is CONSERVATIVE there rather than derived; it is derived
@@ -10699,7 +10699,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         `setup-python`+`cache: pip` — cycle 8 review round 2).
         """
         _with = step.get("with") or {}
-        _action = _uses_of(step).split("@")[0]
+        # ⛔ ACTION IDS RESOLVE CASE-INSENSITIVELY (#11065 delta review, P3-1).
+        # `Actions/Setup-Python@v5` + `cache: pip` measured GREEN against a
+        # case-sensitive table — a fail-open spelled with a capital letter. Every table
+        # below is lower-case, so lower-case the extracted id.
+        _action = _uses_of(step).split("@")[0].strip().lower()
         if _action in _CACHE_WRITING_ACTIONS:
             return ["the action IS a cache write"]
         _generic = [k for k in sorted(_with)
@@ -10719,11 +10723,21 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
             # never created. Both were false blocks (#11065 cycle 8 round 3, and review
             # 2026-11-06 finding 5).
             _val = str(_with.get("cache") or "").strip().lower()
+            # ⛔ AN UNRESOLVED `${{ … }}` EXPRESSION CANNOT BE CERTIFIED (#11065 delta
+            # review, P2-1). `with:` values are resolved by the RUNNER at execution time,
+            # so `cache: ${{ vars.python_cache_manager }}` can resolve to `pip` and install
+            # setup-python's own unbounded post-step save of `~/.cache/pip` — the 3.6 GB
+            # half, i.e. #11063 exactly — while a literal-value test reads GREEN. Treat any
+            # expression as ARMED: the pin cannot see what it will become.
+            if "${{" in _val:
+                return [f"cache ({_val}) — unresolved expression"]
             return ["cache"] if _val in _SUPPORTED_CACHE_VALUES[_action] else []
         if _action in _DEFAULT_ON_CACHE_ACTIONS:
-            # The off is an EXPLICIT `cache: false`; absence is ON.
-            _val = _with.get("cache", True)
-            return [] if str(_val).strip().lower() == "false" else ["cache (default `true`)"]
+            # The off is an EXPLICIT `cache: false`; absence is ON. An EMPTY value is also
+            # off — `core.getInput('cache')` returns `''`, which is falsy in the action's
+            # own gate, so redding it was a false block (#11065 delta review, D1 note).
+            _val = str(_with.get("cache", True)).strip().lower()
+            return [] if _val in {"false", ""} else ["cache (default `true`)"]
         return []
 
     implicit = [(s.get("name"), s.get("uses")) for s in steps
@@ -10768,11 +10782,23 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
                 # PARSED, not grepped: a composite body can reach a cache write through any
                 # of the mechanisms `_arming_of`/`_is_writer` model, and a substring scan
                 # for one spelling certified the others (measured GREEN — cycle 8 round 2).
+                # ⛔ A COMPOSITE-STEP `timeout-minutes` IS AN INERT KEY (#11065 delta review,
+                # P2-2). The runner's composite schema does not list it (`actions/runner`
+                # `action_yaml.json` composite-step ∈ run-step|uses-step; neither admits it) and
+                # `actions/runner#1979` "Support timeout-minutes in composite-actions" is OPEN,
+                # its body recording that a stuck cache action then runs for the DEFAULT
+                # timeout. So an inner `timeout-minutes` certifies nothing: the bound that
+                # actually bounds the whole composite is on the CALLING step (`s`). Reading the
+                # inner key made the pin certify the #11063 shape as bounded — an inert
+                # enforcer, which is worse than no arm. `continue-on-error` is required too,
+                # for the same reason the top-level `~/.cache` loop requires it.
+                _caller_bound = s.get("timeout-minutes")
+                _caller_bounds = isinstance(_caller_bound, int) and _caller_bound > 0
                 _offenders = [(b.get("name"), _uses_of(b)) for b in _body_steps
                               if _arming_of(b)
                               or (_is_writer(b)
-                                  and not (isinstance(b.get("timeout-minutes"), int)
-                                           and b.get("timeout-minutes") > 0))]
+                                  and not (_caller_bounds
+                                           and b.get("continue-on-error") is True))]
                 # A body that is not a composite (no `runs.steps`) is not resolvable here;
                 # the grep fallback keeps the arm honest rather than silently green.
                 if not _body_steps:
@@ -10792,10 +10818,12 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
                     f"the `test` job's step {s.get('name')!r} delegates to the "
                     f"composite action {_ref!r}, whose body carries an UNBOUNDED cache "
                     f"write {_offenders}. A cache-arming `setup-*`/`setup-uv` input, or a "
-                    "write with no positive `timeout-minutes`, is charged against the "
-                    "JOB cap and withholds a REQUIRED check on a green shard (#11063). "
-                    "An explicit `actions/cache/save@` WITH a positive "
-                    "`timeout-minutes` is the prescribed remedy and does not red here.")
+                    "cache write with no bound, is charged against the JOB cap and "
+                    "withholds a REQUIRED check on a green shard (#11063). ⛔ A "
+                    "`timeout-minutes:` INSIDE a composite step is an INERT KEY — the "
+                    "runner does not support it (`actions/runner#1979` is open) — so the "
+                    "bound must go on the `uses: ./…` step in THIS job, together with "
+                    "`continue-on-error: true` on the inner write.")
                 _frontier.extend((_uses_of(b), _depth + 1) for b in _body_steps
                                  if _uses_of(b).startswith("./"))
     assert not implicit, (
@@ -11099,9 +11127,13 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # sentence that attributes #7612's torch payload must not place it in `~/.cache/uv`
     # without also naming `~/.cache/pip`.
     _prose = " ".join(re.sub(r"^\s*#\s?", "", _ln) for _ln in overrides.splitlines())
-    for _sentence in re.split(r"(?<=[.;:])\s+", _prose):
-        _attributes = ("#7612" in _sentence and "torch" in _sentence.lower())
-        if not _attributes or "~/.cache/uv" not in _sentence:
+    # ⛔ No `:` in the split (#11065 delta review, P3-2ii): a hard-wrapped claim written
+    # `#7612's torch payload: in \`~/.cache/uv\`` split at the colon and both halves read
+    # GREEN. And no `torch` conjunct (P3-2i): the exact banned sentence without that word —
+    # `#7612's payload is in \`~/.cache/uv\`` — also read GREEN. The conjunct that matters is
+    # the ISSUE NUMBER, because that is what the attribution claim is about.
+    for _sentence in re.split(r"(?<=[.;])\s+", _prose):
+        if "#7612" not in _sentence or "~/.cache/uv" not in _sentence:
             continue
         assert "~/.cache/pip" in _sentence, (
             "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB torch wheel "
