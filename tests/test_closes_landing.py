@@ -4833,16 +4833,19 @@ def test_a_WIDE_GAP_marker_in_a_NEW_blockquote_after_an_HTML_block_is_CODE():
             <ol start="2">…<pre><code>Closes #100`  -> the keyword is CODE, so every arm owes `[]`.
 
     The round-49..51 heads (from `282644682d`, the round-48 resolution) credited it in ALL FOUR
-    arms; the round-48 head (`4ef23920a5`) and `origin/main` refused it in `strict` and
-    `indented_code` and credited it in `lenient` (the pre-existing #11156 direction). Round 52
-    (`cc8f7baf02`, merged as #11186) closed both, and its term is `_html_leaf_text` — "a leaf block's
-    own raw text leaves no paragraph" — measured NECESSARY AND SUFFICIENT on these rows: clearing
-    that flag on the fixed tree restores `[100]` in all four arms, and nothing else is needed.
-    ⚠️ NOT `_html_here` (it is `False` on the marker line at every tree here, and its "this line's own
-    answer" comment predates round 52), and NOT `_html_rest` (round 52's §4.6 content-column
-    allowance, an IDENTITY on these rows because `container is None`; it is the term for the
-    lost-close family, which is control 2 below). This test reds on the round-51 tree (`1bbc16ce57`)
-    — that is the property it exists to keep.
+    arms; the round-48 head (`4ef23920a5`) and pre-#11186 `main` (`80c912244f`) refused it in
+    `strict` and `indented_code` and credited it in `lenient` (the pre-existing #11156 direction).
+    Round 52 (`cc8f7baf02`, merged as #11186) closed both, and its term is `_html_leaf_text` — "a leaf
+    block's own raw text leaves no paragraph" — measured NECESSARY AND SUFFICIENT on these rows:
+    clearing that flag on the fixed tree restores `[100]` in all four arms, and nothing else is
+    needed. ⚠️ NOT `_html_here` (it is `False` on the marker line at every tree here, and its "this
+    line's own answer" comment predates round 52), and NOT `_html_rest` (round 52's §4.6
+    content-column allowance, an IDENTITY on these rows because `container is None`; it is the term
+    for the lost-close family, which is control 2 below). This test reds on the round-51 tree
+    (`1bbc16ce57`) — that is the property it exists to keep.
+    ⚠️ The baseline for the two "pre-existing" rows is **pre-#11186 `main`**, never `origin/main`:
+    after #11186 landed, `main` refuses these shapes in all four arms, so a reader re-deriving them
+    against today's `main` gets `[]` and would wrongly conclude the fail-open was never there.
 
     ⚠️ Not #11268 (the `indented_code` arm crediting inside a DEEPER blockquote) and not #11156
     (`strip_code` never blanks raw-HTML content): what is measured here is the HTML block's END,
@@ -4863,9 +4866,9 @@ def test_a_WIDE_GAP_marker_in_a_NEW_blockquote_after_an_HTML_block_is_CODE():
         assert "#100" not in cl.strip_code(body, indented_code=True, strict=True), body
 
     # The same body WITHOUT an indented line between the opener and the marker: the renderer also
-    # puts the keyword in `<pre><code>`, and BOTH `origin/main` and the series heads credited it —
-    # a pre-existing fail-open the same per-line term closed. Pinned so "refuse this family" is the
-    # recorded answer rather than an accident of the two rows above.
+    # puts the keyword in `<pre><code>`, and both pre-#11186 `main` (`80c912244f`) and the series
+    # heads credited it — a pre-existing fail-open the same `_html_leaf_text` term closed. Pinned so "refuse
+    # this family" is the recorded answer rather than an accident of the two rows above.
     pre_existing = "> <span>\nx\n> 2.     Closes #100\n"
     assert keyword_types(pre_existing) == {"code_block"}, pre_existing
     assert cl.parse_closing_refs(pre_existing) == [], pre_existing
