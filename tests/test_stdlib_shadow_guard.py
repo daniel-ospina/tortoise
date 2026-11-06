@@ -110,8 +110,8 @@ if str(_REPO_ROOT) not in sys.path:
 # `tests/test_dod_5090_probe.py:639` imports.
 #
 # ⚠️ `tests/test_ci_selection.py` is NOT such a consumer and must not be cited as
-# one (measured at this head: `:43` is `from tools import ci_selection as cs`,
-# resolved through the repo root, never the bare name) — the earlier telling of
+# one (it does `from tools import ci_selection as cs`, resolved through the repo
+# root, never the bare name) — the earlier telling of
 # this comment named it and was wrong on the half that justifies the insert
 # above.
 if str(_REPO_ROOT / "tools") not in sys.path:
