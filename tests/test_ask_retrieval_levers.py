@@ -10,6 +10,15 @@ Spec items 9/10 of docs/planning/2026-08-31-2070-scoping-package.md:
   exactly as the bench's docker lane does. On the degraded embedded lane
   the honest assertions are POOL MEMBERSHIP (the plan's "fix membership
   before ordering" step), which is what A1/A4/A5 deliver there.**
+- **Runtime prerequisite (#11056): the bench is ARMED EXPLICITLY.** The
+  dataset defaults to an ambient home-directory cache, so before #11056 a
+  fleet box's `$HOME` — not CI config — decided whether a ~20-minute bench
+  ran inline in the FAST gating shard, and `test (c)` was withheld on a diff
+  that never touched this file. The bench now arms on `TORTOISE_LME_BENCH=1`
+  or an explicit `TORTOISE_LME_DATASET` path, and skips with the reason that
+  actually applies. Run it with:
+  `TORTOISE_LME_BENCH=1 uv run pytest tests/test_ask_retrieval_levers.py`
+  (dataset cached, embeddings extra installed).**
 - Same-value numeric fixture (A1): a money question that itself carries an
   amount retrieves the amount-carrying turn with keep_numeric on.
 - OR-cap preservation (A4): injected expansion aliases never displace the
@@ -56,6 +65,63 @@ _CACHED_DATASET = Path(
     )).expanduser()
 _MINIFIX = _REPO / "tests" / "fixtures" / "longmemeval_mini.json"
 RECORDED_FAILURES = ["ceb54acb", "1de5cff2", "gpt4_d84a3211", "1d4e3b97"]
+
+# #11056: the EXPLICIT arm for the LongMemEval bench — see `_bench_opted_in()`.
+_BENCH_OPT_IN_ENV = "TORTOISE_LME_BENCH"
+
+
+def _bench_opted_in() -> bool:
+    """Whether the LongMemEval bench is explicitly ARMED (#11056).
+
+    `_CACHED_DATASET` defaults to an **ambient home-directory file**, so before
+    #11056 whether a ~20-minute bench ran inline in the FAST gating shard was
+    decided by whichever fleet box the shard landed on, not by CI config.
+    Measured on the self-hosted pool (run 42120750405, job `test (c)`,
+    `pi-runner-cmux-x64-7`): this file alone cost **1,252 s of a 1,560 s**
+    shard watchdog, and `test_gold_turn_in_pool_membership_embedded` seeds
+    three haystacks (~570 s) inside a per-test `--timeout=300`, so the shard
+    first reported a `FAILED` and then died on its own budget — a required
+    check withheld by a box's `$HOME`, on a diff that never touched this file.
+
+    Two things make that ambient default wrong as a CI prerequisite: the repo's
+    stated CI assumption is the opposite (`tests/longmem_eval/`
+    `test_gold_evidence_claims.py` skips with *"frozen LongMemEval-S dataset
+    not cached (CI)"*), and a **shared runner's `$HOME` is not a CI
+    prerequisite** — it is an accident of the box.
+
+    So the prerequisite is now EXPLICIT, on the same shape its sibling
+    `tests/test_ask_regression_llm.py` already uses for
+    `TORTOISE_ASK_LLM_REGRESSION`: the bench arms only when it is ASKED for —
+    `TORTOISE_LME_BENCH=1`, or an explicit `TORTOISE_LME_DATASET` path (a
+    deliberate act, unlike the default it overrides). The ambient
+    `~/.cache/tortoise-longmemeval/` default alone arms nothing, so the SKIP
+    path is deterministic on every runner and the run path is where someone
+    opted in. The bench is not weakened: `UV`-free, it still runs end-to-end
+    with `TORTOISE_LME_BENCH=1` wherever the dataset is cached.
+    """
+    return (os.environ.get(_BENCH_OPT_IN_ENV) == "1"
+            or bool(os.environ.get("TORTOISE_LME_DATASET")))
+
+
+def _bench_questions() -> dict[str, dict]:
+    """The recorded questions this module asserts against, or a SKIP naming
+    WHICH prerequisite is missing.
+
+    The two prereqs are DIFFERENT facts and are reported as such: a fleet
+    runner that skips because nobody armed the bench must never read as "the
+    dataset is gone", and a missing dataset must never read as "not opted
+    in". Every skip is explicit, so no assertion here can pass vacuously.
+    """
+    if not _bench_opted_in():
+        pytest.skip(
+            "LongMemEval bench not armed — set TORTOISE_LME_BENCH=1 (or an "
+            "explicit TORTOISE_LME_DATASET) to run it. The ambient "
+            "~/.cache/tortoise-longmemeval/ default does NOT arm it: a shared "
+            "runner's $HOME is not a CI prerequisite (#11056)")
+    questions = _recorded_questions()
+    if not questions:
+        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+    return questions
 
 
 def _embedder_present() -> bool:
@@ -134,10 +200,84 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
 
 
 def _recorded_questions() -> dict[str, dict]:
+    """The recorded questions the bench asserts against — **the ONE gate**.
+
+    Returns `{}` unless the bench is explicitly armed (#11056), so no caller
+    can re-arm it by accident: a future test that reads this reader directly
+    fails closed to "nothing to assert" instead of silently spending a
+    shard's budget on an ambient `$HOME` cache. `_bench_questions()` builds
+    the honest SKIP reason on top of it; nothing bypasses it.
+    """
+    if not _bench_opted_in():
+        return {}
     if not _CACHED_DATASET.exists():
         return {}
     data = json.loads(_CACHED_DATASET.read_text(encoding="utf-8"))
     return {q["question_id"]: q for q in data if q["question_id"] in RECORDED_FAILURES}
+
+
+def test_the_bench_is_armed_explicitly_never_by_an_ambient_home_cache(
+        monkeypatch, tmp_path):
+    """#11056: an ambient `$HOME` cache must NOT decide whether a ~20-minute
+    bench runs inline in the FAST gating shard.
+
+    This is the pin for the arm that withheld a required check: on the
+    self-hosted pool the default `~/.cache/tortoise-longmemeval/...` path
+    EXISTS, so `_recorded_questions()` returned the dataset's questions with
+    no opt-in anywhere and this file cost 1,252 s of a 1,560 s shard watchdog
+    (run 42120750405, job `test (c)`) — on a diff that never touched it.
+
+    Non-vacuous in BOTH directions:
+
+    * ARM 1 reds the PRE-FIX code, which had no predicate at all — there
+      `_recorded_questions()` returned `{qid}` with the dataset merely
+      present, so `== {}` fails.
+    * ARM 2 reds a gate tightened into a NO-OP that can never be armed (a
+      `return False`, or one that demands the dataset path AND the flag):
+      `TORTOISE_LME_BENCH=1` alone must arm it with `TORTOISE_LME_DATASET`
+      unset.
+    * ARM 3 reds a gate that ignores the explicit path — the documented way to
+      run the bench at a fetched dataset (`TORTOISE_LME_DATASET`), which is a
+      DELIBERATE act and therefore a valid opt-in on its own.
+
+    The dataset file is written to `tmp_path` and installed as the module's
+    `_CACHED_DATASET`, so the arms do not depend on — and never touch — the
+    real home-directory cache: a runner without it must fail this pin too,
+    not skip it.
+    """
+    mod = sys.modules[__name__]
+    qid = RECORDED_FAILURES[0]
+    dataset = tmp_path / "longmemeval_s_cleaned.json"
+    dataset.write_text(json.dumps([{
+        "question_id": qid,
+        "question": "a recorded question",
+        "haystack_sessions": [],
+    }]), encoding="utf-8")
+    monkeypatch.setattr(mod, "_CACHED_DATASET", dataset)
+    monkeypatch.delenv(_BENCH_OPT_IN_ENV, raising=False)
+    monkeypatch.delenv("TORTOISE_LME_DATASET", raising=False)
+
+    # ARM 1 — the dataset is PRESENT and readable, and the bench is STILL not
+    # armed. Presence alone is the ambient-$HOME decision this pin removes,
+    # and `_recorded_questions()` is the ONE gate, so a future caller that
+    # reads it directly also fails closed.
+    assert dataset.exists(), "the fixture must be present for arm 1 to bite"
+    assert _bench_opted_in() is False
+    assert _recorded_questions() == {}
+    with pytest.raises(pytest.skip.Exception):
+        _bench_questions()
+
+    # ARM 2 — the flag alone arms it, with TORTOISE_LME_DATASET unset.
+    monkeypatch.setenv(_BENCH_OPT_IN_ENV, "1")
+    assert _bench_opted_in() is True
+    assert set(_recorded_questions()) == {qid}
+
+    # ARM 3 — an explicit dataset PATH arms it on its own (#11056's "make the
+    # prerequisite explicit rather than ambient").
+    monkeypatch.delenv(_BENCH_OPT_IN_ENV)
+    monkeypatch.setenv("TORTOISE_LME_DATASET", str(dataset))
+    assert _bench_opted_in() is True
+    assert set(_recorded_questions()) == {qid}
 
 
 # ── Indicator 1 / Target 0: 4 gold-turn-in-context fixtures ────────────────
@@ -153,9 +293,7 @@ def test_gold_turn_in_context_recorded_failure(qid):
             "vector leg absent (embeddings extra not installed) — the "
             "lexical-trio class needs it (plan A2 runtime prerequisite); "
             "see the pool-membership tests for the degraded-lane assertions")
-    questions = _recorded_questions()
-    if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+    questions = _bench_questions()
     q = questions.get(qid)
     if q is None:
         pytest.skip(f"{qid} not in cached dataset")
@@ -184,9 +322,7 @@ def test_gold_turn_in_pool_membership_embedded():
     plan's "fix membership before ordering" step). gpt4_d84a3211 is the
     numeric-invisible class whose membership requires the vector leg (A2) —
     asserted separately with its documented prerequisite."""
-    questions = _recorded_questions()
-    if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+    questions = _bench_questions()
     for qid, q in questions.items():
         if qid == "gpt4_d84a3211":
             continue  # documented: needs the vector leg (A2), not A1
@@ -270,9 +406,7 @@ def test_gold_turn_in_context_cap_review_embedded_1d4e3b97():
     here). On the keyword lane it is `xfail(strict)` so a real fix there cannot
     land without removing the marker.
     """
-    questions = _recorded_questions()
-    if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+    questions = _bench_questions()
     q = questions.get("1d4e3b97")
     if q is None:
         pytest.skip("1d4e3b97 not in cached dataset")
@@ -316,9 +450,7 @@ def test_ask_cap_attribution_5821():
     property 3 needs to be discriminating. The test SKIPS (rather than passing
     vacuously) when the cached LongMemEval dataset is absent.
     """
-    questions = _recorded_questions()
-    if not questions:
-        pytest.skip("cached LongMemEval dataset absent (bench prerequisite)")
+    questions = _bench_questions()
     q = questions.get("1d4e3b97")
     if q is None:
         pytest.skip("1d4e3b97 not in cached dataset")
