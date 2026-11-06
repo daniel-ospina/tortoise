@@ -8782,7 +8782,16 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
         # A MISTYPED section is a drop, not a no-op: every relation in it is
         # lost, so it must reach `connections_incomplete` (the reporting
         # discipline rule 1 rests on) rather than only a shape warning.
-        n = len(raw) if isinstance(raw, (dict, tuple)) else 1
+        # ⚠️ `len(dict)` counts KEYS, and the realistic mistype is ONE relation
+        # OBJECT where a list was asked for (`{"src": …, "dst": …,
+        # "predicate": …}`) — counting its three keys reported 3 lost relations
+        # for 1. A mapping OF relations still counts one per entry.
+        if isinstance(raw, dict):
+            n = 1 if ({"src", "dst", "predicate"} & set(raw)) else len(raw)
+        elif isinstance(raw, tuple):
+            n = len(raw)
+        else:
+            n = 1
         warnings.append(f"relations section is {type(raw).__name__}, not a "
                         "list — ignored")
         warnings.append(

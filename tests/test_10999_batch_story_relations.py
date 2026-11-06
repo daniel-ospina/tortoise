@@ -817,3 +817,51 @@ def test_the_declared_vocabulary_has_one_home():
     assert set(declared) == write_path
     # and S5's gate answers from the same call
     assert v2._declared_relation_predicates() == declared
+
+
+# ── 10. the cross-pass leg (P1) and the mistype count (P2) ───────────────
+#
+# Both were raised by an earlier review at `3edd17702c` and were still
+# present at `c0d016747`; the fixes here are red-first.
+
+def test_a_relation_endpoint_restores_an_entity_an_earlier_pass_removed():
+    """Rule 4 is the ONLY leg that can bring back an entity an EARLIER pass
+    removed — and S4 arrives between the two passes, so the narrative's
+    conclusion (`relations`) is exactly the cross-pass reference Rule 4 exists
+    for.
+
+    The `relation_endpoints` flag was applied to the whole `to_restore`
+    computation instead of to the WARNING, so a relation-only endpoint restored
+    nothing: the entity stayed gone and S5 dropped the edge as unresolvable,
+    with no warning saying why.
+    """
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"}],
+        "relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
+                       "predicate": "IMPL"}],
+    }
+    prior = {"removed_entities": {
+        "deadline rule": {"name": "Deadline Rule", "kind": "core:rule"}}}
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Retry Storm",
+                                                    "Deadline Rule"]
+    assert any("restored" in w for w in warns), warns
+    # ...and the restore is not claimed as Layer-1 integrity: the channel is
+    # result-level, so this reference cannot 422.
+    assert not any("Layer-1 referential integrity" in w for w in warns), warns
+    assert [(r["src"], r["dst"]) for r in _run(out)["relations"]] == [
+        ("Retry Storm", "Deadline Rule")]
+
+
+def test_a_single_relation_object_where_a_list_was_asked_for_counts_as_one():
+    """The realistic mistype is ONE relation object as the whole section value.
+    `len(dict)` counts its three KEYS, so the counter added to make the report
+    honest over-reported 3 lost relations for 1.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = {"src": "Retry Storm", "dst": "Deadline Rule",
+                             "predicate": "IMPL"}
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("connections_incomplete" in w for w in result["warnings"])
