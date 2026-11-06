@@ -515,6 +515,133 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   the record of *why* the seam was needed; the seam itself is built, see
   `docs/architecture/S2-DECISION-SEAM.md` — not this file.
 
+### ⛔ HARD RULE: Prove the Credential Can WRITE — before an hour you cannot deliver
+
+**One line, as the lane's FIRST command — before any work you intend to deliver:**
+`uv run python tools/gh_write_preflight.py --repo .`
+
+It proves the write by **doing** it: push the commit already at `HEAD` onto a namespaced throwaway
+ref (`gh-write-preflight/<utc>-<pid>-<rand>`), confirm it with `git ls-remote` (never trusting
+`git push`'s own exit code), delete it, confirm the delete the same way. ⚠️ A probe killed by
+`SIGTERM` (what a fleet watchdog sends) runs no cleanup, so it can leave the ref behind and print
+no verdict: after a killed run, check `git ls-remote <remote> 'refs/heads/<prefix>/*'` — using the
+`--remote` and `--probe-ref-prefix` you actually ran with, which default to `origin` and
+`gh-write-preflight`.
+
+- `exit 0` = `GH-WRITE-OK(<remote>) — push confirmed by ls-remote; <cleanup>` — the credential can
+  write **repository contents**, measured by the one operation that needs it: a throwaway ref was
+  **created and confirmed on the remote**, then deleted — unless cleanup was switched off or could not
+  be confirmed. That is the `git push` path, so a lane can publish its branch (which is what every
+  later step needs a remote ref for) — subject to the branch-ruleset caveat in the `push-refused`
+  bullet below, which is the one sub-case of `push-refused` where the branch *namespace* — not the
+  credential — is what the remote rejects. Read the `cleanup`
+  clause rather than assuming the remote is clean: `deleted` (confirmed), `KEPT (--keep-ref)` (asked
+  for), or `deletion UNCONFIRMED` (the delete or its read-back failed — the credential still wrote;
+  check the remote).
+  ⛔ Under `--json` **no OK line is printed at all** — stdout is pure JSON and the verdict lives in
+  its `writable` / `cleaned_up` fields, so a caller that greps for `GH-WRITE-OK` must not pass
+  `--json`. The `GH-WRITE-UNAVAILABLE` marker is different: it goes to stderr in **both** modes.
+- `exit 1` = `GH-WRITE-UNAVAILABLE(<reason>)` — the MARKER goes to **stderr** (stdout carries the
+  human render, or pure JSON under `--json`). Do **not** start the work until the reason is
+  resolved, but the resolution differs by class and only a **credential** refusal means "park": the
+  NO-VERDICT and environment tokens below are cleared by re-running, by fixing the invocation, or by
+  repairing the box or config the reason names — `git-absent` and `no-remote` will not clear by
+  re-running the same command on the same box.
+  `REASONS` is a **closed set of ten** and the module docstring publishes all of it. **Ten tokens,
+  three groupings — plus one token that reads like a refusal and is not:**
+  - **refusal** — `push-refused`. ⛔ **ONLY ONE of its causes is the credential, so read the detail
+    before you park** — parking any of the others is the failure this rule exists to prevent.
+    `REASONS` names two of them on the marker line itself — **no network** and **branch protection /
+    a ruleset** — and two more reach the token only through the `detail` line: a **transport
+    failure** (the failing step's own detail), and a push that **exited 0 without reporting a ref
+    update**, where nothing failed and the tool writes the message itself (`nothing was written, so
+    write capability is not proven` — `tools/gh_write_preflight.py:816-819`). None of
+    those four is "re-mint the credential": re-run, or read the detail — and for branch protection
+    the remedy is the caveat below.
+    ⚠️ **A ruleset that restricts branch *creation* to a pattern (say `main`/`fix/*`) can refuse the
+    PROBE's namespace `gh-write-preflight/…` while permitting YOUR OWN branch** — the tool's own
+    STATED RESIDUAL, and it reports `push-refused` for a credential that CAN write. So a
+    `push-refused` is not proof your branch is refused: when the failure detail carries git's own
+    protection evidence — `protected branch`, `policy prohibits`, or a `GH006`/`GH013` rule
+    violation — re-run once with `--probe-ref-prefix <a namespace the ruleset allows>` before
+    concluding the credential is read-only and reporting BLOCKED. Otherwise you park work that would
+    have landed, which is the failure this whole rule exists to prevent. (The failing step keeps only
+    its last 800 characters, so if the code itself is truncated, read this bullet rather than
+    concluding "read-only".)
+  - **NO VERDICT, re-run — never "read-only"** — `push-unknown` (the push did not COMPLETE: timed
+    out, signalled, no output), `internal-error` (the probe itself failed), `remote-unreachable` (the
+    reachability read itself failed — transport, DNS, a wrong remote URL, or read-side auth; the
+    tool's own suite calls a `remote-unreachable` on a credential that CAN write "a false block, the
+    one failure this tool must never add"), and `verify-mismatch` (the push claimed success but
+    the confirming `ls-remote` did not show the ref **at our sha** — which also covers a read that
+    could not be performed, since an unreadable target is not a proven one). Folding any of these
+    into `push-refused` parks deliverable work on a slow, unreachable or OOM-killed push; the closed
+    set is pinned by `test_the_contract_publishes_the_closed_reason_set`. ⛔ If any of them unwound
+    AFTER its push, a probe ref may be sitting on the remote. Do not rely on the detail line to name
+    it — read `cleaned_up` / `leftover_ref` / `probe_ref` instead, because the detail may name no ref
+    at all (it is stdout+stderr, truncated to the last 800 characters) and the survivor note is
+    appended under ANY reason (`delete-failed` is stamped only when nothing else explains the
+    failure) — then delete that ref as the `delete-failed` bullet says.
+  - **environment, not the credential** — `git-absent`, `not-a-repo` (`--repo` is a CHECKOUT PATH,
+    never `owner/name`), `no-remote` (no remote of that name), `no-head` (`HEAD` does not resolve).
+  - `delete-failed` is **litter, not capability** — the push already succeeded. ⛔ **A RE-RUN DOES NOT
+    CLEAN IT**: every run mints a NEW ref (`<utc>-<pid>-<rand>`) and deletes only its own, so a
+    remote that refuses deletes grows one survivor per run. The tool names it — `PROBE REF SURVIVED
+    on <remote>: refs/heads/<ref>` (`probe_ref`, or the `detail` field under `--json`) — so delete
+    THAT ref (`git push <remote> --delete <ref>`), then re-run. In plain mode `detail` is printed
+    truncated to its **last 600** characters, so on a verbose delete refusal the marker and the ref
+    name in it can be cut away; `--json` is the reliable read. If the remote refuses the delete too,
+    re-probe under a namespace it will let you create **and** delete (`--probe-ref-prefix`). Never
+    read it as "lanes cannot deliver".
+- `exit 2` = usage (argparse's own code, deliberately not a verdict).
+
+**Why it is a gate and not a courtesy call.** `gh` resolves `GH_TOKEN` → `GITHUB_TOKEN` →
+`$HOME/.config/gh/hosts.yml`, and GitHub's manual states it *"takes precedence over previously
+stored credentials"* — so a cell that exports a **read-only** token as `GH_TOKEN` never
+reaches the write-capable OAuth token sitting in `hosts.yml`. `git push` inherits the same choice
+through `credential.helper = !gh auth git-credential`. Measured 2026-11-05: a **17-lane wave produced
+0 landings** while every lane honestly reported "built, parked" — none misreported itself; nothing
+had asked whether the credential could push at all.
+
+**Two proxies are rejected, both having been relied on in the fleet** — neither is this test:
+
+- **`gh auth status`** exits **0** for a read-only credential: it reports that the credential exists
+  and is valid, never that it can write.
+- **`GET /repos/{o}/{r}` → `.permissions.push`** (and GraphQL `viewerPermission`) reports the
+  permissions the **authenticated USER** holds, not the ones the **token was granted**. A
+  fine-grained PAT with `contents: read` authenticates AS THE USER, so it reads `{"admin":true,
+  "push":true,…}` while every push it makes is refused. On a fine-grained PAT, `Issues: write`,
+  `Pull requests: write` and `Contents: write` are **separately granted** — `issues=write` can
+  be present while the PR surface 403s on the same token in the same minute (#10930).
+
+⛔ **THE CLAIM IS NO WIDER THAN THE MEASUREMENT — this proves `Contents: write` and nothing else.**
+It does **not** probe `Issues: write` or `Pull requests: write`, so `exit 0` does **not** promise a PR
+create, a PR comment, a constituent-PR close, or an issue close — any of those can 403 on a token
+whose contents half is fine, and vice versa. #10930 records the requirement exactly: a **landing**
+lane's preflight must prove **three grants** — `Contents`, `Pull requests`, `Issues` — **not two**,
+because #10945's two legs were `Contents` and `Pull requests` **only**, so a token holding those two
+and **no** `Issues: write` passes that probe without ever measuring the third grant — the grants are
+independent, and the token measured on #10930 is a shape where one grant is present and another
+absent. This gate proves one of the three. If your lane LANDS — comments the evidence on the PR,
+closes constituents, closes delivered issues — `exit 0` proves none of that, so prove those two
+surfaces by the operation itself before you start. ⛔ **The route selects the grant, but not always
+uniquely** — which is why a naive two-route proof false-PASSes a token of #10945's shape, holding
+`Contents` and `Pull requests` but no `Issues`:
+
+- `PATCH /repos/{o}/{r}/pulls/{n}` (no-op title) needs `Pull requests` write and nothing else, so it
+  is a valid leg. #10930 measured it **residue-free** on a PR number.
+- `PATCH /repos/{o}/{r}/issues/{n}` is documented as **at least one of** `Issues` **or** `Pull
+  requests` write — so it CANNOT prove `Issues: write`: a token holding `Pull requests` and no
+  `Issues` passes it, which is #10945's two-leg shape exactly.
+- The Issues leg needs an endpoint whose permission set is Issues-only. `POST /repos/{o}/{r}/issues`
+  is, but it creates a real issue — close it, or record the residue rather than leaving it.
+
+If the **Issues** leg cannot be proven without residue, **escalate rather than build**; do not record
+a surface as proven because a proxy for it passed. The preflight also proves the credential **`git`**
+resolves for this checkout's push URL (normally the same token `gh` resolves, because the helper is
+`!gh auth git-credential`; a box whose helper is something else is the exception — and even for one
+token the grant is **per resource kind**, which is why the surfaces above stay unproven).
+
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
 Never dispatch to a cmux pane with a bare `cmux send`. **Use `tools/cmux_dispatch.py`** — it is the

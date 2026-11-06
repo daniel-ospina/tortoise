@@ -3375,7 +3375,7 @@ fly secrets list -a tortoise-y4mjjq | grep -E '^TORTOISE_RECORD_DSN'
 **Verify it is ARMED, not merely set** — a set variable that reaches an
 unreachable or misconfigured database is the one failure this cannot show you.
 The first read below answers it directly: `GET /health`'s `record` block reports
-`armed`, the value's fingerprint, and the three counters.
+`armed`, the value's fingerprint, and the record counters.
 
 ⛔ **There is NO `/metrics` route on the hosted app — do not go looking for one.**
 The listener on **9090** is the dedicated liveness listener
@@ -3389,7 +3389,7 @@ prints **nothing in every state** — armed-and-writing, armed-and-refusing, and
 unarmed alike (`curl -s` prints the 404 body, `grep` matches none of it). An
 empty grep is **not** a passing reading: it is the silent `NOT_ARMED` class this
 section exists to close, one layer up. Hosted `GET /health` (8000) carries the
-record's **arming state and its three counters** in an additive `record` block
+record's **arming state and its record counters** in an additive `record` block
 (`hosted_api._record_health`, #9548) — but it still does not serve `/metrics`
 text, so do not grep the 9090 listener for a counter name.
 
@@ -3410,7 +3410,8 @@ text, so do not grep the 9090 listener for a counter name.
    | `armed` | `true` = the seam ACCEPTED the value: a Postgres scheme **and** a host (`record_dsn()`'s scheme + host rules). `false` + `error: null` = the supported default-off state (not a fault). `false` + `error` = a value was SET and the seam REFUSED it — a typo'd scheme, a **hostless** value (`postgresql://user:pw@`, the shape a clipped paste produces), or one carrying raw whitespace — and that case is one of five that flip `/health`'s `status` to `degraded` (with `degraded`, `counters_error`, `tenancy_error` and `refusal_error`), because every capture then counts `malformed_dsn` while the record stays empty |
    | `dsn` | the **8-hex fingerprint** of the value, never the value. To answer "is that the value I set?": `printf %s "$TORTOISE_RECORD_DSN" \| shasum -a 256 \| cut -c1-8` — equal ⇒ the machine carries THIS value; different ⇒ a stale secret, with nothing disclosed either way. ⚠️ The code fingerprints the value **after `.strip()`** (`record_dsn()`), so hash the secret the way it is staged: a file ending in a newline makes your `printf` result differ from the process's for the SAME secret. Trailing whitespace is stripped by both — interior whitespace is refused outright, so it cannot reach here |
    | `single_tenant_declared` | must be **`false`** on hosted. `true` means someone armed the process-global org/graph pair, which the multi-tenant app must refuse (#9192) |
-   | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the counters this section's "pass bar" reads, now readable from the pod without `/mcp` auth |
+   | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the counters this section's "pass bar" reads, now readable from the pod without `/mcp` auth. ⚠️ All three are **failure/decline** channels: a `{}` here does NOT evidence that a row was written, so read the positive pair below beside them |
+   | `record_writes_applied` / `record_last_write_at` | **the positive channel (#9548)** — the number of live record writes THIS PROCESS has committed since it started, and the instant of the last one (ISO-8601 UTC). This is the field that answers *"is the record actually writing?"* on its own: `record_write_failures: {}` is equally consistent with "writes are landing" and with "no write has ever reached the seam", which is how #9548 was closed on an empty object and reopened. Read it **before and after** a capture: an unchanged count means nothing was written, whatever the failures object says. ⚠️ The two `null`s mean DIFFERENT things and `counters_error` is what separates them: for `record_writes_applied`, `null` = the counter could not be READ (so a `.get(…, 0)` must not turn an unanswered read into the never-writing finding), while for `record_last_write_at`, `null` = this process has not committed a write since it started, and it is also `null` on an unread snapshot. ⚠️ Two honest limits: they are in-process, so they reset on deploy/restart (`record_last_write_at` is how you date them), and a non-zero value claims *a transaction committed in this process*, not *how many rows landed* — the SQL row count below is still the witness for rows |
    | `degraded` / `degraded_reasons` / `refusing` | **the record's own verdict, and the field to read first** (#10185, #10620). `degraded`: `null` = not evaluated, because the counter snapshot could not be read (see `counters_error`) or the verdict itself could not be read (see `refusal_error`); `false` = no armed write was refused inside the window; `true` = **rows were dropped in the last `RECORD_REFUSAL_WINDOW_SECONDS` (5 min)**, and it flips `status` to `degraded`. `refusing` names *what* is refusing and *how long ago*: `{"reason": …, "age_s": …}`, or `null` = nothing is refusing. ⛔ The key is **ABSENT** when the verdict could not be read (`refusal_error` non-null), deliberately: absence and "not evaluated" are one fact, so a consumer must never read a missing key as "nothing is refusing" — the same rule `degraded: null` follows, one field over (#10648 review P3). `degraded_reasons` carries the reason behind that verdict with its cumulative count. ⛔ **The verdict is WINDOW-based, not a fold over the counters** — #10185 measured that folding `any(record_write_failures)` pins a deployment `degraded` for the life of the process after one transient refusal (and an always-red flag is one an operator ignores), while a restart reads `ok` with the rows still missing. So it CLEARS on its own after a quiet window, with no restart and **no counter reset or hidden** — read `record_write_failures` for the history, `degraded`/`refusing` for *now*. The vocabulary is SIX values, and **not all are replay-healable**: `write_failed` (replay heals), `circuit_open` (replay heals), `no_tenant` (heal the tenant resolution, then replay), `malformed_dsn` (fix the value); but `no_journal` (armed with **no journal** — no source exists, **no replay can heal it**) and `seam_unimportable` (the record module could not be imported, so the seam never ran) are fixed by their own cause, **not** by a replay. ⚠️ `record_non_journal_skips` and `record_position_unproven` are deliberately NOT folded in: those are healthy declines and self-healing skips, not lost rows |
    | `counters_error` | why the counter snapshot could not be read, or `null`. Kept apart from `error` so the pairing above stays true; non-null also flips `status` to `degraded` |
    | `refusal_error` | why the **refusal verdict** could not be read, or `null`. Kept apart from `error` for the same reason as `counters_error`, and one field further: `error`'s remedy is "fix the DSN", which is the wrong row for an unreadable process global. When it is non-`null` the verdict was NOT EVALUATED, so `degraded` is `null` — never `false`, which would claim "nothing is refusing" about a read that never happened. Non-null also flips `status` to `degraded` |
@@ -3427,15 +3428,18 @@ text, so do not grep the 9090 listener for a counter name.
    without a connection. A dead host, a paused project and a wrong password all
    still read `armed: true`.
 
-   ⛔ **`record_write_failures: {}` is NOT evidence that a row was written.** All
-   three counters are FAILURE/DECLINE channels — there is no positive
-   `record_writes` counter anywhere in `monitoring.py` — so an armed-and-writing
-   deployment and one that has never written a row both read `{}`. A zero here
-   can only ever falsify "writes are failing"; it cannot confirm "writes
-   happened". Indicator (b) of #9548 (`record_write_failures` = 0) is therefore
-   only meaningful **beside the SQL row count** in “No unexpected failure” below:
-   a healthy-looking counter with no new `journal_event` / `point` row is the
-   R1-without-R2 state, not a pass.
+   ⛔ **`record_write_failures: {}` is NOT evidence that a row was written.** The
+   three failure/decline counters cannot show it on their own, so an
+   armed-and-writing deployment and one that has never written a row both read
+   `{}`. A zero there can only ever falsify "writes are failing"; it cannot
+   confirm "writes happened". **The positive witness is
+   `record_writes_applied`** (added for exactly this, #9548): it counts writes
+   this process COMMITTED, so a delta across the capture is the presence reading
+   item 1 below asks for. Indicator (b) of #9548 (`record_write_failures` = 0)
+   is therefore read as **the pair** — a rising `record_writes_applied` with no
+   growth in the failures, beside the SQL row count in “No unexpected failure”
+   below for how MANY rows landed: a healthy-looking counter with no new
+   `journal_event` / `point` row is the R1-without-R2 state, not a pass.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
@@ -3546,7 +3550,9 @@ So the bar has **two parts, and BOTH are required**:
    capture and again after**: presence and growth are the *difference* between
    the two reads, never an absolute count (a `write_failed` left from earlier in
    the process's life is not this capture's reading). After the capture, require
-   at least one reading **before** you interpret anything: any reason on
+   at least one reading **before** you interpret anything: a **delta on
+   `record_writes_applied`** (the positive witness, #9548 — this one alone says a
+   transaction committed), any reason on
    `record_write_failures`, any reason on `record_non_journal_skips`,
    a non-zero delta on `record_position_unproven`, or a new `journal_event` / `point` row
    on the record project. ⚠️ **The capture that proves presence must be a
