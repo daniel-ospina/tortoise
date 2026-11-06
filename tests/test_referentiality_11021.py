@@ -755,3 +755,223 @@ def test_the_25_row_label_set_is_the_ARBITERS_class_not_this_cue_s():
         "the cue claimed a definite description — that class is the arbiter's, "
         "and the must-keep arm contains rows of the identical shape")
     assert len(held) == 0
+
+
+# ── review cycle 5: the UNION pass carries decisions, it does not re-derive ─
+#
+# Every P1 in cycles 1–5 lived in the same corner: the interaction between pass
+# 1, the S4 union, the `mentions[]` channel and the fail-open guard. Pass 2
+# re-enters with a list pass 1 already rewrote, so anything it REBUILDS from that
+# list disagrees with pass 1 — a re-emitted surface has no reference left, a
+# re-read record loses its `span_source`, a long claim no longer resolves. These
+# rows drive TWO passes, which is the only configuration production runs and the
+# one the single-pass rows could not see.
+
+def _union_pass(el: dict, **s4_changes) -> dict:
+    """Pass 1, then the S4 union pass on its OUTPUT — what `extract_session_v2`
+    does (S2 → S4 merge → union), with S4's edits supplied by the caller."""
+    once = route_mentions(copy.deepcopy(el), "")
+    for key, value in s4_changes.items():
+        if key == "add_entity":
+            once["entities"] = list(once["entities"]) + [value]
+        elif key == "add_point":
+            once["points"] = list(once["points"]) + [value]
+        else:                                     # pragma: no cover - test helper
+            raise AssertionError(f"unknown s4 change {key!r}")
+    return route_mentions(once, "")
+
+
+def test_an_EVENT_only_hold_is_not_minted_by_the_union_pass():
+    """⛔ THE REGRESSION (review cycle 5, P1). `execute_embed`'s ref set is
+    points-only, so a surface whose only carrier is an EVENT writes no record —
+    and with no surface-level memory of the decision, pass 2 found no carrier,
+    abandoned the hold and MINTED the entity pass 1 had held. That is #11021's
+    central guarantee inverted on the ordinary two-pass pipeline, silently."""
+    el = {"entities": [{"name": "it", "kind": "core:other"},
+                       {"name": "the admin-merge rail", "kind": "core:policy"}],
+          "events": [{"content": "it broke the deploy", "eventKind": "core:event",
+                      "about_entities": ["it"]}],
+          "points": [{"content": "a claim about the admin merge rail",
+                      "pointKind": "statement",
+                      "about_entities": ["the admin-merge rail"],
+                      "quote": "a claim about the admin merge rail"}],
+          "operators": []}
+    once = route_mentions(copy.deepcopy(el), "")
+    assert once["mention_stats"]["mention_carrier_is_event"] == 1
+    assert once["mention_stats"]["held_surfaces"] == 1
+    # S4 reviews gaps against the S3 index, where the entity was still visible.
+    twice = _union_pass(el, add_entity={"name": "it", "kind": "core:object"})
+    assert "it" not in {e["name"] for e in twice["entities"]}, (
+        "the union pass minted the surface pass 1 held")
+    assert twice["mention_stats"]["hold_abandoned_no_claim"] == 0
+    payload = execute_embed(copy.deepcopy(twice), {}, session_id="ev-union")["payload"]
+    assert "it" not in _entity_names(payload), (
+        "held-then-minted: the phantom node #11021 exists to delete")
+
+
+def test_a_held_record_survives_the_union_pass_when_S4_re_emits_the_entity():
+    """Pass 2 used to read this module's OWN record as "the model said entity"
+    (`candidate_surfaces` was built from the pre-hold list), rebuild `mentions[]`
+    from scratch and drop the record — the surface then lived in no entity, no
+    `about_entities` and no mention, with no warning (review cycle 4, P1-b)."""
+    twice = _union_pass(_embed_list("it"),
+                        add_entity={"name": "it", "kind": "core:object"})
+    assert [m["surface"] for m in twice["mentions"]] == ["it"]
+    assert twice["mention_stats"]["channel_entry_is_entity"] == 0, (
+        "the module's own carried record was counted as a model contradiction")
+
+
+def test_a_held_record_is_BYTE_IDENTICAL_after_the_second_pass():
+    """The idempotence row asserted only `entities` and a COUNT, so it passed
+    while pass 2 rewrote every derived record's `span_source` to `"model"` (the
+    offsets address the claim's QUOTE, not a model emission) and replaced the
+    cue's `reason` with the channel's boilerplate (review at 41fb0c65e, P1)."""
+    once = route_mentions(_embed_list("it"), "")
+    twice = route_mentions(copy.deepcopy(once), "")
+    assert twice["mentions"] == once["mentions"]
+    assert once["mentions"][0]["span_source"] in ("quote", "narrative")
+
+
+def test_a_bare_about_reference_S4_added_is_still_stripped():
+    """`held_surfaces` was rebuilt from what the entity loop kept, so a claim S4
+    added whose `about_entities` names an already-held surface (with no entity
+    behind it) kept the reference — and Layer-1 422'd the whole session, where
+    the fail-open `try/except` could not see it (review cycle 4, P1-a)."""
+    once = route_mentions(_embed_list("it"), "")
+    once["points"] = list(once["points"]) + [
+        {"content": "S4's new claim", "pointKind": "statement",
+         "about_entities": ["it"]}]
+    twice = route_mentions(once, "")
+    assert twice["points"][-1]["about_entities"] == [], (
+        "a bare reference to a held surface survived the union pass")
+    payload = execute_embed(copy.deepcopy(twice), {}, session_id="bare-ref")["payload"]
+    verdict, _ = validate_payload_dict(payload)
+    assert verdict.ok is True, verdict.errors
+
+
+def test_a_mention_on_a_CLAIM_over_the_cap_survives_the_union_pass():
+    """`claim_ref` is the WRITE's window (`_write_span(...strip(), _MAX_CONTENT)`),
+    so pass 2 must key claims the same way — keyed on the raw content, a record
+    over the cap resolved against nothing and was refused as
+    `channel_refused_no_claim` (review cycle 4, P1-c)."""
+    el = _embed_list("it")
+    el["points"][0]["content"] = "x" * 1300 + " it"
+    twice = _union_pass(el)
+    assert [m["surface"] for m in twice["mentions"]] == ["it"]
+    assert twice["mention_stats"]["channel_refused_no_claim"] == 0
+    res = execute_embed(copy.deepcopy(twice), {}, session_id="long-union")
+    assert res["stats"]["mentions_attached"] == 1, res["stats"]
+
+
+def test_a_carried_hold_cannot_hold_a_referent():
+    """`mention_held` rides the merged embed list, and S4 is rendered that whole
+    list — so the model can emit one. It must re-verify against `judge()` like
+    every other model-supplied hold, or it is a one-field delete of a referent
+    (review cycle 3, P1, one door over)."""
+    el = _embed_list("the admin-merge rail")
+    el["mention_held"] = [{"surface": "the admin-merge rail",
+                           "rule_id": ref.RULE_PRONOUN}]
+    routed = route_mentions(el, "")
+    assert [e["name"] for e in routed["entities"]] == ["the admin-merge rail"]
+    assert routed["mention_stats"]["held_surfaces"] == 0
+    assert "mention_held" not in routed, (
+        "a refused carried decision must not be re-published as held")
+
+
+def test_an_event_only_hold_names_the_record_it_cannot_write():
+    """An event is a carrier (its `about_entities` is stripped), but a record
+    against it can never resolve — so the hold writes NO record. That used to be
+    silent while the docstring promised "a mention no claim can carry is
+    refused" (review cycle 4, P2). The surface is still held; the gap is named."""
+    el = {"entities": [{"name": "it", "kind": "core:other"}],
+          "events": [{"content": "it broke the deploy", "eventKind": "core:event",
+                      "about_entities": ["it"]}],
+          "points": [{"content": "an unrelated claim", "pointKind": "statement",
+                      "about_entities": []}],
+          "operators": []}
+    routed = route_mentions(el, "")
+    stats = routed["mention_stats"]
+    assert stats["held_surfaces"] == 1
+    assert stats["mention_carrier_is_event"] == 1
+    assert stats["mention_unrecorded_surfaces"] == ["it"]
+    assert routed["mentions"] == []
+    assert routed["events"][0]["about_entities"] == []
+
+
+def test_a_MITIGATES_target_alias_cannot_mint_a_held_surface():
+    """`execute_embed`'s mint pre-pass reads `target` OR `target_edge`, so a
+    pronoun named in the `target` spelling was materialised as a fabricated
+    statement Point while the `target_edge` spelling was pruned correctly
+    (review cycle 4, P2)."""
+    el = _embed_list("it", "the admin-merge rail")
+    el["operators"] = [{"src": "the admin-merge rail",
+                        "dst": "the admin-merge rail", "op_type": "MITIGATES",
+                        "target": {"src": "it",
+                                   "dst": "the admin-merge rail"}}]
+    payload, ctx = _mint(el)
+    assert ctx["held"]["mention_stats"]["operators_dropped"] == 1
+    assert payload["operators"] == []
+
+
+def test_a_model_rule_id_cannot_be_stored_as_a_hold_that_never_happened():
+    """The model's `rule_id` was copied verbatim into `Mention.rule_id`, so an
+    entry tagged `referentiality.pronoun` on a surface the cue calls a REFERENT
+    was stored as a cue attribution for a rule that never ran — on the evidence
+    surface plan R1's arming gate reads (review cycle 4, P3)."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "the admin-merge rail",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "the admin-merge rail",
+                       "rule_id": ref.RULE_PRONOUN}]
+    routed = route_mentions(el, "")
+    assert routed["mentions"][0]["rule_id"] == ref.RULE_CHANNEL
+    assert routed["mention_stats"]["held_surfaces"] == 0
+
+
+def test_a_boolean_offset_is_not_an_address():
+    """`isinstance(True, int)` is `True`: `span_start: true` was accepted, stored
+    as `span_source: "model"` and coerced to `1` by the model — an address naming
+    bytes the surface never occupied (review P2)."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "the thing",
+                       "claim_ref": el["points"][0]["content"],
+                       "span_start": True, "span_end": 2}]
+    payload, _ = _mint(el)
+    rec = _mentions_of(payload)[0]
+    assert "span_start" not in rec and "span_end" not in rec
+    assert "span_source" not in rec
+
+
+def test_an_unarmed_run_publishes_no_held_record(monkeypatch):
+    """`result["mentions"]["records"]` was flag-agnostic, so a run with the cue
+    OFF published the model's raw `mentions[]` entries as "the mentions held"
+    when nothing was held (review cycle 4, P3). Driven through
+    `extract_session_v2`, the only place that block is assembled."""
+    from tortoise.extractor_v2 import extract_session_v2
+
+    monkeypatch.delenv(ref.ENV_FLAG, raising=False)   # the fixture ARMS it
+
+    class _M:
+        last_finish_reason = None
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.last_finish_reason = "stop"
+            if "STORY SUMMARIZER" in system:
+                return "A narrative."
+            if "GAP REVIEWER" in system:
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [], "chain_notes": [], '
+                        '"link_before_create": []}')
+            return ('{"entities": [{"name": "ACME Corp", "kind": "core:org"}], '
+                    '"events": [], "operators": [], '
+                    '"points": [{"content": "the budget is 40k", '
+                    '"pointKind": "statement"}], "chain_notes": [], '
+                    '"link_before_create": [], '
+                    '"mentions": [{"surface": "the plan doc", '
+                    '"claim_ref": "the budget is 40k"}]}')
+
+    out = extract_session_v2(_M(), [{"role": "user",
+                                     "content": "the budget is 40k"}],
+                             session_id="unarmed-records")
+    assert out["mentions"]["records"] == [], (
+        "an unarmed run reported records it never made")
