@@ -196,11 +196,19 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
-#: (lines 342-344) records that derivation in its own words — *"The budget's default is
+#: (lines 369-371) records that derivation in its own words — *"The budget's default is
 #: derived from this document's own §1 measurement (max first-job wait 81.9 min →
 #: 90 min), so it fires past the measured-normal population rather than on it."* 5400 s
 #: sits on the same side of the same measurement: past the measured maximum, so a run
 #: named here has outlasted every first-job wait this repo has recorded.
+#:
+#: ⚠ RE-ANCHORED 2026-11-06 (#6744): the §7 insert on this PR's branch moved §6 down from
+#: 336 to 363, so the previous span (342-344) then read §5's kill table. The span is read
+#: back out of this docstring by
+#: `tests/test_ci_check_repair.py::test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head`,
+#: which is what reds on the NEXT insert instead of leaving the stale coordinate to be
+#: found by a lane as a misreading — so re-anchor the number here, and do not delete the
+#: pin to make it pass.
 #:
 #: ⛔ CITE EACH PLACE FOR WHAT IT SAYS. §6 OPENS with *"**It does not bound queue
 #: wait.** §1. No `timeout-minutes` can."* — that sentence is about `timeout-minutes`,
