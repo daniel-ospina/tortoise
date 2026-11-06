@@ -1,7 +1,8 @@
 """The production home for *"this embedding writer is legitimately exempt"* (#11085).
 
-**Why this module exists.** `#10541` classified the embedding-writer population — 6 recognised
-producers, 9 legitimately exempt, **0 bypasses** — but the only place that classification lived was
+**Why this module exists.** `#10541` classified the embedding-writer population (0 bypasses at every
+head since; the class counts move as writers are declared, so read `WRITER_CENSUS` rather than a
+number restated here) but the only place that classification lived was
 `tools/dod_5090_probe.py::WRITER_CENSUS`, which is a **read-only instrument** and says so at its own
 `:1264` (*"the census CLASSIFIES the unresolved set; it does not license moving this verdict"*). An
 audit instrument is not a product decision: the answer to *"is this writer allowed to store a vector
@@ -71,15 +72,18 @@ unclassified, absent, which is why the guard in `tests/test_embed_writer_registe
 for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace
 (`SET n = $map`), a property name INTERPOLATED into the clause, and the container-HELPER /
 COMPUTED-KEY forms a regex and a literal-slice test both miss
-(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and three of those are **live**: the
-interpolation in `tortoise.cache_projection::node_statement`, the helper in
-`tortoise.sdk::_emit_event`, and the computed key in `tortoise.sdk::update_point`. The full list is
+(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and those forms are not hypothetical:
+the interpolation in `tortoise.cache_projection::node_statement`, the helper in
+`tortoise.sdk::_emit_event`, the computed key in `tortoise.sdk::update_point`, and the WHOLE-NODE
+replace in `tortoise.hosted_backup::restore_graph` (a writer declared here). The full list is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which is the authority: a count written
-here re-stales with every shape added, so this paragraph names forms and does not count them.
-⚠️ Its direct analogue `tortoise.sdk::_journal_event_raw_write` is
+here re-stales with every shape added, so this paragraph names forms and instances and does not
+count them.
+⚠️ `tortoise.sdk::_journal_event_raw_write` is
 visible for a DIFFERENT reason — `_EMBED_WRITE` matches the `embedding=None` in its SIGNATURE — so
 it is not evidence that a literal subscript is what gets a carrier seen; the writers that genuinely
-owe their visibility to `#11274`'s AST pass are the container-key instances declared here. A writer is also
+owe their visibility to `#11274`'s AST pass are the four named at the top of this section, not every
+container-key declaration in the table. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
 *named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
 module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
@@ -106,8 +110,8 @@ probe's third class exists only so the instrument can *name* one if it ever find
 
 **Vocabulary, and one finding.** `#11085`'s body says `gated`; `04-plan.md` §6.2 — higher precedence,
 and the vocabulary `tools/dod_5090_probe.py` already uses — says `recognised_producer`. The plan's
-word is used here because `gated` would be a **false claim**: the probe measures that *none* of these
-six reaches `encode_for_row` (the gate's seam); they reach the canonical clause builder
+word is used here because `gated` would be a **false claim**: the probe measures that *no writer in
+this class* reaches `encode_for_row` (the gate's seam); they reach the canonical clause builder
 (`set_embedding_clause`) or the `#5008` session producer. `recognised_producer` is exactly the
 claim the seam supports. Recorded on `#11085` rather than silently reconciled.
 """
@@ -121,7 +125,7 @@ from types import MappingProxyType
 #: A writer whose vector reaches a **recognised** producer — the canonical clause builder
 #: (`tortoise/vector_write.py::set_embedding_clause`) or the `#5008` session producer
 #: (`compute_session_embedding`, via `SDK._session_embedding`). ⚠️ It does **not** mean
-#: `encode_for_row`: none of the census's six producers calls it, which is why `gated` is not the
+#: `encode_for_row`: no writer in this class calls it, which is why `gated` is not the
 #: class name. ⛔ And this spelling is NOT the instrument's `kind == "producer"`, which means
 #: "computes a vector another function writes" — the two vocabularies collide on the word and
 #: disagree on the meaning (`tortoise/sdk.py::_session_embedding` is the instrument's `producer`
@@ -314,8 +318,8 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`tortoise/sdk.py::_embedding_repair_attempt` DOES compute and store — "
             "`embedding = self._session_embedding(...)` and `set_embedding_clause(\"e\")` in its "
             "own body. It is both a producer on the `#5008` chain and a repair by ROLE, which is "
-            "why `exempt` (the #10541 wording for the other nine) would contradict the class the "
-            "chain's own seam carries",
+            "why `exempt` (the `#10541` wording for the class that stores nothing) would contradict "
+            "the class the chain's own seam carries",
             "#5008",
         ),
     ),

@@ -12,8 +12,9 @@ container HELPER / COMPUTED key (`clean.setdefault("embedding", None)`, `d[KEY] 
 from the census rather than undeclared — and every test below is green. `#11274` owns widening
 it; the register's module docstring states the same boundary.
 
-**What `#11085` is.** `#10541` *classified* the embedding-writer population (6 recognised producers,
-9 legitimately exempt, 0 bypasses) but left that classification in `tools/dod_5090_probe.py`'s
+**What `#11085` is.** `#10541` *classified* the embedding-writer population (0 bypasses at every head
+since; read `WRITER_CENSUS` for the class counts rather than a number restated here — the #11274
+widening moved them) but left that classification in `tools/dod_5090_probe.py`'s
 `WRITER_CENSUS`, which is a **read-only instrument**. `#5090`'s DoD row 1 has two readings — **(a)**
 a classified population is enough, **(b)** every writer must route through the gate *or* be a
 **named, accepted exception in the product**. This issue takes (b), because (a) makes the metric
