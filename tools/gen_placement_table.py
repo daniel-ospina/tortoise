@@ -34,12 +34,21 @@ from __future__ import annotations
 
 import sys
 
+# #5128: refuse a <3.12 interpreter before the imports below.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    # #4053: this is an ENVIRONMENT failure, not a verdict. `SystemExit(<str>)`
+    # exits 1, and `--check` gives 1 to "the carrier is missing or stale" (see
+    # USAGE above and `main()`) — so a drift gate that never regenerated anything
+    # would report STALE, whose natural "repair" is regenerating under the same
+    # old interpreter or hand-editing a GENERATED artifact. Print on stderr and
+    # exit 2, which `main()` never returns (it returns 0 and 1 only).
+    print(
         f"tools/gen_placement_table.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/gen_placement_table.py …`"
+        f"`uv run python tools/gen_placement_table.py …`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
 import hashlib
