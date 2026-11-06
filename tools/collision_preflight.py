@@ -1288,7 +1288,7 @@ def _run(cmd: list[str], cwd: str, timeout: float, env: dict | None = None):
         return 124, "", f"timeout after {timeout:g}s", True
     except OSError as exc:  # pragma: no cover - defensive
         return 126, "", f"{cmd[0]}: {exc}", False
-    except ValueError as exc:  # UnicodeDecodeError under `text=True` (#8881)
+    except ValueError:  # UnicodeDecodeError under `text=True` (#8881)
         # ⛔ NOT `errors="replace"`. A replacement character produces a
         # plausible-looking ref/slug that then answers the caller (the wrong-slug
         # path #8881 measured). Refuse the read instead of guessing at it.
@@ -7314,7 +7314,7 @@ def _process_rows(ps_bin: str, cwd: str, timeout: float
     seam = os.environ.get(PROCESS_TABLE_ENV)
     if seam:
         try:
-            with open(seam, "r", encoding="utf-8", errors="strict") as fh:
+            with open(seam, encoding="utf-8", errors="strict") as fh:
                 text = fh.read()
         except OSError as exc:
             return None, f"{PROCESS_TABLE_ENV}={seam} could not be read ({exc})"
@@ -7512,7 +7512,7 @@ def _lane_queue_entries(slug: str | None
         if not remainder.isdigit() or not tail.isdigit():
             continue
         try:
-            with open(os.path.join(root, name), "r", encoding="utf-8",
+            with open(os.path.join(root, name), encoding="utf-8",
                       errors="strict") as fh:
                 pid_txt = fh.read().strip()
         except (OSError, ValueError) as exc:
