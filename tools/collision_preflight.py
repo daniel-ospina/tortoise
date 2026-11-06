@@ -1669,7 +1669,18 @@ def closing_reference(text: str, issue: int) -> bool:
 
     * the ADVISORY closed-PR surface, whose payload comes from the REST `/pulls`
       endpoint and therefore carries no `closingIssuesReferences`. Every hit
-      there is already `weak`, so an imprecise regex cannot block anything;
+      there is already `weak` **as a row on THAT surface** — but "cannot block
+      anything" would be FALSE, and it was written here until the #11105 review
+      measured the contradiction: the same matched PR number is returned by
+      `_prs_serving_issue` into `attributed_prs`, and the live-lane
+      harness-queue arm renders that attribution at `strong` (:8044), which
+      DECIDES the verdict. So this regex CAN block through the queue arm, and it
+      does so even when the body NEGATES the phrase ("This does NOT close #N") —
+      a keyword regex cannot read negation. That over-attribution is the
+      ACCEPTED direction (a missed duplicate is worse than a false alarm); the
+      deliberate arm is `test_the_body_arm_carries_the_SURFACES_OWN_imprecision_onto_the_queue`.
+      ⛔ Do not "restore" the narrow reading by deleting the fall-through —
+      that re-opens the fail-open #11105 closed;
     * the BLOCKING open-PR surface when its list was rescued over REST (#9402):
       REST has no such field either, so on that call this regex is the ONLY
       closing test, and a non-terminal hit from it is `strong` and DECIDES the
@@ -1679,8 +1690,9 @@ def closing_reference(text: str, issue: int) -> bool:
 
     So the accurate rule for an editor is: a blocking surface uses
     `_closing_ref_numbers` as the SOURCE, and this regex only as an
-    ADDING-ONLY union (when the field was requested) or as the documented
-    REST-rescue fallback, whose hits stay `strong`.
+    ADDING-ONLY union (when the field was requested), as the documented
+    REST-rescue fallback, whose hits stay `strong`, or as the body arm of the
+    live-lane queue widening — where a hit is also `strong`.
 
     ⛔ THE GRAMMAR LIVES IN ONE PLACE (#9957). This used to spell the pattern
     inline, and `_closing_numbers_in_text` needs the SAME grammar to answer the
@@ -5349,14 +5361,17 @@ def _prs_serving_issue(prs: list[dict], issue: int) -> set[int]:
 
     Used only to widen the live-lane surface's harness-queue arm (#1233): a
     `pr-doctor` lane is dispatched BY a PR number, so the queue entry names the
-    PR and never the issue. The same three name-like fields the PR surface treats
-    as STRONG evidence are read here — title, head ref, and the computed closing
-    reference — and nothing lexical is invented.
+    PR and never the issue. The same FOUR name-like fields the PR surface treats
+    as STRONG evidence are read here — title, head ref, the computed closing
+    reference, and the body's closing keyword — and nothing lexical is invented.
 
     ⛔ A missing/unreadable `closingIssuesReferences` answers "not by that arm"
     here, because the PR surface ALREADY reports that surface INCOMPLETE (an
-    unmeasured test is not evidence either way). This helper can therefore only
-    ever NARROW the queue arm, never decide the verdict.
+    unmeasured test is not evidence either way) — it then falls through to the
+    BODY keyword below. So the precise statement of this helper's reach is: a
+    MISS can only ever NARROW the queue arm, while a HIT (from any of the four
+    fields) can DECIDE the verdict, because the queue arm renders an attribution
+    at `strong` (:8044).
 
     ⛔ BUT THE BODY IS STILL CLOSING EVIDENCE (review of #11105, P2 — fail-open).
     The closed-PR page is REST `/pulls`, which carries NO
@@ -8407,8 +8422,11 @@ def run_preflight(
                 # fetched (one REST page above), so the extra evidence costs no
                 # API call: the projection carries `number`, `title` and
                 # `headRefName`, which is what `_prs_serving_issue` reads; the
-                # GraphQL-only closing reference is absent here, and that helper
-                # answers "not by that arm" for a field it cannot read.
+                # GraphQL-only closing reference is absent here — which does NOT
+                # make that helper blind: it falls through to the SAME body
+                # predicate this page's own PR surface attributes with
+                # (`closing_reference(body, issue)`), so a body-only closing
+                # keyword still reaches `attributed_prs` (#11105 review).
                 attributed_prs.update(_prs_serving_issue(prs, issue))
                 if partial:
                     shown = (

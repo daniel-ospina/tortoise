@@ -9631,6 +9631,76 @@ exec {real} "$@"
         self.assertIn("lane:prd-test-owner-test-repo-7654", out)
         self.assertIn("background harness lane is RUNNING for PR #7654", out)
 
+    def test_the_body_arm_carries_the_SURFACES_OWN_imprecision_onto_the_queue(self):
+        """A body that NEGATES the phrase still attributes — the ACCEPTED trade.
+
+        `closing_reference` is a keyword regex and cannot read negation, so a
+        merged PR whose body says "This does NOT close #3061; a follow-up is
+        needed." matches it. Routed through `_prs_serving_issue` that hit reaches
+        the live-lane harness-queue arm, whose row is `strong` (:8044) and
+        therefore DECIDES the verdict — the same hit the closed-PR surface
+        renders as `(weak) (advisory — cannot block)`.
+
+        That asymmetry is deliberate and must stay in this direction: the surface
+        already accepts it for itself ("a missed duplicate is worse than a false
+        alarm"), and narrowing the arm to restore it would re-open the fail-open
+        the previous commit closed. What must NOT stand is the state a maintainer
+        finds today in the prose — a regex documented as unable to block, wired
+        into an arm that blocks — because the obvious tidy-up (delete the
+        fall-through to match the stated rule) silently restores the fail-open.
+        So this test PINS the trade, and the docstrings state it.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654,
+            "title": "fix(tools): the bundled shape",
+            "body": "This does NOT close #3061; a follow-up is needed.",
+            "headRefName": "fix/bundled-shape",
+            "state": "closed",
+            "mergedAt": "2026-11-05T12:00:00Z",
+        }])
+        queue = self.tmp / "lane-queue-negated-body"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.started").write_text("0")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        # Fail-CLOSED: the negated body still blocks. If this ever flips to 0,
+        # the fail-open is back and the queue arm is blind to body attribution.
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        # …and the refusal names the lane-queue evidence, so the operator can
+        # see WHICH surface decided rather than guessing at the regex.
+        self.assertIn("lane:prd-test-owner-test-repo-7654", out)
+        self.assertIn("background harness lane is RUNNING for PR #7654", out)
+
+    def test_a_body_with_no_closing_keyword_does_not_attribute(self):
+        """The negative control for the trade above: the arm is not a net.
+
+        Same closed PR, same live `prd-…` lane, but the body carries no closing
+        keyword anywhere — so nothing attributes and the verdict stays CLEAN.
+        Without this, the test above would pass even if the fall-through had been
+        replaced by "attribute every closed PR".
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654,
+            "title": "fix(tools): the bundled shape",
+            "body": "Follow-up tracked separately in the tracker.",
+            "headRefName": "fix/bundled-shape",
+            "state": "closed",
+            "mergedAt": "2026-11-05T12:00:00Z",
+        }])
+        queue = self.tmp / "lane-queue-no-keyword"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.started").write_text("0")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("lane:prd-test-owner-test-repo-7654", out)
+
     def test_a_finished_harness_lane_does_not_block(self):
         """An `.end` marker outranks a live pid — a finished lane is not a holder.
 
