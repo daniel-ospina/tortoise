@@ -273,15 +273,30 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
     # Review round 6 (P3): the DEBUG line is asserted POSITIVELY, not only as an
     # absence of ERROR. Absence-of-ERROR is equally true when nothing is logged
     # at all, so deleting the `.debug("client disconnected: …")` call in
-    # `_unhandled_exception_handler` left all 15 tests green — while that line is
-    # the only per-abort signal we keep (uvicorn's own ERROR is not ours to
-    # silence). This assertion is the pin that makes its removal red.
+    # `_unhandled_exception_handler` left all 15 tests green. This pin makes that
+    # deletion red, so the line cannot be dropped silently.
+    #
+    # ⛔ WHAT THIS PIN DOES **NOT** CLAIM (review round 7, P2 — measured): that
+    # this line is the production per-abort signal. It is not. The hosted runtime
+    # applies uvicorn's `LOGGING_CONFIG`, which configures ONLY the `uvicorn*`
+    # loggers and leaves root at WARNING (`Dockerfile.hosted:153` passes no
+    # `--log-level`; nothing in `tortoise/` or `entrypoint.sh` sets a level for
+    # `tortoise.*`), so `tortoise.api` is effectively WARNING in production and a
+    # `.debug()` record is dropped there. The production per-abort signal is
+    # uvicorn's own `ERROR: Exception in ASGI application` traceback (see
+    # `hosted_api.py:3147-3149`), which is not ours to silence.
+    #
+    # The level is asserted as `< ERROR` rather than `== DEBUG` because that is
+    # the property this repo DEPENDS on: Sentry's logging integration captures at
+    # `event_level=ERROR` (`LoggingIntegration` default, pinned SDK 2.68.1), so any
+    # level below ERROR is guaranteed to build no event. A move to INFO keeps that
+    # guarantee and must not red a test that never promised DEBUG specifically.
     assert any(
-        r.levelno == logging.DEBUG and "client disconnected" in r.getMessage()
+        r.levelno < logging.ERROR and "client disconnected" in r.getMessage()
         for r in caplog.records
     ), (
-        "a benign disconnect must still be logged at DEBUG — it is the only "
-        "per-abort signal we keep"
+        "a benign disconnect must still be logged below ERROR — one record per "
+        "abort, below the level Sentry turns into an event"
     )
     # Review round 1 (P3): the response SHAPE is deliberately unchanged. A 204
     # for a request whose body never arrived would tell a slow-but-alive caller
@@ -329,14 +344,16 @@ def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
         "logging integration"
     )
     # Positive half of the same pin (review round 6, P3): the inbound-reset
-    # branch keeps the same single DEBUG signal, so its removal must red HERE
-    # too — the two benign branches are reached by different exceptions.
+    # branch keeps the same single sub-ERROR signal, so its removal must red HERE
+    # too — the two benign branches are reached by different exceptions. Same
+    # `levelno < ERROR` rationale as the block above (review round 7, P2): the
+    # property is "no event", not the literal token DEBUG.
     assert any(
-        r.levelno == logging.DEBUG and "client disconnected" in r.getMessage()
+        r.levelno < logging.ERROR and "client disconnected" in r.getMessage()
         for r in caplog.records
     ), (
-        "an inbound reset is still a disconnect — it must log at DEBUG, which "
-        "is the only per-abort signal we keep"
+        "an inbound reset is still a disconnect — it must log below ERROR, "
+        "which is what keeps it out of Sentry's event stream"
     )
     assert response.status_code == 500
 

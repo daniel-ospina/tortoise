@@ -197,6 +197,16 @@ def is_benign_exception(exc: BaseException, *, inbound_request: bool = False) ->
     UPSTREAM reset the connection", so an MRO walk classified a dependency
     outage as a client hang-up and the handler logged it at DEBUG and captured
     nothing. Subclass coverage is the `isinstance` arm's job, not this one's.
+
+    ⚠️ The name arm uses `type(exc).__name__`, which is BROADER than the SDK's
+    filter in one narrow case (review round 7, P3, measured on pinned 2.68.1):
+    `Client._is_ignored_error` compares `get_type_name(exc)`, i.e. `__qualname__`,
+    so a class defined inside a function — `__qualname__`
+    `make.<locals>.ClientDisconnect`, `__name__` `ClientDisconnect` — is benign
+    HERE and NOT ignored by the SDK. No product effect: the SDK's ignore list is
+    the binding constraint on the re-raise path, and starlette raises the
+    top-level class, where both agree. Stated so nobody reads these two filters as
+    equivalent.
     """
     names = (
         REQUEST_LAYER_DISCONNECT_NAMES if inbound_request else BENIGN_EXCEPTION_NAMES

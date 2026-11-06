@@ -3167,9 +3167,30 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     # the log (log-line forgery for monitoring/audit pipelines).
     _path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
     if _benign:
-        # Below ERROR (the ERROR level is what feeds the Sentry logging
-        # integration), and no capture. Deliberately not a bare `if ...: return`
-        # with a new response: the 500 shape below is kept as-is.
+        # Below ERROR — the ERROR level is what feeds the Sentry logging
+        # integration (`LoggingIntegration.event_level` defaults to ERROR), so a
+        # sub-ERROR record builds no event — and no capture. Deliberately not a
+        # bare `if ...: return` with a new response: the 500 shape below is kept
+        # as-is.
+        #
+        # ⚠️ MEASURED, and it corrects an earlier claim here (review round 7, P2):
+        # at DEBUG this line is NOT emitted in the hosted deployment. uvicorn's
+        # `LOGGING_CONFIG` configures only the `uvicorn*` loggers and leaves root
+        # at WARNING, `Dockerfile.hosted:153` passes no `--log-level`, and nothing
+        # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
+        # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
+        # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
+        # per-abort signal is uvicorn's own `ERROR: Exception in ASGI
+        # application` + traceback, from `ServerErrorMiddleware`'s unconditional
+        # re-raise (see the block above `:3147-3149`) — not this line.
+        #
+        # Why not WARNING instead? Because uvicorn already emits an ERROR with the
+        # full traceback for every abort, so raising ours would ADD a record per
+        # abort to the very storm this change exists to make cheap, while adding no
+        # signal that is not already there. If our own structured one-liner IS
+        # wanted in production, the fix is a uvicorn `--log-config`/dictConfig arm
+        # that sets `tortoise.*` to DEBUG and pins that config — a deployment
+        # change, recorded rather than taken silently here.
         _logging.getLogger("tortoise.api").debug(
             "client disconnected: %s %s", request.method, _path)
     else:
