@@ -720,6 +720,100 @@ def _mentions_extractor_v2(node: ast.AST) -> bool:
     return "extractor_v2" in ast.unparse(node)
 
 
+def _imports_on_the_wiring_call(root: ast.AST) -> list[str]:
+    """`extractor_v2` imports that EXECUTE when `wiring()` is called.
+
+    This is the eager-import predicate, and it is deliberately about WHEN the
+    import runs, not about where it is spelled. The wiring entry is called at
+    MODULE scope, so every statement a call reaches — the body, and an `if`,
+    `try`, `with` or `for` inside it — is paid by `import tortoise.sdk`. A body
+    inside a nested function is deferred ONLY if nothing calls that function on
+    the wiring path, which is why the defs a walked statement list binds are
+    resolved and followed when one of their names is CALLED there (a
+    `def _install(): …; _install()` shape is as eager as a bare statement).
+
+    Stated this way because the earlier form (`ast.walk(wiring)` for the import)
+    could not tell the two apart: a direct `from .extractor_v2 import …` as the
+    wiring function's own first statement satisfied it, and that is EXACTLY the
+    pre-fix source (`f18a89bc7`'s `_wire_vocabulary_gap_run_reader_10626`, the
+    second parent of the fold head), so the pin passed on the regression it
+    exists to refuse (review cycle 16, P2, reproduced against
+    `f18a89bc7:tortoise/sdk.py`).
+
+    ⚠️ STATED LIMIT: an import reached through `importlib.import_module(...)` or
+    `__import__(...)` is not an `ast.Import`/`ast.ImportFrom` and is therefore
+    NOT seen. That spelling is refused at review time, not here — modelling it
+    would mean interpreting arbitrary call graphs from a manifest, and this gate
+    errs toward the shapes a real edit produces.
+    """
+    nested: dict[str, ast.AST] = {
+        node.name: node
+        for node in ast.walk(root)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    found: list[str] = []
+    walked: set[int] = set()
+    frontier: list[ast.AST] = list(ast.iter_child_nodes(root))
+    while frontier:
+        node = frontier.pop()
+        if id(node) in walked:
+            continue
+        walked.add(id(node))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # Deferred UNLESS something walked CALLS it. A caller pushes the
+            # body below, so a synchronous helper is still walked — and so is
+            # that helper's own helper, to a fixpoint.
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and _mentions_extractor_v2(
+            node
+        ):
+            found.append(ast.unparse(node))
+            continue
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in nested
+            and id(nested[node.func.id]) not in walked
+        ):
+            frontier.extend(ast.iter_child_nodes(nested[node.func.id]))
+        frontier.extend(ast.iter_child_nodes(node))
+    return found
+
+
+#: The PRE-FIX wiring, verbatim in shape (`f18a89bc7:tortoise/sdk.py`): the
+#: import is the wiring function's own first statement and the function is called
+#: at module scope, so `import tortoise.sdk` paid the whole extractor stack.
+PRE_FIX_WIRING = '''
+def _wire_vocabulary_gap_run_reader_10626() -> None:
+    from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+
+    TortoiseSDK._extract_session_llm = _scope_run(
+        TortoiseSDK._extract_session_llm)
+
+
+_wire_vocabulary_gap_run_reader_10626()
+'''
+
+#: The eager shape ONE `def` AWAY from the pre-fix one (review cycle 17, P2): the
+#: import sits in a nested helper, and the wiring body CALLS that helper — so the
+#: module-scope call still pays the extractor stack, and a predicate that treats
+#: every nested body as deferred watches nothing.
+CALLED_HELPER_WIRING = '''
+def _wire_vocabulary_gap_run_reader_10626() -> None:
+    def _install() -> None:
+        from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+
+        TortoiseSDK._extract_session_llm = _scope_run(
+            TortoiseSDK._extract_session_llm)
+
+    _install()
+
+
+_wire_vocabulary_gap_run_reader_10626()
+'''
+
+
 def test_the_vocabulary_gap_reader_is_wired_LAZILY_at_module_scope():
     """The measured cold-start fix, pinned at the mechanism it rests on.
 
@@ -757,6 +851,16 @@ def test_the_vocabulary_gap_reader_is_wired_LAZILY_at_module_scope():
         "entry — the bound name the wrapper rebinds to must come from a call-"
         "time import, or the module-scope parsimony is a fiction")
 
+    # …and the import must be DEFERRED, not merely nested in the function's own
+    # body: the wiring call is at module scope, so an import there is as eager as
+    # one at the top of the file. This is the arm that reds on the pre-fix shape.
+    on_call = _imports_on_the_wiring_call(wiring)
+    assert not on_call, (
+        f"`{WIRING_NAME}` imports `extractor_v2` on the MODULE-SCOPE call, so "
+        "`import tortoise.sdk` pays the extractor stack again — the measured "
+        "#10626 cold-start regression. The import belongs inside a nested "
+        f"function that runs on the first capture: {on_call}")
+
     installed = [
         n for n in tree.body
         if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
@@ -765,3 +869,43 @@ def test_the_vocabulary_gap_reader_is_wired_LAZILY_at_module_scope():
     assert installed, (
         f"tortoise/sdk.py defines `{WIRING_NAME}` but never CALLS it at module "
         "scope, so the wrapper is never installed")
+
+
+def test_the_laziness_pin_refuses_the_pre_fix_wiring():
+    """Non-vacuity, MEASURED both ways (review cycle 16, P2).
+
+    The arm above reds on the pre-fix shape and passes on the fixed one. Both
+    halves are asserted here over SOURCE, so the pin cannot become vacuous
+    again without this test telling someone: the pre-fix wiring (the shape
+    `f18a89bc7` carried, and the shape a "simplify this" edit reproduces) MUST
+    be refused, a nested helper that is CALLED on the wiring path MUST be
+    refused too (review cycle 17, P2 — a `def _install(): …; _install()` is as
+    eager as a bare statement), and the shipped `sdk.py` MUST NOT be.
+    """
+    pre_fix = ast.parse(PRE_FIX_WIRING)
+    pre_wiring = next(
+        n for n in pre_fix.body
+        if isinstance(n, ast.FunctionDef) and n.name == WIRING_NAME)
+    refused = _imports_on_the_wiring_call(pre_wiring)
+    assert refused, (
+        "the eager-import predicate no longer refuses the PRE-FIX wiring, so "
+        "the laziness pin above passes on the regression it documents — the "
+        "predicate must not cross into a nested function, but it MUST see a "
+        "direct statement of the wiring function's own body")
+
+    called_helper = ast.parse(CALLED_HELPER_WIRING)
+    helper_wiring = next(
+        n for n in called_helper.body
+        if isinstance(n, ast.FunctionDef) and n.name == WIRING_NAME)
+    assert _imports_on_the_wiring_call(helper_wiring), (
+        "a nested helper CALLED on the module-scope wiring path imports "
+        "`extractor_v2` eagerly and the predicate does not follow the call — "
+        "that is the same #10626 cost one `def` away")
+
+    shipped = ast.parse(SDK_SOURCE.read_text(encoding="utf-8"))
+    shipped_wiring = next(
+        n for n in shipped.body
+        if isinstance(n, ast.FunctionDef) and n.name == WIRING_NAME)
+    assert not _imports_on_the_wiring_call(shipped_wiring), (
+        "tortoise/sdk.py imports `extractor_v2` on the module-scope wiring call"
+    )

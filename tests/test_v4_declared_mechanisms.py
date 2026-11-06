@@ -1001,7 +1001,16 @@ def _test_node_names(path: Path) -> set[str] | None:
         pin would red nowhere while reading as watched — is NO LONGER in this
         list: the UNCONDITIONAL forms are now detected by `_never_reds` /
         `_pytestmark_never_reds` below (review cycles 10-11), which is why this
-        is FIVE shapes and not the earlier SIX;
+        is FIVE shapes and not the earlier SIX. That detection covers the
+        `pytest`/`unittest` (`unittest` and `unittest.case`) import SPELLINGS and
+        a module-level alias of any of them — `S = pytest.mark.skip`,
+        `S: object = …`, `A = B = …`, chains of aliases, resolved so the LAST
+        binding of a name wins (review cycle 16-17, P2). What it does NOT model
+        is named here rather than left to be discovered: `unittest.skipIf` /
+        `skipUnless`, whose second positional argument is a `reason` and not a
+        condition, so the pytest any-of rule would misread them (they are kept as
+        pins — a false refusal is the worse error); and an alias bound inside a
+        FUNCTION, which is not module-level state. Both stay review-time.
       * a base imported from ANOTHER file that defines ``__init__`` — pytest
         REFUSES the subclass, this gate accepts it;
       * an imported base carrying ``__test__ = False`` — pytest collects
@@ -1202,6 +1211,67 @@ def _test_node_names(path: Path) -> set[str] | None:
                     never_red_skips.add(f"{spelled}.skip")
                     never_red_xfails.add(f"{spelled}.xfail")
                     never_red_skipifs.add(f"{spelled}.skipif")
+
+    #: `unittest`'s UNCONDITIONAL skip is the same fail-open under a different
+    #: module (review cycle 16, P2): pytest COLLECTS a `unittest.TestCase` method
+    #: and never runs a `@unittest.skip`-marked one, so a `pins:` row citing it
+    #: watches nothing. `unittest.skipIf`/`skipUnless` are deliberately NOT
+    #: modelled — they are CONDITIONAL, and their second positional argument is a
+    #: `reason`, so the any-of rule below would read a truthy reason as a
+    #: truthy condition and REFUSE a legitimate pin (a false refusal is the worse
+    #: error here; they are named as review-time above).
+    for top in tree.body:
+        if isinstance(top, ast.Import):
+            for alias in top.names:
+                if alias.name in ("unittest", "unittest.case"):
+                    never_red_skips.add(f"{alias.asname or alias.name}.skip")
+        elif isinstance(top, ast.ImportFrom) and (top.module or "") in (
+            "unittest",
+            "unittest.case",
+        ):
+            for alias in top.names:
+                if alias.name == "skip":
+                    never_red_skips.add(alias.asname or alias.name)
+
+    #: A module-level ALIAS of a never-red marker (`S = pytest.mark.skip`,
+    #: `SI = pytest.mark.skipif`) is the same fail-open one indirection away, and
+    #: a set of SPELLINGS cannot see it — the decorator's own text is `S`
+    #: (review cycle 16, P2, reproduced: `@S` was accepted as a pin). Nothing is
+    #: seeded: every member still comes from a real import. Two properties are
+    #: deliberate (review cycle 17, P2): the LAST module-level binding of a name
+    #: wins, so a name rebound to a different marker later is not graded by the
+    #: first set it landed in (that would refuse a legitimate conditional pin);
+    #: and `AnnAssign`, chained `A = B = …` and alias CHAINS are all resolved, to
+    #: a fixpoint so `S_CHAIN = S` follows `S`. An alias bound inside a function
+    #: is not module-level state and is not resolved.
+    alias_groups = (never_red_skips, never_red_xfails, never_red_skipifs)
+    bindings: dict[str, int] = {}
+    for _ in range(5):
+        bindings = {}
+        for top in tree.body:
+            targets: list[ast.expr]
+            value: ast.expr | None
+            if isinstance(top, ast.Assign):
+                targets, value = list(top.targets), top.value
+            elif isinstance(top, ast.AnnAssign) and top.value is not None:
+                targets, value = [top.target], top.value
+            else:
+                continue
+            spelled = ast.unparse(value)
+            for index, group in enumerate(alias_groups):
+                if spelled not in group:
+                    continue
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        bindings[target.id] = index
+                break
+        added = False
+        for name, index in bindings.items():
+            if name not in alias_groups[index]:
+                alias_groups[index].add(name)
+                added = True
+        if not added:
+            break
 
     def _decorator_never_reds(decorator: ast.expr) -> bool:
         """An UNCONDITIONAL skip/xfail decorator — it removes the node's red.
@@ -6924,6 +6994,65 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "class TestSkippedGroup:\n"
         "    def test_inside(self):\n"
         "        assert True\n"
+        # ── the same fail-open under a different SPELLING (review cycle 16, P2)
+        "import unittest\n"
+        "import unittest.case\n"
+        "from unittest import skip as unittest_skip\n"
+        "from unittest.case import skip as case_skip\n"
+        "S = pytest.mark.skip\n"
+        "SI = pytest.mark.skipif\n"
+        "S_CHAIN = S\n"
+        "S_ANNOTATED: object = pytest.mark.skip\n"
+        "A_CHAIN = B_CHAIN = pytest.mark.skip\n"
+        "XF = pytest.mark.xfail\n"
+        "\n"
+        "@unittest.skip('never runs')\n"
+        "def test_unittest_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "@unittest.case.skip('never runs')\n"
+        "def test_unittest_case_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "@case_skip('never runs')\n"
+        "def test_unittest_case_skip_imported():\n"
+        "    assert True\n"
+        "\n"
+        "@unittest_skip('never runs either')\n"
+        "def test_unittest_skip_imported():\n"
+        "    assert True\n"
+        "\n"
+        "@S('aliased')\n"
+        "def test_aliased_skip():\n"
+        "    assert True\n"
+        "\n"
+        "@S_CHAIN('aliased twice')\n"
+        "def test_aliased_skip_chain():\n"
+        "    assert True\n"
+        "\n"
+        "@S_ANNOTATED('annotated alias')\n"
+        "def test_annotated_aliased_skip():\n"
+        "    assert True\n"
+        "\n"
+        "@B_CHAIN('chained assignment alias')\n"
+        "def test_chained_aliased_skip():\n"
+        "    assert True\n"
+        "\n"
+        "@SI(True, reason='aliased conditional, literal true')\n"
+        "def test_aliased_skipif_true():\n"
+        "    assert True\n"
+        "\n"
+        "@SI(CONDITION, reason='aliased conditional, unknowable')\n"
+        "def test_aliased_skipif_unknown():\n"
+        "    assert True\n"
+        "\n"
+        "@XF\n"
+        "def test_aliased_xfail():\n"
+        "    assert False\n"
+        "\n"
+        "@unittest.skipIf(CONDITION, 'conditional unittest skip')\n"
+        "def test_unittest_skipif_kept():\n"
+        "    assert True\n"
     )
     assert _test_node_names(module) == {
         "test_plain",
@@ -6939,6 +7068,8 @@ def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
         "test_xfail_any_of_falsy_then_unknown",  # any-of with an unknowable: kept
         "test_conditionally_skipped",
         "test_skips_in_body",
+        "test_aliased_skipif_unknown",  # a CONDITIONAL alias is still decidable
+        "test_unittest_skipif_kept",  # skipIf is conditional: kept (errs to KEEP)
         "TestGroup::test_kept",
     }
 
