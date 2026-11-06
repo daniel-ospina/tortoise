@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,12 @@ def _rule(
     }
 
 
+#: Sentinel for "the caller said nothing", which is NOT the same as `None` ("write an
+#: explicit null"). `live_observed_contexts` needs both: absent, explicit-null and
+#: "defaults to `required_contexts`" are three different records.
+_UNSET: Any = object()
+
+
 def _tree(
     root: Path,
     *,
@@ -67,11 +74,22 @@ def _tree(
     required_contexts: list[str] | None = None,
     emitters: dict[str, Any] | None = None,
     write_record: bool = True,
+    live_result: str | None = "SATISFIED",
+    live_observed_contexts: Any = _UNSET,
+    live_verified_at: str | None = "2026-09-29T02:35:26Z",
 ) -> Path:
     """A minimal tree carrying `.mergify.yml` + the committed snapshot.
 
     `required_contexts` defaults to the union of the rules, so a case only names it when
     it is deliberately testing a DISAGREEMENT between the two sources.
+
+    The LIVE VERDICT defaults to today's tracked shape — `live_result: SATISFIED`, an
+    `live_observed_contexts` equal to `required_contexts`, and a dated
+    `live_verified_at` — because that is what `mergify_config_guard.--live` actually
+    writes on a clean read (`_record_live_attempt`), and a fixture that omitted it would
+    model a state the repo cannot be in. Pass `live_result=None` (and
+    `live_observed_contexts=None`) for a record PREDATING the I1 read, which is the one
+    absence that must still derive.
     """
     rules = rules if rules is not None else [_rule()]
     root.mkdir(parents=True, exist_ok=True)
@@ -98,6 +116,16 @@ def _tree(
         # `test_a_record_without_emitters_degrades_to_unattributed`).
         if emitters is not None:
             payload["emitters"] = emitters
+        # THE RECORD'S OWN LIVE VERDICT — the second fact a consumer must read, not just
+        # the payload. `None` omits the key entirely (a pre-I1 record).
+        if live_result is not None:
+            payload["live_result"] = live_result
+        if live_observed_contexts is _UNSET:
+            payload["live_observed_contexts"] = list(required_contexts)
+        elif live_observed_contexts is not None:
+            payload["live_observed_contexts"] = live_observed_contexts
+        if live_verified_at is not None:
+            payload["live_verified_at"] = live_verified_at
         record.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return root
 
@@ -180,6 +208,162 @@ def test_a_missing_record_is_a_refusal_not_an_empty_pass(tmp_path: Path) -> None
 def test_an_empty_record_is_a_refusal(tmp_path: Path) -> None:
     with pytest.raises(RequiredSetUnreadable):
         derive_from_config(_tree(tmp_path, required_contexts=[]))
+
+
+# ── the record's OWN live verdict is part of the witness ───────────────────
+
+
+def test_a_diverged_live_read_is_refused_not_certified(tmp_path: Path) -> None:
+    """⛔ A RECORD THAT SAYS THE LIVE READ DIVERGED MUST NOT CERTIFY READY.
+
+    `mergify_config_guard._record_live_attempt` re-attests `required_contexts` ONLY on a
+    `SATISFIED` read, so a `DIVERGED` record keeps the OLD payload — which still equals
+    the config union, because the config is what the divergence is measured against.
+    A consumer that checks only `set(derived) == set(required_contexts)` therefore sees
+    PERFECT agreement and reports `snapshot_agrees: True` over a set the record itself
+    says live protection no longer matches: the "silent deadlock" clause 2 exists to
+    prevent, and the reviewer's exact reproduction.
+
+    Measured on the PRE-FIX code at `58124337`: this fixture derives
+    `('docs', 'test-isolation', 'python-ci-gate')` with `snapshot_agrees: True` and NO
+    exception, while `live_observed_contexts` names `brand-new-required-check` — a
+    required context the tool would never evaluate. `_live_attestation` reads
+    `live_result` and this REDs; delete that call and it is green again.
+    """
+    with pytest.raises(RequiredSetConfigError) as excinfo:
+        derive_from_config(
+            _tree(
+                tmp_path,
+                live_result="DIVERGED",
+                live_observed_contexts=["docs", "brand-new-required-check"],
+            )
+        )
+    message = str(excinfo.value)
+    assert "DIVERGED" in message
+    # The remedy must be one that WORKS: `--recut` rewrites only gate_digest/emitters/
+    # verified_at, so it can never re-attest a live read. Naming it only to rule it out is
+    # the point, and the real remedy (`--live`) must be there.
+    assert "--live" in message
+    assert "does NOT fix this" in message
+
+
+def test_an_unavailable_live_read_is_refused(tmp_path: Path) -> None:
+    """`UNAVAILABLE` is NON-CLEAN, never "satisfied by default".
+
+    `run_live` records `UNAVAILABLE` when no admin credential could make the read at all.
+    That is `EXIT_UNAVAILABLE`, never `EXIT_OK`, and it leaves `required_contexts` stale
+    exactly like `DIVERGED` — so the payload witness is no more trustworthy here. Same
+    refusal, same remedy; the token is different and the message must still carry it.
+    """
+    with pytest.raises(RequiredSetConfigError) as excinfo:
+        derive_from_config(_tree(tmp_path, live_result="UNAVAILABLE"))
+    message = str(excinfo.value)
+    assert "UNAVAILABLE" in message
+    assert "--live" in message
+
+
+def test_a_self_contradictory_record_is_refused(tmp_path: Path) -> None:
+    """`SATISFIED` is not enough on its own: the two recorded sets must also AGREE.
+
+    A `SATISFIED` read writes `required_contexts = live_observed_contexts` in the same
+    write (`_record_live_attempt`), so a record where they differ was hand-edited or
+    half-written. Neither list is then a witness, and picking one silently would let the
+    edit that created the difference decide the gate. Revert the comparison arm and this
+    reds with `snapshot_agrees: True`.
+    """
+    with pytest.raises(RequiredSetConfigError) as excinfo:
+        derive_from_config(_tree(tmp_path, live_observed_contexts=[*ENTRY, "smuggled-in"]))
+    message = str(excinfo.value)
+    assert "smuggled-in" in message
+    assert "required_contexts" in message
+
+
+def test_a_record_predating_the_live_read_still_derives(tmp_path: Path) -> None:
+    """⛔ THE COUNTERPART PIN: tolerance must not collapse into a blanket refusal.
+
+    A record written before the I1 read has NO `live_result` at all — and there are real
+    ones (`tests/test_ready_for_owner.py` builds such a record, and so does any tree that
+    predates the field). Refusing there would demand an ADMIN credential to produce any
+    verdict, which is the very 403 this module exists to remove, so absence is tolerated
+    and DISCLOSED. Delete the `live is None` arm (falling through to the non-clean refusal)
+    and this reds — which is why the pair is needed: without it, "refuse everything" would
+    pass every other case here.
+    """
+    required = derive_from_config(
+        _tree(tmp_path, live_result=None, live_observed_contexts=None, live_verified_at=None)
+    )
+    assert required.names == (*ENTRY, HEAVY)
+    assert required.snapshot_agrees is True
+    assert "no recorded live verdict" in required.source
+
+
+def test_a_non_string_live_verdict_is_unreadable(tmp_path: Path) -> None:
+    """A present-but-unreadable verdict is NOT the tolerated absence. Fail closed.
+
+    An explicit `null` (or a number) is the shape a half-written or hand-edited record
+    produces. Reading it as "no verdict recorded" would make a corrupt field
+    indistinguishable from a clean pre-I1 record, which is the wrong direction for a
+    gate — so it is UNREADABLE ("I could not read this"), never a PASS.
+    """
+    _tree(tmp_path)
+    record = tmp_path / RECORD_REL
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    payload["live_result"] = None
+    record.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with pytest.raises(RequiredSetUnreadable) as excinfo:
+        derive_from_config(tmp_path)
+    assert "live_result" in str(excinfo.value)
+
+
+def test_the_live_verdict_is_disclosed_with_its_age() -> None:
+    """⛔ THIS REPO'S TRACKED RECORD MUST STILL DERIVE — and must say what it rests on.
+
+    `snapshot_agrees: True` reads to a human as "the required set was verified". It is not:
+    it says the CONFIG agrees with the record's payload, and the attestation behind that
+    payload has an age. So the age is DISCLOSED against the guard's own window (never
+    enforced — enforcing it would put an admin credential in the gate's critical path) and
+    the verdict is named, so a 38-day-old read cannot be mistaken for a fresh one.
+
+    This is also the pin that keeps the refusal from eating today's tree: if the tracked
+    record ever stops deriving, this REDs and names it, instead of the whole instrument
+    silently refusing every PR.
+    """
+    required = derive_from_config(REPO_ROOT)
+    record = json.loads((REPO_ROOT / RECORD_REL).read_text(encoding="utf-8"))
+    assert record["live_result"] == "SATISFIED"
+    assert sorted(record["live_observed_contexts"]) == sorted(record["required_contexts"])
+    assert "live read SATISFIED at " in required.source
+    assert record["live_verified_at"] in required.source
+    assert re.search(r"\(\d+d old, window \d+d", required.source), required.source
+
+
+def test_the_record_is_read_once_per_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The payload, the emitters and the live verdict must come from the SAME bytes.
+
+    Three fields of ONE attestation read by three separate `read_text` calls can pair the
+    PAYLOAD of one record with the VERDICT of another — and the verdict is now
+    load-bearing (`_live_attestation`), so a torn read is a real fail-open rather than a
+    cosmetic inconsistency. Revert `_read_record` to per-field reads and the count below
+    becomes 3.
+    """
+    _tree(tmp_path, emitters={HEAVY: [["python-ci.yml", HEAVY]]})
+    record = tmp_path / RECORD_REL
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == record:
+            reads.append(str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    required = derive_from_config(tmp_path)
+    # Both projections still resolved, so the single read is a real one.
+    assert required.emit_workflows(HEAVY) == ("python-ci.yml",)
+    assert required.snapshot_agrees is True
+    assert len(reads) == 1, f"the committed record was read {len(reads)} times, not once"
 
 
 def test_a_context_the_record_names_and_the_config_dropped_is_a_config_error(

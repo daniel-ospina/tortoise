@@ -85,6 +85,19 @@ THE COMMITTED SNAPSHOT IS A WITNESS, AND ITS ABSENCE IS A REFUSAL
         cross-checked, so condition 2 would be a verdict about an UNVERIFIED set.
         Deleting the file must never be the cheapest way to a READY.
 
+    ⛔ AND THE RECORD'S OWN LIVE VERDICT IS PART OF THE WITNESS. The record states TWO
+    facts: `required_contexts` (the PAYLOAD a live read observed) and `live_result` /
+    `live_observed_contexts` (the RESULT — whether that read agreed with the config at
+    all). `mergify_config_guard._record_live_attempt` re-attests `required_contexts`
+    ONLY on a `SATISFIED` read, so a `DIVERGED` or `UNAVAILABLE` record keeps a STALE
+    payload while saying, in the same file, that live protection enforces something
+    else. Checking only `set(derived) == set(required_contexts)` therefore prints
+    `snapshot_agrees: True` over a set the record itself calls unverified. So a
+    non-clean verdict is a REFUSAL (`_live_attestation`), absence is tolerated (a
+    record predating the live read still carries the payload), and the attestation's
+    AGE is disclosed in `RequiredSet.source` rather than enforced — a gate that can
+    only pass under an admin token is the gate this module exists to replace.
+
     The protection API is NOT called here — calling it would reintroduce the 403
     this module exists to remove. A caller that CAN read it (a user OAuth token) is
     welcome to cross-check; a disagreement is a loud config error, never a silent
@@ -129,15 +142,20 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.mergify_config_guard import (
     KNOWN_INJECTION_MODES,
+    LIVE_FRESH_DAYS,
     MERGIFY_REL,
     RECORD_REL,
+    GuardUnreadable,
     _effective_mode,
     _load_mergify,
+    _now,
+    _parse_iso,
     _success_names,
 )
 
@@ -147,13 +165,23 @@ class RequiredSetUnreadable(Exception):
 
 
 class RequiredSetConfigError(Exception):
-    """The required set violates `.mergify.yml`'s clause 1 — one of THREE shapes.
+    """The repo's own recorded evidence says the derived set is NOT the required set.
 
-    Raised for (a) a check named in BOTH lists under ``mode=merge``, (b) a context the
-    committed record names and the config no longer derives, (c) a context the config
-    derives and the record does not confirm. (b) and (c) involve no overlap at all — they
-    are EQUALITY violations between the config and the record of the live read — so a
-    handler must not assume the both-lists shape from this class.
+    FOUR shapes, and a handler must not assume any one of them from this class:
+
+    * (a) a check named in BOTH lists under ``mode=merge`` (clause 1);
+    * (b) a context the committed record names and the config no longer derives, or
+      (c) one the config derives and the record does not confirm — the two EQUALITY
+      violations of clause 1, with no overlap involved at all;
+    * (d) the record's OWN live verdict — `live_result` / `live_observed_contexts` — is
+      not clean (`DIVERGED`, `UNAVAILABLE`, or a self-contradictory pair), so its
+      `required_contexts` is a stale payload rather than a witness (clause 2).
+
+    Why (d) belongs to the same family: in every shape the CONFIG may be perfectly
+    well-formed and the tree may build — what is broken is the attestation that ties it
+    to live branch protection, and the only remedy is a `--live` read under a credential
+    that can make one. What must never happen is that this class is caught and treated as
+    a retryable read failure: all four shapes are refusals, never a PASS.
     """
 
 
@@ -208,28 +236,43 @@ class RequiredSet:
         return ()
 
 
-def _snapshot_names(root: Path) -> tuple[str, ...] | None:
-    """`required_contexts` from the committed record, or None if unreadable.
+def _read_record(root: Path) -> dict[str, Any] | None:
+    """The committed record, parsed ONCE, or ``None`` if absent/unreadable/non-object.
 
-    Read with `json`, not the guard's YAML loader: this file is JSON, so a non-JSON
-    surprise here must degrade to "no snapshot", never to an exception raised from
-    the READ — a parse error that escapes would mask the primary path. The CALLER
-    then decides what an unusable record MEANS, and for a readable config it is a
-    refusal (`derive_from_config`), because the record is the only witness that the
-    derived set equals the live required set.
+    ⛔ ONE READ, NOT ONE PER FIELD. `required_contexts`, `emitters` and the live verdict are
+    three facts of a SINGLE attestation; reading the file three times lets a concurrent
+    writer pair the PAYLOAD of one record with the VERDICT of another — and the verdict is
+    now load-bearing (`_live_attestation`), so a torn read would be a real fail-open rather
+    than a cosmetic inconsistency.
+
+    Read with `json`, not the guard's YAML loader: this file is JSON, so a non-JSON surprise
+    here must degrade to "no record", never to an exception raised from the READ — a parse
+    error that escaped would mask the primary path. The CALLER then decides what an unusable
+    record MEANS, and for a readable config it is a refusal (`derive_from_config`), because
+    the record is the only witness that the derived set equals the live required set.
     """
     path = root / RECORD_REL
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _snapshot_names(doc: dict[str, Any] | None) -> tuple[str, ...] | None:
+    """`required_contexts` from the committed record, or None if unreadable/absent.
+
+    ``None`` covers both "no record" and "an empty or malformed `required_contexts`"; the
+    caller refuses either way, and distinguishes them only in the message, because in both
+    states the union has no witness.
+    """
     names = doc.get("required_contexts") if isinstance(doc, dict) else None
     if not isinstance(names, list) or not all(isinstance(n, str) and n for n in names):
         return None
     return tuple(names)
 
 
-def _snapshot_emitters(root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
+def _snapshot_emitters(doc: dict[str, Any] | None) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """``emitters`` from the committed record, projected to ``name -> workflow FILES``.
 
     The record stores ``[[workflow_file, job_key], …]`` per effective check-run name
@@ -241,11 +284,6 @@ def _snapshot_emitters(root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
     be able to turn a readable record into a refusal — but the CONSUMER must treat the
     empty answer as "cannot attribute", never as "nothing can emit it".
     """
-    path = root / RECORD_REL
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ()
     emitters = doc.get("emitters") if isinstance(doc, dict) else None
     if not isinstance(emitters, dict):
         return ()
@@ -264,6 +302,113 @@ def _snapshot_emitters(root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
         if files:
             out.append((name, tuple(files)))
     return tuple(out)
+
+
+def _live_attestation(doc: dict[str, Any] | None, names: tuple[str, ...] | None) -> str:
+    """Validate the record's OWN live verdict; return the disclosure that goes in `source`.
+
+    ⛔ THE RECORD STATES TWO FACTS AND THIS MODULE USED TO READ ONLY ONE. `required_contexts`
+    is the PAYLOAD — the set a live branch-protection read observed. `live_result` and
+    `live_observed_contexts` are the RESULT — whether that read agreed with the config at
+    all. `mergify_config_guard._record_live_attempt` rewrites `required_contexts` ONLY when
+    the read was `SATISFIED`, so a `DIVERGED` or `UNAVAILABLE` record keeps a STALE payload
+    while stating, in the same file, that live protection enforces something else. Measuring
+    only `set(derived) == set(required_contexts)` therefore reports `snapshot_agrees: True`
+    — and READY — over a set the record itself calls unverified. That is the "silent
+    deadlock" `.mergify.yml` clause 2 exists to prevent, and it is the same inference error
+    as "a measurement artifact is not a state": the payload was TRUE when it was written,
+    and the verdict in the same file says it no longer holds.
+
+    Why a REFUSAL and not a note. Two independent statements of the rule, plus this repo's
+    own:
+
+      * SLSA's Verification Summary Attestation requires a consumer to confirm the recorded
+        `verificationResult` is `PASSED`, "not merely inspect the attested payload";
+      * in-toto's consumer guidance is that ignoring an attestation must never turn a deny
+        into an allow (the monotonic-consumer rule);
+      * and `mergify_config_guard._clause_viii_a` ALREADY reds `--static` on exactly this
+        field (`live_result not in ("", "SATISFIED")`). A note here would make this
+        instrument and the repo's own CI guard disagree about whether the tree is sound.
+
+    ⛔ WHY ABSENCE IS TOLERATED AND AGE IS ONLY DISCLOSED. A record that predates the I1
+    read carries no `live_result` at all; refusing there would demand an ADMIN credential
+    to produce any verdict, which is the 403 this module exists to remove — so absent is
+    treated as "no verdict recorded" and said so. A STALE attestation is information for
+    the reader, never a refusal, for the same reason: enforcing freshness would put the
+    credential back in the gate's critical path.
+    """
+    if not isinstance(doc, dict):
+        return "no recorded live verdict (no readable record)"
+    # ⛔ ABSENT IS NOT NULL, the same distinction `Probe.labels` / `required_deferred` make
+    # in `ready_for_owner`. `doc.get("live_result")` cannot tell them apart, and conflating
+    # them would let an explicit `null` — the shape a half-written record produces — read as
+    # the tolerated pre-I1 absence. MUTATION: replace this with `live = doc.get(...)` and
+    # `test_a_non_string_live_verdict_is_unreadable` REDs by not raising at all.
+    if "live_result" in doc:
+        live = doc["live_result"]
+        if not isinstance(live, str):
+            raise RequiredSetUnreadable(
+                f"{RECORD_REL}: `live_result` must be a string, got {type(live).__name__} "
+                "— the record's own live verdict cannot be read, so its "
+                "`required_contexts` cannot be treated as verified. (An ABSENT field is "
+                "tolerated: that is a record predating the live read. A "
+                "present-but-unreadable one is not.)"
+            )
+    else:
+        live = None
+    observed_raw = doc.get("live_observed_contexts")
+    observed: tuple[str, ...] | None = None
+    if "live_observed_contexts" in doc:
+        if not isinstance(observed_raw, list) or not all(
+            isinstance(n, str) and n for n in observed_raw
+        ):
+            raise RequiredSetUnreadable(
+                f"{RECORD_REL}: `live_observed_contexts` must be a list of non-empty "
+                f"strings, got {type(observed_raw).__name__} — the record's live "
+                "observation cannot be read, so its payload cannot be cross-checked"
+            )
+        observed = tuple(observed_raw)
+    if live is not None and live not in ("", "SATISFIED"):
+        when = doc.get("live_checked_at")
+        when_note = f" at {when}" if isinstance(when, str) and when else ""
+        raise RequiredSetConfigError(
+            f"{RECORD_REL} records the last live branch-protection read as {live}{when_note}, "
+            "and its `required_contexts` is re-attested ONLY on a SATISFIED read — so the "
+            f"payload this module would otherwise cross-check is STALE, not a witness that "
+            f"{MERGIFY_REL} equals the live required set (contract clause 2). Re-attest with "
+            "`tools/mergify_config_guard.py --live` under a credential that can read branch "
+            "protection. `--recut` does NOT fix this — it rewrites only `gate_digest`, "
+            "`emitters` and `verified_at`"
+        )
+    if observed is not None and names is not None and set(observed) != set(names):
+        observed_only = tuple(n for n in dict.fromkeys(observed) if n not in set(names))
+        names_only = tuple(n for n in dict.fromkeys(names) if n not in set(observed))
+        raise RequiredSetConfigError(
+            f"{RECORD_REL} contradicts ITSELF: `live_observed_contexts` "
+            f"({', '.join(sorted(set(observed)))}) is not the set its own "
+            f"`required_contexts` names ({', '.join(sorted(set(names)))}) — so neither field "
+            "is a witness that the derived set equals the live required set (contract "
+            "clause 2). Only a SATISFIED `--live` read writes them together; re-attest "
+            "rather than hand-editing either list"
+            + (f" [live-only: {', '.join(observed_only)}]" if observed_only else "")
+            + (f" [required_contexts-only: {', '.join(names_only)}]" if names_only else "")
+        )
+    if live is None:
+        return "no recorded live verdict (record predates the live read)"
+    label = live or "UNRECORDED"
+    stamp = doc.get("live_verified_at")
+    if not isinstance(stamp, str) or not stamp:
+        return f"live read {label} (no live_verified_at)"
+    try:
+        age = (_now() - _parse_iso(stamp, f"{RECORD_REL}.live_verified_at")).days
+    except GuardUnreadable:
+        # Disclose, never refuse: an unreadable timestamp is not a reason to demand an
+        # admin token, but it must not be silently omitted either.
+        return f"live read {label} at {stamp} (age unreadable)"
+    return (
+        f"live read {label} at {stamp} "
+        f"({age}d old, window {LIVE_FRESH_DAYS}d — disclosed, never enforced)"
+    )
 
 
 def derive_from_config(root: Path) -> RequiredSet:
@@ -351,7 +496,14 @@ def derive_from_config(root: Path) -> RequiredSet:
             f"{MERGIFY_REL}: no positive `check-success=` condition in any queue rule"
         )
 
-    snapshot = _snapshot_names(root)
+    record = _read_record(root)
+    snapshot = _snapshot_names(record)
+    # ⛔ BEFORE the equality block, not after: a record whose OWN verdict is `DIVERGED`
+    # usually still matches the config (that is why the payload is stale), so the equality
+    # check would pass and the divergence would never be looked at. Refusing here also
+    # keeps the diagnosis the actionable one — "the live read diverged, re-attest" —
+    # instead of "the record lacks a name the config derives".
+    live_note = _live_attestation(record, snapshot)
     agrees: bool | None = None
     if not snapshot:
         # `None` = absent/unreadable record, `()` = an EMPTY `required_contexts`.
@@ -432,10 +584,14 @@ def derive_from_config(root: Path) -> RequiredSet:
         agrees = True
     return RequiredSet(
         names=union,
-        source=f"{MERGIFY_REL} (queue_conditions union merge_conditions)",
+        # `source` names what was READ, including the record's own live verdict and the
+        # AGE of that attestation — so `snapshot_agrees: True` can never again be read as
+        # "the required set was verified" when the verification it rests on is a
+        # 38-day-old read. Disclosure, not enforcement: see `_live_attestation`.
+        source=f"{MERGIFY_REL} (queue_conditions union merge_conditions); {live_note}",
         queue_names=q,
         merge_names=m,
-        emit_files=_snapshot_emitters(root),
+        emit_files=_snapshot_emitters(record),
         snapshot_agrees=agrees,
         mode=mode,
     )
