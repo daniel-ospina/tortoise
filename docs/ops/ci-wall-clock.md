@@ -53,8 +53,8 @@ The same shape holds across the sample — 54 `python-ci` runs whose jobs are vi
 
 ⛔ **`timeout-minutes` cannot bound any of that.** The clock starts when a runner picks the job
 up, so a job that never gets a runner has no timeout at all. A timeout bounds a WEDGED job — the
-360-minute default that holds a required check pending for six hours — and that is the hole §3
-closes.
+360-minute default that holds a required check pending for six hours — and that is the hole §2
+closes (its tail: `python-ci.yml` is now capped on **every** job, so no leg inherits the default).
 
 **What the queue is made of** (the lever nobody should confuse with a timeout):
 
