@@ -717,15 +717,17 @@ def _raw_detach_violations(root=None):
             # The journal is an ownership RECORD only for a name the sweep's
             # vocabulary accepts — see `_non_owned_handles`. Resolved over the
             # whole file (the AST needs whole-file context) and restricted to the
-            # journal calls THIS block contains — in THIS block's OWN scope.
-            # A `_journal_append` written inside a nested `def`/`lambda`/`class`/
-            # comprehension journals the name THAT scope builds, which says nothing
-            # about the handle this block DETACHes — for EITHER half of the
-            # contract. Restricted by LINE RANGE alone it satisfied both: a block
-            # whose only journal was a nested `helper()`'s owned name read CLEAN
-            # while it DETACHed an unowned, un-journaled graph (measured: 0
-            # violations — the false PASS this arm exists to prevent, #11217
-            # review round 8).
+            # journal calls THIS block contains. A `_journal_append` written
+            # inside a nested `def`/`lambda`/`class`/comprehension journals the
+            # name THAT scope builds, which says nothing about the handle this
+            # block DETACHes — so it never SATISFIES the presence half. (It is
+            # still JUDGED on its own prefix: see the asymmetry note below, which
+            # is the current contract, and which an earlier version of this
+            # comment contradicted.) Restricted by LINE RANGE alone a nested
+            # journal satisfied both halves: a block whose only journal was a
+            # nested `helper()`'s owned name read CLEAN while it DETACHed an
+            # unowned, un-journaled graph (measured: 0 violations — the false PASS
+            # this arm exists to prevent, #11217 review round 8).
             first_line = src.count(chr(10), 0, block_start) + 1
             last_line = src.count(chr(10), 0, max(block_end - 1, block_start)) + 1
             if scope_boxes is None:
@@ -745,6 +747,14 @@ def _raw_detach_violations(root=None):
             #     "_journal_append in the same block" is the contract this guard
             #     states. Cost to the author is a one-line move of the journal;
             #     accepting a nested journal instead re-opens a false PASS.
+            #     ⚠️ The cost is LARGER than that sentence used to say, because
+            #     containment is decided POSITIONALLY and not by execution scope
+            #     (#11217 review round 9, P3): a journal in a nested `def`'s
+            #     DEFAULT, a nested class's keyword/base, or a comprehension's
+            #     outermost iterable RUNS in this block's scope but sits inside
+            #     the nested scope's box, so it is rejected too. Fail-closed, no
+            #     corpus site, and the arm's own `_mutated_from_a_nested_scope`
+            #     already models the difference — recorded rather than guessed.
             #   • OWNERSHIP (`in_block`) judges EVERY journal in the block, nested
             #     or not. Restricting it to `own` was measurably WORSE than the
             #     defect it fixed: an unowned prefix journaled in a nested helper
@@ -2089,6 +2099,40 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
     assert bad and "'evict_'" in bad[0], (
         "a NESTED def's owned journal was read as THIS block's record: "
         f"{bad}")
+
+    # ⛔ ROUND 9's TWO FIXES EACH NEED A PIN, or a revert of either keeps this
+    # suite green (#11217 review round 9, ISSUE 1 — measured: mutating
+    # `in_block` back to `own`, and the `(line, col)` boxes back to line
+    # granularity, produced 0 census failures).
+    #
+    # (1) The nested journal is still JUDGED: a nested `evict_` beside a proper
+    # own-scope journal must red on the NON-OWNED half. With the ownership half
+    # reading `own` this is GREEN, and GREEN here is the false PASS round 9
+    # fixed — the sweep preserves a graph whose only record is inert.
+    site.write_text(_raw_client_site(
+        "    def helper():",
+        '        _journal_append(f"evict_{os.urandom(4).hex()}")',
+        "    helper()",
+        '    name = f"test_mine_{os.urandom(4).hex()}"',
+        "    _journal_append(name)",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "_SWEEP_OWNED_PREFIXES" in bad[0], (
+        "a NESTED journal of an UNOWNED name was not judged on its own prefix "
+        f"(the sweep preserves that graph): {bad}")
+    #
+    # (2) Containment is decided on `(line, col)`, not on the LINE: a direct
+    # `_journal_append` sharing a line with a nested `lambda` IS this block's
+    # journal. With line-granular containment it is judged nested, `own` empties,
+    # and the block reds — a false BLOCK on a compliant site.
+    site.write_text(_raw_client_site(
+        '    name = f"test_ok_{os.urandom(4).hex()}"',
+        "    cb = lambda: None; _journal_append(name)",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert not bad, (
+        "a direct journal sharing a line with a nested lambda was judged as "
+        f"NESTED (line-granular containment): {bad}")
 
     # ── the TRANSFORM false-pass / false-block pair (#11217 review round 5, B2) ──
     # A pure `str` method on a receiver this arm cannot FOLD rewrites the value,
