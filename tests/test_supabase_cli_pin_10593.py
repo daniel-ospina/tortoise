@@ -396,28 +396,27 @@ def _alias_supplies_the_pin(workflow_text: str) -> bool:
     """
     step_node = _setup_cli_step_node(workflow_text)
     step_first, step_last = step_node.start_mark.index, step_node.end_mark.index
-    tokens = list(yaml.scan(workflow_text))
-    for index in range(len(tokens) - 2):
-        key_token, separator, value_token = tokens[index], tokens[index + 1], tokens[index + 2]
-        if not (
-            isinstance(key_token, yaml.tokens.ScalarToken)
-            and key_token.value in ("with", "version")
-        ):
-            continue
-        if not isinstance(separator, yaml.tokens.ValueToken):
-            continue
-        if not isinstance(value_token, yaml.tokens.AliasToken):
-            continue
-        if not (step_first <= key_token.start_mark.index < step_last):
-            continue
-        # `with:` directly — the alias supplies the whole input mapping, pin included.
-        if key_token.value == "with":
-            return True
-        # `version:` — only when it IS the pin, i.e. it lives inside a `with:` mapping this step
-        # owns. A `version:` under `env:`/`secrets:` is a different key that happens to share a name.
-        window = workflow_text[step_first:key_token.start_mark.index]
-        if re.search(r"(?m)(^|\n)[ \t]*with[ \t]*:[ \t]*$|\{[^{}]*\bwith\s*:", window):
-            return True
+
+    def alias_reached(value: object) -> bool:
+        """Did this VALUE arrive by alias? PyYAML substitutes the ANCHORED node, so the tell is its
+        position: a node reached through an alias carries the marks of the ANCHOR's location, which
+        is outside this step. Measured on `with: *pinned` — the composed value node's
+        `start_mark.index` is the anchor's, not the alias's."""
+        mark = getattr(value, "start_mark", None)
+        return mark is not None and not (step_first <= mark.index < step_last)
+
+    with_node = None
+    for key_node, value_node in step_node.value:
+        if isinstance(key_node, yaml.ScalarNode) and key_node.value == "with":
+            if alias_reached(value_node):
+                return True  # `with: *pinned` — the whole input mapping, pin included
+            with_node = value_node
+    if isinstance(with_node, yaml.MappingNode):
+        for key_node, value_node in with_node.value:
+            # `version:` INSIDE the step's own `with:` — including a flow mapping
+            # (`with: {version: *pinned}`), which the textual window used to miss.
+            if isinstance(key_node, yaml.ScalarNode) and key_node.value == "version":
+                return alias_reached(value_node)
     return False
 
 
@@ -490,6 +489,11 @@ def _requested_version(workflow_text: str) -> str:
         "want it accepted. A pin supplied by an ALIAS is ACCEPTED outright (see "
         "`_alias_supplies_the_pin`); reaching this message through one means the alias sits "
         "somewhere this reader could not follow."
+    )
+    assert len(literals) == 1, (
+        f"the setup-cli step carries {len(literals)} literal `version:` lines ({', '.join(literals)}) "
+        "— a duplicate key's tie-break is not measured against GitHub's parser, so the value read "
+        "here is not provably the one installed. Pin exactly once."
     )
     assert literals[0] == resolved, (
         f"the setup-cli step's literal pin is `{literals[0]}` but this reader resolved `{resolved}` "
