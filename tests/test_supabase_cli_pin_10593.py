@@ -89,40 +89,76 @@ def _setup_cli_step(workflow_text: str) -> dict:
     return steps[0]
 
 
-def _setup_cli_block(workflow_text: str) -> list[str]:
-    """The setup-cli step's own source lines, from the step's list item to its end.
+def _setup_cli_step_node(text: str) -> yaml.MappingNode:
+    """The PARSED node for the `supabase/setup-cli` step — the one reader of *which step it is*.
 
-    Two scoping rules, each from a demonstrated defect:
-    * The block starts at the step's own `- ` item, not at its `uses:` line — `with:` may legally
-      precede `uses:` in YAML, and starting at `uses:` would then miss the pin and report a false
-      block on a legitimate shape.
+    `_setup_cli_step` (the comparison) and `_setup_cli_block` (the literal-line check) must resolve
+    the SAME step, or the guard can assert a pin read from a different place than CI installs from.
+    """
+    doc = yaml.compose(text)
+    found: list[yaml.MappingNode] = []
+
+    def walk(node: object, seen: set[int]) -> None:
+        if id(node) in seen:  # an alias can point back at an ancestor
+            return
+        seen.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                if (
+                    isinstance(key, yaml.ScalarNode)
+                    and key.value == "uses"
+                    and isinstance(value, yaml.ScalarNode)
+                    and str(value.value).startswith("supabase/setup-cli")
+                ):
+                    found.append(node)
+                walk(value, seen)
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                walk(item, seen)
+
+    walk(doc, set())
+    assert found, "no `supabase/setup-cli` step found — the migration door changed shape"
+    assert len(found) == 1, f"expected exactly one setup-cli step, found {len(found)}"
+    return found[0]
+
+
+def _setup_cli_block(workflow_text: str) -> list[str]:
+    """The setup-cli step's own source lines, sliced from the PARSED node's marks.
+
+    Three scoping rules, each from a demonstrated defect:
+    * The block comes from `yaml.compose`'s `start_mark`/`end_mark`, not from a line pattern. A text
+      scan is a SECOND reader of "which step is this" with its own dialect, and it disagreed:
+      measured in review, `uses : supabase/setup-cli@v1` (a space before the colon — legal YAML, and
+      what PyYAML and GitHub both read as the same step) did not match the pattern, so a legitimate
+      workflow was REFUSED with a message claiming the migration door had MOVED. A flow-mapping
+      step (`- {uses: …, with: {version: …}}`) had the same failure. The node cannot disagree with
+      `yaml.safe_load` about which step this is, so key spelling is not a surface at all — and the
+      pin still has to be a literal line, which the flow mapping then fails for the RIGHT reason.
+    * `with:` may legally precede `uses:`, so nothing here assumes an order.
     * The pin check must be scoped to THIS step. A file-wide search is satisfied by a decoy literal
       — review demonstrated a green path through an `actions/setup-node` step's
       `with: version: 2.122.1` while the setup-cli step itself carried none — so "a matching line
       exists somewhere" is not the claim the guard needs to make.
     """
     lines = workflow_text.splitlines()
-    uses_idx = next(
-        (
-            i
-            for i, line in enumerate(lines)
-            if re.match(r"^\s*(?:-\s*)?uses:\s*['\"]?supabase/setup-cli", line)
-        ),
-        None,
-    )
-    assert uses_idx is not None, "no `uses: supabase/setup-cli` line found — the migration door moved"
-    start = uses_idx
-    for i in range(uses_idx, -1, -1):
-        if lines[i].lstrip().startswith("- "):
-            start = i
-            break
-    step_indent = len(lines[start]) - len(lines[start].lstrip())
-    block = [lines[start]]
-    for line in lines[start + 1 :]:
-        stripped = line.strip()
-        if stripped and stripped.startswith("- ") and len(line) - len(line.lstrip()) <= step_indent:
-            break  # the next step starts here
-        block.append(line)
+    node = _setup_cli_step_node(workflow_text)
+    # `start_mark` is the step's first key (on the `- uses:` line, or on `with:` when it comes
+    # first); `end_mark` points AT the next token after the mapping, so the slice is exclusive.
+    # A one-line flow mapping (`- {uses: …, with: {version: …}}`) starts and ends ON that line, so
+    # the exclusive slice would be empty — widen it to include the line, which is what makes the
+    # pin check refuse a flow-mapping pin for the RIGHT reason (no literal `version:` line).
+    end = node.end_mark.line
+    if end <= node.start_mark.line:
+        end = node.start_mark.line + 1
+    block = lines[node.start_mark.line : end]
+    # Trailing blank/comment lines belong to the NEXT step (comments are no node's children), and
+    # `version:` is never inside a comment, so trimming them cannot hide a pin — it only stops this
+    # block from swallowing the neighbour's prose.
+    while block and (
+        not block[-1].strip() or block[-1].lstrip().startswith("#")
+    ):
+        block.pop()
+    assert block, "the setup-cli step resolved to no source lines — cannot check its pin"
     return block
 
 
@@ -652,6 +688,48 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         _requested_version(case_variant)
 
 
+def test_a_legal_spelling_of_the_step_is_read_not_refused() -> None:
+    """The literal-line reader must resolve the SAME step PyYAML does, in ANY legal spelling.
+
+    ⛔ Measured in review against the line pattern this replaces: `uses : supabase/setup-cli@v1`
+    (a space before the colon — legal YAML, and what PyYAML and GitHub both read as the same step)
+    did not match, so a legitimate workflow was REFUSED with the message *"no `uses:
+    supabase/setup-cli` line found — the migration door moved"*. That is a false block that also
+    sends a maintainer hunting a diff which does not exist, and it contradicted the function's own
+    stated contract. The reader now slices the PARSED node's marks, so the key's spelling is not a
+    surface at all; this arm is the regression guard, and it asserts the pin is still READ — a
+    refusal here would be a false block, not a guard.
+
+    The reorder row is the sibling half of the same claim: `with:` may legally precede `uses:`, and
+    nothing in the reader may assume an order.
+    """
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    config = CONFIG.read_text(encoding="utf-8")
+    pin = _requested_version(workflow)  # the live pin, so no mutation hardcodes a version
+
+    # (a) `uses :` — a space before the colon.
+    spaced = workflow.replace("- uses: supabase/setup-cli@v1", "- uses : supabase/setup-cli@v1", 1)
+    assert "uses : supabase/setup-cli" in spaced, "mutation (a) did not apply — vacuous"
+    assert _requested_version(spaced) == pin, "a legal `uses :` spelling was not read as the step"
+    assert _literal_version_lines(spaced) == [pin], _literal_version_lines(spaced)
+    assert not _violations(spaced, config), "a legal spelling produced a false violation"
+
+    # (b) `with:` BEFORE `uses:` in the same step.
+    reordered = workflow.replace(
+        "      - uses: supabase/setup-cli@v1\n",
+        f"      - with:\n          version: {pin}\n        uses: supabase/setup-cli@v1\n",
+        1,
+    )
+    reordered = re.sub(
+        r"(?m)^        with:\n          version: [^\s#]+\n", "", reordered, count=1
+    )
+    assert "- with:\n" in reordered and "uses: supabase/setup-cli@v1" in reordered, (
+        "mutation (b) did not apply — vacuous"
+    )
+    assert _requested_version(reordered) == pin, "`with:` before `uses:` was not read as the step"
+    assert not _violations(reordered, config), "the reordered step produced a false violation"
+
+
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
     """This rename retires the config-load arm — the major-3 ceiling must survive it.
 
@@ -663,8 +741,17 @@ def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> Non
     workflow = WORKFLOW.read_text(encoding="utf-8")
     mutated = re.sub(r"(?m)^(\s*version:\s*).*$", r"\g<1>3.0.0", workflow, count=1)
     assert "version: 3.0.0" in mutated, "mutation did not apply — this test would be vacuous"
-    migrated_config = re.sub(r"(?m)^\[inbucket\]\s*$", "[local_smtp]", CONFIG.read_text("utf-8"))
-    assert not _config_declares_inbucket(migrated_config), "the config mutation did not apply"
+    # A PREMISE, deliberately not a "mutation" (#10896). The committed config IS migrated, so a
+    # `re.sub` renaming `[inbucket]` matches nothing and its "mutation applied" guard passes on the
+    # pre-existing state — a vacuous arm wearing a mutation guard's message (found in review). Stated
+    # as a premise it is still load-bearing: if the rename is ever reverted this REDs, and the arm
+    # that then applies is the sibling below (`test_the_coupling_moves_from_the_section_to_the_major`),
+    # which builds its `[inbucket]` config from the header that really exists and asserts IT applied.
+    migrated_config = CONFIG.read_text(encoding="utf-8")
+    assert not _config_declares_inbucket(migrated_config), (
+        "the committed config still declares [inbucket] — this arm asserts the major-3 ceiling "
+        "against the MIGRATED tree; if the rename is reverted, this premise is the signal"
+    )
     problems = _violations(mutated, migrated_config)
     assert problems, (
         "a major-3 pin passed against a migrated config — the v3 trap is unguarded, and a major "
