@@ -1937,8 +1937,9 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
     # 3. The cited span must be the span the QUOTED SENTENCE actually occupies, derived
     #    from the doc's own text — so a shift reds with the number to write instead of
     #    leaving the next lane to re-derive it. The span has moved twice already (`326-332`
-    #    before `a7436214f`, `342-344` while `main` said so, `369-371` after #6744's §7
-    #    insert), and arms (1)-(2) cannot tell a wide-enough span from the right one.
+    #    before `a7436214f`, `342-344` while `main` said so, `369-371` once `fea87bf88e` grew
+    #    §2 — not §7, which sits below §6), and arms (1)-(2) cannot tell a wide-enough span
+    #    from the right one.
     opens = [i + 1 for i, line in enumerate(doc)
              if "The budget's default is derived from this" in line]
     closes = [i + 1 for i, line in enumerate(doc)

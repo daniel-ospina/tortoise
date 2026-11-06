@@ -205,7 +205,8 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: ⚠ RE-ANCHORED 2026-11-06 (#6744): commits on this branch that expand sections ABOVE §6
 #: moved it down from 336 to 363 — the FIRST mover is `fea87bf88e` (the two save-arm caps, in §2),
 #: NOT §7, which sits below §6 and moves nothing. The previous span (342-344) then read §4's tail
-#: (`tests/test_reporting_workflow_concurrency.py`), four lines above §5's kill table. The span is
+#: (`tests/test_reporting_workflow_concurrency.py`), four lines above the §5 heading — §5's own
+#: kill table is further down, under "A timeout kill is one fact and no diagnosis". The span is
 #: read back out of this docstring by
 #: `tests/test_ci_check_repair.py::test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head`,
 #: which is what reds on the NEXT insert instead of leaving the stale coordinate to be
