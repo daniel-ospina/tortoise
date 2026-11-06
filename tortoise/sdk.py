@@ -17153,9 +17153,16 @@ class TortoiseSDK:
         with the pre-fix prose, re-capture the identical conversation and again
         with an extra turn — the pair is unchanged, only the counts move.
 
-        The routes that DO clear it are ONE: a retry of a prior FAILED capture
+        The routes that DO clear it are THREE, and they are named by
+        ``graph-scripts/11070_repair_session_source_prose.py``'s own reconciler
+        plus the two destructive ones: (1) a retry of a prior FAILED capture
         (``retry_failed_capture``, #2335 — the gate admits that arm, so the
-        mint re-runs for the SAME node and the SETs above overwrite the pair).
+        mint re-runs for the SAME node and the SETs above overwrite the pair);
+        (2) ``tortoise.session_source_prose_migration.reconcile_session_source_prose``
+        (#11070, shipped via #11152), which repairs the PAIR IN PLACE from the
+        record without a wipe — the only NON-destructive route; and (3) a full
+        ``record-restore``, whose ``_wipe_all_nodes`` is unconditional and
+        whole-graph, so it clears the pair along with everything else.
         Two things that look like repairs are NOT, and a reader who acts on
         them leaves the prose exactly where it is (#10852 review, P3): a
         capture under a NEW ``session_id`` materialises a DIFFERENT node, since
@@ -17165,8 +17172,8 @@ class TortoiseSDK:
         (``MERGE … SET n += $props``, ``cache_projection.node_statement``) and
         ``summary`` is declined on that door, so a node that ALREADY carries
         the pair keeps it, and the projection only ever produces a prose-free
-        node where none existed. Clearing an existing node's pair otherwise
-        needs an explicit property clear — #11070's work, not a replay's.
+        node where none existed — PREVENTION, and that is all an INCREMENTAL
+        projection does. ⛔ It is not what a full restore does (route 3 above).
         Everything else is a replay.
 
         ⛔ Do NOT make the healing true by re-SETting on the replay arm. A

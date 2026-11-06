@@ -128,7 +128,7 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 | `test (a…i)` (9 shards) | 15–16 | 10.1–14.9 | 15.3–23.7 | **34.97** | 90 |
 | `test-slow (a…e)` (5 legs) | 18–19 | 8.0–9.9 | 9.9–12.7 | 12.92 | 60 |
 | `test-carve-out` (+`(b)`,`(c)`) | 20–23 | 8.3–8.6 | 8.7–9.2 | 19.85 | 30 |
-| `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | **50 (was 20)** |
+| `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | 20 |
 | `test-d14-hosted-api` | 22 | 4.71 | 7.23 | 8.03 | **50 (was 40)** |
 | `test-concurrency-falkor` | 18 | 2.02 | 2.71 | 2.95 | 15 |
 | `test-track-b` | 17 | 0.93 | 1.09 | 1.18 | **30 (was 10)** |
@@ -146,8 +146,8 @@ when the predicate job is what wedged. It has no p50/p95 here yet because it lan
 after this sample was taken — take a fresh measurement (`filter=all`, completed jobs
 only, §2's command) before moving the cap, rather than inferring one from a sibling.
 
-⚠ `test-record-postgres` **false-killed on 2026-11-05 and the cap moved 20 → 50.** It was the row
-this document had already flagged as arm-2 and left for a measurement; this is that measurement.
+⚠ `test-record-postgres` **false-killed on 2026-11-05 at its 20 m cap — and the remedy is
+RESTORE-ONLY, not a raised cap.** The false kill is real and worth keeping on the record.
 Run [41975408278](https://github.com/daniel-ospina/tortoise/actions/runs/41975408278), job
 `127110027242`, head `9e32e81a3`:
 
@@ -160,58 +160,35 @@ Run [41975408278](https://github.com/daniel-ospina/tortoise/actions/runs/4197540
 | killed at **79.8%** (2,885,681,152 of 3,616,385,407 sent) when the cap elapsed | 08:00:46 |
 | conclusion | **`cancelled`** → `python-ci-gate` red (#5219) |
 
-The work was green and never at risk; the whole red is the POST-step, on a diff that never touched
-this job. **It IS exposed to the post-step class below — conditionally, on the cache key.** What
-keeps its save small is not what the job installs; it is whether the `actions/cache` lookup hits
-the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.ts:45` extracts the
-matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
-exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
-everything the restore just put there. This job — p50 1.62 m, the fastest of them — is the likely
-payer: its own `.[test,postgres]` downloads (`python-ci.yml:4674` — the
-`Install package + the postgres extra` step in `test-record-postgres`; `[embeddings]`/torch
-deliberately absent) are a rounding error beside the shared archive it restores and re-saves.
+The work was green and never at risk; the whole red was the POST-step, on a diff that never touched
+this job. The first response was to raise the cap to 50 over a SUM that included that save — **and
+that arm is now VOID, because #11063 removed the save from this job.** It runs
+`actions/cache/restore@v4` with no post step, so nothing is charged against its cap but its own
+steps: **12 m in-step watchdog + ~1 m setup/provision ≈ 13 m; × 1.5 = 19.5 → 20**. Its own
+`.[test,postgres]` downloads (`python-ci.yml:4664` — the `Install package + the postgres extra` step
+in `test-record-postgres`; `[embeddings]`/torch deliberately absent) are a rounding error beside the
+shared archive it now only restores. The cap is
+**20** — what `main` carried before #10962 raised it, re-derived here rather than inherited — keeping the raised
+cap would pin a per-PR concurrency slot at 50 m (#3239) against a SUM that can no longer occur.
 
-**Re-derived by the arm-2 rule from THIS run, not from the estimate this note used to carry.** It
-pre-computed `20 → 40` from an assumed ~9 m save; the measured save is **15.9 m (953 s) and was
-still in flight at the kill** — a CENSORED lower bound, since GitHub reported 79.8% sent. Applied
-the same way every other row in this document is, with the completed save rather than the censored
-one: **12 m in-step watchdog + ~1 m setup/provision + ~20 m completed save = ~33 m; × 1.5 = 49.5 →
-50**. The ~20 m is the completed SAVE STEP (tar + transfer) — the transfer alone is 977 s at the
-~3.7 MB/s the log reports, and the step also tars — not the transfer alone. The censored 15.9 m is
-the floor under that figure, and it alone would give 43.4 → 50 as well, so the two brackets agree
-on 50. `× 1.5, round up to the next 10` on either reading is what §2's **Rule used** block
-says (arm 2, `that SUM × 1.5, rounded UP to the next 10 m`); nothing here
-overrides it. Arm 2 rather than arm 1 for the reason it always
-was: the save this row pays on a key change is the SHARED archive, not its own downloads — so
-`2 × 15.43 = 30` is not the number.
+That also retires the arm-2 ranking this row used to carry. Arm 2 exists for a job that pays the
+shared archive's save on a key change; this job no longer writes a cache at all, so the ~20 m term
+the 50 was derived from is not in its SUM, and the "it warms the shared key for the long legs"
+argument no longer holds for it. Which rows still pay a save is the caveat below's own list —
+stated there once, not restated here, which is how this pair drifted apart in the first place.
 
-⚠ **What this measurement does NOT settle: the `~9 m` save term the other rows use.** That figure
-comes from the `test-d14-hosted-api` incident (#10182) and is not re-measured here; 15.9 m is a
-different runner on a different day, so it does not by itself falsify it — but it does show a
-3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, and the
-`test-carve-out` / `test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below —
+⚠ **The `~9 m` save term the saving rows use is not re-measured here.** That figure comes from the
+`test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063
+stood its save down, on a different runner and day, and shows a 3.6 GB save can cost TWICE that.
+The rows derived from `~9 m` (`test-slow`'s 60 m, and the `test-carve-out` /
+`test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below —
 ⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived its SUM on a MEASURED
 ~7.3 m startup plus an 8 m cache-write term, and split its payload so that job no longer writes
 the 3.6 GB archive at all — see its row below, which is the authority for it) are
-optimistic by ~7 m against the censored 15.9 m and by ~11 m against the completed ~20 m — so the
-re-derivation owed below should use the ~20 m figure (at which `test-slow` is ~11 m PAST its cap,
-not merely level with it). Re-deriving them is owed and is
-deliberately NOT done here: nothing has measured any of the four being cancelled, and this
-document's rule is to move a cap from a measurement, not from a comparison of two samples.
-
-⚠ It is not a free move: **the cap IS the stale-head exposure** (#3239), and 50 m is the most this
-job may hold a per-PR concurrency slot when it genuinely wedges (p50 1.62 m, p95 14.61 m).
-Restore-only — the arm `test-carve-out` took in #10327 — is NOT taken here, and that job's recorded
-rationale has three parts, two of which do not carry over. **It holds:** its cap is pinned to 3×
-its measured pytest step, so it could never hold the SUM, while this one can. **It does not:** the
-`UNBOUNDED save has no timeout` objection is answered by a cap that now clears the COMPLETED save
-rather than the censored one; and `nothing is lost by not saving, the key is written elsewhere
-unconditionally` WOULD apply (same key, the `Cache pip dependency caches (#7612)`
-step in `test-record-postgres`) — but only because of the third
-reason. **What decides it here:** this job is the FASTEST participant (p50 1.62 m), so it reaches
-the post step first and is the one that warms the shared key for the long legs that start earlier
-and are tighter (`test-slow` sits AT its cap). Standing it down would move its ~20 m onto those
-legs — that is the amortization `test-carve-out`, which starts late and is capped, cannot offer.
+optimistic by ~7 m against the censored 15.9 m and by ~11 m against the completed ~20 m. Re-deriving
+them is owed and is deliberately NOT done here: nothing has measured any of the four being
+cancelled, and this document's rule is to move a cap from a measurement, not from a comparison of
+two samples.
 
 ⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
 itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job
@@ -274,10 +251,10 @@ clamp the carve-out shards land on, not the fast shards' budget, and restating a
 is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were
 recorded here rather than moved: nothing had measured any of them being cancelled, and this
 document's own rule is to move a cap from a measurement instead of on suspicion. THREE of the four
-are still in that state. `test-record-postgres` was the first — 22 m against 20 on the arm-2
-estimate — and it false-killed on 2026-11-05, so it has MOVED: `20 → 50` from the measured
-15.9 m censored save (above); the remaining three are `test-slow`, `test-carve-out` and
-`test-concurrency-falkor`. `test-slow` sits exactly AT its
+are still in that state — `test-slow`, `test-carve-out` and `test-concurrency-falkor`.
+`test-record-postgres` was the FIRST of them (22 m against 20 on the arm-2 estimate), and it
+false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its cap rose: #11063
+took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its
 cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
 `test-carve-out` is 9 m past it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against
 30). The last has the least headroom of all:
@@ -325,13 +302,14 @@ produces no runs — and because a warn-only step added to that workflow never e
 - **The job's cold save is NOT the 3.6 GB torch/embeddings archive** — cap = **2 × measured max**,
   rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
-  deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
-  writable shared key (`python-ci.yml:4666-4668` — the `Cache pip dependency caches (#7612)` step's
-  `with:` block in `test-record-postgres`) and is therefore NOT an arm-1 row — on a key
-  change its save IS the archive, measured at 3.6 GB / 15.9 m on 2026-11-05 (see the note under the
-  table, and the cap it moved to). Arm 1 applies to a job whose save is
-  small because nothing restores an archive into its cache path, not because its `pip install`
-  line omits torch.
+  deliberately narrower than "no cache step": a job that mounts `~/.cache/pip` on a WRITABLE
+  shared key is not an arm-1 row, because on a key change its save IS the archive.
+  `test-record-postgres` mounts that path (`python-ci.yml:4656-4658` — its `Restore pip dependency
+  caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block) but is **restore-only since #11063**,
+  so it pays no save: 20 is the ARM-2 SUM minus that term (13 m × 1.5 → 20), not an arm-1 reading,
+  and its retained `max` 15.43 m is save-era (§1 predates #11063), so arm 1 would say 30 — re-measure.
+  Arm 1 otherwise applies to a job whose save is small because nothing restores an archive into
+  its cache path, not because its `pip install` line omits torch.
 - **The job's cold save IS that archive** — `2 × max` cannot see the POST-step at all, so the
   binding term is the SUM of every in-step cap plus ~1 m setup plus the observed cold save, and
   the cap is **that SUM × 1.5, rounded UP to the next 10 m**. The margin is not decoration: a save
@@ -342,11 +320,11 @@ produces no runs — and because a warn-only step added to that workflow never e
 At the time of the first pass no cap was raised and none was lowered: `test` 90, `test-slow` 60 and
 `test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase + the shard's
 in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode — a runner-level
-kill that loses the pass/fail summary. THREE caps have moved since, all on the post-step arm:
-`test-d14-hosted-api` 20 → 40 → 50 (#10182, re-sized in #10212), `test-record-postgres` 20 → 50
-(2026-11-05, from the first measured false-kill — see the note under the table; its
-estimate-derived `40` was superseded by a 15.9 m censored save), and `test-track-b` 10 → 30 (the
-same class: an `actions/setup-python cache: pip` save).
+kill that loses the pass/fail summary. TWO caps have moved since, both on the post-step arm:
+`test-d14-hosted-api` 20 → 40 → 50 (#10182, re-sized in #10212) and `test-track-b` 10 → 30 (the
+same class: an `actions/setup-python cache: pip` save). ⚠ `test-record-postgres` was raised 20 → 50
+on 2026-11-05 from the first measured false-kill; #11063 then made the job restore-only and removed
+the save that raise was derived from, and the cap is **put back to 20 by this change** — see the note under the table.
 
 `python-ci.yml` is now capped on **every** job, and `tests/test_ci_selection.py` asserts both
 that and the derived-required-context invariant, so the next added leg cannot silently inherit

@@ -82,7 +82,7 @@ __all__ = [  # noqa: RUF022
     "Vocab", "CORE_POINT_KINDS",
     "compile_vocab", "get_vocab", "refresh_vocab",
     # models
-    "ProvenanceRef", "Source", "Entity", "Point", "OperatorTarget",
+    "ProvenanceRef", "Source", "Entity", "Point", "Mention", "OperatorTarget",
     "Operator", "ExtractorInfo", "TelemetryExtractor", "TelemetryModel",
     "TelemetryCounts", "Telemetry", "CommitPayload",
     # Layer-1
@@ -563,6 +563,46 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
         )
 
 
+class Mention(BaseModel):
+    """A phrase that POINTS at something instead of naming it (**#11021**).
+
+    A mention is **not** an entity and never becomes one: it is recorded on the
+    claim that used it, with the surface the claim used and the span it
+    addressed, so a reader can see what the sentence meant without a node being
+    minted for a pronoun. It is the DM1 property shape
+    (``docs/epics/2026-11-05-5087-extractor-v4/05-plan.md``): ``surface``,
+    ``span_start``, ``span_end``, ``kind_guess`` — and deliberately **no
+    ``claim_id``**, because the point carrying the property IS the claim.
+
+    ``span_start``/``span_end`` are the same "pointer, not payload" pair the
+    Point carries (E4 / ``#5007``): all-or-nothing and ``end > start``, or both
+    absent. Absent means "the surface was not uniquely locatable in the text the
+    extraction saw" — never a fabricated offset, because an address that names
+    the wrong bytes is worse than no address.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    surface: str = Field(min_length=1, max_length=200)
+    claim_ref: str = ""              # the claim's own content (no `claim_id` — DM1)
+    quote: str = Field(default="", max_length=200)
+    span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)
+    span_end: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)
+    #: Which text the offsets address: ``"quote"`` (the claim's own verbatim
+    #: quote), ``"narrative"`` (the compiled story the extraction saw), or
+    #: ``"model"`` (the extraction model supplied them). A bare offset that does
+    #: not say which space it is in is not an address — the Point's own span is
+    #: quote-inside-turn, so the two are not interchangeable.
+    span_source: Literal["", "quote", "narrative", "model"] = ""
+    kind_guess: str | None = Field(default=None, max_length=60)
+    rule_id: str = ""                # which rule held it — no silent hold
+
+    @model_validator(mode="after")
+    def _span_is_an_address(self) -> Mention:
+        validate_span(self.span_start, self.span_end)
+        return self
+
+
 class Point(BaseModel):
     """A single extracted point — content-addressed id, closed kind vocab."""
 
@@ -595,6 +635,10 @@ class Point(BaseModel):
                     "hint; absence = Tier-B default",
     )
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
+    # #11021: the phrases this claim POINTED with but did not NAME. Additive-
+    # optional, so a pre-#11021 payload validates unchanged, and the write path
+    # never promotes a member to an :Object — a mention is a record, not a node.
+    mentions: list[Mention] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _span_is_an_address(self) -> Point:
