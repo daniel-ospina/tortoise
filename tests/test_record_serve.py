@@ -657,6 +657,61 @@ def test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention():
     assert set(invented.invented) == {"aFieldTheRecordMadeUp"}, invented.as_dict()
 
 
+def test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention():
+    """The SAME mirror rule, applied to the OTHER declared class (#10853).
+
+    ⛔ WHY THIS IS NOT A RESTATEMENT OF THE ARM ABOVE. That one covers
+    ``CACHE_FORBIDDEN_COLUMNS``; this one covers
+    ``episodic_source_declined_properties()`` — §9.1/D1's turn prose on an
+    EPISODIC Source, which the record KEEPS and the projection declines. The
+    ``explained_missing`` loop has known that class since #10867; the ``invented``
+    loop did not, so the mirror direction reported ``invented: ['summary']`` —
+    *"the record path made up a field"* — for the state #10853 deliberately
+    creates. Same false RED, same wrong repair, one class over; it was found by
+    measuring the general claim this change's own docstring makes about which
+    classes are mirrored, not by reading the code.
+
+    The control arms keep it honest: a name outside BOTH declarations still
+    reddens, and the SAME name on a NON-episodic (document) Source is still
+    explained by nothing — the decline is scoped by the node's identity, so
+    blanket-explaining the pair here would decouple this arm from that scoping.
+    """
+    from tortoise.cache_projection import episodic_source_declined_properties, node_from_row
+
+    # ⚠️ BOTH sides are the PROJECTION's own vocabulary, which is what
+    # `parity_difference` documents its arguments as (the record's answer IS
+    # `node_from_row`'s map). A raw row's COLUMN spelling (`source_kind`) would
+    # differ from the property's (`sourceKind`) on the five ambiguous columns and
+    # the arm would then be testing the placement table, not this rule.
+    episodic_row = {"url": "session:s-1", "source_kind": "agentSession",
+                   "summary": "the captured turns", "_search_text": "a, b"}
+    served = dict(node_from_row("Source", episodic_row).props)
+    assert "summary" not in served, sorted(served)   # the decline, pre-condition
+    assert served.get("sourceKind") == "agentSession", served  # the identity arm
+
+    diff = rs.parity_difference(served, {**served, "summary": "the captured turns"},
+                                label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) <= episodic_source_declined_properties()
+    assert set(diff.explained_missing) == {"summary"}, diff.as_dict()
+
+    # …and it is still THAT class only, in this direction.
+    invented = rs.parity_difference(
+        served, {**served, "aFieldTheRecordMadeUp": 1}, label="Source")
+    assert set(invented.invented) == {"aFieldTheRecordMadeUp"}, invented.as_dict()
+
+    # The control that keeps the mirror SCOPED: the decline is decided by the
+    # node's OWN identity, so on a DOCUMENT Source the same name is not declared
+    # at all — a record that claims one there has genuinely invented it.
+    doc_served = dict(node_from_row(
+        "Source", {"url": "docs/transcript.md",
+                   "source_kind": "document"}).props)
+    assert "summary" not in doc_served, sorted(doc_served)
+    doc_diff = rs.parity_difference(doc_served, {**doc_served, "summary": "a label"},
+                                    label="Source")
+    assert set(doc_diff.invented) == {"summary"}, doc_diff.as_dict()
+
+
 def test_a_record_served_read_carries_no_derived_name():
     conn = _FakeConn(rows=[_row(content_hash="abc", ep_dirty=True)])
     props = rs.read_point(conn, org_id="org_t", graph_id="g_t", point_id="p-1")

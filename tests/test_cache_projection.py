@@ -249,6 +249,20 @@ def test_the_props_tail_filters_a_not_projectable_column_in_PROPERTY_space(
     Nothing here states a policy: the column is borrowed from the placement
     table's own ambiguity list and the declaration is monkeypatched, so the real
     `CACHE_FORBIDDEN_COLUMNS` is untouched.
+
+    ⛔ THE CACHE MUST BE CLEARED IN BOTH `try` AND `finally`, and this is not
+    housekeeping — it is the difference between a test and a landmine. The
+    monkeypatched entry REPLACES `event`'s set, so during the patch `story_arc`
+    is not forbidden and the `projected_columns("event")` call this test makes
+    caches a projection that KEEPS it. `monkeypatch` restores the dict and not
+    that cache, so the stale entry then outlives the test — and
+    `test_9555_narrative_cache_rebuild.py::test_the_record_restore_writes_no_story_arc_on_any_node`
+    reports this PR's own seam as re-opened (`projected_columns('event') still
+    keeps 'story_arc' …`) on a CORRECT tree. Measured: running this test and
+    that pin together in one selection failed 1 of 2 before this clear was
+    added, and passes after. Clearing in `finally` too, so a failure inside the
+    asserts cannot leak it either. The `props`-tail arm in
+    `test_9555_narrative_cache_rebuild.py` (2c) already does exactly this.
     """
     column = "session_id"
     spellings = cp.placement_spellings()["event"][column]
@@ -257,16 +271,20 @@ def test_the_props_tail_filters_a_not_projectable_column_in_PROPERTY_space(
 
     monkeypatch.setitem(cp.CACHE_FORBIDDEN_COLUMNS, "event",
                         frozenset({column}))
-    row = {"props": {property_name: "the S1 narrative",
-                     "openSetProp": "kept"}}
-    got = _node("Event", row)
-    assert property_name not in got.props, (
-        f"`event.{column}` is declared not-projectable but its GRAPH spelling "
-        f"{property_name!r} reached the node through the `props` tail — the "
-        "tail filter is keyed in COLUMN space and cannot deny an ambiguous "
-        "column")
-    assert got.props.get("openSetProp") == "kept", (
-        "the tail deny dropped the whole tail instead of the one property")
+    cp.projected_columns.cache_clear()
+    try:
+        row = {"props": {property_name: "the S1 narrative",
+                         "openSetProp": "kept"}}
+        got = _node("Event", row)
+        assert property_name not in got.props, (
+            f"`event.{column}` is declared not-projectable but its GRAPH spelling "
+            f"{property_name!r} reached the node through the `props` tail — the "
+            "tail filter is keyed in COLUMN space and cannot deny an ambiguous "
+            "column")
+        assert got.props.get("openSetProp") == "kept", (
+            "the tail deny dropped the whole tail instead of the one property")
+    finally:
+        cp.projected_columns.cache_clear()
 
 
 def test_no_derived_property_has_a_record_column():

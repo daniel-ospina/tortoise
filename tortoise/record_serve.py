@@ -1155,13 +1155,21 @@ def parity_difference(cache_props: Mapping[str, Any],
     * **nothing else.** A field the cache answers and the record does not, with no
       explanation, is a projection gap — and it reddens. A field the record
       answers and the cache does not is an invention — and it reddens too, UNLESS
-      it is a not-projectable column (above) or a fold default. The carve-out,
-      the decline above and the not-projectable set are the ONLY sanctioned
-      asymmetries, and because all three are enumerated they cannot be used to
-      hide a gap. ⚠️ The not-projectable set is mirrored into the ``invented``
-      direction (above); the CARVE-OUT is not yet, so a raw record row still
+      it is a not-projectable column, a DECLINED name (the §9.1/D1 pair above),
+      or a fold default. The carve-out, the decline above and the
+      not-projectable set are the ONLY sanctioned asymmetries, and because all
+      three are enumerated they cannot be used to hide a gap. ⚠️ TWO of the three
+      are mirrored into the ``invented`` direction (the decline and the
+      not-projectable set); the CARVE-OUT is not, so a raw record row still
       reports its own ``content_hash`` as invented — a pre-existing gap of that
       arm, filed as ``#11192`` rather than absorbed here.
+      ⚠️ ``as_dict()`` is DIRECTION-BLIND by design: a legacy cache node still
+      holding the prose and a record row rightly holding it both render as
+      ``explained_missing: [...]``, because the caller supplied the arguments and
+      so knows which direction it asked. The two need different repairs
+      (``#10017``'s graph-side purge vs nothing at all), and
+      ``record_reconcile`` is where that distinction is made (``graph_only``
+      versus a record-side omission), not here.
 
     ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
     the record's answer here is the projection's own map
@@ -1242,10 +1250,21 @@ def parity_difference(cache_props: Mapping[str, Any],
         # `invented`'s only sanctioned repair is a re-projection, i.e. re-opening
         # the door. Measured red-first in
         # `tests/test_record_serve.py::test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention`.
-        # ⚠️ The same mirror for the SCHEMA-REFUSED names (`_refused`) is a
-        # pre-existing gap of this arm, filed as #11192 and deliberately NOT
-        # fixed here: that class is not the one this change introduces.
-        if field_name in not_projectable:
+        # ⚠️ The same mirror for the §9.1/D1 DECLINE (`declined`, #10853) is
+        # applied here for the same reason and by the same rule: the record keeps
+        # `summary`/`_searchText` and the projection declines to materialise
+        # them, so the record holding them is DECLARED, not invented. It was
+        # MISSING until review cycle 2 measured it — a genuinely episodic Source
+        # audit reported `invented: ['summary']` on a correct pair, the identical
+        # false RED this arm exists to remove, one class over. Pinned by
+        # `test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention`.
+        # ⚠️ ONE class is still unmirrored, and it is a PRE-EXISTING gap of this
+        # arm rather than this change's: the SCHEMA-REFUSED names (`_refused`),
+        # so a raw record row reports its own `content_hash` as invented. Filed
+        # as #11192 and deliberately NOT fixed here — that class is not the one
+        # this change introduces, and the fix is a different decision (the record
+        # is not even supposed to carry those names).
+        if field_name in not_projectable or field_name in declined:
             explained[field_name] = value
             continue
         # A fold `ON CREATE` default fills a field the record row is SILENT
