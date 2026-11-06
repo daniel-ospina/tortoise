@@ -3816,6 +3816,95 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
             f"--integrity refuses: {problems}")
 
 
+def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
+    """#10726 MUTATION PROOF: the refresh gate must SEE a duplicate mapping key.
+
+    `config/ci-surfaces.yml` is `merge=union`, so a replay can leave the same
+    `.durations` key in the file twice; `yaml.safe_load` keeps the LAST while
+    `render_refreshed_manifest` rewrites the FIRST in the TEXT. Before this
+    wiring `--integrity` reported the class and :func:`integrity_problems`
+    returned `[]` — so `--refresh-durations` (whose sole pre-write gate this
+    is) could PERSIST a manifest the required `manifest-integrity` job reds,
+    rewriting a weight the shard packer never reads.
+
+    Non-vacuous both ways, and graded on the TEXT rather than a path, because
+    the whole point is the document that has not been written yet: the path
+    form would grade the file the refresh is about to replace.
+
+    ⛔ THE PLANTED ROW MUST CARRY A DIFFERENT VALUE FROM THE ROW IT SHADOWS —
+    the property is load-bearing (#10648 review P3), and only because the
+    resolution is ASSERTED below rather than stated here: with the SAME value
+    the planted row would be indistinguishable from the one it precedes, so
+    "last-wins" would be unfalsifiable. First-wins would surface the planted
+    value to every reader of the map; last-wins surfaces the real weight, which
+    is exactly why a persisted duplicate is silent rather than loud.
+
+    The planted value is DERIVED from the real one instead of hard-coded, so
+    that property holds whatever a `--refresh-durations` sweep does to this
+    row: a hard-coded figure collides with the row's own weight the moment a
+    sweep lands on it, which turns this pin into a red about its own FIXTURE
+    rather than about the defect it exists to catch. The difference is asserted
+    below either way, so a botched derivation reds here too.
+    """
+    import ci_selection as cs
+
+    real = cs.MANIFEST.read_text()
+    assert ci_timing.integrity_problems(real) == []
+
+    key = "test_7818_plan_record_5362.py"
+    anchor = f"  {key}: "
+    real_value = yaml.safe_load(real)["durations"][key]
+    # derive a value that provably DIFFERS from the real one, whatever it is
+    other_value = 0.9 if real_value != 0.9 else 0.8
+    dup = f"  {key}: {other_value}  # duplicate planted by this test\n"
+    at = real.index(anchor)
+    planted = real[:at] + dup + real[at:]
+
+    # The loader the shard packer uses cannot see it …
+    assert sum(1 for line in planted.splitlines()
+               if line.startswith(anchor)) == 2
+    # … and it resolves LAST-wins, which is the mechanism that makes a persisted
+    # duplicate inert: `render_refreshed_manifest` rewrites the FIRST row in the
+    # TEXT while every reader of the map loads the LAST, so the refresh would
+    # report a weight the shard packer never reads. Pinned, not assumed.
+    assert yaml.safe_load(planted)["durations"][key] == real_value
+    assert real_value != other_value, (
+        "the planted value must differ from the row it shadows, otherwise "
+        "last-wins and first-wins are indistinguishable here and the "
+        "assertion above proves nothing")
+
+    # … and the refresh's pre-write gate SEES it, by name.
+    problems = ci_timing.integrity_problems(planted)
+    assert any("duplicate mapping key 'test_7818_plan_record_5362.py'" in p
+               for p in problems), (
+        "the refresh's pre-write gate must compose the duplicate-key walk "
+        "(#5373) — otherwise --refresh-durations writes what --integrity "
+        "rejects")
+
+    # SECOND ARM — the shape that actually REACHES the writer (#10726 review).
+    # A duplicated `.durations:` ROW cannot get there: `_locate_durations_block`
+    # refuses it, raising `DurationsBridgeError` ("duplicate `durations:` key
+    # 'test_7818_plan_record_5362.py' on lines <n> and <n+1>") before anything is
+    # rendered — the figures are deliberately not quoted, because they move with
+    # every union merge above the row (they were 8566/8567 when this arm was
+    # written and 8586/8587 at `59692c8c6`). What DOES reach it is a duplicated
+    # TOP-LEVEL `durations:` key:
+    # that locator `break`s at the first block's end, so the renderer never sees
+    # the second — measured, it emits TWO `durations:` blocks and
+    # `validate_refreshed_manifest` reports nothing. Without this arm the pin
+    # above covers only a shape the writer would have refused anyway.
+    top_level_dup = real + f"\ndurations:\n  {key}: {other_value}\n"
+    top_problems = ci_timing.integrity_problems(top_level_dup)
+    assert any("duplicate mapping key 'durations'" in p for p in top_problems), (
+        "a duplicated TOP-LEVEL durations: key is emitted twice by the renderer "
+        "and is NOT reported by validate_refreshed_manifest — the composed "
+        "duplicate-key walk is the only term that refuses it")
+    assert not any("duplicate" in p.lower()
+                   for p in ci_timing.validate_refreshed_manifest(top_level_dup)), (
+        "if this ever starts catching the shape, this arm's premise changed — "
+        "re-derive which gate is load-bearing instead of deleting the arm")
+
+
 def test_integrity_problems_mirrors_the_listed_integrity_composition(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3888,6 +3977,14 @@ def test_integrity_problems_mirrors_the_listed_integrity_composition(
         "watchdog_headroom_issues",
         "duration_coverage_issues",
         "duplicate_entries",
+        # #10726 review: the DUPLICATE-KEY walk (#5373) must run on BOTH entry
+        # points. It was added to `--integrity` alone, and this tuple — whose own
+        # docstring says it "must be extended when a validator is added" — was
+        # not extended, so the omission was invisible. Measured: with a duplicate
+        # `.durations` key planted, `--integrity` reported it and
+        # `integrity_problems` returned `[]`, i.e. `--refresh-durations` could
+        # persist a manifest the required `manifest-integrity` job reds.
+        "duplicate_mapping_key_issues",
         "workflow_matrix_issues",
         "workflow_halves_issues",
     )
