@@ -1277,6 +1277,16 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             widening). The REST doors pass `sdk=` anyway, for identity (one
             handle for the count and the write) rather than because the fallback
             is wrong.
+            ⛔ A non-None `sdk` is NOT sufficient — the pre-#10637 call passed
+            one (`_org_sdk_for_credential`, a default-graph handle) and still
+            counted another graph. Pass the write graph's SDK, or an
+            `sdk_factory` returning it. All 4 current executable call sites do
+            (`rg -n 'enforce_org_limit[(]' tortoise/` also prints the `def` and
+            two prose mentions): `hosted_api._check_org_limit` supplies
+            `sdk_factory=lambda: _gate_sdk_for(org, resource)` (`sdk=sdk` too,
+            when its caller already holds the handle); `mcp_server` supplies
+            `sdk=_get_org_sdk()`; the two `/v1/index/docs` gates supply
+            `sdk=org_sdk`, which IS their write target.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the
