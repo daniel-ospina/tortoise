@@ -1317,6 +1317,15 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
     r"\bvalue class\b|\bnumeric side\b|\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
     + _UNIT_TOKEN.pattern, re.I)
 
+#: The anchors that mark a claim about the CLOSED gap. `_is_honest_spelling` reads
+#: this narrower set instead of `_RESIDUAL_CLASS_ANCHOR`: the carve-out is the
+#: mechanism's own name and the spelling gap is open inside it, so naming it must
+#: not cost a disclosure its waiver (#11258 review round 2 `P2`, measured).
+_RESIDUAL_CLOSED_CLASS_ANCHOR = re.compile(
+    r"adjacency|\btime[- ]unit\b|\bthe guarantee\b|\bretention\b|"
+    r"\bvalue class\b|\bnumeric side\b|\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
+    + _UNIT_TOKEN.pattern, re.I)
+
 #: The affirmations that something IS open / STOPPED being closed. TWO ARMS,
 #: and the split is the whole design — each arm was measured into place.
 #:
@@ -1363,7 +1372,12 @@ _RESIDUAL_OPENNESS = (
     # gap is not open again` DENIES the gap and it red before this pair was added
     # (#11258 review `P2`, measured). `not closed` is deliberately NOT guarded —
     # there the negation ASSERTS the gap is open, which is the whole arm.
-    r"(?<!\bnot\s)(?<!\bnever\s)\bopen\s+again\b",
+    # ⛔ SIX FORMS, matching the opening verb's window below, and for the same
+    # measured reason: two forms read only `not open again` / `never open again`
+    # and left `has not been open again`, `has never been open again` and
+    # `hasn't been open again` as FALSE BLOCKS (#11258 review round 2 `P2`).
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bopen\s+again\b",
 )
 
 #: The ANCHORED arm: `<verb> … open` and the opening verb. ⛔ NO HYPHEN EXCEPTION —
@@ -1379,6 +1393,16 @@ _RESIDUAL_OPEN_VERBS = (
 #: verb so it can only ever speak about THIS predicate — `is unjudged and never
 #: closed` is still read by the `not … closed` arm, where the negation asserts the
 #: gap is open (#11258 review `P2`, measured: seven honest denials red before it).
+#: ⛔ IT VETOES ONLY THE PREDICATE'S OWN NEGATOR. A wider `(?!…not…)` swallowed the
+#: EMPHATIC negations, which ASSERT the gap is open — `is not only open`, `is not
+#: merely open`, `is not just open, it is unjudged`, `is never far from open` all
+#: went GREEN, a coverage REGRESSION against the head the previous review approved
+#: (#11258 review round 2 `P1`, measured). So the negation must be followed by
+#: `open` ITSELF (or a bare adverb that does not change the polarity), which is
+#: what `(?:yet|fully|really|still)\s+` admits and nothing else.
+_RESIDUAL_NEGATED_OPEN = (
+    r"(?!\s*(?:not|never)\s+(?:(?:yet|fully|really|still)\s+)?(?:fail-)?open\b)"
+    r"(?!\s*n't\s+(?:(?:yet|fully|really|still)\s+)?(?:fail-)?open\b)")
 
 #: `fails open` (no hyphen) is the row's OWN vocabulary for the same thing, and it
 #: is read CLAUSE-anchored rather than by adding `fails?` to the verb list above:
@@ -1405,8 +1429,9 @@ _RESIDUAL_FAIL_OPEN = re.compile(r"\bfails?\s+open\b", re.I)
 #: (`is unjudged and open` GREEN — round 3, measured); this bound blocks the
 #: coordinator only when a subject and a verb follow it.
 _RESIDUAL_ANCHORED_OPENNESS = (
-    rf"\b({_RESIDUAL_OPEN_VERBS})\b(?!\s*(?:not|never)\b|n't\b)"
-    r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
+    rf"\b({_RESIDUAL_OPEN_VERBS})\b"
+    + _RESIDUAL_NEGATED_OPEN
+    + r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
     r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,30}?"
     r"(?:fail-)?open(?!\w)",
     # ⛔ A NEGATED reopening is a DENIAL of one: `(d2) does not reopen (d)'s
@@ -1540,13 +1565,23 @@ def _is_honest_spelling(text: str) -> bool:
     """Does this TEXT disclose the still-open SPELLING class and nothing else?
 
     That gap IS open, so saying so is the row's own honest disclosure — but the
-    waiver is only ever granted to a span that names no other class (a unit
-    token, `adjacency`, the carve-out, the guarantee), so it can never travel to
-    a claim about the adjacency class.
+    waiver is only ever granted to a span that names no CLOSED class (a unit
+    token, `adjacency`, the guarantee), so it can never travel to a claim about
+    the adjacency gap.
+
+    ⛔ `carve-out` IS NOT A CLOSED CLASS, so it does not withhold the waiver. It
+    is this mechanism's own NAME (`state_value_carve_out`), and the spelling gap
+    is open *inside* it — refusing the waiver on that word turned four honest
+    disclosures red (`the SPELLING carve-out is still open by design`, `the
+    SPELLING gap stays open inside the carve-out`, …), which is a FALSE BLOCK in
+    the artifact's other direction (#11258 review round 2 `P2`, measured). The
+    waiver still cannot travel to `adjacency` or a unit token, which is the arm
+    that matters: that is what stops a reopening hiding behind the word
+    `spelling`.
     """
     return ("spelling" in text
             and not _UNIT_TOKEN.search(text)
-            and not _RESIDUAL_CLASS_ANCHOR.search(text))
+            and not _RESIDUAL_CLOSED_CLASS_ANCHOR.search(text))
 
 
 def test_the_registry_row_names_the_residual_that_still_stands():
@@ -1601,8 +1636,9 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     # statement about some OTHER subject from tripping it, and the closed-claim
     # rule stays scoped to `(d)` where that claim lives.
     # The block's own structural half is asserted here; the reopening half lives
-    # in `_residual_reopening_claims`, whose proof list (39 reopenings that must
-    # RED, 10 truthful statements that must stay GREEN) is
+    # in `_residual_reopening_claims`, whose proof list (43 reopenings that must
+    # RED, 16 truthful statements that must stay GREEN — `len()` of the two tuples
+    # below, so re-derive rather than trust these numbers) is
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` below — that test
     # is what makes the list above a checked claim rather than a docstring.
     # — plus the structural rule that the still-open SPELLING disclosure must be
@@ -1718,6 +1754,13 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the time-unit half fails open.",
     "the carve-out fails open.",
     "the value class fails open.",
+    # round 5 (#11258 review round 2 `P1`): EMPHATIC negations ASSERT the gap is
+    # open — a negation veto wide enough to refuse these is a coverage regression,
+    # and one was shipped for a round before these probes caught it.
+    "the ADJACENCY half is not only open, it is unfused.",
+    "the ADJACENCY half is not merely open.",
+    "the ADJACENCY half is not just open, it is unjudged.",
+    "the ADJACENCY half is never far from open.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -1744,6 +1787,17 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the carve-out has never been reopened.",
     "the ADJACENCY half has not been re-opened.",
     "it doesn't reopen (d)'s ADJACENCY result.",
+    # ⛔ ... AND THE SAME DENIALS ONE VERB OVER (`open again`), plus the SPELLING
+    # disclosures that name the mechanism's own `carve-out`. Both were FALSE BLOCKS
+    # at the previous head: the `open again` arm had two negation forms where the
+    # opening verb had six, and the waiver withheld itself on the word `carve-out`
+    # (#11258 review round 2 `P2`, measured).
+    "the ADJACENCY gap has not been open again since the tables landed.",
+    "the ADJACENCY gap has never been open again.",
+    "the ADJACENCY gap hasn't been open again.",
+    "the SPELLING carve-out is still open by design.",
+    "the SPELLING gap stays open inside the carve-out.",
+    "the carve-out is open only for SPELLING.",
     "splitting it would re-open that false refusal on every two-group decimal.",
     "that needs the owner's decision reopened there, not a rung bolted on here.",
 )
@@ -1766,7 +1820,7 @@ def _with_appended(text: str, sentence: str) -> str:
 
 
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
-    """#11223: the pin's own proof list, executable — 43 REDs and 16 passes.
+    """#11223: the pin's own proof list, executable — 47 REDs and 22 passes.
 
     The pin above asserted a scan whose bounds were the `(d)` block; measured on
     the row at `af864a42a` that block is 10,019 chars and does NOT contain the
