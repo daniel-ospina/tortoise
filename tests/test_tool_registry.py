@@ -75,29 +75,45 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """76 live tools = 98 − the 16 owner-approved retirements (#3863) − 1 − 5.
+        """72 live tools = 98 − the 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5.
 
-        The extra −1 is #3540 ruling B: the two per-source switches were
-        consolidated into `tortoise_manage_sources`, which is the ruling's own
-        requirement ("the surface ends up one tool fewer, not more"). The
-        census is bumped per add — and, here, per approved CONSOLIDATION.
+        The −1 is #3540 ruling B: the two per-source switches were consolidated into
+        `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
+        ends up one tool fewer, not more"). The census is bumped per add — and, here,
+        per approved CONSOLIDATION.
 
-        The final −5 is #4282 Phase 3.2: the five `run_onboarding` tools
+        #4282 (this change): the `graph_overview` container absorbs FIVE advertised
+        names (`overview`, `summarize_structure`, `validate_domain`, `audit`,
+        `dream_health`) and adds itself — 81 − 5 + 1 = 77. `check_structure` is absorbed
+        as a SECTION while its door stays live, because it is the one member carrying the
+        #8482 wrap-envelope repair that a `-> Any` container cannot. The approved target
+        is 27 advertised tools; `tools/surface-target-check.py` is what measures the
+        distance to it, and this pin moves with every landed container batch.
+
+        #4282 Phase 3.2 (main): the five `run_onboarding` tools
         (`tortoise_onboarding_state`, `_seed`, `_demo_create`,
         `_github_connect`, `_github_status`) were DELETED from the registry on the
         2026-09-22 owner ruling (`run_onboarding` dropped for `check_connection`),
         so they are neither live nor retired — they have no replacement NAME to
-        redirect to. 81 − 5 = 76.
+        redirect to. 77 − 5 = 72. The two moves are independent (disjoint name
+        sets) and compose: neither side's own figure survives the merge.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 76, f"Expected 76, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 72, f"Expected 72, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
-        # The 16 #3863 retirements plus the 2 per-source switches #3540 ruling B
-        # consolidated are NOT live, and each one is declared retired (#3883).
+        # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
+        # consolidated and the 5 #4282 container members are NOT live, and each one is
+        # declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 18, f"Expected 18 retired, got {len(retired)}"
+        assert len(retired) == 23, f"Expected 23 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
-        assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
+        # #405's `validate_domain` capability is not lost: #4282 retired the door into the
+        # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
+        # the NAME would re-assert the surface shape the approved target removes, so the
+        # assertion follows the capability.
+        assert "tortoise_graph_overview" in names, "Missing the graph_overview container"
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        assert "validate_domain" in RETIRED_USE_INSTEAD["tortoise_validate_domain"]
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
         assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
         onboarding = {
@@ -121,19 +137,25 @@ class TestRegistryEquivalence:
         assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
         assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
-        assert "tortoise_audit" in names, "Missing #348 tortoise_audit tool"
+        # #348's audit capability, reached through the #4282 container: the door retired and
+        # `graph_overview(section="audit")` is the name that resolves now.
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD as _RUI
+        assert 'section="audit"' in _RUI["tortoise_audit"], "Missing #348 audit capability"
         # W1–W4 consolidated tools (#888): recall (W1), update/delete/
         # operator_action/create_edge (W2), overview/get_entity (W3), ingest (W4).
         # W3's fetch tool is `tortoise_get_entity` — `tortoise_get` retires into it
         # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
+        # `tortoise_overview` left this set when #4282 retired it into
+        # `tortoise_graph_overview` — the container is the W3 consolidation now.
         w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
                             "tortoise_operator_action", "tortoise_create_edge",
-                            "tortoise_overview", "tortoise_get_entity", "tortoise_ingest"}
+                            "tortoise_graph_overview", "tortoise_get_entity",
+                            "tortoise_ingest"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
         for name in ("tortoise_query", "tortoise_suggest_entry_points",
-                     "tortoise_overview"):
+                     "tortoise_graph_overview"):
             assert name in names, f"Missing tool: {name}"
         # Phase-4 mining/promotion/dedup/timeline surface (#787)
         phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
@@ -880,6 +902,38 @@ class TestCapabilityModel:
         assert writers >= NON_SDK_WRITER_TOOLS, (
             "a NON_SDK_WRITER_TOOLS member is not writer-annotated: "
             f"{sorted(NON_SDK_WRITER_TOOLS - writers)}")
+
+    def test_every_non_sdk_reader_is_still_served(self):
+        """`NON_SDK_READ_TOOLS` is "Kept exact" too, so its liveness needs the same arm.
+
+        #10914 review P3: the writer set got
+        `test_every_non_sdk_writer_is_still_served` for exactly this reason and the read
+        set got nothing, so a rename on the read side would leave the declaration
+        pointing at a name that resolves nowhere while every other check stayed silent —
+        `declared_set_violations` iterates live ENTRIES, never the declared names.
+
+        The two extra arms pin what makes the set *mean* "handler-served read": an
+        empty `sdk_method` (the binding is in hosted_api, outside the sdk.py
+        derivation) and no `writes` flag. A member that gains either belongs in
+        `NON_SDK_WRITER_TOOLS` — inheriting the reader exemption would let an
+        empty-binding WRITE escape the writer guards by being declared read.
+        """
+        from tool_surface_capabilities import NON_SDK_READ_TOOLS, served_registry
+
+        served = served_registry()
+        names = {e.name for e in served}
+        stale = sorted(NON_SDK_READ_TOOLS - names)
+        assert stale == [], (
+            f"NON_SDK_READ_TOOLS names no served tool: {stale} — delete or rename "
+            f"the entry")
+        rows = {e.name: e for e in served if e.name in NON_SDK_READ_TOOLS}
+        bound = sorted(n for n, e in rows.items() if e.sdk_method)
+        assert bound == [], (
+            f"a NON_SDK_READ_TOOLS member declares an sdk_method: {bound}")
+        writers = sorted(n for n, e in rows.items() if e.writes)
+        assert writers == [], (
+            f"a NON_SDK_READ_TOOLS member is writer-annotated: {writers} — it "
+            f"belongs in NON_SDK_WRITER_TOOLS")
 
     def test_guards_cover_the_served_set_not_only_the_live_one(self):
         """#3883: a retired name is still resolvable and callable by name, so the

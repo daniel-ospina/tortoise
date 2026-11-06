@@ -465,6 +465,32 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
     )
 
 
+def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
+    """#11104 review (P1): the applier's own guard must run on the applier's docs.
+
+    `tests/test_supabase_deploy_applier_config.py` pins the operator remedy the
+    README prints (`supabase/README.md` — the manual-fallback `db push` /
+    `functions deploy` block) BECAUSE that text is copied by an operator during a
+    failed co-move. `supabase/README.md` matches no SOURCE_PATTERNS entry, so a
+    README-only diff filters to `changed == []` and takes the docs-only early
+    return — tier1 ONLY. Registered in `core` but not in `tier1`, the guard is
+    asleep on the one diff that can re-break it: dropping `--yes` from that block
+    (the exact pre-#10896 shape, which a v3 CLI refuses unattended, applying
+    nothing) would merge green and only red `main` post-merge (#4309 silent-drop
+    class; the #8614 / #9548 shape one document over). Dropping the tier1 entry
+    re-opens that hole.
+    """
+    r = _sel(["supabase/README.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_supabase_deploy_applier_config.py" in r["test_files"], (
+        "a supabase/README.md-only diff must select the guard that pins its "
+        "printed remedies (`test_supabase_deploy_applier_config.py`) — "
+        "otherwise a README edit dropping `--yes` merges green (#11104 review, "
+        "#4309 class)"
+    )
+
+
 def test_the_8503_docs_pins_run_on_a_docs_only_diff():
     """#8503 round 9 (P1): the bundle's own pins must run on the bundle.
 
