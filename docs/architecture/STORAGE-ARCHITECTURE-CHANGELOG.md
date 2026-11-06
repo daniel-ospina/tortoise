@@ -2105,8 +2105,10 @@ occurrence (one property the projection declines to write), NOT as a `field_mism
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
 a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too. ⛔ What no class has here is a NON-destructive repair:
-the classes differ in WHY the name must be absent, not in which lane clears it.
+whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE class lacks a non-destructive repair (nothing writes
+the column, so no in-place route can exist); the declined pair has one, shipped —
+`session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
+repairs it in place. The classes differ in both why and which lane.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED

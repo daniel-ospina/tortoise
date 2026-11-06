@@ -152,10 +152,13 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      an already-captured session id is the #1727 no-op replay, so
      ``_materialize_session_source`` — whose only caller sits behind the fresh
      capture gate — never runs and the stale pair survives (measured:
-     `#10852` review, P1). The ONE route that clears an existing node's pair is a
-     retry of a prior FAILED capture: that arm re-runs the mint for the SAME
-     `url` (`retry_failed_capture`, #2335), so the capture's SETs overwrite the
-     pair. Two things that read like repairs are NOT (#10852 review, P3): a
+     `#10852` review, P1). THREE routes clear an existing node's pair: a retry
+     of a prior FAILED capture (that arm re-runs the mint for the SAME `url`
+     — `retry_failed_capture`, #2335 — so the capture's SETs overwrite the
+     pair); ``session_source_prose_migration.reconcile_session_source_prose``
+     (#11070, shipped via `#11152` — repairs/clears the PAIR IN PLACE from the
+     record, the only NON-destructive route); and a full ``record-restore``,
+     whose wipe is whole-graph (see below). Two things that read like repairs are NOT (#10852 review, P3): a
      capture under a NEW `session_id` MERGEs a DIFFERENT node and leaves the old
      one alone; and a record-sourced re-projection for a node the projection
      CREATES is a PREVENTION route — its write is additive

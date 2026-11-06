@@ -365,14 +365,18 @@ bounds, both deliberate:
   production caller sits behind the fresh-capture gate — **never runs** and the
   stale pair survives (pinned by
   `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`).
-  The ONE route that DOES clear it is a retry of a prior FAILED capture — that
-  arm re-runs the mint for the SAME node (`url = session:<id>`), so the
-  capture's `SET`s overwrite the pair. Two routes that read like repairs are NOT
-  (`#10852` review, P3): a capture under a NEW `session_id` MERGEs a DIFFERENT
-  node and leaves the old one alone, and a record-sourced re-projection is a
-  **prevention** route, not a clearing one (see the next bullet). Clearing an
-  existing node's pair otherwise needs an explicit property clear — `#11070`'s
-  work, not a replay's;
+  THREE routes DO clear it: (1) a retry of a prior FAILED capture — that arm
+  re-runs the mint for the SAME node (`url = session:<id>`), so the capture's
+  `SET`s overwrite the pair (route 1); (2)
+  `session_source_prose_migration.reconcile_session_source_prose` (`#11070`,
+  shipped via `#11152`), which repairs or CLEARS the PAIR IN PLACE from the
+  record **without a wipe** — the only NON-destructive route, and it leaves the
+  node's other properties untouched; and (3) a full `record-restore`, whose
+  `_wipe_all_nodes` is unconditional and whole-graph. Two routes that read like
+  repairs are NOT (`#10852` review, P3): a capture under a NEW `session_id`
+  MERGEs a DIFFERENT node and leaves the old one alone, and an INCREMENTAL
+  record-sourced re-projection is a **prevention** route, not a clearing one
+  (see the next bullet);
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
   projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
   the cache-held partition keeps every name the record side holds, so a drifted

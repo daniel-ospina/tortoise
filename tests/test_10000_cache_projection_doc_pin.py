@@ -21,13 +21,22 @@ A SECOND review round (`#10852` @ `3466bc1ce`, P3) found the correction itself
 carried the same defect in miniature: the list it published named THREE routes,
 and for the population under discussion — the node that already carries the
 pair — two of them clear nothing. A capture under a NEW `session_id` MERGEs a
-DIFFERENT node (`url = session:<id>`), so the old node keeps its pair; a
-record-sourced re-projection is a PREVENTION route (its write is additive,
-`MERGE … SET n += $props`, and `summary` is declined on that door), so it only
-ever produces a prose-free node where none existed. The guard below now pins
-the SINGLE clearing route and keeps the three-route claim out of both docs,
-because a repair list that is wrong for two of its three members is the same
-"this population sorts itself out" misdirection the retraction exists to remove.
+DIFFERENT node (`url = session:<id>`), so the old node keeps its pair; an
+INCREMENTAL record-sourced re-projection is a PREVENTION route (its write is
+additive, `MERGE … SET n += $props`, and `summary` is declined on that door), so
+it only ever produces a prose-free node where none existed. The guard below
+pins every route that really does clear the pair and keeps the wrong two out of
+both docs, because a repair list that is wrong for two of its three members is
+the same "this population sorts itself out" misdirection the retraction exists
+to remove.
+
+⚠️ THE CENSUS IS THREE, not one (#11184 review, cycle 10 — measured): `#11070`'s
+repair SHIPPED in `98df3bd4cf` (`tortoise/session_source_prose_migration.py`,
+operator path `graph-scripts/11070_repair_session_source_prose.py`), and it
+repairs or clears the pair IN PLACE from the record without a wipe; and a full
+`record-restore` wipes unconditionally (`_wipe_all_nodes`), clearing the pair
+along with everything else. The two PREVENTION routes above are still not
+clearing routes — that half of the `#10852` correction stands.
 
 WHY ITS OWN FILE, REGISTERED IN `tier1`. The guarded artifact is under `docs/`,
 and a docs-only diff selects no surface and runs `tier1` only, so a pin placed in
@@ -99,11 +108,23 @@ RETRACTED_SHAPES = (
 #: statement passes, a correct-looking one that loses the mechanism does not.
 CORRECTION_KEYWORDS = ("does not repair", "no-op replay", "1727")
 
-#: The ONE route that clears an EXISTING legacy node's pair: a retry of a prior
-#: FAILED capture re-runs the mint for the same `url`, so the capture's `SET`s
-#: overwrite the pair (`retry_failed_capture`, `#2335`). It is the only entry
-#: because `#10852`'s review measured the other two as prevention, not repair.
-CLEARING_ROUTES = ("retry of a prior FAILED capture",)
+#: Every route that clears an EXISTING legacy node's pair, and each is pinned
+#: because a repair list short by one sends the operator to the wrong lane:
+#:   * a retry of a prior FAILED capture re-runs the mint for the same `url`, so
+#:     the capture's `SET`s overwrite the pair (`retry_failed_capture`, `#2335`);
+#:   * `#11070`'s reconciler repairs or CLEARS the pair IN PLACE from the record
+#:     without a wipe (shipped `98df3bd4cf`, `#11152`) — the only non-destructive
+#:     route;
+#:   * a full `record-restore` wipes unconditionally (`_wipe_all_nodes`), so it
+#:     clears the pair along with the rest of the graph.
+#: ⚠️ The `#10852` review's "SINGLE clearing route" was true when it was measured
+#: and stopped being true when `#11070` shipped; the PREVENTION half of it — a NEW
+#: `session_id` and an incremental re-projection clear nothing — still stands.
+CLEARING_ROUTES = (
+    "retry of a prior FAILED capture",
+    "reconcile_session_source_prose",
+    "record-restore",
+)
 
 #: The two routes the earlier cut published as clearing ones. They must still be
 #: NAMED — an operator who was told about them needs to learn they do not clear

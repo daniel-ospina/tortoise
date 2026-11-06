@@ -56,12 +56,17 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   DOES hold, and which a record-sourced re-projection removes; and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
   — which the record ALSO holds and which no projection may ever write, because
-  the graph is where they must not live. ⛔ The repair is a DESTRUCTIVE CLEAR, the
-  same class of route as the declined pair's: ``record-restore`` /
-  ``rebuild_from_record`` wipe the graph first (``_wipe_all_nodes``, unconditional
-  and whole-graph) and therefore clear a legacy copy, and ``#10017`` is the
-  targeted graph-side purge for an operator who does not want the wipe. What no
-  class here has is a NON-destructive repair. Counting them as
+  the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
+  ``record-restore`` / ``rebuild_from_record`` wipe the graph first
+  (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
+  legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
+  who does not want the wipe — and it has NO non-destructive route: nothing
+  writes the column any more, so no in-place repair can exist. That is WHERE IT
+  DIFFERS from the declined pair, which does have one, shipped:
+  ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
+  ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
+  node's other properties untouched. So the three classes differ in which lane
+  clears them, not only in why the name must be absent. Counting them as
   ``field_mismatches`` would make the clean verdict UNREACHABLE on a
   journal-projected cache — every folded point carries them — which is exactly
   the "a signal indistinguishable from noise is not observability" failure
