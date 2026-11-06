@@ -2654,12 +2654,13 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
     a lane editing a clause finds its verdict beside its siblings.
 
     ⛔ EVERY VERDICT BELOW WAS MEASURED AT `origin/main` `277a559b1`, this file's
-    own head, and each assert that holds a row clause names it. SIX of them are
+    own head, and each assert that holds a row clause names it. SEVEN of them are
     REFUSALS (`:MM` with a fused unit, its pre-existing `27:12` spelling, an
-    identifier against a QUANTITY, a different identifier, and the two range
-    comparisons) and the rest are TOLERANCES — a tolerance is not a bug, but an
-    UNDISCLOSED or UNPINNED tolerance is how a future narrowing ("why does this
-    pair fail open?") quietly reverses a measured decision.
+    identifier against a QUANTITY, a different identifier, an identifier with a
+    PLAIN unit tail against another quantity, and the two range comparisons) and
+    the rest are TOLERANCES — a tolerance is not a bug, but an UNDISCLOSED or
+    UNPINNED tolerance is how a future narrowing ("why does this pair fail
+    open?") quietly reverses a measured decision.
     """
     # (c) a colon form that is a valid CLOCK SHAPE without being a clock — the
     # row's own example, `4:32` read as a marathon time — is NOT caught, and
@@ -2734,6 +2735,20 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
     assert v2._value_slot_divergence("the see was x4k ms",
                                      "the see was x5k ms") == (
         ("see", "4kms", "5kms"),)
+    # ⛔ SCOPE, pinned (#10943 review cycle 2): (d2) is the PREFIX-TAIL shape, not
+    # a blanket identifier tolerance. An identifier followed by a PLAIN unit word
+    # is judged normally — `x4 ms` against a different quantity REFUSES, and
+    # `arr4 ms` against `9000 ms` REFUSES — while `x4 ms` against the SAME value
+    # tolerates. A future fix that broadens (d2) into "identifiers are not judged"
+    # has to move these.
+    assert v2._value_slot_divergence("the see was x4 ms",
+                                     "the see was 5000 ms") == (
+        ("see", "4ms", "5000ms"),)
+    assert v2._value_slot_divergence("the field was arr4 ms",
+                                     "the field was 9000 ms") == (
+        ("field", "4ms", "9000ms"),)
+    assert v2._value_slot_divergence("the see was x4 ms",
+                                     "the see was 4 ms") == ()
 
     # a HYPHENATED compound is ONE token, so it never reaches the fusion arm and
     # the composition folds `kmile` into `k`+`mile`: `20k-mile`/`20000 miles` is

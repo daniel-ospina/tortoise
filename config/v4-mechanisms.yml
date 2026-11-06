@@ -735,7 +735,10 @@ mechanisms:
       `_value_bindings` (the E5/E7 contradiction engine, live) and adds no second
       value CLASSIFIER — the P2 that killed the previous attempt at this row.
       THE DISCRIMINATOR — how the rule tells a droppable identifier from a
-      retainable state value: it never judges identifiers at all. It judges
+      retainable state value: it never judges identifiers at all — with the
+      residual (d2) exception recorded below, where an identifier-shaped token
+      whose TAIL is a magnitude prefix over a known unit (`x4k`+`ms`) is READ AS
+      A QUANTITY and judged. It judges
       VALUES over the engine's own bindings, in three tolerances (#10360 lane
       record): (i) value identity, not string identity — a numeric core with its
       SIGN and its UNIT kept, so ``4.20``/``4.2``,
@@ -977,9 +980,10 @@ mechanisms:
       callers
       (pinned by
       `test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded`).
-      (d2) AN IDENTIFIER-SHAPED value beside a unit word TOLERATES, AND IT DOES
-      SO BY INVENTING A SCALE — not by declining to judge (#10943, which records
-      this clause as `(q2)`; measured at this head): `the see was x4k ms` binds
+      (d2) AN IDENTIFIER-SHAPED value whose TAIL reads as a MAGNITUDE PREFIX
+      over a known unit (`x4k`+`ms` → `kms`) TOLERATES, AND IT DOES SO BY
+      INVENTING A SCALE — not by declining to judge (#10943, which records this
+      clause as `(q2)`; measured at this head): `the see was x4k ms` binds
       `x4kms`, whose core is `4` with suffix `kms`, and `_composed_identity`
       folds `k`+`ms` and multiplies it to `4000 ms` — so the pair IS judged, both
       sides bind slots, and the identifier agrees with a quote it was never a
@@ -987,8 +991,11 @@ mechanisms:
       (`x4k` is not read as 4000 in place); it does not block the GLUED token,
       which is why this is the composition arm's fail-open and not an identifier
       exemption. That the digits ARE compared is measured: `x4k ms` against
-      `5000 ms` REFUSES. (d2) does NOT reopen (d)'s ADJACENCY result — the unit
-      word IS fused.
+      `5000 ms` REFUSES. ⛔ SCOPE, measured: an identifier followed by a PLAIN
+      unit word is judged normally — `x4 ms` against `5000 ms` REFUSES and
+      `arr4 ms` against `9000 ms` REFUSES — so (d2) is the PREFIX-TAIL shape and
+      NOT a blanket identifier tolerance. (d2) does NOT reopen (d)'s ADJACENCY
+      result — the unit word IS fused.
       ⚠️ Residuals (c) (`4:32` read as a marathon time), (d) (`per <unit>` rates),
       (d2) and the `20k-mile`/`20000 miles` agreement are PINNED as a battery by
       `tests/test_state_value_verbatim_10360.py::test_the_registry_rows_measured_disclosures_are_pinned`
