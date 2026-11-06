@@ -175,7 +175,9 @@ empties the **dense leg** for those labels, so a query that matched only by mean
 
 1. **The population.** It named `entity_type='object'` / `'event'` — two values. The census measures
    **FOUR labels / FIVE `entity_type` values**: `:Event`, `:Object`, `:Source`, `:Subject` →
-   `event`, `object`, `document`, `source`, `subject`. Stating it for two of five under-reports the
+   `event`, `object`, `document`, `source`, `subject` — **on the population it ran on**; the affected
+   set is whatever `--census` prints for the graph a removal applies to, because a label holding no
+   vectors cannot be affected. Stating it for two of five under-reports the
    change, and under-reporting is the direction that matters for an approval request
    (`S3-VECTOR-CENSUS.md` §4.1/§7).
 2. **The consequence.** It said those queries "return zero rows" — false while the FTS leg answers

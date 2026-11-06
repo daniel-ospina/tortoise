@@ -807,6 +807,15 @@ class _CensusGraph:
                 rows = [[v] for v in samples]
             else:
                 rows = [[samples]]
+            # ⛔ HONOUR THE `LIMIT` the production query issues. Returning every
+            # sample regardless made the mixed-width test pass with
+            # `WIDTH_PROBE_SAMPLES = 1` — i.e. with the exact single-row bug it
+            # exists to catch — so the test could not fail on a regression
+            # (review round 9, P2: a verification gate with no discriminating
+            # power).
+            limit = cypher.rsplit("LIMIT", 1)[-1].strip()
+            if limit.isdigit():
+                rows = rows[:int(limit)]
         else:
             rows = []
         return type("_R", (), {"result_set": rows})()
@@ -3062,10 +3071,13 @@ def test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure():
     produce, with nothing marking it as estimated. The module's posture is
     UNMEASURED when the inputs disagree, and here they do.
     """
+    # The minority width FIRST, so the `LIMIT WIDTH_PROBE_SAMPLES` window
+    # contains it — the fake honours the LIMIT, so where the odd row sits
+    # decides whether the probe can see it (the residual is pinned below).
     graph = _CensusGraph(
         catalogue=[],
         labels=["Object"],
-        vectors={"Object": (6, [[0.0] * 1024] * 5 + [[0.0] * 384])},
+        vectors={"Object": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)},
     )
     row = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
                               graph_names=["g"])["labels"]["Object"]
@@ -3074,6 +3086,101 @@ def test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure():
     assert "disagree" in str(row["payload"]["derived_payload_B"]), row
     # …and the COUNT is unaffected: it is a count of rows, not a width.
     assert row["unindexed"] == 6, row
+
+
+def test_the_mixed_width_refusal_needs_MORE_THAN_ONE_sample(monkeypatch):
+    """The width fix's own discriminating power (#11088 review round 9, P2).
+
+    With `WIDTH_PROBE_SAMPLES = 1` the single-row bug returns: the first sampled
+    row's width is multiplied across the label and the figure reads as measured.
+    Pinning BOTH directions is what makes the refusal attributable to the
+    multi-row probe rather than to the fixture.
+    """
+    vectors = {"Object": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)}
+    graph = _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors)
+    row = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), row
+
+    # ⚠️ THE DECLARED RESIDUAL: a sample window that misses the minority width
+    # cannot refuse (5 of 6, minority last). The figure then stands, and `how`
+    # must say how many rows it came from — the sample size is what keeps it an
+    # observation rather than an implied exhaustive check.
+    late = {"Object": (6, [[0.0] * 1024] * 5 + [[0.0] * 384])}
+    residual = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=late),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert residual["payload"]["derived_payload_B"] == 6 * 1024 * 4, residual
+    assert "5 sampled row(s)" in residual["payload"]["how"], residual["payload"]
+    assert "minority" in residual["payload"]["how"], residual["payload"]
+
+    # …and with a SINGLE sample the same fixture reports a measured-looking
+    # figure from one row: the regression this test must be able to see.
+    monkeypatch.setattr(probe, "WIDTH_PROBE_SAMPLES", 1)
+    one = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert one["payload"]["derived_payload_B"] == 6 * 384 * 4, (
+        "with a single sample the first row's width is multiplied across the "
+        f"label — that is the regression this test must be able to see: {one}")
+
+
+def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
+    """No removable vector, nothing changes — including for the caller-chosen
+    tools (#11088 review round 9, P2).
+
+    A graph whose only label is indexed yields an empty affected set, and the
+    pass-through branch used to print "any (the caller chooses)" anyway, naming
+    `tortoise_search`/`tortoise_query` as changing on a graph where a removal
+    would change nothing.
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"], vectors={"Point": (3, [0.0] * 384)},
+    )
+    sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                             graph_names=["g"])["surface_consequence"]
+    assert sc["entity_types_whose_query_results_change"] == [], sc
+    assert {e["tool"]: e["reaches_affected_labels"] for e in sc["surface"]
+            if "tool" in e and e["reaches_affected_labels"]} == {}, (
+        "a tool was reported as changing on a graph with nothing to remove: "
+        f"{sc['surface']}")
+
+
+def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
+        monkeypatch):
+    """An `UNKNOWN(...)` member must not intersect to `[]` (#11088 round 9, P2).
+
+    `_types_for` reports a non-literal argument as `UNKNOWN(<expr>)`, never
+    guessed. Intersecting that string with the affected types yields `[]`, which
+    the printer drops — an unmeasured consequence published as a measured "does
+    not change", the direction the module calls dangerous.
+    """
+    graph = _CensusGraph(
+        catalogue=[], labels=["Object"], vectors={"Object": (2, [0.0] * 384)},
+    )
+    monkeypatch.setattr(
+        probe, "_sdk_methods_on_vector_leg",
+        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None))
+    sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                             graph_names=["g"])["surface_consequence"]
+    recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
+    assert str(recall["reaches_affected_labels"]).startswith("UNMEASURED"), recall
+
+
+def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
+    """A private helper must not hide a tool (#11088 review round 9, P2).
+
+    `review_connections` → `_review_add`/`_review_prune` → `_review_pool` → the
+    leg. Keying the scan on the ENCLOSING function named only `_review_pool`,
+    which is not a `TOOL_REGISTRY.sdk_method`, so the tool vanished from the
+    caller list with no `UNMEASURED` entry anywhere.
+    """
+    methods, error = probe._sdk_methods_on_vector_leg()
+    assert error is None, error
+    assert methods["review_connections"] == {"point"}, methods
+    named = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
+    assert "tortoise_review_connections" in named, sorted(named)
 
 
 def test_the_census_reports_EVERY_index_KIND_not_only_VECTOR():

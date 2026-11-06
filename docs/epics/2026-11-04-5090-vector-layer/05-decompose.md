@@ -126,8 +126,9 @@ claim and not an assertion:
 - **Complexity:** standard · **Blocked by:** none (the census half) · **Blocks:** none.
 - ⛔ **Why the removal is not in this child's authority:** `entity_type='object'` / `'event'` vector search
   **returns rows today** by full scan — and the census widened the affected population to **FOUR labels /
-  FIVE `entity_type` values** (`event`, `object`, `document`, `source`, `subject`), because `:Source` maps to
-  `document`+`source` (`S3-VECTOR-CENSUS.md` §4.1/§7). `Source`/`Subject` carry no vector **INDEX** — an index
+  FIVE `entity_type` values** (`event`, `object`, `document`, `source`, `subject`) **on the population it
+  measured** (the set is whatever `--census` prints for the graph a removal applies to), because `:Source`
+  maps to `document`+`source` (`S3-VECTOR-CENSUS.md` §4.1/§7). `Source`/`Subject` carry no vector **INDEX** — an index
   fact, not a claim about the property: both labels' writers DO store `embedding`, and the 2026-09-24 inventory
   reports no per-label vector count for them at all, so what they hold is what `--census` measures, never
   something inferred from the inventory (`S3-VECTOR-CENSUS.md` §5). Removing the vectors removes that answer —

@@ -2015,8 +2015,10 @@ def vector_leg_surface() -> list[dict]:
     the binding would therefore name ONE tool where the surface has two. So the
     handler body is AST-scanned for a `tortoise_fts_query` call that passes
     `entity_type` — the same technique this file already uses for embedding
-    writers — and the two sources are UNIONED, each entry carrying which one
-    named it.
+    writers. The TWO handler-shaped sources are unioned with a THIRD,
+    :func:`_sdk_methods_on_vector_leg` (SDK methods that ask the leg for a fixed
+    `entity_type`, including through a private helper), and each entry carries
+    `named_by` saying which sources named it.
     """
     try:
         from tortoise.tool_registry import TOOL_REGISTRY
@@ -2068,7 +2070,8 @@ def vector_leg_surface() -> list[dict]:
             rest = "MCP only (no REST route)"
         else:
             rest = "UNMEASURED(handler not in TOOL_REGISTRY — not on the MCP surface)"
-        out.append({
+        fixed = by_fixed.get(name)
+        entry = {
             "tool": name,
             "rest": rest,
             "named_by": how,
@@ -2076,11 +2079,18 @@ def vector_leg_surface() -> list[dict]:
             # ⛔ Two different facts about the same tool, and collapsing them
             # would overstate one class: a PASS-THROUGH tool can ask the leg
             # for ANY type the caller supplies (`"caller-supplied"`), while a
-            # fixed-type tool asks for one the caller never names. The fixed
-            # list is what makes the approval request complete — see
-            # `_sdk_methods_on_vector_leg` (#11088 review round 7, P1).
-            "entity_types": by_fixed.get(name, "caller-supplied"),
-        })
+            # fixed-type tool asks for one the caller never names. A tool that
+            # is BOTH keeps both — `entity_types` reads `caller-supplied` (the
+            # wider fact, so a consequence is never understated) and the fixed
+            # list rides beside it as `also_fixed_entity_types` (review round 9,
+            # P3: the single value silently dropped the pass-through reach of a
+            # tool that also fixes a type).
+            "entity_types": ("caller-supplied" if (name in by_handler or fixed is None)
+                             else fixed),
+        }
+        if fixed is not None and name in by_handler:
+            entry["also_fixed_entity_types"] = fixed
+        out.append(entry)
     for error in (handler_error, fixed_error):
         if error:
             out.append({"tools": error})
@@ -2130,7 +2140,6 @@ def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
     #: than restated here: `entity_type: str = "point"` in
     #: `TortoiseSDK.tortoise_fts_query`. A call that omits the kwarg runs it.
     default_entity_type = "UNKNOWN(no declared default found)"
-    out: dict[str, set[str]] = {}
 
     def _is_target(node: ast.AST) -> bool:
         if isinstance(node, ast.Attribute):
@@ -2185,13 +2194,54 @@ def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
             if a.arg == "entity_type" and isinstance(default, ast.Constant):
                 default_entity_type = default.value
 
+    direct: dict[str, set[str]] = {}
+    callees: dict[str, set[str]] = {}
+    known = {fn.name for fn in functions}
     for fn in functions:
         if fn is leg:
             continue
         types = _scan(fn)
         if types:
-            out[fn.name] = types
-    return {name: out[name] for name in sorted(out)}, None
+            direct[fn.name] = types
+        calls: set[str] = set()
+        stack = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                continue
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = (func.attr if isinstance(func, ast.Attribute)
+                        else func.id if isinstance(func, ast.Name) else None)
+                if name in known:
+                    calls.add(name)
+            stack.extend(ast.iter_child_nodes(node))
+        if calls:
+            callees[fn.name] = calls
+
+    # ⛔ ONE HOP IS NOT THE POPULATION (review round 9, P2). A registry tool can
+    # reach the leg through a PRIVATE helper: `review_connections` →
+    # `_review_add`/`_review_prune` → `_review_pool` → the leg. Keying the scan
+    # on the ENCLOSING function named `_review_pool` (not a `TOOL_REGISTRY
+    # .sdk_method`) and then dropped the tool with no entry anywhere — a silent
+    # hole in the caller list of an approval request. The transitive closure
+    # over in-module calls closes that class: a method is an entrant iff any
+    # path from it reaches the leg, and it carries the entity types found along
+    # the paths it can take.
+    changed = True
+    while changed:
+        changed = False
+        for name, calls in callees.items():
+            reach = set(direct.get(name, set()))
+            for callee in calls:
+                reach |= direct.get(callee, set())
+            if not reach <= direct.get(name, set()):
+                merged = direct.get(name, set()) | reach
+                if merged != direct.get(name):
+                    direct[name] = merged
+                    changed = True
+    return {name: direct[name] for name in sorted(direct)}, None
 
 
 def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
@@ -2427,6 +2477,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
         # from the same number.
         width = None
         width_reason: str | None = None
+        width_samples = 0
         if isinstance(stored, int) and stored > 0:
             try:
                 # `size(n.embedding)` is REJECTED on a vecf32 column, so the
@@ -2448,8 +2499,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                     f"WHERE n.embedding IS NOT NULL RETURN n.embedding "
                     f"LIMIT {WIDTH_PROBE_SAMPLES}",
                 ).result_set
-                widths = {len(r[0]) for r in (probe or [])
-                          if r and r[0] is not None}
+                seen = [len(r[0]) for r in (probe or [])
+                        if r and r[0] is not None]
+                widths = set(seen)
+                width_samples = len(seen)
                 if len(widths) == 1:
                     width = widths.pop()
                 elif len(widths) > 1:
@@ -2479,7 +2532,14 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 (("the index dimension", dim), ("the stored width", width))
                 if value is None
             )
-            unindexed = f"UNMEASURED(coverage not provable: {missing} unreadable)"
+            # ⛔ Name the MEASURED cause when the width was read and the readings
+            # disagreed: "unreadable" sends a reader to debug a probe failure
+            # that did not happen (review round 9, P3).
+            if width is None and width_reason:
+                missing = f"the stored width ({width_reason})"
+                unindexed = f"UNMEASURED(coverage not provable: {missing})"
+            else:
+                unindexed = f"UNMEASURED(coverage not provable: {missing} unreadable)"
         elif covering:
             unindexed = 0
         else:
@@ -2526,10 +2586,17 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # unreadable, and keying on `dim` put "NO covering index" in `how`
             # beside `indexed=True` and a populated `vector_indexes_on_label` —
             # the row contradicting its own field (review, P2).
+            # ⛔ The SAMPLE SIZE belongs in `how`: a probe of N rows cannot
+            # prove every row agrees, so a narrower minority width outside the
+            # sample is not seen. Stating the sample is the difference between
+            # a bounded observation and an implied exhaustive check (review
+            # round 9, P2 — the figure stays, the overclaim goes).
             payload = {"derived_payload_B": stored * width * 4,
                        "how": f"stored {stored} x probed width {width} dims x 4 B "
-                              "(vecf32); NO covering index, so the width is "
-                              "measured but not cross-checked"}
+                              f"(vecf32); NO covering index, so the width comes "
+                              f"from {width_samples} sampled row(s) and is not "
+                              "cross-checked — a narrower minority width outside "
+                              "that sample would not be seen"}
         elif dim is None:
             # A covering index EXISTS and its `dimension` is unreadable. The
             # stored width is still measured, but coverage is not provable —
@@ -2695,8 +2762,22 @@ def _annotated_surface(affected: list[dict], unmeasured: list[dict]) -> list[dic
         if unmeasured:
             entry["reaches_affected_labels"] = (
                 "UNMEASURED(the affected set is partial — see unmeasured_labels)")
+        elif not possible:
+            # ⛔ NOTHING is removable on this graph, so NOTHING changes — and a
+            # pass-through tool must not print "any (the caller chooses)" here,
+            # which would name two tools as changing on a graph where the
+            # affected set is empty (review round 9, P2: an over-report in the
+            # approval artifact, contradicting this function's own promise).
+            entry["reaches_affected_labels"] = []
         elif not isinstance(asked, list):
             entry["reaches_affected_labels"] = "any (the caller chooses)"
+        elif any(str(t).startswith("UNKNOWN") for t in asked):
+            # ⛔ An `UNKNOWN(...)` member is the reporting channel for a
+            # non-literal `entity_type`; intersecting that STRING with the
+            # affected types would yield `[]` and read as a measured "no
+            # change" (review round 9, P2).
+            entry["reaches_affected_labels"] = (
+                "UNMEASURED(its SDK method's entity_type is not a literal)")
         else:
             entry["reaches_affected_labels"] = sorted(set(asked) & possible)
     return surface

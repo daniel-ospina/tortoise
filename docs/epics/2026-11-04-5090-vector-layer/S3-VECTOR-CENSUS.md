@@ -64,7 +64,7 @@ not the union that formed the row set:
 | `stored` | nodes whose `embedding` is not null |
 | `indexed` | `CALL db.indexes()` holds a **VECTOR** index on that label's `embedding` (an index on another field does not count) |
 | `unindexed` | the stored remainder — `UNMEASURED(...)` when the coverage cannot be proved (`#4280` dimension disagreement, unreadable width) |
-| `payload.derived_payload_B` | `stored × width × 4 B`. The width is **probed from the stored vectors** — up to **five**, because one row's width is not the label's: a graph that went through an `EMBEDDING_DIM` rotation holds vectors of two widths, and `stored × width` would then multiply one sampled row across every row. Sampled widths that **disagree** → `UNMEASURED(stored widths disagree (…))`, never a product. When a covering index exists its `dimension` must agree, and a disagreement refuses. **No covering index at all** → the figure is derived from the probed width alone and `how` says the width was not cross-checked; a **covering index whose `dimension` is unreadable** → `UNMEASURED`, because the row reports `indexed: true` and must not also claim coverage; an **unreadable catalogue row** → `UNMEASURED` as well, because `not covering` cannot tell "no index" from "an index we could not see" |
+| `payload.derived_payload_B` | `stored × width × 4 B`. The width is **probed from the stored vectors** — the first `WIDTH_PROBE_SAMPLES` (5) of them, because one row's width is not the label's: a graph that went through an `EMBEDDING_DIM` rotation holds vectors of two widths, and `stored × width` would then multiply one sampled row across every row. Sampled widths that **disagree** → `UNMEASURED(stored widths disagree (…))`, never a product. ⚠️ **Declared residual:** a sample window that misses a narrower minority width cannot refuse, so `how` states the sample size (`… comes from 5 sampled row(s) …`) — an observation, not a claim of exhaustiveness. When a covering index exists its `dimension` must agree, and a disagreement refuses. **No covering index at all** → the figure is derived from the probed width alone and `how` says the width was not cross-checked; a **covering index whose `dimension` is unreadable** → `UNMEASURED`, because the row reports `indexed: true` and must not also claim coverage; an **unreadable catalogue row** → `UNMEASURED` as well, because `not covering` cannot tell "no index" from "an index we could not see" |
 | `indexes_on_label` | **every** index kind the catalogue reports for the label, not only VECTOR — `{"FULLTEXT": ["_searchText"]}` or `{"VECTOR": ["embedding"]}` or `none`. Read from the same `CALL db.indexes()` rows at no extra query cost, because §3.1's deciding datum (does this label carry a FULLTEXT index?) is a **non-vector** kind — and the census used to promise the run settled it while parsing VECTOR rows only |
 | `affected_entity_types` | the `entity_type` values the product translates onto this label |
 | `removal_changes_query_results` | `true` iff the label stores unindexed vectors **and** some `entity_type` reaches it; `false` when it does not; **`UNMEASURED(...)`** when either input is unmeasured (a consequence is never claimed from a hole) |
@@ -107,11 +107,15 @@ under-reports in a different direction:
 1. `tool_registry.TOOL_REGISTRY` (the ONE declaration of the MCP/REST surface) for tools bound to
    `sdk_method == "tortoise_fts_query"`;
 2. an AST scan of `tortoise/mcp_server.py` for **handlers** that pass `entity_type` into that method;
-3. an AST scan of `tortoise/sdk.py` for **SDK methods** that call the leg with a *fixed*
+3. an AST scan of `tortoise/sdk.py` for **SDK methods** that *reach* the leg with a *fixed*
    `entity_type` — a class neither of the other two can see, because the handler never forwards the
-   argument. A call that omits the kwarg runs the SDK's own default (`entity_type="point"`), which is
+   argument. Reach is **transitive over in-module calls**, not one hop: `review_connections` →
+   `_review_add`/`_review_prune` → `_review_pool` → the leg, and a scan keyed on the enclosing
+   function would have named the private helper (not a registry `sdk_method`) and silently dropped
+   the tool. A call that omits the kwarg runs the SDK's own default (`entity_type="point"`), which is
    as much of an entrant as an explicit one; a non-literal argument is reported as
-   `UNKNOWN(<expr>)`, never guessed into a type.
+   `UNKNOWN(<expr>)`, never guessed into a type — and such a tool's consequence reads
+   `UNMEASURED(...)`, never `[]`.
 
 | tool | route | asks the leg for | named by | results change |
 |---|---|---|---|---|
@@ -119,6 +123,7 @@ under-reports in a different direction:
 | `tortoise_query` | MCP only | the caller's `entity_type` | handler forwards `entity_type` into the hybrid engine (its registry binding is `paginated_query`) | **yes** — same reason |
 | `tortoise_recall` | MCP only | `object` **and** `point` | its SDK method (`recall_state`) calls the leg with a fixed `entity_type` | **yes** — its **default** `mode="state"` read queries `:Object` (`object_centric` defaults `True`) |
 | `tortoise_search_sessions` | MCP only | `event` | its SDK method (`search_sessions`) calls the leg with a fixed `entity_type` | **yes** — `:Event` |
+| `tortoise_review_connections` | MCP only | `point` **via a private helper** (`_review_add`/`_review_prune` → `_review_pool`) | reachability from its SDK method to the leg | no — `:Point` is the one indexed label |
 | `tortoise_issue_insight` | `GET /v1/issue-insight` | `point` | its SDK method calls the leg with a fixed `entity_type` | no — `:Point` is the one indexed label |
 | `tortoise_suggest_entry_points` | MCP only | `point` (the SDK default, no kwarg) | its SDK method calls the leg without `entity_type` | no — same reason |
 
@@ -214,7 +219,7 @@ The transcript below is the tool's **text mode**, pasted unedited:
 
 ```text
 $ uv run python tools/dod_5090_probe.py --census --uri <lane-uri> --graph census11088_demo
-Census — graph `census11088_demo` at 2026-11-06T23:06:46+00:00 (CALL db.indexes()):
+Census — graph `census11088_demo` at 2026-11-06T23:21:34+00:00 (CALL db.indexes()):
   command: uv run python tools/dod_5090_probe.py --census --uri docker://:pw@host:6379/<graph> --graph <graph>
   Event      stored=2            indexed=False  unindexed=2            payload=3072
              entity_type(s) served by this label: ['event'] — removing the UNINDEXED remainder changes query results: True
@@ -229,16 +234,18 @@ Census — graph `census11088_demo` at 2026-11-06T23:06:46+00:00 (CALL db.indexe
              entity_type(s) served by this label: ['subject'] — removing the UNINDEXED remainder changes query results: True
   surface consequence — removal is REQUESTED, not performed; it needs the owner's approval (MCP/SDK surface):
     affected entity_type values: ['document', 'event', 'object', 'source', 'subject']
-    path: tortoise_issue_insight (GET /v1/issue-insight, entity_type=point) / tortoise_query (MCP only (no REST route)) / tortoise_recall (MCP only (no REST route), entity_type=object|point) / tortoise_search (GET /v1/search) / tortoise_search_sessions (MCP only (no REST route), entity_type=event) / tortoise_suggest_entry_points (MCP only (no REST route), entity_type=point) → tortoise_fts_query(entity_type=…) → tortoise.search_engine.run_vector_query
+    path: tortoise_issue_insight (GET /v1/issue-insight, entity_type=point) / tortoise_query (MCP only (no REST route)) / tortoise_recall (MCP only (no REST route), entity_type=object|point) / tortoise_review_connections (MCP only (no REST route), entity_type=point) / tortoise_search (GET /v1/search) / tortoise_search_sessions (MCP only (no REST route), entity_type=event) / tortoise_suggest_entry_points (MCP only (no REST route), entity_type=point) → tortoise_fts_query(entity_type=…) → tortoise.search_engine.run_vector_query
     tools whose results change: tortoise_query (any (the caller chooses)) / tortoise_recall (['object']) / tortoise_search (any (the caller chooses)) / tortoise_search_sessions (['event'])
   population: CALL db.labels()
 ```
 
 The two tools whose results change that a caller would **not** guess from the argument they pass are
 `tortoise_recall` (default `mode="state"` reads `:Object`) and `tortoise_search_sessions` (`:Event`);
-they appear because §3's third source reads the SDK's own call sites. `tortoise_issue_insight` and
+they appear because §3's third source reads the SDK's own call sites. `tortoise_issue_insight`,
+`tortoise_review_connections` (which reaches the leg through `_review_pool`) and
 `tortoise_suggest_entry_points` are entrants with `reaches_affected_labels: []` — they ask the leg for
-`point` only, and `:Point` is indexed.
+`point` only, and `:Point` is indexed. On a graph with **nothing** removable, that column is `[]` for
+every tool, including the caller-chosen ones: nothing changes, and the census does not say otherwise.
 
 (`--json` emits the same numbers as the report's `census` object, with `labels`, `payload`,
 `affected_entity_types`, `removal_changes_query_results`, `indexes_on_label` and `surface_consequence`
@@ -312,10 +319,10 @@ assertion measures.
 
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
-117 passed, 1 skipped in 42.07s
+121 passed, 1 skipped in 42.50s
 ```
 
-(115 collected before this change's round 7, 118 after; the skip is the `<3.12` re-derive.)
+(115 collected before this change's round 7, 122 after; the skip is the `<3.12` re-derive.)
 
 **Row 2 — an unreadable catalogue exits non-zero and does not report an empty population.**
 Three routes, all `2`, none reporting a population. ⚠️ These are **excerpts**, not full transcripts:
