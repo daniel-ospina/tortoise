@@ -3981,12 +3981,13 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
 
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
-    # This doc cites `python-ci.yml:<n>` for three cost arguments (§1's postgres cache row, §1's
-    # falkor install row, §6's arm-1 exemption). All three were correct when written and had
-    # drifted since — and `_REFUSAL_CITATION_SITES` above cannot cover them, because its anchor is
-    # the `test-slow` refusal paragraph and these cite other steps. Nothing read this file either,
-    # so its drift shipped green exactly like ci.yml's and actionlint.yaml's did. Pinned by
-    # SENTENCE inside the cited range, so a number that lands elsewhere reds here.
+    # This doc cites `python-ci.yml:<n>` for four cost arguments (§1's postgres cache row, §1's
+    # falkor install row, §2's save-arm note, §6's arm-1 exemption). All four were correct when
+    # written and had drifted since — and `_REFUSAL_CITATION_SITES` above cannot cover them,
+    # because its anchor is the `test-slow` cost paragraph's opener and these cite other steps.
+    # Nothing read this file either, so its drift shipped green exactly like ci.yml's and
+    # actionlint.yaml's did. Pinned by SENTENCE inside the cited range, so a number that lands
+    # elsewhere reds here.
     wall_clock = (REPO_ROOT / "docs" / "ops" / "ci-wall-clock.md").read_text()
     for citation, anchors in _WALL_CLOCK_CITATION_ANCHORS:
         assert citation in wall_clock, (

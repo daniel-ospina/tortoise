@@ -10651,7 +10651,8 @@ def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
       step and GitHub cancelled the job at 10 m 15 s against a 10 m cap. Its
       save surface comes from a THIRD-PARTY action, not from an `actions/cache`
       step of its own, which is why no `actions/cache`-shaped audit saw it: a
-      1.18 m max looked like a comfortable 10 m. 15 m x 1.5 -> 30 m.
+      1.18 m max looked like a comfortable 10 m. Its SUM is 5 m in-step + ~1 m + ~9 m = 15 m,
+      and 15 m x 1.5 = 22.5 m, rounded UP to the next 10 m -> 30 m.
 
     Pinned as the RELATIONSHIP, so a measured re-tune passes and a silent revert
     to either pre-fix number reds: the 15 m watchdog fails the in-step floor, the

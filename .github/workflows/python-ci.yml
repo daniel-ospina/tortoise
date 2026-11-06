@@ -3071,8 +3071,8 @@ jobs:
         # (the coverage-manifest observed-set source).
         run: |
           set +e
-          # #3239: 5m (was 20m) — the measured pytest step is 0.08m; the
-          # in-step kill must stay BELOW the job's 10m outer cap (#798).
+          # #3239: 5m (was 20m) — the measured pytest step is 0.08m; the in-step
+          # kill must stay BELOW the job's 30m outer cap (#798; 10m when it was written).
           timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
             tests/test_ingest_safety.py -m track_b -v --timeout=300 \
             -p no:cacheprovider --maxfail=20 -r fEs --junitxml="$PYTEST_JUNIT" \
