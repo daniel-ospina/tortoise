@@ -2958,3 +2958,100 @@ def test_a_ticked_list_after_the_heading_is_not_this_headings_criteria():
         assert L.classify_issue([inv, satisfies], 1)[0] == [], satisfies
         assert L.classify_issue([inv, satisfies, "- [x] a\n"], 1)[0] == [], satisfies
     assert L.has_satisfies_checklist(["## Satisfies\n\n- [x] a\n"]) is True
+
+
+# --- review round 28: the PASS arm is strict about CONTAINMENT, and only the PASS arm -----------
+# Round 27 applied `strict=True` to the SHARED `strip_code`, which the arm-2 predicates also read.
+# Two P2s followed, and both are pinned here from the direction each one broke: a claim credited
+# through an INDENTED block (arm 1, false PASS) had to stop being credited, while a 4-space-indented
+# list item — PROSE inside a list, not code — had to keep being read (arm 2, silent miss).
+
+def test_an_indented_closing_keyword_does_not_resolve_a_claim():
+    """Round 28 P2, class A — the PASS direction's CONTAINMENT, not just its separator.
+
+    `closes_landing.parse_closing_refs(..., strict=True)` treats an INDENTED block as code; F1's fix
+    narrowed only the SEPARATOR, so `Refs #100` + blank line + a 4-space-indented `Closes #100` was
+    credited as a close — `NOTHING FLAGGED`, rc 0 — while the sibling grammar said nothing closes.
+    F1's own invariant ("a CLEAN verdict may not rest on a shape the sibling grammar refuses to pass
+    on") applied to one half of its own statement.
+    """
+    for body in ("Refs #100\n\n    Closes #100\n",
+                 "Refs #100\n\n\tCloses #100\n"):
+        assert L.claims(body)["closing"] == [], body
+        assert [f.arm for f in L.classify_pr(body, 999)] == [L.ARM_PR], body
+    from tools.closes_landing import parse_closing_refs
+    assert parse_closing_refs("Refs #100\n\n    Closes #100\n", None, strict=True) == []
+    # CONTROLS — prose closers (at any indent ≤ 3) still resolve, so this is not a blanket ban.
+    for ok in ("Refs #100\n\nCloses #100\n", "Refs #100\n\n   Closes #100\n"):
+        assert L.claims(ok)["closing"] == [100], ok
+        assert L.classify_pr(ok, 999) == [], ok
+
+
+def test_a_multiline_code_span_is_not_a_claim():
+    """Round 28 P2 — a QUOTED multi-line example must not be read as prose claims.
+
+    An inline code span may cross a soft line break (CommonMark), and `strict` is what makes the
+    span scanner honour that boundary. Without it a quoted example's refs were read as claims —
+    a false positive, live on PR #11078's own body.
+    """
+    body = "Prose.\n\nRefs #100\n\n`Part of #10085,\n#10063` is a quoted example.\n"
+    assert L.claims(body)["weak"] == [100], L.claims(body)
+    # `#100` IS still flagged (a `Refs` with nothing closing it — arm 1's whole point). What the fix
+    # buys is that the QUOTED refs are not dragged in with it.
+    findings = L.classify_pr(body, 999)
+    assert [f.evidence["unresolved"] for f in findings] == [[100]], findings
+    # Control: the same refs OUTSIDE a span are still claims.
+    assert sorted(L.claims("Refs #100\n\nPart of #10085,\n#10063\n")["weak"]) == [100, 10063, 10085]
+
+
+def test_strict_containment_does_not_reach_the_WIP_arms():
+    """Round 28 P2 — the regression the first attempt at the fix above introduced, pinned.
+
+    `strict` was applied to the SHARED `strip_code`, which `has_satisfies_checklist` and
+    `in_flight_markers` also read. Both predicates deliberately admit leading whitespace, and a line
+    indented 4 spaces INSIDE A LIST ITEM is PROSE, not code (CommonMark measures the content column
+    from the list marker), so:
+
+        `## Satisfies` + `1. Criteria` + `    - [ ] a`   -> arm 2 said "no criteria" (false positive)
+        `- note` + `    IN FLIGHT: 3.2c`                -> the marker vanished (silent miss)
+
+    Only `claims()` (arm 1) passes `strict=True`; the arm-2 predicates use the default.
+    """
+    assert L.has_satisfies_checklist(["## Satisfies\n\n1. Criteria\n    - [ ] a\n"]) is True
+    assert L.in_flight_markers(["- note\n    IN FLIGHT: 3.2c\n"]) == ["3.2c"]
+    # …and the indented-block narrowing still holds where it belongs (arm 1).
+    assert L.claims("Refs #100\n\n    Closes #100\n")["closing"] == []
+
+
+def test_a_deeper_heading_ends_the_satisfies_section():
+    """Round 28 P2 — the false PASS that the "same-or-higher level" terminator introduced.
+
+    Making a deeper heading part of the section meant every box under it was this section's
+    criteria, so an unrelated list ONE LEVEL DOWN cleared a criteria-less `## Satisfies` — round
+    25/26's exact population re-opened. ANY ATX heading ends the section.
+
+    ⚠️ DECLARED trade-off, pinned so it reads as a decision: a `###`-per-criterion layout
+    (`## Satisfies` + `### 1. Guard holds` + boxes) is therefore flagged. That is a false POSITIVE on
+    honest scoping, and it is accepted because the alternative is a false PASS — which this module
+    ranks worse. A structured checklist should put its boxes directly under `## Satisfies`.
+    """
+    false_pass = "## Satisfies\n\nTo be derived.\n\n### Verification\n\n- [ ] x\n"
+    assert L.has_satisfies_checklist([false_pass]) is False
+    assert [f.arm for f in L.classify_issue(
+        [false_pass, "IN FLIGHT: 3.2c — branch x"], 1)[0]] == [L.ARM_ISSUE]
+    # The accepted false positive, pinned rather than left to be "discovered".
+    per_criterion = "## Satisfies\n\n### 1. Guard holds\n\n- [ ] a\n"
+    assert L.has_satisfies_checklist([per_criterion]) is False
+    # CONTROLS: boxes directly under the heading still clear it, at any level of `Satisfies`.
+    for ok in ("## Satisfies\n\n- [ ] a\n", "### Satisfies\n\n- [ ] a\n"):
+        assert L.has_satisfies_checklist([ok]) is True, ok
+
+
+def test_the_ascii_hyphen_is_an_appositive_dash_too():
+    """Round 28 P3 — the same honest sentence typed with `-` instead of `—` was flagged."""
+    for honest in ("Refs #100 — not closing it - measurement only.\n",
+                   "Refs #100 — not closing it – measurement only.\n"):
+        assert L.classify_pr(honest, 1) == [], honest
+    # The no-`#` guard is what keeps the widening contained.
+    assert [f.arm for f in L.classify_pr("Refs #100 — not closing it - #300 must land first.\n", 1)] \
+        == [L.ARM_PR]

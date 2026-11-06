@@ -627,9 +627,15 @@ CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULT
 # was: any finished task list anywhere after the heading cleared a `## Satisfies` with no criteria.
 # A constant kept "just in case" reads as a live second spelling of "is this a task item", which is
 # the drift this module keeps re-discovering — so it is removed with its reader, not parked.
-# Any ATX heading at line start — the terminator of a `## Satisfies` SECTION (see
-# `_satisfies_sections`). Deliberately ANY level, not only `<= 2`: a `### criteria` or a later
-# `### Claim` opens a new section, and a box under it is that section's list.
+# Any ATX heading at line start — used by `_satisfies_sections` to end a `## Satisfies` SECTION.
+# ⚠️ ANY LEVEL, INCLUDING A DEEPER ONE (round 28, P2 — this was tried the other way and it cost a
+# FALSE PASS). Ending the section only at the same-or-higher level makes every box under any deeper
+# heading this section's criteria, so an unrelated list one level down clears a criteria-less heading:
+#     `## Satisfies` + `To be derived.` + `### Verification` + `- [ ] x`  -> TRUE, rc 0
+# That is round 25/26's exact population re-opened, and a false PASS outranks the false positive on
+# the other side (`## Satisfies` + `### 1. Guard holds` + `- [ ] a` reads as no criteria). A structured
+# criterion-per-`###` checklist should therefore not put boxes under the sub-heading; the safer error
+# is to flag it than to clear an issue that has no criteria at all.
 _ATX_ANY_RE = re.compile(r"^[ \t]{0,3}(?P<hashes>#{1,6})[ \t]", re.MULTILINE)
 IN_FLIGHT_RE = re.compile(
     r"^[ \t]*(?:[-*+][ \t]+)?[\s*_`]*IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE
@@ -680,7 +686,7 @@ class Unmeasurable(Exception):
 
 
 # --- normalisation --------------------------------------------------------------------------
-def strip_code(body: str) -> tuple[str, int]:
+def strip_code(body: str, strict: bool = False) -> tuple[str, int]:
     """Return (text with fenced blocks, inline-code spans and HTML comments removed, hidden_lines).
 
     `hidden_lines` is the number of lines an UNTERMINATED fence hid from the scan: that is a miss in
@@ -711,34 +717,28 @@ def strip_code(body: str) -> tuple[str, int]:
     separates a blanked OBJECT from a sentence that simply names none.
     """
     stats: dict[str, int] = {}
-    # ⛔ STRICT (round 27, P2) — the PASS direction, for the same reason F1 narrowed the separator.
-    # `strict=True` additionally treats an INDENTED block as code and refuses to let an inline span
-    # cross a block boundary. Without it, this lint's CLEAN verdict rested on two shapes
-    # `closes_landing` refuses to pass on:
-    #     `Refs #100\n\n    Closes #100\n`                    -> closing=[100], rc 0, while
-    #        `parse_closing_refs(b, None, strict=True) == []`   (an indented block is code)
-    #     an inline span across a soft line break (`Part of #10085,\n#10063` in backticks) was never
-    #        blanked, so a QUOTED example's refs were read as claims — a false positive on honest
-    #        prose, and live on this PR's own body.
-    # Blanking MORE can only lose a claim this lint used to credit (a finding where there was none),
-    # never invent a close, so the narrowing is safe in the direction the module forbids.
-    #
-    # ⚠️ DECLARED RESIDUAL (round 27, P2) — an inline code span that CROSSES A SOFT LINE BREAK is
-    # still not blanked, because the span scanner is `closes_landing`'s and it leaves a run that
-    # wraps a newline literal, emitting the span content verbatim. So a QUOTED multi-line example
-    # leaks refs as claims — a FALSE POSITIVE, the less-bad direction:
-    #     `Prose.\n\nRefs #100\n\n`Part of #10085,\n#10063` is an example.`  -> weak=[100,10063,10085]
-    # It is live on #11078's OWN body (the only `#10085` there is inside exactly that span). Not
-    # fixed here on purpose: the fix is in the sibling grammar's span boundary, which needs its own
-    # red-first pins and its own round; patching it from this module would duplicate the span rule
-    # this file exists to NOT duplicate.
-    #
+    # ⛔ `strict` IS THE PASS DIRECTION AND ONLY ARM 1 ASKS FOR IT (round 28, P2 — the first attempt
+    # applied it to BOTH arms and broke arm 2). It additionally treats an INDENTED block as code and
+    # refuses to let an inline span cross a block boundary, which is what
+    # `closes_landing.parse_closing_refs(..., strict=True)` does — so arm 1's CLEAN verdict stops
+    # resting on shapes the sibling grammar refuses to pass on:
+    #     `Refs #100\n\n    Closes #100\n`                    -> must NOT credit a close
+    #     an inline span across a soft line break (`#10085,\n#10063` in backticks) -> must be blanked
+    # ⛔ BUT THE TWO ARMS ASK DIFFERENT QUESTIONS, AND `strict` IS WRONG FOR ARM 2. Arm 2's own
+    # predicates deliberately admit leading whitespace (`CHECKBOX_RE` / `IN_FLIGHT_RE` both start
+    # `^[ \t]*`), and a line indented 4 spaces INSIDE A LIST ITEM is PROSE, not code (CommonMark
+    # measures the content column from the list marker): `1. Criteria` + `    - [ ] a` renders as a
+    # NESTED LIST. Blanking it made arm 2 report `wip-no-satisfies` for an issue whose criteria exist
+    # (false positive) and drop an indented `IN FLIGHT:` marker entirely (silent miss — the direction
+    # this module forbids). `closes_landing.strip_code`'s own docstring records that indented-blanking
+    # "loses a REAL claim"; that is a PASS-arm concern, not a WIP-detection one.
+    # So the caller chooses: `claims()` passes `strict=True`; the arm-2 predicates use the default.
     # ⚠️ DECLARED RESIDUAL (round 27, P3) — a SETEXT heading (`Verification` + `---`) does not end a
     # `## Satisfies` SECTION, so an unrelated list under one can still clear arm 2. A `---` underline
     # is indistinguishable from a thematic break without a full block grammar, and guessing it wrong
     # re-opens the false-positive direction; an ATX heading (`## Verification`) is the shape the
     # docs use and is handled.
-    text = _strip_fenced_blocks(body, strict=True, stats=stats)
+    text = _strip_fenced_blocks(body, strict=strict, stats=stats)
     # HTML comments, now that code regions are already blanked. ⛔ BLANKED, NOT DELETED: deletion
     # collapsed `does not close<!-- #11078 -->` to `does not close ` (ONE space), which the
     # unreadable-object guard reads as an honest reason and clears the ref before it — the silent
@@ -748,7 +748,7 @@ def strip_code(body: str) -> tuple[str, int]:
                   flags=re.DOTALL)
     # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim. Imported, not
     # re-derived — a single-backtick regex here read a ``Refs #1234`` span as prose (F1).
-    text = _strip_inline_code_spans(text)
+    text = _strip_inline_code_spans(text, strict=strict)
     return text, stats.get("hidden_lines", 0)
 
 
@@ -759,7 +759,7 @@ def claims(body: str, own_number: int | None = None,
     `closing` / `satisfies` resolve an issue; `weak` (`Refs`, `Part of`, `serves`, `addresses`)
     links nothing and closes nothing — that is the #10534 hole.
     """
-    return _claims_in(strip_code(body)[0], own_number, repo)
+    return _claims_in(strip_code(body, strict=True)[0], own_number, repo)
 
 
 def _ref_run_back(line: str,
@@ -1089,20 +1089,15 @@ def _satisfies_sections(text: str) -> list[str]:
     """
     sections: list[str] = []
     for match in SATISFIES_HEADING_RE.finditer(text):
-        level = len(match.group("hashes"))
         remainder = text[match.end():]
-        # ⛔ THE SECTION ENDS AT THE NEXT HEADING THAT IS NOT A SUBSECTION OF IT (round 27, P3).
-        # "Any ATX heading" ended the section at a `###` SUB-HEADING too, so the most natural
-        # structured checklist — a `###` per criterion, boxes underneath — read as having NO
-        # criteria and the arm flagged an issue whose criteria plainly exist:
-        #     `## Satisfies` + `### 1. Guard holds` + `- [ ] a`  -> False  (false positive)
-        # A heading of the SAME OR HIGHER level closes the section; a deeper one is part of it.
-        for nxt in _ATX_ANY_RE.finditer(remainder):
-            if len(nxt.group("hashes")) <= level:
-                sections.append(remainder[: nxt.start()])
-                break
-        else:
-            sections.append(remainder)
+        # ⛔ THE SECTION ENDS AT THE NEXT ATX HEADING OF **ANY** LEVEL (round 28, P2). This was tried
+        # as "same or higher level only" and that is a CLASS-A FALSE PASS: a box under any deeper
+        # heading then became this section's criteria, so an unrelated `### Verification` list one
+        # level down cleared a criteria-less `## Satisfies` — round 25/26's population re-opened. The
+        # cost on the other side is a false positive on a `###`-per-criterion layout; a false PASS
+        # outranks it, so ANY heading ends the section and the comment says so.
+        nxt = _ATX_ANY_RE.search(remainder)
+        sections.append(remainder[: nxt.start()] if nxt else remainder)
     return sections
 
 
@@ -1174,7 +1169,13 @@ def classify_pr(body: str, number: int | str, repo: str | None = None,
     `--sweep` silently swallowed the one thing that says the scan could not see the rest of a body —
     and a sweep is the one mode that reads a POPULATION (review P2, adjacent).
     """
-    text, hidden = strip_code(body)
+    # ARM 1 ONLY — `strict=True` (round 28, P2). This is the PASS path (`classify_pr`'s CLEAN
+    # verdict), so it must not rest on a shape `closes_landing.parse_closing_refs(..., strict=True)`
+    # refuses to pass on: an INDENTED block is code, and an inline span may cross a soft line break.
+    # `claims()` above and `classify_pr` here are the two arm-1 readers; the arm-2 predicates at
+    # `:1063`/`:1130` deliberately keep the DEFAULT, because a 4-space line inside a list item is
+    # PROSE and blanking it drops a real checklist item and a real `IN FLIGHT:` marker.
+    text, hidden = strip_code(body, strict=True)
     if hidden and notes is not None:
         notes.append(f"an unterminated fence hid {hidden} line(s) from the scan in #{number}")
     own = number if isinstance(number, int) and number > 0 else None
