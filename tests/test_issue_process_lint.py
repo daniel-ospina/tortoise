@@ -393,8 +393,8 @@ def test_a_decline_list_stops_at_the_clause_end():
     # itself is not recognised either, because the sentence has no clause terminator — the flag is
     # the safe direction for both refs.)
     body = "Refs #300, #100 — deliberately not closing #100. #300\n"
-    assert 300 not in L.claims(body, 1)["declined"]
-    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100, 300]]
+    assert L.claims(body, 1)["declined"] == [100]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[300]]
 
 
 @pytest.mark.parametrize("body", [
@@ -407,6 +407,24 @@ def test_a_written_out_object_list_declines_every_ref_in_it(body):
     """`or` was missing from the separator while `and` was admitted, so the SAME honest sentence
     written with `or` was not a decline at all (measured at `0e785300b`, review P3)."""
     assert L.classify_pr(body, 1) == []
+
+
+@pytest.mark.parametrize("body", [
+    "Part of #100, #200, #300 — deliberately not closing #100, #200, and #300.\n",
+    "Part of #100, #200, #300 — deliberately not closing #100, #200, or #300.\n",
+    "Refs #100, #200 — deliberately not closing #100, #200. Done.\n",
+])
+def test_a_serial_comma_and_trailing_text_do_not_truncate_the_object_list(body):
+    """Measured at `e960ed6d1` (review, 2 × P2), both in the lookahead that terminates the clause.
+
+    The conjunction branch could not consume the comma of an Oxford list (`#100, #200, and #300`), so
+    the list stopped after two refs and the third — which the author explicitly declined — was
+    flagged; and `.` was missing from the terminator set, so any text AFTER the full stop truncated
+    the list the same way. Both are the false-positive direction, and both were CLEAN at a previous
+    head. The terminator is now `$`/`.`/`;`/`and`/`or`, with a comma accepted only when it does NOT
+    start another ref (a list continuation is the object list's job, not the clause's).
+    """
+    assert L.classify_pr(body, 1) == [], body
 
 
 def test_a_plural_decline_clears_the_whole_list_it_names():
