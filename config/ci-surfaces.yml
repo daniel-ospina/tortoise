@@ -4692,6 +4692,9 @@ surfaces:
   # *docs-only* diff, where NO surface is selected at all (#9089 review).
   - test_7949_capstone_measure.py
   - test_7949_capstone_verdict_check.py
+  # #10982: the A-row registration's own arms (record, amendment, verdict-gate
+  # recognition, census arithmetic through a fake projection — no DB).
+  - test_capstone_a_rows_10982.py
   # #9889: the three ADDITIVE probes that make the capstone's E1/E2 rows
   # PRODUCIBLE instead of refused — `e1_paired_arm.py` (the OFF arm E1's bar is
   # written over; `capstone_measure.py` forces the measured arm ON, so its
@@ -10879,6 +10882,7 @@ durations:
   # the file; a marker on the comment lines above would outlive its own truth
   # (#9110 review P2, the #8254/#2876 stale-basis class).
   test_e1_e2_measurement.py: 25.0  # #9076: flat default until a CI sweep measures this file — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0 — ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (19.9s) is a LOWER bound; kept 25.0
+  test_capstone_a_rows_10982.py: 1.0  # #10982: file-scan + unit arms only (JSON/YAML/markdown parse, one git-free `check.run`, a fake projection). A first-cut weight — replace with the first post-merge ci-timing sweep reading.
   test_capstone_preregistration_9075.py: 9.2  # Do NOT substitute a local timing: what the weight covers is a markdown table scan, a YAML pins parse, a JSON record cross-check and a `tests/eval/write_path` fixtures_hash re-derivation (7 sessions of fixtures + gold, no DB, no network, no graph fixture) — a local wall reading is dominated by interpreter and session cost rather than this file's weight, and the map is a SHARD-LAYOUT input. Refresh from the first post-merge sweep — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 9.1
   # The #9109 pin is a file ADDED BY A PR, so it has no CI junit measurement (the
   # refresher samples push-to-main runs only): it carries the flat default until a

@@ -278,12 +278,16 @@ def test_unknown_criterion_is_a_finding():
 
     Non-vacuity: the old version relabelled E5 to "E6", which deleted E5 and let
     the missing-row arm satisfy the assertion. A sixth row keeps 5/5 present, so
-    only the "not an E1–E5 criterion" branch can produce this finding.
+    only the "not an E1–E5 or A1–A5 criterion" branch can produce this finding.
+
+    The vocabulary widened on 2026-11-06 (`#10982`): the record now registers `A1`–`A5`, so the
+    gate must RECOGNISE them (`RECOGNISED_CRITERIA`) without making them REQUIRED — and `E6` is
+    still unknown, which is what keeps this arm non-vacuous.
     """
     rec = _record()
     rec["rows"].append(dict(rec["rows"][4], criterion="E6"))
     msgs = _messages(rec)
-    assert any("not an E1–E5 criterion" in m for m in msgs), msgs
+    assert any("not an E1–E5 or A1–A5 criterion" in m for m in msgs), msgs
 
 
 # ── V4/V5: green means measured, with a file ─────────────────────────────

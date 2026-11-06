@@ -270,9 +270,20 @@ reporting one is the defect, not the small number.
 | **E3** | derived nodes written by the run (`Point` + `Event` + `Document`) carrying a version anchor | **all** derived nodes written by the run — `Point` + `Event` + `Document` (the classes the model anchors: `Point` on the node, `Event`/`Document` on their derivation link; floor ≥ 30 nodes) | `= 1.000` (zero unanchored) |
 | **E4** | planted operator edges **wired AND persisted** with endpoint refs remapped | the **15** planted operator edges of the full 7-session corpus | `= 15 of 15` |
 | **E5** | hedge/scope/stance-bearing claims recovered as claims in the **narrative** arm | the same claims recovered in the **raw** arm of the same run, both over the **29** marker-bearing sentences (the ratio's denominator); the raw arm's absolute recovery is reported too | `>= 0.90` ratio `and >= 0.80` raw absolute |
+| **A1** | `object→object` edges written by the run, by **declared relation type** and by **endpoint kind**, plus the number of **rollup queries** the run asks that answer (return at least one row) | every `:Object` node written by the run, same arm, same commit (floor of at least 30 Objects); and the rollup queries asked (floor of at least 1 query) | `>= 1` edge for **each** relation family the A-corpus's pack declares, and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED |
+| **A2** | S3 RESOLVE candidates **attached** to an existing `:Object` versus **minted**, plus candidates **held** and each held candidate named with its reason | all S3 RESOLVE candidate mentions in the scored run (floor of at least 30 candidates) | `attach_share >= 0.50` of **decided** candidates, and every `held` candidate named with its reason — a run that holds candidates without naming them is **RED** |
+| **A3** | statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event`/session root) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar | all statements written by the run — `Point` nodes whose `pointKind` is `statement` (floor of at least 30 statements); the `NULL` `pointKind` population is reported separately, never folded in | `chain_join_rate >= 0.50` under the registered definition; the cheap rate is reported and never compared to this bar |
+| **A4** | typed claims — statements whose `pointKind` is present and is not `statement` — reported by kind, with the `statement` and `NULL` populations reported beside them | all `Point` nodes written by the run (floor of at least 30 typed statements) | UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED above the floor of `>= 30` typed statements and compared to no bar) |
+| **A5** | `:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family, plus the statements carrying at least one of them | the distinct actors the A-corpus names — the Subjects the run could write (floor of at least 30 `Point` nodes written by the run) | `>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away |
 
 ⚠️ The **step set** these rows are measured over is not all-unconditional: §11 records which of §4.1's
 eight steps are required and which is conditional on the pipeline having work for it (`#10215`).
+
+⚠️ **The five `A`-rows were added on 2026-11-06 by `#10982` (§10.8) and are NOT required rows.**
+`pins.required_criteria_rows` stays `[E1, E2, E3, E4, E5]`: the `A`-rows name criteria whose scoring runs
+`#10984`–`#10988` own, and a registration may not turn a row into a gate before anyone has measured it.
+A verdict table that omits them is not refused; a table that carries one is held to the same rules as
+`E`-row (`V12` refuses a row whose `blocked_by` has CLOSED).
 
 ### 3.2 E1 — volume falls, and the bar is bounded by the shipped detector
 
@@ -384,6 +395,91 @@ clear a floor of its own.
 **Per-half reporting.** The split's counts are reported per half, but a half's rate is reported **only
 if that half's marker denominator ≥ 10** — TUNE has 21 (rate reportable), HELD-OUT has 8 (counts
 only). This is §3's refusal rule applied to E5.
+
+### 3.7 The `A`-rows — the object layer the epic's assertions name (`#10982`)
+
+`#7949` was extended on 2026-11-04 with five owner assertions (`A1`–`A5`) about the **object layer**,
+measured on the fleet's hosted `live-v4` graph (`#7949` comment `6645275147`). `E1`–`E5` name none of
+them: they cover volume, retention, anchoring, operator edges and narrative fidelity, so the object
+layer had **no acceptance criterion at all**. These five rows close that gap — **registered here,
+before any `A`-row run is scored**, so `#10984`–`#10988` report against a fixed bar rather than a bar
+written after their numbers landed.
+
+**The corpus, and the refusal that guards it.** `A1`–`A5` score on the **same** corpus the `E`-rows pin
+(`tests/eval/write_path`, `fixtures_hash` above), because the record's corpus pin is a single
+`fixtures_hash` and two corpora would make the two row families incomparable on one run. That pin is
+**provisional**: the registered corpus is a fixture, and `A1` needs a pack that declares a part-whole
+hierarchy while `A5` needs statements carrying bindable subject slots — `#10983` (C2) owns the
+reconciliation, and until it lands a row whose population is absent is **REFUSED** with the absent
+population named, never scored on a population of three objects. A run handed a **different** corpus is
+refused by the `G1` rule the record already applies, not scored.
+
+**One instrument, one record.** The census is emitted by the existing
+`probes/capstone_measure.py` (an `a_rows` block per graph) — there is no second census, no second
+registration file and no new gate. `TAGGED` is emitted **with its "no carrier" annotation**, never as
+a target: it is written only by `_sync_tags` from an explicit `tags` value and no extraction path sets
+one (`#7949` §2 R7).
+
+**Per row: metric, denominator, floor, and where the bar comes from.**
+
+- **A1 — pack business logic is load-bearing.** *Metric:* `object→object` edges **by declared relation
+  type and by endpoint kind**, plus rollup queries answered. *Denominator:* `:Object` nodes in the
+  scored graph (floor **30**), and the rollup queries asked (floor **1**). *Bar:* at least one edge per
+  relation family the pack declares **and** every rollup query answering. *Basis:* the 2026-11-04
+  reading measured `object→object edges []` — zero of every relation type — against 5,314 Objects,
+  while the declared vocabulary already exists (`packs/dev/manifest.yaml:142` `decomposesInto`,
+  `:148` `hasPart`). **Not `E6`** (`#11083`): `E6` measures the declared→writable→written chain per
+  pack across all 36 declared relations; `A1` measures what the **written** graph can answer.
+- **A2 — S3 attaches instead of minting.** *Metric:* candidates **attached** vs **minted**, plus
+  **held** (each named with its reason). *Denominator:* S3 RESOLVE candidates (floor **30**). *Bar:*
+  `attach_share >= 0.50` of decided candidates, and no unnamed hold. *Basis:* it is a two-way decision,
+  so the bar is its half-way point. The measured context it exists to reverse is the backfill's own
+  census (`tortoise/definite_description_backfill.py:15-23`): of a drop-shaped population of **6,533**
+  Objects, **2,614 are single-use** and 402 unused, on **7,870** Objects and 27,324 reference edges.
+  ⚠️ The 62.3% figure in §1.2 is a **different** measurement (`the `-prefixed rows: 4,901 of 7,870, of
+  which 2,570 are load-bearing) and it is **not** a single-reference share — a bar must not be
+  justified by a class it does not describe. No `A2` run exists, so nothing is fitted to one.
+- **A3 — S5 emits the batch's story *and* the cross-batch link.** *Metric:* chain-join rate under the
+  **registered** definition — an incident `IMPL`/`NAND` **and** at least one such edge crossing a batch
+  boundary. *Denominator:* statements (`pointKind = statement`; floor **30**), with `NULL` `pointKind`
+  reported separately. *Bar:* `chain_join_rate >= 0.50`; the **cheap** rate (any incident `IMPL`/`NAND`)
+  is reported beside it and is **not** the bar. *Basis:* 9,910 of 15,534 statements (63.8%) carried
+  **neither** edge in the 2026-11-04 reading, so 36.2% join cheaply — half is a reversal of the
+  measured majority. The cross-batch requirement is what makes the *claim* the measured thing: intra-
+  session `CONTAINS`/`extractedFrom`/`INPUT` already exist and must not count as the link.
+  (⚠️ "member of a connected component of ≥ 2" is **not** a third definition — any incident edge
+  already makes a component of two, so that phrasing collapses into the cheap one and is rejected for
+  exactly the reason it looks attractive.)
+- **A4 — typing is applied.** *Metric:* typed claims by kind, with `statement` and `NULL` beside them.
+  *Denominator:* `Point` nodes written by the run (floor **30** typed statements). *Bar:*
+  **`UNMEASURED`** — deliberately, and this is a registration of that fact rather than an omission.
+  The owner's *"0.6% typed is the ceiling the capstone must beat"* points **opposite** to `D3`'s
+  "statement only"; `#10988` (C7) is blocked on that reopen and `#1022` carries the decision, so a bar
+  invented here would settle an owner decision this registration has no authority over. The row is
+  **reported** above its floor and compared to nothing.
+- **A5 — Subjects are populated.** *Metric:* `:Subject` nodes, the **four** subject-edge families
+  (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) per family, and statements carrying one.
+  *Denominator:* the distinct actors the corpus names (floor **30** `Point`s written by the run).
+  *Bar:* at least one `:Subject` per distinct actor named, and at least one statement carrying a subject
+  edge; a family that is zero is **named with its reason**. *Basis:* 26 Subjects against 19,300 points
+  in the 2026-11-04 reading, while `#4889` is CLOSED — the bar is the corpus's own actor count, not the
+  number **26**, so it cannot be satisfied by writing one Subject per run. `#10987` (C6) owns the
+  scoring and the `#4889` verdict.
+
+**Floors, in one place.** `pins.denominator_floors` carries `a1_objects`, `a2_candidates`,
+`a3_statements`, `a4_typed_statements` and `a5_points`, all **30** — the `E1` object floor, applied
+uniformly, because a per-row floor chosen after seeing a population is a floor fitted to its own
+result. Below a floor a row is **REFUSED**, which §3 defines as neither a pass nor a fail.
+
+**A zero denominator is REFUSED, and it is never `0/0`.** Two bars divide by a population the floor
+does not itself guarantee: `A2`'s is **decided** candidates (a run that holds all 30 candidates clears
+`a2_candidates` and decides none), and `A5`'s is the **distinct actors the corpus names** (a run can
+clear `a5_points` on points that name no actor). Those two denominators are therefore guarded by the
+same rule in both directions: a decided-candidate count of zero, or a named-actor count of zero, makes
+the row **REFUSED** and the instrument emits `UNMEASURED(<the absent population>)` — never a rate.
+The probe already applies exactly this to `A3`'s statement denominator and `A4`'s claim-point
+denominator, for the same reason; registering the rule here is what makes it the row's and not the
+instrument's private convention.
 
 ---
 
@@ -653,7 +749,7 @@ split:
   held_out: [wp04_aurora_perf, wp05_retro_writeup, wp07_bluepeak_followup]
   tune_counts: {units: 53, operator_edges: 7, value_bearing_units: 5, hedge_scope_sentences: 21}
   held_out_counts: {units: 37, operator_edges: 8, value_bearing_units: 9, hedge_scope_sentences: 8}
-criteria: [E1, E1b, E2a, E2b, E3, E4, E5]
+criteria: [E1, E1b, E2a, E2b, E3, E4, E5, A1, A2, A3, A4, A5]
 required_criteria_rows: [E1, E2, E3, E4, E5]
 steps:
   source: "EXTRACTOR-V4-ARCHITECTURE.md §4.1 — the eight top-level steps"
@@ -686,6 +782,13 @@ denominator_floors:
   e2b_surviving_units: 30
   e3_derived_nodes: 30
   e5_rate_min_sentences: 10
+  # #10982: the A-rows' floors, all 30 — the E1 object floor applied uniformly, because a per-row
+  # floor chosen after seeing its population is a floor fitted to its own result (§3.7).
+  a1_objects: 30
+  a2_candidates: 30
+  a3_statements: 30
+  a4_typed_statements: 30
+  a5_points: 30
 pre_existing_unscored_logs:
   e1-e2.log:
     added_at: bc547406f
@@ -1073,6 +1176,54 @@ place a machine reads it.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+### 10.8 — five `A`-rows added to the criteria table, none of them required (`#10982`, 2026-11-06)
+
+**Old value (verbatim).** The record registered **seven** rows and two places said so:
+
+- the pins fence: `criteria: [E1, E1b, E2a, E2b, E3, E4, E5]`
+- §3.1's criteria table: its last row was E5, and the table ran `E1, E1b, E2a, E2b, E3, E4, E5`.
+
+**New value.** Both now name **twelve**: the same seven, plus `A1, A2, A3, A4, A5` — appended as
+five §3.1 rows and as five `criteria[]` entries in `preregistration.json`, with their metric,
+denominator, threshold and threshold basis set out in prose in the new **§3.7**. The floors are
+`denominator_floors.a1_objects` / `a2_candidates` / `a3_statements` / `a4_typed_statements` /
+`a5_points`, all **30**.
+
+**`required_criteria_rows` is UNCHANGED at `[E1, E2, E3, E4, E5]`, and that is the load-bearing half
+of this entry.** Adding a row to a registration is not the same act as adding a row to the gate: a
+required row cannot be inferred from the rest, so making `A1`–`A5` required would red **every existing
+verdict table**, including the committed `capstone-measured-9152448d.log`, for rows nobody has run yet.
+The `A`-rows are therefore **registered, reported and scored by their own children**
+(`#10984` `A1`, `#10985` `A2`, `#10986` `A3`, `#10988` `A4`, `#10987` `A5`), and the gate's V2 accepts
+a table that carries them without demanding them.
+
+**Why an amendment and not a second registration.** The record's corpus pin is a single
+`fixtures_hash`, its checker parses one criteria table and one machine record, and its
+`measurement_visible_to_author` disclosure is per-row. A second registration would duplicate the corpus
+pin, let two rows disagree about the same number, and split the gate — the exact failure the decompose
+gate caught in this child's first version (§ `#10982` body). §3.7 is therefore an **extension** of the
+pinned record.
+
+**Why it is honest to record it now, and what it does NOT claim.** This is the first amendment in this
+section that adds rows **after a scored log exists** (`capstone-measured-9152448d.log`, 2026-11-04). It
+is filed under §8's protocol-deviation rule for that reason — and it is safe to file under it because
+**no existing row moves**: no `E`-row's metric, denominator, threshold, class set or floor changes, and
+no committed verdict is re-scored. What it does claim is new: that the object layer the epic's five
+assertions name now has **registered criteria written before any `A`-row run**, and that
+`measurement_visible_to_author` is **`false`** for all five on the only ground that field recognises —
+no `A`-row has been measured, so there is nothing in `prior_measurements` that could contradict it. The
+owner's 2026-11-04 `live-v4` table that *motivated* these rows is cited as the **threshold basis** for
+`A1`/`A3`/`A5`, never as a measurement of them: it was taken by hand on the hosted graph, has **no
+committed artifact**, and is not re-derivable from any command in this repository
+(`docs/epics/2026-11-05-5087-extractor-v4/01-align.md:20,31` records exactly that). A reader must not
+read `A1 = 0` in that table as this registration's measurement.
+
+**What enforces it.** `tools/capstone_preregistration_check.py` — the amended record must pass it, which
+means the five new §3.1 cells and the five `criteria[]` entries agree character for character, the
+floors agree between pins and record in both directions, and `document_sha256` is re-cut in this same
+commit (§8). `tools/capstone_verdict_check.py` — a table that carries an `A`-row is checked by the same
+`V1`–`V12` rules as an `E`-row, including `V12`'s refusal of a row whose `blocked_by` has **CLOSED**.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 

@@ -132,7 +132,17 @@ from datetime import datetime
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"
+#: The rows the epic CLOSES on. V2 demands one row per member, so this tuple may only grow when
+#: the epic's own closing rule grows (#7949: "5/5").
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The object-layer rows `#10982` registered (`PRE-REGISTRATION.md` §3.7). They are RECOGNISED but
+#: NOT REQUIRED, and the distinction is load-bearing: a required row cannot be inferred from the
+#: rest (V2), so adding them to ``CRITERIA`` would red every verdict table that predates their
+#: scoring runs — including the committed `capstone-measured-9152448d.log` — for five rows nobody
+#: has run yet. `#10984`–`#10988` own those runs. A table that carries one is checked by V1–V12
+#: exactly as an `E`-row is, `V12`'s CLOSED-``blocked_by`` refusal included.
+A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
+RECOGNISED_CRITERIA = CRITERIA + A_CRITERIA
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: The two states a CONDITIONAL step may be accounted in (#10215). ``observed``
 #: means the pass did work; ``idle`` means its flag was ON, it did no work, and
@@ -818,8 +828,9 @@ def check(record: dict, *, repo: Path,
             f.add("V2", f"rows[{criterion}]", f"{n} rows — a criterion is "
                                               "decided once, not voted on")
     for criterion in seen:
-        if criterion not in CRITERIA:
-            f.add("V2", f"rows[{criterion}]", "not an E1–E5 criterion")
+        if criterion not in RECOGNISED_CRITERIA:
+            f.add("V2", f"rows[{criterion}]",
+                  "not an E1–E5 or A1–A5 criterion")
 
     # A block that is `[]`/`"x"`/`5` is REPORTED here and read as empty below.
     # `.get` on a non-object raised AttributeError and escaped as exit 1 on a
