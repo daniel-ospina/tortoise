@@ -2598,10 +2598,17 @@ def test_declaration_path_rejects_undeclared():
             f"the inline-value setenv form {inline!r} must be declared for "
             "test_hosted_api.py (#10962) — it is the same deliberate URI "
             "branch #4661 declares, differing only in line wrapping")
-    # …and the inline arm is NOT a blanket license: an inline setenv in a
-    # file with no registry-probe declaration stays undeclared.
+    # …and the inline arm is NOT a blanket license. ⛔ The negative below is
+    # taken against the SAME declared file ON PURPOSE: `test_unknown.py` is
+    # absent from DELIBERATE_URI_MUTATIONS, so `_is_declared` answers False for
+    # it against ANY pattern at all and such a negative pins nothing about this
+    # arm's breadth (that file-scoping is already pinned at the top of this
+    # test). Scoped to `test_hosted_api.py`, the assert fails the moment the
+    # arm is loosened from `setenv\(\s*"TORTOISE_DB_URI",` to a bare
+    # `setenv\(` — which is exactly the widening the inline shape must never
+    # become.
     assert not _is_declared(
-        "test_unknown.py", 'monkeypatch.setenv("TORTOISE_DB_URI", uri_a)')
+        "test_hosted_api.py", 'monkeypatch.setenv("TORTOISE_OTHER_URI", uri_a)')
     assert _is_declared(
         "test_directional_impl.py", 'os.environ["TORTOISE_DB_URI"] = _uri')
     # #9061: a declaration is bound to ONE module. Before the bare-name lookup

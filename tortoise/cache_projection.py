@@ -1473,6 +1473,29 @@ def _row_identity_view(row: Mapping[str, Any],
     AMBIGUOUS row is read as a DOCUMENT, so it keeps its prose (the pre-existing
     defect) rather than stripping a document's own metadata.
 
+    ⛔ THE KIND IS READ IN THE CANONICAL SPELLING ONLY, AND THAT IS DELIBERATE
+    — it is NOT the same rule as :func:`episodic_source_declined_properties`,
+    which covers BOTH spellings (`sourceKind` and the COLUMN's `source_kind`)
+    because the `props` tail is an open set. (#10962 review.) The two sets are
+    asymmetric because their FAILURE DIRECTIONS are opposite, and this function
+    is the one that moves the dangerous way:
+
+    * popping a name that is not there costs nothing, so the decline set can
+      afford to be generous — it is also why it is the safe place to be wrong;
+    * answering EPISODIC here strips a row's metadata and un-indexes it, which
+      is the false positive this module refuses everywhere else.
+
+    And a tail-carried `source_kind` CANNOT make the node episodic anyway:
+    `_props_from_row` seeds the tail verbatim, so the node gets a literal
+    `source_kind` property while :func:`is_episodic_source_node` reads
+    `sourceKind` — the node is a DOCUMENT by the graph's own vocabulary. Reading
+    the snake spelling here would therefore make this view answer EPISODIC for a
+    node the projector and the node predicate both call a document: the same
+    row-predicate/node-predicate divergence this function exists to close, only
+    mirrored. (The shape is unreachable through the writer regardless —
+    `record_projection._split_properties` classifies `source_kind` as a COLUMN —
+    so this is an invariant on hand-built rows, declared rather than assumed.)
+
     ⛔ AND THAT RULE IS THE *NODE MAP's* RULE TOO — `_props_from_row` seeds `out`
     from the tail and lets the column loop overwrite it, for this reason (#10867
     review ISSUE 1). The rule is stated here once and applied in both places on
