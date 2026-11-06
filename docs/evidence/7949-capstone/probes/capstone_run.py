@@ -17,13 +17,13 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16258``, called at ``:15295``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:10547``) calls
-   ``_edus_from_conversation`` (S0, ``:10665``), ``run_s1`` (S1, ``:10705``),
-   ``run_s2`` (S2.1, ``:10729``), ``_run_vet_pass`` (S2.2, ``:10758``),
-   ``kind_classifier.classify_items`` (S2.3, ``:10773``),
-   ``_apply_classify_kinds`` (S2.3, ``:10774``), ``search_graph`` (S3,
-   ``:10790``), ``run_s4`` (the gap filler, ``:10811``), and ``execute_embed``
-   (S5+S6, ``:11010``). ONE cite per symbol, on the line that symbol is on:
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:11609``) calls
+   ``_edus_from_conversation`` (S0, ``:11727``), ``run_s1`` (S1, ``:11767``),
+   ``run_s2`` (S2.1, ``:11791``), ``_run_vet_pass`` (S2.2, ``:11835``),
+   ``kind_classifier.classify_items`` (S2.3, ``:11850``),
+   ``_apply_classify_kinds`` (S2.3, ``:10422``), ``search_graph`` (S3,
+   ``:11867``), ``run_s4`` (the gap filler, ``:11888``), and ``execute_embed``
+   (S5+S6, ``:8722``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
    that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming

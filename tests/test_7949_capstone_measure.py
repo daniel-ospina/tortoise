@@ -4528,10 +4528,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("10757", "if vet_enabled and embed_list:"),
-            ("10758", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("10879", "if vet_enabled and complete_list:"),
-            ("10880", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("11834", "if vet_enabled and embed_list:"),
+            ("11835", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("11973", "if vet_enabled and complete_list:"),
+            ("11974", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys (10587-10589) close on
         # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -4542,8 +4542,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sides' bump disagreed here and why every ASSERTED number in this table
         # is verified by content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("11040", 'result["classify_later"] = {'),
-            ("11050", 'result["vet"] = {'),
+            ("12148", 'result["classify_later"] = {'),
+            ("12158", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
         # `+33` shift the fold applied to this row moved the first member to
@@ -4557,25 +4557,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # a reader following `:10620` must land in the `classify_later and
         # complete_list` block, which the row below holds at `:10599`.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("10785", "except Exception as e:  # never block capture (P1)"),
-            ("10915", "except Exception as e:  # never block capture (P1)"),
+            ("11862", "except Exception as e:  # never block capture (P1)"),
+            ("12009", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("10666", "if not edus:"),
-            ("10682", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("11728", "if not edus:"),
+            ("11744", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("10682", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("11744", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("10665", "edus = _edus_from_conversation(conversation)"),
+            ("11727", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("11050", 'result["vet"] = {'),
-            ("11054", ("exact", "}")),
+            ("12158", 'result["vet"] = {'),
+            ("12162", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4615,10 +4615,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # return it names, while every gate reported OK. Two rows because the
         # claim wraps over two lines and a row scopes to ONE line.
         ("README.md", "i.e. BEFORE the", (
-            ("10662", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+            ("11724", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
         )),
         ("README.md", "early return (`", (
-            ("10666", "if not edus:"),
+            ("11728", "if not edus:"),
         )),
         # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
         # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
@@ -4627,8 +4627,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # `_BUNDLE_CITE` resolves that the number exists and lands on a code
         # line, never that it is the code the sentence names. Held by content.
         ("docs/00_index.md", "refuses a value-free point at", (
-            ("5097", "if not _carries_value(content, quote):"),
-            ("5098", "return None"),
+            ("5168", "if not _carries_value(content, quote):"),
+            ("5169", "return None"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
