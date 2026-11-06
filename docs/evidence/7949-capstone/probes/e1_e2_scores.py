@@ -1472,7 +1472,7 @@ def read_on_arm(repo: Path) -> dict:
                 "before/after pair while its OFF switches are declared")
         if _is_truthy(after_arm.get(var)):
             raise _refuse(
-                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}=" 
+                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
                 f"{after_arm.get(var)!r}, but the measured arm pins it OFF — "
                 "that is a different arm (the value-gate/seam pass), and "
                 "crediting its after share to E1 would score a treatment this "
