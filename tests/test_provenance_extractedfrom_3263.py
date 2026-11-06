@@ -295,9 +295,13 @@ def test_dedup_hit_accumulates_the_second_source(prov):
     assert _sources_of(proj, pid) == {
         "https://example.com/alpha", "https://example.com/beta"}, \
         "the fold dropped the second source — the evidence difference is LOST"
-    # The prop is the surface `list_drafts` reports AND the surface
-    # `query(extractedFrom=…)` matches by EQUALITY: it stays the scalar the
-    # Point was created under, with the folded set beside it (#7704 review P1).
+    # The prop is the surface `list_drafts` reports, and it stays the scalar the
+    # Point was created under with the folded set beside it (#7704 review P1 —
+    # the WRITE shape). ⚠️ It no longer bounds the read door, and saying so is
+    # the fix this file pins: `query(extractedFrom=…)` now answers through a
+    # UNION (property equality OR `(n)-[:extractedFrom]->(:Source {url: $k})`,
+    # #10063), so a prop-only reader is not what the read door matches by — do
+    # NOT re-narrow the read door to that scalar (#11038).
     assert _prop_refs(proj, pid) == "https://example.com/alpha", (
         "the convenience property must stay the survivor's own creating "
         f"source: {_prop_refs(proj, pid)!r}")
