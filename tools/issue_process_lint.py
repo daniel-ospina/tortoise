@@ -213,6 +213,20 @@ _LIST_SEP = r"[\s*_`]*"
 # wrapped line break is still admitted, which is what keeps `#100 (the parent),\n#200` a list.
 _SOFT_EMPH = r"[ \t*_`]*(?:\n[ \t*_`]*)?"
 _GLOSS = rf"(?:{_SOFT_EMPH}\([^)\n#]{{0,80}}\))?"
+# ⛔ THE BRIDGE'S GLOSS IS NARROWER THAN THE LIST'S, and it has to be. `_GLOSS` is opaque — any ≤ 80
+# characters without a `)` or a `#` — so admitting it whole into `_DECLINE_BRIDGE_RE` let a clause
+# move its SUBJECT one level into the parenthetical and go CLEAN (measured at `8c74e5fca`, review P3):
+#     `Refs #1234 (the outage on the other box is) — not closed.`   -> declined, CLEAN
+#     `Refs #1234 — the outage on the other box is not closed.`     -> flagged
+# The bridge's closed vocabulary exists so a real subject noun (`the sprint is`, `the outage on the
+# other box is`) is prose about that noun and NOT a decline, and a gloss that ENDS on an auxiliary is
+# that same subject with its verb moved outside — so the content may not end on a copula/modal. The
+# honest glosses this feature exists for (`(a)`, `(blind spot)`, `(latency)`, `(the parent)`) are
+# unaffected: they end on a noun. Excluded by a negative LOOKAHEAD on the content (`A(?=B)`-style
+# fixed-width look-behind is not expressible across a variable-length body).
+_AUX_TAIL = (r"(?:is|was|are|were|does|do|did|has|have|had|will|would|should|must|could|can"
+             r"|may|might)")
+_GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}[ \t]*\))[^)\n#]{{0,80}}\))?")
 # ⛔ A LIST DOES NOT CONTINUE ACROSS A BLANK LINE (review round 22, P3-1). The continuation's separator
 # was `\s`, which includes `\n`, so a conjunction or comma in a FOLLOWING PARAGRAPH continued the
 # list and a legitimate mention was claimed and flagged:
@@ -466,18 +480,21 @@ _BRIDGE_WORD = rf"(?:{_SUBJECT_WORD}|{_SUBJECT_PHRASE}|{_COPULA}|the|a|an|delibe
 _BRIDGE_WORDS_MAX = 3
 _DECLINE_BRIDGE_RE = re.compile(
     # A parenthetical GLOSS may sit between the reference and the sentence that answers it —
-    # `Refs #10892 (blind spot), #10602 (latency) — deliberately not closing them.` The gloss is
-    # `_GLOSS` (balanced, no `#`), so it still cannot smuggle a subject or a reference into the
-    # bridge; what follows it is still only tail punctuation or the closed vocabulary.
+    # `Refs #10892 (blind spot), #10602 (latency) — deliberately not closing them.` It is
+    # `_GLOSS_BRIDGE`, NOT `_GLOSS`: a gloss whose content ends on an auxiliary is a clause SUBJECT
+    # with its verb parked outside, and admitting it whole made
+    # `Refs #1234 (the outage on the other box is) — not closed.` decline while the inlined form of
+    # the same sentence flags (measured at `8c74e5fca`, review P3). What follows the gloss is still
+    # only tail punctuation or the closed vocabulary.
     # (i) a STATE of the reference itself: `— it is not closed`, `— this is not closed`.
-    rf"^{_DECLINE_TAIL_BRIDGE}{_GLOSS}"
+    rf"^{_DECLINE_TAIL_BRIDGE}{_GLOSS_BRIDGE}"
     rf"{_REF_ONLY_SUBJECT}{_EMPH}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
     # (ii) the reference IS the subject, with no separate subject word: `#200 is deliberately not
     #      Closes.`, `Part of #11000 — #11000 is not closed.` — the bridge is the copula alone.
-    rf"|^{_DECLINE_TAIL_BRIDGE}{_GLOSS}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
+    rf"|^{_DECLINE_TAIL_BRIDGE}{_GLOSS_BRIDGE}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
     # (iii) an ACT by a named subject: `— this PR does not close the issue`,
     #       `— the author deliberately does not close the issue`.
-    rf"|^{_DECLINE_TAIL_BRIDGE}{_GLOSS}"
+    rf"|^{_DECLINE_TAIL_BRIDGE}{_GLOSS_BRIDGE}"
     rf"(?:{_BRIDGE_WORD}{_EMPH}){{0,{_BRIDGE_WORDS_MAX}}}"
     rf"{_DECLINE_TAIL_BRIDGE}$",
     re.IGNORECASE,
@@ -582,7 +599,7 @@ def strip_code(body: str) -> tuple[str, int]:
     # unreadable-object guard reads as an honest reason and clears the ref before it — the silent
     # drop it exists to stop. Equal-length spaces keep every offset AND leave the whitespace run of
     # two or more that separates a blanked OBJECT from a sentence that names none.
-    text = re.sub(r"<!--.*?-->", lambda m: re.sub(r"[^\n]", " ", m.group(0)), text,
+    text = re.sub(r"<!--.*?-->", lambda m: re.sub(r".", " ", m.group(0), flags=re.DOTALL), text,
                   flags=re.DOTALL)
     # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim. Imported, not
     # re-derived — a single-backtick regex here read a ``Refs #1234`` span as prose (F1).
@@ -695,9 +712,10 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # ⛔ AND A REASON MUST NOT RESCUE A BLANKED OBJECT. `_REASON_TAIL` lets an honest
             # decline carry WHY, and its capture (`reason_a`/`reason_b`) is the one mechanical
             # signal that separates a reason from prose. The two are distinguishable because
-            # `strip_code` blanks a span to SPACES (length preserved) and DELETES an HTML comment:
-            # a blanked object leaves a whitespace run of two or more characters between the stem
-            # and the reason, while an honest sentence has exactly one space there.
+            # `strip_code` blanks an inline-code SPAN **and an HTML COMMENT** to SPACES (length
+            # preserved, newlines included): a blanked object leaves a whitespace run of two or
+            # more characters between the stem and the reason, while an honest sentence has exactly
+            # one space there.
             #     `does not close `#11078` because …`   -> 10 spaces  -> unreadable -> FLAGGED
             #     `no close intended.`                  ->  1 space   -> honest     -> declines
             # Both directions are pinned as a pair, so neither half can be "fixed" by tweaking the
