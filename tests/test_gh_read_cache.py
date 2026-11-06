@@ -51,6 +51,9 @@ M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly
   M82 404->negative mapping disabled ................. KILLED   M83 negative lane removed (no own TTL) ..... KILLED
   M84 negative allow-list widened to ANY body ........ KILLED   M85 `_validate_negative` unwired ........... KILLED
   M86 protection ROUTE guard deleted ................. KILLED   M87 stderr spelling return deleted ......... KILLED
+  M88 `read()` skips `_validate_negative` ............ KILLED   M89 tightening DROPS the negative .......... KILLED
+  M90 door skips `_validate_negative` ................ KILLED   M91 tighten-past-negative refusal deleted .... KILLED
+  M92 sentinel never recognised as a value ........... KILLED
 ⛔ M82-M85 are the round-18 fix lane's numbering (the documented-negative work, #11047). Each was
 RUN against this head, and each states what it does NOT cover:
   M82 (`_gh_reader`'s `neg = spec.negative` forced to `None`, i.e. the 404 falls back through the
@@ -81,6 +84,30 @@ RUN against this head, and each states what it does NOT cover:
   M87 (the measured `gh: Branch not protected (HTTP 404)` stderr return replaced with `False`):
   **2 failed, 337 passed** — the stderr-drained reader arm and the direct helper arm. Also SURVIVED
   the previous cut, for the reason recorded under M84.
+⛔ M88-M92 are round 19's numbering (the guard-at-every-door fix, #11047). Each was RUN at this
+head, and each states what it does NOT cover:
+  M88 (`_validate_negative(key, _spec)` deleted from `read()`'s defence-in-depth): **1 failed, 343
+  passed** — `test_read_REFUSES_a_spec_injected_with_a_negative_it_would_not_accept`. ⛔ THE PRE-FIX
+  BEHAVIOUR IS MEASURED, not asserted: with a 1800 s-priced negative injected, `read()` served the
+  sentinel and the reader was called **once across 1700 s** — the 30-minute fail-OPEN window the
+  short TTL exists to prevent. It does not cover the IMPORT path (M85 does) or the DOOR (M90).
+  M89 (`declare_invariant` stops preserving an omitted `negative`, i.e. the pre-fix silent loss):
+  **2 failed, 342 passed** — the preservation arm and the tighten-below-the-negative arm (`declared`
+  becomes `None`, so no refusal fires at all). It does not cover the `negative=None` leg: that leg
+  asserts the EXPLICIT drop, which a mutation that drops everything still satisfies.
+  M90 (`_validate_negative(key, spec)` deleted from `declare_invariant`): **1 failed, 343 passed** —
+  the door arm's unprojectable-sentinel leg. ⛔ ITS CONTROL LEG IS WHY THIS ROW IS HONEST: the same
+  arm also declares a VALID negative through the same door, so the mutant cannot pass by refusing
+  every negative.
+  M91 (the tightening-below-the-negative refusal deleted → `_validate_negative`'s generic message
+  answers instead): **1 failed, 343 passed** — the arm asserts the refusal NAMES `negative=None`,
+  because a raise alone survives this mutation (the generic validator still raises). Without that
+  message assertion M91 SURVIVES, which is the same "a pass for an unrelated reason" shape as M85.
+  M92 (`_is_negative_answer` returns `False` — the sentinel is never recognised, so nothing is
+  priced on the short lane): **2 failed, 342 passed** — the short-TTL arm and the new
+  genuine-no-checks arm. ⛔ THE SECOND ONE PINS A COST, NOT A FEATURE: it fails if the trade is
+  "fixed" in the other direction too, which is why its docstring names why the RAW-body alternative
+  is the fail-OPEN one.
 ⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
 parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
 satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
