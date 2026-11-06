@@ -8511,6 +8511,81 @@ def test_the_before_arms_counts_are_the_population_they_count(tmp_path, capsys):
         assert expected in err, (marker, err)
 
 
+@pytest.mark.parametrize("marker,mutate,expected", (
+    ("absent", lambda rec: rec.pop("label_counts"),
+     "carries no `label_counts` census"),
+    ("str", lambda rec: rec.__setitem__("label_counts", "x"),
+     "carries no `label_counts` census"),
+    ("list", lambda rec: rec.__setitem__("label_counts", [1, 2]),
+     "carries no `label_counts` census"),
+    ("object-str", lambda rec: rec["label_counts"].__setitem__("Object", "78"),
+     "is not a node count"),
+    ("object-bool", lambda rec: rec["label_counts"].__setitem__("Object", True),
+     "is not a node count"),
+    ("object-absent", lambda rec: rec["label_counts"].pop("Object"),
+     "reports 0 `:Object`"),
+))
+def test_a_before_arms_label_census_cannot_be_omitted_away(marker, mutate, expected, tmp_path, capsys):
+    """#10610 review at `2ffc5db19` (P2): `isinstance(counts, dict)` WAS the guard.
+
+    Every other census arm in this file reconciles `objects` / `bare_definite` /
+    `share` against `object_names`, and `label_counts` is the run's SECOND census of
+    the same population. But the whole check was wrapped in `if isinstance(counts,
+    dict):`, so an ABSENT or wrong-typed `label_counts` skipped it silently and the
+    record still scored — the `isinstance(...)`-as-a-no-op shape the sibling
+    `gate_names` guard had already closed one field over.
+
+    Measured at the pre-fix head on copies of `e1-paired-off-arm-1.json`: replacing
+    `label_counts` with `"x"`, and deleting the field, both exited **0** and wrote a
+    record. A label map that does not list `Object` means the run counted none, so
+    an absent `Object` is 0 rather than "unchecked", and 0 beside a positive
+    `objects` is the refusal along with the rest.
+    """
+    repo = _bundle(tmp_path / marker)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert isinstance(record["label_counts"], dict) and record["label_counts"]["Object"] == 78, (
+        "the SHIPPED before arm no longer carries label_counts.Object — re-derive this pin")
+    mutate(record)
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, (marker, refused.value)
+    err = capsys.readouterr().err
+    assert expected in err, (marker, err)
+
+    # …and the SHIPPED bundle still scores, so the guard discriminates a record whose
+    # second census was removed from the one that ships rather than refusing the form.
+    shipped = _bundle(tmp_path / "shipped")
+    assert scores_probe.score(shipped)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+
+
+def test_a_gate_drops_census_member_of_another_type_is_refused(tmp_path, capsys):
+    """#10610 review at `2ffc5db19` (P3): the ON run's only independent witness.
+
+    `gate_bare` counts `_is_bare_definite(item)`, and that helper stringifies, so a
+    list or dict member silently counted as NON-bare. `object_names: [0..60]` was
+    refused only INCIDENTALLY — its bare count came out 0 against the log's 13 — and
+    a member of another type orchestrated to the right count would have scored. The
+    before arms and `_unit_id_members` already refuse a member of another type; this
+    is the same rule on the census `e1-gate-drops.json` is cited as witness FOR.
+    """
+    repo = _bundle(tmp_path / "gate")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    record = json.loads(path.read_text())
+    names = record["object_names"]
+    assert names and all(isinstance(n, str) for n in names), (
+        "the SHIPPED gate-drops census is not all strings — re-derive this pin")
+    record["object_names"] = [i for i in range(len(names))]
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "is not an object name" in err, err
+    assert "e1-gate-drops.json" in err, err
+
+
 def test_the_bare_definite_shape_is_the_repos_own_predicate():
     """The driver's local copy of the repo's predicate must BE the repo's predicate.
 

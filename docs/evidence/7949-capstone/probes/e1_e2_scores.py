@@ -47,16 +47,24 @@ Usage::
         --out docs/evidence/9889/e1-e2-scores.json
 
 Exit status: 0 when a scoreable record was written; **2** when any input record
-is missing, when a threshold cannot be parsed out of the frozen record, when the
+is missing, when a threshold cannot be parsed out of the frozen record, when an
+input record, block, census or floor is a shape the reader cannot grade — not
+JSON, not UTF-8 text, not a JSON object, a `label_counts` census that is absent
+or carries a non-numeric `:Object`, a census member that is not a unit id, a
+census that is not a partition (a unit both kept and lost, or one listed twice),
+a count or floor that is not a finite number, or a `corpus.fixtures_hash` that is
+not a string — when the
 E2a record grades a denominator other than the frozen **14** (a bar printed over
 an unfrozen population), when the E2a falsifier did not reach the frozen
 denominator (an inert counter), when the ON arm and the E2a counts come from
 different graphs (two populations in one record), when the falsifier's SCORED
 `with_anchor` block is not the very run the E2a record was taken on — the same
 head is not the same run, because a graph is `capstone_on_<head>_<stamp>`, and
-naming the head is not enough — when the TWO before artifacts name the SAME graph
-(two copies of one run are one realization, not two, so the pairing set they
-produce can only ever agree), when a `with_anchor` block is PRESENT but EMPTY
+naming the head is not enough — when the TWO before artifacts carry the SAME
+`object_names` population (a fresh graph stamp over one population is one
+realization, not two, so the pairing set they produce can only ever agree; and an
+artifact naming no graph at all is refused as absent provenance), when a
+`with_anchor` block is PRESENT but EMPTY
 (a record that never wrote its counter is not the flat shape), when its
 `as_written` block carries no graph (an
 absent provenance is not an inherited one), sits on another run, or reads counts
@@ -303,7 +311,12 @@ def _read_json(path: Path) -> dict:
         raise _refuse(f"{path} does not exist — a row cannot cite an artifact "
                       "the tree does not carry")
     try:
-        text = path.read_text()
+        # `encoding="utf-8"` deliberately, not the locale default (#10610 review at
+        # `2ffc5db19`, P3): `read_text()` with no encoding decodes with the AMBIENT
+        # locale, so under a latin-1 locale a latin-1 record parsed and was scored
+        # while this refusal's message promised "not UTF-8". No fail-open either way
+        # (both refuse), but the contract must not depend on the box's locale.
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         # ⛔ A RECORD THAT IS NOT UTF-8 IS CORRUPT INPUT, NOT A CRASH (#10610 review
         # at `858675ade`, P2): the sibling `is not JSON` arm exists precisely to turn
@@ -998,14 +1011,34 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
                 f"{bare_in_names} of its {len(names)} `object_names` have the "
                 "bare-definite shape — a share computed over a count the record's "
                 "own names refute")
+        # ⛔ `isinstance(counts, dict)` WAS the whole guard, so an ABSENT or
+        # wrong-typed `label_counts` skipped it and the record still scored
+        # (#10610 review at `2ffc5db19`, P2). Measured on a copy of
+        # `e1-paired-off-arm-1.json`: replacing `label_counts` with `"x"`, or
+        # deleting the field, both exited **0** and wrote a record. That is the
+        # `isinstance(...)`-as-a-no-op shape the sibling `gate_names` guard closed
+        # one field over, left in place here — while `probes/e1_paired_arm.py:276`
+        # writes the field UNCONDITIONALLY, so its absence is an edit, never a
+        # producer's older shape. The map is a label->count census, so a label it
+        # does not list is a label the run had NONE of: absent `Object` is 0, not
+        # "unchecked", and 0 against a positive `objects` is the refusal below.
         counts = record.get("label_counts")
-        if isinstance(counts, dict):
-            labelled = counts.get("Object")
-            if labelled is not None and labelled != objects:
-                raise _refuse(
-                    f"{name} states objects={objects} but its own label_counts "
-                    f"reports {labelled} `:Object` — two censuses of one run "
-                    "cannot disagree")
+        if not isinstance(counts, dict):
+            raise _refuse(
+                f"{name} carries no `label_counts` census "
+                f"({type(counts).__name__}) — this record's second census of the "
+                "same run cannot be skipped by omitting it")
+        labelled = counts.get("Object", 0)
+        if isinstance(labelled, bool) or not isinstance(labelled, int):
+            raise _refuse(
+                f"{name} carries label_counts['Object']={labelled!r}, which is "
+                "not a node count — a non-numeric census member is an edited "
+                "record")
+        if labelled != objects:
+            raise _refuse(
+                f"{name} states objects={objects} but its own label_counts "
+                f"reports {labelled} `:Object` — two censuses of one run "
+                "cannot disagree")
         arms.append({
             "artifact": f"{EVIDENCE / name}",
             "graph": graph,
@@ -1095,7 +1128,9 @@ def read_on_arm(repo: Path) -> dict:
     if not path.is_file():
         raise _refuse(f"{EVIDENCE / ON_ARM_LOG} does not exist")
     try:
-        text = path.read_text()
+        # UTF-8 explicitly, for the same reason as `_read_json`'s (#10610 review at
+        # `2ffc5db19`, P3): the locale default is not this file's contract.
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         # Same class as `_read_json`'s (#10610 review at `858675ade`, P2): a log that
         # is not UTF-8 was an uncaught traceback, not the exit-2 refusal the module
@@ -1661,6 +1696,21 @@ def score(repo: Path = _ROOT) -> dict:
             "WITNESSES the ON run's census must carry the population it counts; an "
             "absent, empty or non-list census is the shape a cheaper edit produces, "
             "and it cannot be confirmed by anything else in the record")
+    # ⛔ The MEMBERS are checked as object names, like the before arms'
+    # `object_names` above (#10610 review at `2ffc5db19`, P3). `gate_bare` counts
+    # `_is_bare_definite(item)` and that helper stringifies, so a list or dict
+    # member silently counted as NON-bare: `object_names: [0..60]` was refused only
+    # incidentally (its bare count came out 0 against the log's 13), and a member of
+    # another type that happened to orchestrate to the right count would have
+    # scored. This is the one census the file calls the ON run's only independent
+    # witness, and its siblings — the before arms and `_unit_id_members` — already
+    # refuse a member of another type.
+    for member in gate_names:
+        if not isinstance(member, str):
+            raise _refuse(
+                f"{GATE_DROPS} carries an `object_names` member {member!r}, which "
+                "is not an object name — the census is the run's own list of "
+                "`:Object` names, so a member of another type is an edited record")
     if len(gate_names) != after["objects"]:
         raise _refuse(
             f"{GATE_DROPS} carries {len(gate_names)} `object_names` beside its "
