@@ -93,9 +93,10 @@ nor are consumed by the 100/min general budget. The limiter charges **once per
 request** in `RateLimitMiddleware.dispatch`; the unit is called "points/minute"
 in its own docstring and in the 429 body, and it is one charge per request.
 
-The **second** bound is per TEAM, not per key: the 300/min bucket above
-multiplies with the number of API keys a team may mint (20 on Team), so it does
-not bound a tenant. The team-level ingest budget in `tortoise/quota.py` does —
+The **second** bound is per TEAM, not per key: a per-key bucket multiplies with
+the number of API keys a team may mint (20 on Team) — 300/min on the commit
+endpoint's own bucket, 100/min on the general bucket the capture lane uses — so
+neither bounds a tenant. The team-level ingest budget in `tortoise/quota.py` does —
 it is one window covering **both** session write lanes (`POST /v1/sessions` and
 `POST /v1/sessions/commit`), so alternating endpoints cannot buy a second
 allowance; it is measured in BYTES (the ruled storage unit, #4495/#5331), it is

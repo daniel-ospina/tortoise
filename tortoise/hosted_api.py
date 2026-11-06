@@ -17070,8 +17070,13 @@ class SessionRequest(BaseModel):
 #
 # The commit lane's bound landed with #9798; §3.1 asks for it on BOTH session
 # write lanes — "per-org, per-window ingest rate on ``/v1/sessions/commit`` and
-# ``/v1/sessions``" — and the capture lane kept only the per-KEY bucket
-# (300/min × up to 20 keys) plus the instance-wide in-flight cap. MEASURED
+# ``/v1/sessions``" — and the capture lane kept only the per-KEY bucket. That
+# is the GENERAL bucket, 100/min — ``PATH_LIMITS`` gives the 300/min bucket to
+# ``/v1/sessions/commit`` alone, and ``_limit_for`` is an exact-path lookup — so
+# 20 keys on Team reach 2,000 req/min per org, on top of the instance-wide
+# in-flight cap. At 2 nodes/turn (below) that is 9.8 MiB/min for a one-turn
+# loop, i.e. UNDER the window, and 13.7 MiB/min from two turns up: the hole
+# §3.1 names is bytes of VOLUME, not request count. MEASURED
 # before this charge existed: a free-tier key looping ``POST /v1/sessions``
 # with a fresh ``session_id`` writes ``:Session`` + ``sessionCaptured``
 # ``:Event`` + the transcript ``:Source`` + one episodic ``:Point`` per turn,
