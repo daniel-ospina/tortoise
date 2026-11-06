@@ -5101,32 +5101,6 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         r"^(?:['\u2019]s\s+parent\b|\s+of\s+(?:the\s+)?parent\b)", re.I
     )
     #: …and the `of <sha>` spelling, admissible ONLY behind a "parent" predicate.
-    #: ⛔ THE MIRROR OF `_PREDICATED_OBJECT`: the PHRASE may be the PREDICATE of a
-    #: tree-shaped SUBJECT (#11191 review r11, P1 — MEASURED). The object arm reads only
-    #: AFTER the phrase, so the same claim written the other way round named no tree, dated
-    #: no figure, and passed the default-deny digit test — ACCEPTED at `b0e8e2006d4` and
-    #: still ACCEPTED at `77d4a3eadd4`:
-    #:   "The arming commit is the tree immediately before #9548."
-    #:   "The arming commit itself is the tree immediately before #9548."
-    #:   "The arming commit's son is the tree immediately before #9548."
-    #:   "The arming commit must be the tree immediately before #9548."
-    #: All four assert a tree that is NOT the pre-#9548 tree — the A1 defect spelled
-    #: without a sha, which is why the numeral channel never saw it. The exemptions are the
-    #: object arm's: a subject carrying the PARENT relation ("the arming commit's parent is
-    #: the tree before #9548") is the true tree and stays accepted, and a sha subject is the
-    #: referent rule's business, not this arm's.
-    _PREDICATED_SUBJECT = re.compile(
-        r"\b(?:the|a|an)\s+"
-        r"(?:(?:arming|merge|revert|fix|feature|squash|base)\s+)?"
-        r"(?:commit|merge|tree|branch|tip|subject|revision|sha)\b"
-        r"(?:\s+['\u2019]s\s+(?:son|child|parent|successor|predecessor|descendant|"
-        r"ancestor))?"
-        r"(?:[^.;\u2014\u2013]{0,40}?)"
-        r"\b(?:is|was|are|were|means|denotes|refers\s+to|continues?\s+to\s+be|"
-        r"(?:has|have|had)\s+to\s+be|(?:must|should|would|will|can|could|may|might)\s+be)\b"
-        r"\s+(?:the\s+)?(?:tree\s+)?(?:immediately\s+)?$",
-        re.I,
-    )
     _PARENT_OF_SHA = re.compile(
         r"^\s+of\s+`?(?:785bb2b59|" + _TRUE_TREE + r")`?", re.I
     )
