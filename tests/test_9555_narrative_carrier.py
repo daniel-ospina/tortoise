@@ -2309,20 +2309,46 @@ def _ontology_section_of(field: str) -> str:
 #: expression the pin below derives, so a home move reds here and there together.
 _HOME = f"public.{rp.NARRATIVE_TABLE}"
 
+
+def _params(cases: list[tuple[str, str, str]]) -> list:
+    """Bind each case's id to ITS OWN row for `pytest.mark.parametrize`.
+
+    *What value makes this test fail?* — nothing in this helper; the contract is
+    in the ROWS. That is the point: a positional `ids=[...]` sequence is mapped
+    onto `argvalues` **by index**, and pytest validates only that the two LENGTHS
+    agree (`_pytest.python` zips them). So a case inserted mid-list keeps
+    collecting, keeps passing, and silently relabels every case after it —
+    measured at `a6a1b28df`: 22 mislabelled cases, a red in the `not so much …
+    as` construction printed as `[not-only-but-also]`, and `-k
+    not-so-much-as-asserted` selecting the `not the only` case instead. The id
+    and the case it names cannot disagree when they are the same row.
+
+    A list of rows rather than `pytest.param(..., id=…)` literals only because
+    the same rows are also iterated as data by the real-artifact controls below;
+    both forms give every case its own id.
+    """
+    return [pytest.param(why, case, id=case_id)
+            for case_id, why, case in cases]
+
 #: Lines that state §9.4's claim and word it DIFFERENTLY from the draft on the
 #: head document. The pin must ACCEPT every one: the contract is what the
 #: sentence SAYS (the recorded decision, `#10978`), never one draft's phrasing of
 #: it. The first two are the MEASURED misfires — under the pre-fix guards
 #: (`"not read from" not in line`, `` f"`{home}`." not in line ``) both RED,
 #: each with a message asserting the inverse of what the line says.
-_VECTOR_REWORDINGS: list[tuple[str, str]] = [
-    ("a correct negation, applied to the SUMMARY rather than to the home",
+#:
+#: ⛔ EACH ROW IS `(case id, why, <the value>)` — the id is the FIRST element, not a
+#: parallel `ids=[...]` list. A positional `ids` sequence is mapped onto
+#: `argvalues` BY INDEX and pytest validates only the COUNT, so a case inserted
+#: mid-list silently relabels every case after it while still collecting cleanly.
+_VECTOR_REWORDINGS: list[tuple[str, str, str]] = [
+    ('negation-of-the-summary', "a correct negation, applied to the SUMMARY rather than to the home",
      "whose embedded text is the S1 narrative read from `{home}` — and that "
      "text is not read from `:Source.summary`"),
-    ("a correct sentence that simply ENDS on the backticked home",
+    ('ends-on-the-backticked-home', "a correct sentence that simply ENDS on the backticked home",
      "whose embedded text is the S1 narrative read from `{home}`. It is one "
      "vector attached to the `:Source` node"),
-    ("the head document's own wording (control: green before AND after the fix)",
+    ('head-document-wording', "the head document's own wording (control: green before AND after the fix)",
      "whose embedded text is the S1 narrative read from `{home}` — ⛔ never "
      "from `:Source.summary`"),
     #: CONTROLS for the NEGATION guard's clause stop set: each carries a cue that
@@ -2330,26 +2356,26 @@ _VECTOR_REWORDINGS: list[tuple[str, str]] = [
     #: boundary would refuse a correct sentence. They are here because widening
     #: the cue→verb span (to catch the three-content-word inversion above) is
     #: what could make a line-wide reading bite again.
-    ("a negation of ANOTHER clause (semicolon stop)",
+    ('other-clause-semicolon', "a negation of ANOTHER clause (semicolon stop)",
      "the text is not stored on the node; it is the S1 narrative read from "
      "`{home}`"),
-    ("a negation of ANOTHER clause (em-dash stop)",
+    ('other-clause-em-dash', "a negation of ANOTHER clause (em-dash stop)",
      "the text is not stored on the node — it is the S1 narrative read from "
      "`{home}`"),
     #: CONTROLS for the SECOND span's clause stop set. That span (read verb →
     #: object) was `[^`;]{0,30}`, which admits `. , : —`, so a cue in ONE clause
     #: reached an object in the NEXT one and refused correct prose with the
     #: inverted diagnosis *"NEGATES the pointer"* (measured at `9d0e75d70`).
-    ("the negation ends its clause before the object (comma stop)",
+    ('clause-end-after-read-verb-comma', "the negation ends its clause before the object (comma stop)",
      "the text is not read, the S1 narrative read from `{home}` is what the "
      "vector embeds"),
-    ("the negation ends its clause before the object (em-dash stop)",
+    ('clause-end-after-read-verb-em-dash', "the negation ends its clause before the object (em-dash stop)",
      "the text is not read — the S1 narrative read from `{home}` is what the "
      "vector embeds"),
     #: CONTROL for the TRAILING direction: a cue that follows the object and
     #: introduces ANOTHER backticked name negates THAT name, not the home — so
     #: binding every trailing cue to `home` would refuse this correct line.
-    ("a cue after the home that introduces ANOTHER backticked name",
+    ('cue-after-home-other-name', "a cue after the home that introduces ANOTHER backticked name",
      "the S1 narrative read from `{home}` is never `:Source.summary`"),
 ]
 
@@ -2357,47 +2383,41 @@ _VECTOR_REWORDINGS: list[tuple[str, str]] = [
 #: about `{home}`. These are what the two object-bound guards are FOR, so they
 #: must stay refused — deleting the guards (rather than binding them) would pass
 #: the list above and fail here.
-_VECTOR_INVERSIONS: list[tuple[str, str]] = [
-    ("the pointer's own negation, beside the correct phrase",
+_VECTOR_INVERSIONS: list[tuple[str, str, str]] = [
+    ('negated-pointer', "the pointer's own negation, beside the correct phrase",
      "the S1 narrative read from `{home}` was the earlier claim; it is not read "
      "from `{home}`"),
     # ⚠️ The same inversion reached through THREE content words. The first cut of
     # the bound cue allowed `(?:(?:\w+)\s+){0,2}` between cue and verb, so this
     # line was ACCEPTED — the pin certified exactly the negation it advertises
     # refusing (measured against the pre-widening guard).
-    ("the pointer's own negation, reached through three content words",
+    ('negated-pointer-three-content-words', "the pointer's own negation, reached through three content words",
      "the vector's text is never the S1 narrative read from `{home}`"),
-    ("the home namespacing its own column (dot form)",
+    ('column-dot-form', "the home namespacing its own column (dot form)",
      "the S1 narrative read from `{home}`.`summary` is what the vector embeds"),
-    ("the home namespacing its own column (possessive form)",
+    ('column-possessive-form', "the home namespacing its own column (possessive form)",
      "the S1 narrative read from `{home}`'s `summary` column is the vector"),
     # ⚠️ The CUE VOCABULARY, not the span. Cycle 17 widened the span (so three
     # content words could not smuggle the cue to the verb) but left `cannot` out
     # of the cue set, so this line — the same inverted claim — was ACCEPTED
     # (measured). It is refused now that `_NEGATION_CUE` carries it.
-    ("the pointer's own negation, through a cue the first set did not carry",
+    ('negated-pointer-cannot-cue', "the pointer's own negation, through a cue the first set did not carry",
      "the vector's text cannot be the S1 narrative read from `{home}`"),
     # ⚠️ The DIRECTION, not the vocabulary and not the span. Every case above
     # puts the cue BEFORE the object, so a guard that reads only that order
     # ACCEPTED the same inverted claim written the other way round — all three
     # below were measured GREEN at `9d0e75d70`, i.e. the pin certified the exact
     # inverse of §9.4.
-    ("the pointer's own negation, the cue AFTER the object",
+    ('negated-pointer-cue-after-object', "the pointer's own negation, the cue AFTER the object",
      "the S1 narrative read from `{home}` is never what the vector embeds"),
-    ("the pointer's own negation, cue after the object, copula form",
+    ('negated-pointer-cue-after-object-copula', "the pointer's own negation, cue after the object, copula form",
      "the S1 narrative read from `{home}` is not the vector's text"),
-    ("the pointer's own negation, cue after the object, cannot form",
+    ('negated-pointer-cue-after-object-cannot', "the pointer's own negation, cue after the object, cannot form",
      "the S1 narrative read from `{home}` cannot be what gets embedded"),
 ]
 
 
-@pytest.mark.parametrize(
-    "why,line", _VECTOR_REWORDINGS,
-    ids=["negation-of-the-summary", "ends-on-the-backticked-home",
-         "head-document-wording", "other-clause-semicolon",
-         "other-clause-em-dash", "clause-end-after-read-verb-comma",
-         "clause-end-after-read-verb-em-dash",
-         "cue-after-home-other-name"])
+@pytest.mark.parametrize("why,line", _params(_VECTOR_REWORDINGS))
 def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
     """*What value makes this test fail?* The pre-fix guards, on cases 1 and 2.
 
@@ -2427,13 +2447,7 @@ def test_the_vector_helper_ACCEPTS_a_correct_rewording(why: str, line: str):
             f"— it said: {refused}") from None
 
 
-@pytest.mark.parametrize(
-    "why,line", _VECTOR_INVERSIONS,
-    ids=["negated-pointer", "negated-pointer-three-content-words",
-         "column-dot-form", "column-possessive-form",
-         "negated-pointer-cannot-cue", "negated-pointer-cue-after-object",
-         "negated-pointer-cue-after-object-copula",
-         "negated-pointer-cue-after-object-cannot"])
+@pytest.mark.parametrize("why,line", _params(_VECTOR_INVERSIONS))
 def test_the_vector_helper_REFUSES_an_inversion(why: str, line: str):
     """*What value makes this test fail?* A fix that DROPS the two guards.
 
@@ -2543,14 +2557,14 @@ def test_the_declared_fail_CLOSED_over_block_is_the_documented_one():
 #: cost — a false red on correct prose — is declared in `_DECLARED_OVER_BLOCK_CUE`
 #: and pinned by `test_the_declared_rather_than_over_block_is_the_documented_one`.
 #: So: one control, four measured reds.
-_SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
-    ("the head document's own wording", "never from `:Source.summary`"),
-    ("and not from", "and not from `:Source.summary`"),
-    ("must not be", "which must not be `:Source.summary`"),
-    ("never the field", "never the field `:Source.summary`"),
+_SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str, str]] = [
+    ('head-document-wording', "the head document's own wording", "never from `:Source.summary`"),
+    ('and-not-from', "and not from", "and not from `:Source.summary`"),
+    ('must-not-be', "must not be", "which must not be `:Source.summary`"),
+    ('never-the-field', "never the field", "never the field `:Source.summary`"),
     #: The TRAILING direction: the trap named first and negated second. Exactly
     #: the same ruling, and the leading-only guard REFUSED it (measured).
-    ("the trap as the subject of the negation",
+    ('trap-as-negated-subject', "the trap as the subject of the negation",
      "`:Source.summary` is never what the vector reads"),
 ]
 
@@ -2558,48 +2572,45 @@ _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
 #: something else. These are what the assert is FOR, so they must stay REFUSED:
 #: deleting the guard (rather than binding it) would pass the list above and
 #: fail here, and so would a cue bound to the wrong object.
-_SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
-    ("the negation dropped, the trap still named",
+_SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str, str]] = [
+    ('negation-dropped', "the negation dropped, the trap still named",
      "⛔ read from `:Source.summary`"),
-    ("the negation bound to ANOTHER backticked name",
+    ('negates-another-name', "the negation bound to ANOTHER backticked name",
      "⛔ not `public.session_narrative`; it is `:Source.summary`"),
-    ("the negation in a neighbouring clause",
+    ('negation-in-other-clause', "the negation in a neighbouring clause",
      "⛔ the narrative is not on the node; `:Source.summary`"),
     #: ⛔ The MIRROR, where the trap is the ASSERTED term — a sentence telling the
     #: vector to read it. It is refused for the SAME reason as the denied form: the
     #: guards bind positionally and cannot tell the two roles apart, so the whole
     #: construction is excluded (declared in `_AFFIRMATIVE_EXCLUSION`).
-    ("the `not so much … as` with the trap ASSERTED",
+    ('not-so-much-as-asserted', "the `not so much … as` with the trap ASSERTED",
      "not so much from the S1 narrative as from `:Source.summary`"),
     #: ⛔ AN AFFIRMATIVE `not only`. The `not` is not a cue there — what follows
     #: is ASSERTED — so counting it certified a sentence telling the vector to
     #: read BOTH texts (measured: `_negates_the_summary` True, pin GREEN).
-    ("the affirmative `not only … but also` construction",
+    ('not-only-but-also', "the affirmative `not only … but also` construction",
      "⛔ not only `:Source.summary` but also the S1 narrative"),
     #: The exclusivity-adverb family, after `only` alone was measured to leave
     #: these open: each turns `not X` into `not ONLY X`, which ASSERTS X.
-    ("the `not merely` affirmative",
+    ('not-merely', "the `not merely` affirmative",
      "⛔ not merely `:Source.summary` but the S1 narrative"),
-    ("the `not just` affirmative",
+    ('not-just', "the `not just` affirmative",
      "⛔ not just `:Source.summary` but the S1 narrative"),
-    ("the `not least` affirmative",
+    ('not-least', "the `not least` affirmative",
      "⛔ not least `:Source.summary`"),
     #: The two the enumeration missed one cut later — `not alone … but also` is
     #: standard English for `not only … but also`, and the document itself writes
     #: the family form at `docs/architecture/STORAGE-ARCHITECTURE.md:41`.
-    ("the `not alone` affirmative",
+    ('not-alone', "the `not alone` affirmative",
      "⛔ not alone `:Source.summary` but the S1 narrative"),
-    ("the `-n't only` contraction",
+    ('isnt-only', "the `-n't only` contraction",
      "⛔ isn't only `:Source.summary` but the S1 narrative"),
-    ("the `not the only` article form",
+    ('not-the-only', "the `not the only` article form",
      "⛔ not the only `:Source.summary` but the S1 narrative"),
 ]
 
 
-@pytest.mark.parametrize(
-    "why,clause", _SUMMARY_NEGATION_REWORDINGS,
-    ids=["head-document-wording", "and-not-from", "must-not-be",
-         "never-the-field", "trap-as-negated-subject"])
+@pytest.mark.parametrize("why,clause", _params(_SUMMARY_NEGATION_REWORDINGS))
 
 
 def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str):
@@ -2622,12 +2633,7 @@ def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str)
         f"does not contain")
 
 
-@pytest.mark.parametrize(
-    "why,clause", _SUMMARY_NEGATION_INVERSIONS,
-    ids=["negation-dropped", "negates-another-name",
-         "negation-in-other-clause", "not-only-but-also", "not-merely",
-         "not-just", "not-least", "not-alone", "isnt-only",
-         "not-the-only", "not-so-much-as-asserted"])
+@pytest.mark.parametrize("why,clause", _params(_SUMMARY_NEGATION_INVERSIONS))
 
 
 def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
@@ -2672,13 +2678,13 @@ def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
 #: claim: under the old literal, **2 of the 3** RED.
 _NARRATIVE_CARRIER = (
     "a session's `summary` is §4.6 metadata and {}.")
-_NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str]] = [
-    ("the head document's own wording", "never the narrative"),
-    ("not, no conjunction", "not the narrative"),
+_NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str, str]] = [
+    ('head-document-wording', "the head document's own wording", "never the narrative"),
+    ('not-no-conjunction', "not, no conjunction", "not the narrative"),
     #: A cue from the shared vocabulary that the FIRST draft of `_NEGATION_CUE`
     #: did not carry — the same widening `_SUMMARY_NEGATION_INVERSIONS` pins for
     #: the other object, read in the ACCEPT direction here.
-    ("cannot, cue before the object", "cannot be the narrative"),
+    ('cannot-cue', "cannot, cue before the object", "cannot be the narrative"),
     #: ⛔ `rather than` / `instead of` belong HERE in spirit and are NOT admitted:
     #: see `_NEGATION_CUE`. In this guard's `cue + span + object` shape they bind
     #: the negation across the term they negate, and the shape
@@ -2691,17 +2697,17 @@ _NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str]] = [
 #: something else. These are what `_negates_the_narrative` is FOR, so they must
 #: stay REFUSED: dropping the guard (rather than binding it) would pass the list
 #: above and fail here.
-_NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
+_NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str, str]] = [
     #: ⚠️ MEASURED ON THE REAL FOOTNOTE, not on a constructed line: applying this
     #: exactly to `docs/architecture/STORAGE-ARCHITECTURE.md:1070` turns the
     #: negation off in the document a reader actually lands on, and the guard
     #: refuses the result (`test_the_REAL_footnote_LOSES_the_negation_when_it_is_
     #: dropped`).
-    ("the negation dropped, the narrative still named", "the narrative"),
-    ("the negation bound to ANOTHER name",
+    ('negation-dropped', "the negation dropped, the narrative still named", "the narrative"),
+    ('negates-another-name', "the negation bound to ANOTHER name",
      "not `public.session_narrative`; `summary` is §4.6 metadata and the "
      "narrative"),
-    ("the negation in a neighbouring clause",
+    ('negation-in-other-clause', "the negation in a neighbouring clause",
      "the narrative is not on the node; `summary` is §4.6 metadata"),
     #: ⚠️ THE CLAUSE STOP, for THIS object's trailing direction — the shape the
     #: three cases above do not reach. The cue is DASH-separated from the object
@@ -2711,7 +2717,7 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: `_negates_the_home`. Green under the literal this guard replaced too,
     #: deliberately: it is a control on the BINDING, not a non-vacuity case for
     #: the fix.
-    ("the cue across a clause boundary from the object",
+    ('cue-across-a-clause-boundary', "the cue across a clause boundary from the object",
      "the narrative — not the summary"),
     #: ⛔ THE SUBJECT FORMS — and they were ACCEPT-listed before cycle 19. The
     #: narrative is the text the vector DOES embed, so making it the subject of a
@@ -2722,41 +2728,41 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: the fail-open these two cases close, and the reason the binding is
     #: `trailing=False`. ⚠️ Only a SPELLING anchor in the real-footnote control
     #: noticed, which is not the claim.
-    ("the narrative as the subject of a trailing cue",
+    ('subject-form-trailing-cue', "the narrative as the subject of a trailing cue",
      "the narrative is never what gets embedded"),
-    ("a copula form, narrative as subject",
+    ('subject-form-copula', "a copula form, narrative as subject",
      "the narrative is not the vector's text"),
     #: ⛔ And the MIRROR must stay refused: there the narrative is the ASSERTED
     #: term, so the sentence says `summary` IS the narrative (§12.1b's inverse).
     #: Merely dropping the construction from the exclusion list certified this.
-    ("the `not so much … as` with the narrative ASSERTED",
+    ('not-so-much-as-asserted', "the `not so much … as` with the narrative ASSERTED",
      "not so much a lexicon as the narrative"),
     #: ⛔ THE AFFIRMATIVE CUES the shared vocabulary counted as negations. Each
     #: asserts the narrative (or asserts more than it) and was ACCEPTED, so the
     #: pin certified the inverse of §12.1b on a two-word prefix (measured:
     #: `_NARRATIVE_CARRIER.format("not only the narrative")` was True while the
     #: documented inversion it extends — plain "the narrative" — is refused).
-    ("the `not only` affirmative", "not only the narrative"),
-    ("the `not unlike` affirmative", "not unlike the narrative"),
-    ("the `never mind` affirmative", "never mind the narrative"),
+    ('not-only-affirmative', "the `not only` affirmative", "not only the narrative"),
+    ('not-unlike-affirmative', "the `not unlike` affirmative", "not unlike the narrative"),
+    ('never-mind-affirmative', "the `never mind` affirmative", "never mind the narrative"),
     #: The rest of the exclusivity-adverb family — measured ACCEPTED while the
     #: exclusion named `only`/`unlike`/`mind` alone.
-    ("the `not merely` affirmative", "not merely the narrative"),
-    ("the `not just` affirmative", "not just the narrative"),
-    ("the `not solely` affirmative", "not solely the narrative"),
-    ("the `not least` affirmative", "not least the narrative"),
+    ('not-merely-affirmative', "the `not merely` affirmative", "not merely the narrative"),
+    ('not-just-affirmative', "the `not just` affirmative", "not just the narrative"),
+    ('not-solely-affirmative', "the `not solely` affirmative", "not solely the narrative"),
+    ('not-least-affirmative', "the `not least` affirmative", "not least the narrative"),
     #: The two the enumeration missed one cut later.
-    ("the `not alone` affirmative", "not alone the narrative"),
-    ("the `not to mention` affirmative", "not to mention the narrative"),
+    ('not-alone-affirmative', "the `not alone` affirmative", "not alone the narrative"),
+    ('not-to-mention-affirmative', "the `not to mention` affirmative", "not to mention the narrative"),
     #: The two shapes the exclusion's PEEK missed, both on §12.1b's own clause.
-    ("the `-n't only` contraction", "isn't only the narrative"),
-    ("the `not the only` article form", "not the only narrative"),
+    ('isnt-only-contraction', "the `-n't only` contraction", "isn't only the narrative"),
+    ('not-the-only-article', "the `not the only` article form", "not the only narrative"),
     #: ⛔ The EMPHASIS spelling — the document bolds its claims, so `not **only**`
     #: is a reachable rendering and `**` inside the peek gap used to defeat the
     #: exclusion (measured: the whole pin GREEN over a footnote stating the
     #: inverse). The guard strips asterisks before matching.
-    ("the emphasised `not **only**`", "not **only** the narrative"),
-    ("the post-positional `not the narrative alone`",
+    ('emphasised-not-only', "the emphasised `not **only**`", "not **only** the narrative"),
+    ('post-positional-not-alone', "the post-positional `not the narrative alone`",
      "not the narrative alone"),
 ]
 
@@ -2767,9 +2773,7 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 #: replaying those.
 
 
-@pytest.mark.parametrize(
-    "why,clause", _NARRATIVE_NEGATION_REWORDINGS,
-    ids=["head-document-wording", "not-no-conjunction", "cannot-cue"])
+@pytest.mark.parametrize("why,clause", _params(_NARRATIVE_NEGATION_REWORDINGS))
 
 
 def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
@@ -2841,19 +2845,7 @@ def test_every_affirmative_adverb_is_refused_on_BOTH_guards():
             f"`{_SUMMARY_OBJECT}`: {trap!r} — it asserts the trap AND more")
 
 
-@pytest.mark.parametrize(
-    "why,clause", _NARRATIVE_NEGATION_INVERSIONS,
-    ids=["negation-dropped", "negates-another-name",
-         "negation-in-other-clause", "cue-across-a-clause-boundary",
-         "subject-form-trailing-cue", "subject-form-copula",
-         "not-only-affirmative", "not-unlike-affirmative",
-         "never-mind-affirmative", "not-merely-affirmative",
-         "not-just-affirmative", "not-solely-affirmative",
-         "not-least-affirmative", "not-alone-affirmative",
-         "not-to-mention-affirmative", "isnt-only-contraction",
-         "not-the-only-article",
-         "emphasised-not-only", "post-positional-not-alone",
-         "not-so-much-as-asserted"])
+@pytest.mark.parametrize("why,clause", _params(_NARRATIVE_NEGATION_INVERSIONS))
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
@@ -2872,6 +2864,72 @@ def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         f"narrative ({why}): {line!r} — the cue is bound to the OBJECT, so "
         f"naming the narrative is not denying it, and a cue that lands on "
         f"another name or in another clause does not reach it")
+
+
+#: Each construction whose spelling appears VERBATIM in a case's own clause, and
+#: the token that case's id must therefore carry. Both `_…_INVERSIONS` lists run
+#: constructions named in `why`, so this table is what makes an id CONTRADICTING
+#: the case it labels a test failure instead of a story in a docstring.
+#:
+#: ⛔ The probes are matched against the CASE, never against an index — that is
+#: the correction. The ids used to be a parallel `ids=[...]` list mapped onto the
+#: cases BY POSITION, so inserting the `not so much … as` case at index 3 left
+#: every id from there on naming the row ABOVE it: measured at `a6a1b28df`, 8 of
+#: 11 `_SUMMARY_NEGATION_INVERSIONS` cases and 14 of 20
+#: `_NARRATIVE_NEGATION_INVERSIONS` cases reported a construction they do not
+#: run, so a red in the `not so much … as` case printed `[not-only-but-also]`.
+#:
+#: Longest-first, because `not the only` and `not **only**` both contain `only`.
+_CONSTRUCTION_PROBES: tuple[tuple[str, str], ...] = (
+    ("not so much", "so-much"),
+    ("not **only**", "emphasised"),
+    ("isn't only", "isnt-only"),
+    ("not the only", "the-only"),
+    ("not only", "not-only"),
+    ("not to mention", "to-mention"),
+    ("never mind", "never-mind"),
+    ("not unlike", "not-unlike"),
+    ("not merely", "merely"),
+    ("not just", "just"),
+    ("not solely", "solely"),
+    ("not least", "least"),
+    ("not alone", "alone"),
+)
+
+
+def test_every_case_id_NAMES_the_construction_its_clause_carries():
+    """*What value makes this test fail?* The pre-fix positional `ids=` lists.
+
+    The id is what CI and `-k` consume, and the assertion MESSAGE is not the
+    subject here: `_negates_the_summary` interpolates `why` from the data tuple,
+    so it stays correct however the case is labelled. The NODE ID is the part
+    that lies, and it lies in the worst direction — it sends the fixer to a
+    construction that passed.
+
+    Replayed against the pre-fix labelling (`a6a1b28df`): the `not so much … as`
+    case carried `not-only-but-also` and the `not only` case carried
+    `not-merely`, so **this test reds there on both lists**; with each id in its
+    own row it is green. That is the non-vacuity proof — the check is not
+    satisfied by making it agree with whatever pytest happens to print.
+    """
+    checked = 0
+    for cases in (_SUMMARY_NEGATION_INVERSIONS, _NARRATIVE_NEGATION_INVERSIONS):
+        for case_id, why, clause in cases:
+            for spelling, token in _CONSTRUCTION_PROBES:
+                if spelling not in clause:
+                    continue
+                checked += 1
+                assert token in case_id, (
+                    f"the case labelled {case_id!r} runs the {spelling!r} "
+                    f"construction ({why}): {clause!r} — its id names a "
+                    f"DIFFERENT construction, so a red in this case is "
+                    f"reported against one that passed, and `-k {case_id}` "
+                    f"selects a case that does something else")
+    assert checked >= 18, (
+        f"only {checked} cases matched `_CONSTRUCTION_PROBES` — the table has "
+        f"drifted off the case data, so the id/case agreement above is barely "
+        f"being checked at all. Re-derive the probes from the clauses in "
+        f"`_SUMMARY_NEGATION_INVERSIONS` / `_NARRATIVE_NEGATION_INVERSIONS`")
 
 
 #: The §12.1b negation CLAUSE of the REAL footnote, DERIVED rather than spelled.
@@ -2959,7 +3017,7 @@ def test_the_REAL_footnote_LOSES_the_negation_when_it_is_dropped():
         f"the negation was DROPPED from the REAL §12.1b footnote and "
         f"`_negates_the_narrative` still accepted it: {dropped!r} — the guard "
         f"is not bound to the narrative's own clause")
-    for why, clause in _NARRATIVE_NEGATION_REWORDINGS:
+    for _case_id, why, clause in _NARRATIVE_NEGATION_REWORDINGS:
         # ⛔ Skip any re-wording the DOCUMENT may ALREADY carry: `head_clause` is
         # derived from the tree, so a document re-worded into one of these very
         # forms makes the replacement a no-op — and the old skip named one
@@ -3001,7 +3059,7 @@ def test_the_REAL_footnote_REFUSES_each_listed_inversion():
     """
     footnote = _source_vector_footnote(_storage_doc_text())
     head_clause = _footnote_negation_clause(footnote)
-    for why, clause in _NARRATIVE_NEGATION_INVERSIONS:
+    for _case_id, why, clause in _NARRATIVE_NEGATION_INVERSIONS:
         mutated = footnote.replace(head_clause, "and " + clause)
         assert mutated != footnote, (
             f"the mutation for {why!r} changed nothing in the footnote")
@@ -3212,7 +3270,7 @@ def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
         f"the head document's deciding sentence no longer carries "
         f"{head_clause!r} — this control mutates THAT clause, so a re-wording of "
         f"the document must update this anchor or the control silently skips")
-    for why, replacement in _SUMMARY_NEGATION_REWORDINGS:
+    for _case_id, why, replacement in _SUMMARY_NEGATION_REWORDINGS:
         if replacement == head_clause:
             continue
         mutated = deciding.replace(head_clause, replacement)
@@ -3468,7 +3526,19 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"lives. ⚠️ SECTION-scoped, mirroring §9.4's count — a LINE-scoped version "
         f"of this assert left the additive form GREEN when the mention was added "
         f"to §12.1b's BODY instead of the footnote line (measured), and the body "
-        f"is precisely where a designer reads the same instruction. Fails CLOSED "
+        f"is precisely where a designer reads the same instruction. "
+        f"⚠️ It counts the `{_SUMMARY_OBJECT}` spelling ONLY — bare `summary` "
+        f"legitimately appears in this section's own footnote (\"a session's "
+        f"`summary`\"), so an ADDED line naming bare `summary` there is caught by "
+        f"NOTHING in this file: a body sentence like *\"the vector's text is the "
+        f"session's `summary`\"* leaves this count at 0, `_RETIRED_VECTOR_"
+        f"FOOTNOTE` absent, and both footnote assertions reading the footnote "
+        f"line alone — the SAME additive-form hole this count closes for the "
+        f"`{_SUMMARY_OBJECT}` spelling, still open for the bare one. The file "
+        f"header states that gap for BOTH counts; this message states it for "
+        f"this one, rather than leaving it to a header a lane fixing THIS red "
+        f"may never read. "
+        f"Fails CLOSED "
         f"on purpose: a future legitimate use of this spelling here reds every "
         f"docs-only PR, and this message tells the next lane to widen the assert "
         f"deliberately")
