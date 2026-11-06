@@ -320,9 +320,39 @@ def _on_default_branch(sha: str, root: Path | None = None) -> bool | None:
         return None
     if probe.returncode == 0:
         return True
-    if probe.returncode == 1:
-        return False
-    return None
+    if probe.returncode != 1:
+        return None
+    # ⛔ #11057 review P2: `exit 1` is not proof of absence. A remote-tracking ref is only as
+    # fresh as the last fetch, so on a clone whose `origin/main` lags, a commit that IS on
+    # `main`'s tip answers 1 — and the caller renders that as "lives only on a lane branch",
+    # telling a reader to correct a CORRECT record. If the ref is an ANCESTOR of the record
+    # the record is ahead of it, which is equally consistent with a stale ref and with an
+    # unmerged lane commit: ambiguous, so `None` (fetch and re-run), never `False`.
+    try:
+        behind = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ref, sha],
+            cwd=where, capture_output=True, env=_PROBE_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    return None if behind.returncode == 0 else False
+
+
+# A commit sha, not a revision expression. Hand-rolled rather than `re` because this copy is
+# pinned from the base ref and its import list is an allow-list (#4828) — and the sibling copy
+# must not grade a different predicate than this one.
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_object_id(sha: str) -> bool:
+    """Whether the recorded value is an OBJECT ID — not merely a valid revision.
+
+    ⛔ #11057 review P1: `cat-file -e <rev>` and `merge-base --is-ancestor <rev> <ref>` accept
+    ANY revision, so a REF NAME answers BOTH provenance questions "yes" (the object resolves,
+    and a branch is its own ancestor). The gate would then report a record verified while it
+    names no commit at all, and `render` would publish `Cut against main`. Refuse the shape.
+    """
+    return 7 <= len(sha) <= 40 and all(c in _HEX for c in sha)
 
 
 def _provenance_problems(
@@ -346,6 +376,17 @@ def _provenance_problems(
     sha = str(doc.get("cut_at_commit") or "")
     if not sha:
         return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
+    if not _is_object_id(sha):
+        # #11057 review P1: a REF NAME passes every probe below (a ref resolves, and a branch
+        # is its own ancestor), so this copy of the gate would verify a record naming no
+        # commit. Clone-shape independent ⇒ a PROVEN defect in both arms.
+        return [
+            f"`cut_at_commit` {sha!r} is not an OBJECT ID (a 7-40 char hex commit sha) but a "
+            "valid git revision, so every probe below answers `yes` for it — a ref never "
+            "resolves to the commit the baseline was cut against, and a branch is an "
+            "ancestor of itself. Re-cut with the commit id (`cut --commit <sha-in-main>`), "
+            "never a ref name"
+        ], None
 
     def cannot_answer(question: str) -> tuple[list[str], str | None]:
         message = (
@@ -370,7 +411,18 @@ def _provenance_problems(
         ], None
     in_history = _on_default_branch(sha, root)
     if in_history is None:
-        return cannot_answer("is in the default branch's history")
+        # Names BOTH causes, because they have different remedies (#11057 review P2):
+        # truncated history needs `--unshallow`, a ref merely behind the record needs a fetch.
+        if strict:
+            return cannot_answer("is in the default branch's history")
+        return [], (
+            f"`cut_at_commit` {sha} is UNPROVABLE in this checkout: it cannot answer whether "
+            "the commit is in the default branch's history. Either history is truncated "
+            "(shallow or partial clone), or the default-branch ref is only as fresh as the "
+            "last fetch and is BEHIND the record — an ambiguous state, never proof of "
+            "absence. Not a verdict on the record — `git fetch origin` (and "
+            "`git fetch --unshallow` if shallow) and re-run to check it"
+        )
     if in_history is False:
         ref = _default_branch_ref(root) or "the default branch"
         return [

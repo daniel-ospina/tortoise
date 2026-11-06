@@ -3150,6 +3150,124 @@ def test_the_guard_grades_the_same_two_questions_from_its_own_copy(tmp_path):
     problems, _ = guard._provenance_problems(doc)
     assert problems and "does not resolve" in problems[0], problems
 
+    # #11057 review P1, the pinned copy: a REF NAME passes every probe (a branch is its own
+    # ancestor), so this copy must refuse the SHAPE before it probes anything.
+    doc["cut_at_commit"] = "main"
+    problems, cannot = guard._provenance_problems(doc)
+    assert problems and "not an OBJECT ID" in problems[0], (problems, cannot)
+    assert cannot is None, "a malformed record is a PROVEN defect, never an \"unprovable\""
+
+
+def test_a_ref_name_is_not_a_cut_commit_even_when_every_probe_says_yes(checker, tmp_path, monkeypatch):
+    """#11057 review P1 — the gate accepted a REF NAME and reported the record VERIFIED.
+
+    `cut_at_commit: main` is a valid REVISION, so `git cat-file -e 'main^{commit}'` and
+    `git merge-base --is-ancestor main <ref>` both exit 0 — measured on a scratch repo, and
+    structurally so: a branch is its own ancestor. The probes are injected as `True` here,
+    which is exactly what the real ones answer for `main`, so the pre-fix code returned `[]`
+    and exited 0 over a record that names NO COMMIT AT ALL — and `cmd_render` published
+    `Cut against main` to `docs/product/mcp-sdk-surface.md` as the commit it was cut from.
+    The refusal must precede the probes, because a probe is what cannot tell a ref from a sha.
+    """
+    doc = _manifest()
+    doc["cut_at_commit"] = "main"
+    consulted: list[str] = []
+    monkeypatch.setattr(
+        checker, "commit_present", lambda sha, root=None: consulted.append("resolve") or True
+    )
+    monkeypatch.setattr(
+        checker, "on_default_branch", lambda sha, root=None: consulted.append("reach") or True
+    )
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 1, "a `cut_at_commit` naming a REF, not a commit, did not red the check"
+    assert "not an OBJECT ID" in out and "'main'" in out, out
+    assert consulted == [], (
+        "the shape refusal must run BEFORE the probes — both of them answer `yes` for a ref, "
+        f"which is the whole defect (probes consulted: {consulted})"
+    )
+
+
+def test_the_cut_refuses_to_record_a_ref_name(tmp_path, monkeypatch, capsys):
+    """#11057 review P1's WRITE half: `cut --commit` was never validated.
+
+    `cmd_cut` wrote `commit or $(git rev-parse HEAD)` verbatim, so `cut --commit main` landed
+    exactly the record the gate above now refuses — and nothing on the way in said so. A gate
+    at read time is the backstop; a refusal at write time is what stops a broken baseline
+    being committed in the first place.
+    """
+    sm = _load_manifest_tool()
+    target = tmp_path / "surface-manifest.yml"
+    monkeypatch.setattr(sm, "MANIFEST_FILE", target)
+    rc = sm.cmd_cut(argparse.Namespace(commit="origin/main", allow_approval_reset=False))
+    assert rc == 1, "`cut --commit <ref>` was accepted and would record a ref as the cut commit"
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "not an object id" in out, out
+    assert not target.exists(), "the refused cut still wrote a baseline"
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_a_stale_default_branch_ref_is_unprovable_while_a_diverged_commit_is_still_a_defect(tmp_path):
+    """#11057 review P2 — a LAGGING `origin/main` produced a false red with a false reason.
+
+    Measured on a scratch repo, the way a reviewer's clone behaves: with
+    `refs/remotes/origin/main` one commit BEHIND a commit that IS on main's tip, the forward
+    probe exits 1, and the pre-fix code returned `False` — which `check` renders as "lives
+    only on a lane branch … correct the field", i.e. it tells a reader to hand-edit a CORRECT
+    record. A remote-tracking ref is only as fresh as the last fetch.
+
+    The reverse question separates that ambiguity from real absence, and the second half of
+    this test is what keeps the F1 gate sharp: a commit genuinely off the default branch
+    (neither side an ancestor) must STILL answer `False`, or the protection this PR adds for
+    a lane SHA that will strand `main` would be gone.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f").write_text("a\n")
+    _git(repo, "add", "f")
+    _git(repo, "commit", "-qm", "A")
+    a = _git(repo, "rev-parse", "HEAD")
+    (repo / "f").write_text("b\n")
+    _git(repo, "commit", "-qam", "B")
+    b = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "lane", a)  # a lane commit carrying none of B
+    (repo / "g").write_text("c\n")
+    _git(repo, "add", "g")
+    _git(repo, "commit", "-qm", "D")
+    d = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+
+    sm = _load_manifest_tool()
+    guard = _load_guard()
+
+    # STALE: origin/main is A, the recorded commit B is on main's tip. Pre-fix: `False` + a
+    # message telling the reader to correct a correct record.
+    _git(repo, "update-ref", "refs/remotes/origin/main", a)
+    assert sm.on_default_branch(b, root=repo) is None, (
+        "a default-branch ref BEHIND a correct record must be UNPROVABLE, not a false "
+        "`not on main` — that red tells the reader to hand-edit a correct record"
+    )
+    assert guard._on_default_branch(b, root=repo) is None, (
+        "the PINNED gate copy must answer the stale-ref case the same way — it is the arm a "
+        "PR cannot edit, so a divergence between the copies is a bypass"
+    )
+
+    # DIVERGED: origin/main is B, the record is D, and neither is an ancestor of the other.
+    # This is a proven defect and must stay one (#11057 F1).
+    _git(repo, "update-ref", "refs/remotes/origin/main", b)
+    assert sm.on_default_branch(d, root=repo) is False, (
+        "a commit genuinely off the default branch must STILL be a proven defect — this is "
+        "the arm that reds a lane SHA before it strands `main`"
+    )
+    assert guard._on_default_branch(d, root=repo) is False
+
 
 def test_the_render_refuses_instead_of_tracing(tmp_path, monkeypatch, capsys):
     """`cmd_render` indexed `family_rank` / `cut_at_commit` with no guard at all."""
@@ -3463,7 +3581,9 @@ def test_cmd_cut_is_actually_wired_to_carry_the_recorded_fields(tmp_path, monkey
     monkeypatch.setattr(sm, "MANIFEST_FILE", out)
     monkeypatch.setattr(sm, "RENDERED_FILE", _render_scratch())
     try:
-        assert sm.cmd_cut(argparse.Namespace(commit="test")) == 0
+        # A real OBJECT ID, because `cut` now refuses a `--commit` that is not one (#11057
+        # review P1). This test pins the response_fields wiring, not the flag's acceptance.
+        assert sm.cmd_cut(argparse.Namespace(commit="af36e9240f30cf7f3ec37f1d82a18a91d45c08e0")) == 0
         written = yaml.safe_load(out.read_text())
     finally:
         out.unlink(missing_ok=True)

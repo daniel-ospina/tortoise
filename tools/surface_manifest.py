@@ -418,9 +418,17 @@ def on_default_branch(sha: str, root: Path | None = None) -> bool | None:
     The question that survives the merge is ANCESTRY — a squash-merged lane commit is
     neither present nor an ancestor, while a `main` commit stays an ancestor forever.
 
-    `None` (cannot answer) for a shallow checkout or a missing default-branch ref: truncated
-    history makes `merge-base --is-ancestor` exit 1 rather than complain, and a false "not on
-    main" would red a correct record.
+    `None` (cannot answer) for a shallow checkout, a missing default-branch ref, or a ref that
+    is BEHIND the record: truncated history makes `merge-base --is-ancestor` exit 1 rather than
+    complain, and a false "not on main" would red a correct record.
+
+    ⛔ #11057 review P2: `exit 1` is NOT by itself proof of absence. A remote-tracking ref is
+    only as fresh as the last fetch, so on a reviewer's clone whose `origin/main` lags, a commit
+    that IS on `main`'s tip answers 1 here — and the caller renders that as "lives only on a lane
+    branch … correct the field", i.e. it tells a reader to hand-edit a CORRECT record. The
+    discriminator is the reverse question: if the ref is an ancestor of the record, the record is
+    AHEAD of the ref, which is equally consistent with a stale ref and with an unmerged lane
+    commit. That is ambiguous, so it is `None` (`git fetch` and re-run), never `False`.
     """
     if is_shallow(root) is not False:
         return None
@@ -439,9 +447,37 @@ def on_default_branch(sha: str, root: Path | None = None) -> bool | None:
         return None
     if probe.returncode == 0:
         return True
-    if probe.returncode == 1:
-        return False
-    return None
+    if probe.returncode != 1:
+        return None
+    # Ahead of the ref ⇒ the ref is stale or the commit is unmerged. Both answer "fetch first".
+    try:
+        behind = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ref, sha],
+            cwd=where, capture_output=True, text=True, env=_GIT_ENV,
+        )
+    except (OSError, ValueError):
+        return None
+    return None if behind.returncode == 0 else False
+
+
+# A commit sha, not a revision expression. Deliberately hand-rolled rather than `re`: the
+# pinned copy of this gate (tools/surface-guard.py) may not import beyond its allow-list, and
+# two copies that share one predicate must not disagree about it.
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_object_id(sha: str) -> bool:
+    """Whether the recorded value is an OBJECT ID — not merely a valid revision.
+
+    ⛔ #11057 review P1: `cat-file -e <rev>` and `merge-base --is-ancestor <rev> <ref>` accept
+    ANY revision expression, so a REF NAME (`main`, `origin/main`, `HEAD~1`, a tag) answers BOTH
+    provenance questions "yes": the object resolves, and a branch is always an ancestor of
+    itself. `provenance_report` then returns no problem while naming no commit at all, and
+    `cmd_render` publishes `Cut against main` to `docs/product/mcp-sdk-surface.md`. It is
+    reachable honestly — `cmd_cut` writes `--commit` verbatim. So the field is refused unless it
+    is a hex OID: that is the one shape whose answer cannot move under the record.
+    """
+    return 7 <= len(sha) <= 40 and all(c in _HEX for c in sha)
 
 
 def _unprovable(sha: str, question: str) -> str:
@@ -451,6 +487,24 @@ def _unprovable(sha: str, question: str) -> str:
         f"clone): it cannot answer whether the commit {question}. Not a verdict on the "
         "record — re-run with full history (`git fetch --unshallow`, or `fetch-depth: 0`) "
         "to check it"
+    )
+
+
+def _unprovable_ancestry(sha: str, ref: str) -> str:
+    """The ancestry arm's "cannot answer", naming BOTH causes and their two remedies.
+
+    Two different states produce this `None` and they are not fixed the same way: a truncated
+    clone needs `--unshallow`, while a remote-tracking ref that is merely BEHIND the record needs
+    `git fetch origin`. Naming only the shallow one is how #11057 review P2's false red got read
+    as a defect in a CORRECT record.
+    """
+    return (
+        f"`cut_at_commit` {sha} is UNPROVABLE in this checkout: it cannot answer whether the "
+        f"commit is in the default branch's history (`{ref}`). Either history is truncated "
+        "(shallow or partial clone), or the ref is only as fresh as the last fetch and is "
+        f"BEHIND the record — `{ref}` being an ancestor of it is ambiguous between the two, "
+        "never proof of absence. Not a verdict on the record — `git fetch origin` (and "
+        "`git fetch --unshallow` if shallow) and re-run to check it"
     )
 
 
@@ -488,6 +542,18 @@ def provenance_report(
     sha = str(doc.get("cut_at_commit") or "")
     if not sha:
         return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
+    if not _is_object_id(sha):
+        # #11057 review P1: a REF NAME is a valid revision, so both probes answer "yes" for
+        # it and this function would verify a record that names no commit. Clone-shape
+        # independent, so it is a PROVEN defect in both arms (never an "unprovable").
+        return [
+            f"`cut_at_commit` {sha!r} is not an OBJECT ID (a 7-40 char hex commit sha) but a "
+            "valid git revision, so every probe below answers `yes` for it — a ref never "
+            "resolves to the commit this baseline was cut against, and a branch is an "
+            "ancestor of itself, so the record would read as verified while naming no "
+            "commit at all. Record the commit id: `cut --commit <sha-in-main>` (or "
+            "`git rev-parse HEAD`), never a ref name"
+        ], None
     probe = commit_present if resolve is None else resolve
     reach = on_default_branch if reachable is None else reachable
 
@@ -508,7 +574,9 @@ def provenance_report(
         ], None
     in_history = reach(sha)
     if in_history is None:
-        return _cannot_answer(_unprovable(sha, "is in the default branch's history"))
+        return _cannot_answer(
+            _unprovable_ancestry(sha, default_branch_ref() or "the default branch")
+        )
     if in_history is False:
         ref = default_branch_ref() or "the default branch"
         return [
@@ -1785,6 +1853,20 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 
 
 def cmd_cut(args: argparse.Namespace) -> int:
+    # ⛔ #11057 review P1: `--commit` was written into the record with NO validation, so
+    # `cut --commit main` landed a record that `check` could not distinguish from a verified
+    # one — a ref resolves, and a branch is its own ancestor. The gate refuses the shape at
+    # read time; refusing it at WRITE time is what stops a broken baseline being committed
+    # in the first place.
+    recorded = str(getattr(args, "commit", None) or "")
+    if recorded and not _is_object_id(recorded):
+        print(f"::error::--commit {recorded!r} is not an object id")
+        print(
+            f"REFUSED `--commit` must be a commit sha (7-40 hex), not a revision: {recorded!r} "
+            "resolves, but recording it would name no commit and the baseline would publish "
+            "it as its cut point. Use `--commit $(git rev-parse <rev>)`."
+        )
+        return 1
     try:
         doc = build_doc(args.commit)
     except SurfaceEvidenceUnreadable as exc:
@@ -2821,7 +2903,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_cut = sub.add_parser("cut", help="declare->manifest, once, by a human")
-    p_cut.add_argument("--commit", help="the commit to cut the baseline at")
+    p_cut.add_argument("--commit", help="the commit sha (7-40 hex) to cut the baseline at")
     p_cut.add_argument(
         "--allow-approval-reset",
         action="store_true",
