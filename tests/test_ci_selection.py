@@ -11474,7 +11474,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert _path_of(pip_restore).strip() == "~/.cache/pip", (
         f"the pip restore reads {_path_of(pip_restore).strip()!r}, not "
         "`~/.cache/pip`. `path` is part of the cache's VERSION, so the entry the "
-        "four writer jobs produce can never match it — a permanent MISS with the "
+        "three writer jobs produce can never match it — a permanent MISS with the "
         "step green, which is a cold 3.6 GB torch download on every shard "
         "(#7612 reverted, #11063 cycle 5 finding 2).")
     assert pip_restore.get("continue-on-error") is True, (
