@@ -3480,9 +3480,12 @@ operator who read the line above as "CI defends this" would never run it.
 >   database"** — this file's own `migrations_head` row says so in as many words: the value
 >   is *"the highest numeric-prefixed `supabase/migrations/*.sql` file this IMAGE CARRIES"*, and
 >   *"It is NOT 'which migration has been APPLIED to the database'"*. The applied set is a database
->   fact, read from `supabase_migrations.schema_migrations` — and it was **not** read here, so it is
->   **not** claimed. (The same applies to the 2026-11-05 decision's own third proof, *"the migrations
->   visible in `supabase_migrations`"* — that proof has not been collected.)
+>   fact, read from `supabase_migrations.schema_migrations` — and it was **not** read AT THAT
+>   `/health` READING, so it is not claimed there. (⛔ **Not the 2026-11-05 decision's own proof,
+>   which is collected:** its proof list is *"a written row read back, the migrations visible in
+>   `supabase_migrations`, a deploy run reaching green"*, and the SECOND of the three is precisely
+>   the ledger read reported in the next bullet — so that proof IS held. The THIRD, *"a deploy run
+>   reaching green"*, is the one this section does not claim.)
 > - **Whether they are APPLIED has a measurement too, and calling it "unmeasured" would be the same
 >   defect one layer down.** The repo's own fail-closed drift gate, run **2026-11-03T18:56:04Z**
 >   (run `41694722380`, quoted in `#9548` comment

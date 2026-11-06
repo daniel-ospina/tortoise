@@ -7601,44 +7601,26 @@ tier1:
 # surface's own entry, which no docs-only diff can reach. `docs/` is in
 # NON_PYTHON_PREFIXES and none of the three matches a SOURCE_PATTERNS row, so a
 # diff touching only one of them filters to `changed == []` and takes the
-# docs-only early return: tier1 ONLY. So its runbook pin
-# (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which requires the
-# §9 drill row to still name a `captured` session and a `direct` DSN), its 09
-# anchor and its 04 sentence were ASLEEP on the only diffs that can break them —
-# `test_record_schema_placement.py` now reads TWO doc paths that select NO
-# surface at all — `docs/infra-runbook.md` (the §9 drill row)
-# and `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
-# (the `_ARMED_SOURCE_OF_TRUTH` anchors) — while its only registration is the
-# `core` surface's own entry, which no docs-only diff can reach. `docs/` is in
-# NON_PYTHON_PREFIXES and neither path matches a SOURCE_PATTERNS row, so a
-# runbook-only OR 09-only diff filters to `changed == []` and takes the docs-only
-# early return: tier1 ONLY. Measured on the authoring tree BEFORE this entry
-# (`tools.ci_selection.select`): `[docs/infra-runbook.md]` → `surfaces=[]`, pin
-# NOT selected; same for the 09 path. (The tier-1 COUNT is not load-bearing and
-# grows whenever `main` adds a tier1 file — re-measure it rather than trusting a
-# number here. What matters is that the pin becomes SELECTED once the entry below
-# is in.) So its runbook pin
-# (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`, which
-# requires the §9 drill row to still name a `captured` session and a `direct`
-# DSN) and its 09 anchor were ASLEEP on the only diffs that can break them —
-# delete `captured`/`direct` from that row, or drop the 09 arming anchor, and the
-# PR merges green while 08 §R8 silently stops agreeing with the runbook it is
-# derived from (#4309 silent-drop class; the #8614 / #9548 shape one file over).
-# Measured (`tools.ci_selection.select`, on the authoring tree BEFORE this entry):
-# each of the three paths → `surfaces=[]`, pin NOT selected; pin SELECTED once
-# the entry below is in. (The count is not restated: it grows whenever `main`
-# adds a tier1 file, and a copied figure is what went stale here before —
-# `tools/ci_selection.py` carries that rule itself. Re-measure; do not read a
-# number.)
-# A `core` registration cannot help: `select()` emits a surface's test files
-# only for a surface it MATCHED, and a docs-only diff matches none — it takes the
-# `if not changed:` early return, whose `test_files` is the tier-1 set and
-# nothing else, so no surface's `test_files` is ever reached. (Named by its
-# mechanism, not a line number: this parenthetical used to pin
-# `tools/ci_selection.py:2039-2041`, a range that had since moved onto an
-# unrelated comment — the decay mode `3443ce66c` corrected across this PR. The
-# `core` registration this comment first cited by line number drifted the same
-# way inside this PR, which is why it is now named by its mechanism too.)
+# docs-only early return: tier1 ONLY, and `select()` emits a surface's test files
+# only for a surface it MATCHED — so no surface's `test_files` is ever reached.
+# So its runbook pin (`test_the_epic_r8_drill_blocker_agrees_with_the_runbook`,
+# which requires the §9 drill row to still name a `captured` session and a
+# `direct` DSN), its 09 anchor and its 04 sentence were ASLEEP on the only diffs
+# that can break them: delete `captured`/`direct` from that row, drop the 09
+# arming anchor, or edit 04's sentence, and the PR merges green while 08 §R8
+# silently stops agreeing with the runbook it is derived from (#4309 silent-drop
+# class; the #8614 / #9548 shape one file over). This is pinned by
+# tests/test_ci_selection.py::test_the_record_schema_placement_pins_run_on_a_doc_only_diff,
+# which asserts all THREE paths select no surface AND select this file.
+# Measured (`tools.ci_selection.select`, authoring tree BEFORE this entry): each
+# of the three -> `surfaces=[]`, pin NOT selected; pin SELECTED once the entry
+# below is in. (The tier-1 COUNT and every character offset are deliberately NOT
+# restated: a copied figure is what went stale here before, twice — re-measure
+# instead. `tools/ci_selection.py` carries that rule itself.) Named by mechanism,
+# not by line number, for the same reason: this comment used to pin
+# `tools/ci_selection.py:2039-2041` and, later, the `core` registration's own
+# line — both had moved onto unrelated text by the next merge (the decay mode
+# `3443ce66c` corrected across this PR).
 # Hermetic — doc + migration scans, no graph,
 # no DB, measured weight 0.2 in the durations map — so tier1 is the correct lane.
 # Pinned by tests/test_ci_selection.py::
