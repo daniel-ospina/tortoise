@@ -46,8 +46,8 @@ REFUSED"* would attribute the refusal to the verdict word and make a licence wid
 look harmless. The day the record can serve, the licence populates and this executor
 becomes reachable without a second decision.
 
-⛔ FOUR INDEPENDENT GATES, and each one alone refuses
-----------------------------------------------------
+⛔ FIVE INDEPENDENT GATES, and each one alone refuses
+-----------------------------------------------------
 1. **The census** — the verdict must be in the allow-list ``{"PLAN", "CLEAN"}``.
    ⛔ An ALLOW-LIST, not "not refused": ``refused`` is True only for
    ``REFUSED``/``UNBOUNDED``, so a deny-list would arm the delete path for a verdict this
@@ -73,6 +73,13 @@ becomes reachable without a second decision.
    keyed on the id alone would take a node created inside the probe→delete window
    that no probe ever saw. ``key_prop`` names the property the key lives in, and a
    candidate with no key cannot be deleted at all.
+5. **The graph** — the handle being deleted from must NAME the graph the census
+   measured (``Assessment.state.graph_name``). The binding is required one hop
+   upstream (``load_parity_report(graph_name=…)``, #11097) because *"a CLEAN census of
+   graph A licensed evicting graph B"*; this module is the half that DELETES, so it
+   re-checks the binding at the last hop instead of trusting the caller to have kept
+   the assessment and the handle together. A handle that names no graph, or a
+   different one, is a REFUSAL.
 
 DRY RUN IS THE DEFAULT. ``dry_run=True`` returns the plan — which nodes, in which
 order, and which were held back and why — and emits **no** mutating statement. It
@@ -548,7 +555,15 @@ def evict(
             count = int(entry.get("nodes") or 0)
         except (TypeError, ValueError):
             count = 0
-        licensed[name] = max(0, count)
+        # ⛔ MIN, NOT LAST-WINS. A plan carrying two entries for the same population
+        # (a hand-built plan, or two censuses folded together) must TIGHTEN to the
+        # smaller proven count. Overwriting would let the second entry widen a licence
+        # the first had already bounded — a fail-open aggregate in the one field that
+        # IS the licence.
+        proven = max(0, count)
+        licensed[name] = (
+            proven if name not in licensed else min(licensed[name], proven)
+        )
     ceiling = assessment.state.bound_bytes
 
     def _refuse(
@@ -607,6 +622,36 @@ def evict(
             f"not be swept"
         )
 
+    # ⛔ GATE 5 — THE GRAPH. The licence is scoped to a graph, so the handle this pass
+    # will delete from must be THAT graph. Checked before anything is measured, because
+    # every reading below (the node total, the resident bytes) and the licence itself
+    # are assertions about the graph the census saw.
+    #
+    # ⚠️ A handle with no readable `name` is REFUSED, not trusted. A duck-typed stub is
+    # exactly the handle most likely to be pointed at the wrong graph, and "I cannot
+    # tell" is not "it matches" — the same reason `_read_statement` refuses a handle
+    # without `ro_query` instead of falling back to the creating verb.
+    measured_graph = assessment.state.graph_name
+    actual_graph = getattr(graph, "name", None)
+    if not isinstance(measured_graph, str) or not measured_graph:
+        return _refuse(
+            "the census did not bind a graph name, so this pass cannot prove its "
+            "licence applies to any graph — a cache node may only be evicted from the "
+            "graph the instrument measured"
+        )
+    if not isinstance(actual_graph, str) or not actual_graph:
+        return _refuse(
+            f"the graph handle does not name its graph (got {actual_graph!r}), so it "
+            f"cannot be proven to be the graph the census measured "
+            f"({measured_graph!r}) — a delete needs a proven target, not an assumed one"
+        )
+    if actual_graph != measured_graph:
+        return _refuse(
+            f"this assessment is a licence for graph {measured_graph!r} but the handle "
+            f"is graph {actual_graph!r} — a census of one graph may not evict another "
+            f"(#10976: the record proof is earned per graph, not globally)"
+        )
+
     # ⛔ AN UNREADABLE STORE IS A REFUSAL, NOT A TRACEBACK. This module's contract is
     # "never raise" for a store fault (`_resident_bytes` below already returns None
     # rather than a fabricated 0 for exactly this reason), so `node_total` — the one
@@ -624,7 +669,18 @@ def evict(
     before_bytes = _resident_bytes(client)
 
     try:
-        resolved = policy or EvictionPolicy.resolve()
+        resolved = policy if policy is not None else EvictionPolicy.resolve()
+        # ⛔ isinstance, not duck-typing. `__post_init__`'s floors are what stop a bound
+        # of zero from emptying the cache one batch at a time, and an object that merely
+        # LOOKS like a policy (`SimpleNamespace(max_nodes=0, …)`) skips them entirely.
+        # Inside a try so the object/type mismatch is this module's REFUSAL, not a
+        # TypeError escaping the sweep.
+        if not isinstance(resolved, EvictionPolicy):
+            raise EvictionConfigError(
+                f"policy must be an EvictionPolicy, got {type(resolved).__name__} — an "
+                f"object that only resembles one skips the bound validation the bounds"
+                f" depend on"
+            )
         quote = _key_property(key_prop)
     except EvictionConfigError as exc:
         return _refuse(
