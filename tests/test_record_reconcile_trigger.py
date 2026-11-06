@@ -416,13 +416,20 @@ def test_a_partial_declaration_reports_its_coverage():
     assert result.as_dict()["declaration_coverage"] == COVERAGE_PARTIAL
 
 
-def test_the_UNDECLARED_second_writer_population_is_reported_but_never_divergence():
-    """The FOURTH population: named in ``graph_only``, and still ``clean``.
+def test_the_UNDECLARED_second_writer_population_is_reported_never_a_mismatch():
+    """The FOURTH population: named in ``graph_only``, never a ``field_mismatches`` entry.
+
+    ⛔ This pin feeds ONE of that population's TWO shapes — a property a SECOND
+    WRITER put on a **placed** node — and that shape's pair reads ``clean``. The
+    other shape, the same kind of property on a **cache-only node the record does
+    not own at all**, is an ``extra_in_cache`` divergence and reads DIVERGENT
+    (measured; the census in ``record_reconcile``'s module docstring states both,
+    and the pin name says only what is true of both: bucketed, never compared).
 
     Three omission classes are DECLARED (§17.5's cache-owned scalars, the
     §9.1/D1 declined pair, the NOT-PROJECTABLE columns); a property a SECOND
-    WRITER put on a placed node is named by nothing, which is why the census is
-    FOUR populations. The module docstring's own wording is "THREE DECLARED
+    WRITER put on a node — either shape — is named by nothing, which is why the
+    census is FOUR populations. The module docstring's own wording is "THREE DECLARED
     classes arrive here — (b) is declared by nothing", and ``graph_only_total``'s
     is "THREE DECLARED omission classes plus one undeclared population" — each
     quoted from its own home rather than paraphrased into one attributed to the
