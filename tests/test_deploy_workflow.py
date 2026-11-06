@@ -2501,27 +2501,32 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # witness this bar exists to add (#9548's `record_writes_applied`) was one it
     # omitted, leaving the delta it demands uncomputable from the reading it
     # prescribed (#9548 review P2).
-    # ⛔ Anchored to the BOLD imperative and paired with a negation guard: a bare
-    # `re.search` on the fragment matches inside "… **never** read every record
-    # counter BEFORE the capture …", i.e. a runbook that FORBIDS the baseline
-    # passed a pin whose own message promises it demands one (#9548 review P3,
-    # measured). The sibling clauses in this test are mutation-proven against a
-    # meaning inversion; this one is too.
-    assert re.search(
+    # ⛔ Anchored to the BOLD imperative and paired with a NEGATION GUARD: `re.search`
+    # on the bare fragment matched inside a sentence that FORBIDS the baseline, so a
+    # runbook saying "⛔ Do not **read every record counter BEFORE the capture and
+    # again after**" stayed GREEN under a pin whose own message promises it demands
+    # one — measured by applying exactly that mutation (#9548 review P2). The bold
+    # anchor alone does not fix it: the negation sits before the bold span. So the
+    # sentence the imperative lives in is negated-checked, case-insensitively and by
+    # clause rather than by a fixed word list at a fixed offset.
+    imperative = re.search(
         r"\*\*read every record counter BEFORE\s+the capture and again after\*\*", flat
-    ), (
+    )
+    assert imperative, (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
         "process's life then reads as this capture's growth — or it names a "
         "subset of the counters the presence list then requires"
     )
-    assert not re.search(
-        r"(never|do not|don't|need not)\s+(\*\*)?read every record counter", flat
-    ), (
-        "the bar NEGATES the baseline it requires elsewhere — an operator "
-        "following the negated sentence takes no pre-capture reading, and the "
-        "fragment assertion above still matches its tail"
-    )
+    # The sentence containing it, from the last sentence boundary before it.
+    sentence = flat[max(0, flat.rfind(".", 0, imperative.start()) + 1):imperative.end()].lower()
+    for negation in ("never", "do not", "don't", "must not", "should not",
+                     "need not", "not required", "not necessary", "no need"):
+        assert negation not in sentence, (
+            f"the baseline's own sentence NEGATES it ({negation!r}) — an operator "
+            "following that sentence takes no pre-capture reading, so the 'growth' "
+            f"the bar requires has no referent: {sentence.strip()!r}"
+        )
     assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "
         "told nothing, and that state is the whole point of the section"
