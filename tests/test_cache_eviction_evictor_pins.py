@@ -30,6 +30,7 @@ from tortoise.cache_evictor import (
     Candidate,
     EvictionConfigError,
     EvictionPolicy,
+    ReadLeases,
     evict,
 )
 
@@ -59,8 +60,13 @@ class _FakeGraph:
         peer_takes: int = 0,
         fail_delete: bool = False,
         name: str | None = "g",
+        fail_first_count: bool = False,
     ) -> None:
         self.nodes = nodes
+        #: Raise on the FIRST node count (the pre-pass read), to pin that a store fault
+        #: there is a REFUSAL returning a report rather than an exception out of `evict`.
+        self.fail_first_count = fail_first_count
+        self._counted = False
         #: The graph this handle SAYS it is. `evict`'s gate 5 refuses a handle that
         #: cannot name its graph, or names one other than the census's — so the fake
         #: must model the identity every real handle carries (`falkordb.Graph.name`).
@@ -90,6 +96,10 @@ class _FakeGraph:
     def query(self, statement: str, params=None):
         self.statements.append(statement)
         if "MATCH (n) RETURN count(n)" in statement:
+            if self.fail_first_count and not self._counted:
+                self._counted = True
+                raise RuntimeError("pre-pass count transport blip")
+            self._counted = True
             if self.fail_recount and self._deleted_once:
                 raise RuntimeError("transport blip")
             return _Result([[self.nodes]])
@@ -950,3 +960,92 @@ def test_a_duplicated_licence_entry_takes_the_smaller_proven_count():
     assert len(report.deleted) == 2, (
         f"evicted {len(report.deleted)} on a licence whose smaller proof was 2"
     )
+
+
+# --------------------------------------------------------------------------------------
+# three gates the comment argues for and no test could fail (found by mutation)
+# --------------------------------------------------------------------------------------
+def test_a_store_fault_on_the_PRE_PASS_count_refuses_and_issues_nothing():
+    """⛔ `evict()` contracts "never raise" for a store fault. The pre-pass `node_total`
+    was the one mapping no test exercised: narrowing it to an exception that never fires
+    left the whole suite green, and a regression lets `ConnectionError`/`CacheReadError`
+    escape through the CLI's `try:/finally:` (which has no `except`) and out of `main()`
+    — exit 1, this file's USAGE code, "retry the FLAGS", for a store fault.
+    """
+    graph = _FakeGraph(fail_first_count=True)
+
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=1),
+    )
+
+    assert report.verdict == "REFUSED"
+    assert "could not be read" in report.reason, report.reason
+    assert graph.mutating == [], f"a refused pre-pass read mutated: {graph.mutating}"
+
+
+def test_a_lease_taken_DURING_the_probe_of_the_SAME_node_still_wins():
+    """⛔ The plan-time check is not enough — the comment says so; this is its pin.
+
+    The existing live case leases a DIFFERENT node than the one being probed, so the
+    plan-time check caught it and the pre-delete re-snapshot never fired: replacing
+    `holds = leases.held()` with `frozenset()` left every test green. Here the probe
+    acquires the lease for the candidate it is currently answering for, which only the
+    re-snapshot can honour.
+    """
+    leases = ReadLeases()
+    leased: set[int] = set()
+
+    def probing(candidate) -> bool:
+        if candidate.node_id == 0:
+            leases.acquire(0)          # the read starts INSIDE the probe→delete window
+            leased.add(0)
+        return True
+
+    graph = _FakeGraph()
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=probing, leases=leases, dry_run=False,
+        policy=EvictionPolicy(max_nodes=6, batch_size=10),
+    )
+
+    assert leased == {0}
+    assert 0 in [c.node_id for c in report.skipped_leased], report.skipped_leased
+    assert 0 not in [c.node_id for c in report.deleted], (
+        "a node leased DURING its own probe was deleted")
+
+
+def test_a_node_that_becomes_SERVABLE_leaves_the_held_list():
+    """⛔ Otherwise a node is DELETED while still listed as unservable.
+
+    `metric()["held_record_cannot_serve"]` would over-report and any monitor intersecting
+    `deleted` with `skipped_record_cannot_serve` — the probe's own `unservable_evicted`
+    pattern — raises a false alarm on the invariant that matters most. Disabling the arm
+    left the whole suite green.
+    """
+    seen: set[int] = set()
+
+    def probing(candidate) -> bool:
+        first = candidate.node_id not in seen
+        seen.add(candidate.node_id)
+        return not first              # unservable on pass 1, servable on pass 2
+
+    graph = _FakeGraph(nodes=10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=probing, dry_run=False,
+        policy=EvictionPolicy(max_nodes=5, batch_size=5, max_passes=3),
+    )
+
+    deleted_ids = {c.node_id for c in report.deleted}
+    held_ids = {c.node_id for c in report.skipped_record_cannot_serve}
+    assert deleted_ids, "the second pass evicted nothing, so the arm is not exercised"
+    assert not (deleted_ids & held_ids), (
+        f"deleted AND reported as unservable: {sorted(deleted_ids & held_ids)}")
