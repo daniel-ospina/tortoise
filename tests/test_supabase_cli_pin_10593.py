@@ -41,12 +41,14 @@ major versions change the config schema this repo commits.
 (`supabase start`/`db reset`, the local-auth harnesses) and its own review — pinning first restores
 delivery without betting production on an unvalidated config migration. This test is written so
 that the two stay coupled — but the coupling is on the **MAJOR**, not on the section name: v3 also
-consent-gates every hosted mutation and fails unattended without `--yes`, so a major-3 pin that
-merely loads the config would still apply nothing. Retiring the `[inbucket]` refusal therefore must
-not retire the guard: the ceiling below keeps refusing major 3 until a lane deliberately moves the
-pin. Both v3 prerequisites have LANDED (`#10896`'s rename, `#11104`'s consent flags), so the ceiling
-is no longer waiting on a missing capability — it is `#11100`'s ruling that the major moves in its
-own PR, with its own local validation.
+consent-gates every hosted mutation and fails unattended without `--yes`. Keying the ceiling on the
+MAJOR rather than on either SYMPTOM is what kept the guard alive through the migration — a ceiling
+that asked "does the config still declare `[inbucket]`?" went INERT the day `#11104` migrated the
+config, and one that asked "does every mutating command pass `--yes`?" is defeatable by a trailing
+comment, a `--yes=false`, or a `--yes` belonging to another command. Both v3 prerequisites have
+LANDED (`#10896`'s rename, `#11104`'s consent flags), so the ceiling is not waiting on a missing
+capability: it is `#11100`'s ruling that the major moves in its own PR, with its own local
+validation.
 """
 from __future__ import annotations
 
@@ -645,6 +647,51 @@ def test_a_construct_this_workflow_cannot_carry_is_refused() -> None:
     with pytest.raises(AssertionError, match=r"does not implement: an alias"):
         _requested_version(aliased)
 
+    # (d) ⛔ THE INDEX BOUND, proven (#11134 review P2). `end_mark.line` is the line of the first
+    # token AFTER the step — i.e. the NEXT step's first line — so a LINE range counts that whole
+    # neighbouring line as ours. `end_mark.index` does not. The shape below is LEGITIMATE: this
+    # step's pin is a plain literal, and the alias `*base` belongs to the step that FOLLOWS, whose
+    # first key is the `with:`-before-`uses:` shape this reader accepts elsewhere.
+    #
+    # Measured on this tree: the real index bound returns `_construct_refusals == []`; reverting the
+    # bound to `start.line <= key.line <= end.line` reports `an alias (`*base`) as the value of
+    # `with:` at line 247` and REFUSES the legitimate workflow while naming the wrong step. Without
+    # this case that reversion leaves the whole file green, so this is the only thing holding it.
+    STEP_HEAD = (
+        "      - uses: supabase/setup-cli@v1\n"
+        "        with:\n"
+        f"          version: {pin}\n"
+        "        env:\n"
+        "          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}\n"
+    )
+    assert STEP_HEAD in workflow, (
+        "the setup-cli step's canonical shape changed — update this mutation rather than "
+        "deleting the case"
+    )
+    neighbour = workflow.replace(
+        STEP_HEAD,
+        "      - uses: actions/checkout@v9\n"
+        "        with: &base\n"
+        "          version: 9.9.9\n"
+        + STEP_HEAD
+        + "      - with: *base\n"
+        "        uses: actions/setup-node@v4\n",
+        1,
+    )
+    assert "      - with: *base" in neighbour, "mutation (d) did not apply — vacuous"
+    assert f"          version: {pin}\n" in neighbour, (
+        "mutation (d) removed this step's own literal pin — the alias would then be the pin and "
+        "the case would be testing the hazard instead of the false block"
+    )
+    assert _construct_refusals(neighbour) == [], (
+        "an alias in the step that FOLLOWS the setup-cli step was refused: the bound is counting "
+        f"the neighbour's line — got {_construct_refusals(neighbour)!r}"
+    )
+    assert _violations(neighbour, CONFIG.read_text(encoding="utf-8")) == [], (
+        "a legitimate workflow with a literal pin was refused because of the next step's shape"
+    )
+    assert _requested_version(neighbour) == pin
+
 
 def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     """The pin must be the step's OWN single literal line.
@@ -682,6 +729,32 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     flow += f"\n      - uses: actions/setup-node@v4\n        with:\n          version: {pin}\n"
     with pytest.raises(AssertionError, match="not a literal"):
         _requested_version(flow)
+
+    # (a2) ⛔ THE WHOLE STEP ON ONE LINE (#11134 review P3). Case (a) keeps `- uses:` on its own
+    # line and flow-izes only `with:`, so the step still spans several lines and the block slice is
+    # non-empty with or without the widening in `_setup_cli_block`. THIS shape is the one that needs
+    # it: a one-line flow mapping starts AND ends on the same line, so without the widening the
+    # exclusive slice is empty and `_setup_cli_block` asserts out with "resolved to no source lines"
+    # — a FALSE diagnosis that blames the reader for a step it resolved perfectly.
+    #
+    # Measured on this tree: real code refuses with `not a literal`; removing the widening refuses
+    # with `no source lines`. Asserting the REASON is what makes this case red on that reversion —
+    # case (a) cannot, because it passes either way.
+    one_line = workflow.replace(
+        "      - uses: supabase/setup-cli@v1\n"
+        "        with:\n"
+        f"          version: {pin}\n"
+        "        env:\n"
+        "          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}\n",
+        f"      - {{uses: supabase/setup-cli@v1, with: {{version: {pin}}}}}\n",
+        1,
+    )
+    assert f"      - {{uses: supabase/setup-cli@v1, with: {{version: {pin}}}}}\n" in one_line, (
+        "mutation (a2) did not apply — vacuous. The canonical step shape changed; update this "
+        "mutation rather than deleting the case"
+    )
+    with pytest.raises(AssertionError, match="not a literal"):
+        _requested_version(one_line)
 
     # (b) two literal pins in the step must be refused, not silently resolved to one.
     duplicated = literal_pin.sub(lambda mm: f"{mm.group(1)}version: latest\n{mm.group(1)}version: {pin}", workflow, count=1)
@@ -835,7 +908,13 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
         1,
     ).replace(canonical, "        with: *pinned", 1)
     assert "        with: *pinned" in aliased_pin, "mutation (b) did not apply — vacuous"
-    with pytest.raises(AssertionError, match="alias"):
+    # ⛔ The `match` names the ARM, not the verb (#11134 review P2). `match="alias"` was satisfied
+    # by the LITERALS arm's prose — that message says "merge key, alias" while explaining what a
+    # construct could be — so DELETING the `AliasToken` scan left this case GREEN: PyYAML then
+    # follows the alias, resolves 9.9.9 from the unrelated step, `literals` comes back empty, and the
+    # literals arm raises a message that merely CONTAINS the word. "does not implement: an alias"
+    # appears in the construct refusal and nowhere else (the sibling case (c) uses the same key).
+    with pytest.raises(AssertionError, match=r"does not implement: an alias"):
         _requested_version(aliased_pin)
 
 
@@ -907,10 +986,13 @@ def test_a_case_variant_second_step_cannot_pin_a_different_major() -> None:
 def test_a_major_three_pin_is_refused_even_after_the_config_is_migrated() -> None:
     """This rename retires the config-load arm — the major-3 ceiling must survive it.
 
-    Measured before this arm existed: with the config migrated, mutating ONLY the pin to `3.0.0`
-    made this suite report `9 passed, 1 skipped` — green — over a workflow that passes no `--yes`,
-    i.e. over an applier that v3 consent-gates into applying zero migrations. That is the same
-    blast radius as #10593 through a different string, so the ceiling is keyed on the MAJOR.
+    Measured at the time — before this arm existed AND before `#11104` landed the consent flags: with
+    the config migrated, mutating ONLY the pin to `3.0.0` made this suite report `9 passed, 1 skipped`
+    — green — over a workflow that passed no `--yes`, i.e. over an applier that v3 consent-gates into
+    applying zero migrations. That is the same blast radius as #10593 through a different string, so
+    the ceiling is keyed on the MAJOR. (`--yes` has SINCE landed on `main`; the ceiling survives it
+    deliberately — `_violations`'s own message carries the operative reason, and that reason is
+    `#11100`'s ruling, not a missing flag. Read it there rather than here.)
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
     mutated = re.sub(r"(?m)^(\s*version:\s*).*$", r"\g<1>3.0.0", workflow, count=1)
