@@ -1688,26 +1688,42 @@ def _residual_region(text: str) -> str:
 #: round 4 `P2`, measured). ⚠️ This is a CLOSED list standing in for a clause
 #: boundary; a joiner not named here still joins. That residual is disclosed in
 #: `WHAT THIS CANNOT CATCH` rather than implied to be covered.
-_RESIDUAL_CLAUSE_SPLIT = r";|,?\s+(?:and|but|while|whereas|although|though|yet)\s+"
+_RESIDUAL_CLAUSE_SPLIT = (
+    r";|,?\s+(?:and|but|while|whereas|although|though|yet)\s+"
+    # ⛔ THE COORDINATOR MUST NOT BITE INSIDE A VERDICT'S OWN TEXT. `has yet to be
+    # closed` splits at `yet` and `anything but closed` at `but`; severing them put
+    # the two halves of `_RESIDUAL_CLOSED_VERDICT` in different segments, so after an
+    # honest `spelling` clause was removed and the survivors rejoined they never
+    # matched — a fail-open reachable by clause ORDER: `the SPELLING gap is open, and
+    # the half has yet to be closed, per the ADJACENCY row` was GREEN while the same
+    # claim with the anchor first was RED (#11258 review round 7 `P1`, measured).
+    r"(?!(?:to\s+be\s+closed|closed)\b)")
 
 def _match_is_honest_spelling_disclosure(sentence: str, match) -> bool:
     """Is `match` a closed verdict INSIDE an honest SPELLING disclosure?
 
-    ⛔ Spans, not clauses. The clause splitter severs these verdicts' own text
-    (`has yet to be closed` splits at `yet`), so a clause-scoped containment test
-    cannot find the honest clause's match — it does not exist. What does hold is the
-    TEXT: if the nearest `spelling` before the match is followed by class-anchor-
-    free prose up to the match, the verdict is about the still-open spelling class,
-    which is honest. `the SPELLING gap has yet to be closed, while the carve-out's
-    ADJACENCY half is CLOSED` passes; `the SPELLING gap is open, and the time-unit
-    half has yet to be closed` reds, because `time-unit` sits between them
-    (#11258 review round 6 `P2`, measured).
+    ⛔ CLAUSE CONTAINMENT, and that is only possible because the splitter no longer
+    bites inside these verdicts' own text (`has yet to be closed` used to split at
+    `yet`) — see `_RESIDUAL_CLAUSE_SPLIT`. The clause whose SPAN holds the match must
+    itself be an honest `spelling` disclosure: `the SPELLING gap has yet to be
+    closed, while the carve-out's ADJACENCY half is CLOSED` passes, and
+    `the SPELLING gap is open, and the half has yet to be closed, per the ADJACENCY
+    row` reds.
+
+    ⛔ IT WAS ONE-SIDED FOR A REVISION, and that was a FAIL-OPEN: the old test looked
+    BACKWARDS for `spelling` and only for an anchor before the match, so a verdict
+    whose anchor sat AFTER it read as an honest disclosure — one clause re-ordered,
+    `the half has yet to be closed, per the ADJACENCY row`, escaped the only guard
+    on "the row must not describe a CLOSED gap as open" (#11258 review round 7
+    `P1`, measured).
     """
-    head, low = sentence[:match.end()], sentence[:match.end()].lower()
-    at = low.rfind("spelling")
-    if at == -1:
-        return False
-    return not _RESIDUAL_CLASS_ANCHOR.search(head[at:match.start()])
+    start = 0
+    for part in re.split(f"({_RESIDUAL_CLAUSE_SPLIT})", sentence):
+        end = start + len(part)
+        if start <= match.start() < end or (start <= match.end() <= end):
+            return _is_honest_spelling(part)
+        start = end
+    return False
 
 
 def _residual_reopening_claims(text: str) -> list[str]:
@@ -2223,9 +2239,12 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "#11258 round-6 reviewer-measured 49, twenty-one deletions were permitted "
         "while `_RESIDUAL_CLOSED_VERDICT` is six shapes, so the whole arm plus every "
         "proof of it could be deleted with both tests GREEN.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 32, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 30, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
-        "list that can be deleted silently is not coverage")
+        "list that can be deleted silently is not coverage. ⚠️ Within two of the "
+        "current length on purpose: at `>= 22` against a 35-entry list THIRTEEN "
+        "deletions were free, so the honest closures this branch added could be "
+        "deleted with both tests GREEN (#11258 review round 7 `P2`, measured).")
     for required in (
             # the issue's own mutation, and the append-point arm
             "the ADJACENCY half is open again",
@@ -2242,9 +2261,25 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # permitted 21 deletions and the arm is 6.
             "the ADJACENCY gap was never closed.",
             "the time-unit half has yet to be closed",
-            "the ADJACENCY half is anything but closed.",):
-        assert required in _RESIDUAL_REOPENING_MUTATIONS, (
-            f"the proof list no longer carries {required!r} — that shape is the "
+            "the ADJACENCY half is anything but closed.",
+            # ⛔ AND ONE SHAPE PER ARM/PATTERN THAT HAS FEW EXCLUSIVE PROOFS. The
+            # round-6 fix covered `_RESIDUAL_CLOSED_VERDICT` and left the rest:
+            # `_SPELLING_FLOOR` had NO membership entry and exactly ONE exclusive
+            # proof, `\bunclosed\b` and the bare opening verb one each, so each
+            # could be deleted WITH its proof inside the floor's slack — and the
+            # first of those silently restores the round-3 `P1` (the honest waiver
+            # skipping the whole openness arm). All three measured GREEN/GREEN
+            # before these three lines (#11258 review round 7 `P1`).
+            "the SPELLING gap is open again.",
+            "the ADJACENCY result is unclosed",
+            "the carve-out reopens.",
+            # ⛔ THE OTHER DIRECTION NEEDS MEMBERSHIP TOO: without it every proof of
+            # this branch's own false-block fixes was deletable with zero red.
+            "the ADJACENCY half is not open.",
+            "the SPELLING gap has never been closed, and the ADJACENCY half is closed by the tables.",):
+        assert (required in _RESIDUAL_REOPENING_MUTATIONS
+                or required in _RESIDUAL_TRUTHFUL_STATEMENTS), (
+            f"the proof lists no longer carry {required!r} — that shape is the "
             "reason its arm exists; a lane reading this list must be able to run "
             "the shape, so deleting it is a silent coverage regression")
     text = (pathlib.Path(__file__).resolve().parent.parent
@@ -2288,7 +2323,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         assert sentence in _residual_region(mutated), (
             f"the fixture appended {sentence!r} OUTSIDE the region it tests — "
             "the mutation would prove nothing")
-        assert mutated.index(sentence) > mutated.index(old_bound) + len(old_bound) - len(sentence), (
+        assert mutated.index(sentence) >= mutated.index(old_bound) + len(old_bound), (
             f"the fixture appended {sentence!r} INSIDE the pre-#11223 `(d)` block "
             "— a mutation there proves nothing about the append point")
         if not _residual_reopening_claims(mutated):
