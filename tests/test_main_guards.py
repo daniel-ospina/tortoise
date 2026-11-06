@@ -226,6 +226,11 @@ def _run_guard_subprocess(argv, cwd, timeout=None):
     full_argv = [sys.executable, "-c", code]
     last = None
     timed_out = None
+    # ⛔ EACH ATTEMPT'S OUTCOME IS RECORDED AS IT HAPPENS (#11054 review P3), so
+    # the mixed-outcome message below can name the attempts in the order they
+    # actually occurred rather than assuming one. `outcomes[i]` describes
+    # attempt `i + 1`.
+    outcomes: list[str] = []
     if timeout is None:
         timeout = _guard_subprocess_budget()
     for _ in range(2):
@@ -238,27 +243,99 @@ def _run_guard_subprocess(argv, cwd, timeout=None):
             # exceed a tight timeout", so letting `TimeoutExpired` escape made
             # the retry cover only the failures that were already returning.
             timed_out = exc
+            outcomes.append(f"TIMED OUT after {timeout}s")
             continue
         if proc.returncode == 0:
             return proc
         last = proc
+        outcomes.append(f"failed (rc={proc.returncode})")
     if last is None and timed_out is not None:
         raise AssertionError(
             f"guard subprocess timed out after {timeout}s on BOTH attempts "
             f"(#3349: the budget is the embedded cold-load bound + "
             f"{_INGEST_WORK_ALLOWANCE_S}s of ingest work)")
-    # ⛔ A MIXED OUTCOME KEEPS BOTH HALVES (#11054 review P2). Attempt 1 returning
-    # non-zero and attempt 2 timing out is the #3349 shape — a loaded runner's
-    # slow spawn — and reporting only attempt 1's rc presents it to whoever
-    # triages the shard as an ordinary failure.
+    # ⛔ A MIXED OUTCOME KEEPS BOTH HALVES (#11054 review P2), IN THE ORDER THEY
+    # HAPPENED (#11054 review P3). There are TWO mixed shapes — a non-zero rc
+    # then a timeout, and a timeout then a non-zero rc (the second is the #3349
+    # shape: a loaded runner's slow spawn) — and a single hard-coded sentence
+    # spelled "failed (rc=N) on the first attempt and TIMED OUT … on the second"
+    # for both, so on timeout-then-failure it named the attempts in REVERSE and
+    # sent whoever triages the shard hunting a fast failure that never happened.
+    # The `AssertionError` was raised either way, which is why no other test
+    # observed it; the ordering is pinned by
+    # `test_the_mixed_outcome_message_names_each_attempt_in_the_order_it_happened`.
     if timed_out is not None:
         raise AssertionError(
-            f"guard subprocess failed (rc={last.returncode}) on the first "
-            f"attempt and TIMED OUT after {timeout}s on the second:\n"
+            "guard subprocess outcome differs between attempts — "
+            + " and ".join(
+                f"attempt {n} {outcome}"
+                for n, outcome in enumerate(outcomes, start=1))
+            + f" (per-attempt budget {timeout}s):\n"
             f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
     raise AssertionError(
         f"guard subprocess failed (rc={last.returncode}):\n"
         f"stdout: {last.stdout[-500:]}\nstderr: {last.stderr[-500:]}")
+
+
+def test_the_mixed_outcome_message_names_each_attempt_in_the_order_it_happened():
+    """#11054 review P3: the mixed-outcome sentence must not reverse the attempts.
+
+    ``_run_guard_subprocess`` retries once, so a mixed outcome has two shapes: a
+    non-zero rc then a timeout, and a timeout then a non-zero rc. The pre-fix
+    message was ONE hard-coded sentence — "failed (rc=N) on the first attempt
+    and TIMED OUT … on the second" — which is true only for the first shape; on
+    timeout-then-failure it reported the opposite order. The outcome (a red,
+    self-describing failure carrying both halves) was correct either way, which
+    is exactly why nothing else observed the ordering: this test is the only
+    thing that reads it.
+
+    ``subprocess.run`` is replaced rather than driven for real, so both shapes
+    are exercised without a 500 s wait. The assertions name the attempts, which
+    the pre-fix sentence cannot satisfy for either shape (`attempt 2 failed` /
+    `attempt 2 TIMED OUT`), so this is a real discriminator.
+    """
+    real_run = subprocess.run
+
+    class _Failed:
+        returncode = 7
+        stdout = "second-attempt stdout"
+        stderr = "second-attempt stderr"
+
+    def _message_for(order):
+        """The AssertionError text for a fake run whose attempts follow `order`."""
+        calls = []
+
+        def _fake_run(*args, **kwargs):
+            calls.append(kwargs.get("timeout"))
+            kind = order[len(calls) - 1]
+            if kind == "timeout":
+                raise subprocess.TimeoutExpired(cmd="guard", timeout=5.0)
+            return _Failed()
+
+        subprocess.run = _fake_run
+        try:
+            with pytest.raises(AssertionError) as excinfo:
+                _run_guard_subprocess(
+                    [sys.executable, "-m", "tortoise.nonexistent_guard"],
+                    cwd=os.path.dirname(os.path.dirname(
+                        os.path.abspath(__file__))),
+                    timeout=5.0)
+        finally:
+            subprocess.run = real_run
+        return str(excinfo.value)
+
+    # Shape 1 — the #3349 shape: a slow first spawn, a fast failure on retry.
+    timed_out_first = _message_for(["timeout", "failed"])
+    assert "attempt 1 TIMED OUT after 5.0s" in timed_out_first, timed_out_first
+    assert "attempt 2 failed (rc=7)" in timed_out_first, timed_out_first
+
+    # Shape 2 — a fast failure, then a late timeout on the retry.
+    failed_first = _message_for(["failed", "timeout"])
+    assert "attempt 1 failed (rc=7)" in failed_first, failed_first
+    assert "attempt 2 TIMED OUT after 5.0s" in failed_first, failed_first
+
+    # Both halves survive whichever order they happened in.
+    assert "second-attempt stdout" in failed_first, failed_first
 
 
 def test_the_guard_retry_fits_inside_its_pytest_item_budget():
