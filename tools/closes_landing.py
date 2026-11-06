@@ -887,12 +887,22 @@ _NO_PARAGRAPH_RE = re.compile(
 #:     `=` + `2.     Closes #100`   renderer `<p>= 2.     Closes #100</p>`   PROSE, main credits it
 #: The `-` spelling never reaches here as a lone underline (three or more is a thematic break above).
 _SETEXT_UNDERLINE_RE = re.compile(r" {0,3}(?:=+|-+)[ \t]*$")
-#: CommonMark §4.6's start conditions, approximated in the ONE direction this needs: a tag NAME
-#: followed by whitespace/`/>`/end-of-line (so `<div>`, `</p>`, `<br />`), or a sigil opener
-#: (`<!--`, `<?`, `<![CDATA[`, `<!X`). NOT a bare `<`, which is what made `<3 items` and
-#: `<https://e.com>` — plain paragraphs — look like HTML blocks.
-_HTML_BLOCK_START_RE = re.compile(
-    r" {0,3}(?:<!--|<\?|<![A-Za-z\[]|</?[A-Za-z][A-Za-z0-9-]*(?:[ \t]|/?>|$))")
+#: ⛔ TWO HTML-BLOCK RULES, NOT ONE, BECAUSE THE SPEC HAS TWO (round 37 review, P2). §4.6 gives
+#: types 1-6, which CAN interrupt a paragraph, and **type 7** — a complete tag alone on a line —
+#: which explicitly CANNOT. The previous single regex accepted a tag NAME, so `<span>`, `<br />`,
+#: `<custom-tag>` and `<x` all ended an open paragraph and blanked the real `Closes #N` below them;
+#: measured at `origin/main`: 24 lenient + 24 strict closes lost per shape, 0 fixed.
+#: `_HTML_BLOCK_INTERRUPT_RE` is types 1-6 (the sigil openers plus the spec's own TYPE-6 TAG LIST —
+#: `<div>` is on it, `span`/`br`/`custom-tag` are not). Type 7 needs no regex at all: its rule is
+#: "never an ender", so the predicate simply does not test it (see the comment at the call site).
+_HTML_TYPE6_TAGS = (
+    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|"
+    "dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|"
+    "h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|"
+    "optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
+)
+_HTML_BLOCK_INTERRUPT_RE = re.compile(
+    rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
 
 
 def _leaves_no_paragraph(rest: str, rest_indent: int,
@@ -917,8 +927,12 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     paragraph at them blanked a real `Closes #N` below — measured at 24 lenient + 24 strict closes
     lost on each shape, with 0 fixed. `_HTML_BLOCK_START_RE` is the start condition instead (a tag
     name followed by `[ \t]`, `/>` or end of line, or one of the four sigil openers), so a genuine
-    `<div>` still ends the paragraph — a quoted close inside raw HTML is not one GitHub acts on —
-    while `<3` and an autolink do not.
+    `<div>` still ends the paragraph, while `<3` and an autolink do not. ⛔ WHAT AN HTML BLOCK DOES
+    NOT DO IS HIDE ITS OWN TEXT: `parse_closing_refs("<div>\nCloses #100\n</div>")` still returns
+    `[100]`, so the ender changes what the NEXT line is measured as, not whether the block's own
+    content is read. That is parity with every head before this one (only FENCED content is blanked),
+    and the sentence above used to imply otherwise — this file does not claim GitHub's behaviour for
+    raw HTML either way, it only decides the block boundary.
 
     The INDENTED case is measured against the CONTAINER, which is the block grammar's test and not
     `strict`'s: `- item` + `    cont` is a paragraph INSIDE the item (4 <= 2 + 3), so it does open
@@ -933,8 +947,21 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # push, so this is a THIRD reader of one definition rather than a fourth definition.
     col = _content_column(rest)
     body = rest[col:] if col is not None else rest
-    if _NO_PARAGRAPH_RE.match(body) or _HTML_BLOCK_START_RE.match(body):
+    # ⛔ A MARKER LINE THAT OPENS NO ITEM HAS NO CONTENT COLUMN TO INSPECT (round 37 review, P2). An
+    # ordered marker ≥ 2 under an open paragraph is a lazy continuation, so its `# H` / `***` is
+    # INLINE TEXT, not a leaf block — reading it as one ended the paragraph and blanked the real
+    # close below (`Notes` + `2. # H` + `3.     Closes #100` renders as ONE `<p>`; `origin/main`
+    # credits it). The same question `_ordered_marker_at_least_two` exists for, asked before the
+    # content-column test rather than after it.
+    if col is not None and prev_prose and _ordered_marker_at_least_two(rest):
+        return False
+    if _NO_PARAGRAPH_RE.match(body) or _HTML_BLOCK_INTERRUPT_RE.match(body):
         return True
+    # §4.6 type 7 (a complete tag alone on a line) NEVER ends a paragraph, in either direction:
+    # it cannot interrupt one, and with none open the line after it is still inline content rather
+    # than a fresh block — measured, `<span>x</span>` + `2.     Closes #100` renders as ONE `<p>`
+    # in the renderer. So a type-7 line leaves the paragraph OPEN unconditionally (the marker below
+    # it is then prose, and `origin/main` credits it).
     if _SETEXT_UNDERLINE_RE.match(body):
         return prev_prose
     # §4.4: an indented code block CANNOT INTERRUPT A PARAGRAPH. With one open, a 4+-column line is
@@ -1214,7 +1241,13 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             # shape that motivated it).
             container = list_items[-1] if list_items else None
             rest_col = _content_column(rest)
-            pushed = rest_col is not None
+            # ⛔ A LAZY CONTINUATION OPENS NO ITEM, SO IT MUST NOT PUSH ONE (round 37 review, P2 —
+            # the second half of the same fact). Leaving the push in made the NEXT line be measured
+            # against a content column the renderer never created, which blanked a real close even
+            # once the leaf predicate was fixed: `Notes` + `2. # H` + `3.     Closes #100` needs both
+            # changes, and the reviewer measured the pair (predicate only: `[]`; both: `[100]`).
+            pushed = rest_col is not None and not (
+                prev_prose and _ordered_marker_at_least_two(rest))
             own_gap = _marker_gap(rest)
             if pushed:
                 list_items.append(
@@ -1310,17 +1343,27 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # line indented past the fence allowance under an open paragraph is a lazy continuation too,
         # whatever its marker is. Missing that kept blanking a real close (`Notes` + `    -     Closes
         # #100` renders as PROSE and `origin/main` credits it, so it was a REGRESSION, not parity).
-        # ⚠️ The INDENT arm of that is bounded to `container is None`, and the bound is measured:
-        # inside an open item a marker indented 4 columns is a NESTED item (its content is code), not
-        # a code-block continuation — `- Notes` + `    -     Closes #100` renders `<pre><code>`, so
-        # excusing it there credited a quotation.
-        marker_cannot_interrupt = (_ordered_marker_at_least_two(rest)
-                                   or (rest_indent > _MAX_FENCE_INDENT and container is None))
-        ordered_continuation = (prev_prose
-                                and marker_cannot_interrupt
-                                and _quote_depth(prefix) == prev_quote_depth
-                                and container is prev_container
-                                and (container is None or rest_indent >= container.rest_col))
+        # ⛔ THE INDENT HALF IS MEASURED FROM THE CONTAINER'S CONTENT COLUMN, NOT "no container"
+        # (round 37 review, P2). §4.4's rule is about the PARAGRAPH, not about the outermost
+        # container: at content-column+4 inside an item — or on a lazy line that dropped its `>` —
+        # an open paragraph makes the line its continuation, and bounding the arm to
+        # `container is None` blanked the real close (`- Notes` + `      -     Closes #100` renders as
+        # `<p>`, and `origin/main` credits it). The flip is at 4 columns PAST the content column and
+        # stays there at every indent 0-12, so it is a distance, not an absolute column.
+        # The two halves also need different container terms, which is why they are two terms:
+        # a lazy INDENT continuation may drop its blockquote marker (it is indentation that continues
+        # the paragraph), while the MARKER half must keep the depth term (a marker at another depth
+        # opens its own list).
+        _indent_base = container.rest_col if container is not None else 0
+        _lazy_indent = (prev_prose
+                        and rest_indent > _indent_base + _MAX_FENCE_INDENT
+                        and container is prev_container)
+        _lazy_marker = (prev_prose
+                        and _ordered_marker_at_least_two(rest)
+                        and _quote_depth(prefix) == prev_quote_depth
+                        and container is prev_container
+                        and (container is None or rest_indent >= container.rest_col))
+        ordered_continuation = _lazy_indent or _lazy_marker
         own_code = own_gap > 4 and not ordered_continuation
         indent_code = rest_indent > _MAX_FENCE_INDENT and (
             strict or (indented_code

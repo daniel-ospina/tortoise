@@ -1939,6 +1939,120 @@ def test_the_paragraph_ender_is_NOT_over_applied_in_either_direction():
     assert cl.parse_closing_refs("- item\n  2.     Closes #100\n") == [100]
 
 
+def test_a_marker_that_opens_NO_item_has_no_content_column_to_inspect():
+    """Round 37 review, P2 — the ORDERED half of the leaf-block rule, and its second mechanism.
+
+    Round 36 taught `_leaves_no_paragraph` to inspect a marker line's CONTENT COLUMN, which fixed
+    `- # H` and left its ordered sibling wrong: an ordered marker >= 2 under an open paragraph opens
+    NO item (§5.2's consumer rule), so its `# H` is INLINE TEXT rather than a heading and the
+    paragraph is still open. Reading it as a heading ended the paragraph and blanked the real
+    `Closes #100` below it — a lost close in the direction this module ranks second-worst.
+
+    ⛔ AND THE PREDICATE ALONE DOES NOT FIX IT. The line also pushed a list item, so the NEXT line was
+    measured against a content column the renderer never created and came out blanked anyway. The
+    reviewer measured the pair: predicate-only `[]`, predicate + no-push `[100]`. Both halves are
+    here because each is invisible while the other is wrong.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for leaf, why in (("2. # H", "an ordered marker >= 2 opens no item, so `# H` is text"),
+                      ("2. ***", "…and `***` is a horizontal rule only inside an item"),
+                      ("10. # H", "any start number above 1")):
+        body = "Notes\n" + leaf + "\n3.     Closes #100\n"
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], (why, body)
+    # The controls: a BULLET opens its item even under a paragraph, so its leaf block DOES end it…
+    body = "- # H\n  2.     Closes #100\n"
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    # …and with no paragraph above, the ordered marker opens its item too.
+    body = "2. # H\n  3.     Closes #100\n"
+    assert cl.parse_closing_refs(body) in ([], [100]), body
+
+
+def test_the_HTML_block_rule_is_the_SPEC_s_two_rules_not_one():
+    """Round 37 review, P2 — §4.6 has types 1-6 (they CAN interrupt) and type 7 (it CANNOT).
+
+    One regex accepting "a tag name" treated `<span>`, `<br />`, `<custom-tag>` and `<x` as
+    paragraph enders, so a real `Closes #N` below them was blanked — 24 lenient + 24 strict closes
+    lost per shape against `origin/main`, 0 fixed. Type 6 requires a name FROM THE SPEC'S LIST, and
+    type 7 — a complete tag alone on a line — never ends a paragraph at all:
+
+        `<div>`            in the type-6 list  -> a real HTML block, ends the paragraph
+        `<span>x</span>`   type 7              -> the marker line below it is still prose
+        `<br />`           type 7              -> same (the regex's docstring used to cite it wrongly)
+        `<x`               not a complete tag  -> same
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for tag in ("<span>x</span>", "<br />", "<x", "<custom-tag>", "<em>x</em>"):
+        # AFTER a paragraph the marker line is unambiguously prose — the shape round 36 broke.
+        body = "Notes\n" + tag + "\n2.     Closes #100\n"
+        assert token_type(body) == "inline", (tag, body)
+        assert cl.parse_closing_refs(body) == [100], (tag, body)
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], (tag, body)
+        # AT THE DOCUMENT START the renderer makes the tag a type-7 html_block that swallows the
+        # marker line, and this module CREDITS the keyword there — which is its standing stance for
+        # HTML-block content (only FENCED content is blanked; see the `<div>` assertion below). The
+        # ender therefore leaves the paragraph open rather than manufacturing a boundary the module
+        # does not otherwise honour.
+        body = tag + "\n2.     Closes #100\n"
+        assert cl.parse_closing_refs(body) == [100], (tag, body)
+    for tag in ("<div>", "<blockquote>", "<p>", "<!-- c -->", "<?php"):
+        body = tag + "\n2.     Closes #100\n"
+        assert cl.parse_closing_refs(body) == [], (tag, body)
+    # What an HTML block does NOT do is hide its own text: only FENCED content is blanked, and that
+    # is parity with every head before this one — stated here so the ender's justification cannot be
+    # read as a claim about GitHub's behaviour for raw HTML.
+    assert cl.parse_closing_refs("<div>\nCloses #100\n</div>\n") == [100]
+
+
+def test_the_44_indent_arm_is_a_DISTANCE_from_the_container_not_no_container():
+    """Round 37 review, P2 — §4.4's rule is about the PARAGRAPH, not about the outermost container.
+
+    Round 36 bounded the lazy-indent excuse to `container is None`, which lost the same close one
+    level in: at content-column + 4 inside an item — or on a lazy line that dropped its `> ` — an
+    open paragraph makes the line its continuation, so the close is prose GitHub acts on:
+
+        `- Notes` + `      -     Closes #100`   renderer `<p>`       (6 columns = 2 + 4)
+        `> Notes` + `    -     Closes #100`     renderer `<p>`       (a lazy line may drop its `>`)
+        `- Notes` + `    -     Closes #100`     renderer `<pre>`     CONTROL: 4 columns = 2 + 2
+
+    So the term is `rest_indent > container.rest_col + 4` — a DISTANCE — and the flip really is at 4
+    past the content column, holding at every indent 0-12. The marker half keeps its depth term: a
+    marker at another blockquote depth opens its own list.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body, why in (("- Notes\n      -     Closes #100\n", "6 columns = item content col 2 + 4"),
+                      ("> Notes\n    -     Closes #100\n", "a lazy continuation may drop its `>`")):
+        assert token_type(body) == "inline", (why, body)
+        assert cl.parse_closing_refs(body) == [100], (why, body)
+    # The control, which must stay CODE: 4 columns is only 2 past the item's content column.
+    control = "- Notes\n    -     Closes #100\n"
+    assert token_type(control) == "code_block", control
+    assert cl.parse_closing_refs(control) == [], control
+
+
 # ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──
 
 @pytest.mark.parametrize("body,expected,why", [

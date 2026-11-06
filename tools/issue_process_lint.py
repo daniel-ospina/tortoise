@@ -78,11 +78,14 @@ remote-only query cannot — #4256); a caller that has already run it injects it
 
 Building a second branch census here would be a second source of truth that can disagree with the
 first, which this repo has already paid for (AGENTS.md: *"a second census path that can disagree"*).
-So the arm is explicit about its bound in the OUTPUT, not only here: every run whose population
-actually consults the WIP arm (``--issue``, ``--sweep-issues``, ``--issue-body-file`` and the
-injected ``--wip``/``--no-wip`` forms) prints how many subjects carried a marker and how many
-carried none, because **``0 markers read`` and ``0 issues with WIP`` are different claims** and a
-bare "NOTHING FLAGGED" would launder one into the other. A PR-side run (``--pr``, ``--sweep``,
+So the arm is explicit about its bound in the OUTPUT, not only here: every run that ACTUALLY READS
+MARKERS (``--issue``, ``--sweep-issues``, ``--issue-body-file``) prints how many subjects carried a
+marker and how many carried none, because **``0 markers read`` and ``0 issues with WIP`` are
+different claims** and a bare "NOTHING FLAGGED" would launder one into the other. ⚠️ The injected
+``--wip``/``--no-wip`` forms are deliberately NOT in that list (review round 29, P3): their verdict
+comes from the branches/worktrees/ref-claims population ``tools/who_is_on.py`` owns, no marker is
+read, and the run says so in words — a ``0 of 0`` count there would claim a reading that never
+happened. A PR-side run (``--pr``, ``--sweep``,
 ``--body-file``) never evaluates this arm, so it prints no WIP line at all — that is a different
 bound and it is stated here rather than implied away by "every run".
 
