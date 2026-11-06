@@ -1314,8 +1314,18 @@ _RESIDUAL_MARKER = "⛔ WHAT IS STILL NOT ENFORCED"
 #: matching.
 _RESIDUAL_CLASS_ANCHOR = re.compile(
     r"adjacency|\btime[- ]unit\b|carve[- ]out|\bthe guarantee\b|\bretention\b|"
-    r"\bvalue class\b|\bnumeric side\b|\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
-    + _UNIT_TOKEN.pattern, re.I)
+    r"\bvalue class\b|\bnumeric side\b|"
+    # ⛔ THE GAP NAMED WITHOUT THE WORD `adjacency`: the unanchored arm catches
+    # `the remaining gap is not closed` but was blind to `the remaining gap is
+    # open` — the same claim with the other verb — because `<verb> … open` needs
+    # an anchor and these subjects carry none (#11258 review round 4 `P2`,
+    # measured). They are SUBJECT PHRASES for THIS row's closed gap, and none of
+    # them occurs in the honest text (measured over the 37,914-char region).
+    r"\bthe remaining gap\b|\bthe gap (?:that|those)\b[^.;]{0,40}\bclosed\b|"
+    r"\bthe exception it (?:carved|carves)\b|"
+    r"\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
+    + _UNIT_TOKEN.pattern,
+    re.I)
 
 #: The anchors that mark a claim about the CLOSED gap, and — because the
 #: honest-SPELLING waiver reads THIS set — the words that withhold that waiver.
@@ -1354,7 +1364,11 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
 #: once more outside the closed set", "adjacency is unjudged again", and the
 #: coordinator form of the row's own vocabulary, "the ADJACENCY half is unjudged
 #: and fails open" (the clause split leaves the anchor in one clause and the
-#: phrase in the next — see `_RESIDUAL_FAIL_OPEN`). ⛔ EVERY
+#: phrase in the next — see `_RESIDUAL_FAIL_OPEN`). ⛔ AND A JOINER THE SPLITTER
+#: DOES NOT KNOW (`_RESIDUAL_CLAUSE_SPLIT` is a CLOSED list: `and`/`but`/`while`/
+#: `whereas`/`although`/`though`/`yet`) puts two claims in one segment, and the
+#: honest `spelling` waiver then covers both — the measured fix for `while` and
+#: `although` is in that list, but a joiner it does not name still does this. ⛔ EVERY
 #: ENTRY HERE IS A CLAIM LIKE ANY OTHER and must be re-measured when the arms
 #: change: "`minute` is back in the open set" sat on this list for one revision
 #: and is RED again (it is mutation #28), because the anchored arm reads an object
@@ -1373,6 +1387,15 @@ _RESIDUAL_OPENNESS = (
     # (#11258 review `P2`, measured).
     r"\bnot\b[^.;]{0,30}\bclosed\b",
     r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
+    # ⛔ `never … closed` ASSERTS the gap is open for the same reason `not …
+    # closed` does, and it was one word away from being caught: `the ADJACENCY gap
+    # was never closed` was GREEN while `the ADJACENCY gap is not closed` RED — the
+    # most natural sentence a lane writes when it believes the closure did not
+    # land (#11258 review round 4 `P1`, measured). The `has yet to be` and
+    # `far from` / `anything but` forms are the same claim in other words.
+    r"\bnever\b[^.;]{0,30}\bclosed\b",
+    r"\b(?:has|have|had|is|are|was|were)\s+yet\s+to\s+be\s+closed\b",
+    r"\b(?:far\s+from|anything\s+but)\s+closed\b",
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
     # ⛔ NEGATION IS NOT A REOPENING, and this arm is the UNANCHORED one — so it is
@@ -1380,7 +1403,11 @@ _RESIDUAL_OPENNESS = (
     # gap is not open again` DENIES the gap and it red before this pair was added
     # (#11258 review `P2`, measured). `not closed` is deliberately NOT guarded —
     # there the negation ASSERTS the gap is open, which is the whole arm.
-    # ⛔ SIX FORMS, matching the opening verb's window below, and for the same
+    # ⛔ THE NEGATION WINDOW IS THE RUN OF FIXED-WIDTH LOOKBEHINDS BELOW, and the
+    # RUN is the count — say `ten forms` and it is stale the next time one is added
+    # (this comment said `SIX FORMS` while carrying ten, in the same commit whose
+    # finding was "stale count comments", #11258 review round 4 `P2`, measured).
+    # They match the opening verb's window, and for the same
     # measured reason: two forms read only `not open again` / `never open again`
     # and left `has not been open again`, `has never been open again` and
     # `hasn't been open again` as FALSE BLOCKS (#11258 review round 2 `P2`).
@@ -1454,14 +1481,15 @@ _RESIDUAL_ANCHORED_OPENNESS = (
     # ⛔ A NEGATED reopening is a DENIAL of one: `(d2) does not reopen (d)'s
     # ADJACENCY result` is the row's own truthful scope boundary (#11223 fix
     # direction 2), so the lookbehinds are what keep it out of the scan. They are
-    # SIX fixed-width forms rather than two because a one-token window read only
-    # `not reopen` / `never reopen` and refused every honest denial that puts a
-    # word between them — `has not been re-opened`, `has never been reopened`,
-    # `doesn't reopen` all red (#11258 review `P2`, measured). ⚠️ The enumeration is
+    # A FAMILY of fixed-width forms rather than the original pair, because a
+    # one-token window read only `not reopen` / `never reopen` and refused every
+    # honest denial that puts a word between them (`has not been re-opened`,
+    # `has never been reopened`, `doesn't reopen` all red — #11258 review `P2`,
+    # measured). ⚠️ The enumeration is
     # BOUNDED, not exact: an ADVERB inside the forms (`has not YET been re-opened`,
-    # `has never BEFORE been reopened`) is still refused, so those two are carried
-    # as extra forms below. A Python lookbehind must be fixed-width, so a different
-    # adverb means another form — do NOT read this list as exhaustive
+    # `has never BEFORE been reopened`) is still refused, so the `yet` and `before`
+    # variants are carried below. A Python lookbehind must be fixed-width, so a
+    # different adverb means another form — do NOT read the run as exhaustive
     # (#11258 review round 3 `P2`, measured on the word "exact").
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
@@ -1484,8 +1512,8 @@ _SPELLING_FLOOR = (
     # and not only in `_RESIDUAL_OPENNESS`: the honest path runs ONLY this tuple, so
     # `the SPELLING gap is open again` was GREEN while the same phrase without the
     # word `spelling` red — the waiver was skipping the whole openness arm
-    # (#11258 review round 3 `P1`, measured). The six negation forms match the
-    # opening verb's window, so an honest denial still passes.
+    # (#11258 review round 3 `P1`, measured). Its negation window matches the
+    # opening verb's lookbehind run, so an honest denial still passes.
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
@@ -1523,6 +1551,17 @@ def _residual_region(text: str) -> str:
     return region[:nxt.start()]
 
 
+#: The clause boundary the scan splits on before matching. ⛔ `while`/`whereas`/
+#: `although`/`though`/`yet` belong here for the same measured reason `and`/`but`
+#: do: they join two claims too, and a joiner the splitter does not know leaves an
+#: honest `spelling` disclosure and a reopening in ONE segment — so the honest
+#: waiver swallowed the second claim (`the SPELLING gap is open while the
+#: remaining gap is not closed` GREEN; the same claim unwrapped RED — #11258 review
+#: round 4 `P2`, measured). ⚠️ This is a CLOSED list standing in for a clause
+#: boundary; a joiner not named here still joins. That residual is disclosed in
+#: `WHAT THIS CANNOT CATCH` rather than implied to be covered.
+_RESIDUAL_CLAUSE_SPLIT = r";|,?\s+(?:and|but|while|whereas|although|though|yet)\s+"
+
 def _residual_reopening_claims(text: str) -> list[str]:
     """Every claim in the residual region that REOPENS a gap the row closed.
 
@@ -1556,7 +1595,7 @@ def _residual_reopening_claims(text: str) -> list[str]:
         # the remaining gap is not closed." stayed GREEN with a sentence-scoped
         # waiver (round 2 `P2`). So the honest clauses are REMOVED and what is
         # left is scanned.
-        clauses = re.split(r";|,?\s+(?:and|but)\s+", sentence)
+        clauses = re.split(_RESIDUAL_CLAUSE_SPLIT, sentence)
         honest = [c for c in clauses if _is_honest_spelling(c)]
         if honest:
             if len(honest) == len(clauses):
@@ -1582,7 +1621,7 @@ def _residual_reopening_claims(text: str) -> list[str]:
         # it can only be read when THIS clause names the class, which is what keeps
         # the row's own `the pair fails open` disclosure green while a lane's
         # `the ADJACENCY half fails open` reds (#11258 review `P2`).
-        for clause in re.split(r";|,?\s+(?:and|but)\s+", scan):
+        for clause in re.split(_RESIDUAL_CLAUSE_SPLIT, scan):
             m = _RESIDUAL_FAIL_OPEN.search(clause)
             if m is not None and _RESIDUAL_CLASS_ANCHOR.search(clause):
                 claims.append(f"{m.group(0)!r} in clause {clause.strip()!r}")
@@ -1797,6 +1836,21 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the SPELLING carve-out stays open.",
     "the SPELLING carve-out is not closed.",
     "the SPELLING carve-out fails open.",
+    # round 7 (#11258 review round 4): the CLOSED-verdict arm enumerated `not` and
+    # missed `never`/`yet to be`/`far from` — the same claim in other words — and
+    # the anchor vocabulary had no subject phrase for this gap, so
+    # `<subject> is open` was blind unless it said `adjacency`.
+    "the ADJACENCY gap was never closed.",
+    "the ADJACENCY half is far from closed.",
+    "the ADJACENCY half is anything but closed.",
+    "the time-unit half has yet to be closed",
+    "the remaining gap is open.",
+    "the gap those tables closed is open.",
+    # round 8 (#11258 review round 4): the clause splitter did not know
+    # `while`/`although`, so an honest `spelling` disclosure and a reopening joined
+    # by one of them shared a segment and the waiver swallowed the second claim.
+    "the SPELLING gap is open while the remaining gap is not closed.",
+    "the SPELLING gap is open although the remaining gap is not closed.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
