@@ -793,7 +793,7 @@ def test_a_key_property_carrying_a_TRAILING_NEWLINE_is_still_safe():
     assert got == "id", got
 
 
-def test_a_pathological_key_property_refuses_the_WHOLE_pass_before_any_statement():
+def test_a_pathological_key_property_refuses_the_pass_without_issuing_a_mutation():
     """The gate is on the PASS, not only the helper: nothing is ISSUED.
 
     ⚠️ "Nothing is READ" would be false, and an earlier version of this docstring said it:
