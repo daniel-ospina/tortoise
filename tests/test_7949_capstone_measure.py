@@ -8556,8 +8556,11 @@ def test_a_before_arms_label_census_cannot_be_omitted_away(marker, mutate, expec
 
     # …and the SHIPPED bundle still scores, so the guard discriminates a record whose
     # second census was removed from the one that ships rather than refusing the form.
+    # ⛔ Asserted against the ACTUAL outcome, not a membership test: every return
+    # value satisfies `in ("REFUSED", "PASS", "FAIL")`, so a tautology there would
+    # only prove `score()` did not raise (#10610 review at `bde94f89d`, P3).
     shipped = _bundle(tmp_path / "shipped")
-    assert scores_probe.score(shipped)["e1"]["outcome"] in ("REFUSED", "PASS", "FAIL")
+    assert scores_probe.score(shipped)["e1"]["outcome"] == "REFUSED"
 
 
 def test_a_gate_drops_census_member_of_another_type_is_refused(tmp_path, capsys):
@@ -8584,6 +8587,39 @@ def test_a_gate_drops_census_member_of_another_type_is_refused(tmp_path, capsys)
     err = capsys.readouterr().err
     assert "is not an object name" in err, err
     assert "e1-gate-drops.json" in err, err
+
+
+def test_a_gate_drops_census_that_lists_a_member_twice_is_refused(tmp_path, capsys):
+    """#10610 review at `bde94f89d` (P2): the ON witness census is a POPULATION.
+
+    The before arms refuse a duplicated `object_names` member ("a census no producer
+    can write") and the E2a census gets the same rule through its partition check, but
+    `e1-gate-drops.json`'s census had neither. Measured at the pre-fix head: replacing
+    the 61 names with the 13 bare ones plus 48 COPIES of one non-bare name kept
+    `len(gate_names) == after["objects"]` (61) and `gate_bare ==
+    after["bare_definite"]` (13), and `score()` wrote a record at exit 0 over a
+    population no producer can emit — which is exactly the coupled multi-field
+    forgery this witness exists to refuse.
+
+    Non-vacuity: removing the `len(set(...))` rule makes this case score instead of
+    refusing (measured).
+    """
+    repo = _bundle(tmp_path / "dup")
+    path = repo / "docs/evidence/9889/e1-gate-drops.json"
+    record = json.loads(path.read_text())
+    names = record["object_names"]
+    bare = [n for n in names if scores_probe._is_bare_definite(n)]
+    assert len(set(names)) == len(names), (
+        "the SHIPPED gate-drops census already carries a duplicate — re-derive this pin")
+    assert bare and len(bare) < len(names), (len(bare), len(names))
+    non_bare = [n for n in names if n not in bare][0]
+    record["object_names"] = bare + [non_bare] * (len(names) - len(bare))
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "lists the same `object_names` member twice" in err, err
 
 
 def test_the_bare_definite_shape_is_the_repos_own_predicate():

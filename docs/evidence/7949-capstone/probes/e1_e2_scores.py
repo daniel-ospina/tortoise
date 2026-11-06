@@ -53,7 +53,9 @@ JSON, not UTF-8 text, not a JSON object, a `label_counts` census that is absent
 or carries a non-numeric `:Object`, a census member that is not a unit id, a
 census that is not a partition (a unit both kept and lost, or one listed twice),
 a count or floor that is not a finite number, or a `corpus.fixtures_hash` that is
-not a string — when the
+not a string, or an `object_names` member that is not an object name, or an
+`object_names` census that lists the same member twice (a population, not a
+multiset) — when the
 E2a record grades a denominator other than the frozen **14** (a bar printed over
 an unfrozen population), when the E2a falsifier did not reach the frozen
 denominator (an inert counter), when the ON arm and the E2a counts come from
@@ -1727,6 +1729,21 @@ def score(repo: Path = _ROOT) -> dict:
                 f"{GATE_DROPS} carries an `object_names` member {member!r}, which "
                 "is not an object name — the census is the run's own list of "
                 "`:Object` names, so a member of another type is an edited record")
+    # ⛔ A CENSUS HAS NO DUPLICATES here either (#10610 review at `bde94f89d`, P2).
+    # The before arms refuse `len(set(names)) != len(names)` — "a census no producer
+    # can write" — and the E2a census gets the same rule through the partition
+    # check, but `gate_names` did not. Measured on a copy of the bundle: replacing
+    # this record's 61 names with the 13 bare ones plus 48 COPIES of one non-bare
+    # name kept `len == after["objects"]` (61) and `gate_bare ==
+    # after["bare_definite"]` (13), and `score()` proceeded at exit 0 with a
+    # population no producer can emit — lowering the cost of the coupled multi-field
+    # forgery this witness is here to refuse.
+    if len(set(gate_names)) != len(gate_names):
+        raise _refuse(
+            f"{GATE_DROPS} lists the same `object_names` member twice "
+            f"({len(gate_names)} entries, {len(set(gate_names))} distinct) — the "
+            "census is a population of `:Object` nodes, and `e1_gate_drops.py` "
+            "writes one row per node, so a duplicated name is an edited record")
     if len(gate_names) != after["objects"]:
         raise _refuse(
             f"{GATE_DROPS} carries {len(gate_names)} `object_names` beside its "
