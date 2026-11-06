@@ -1009,12 +1009,18 @@ def serve_point(*, tenant: tuple[str, str], point_id: str,
         # (`UnprojectableRecord` / `UnknownRecordColumn`) means the record row —
         # or a column the reader does not know — cannot be projected at all:
         # the "the record is newer than the reader" class.
-        # ⛔ Its THIRD subclass, `PlacementTableUnavailable`, is NOT that class
+        # ⛔ One of its subclasses, `PlacementTableUnavailable`, is NOT that class
         # and must not be read with it: nothing about the record is wrong — the
         # property namespace came from a broken INSTALL (no carrier, a carrier
         # or doc that will not decode/read/parse, an EMPTY or truncated one, or
         # a malformed row), so the operator's remedy is to repair the install,
         # not the credentials or the reader version (#10663, #11227).
+        # `UnprojectableRecord` and `UnknownRecordColumn` are not the whole set —
+        # `CacheProjectionError` has FIVE direct subclasses in
+        # `cache_projection.py`: `UnknownRecordLabel` is a caller's label with no
+        # record table and `AmbiguousRecordColumn` is a placement-table
+        # declaration fault, and neither is "newer than the reader" nor a broken
+        # install.
         # `RecordProjectionError` is where `scope_connection` refuses a
         # MISCONFIGURED tenancy: a role that BYPASSES RLS, a lost tenant GUC, an
         # unreadable role posture. Its message names the fix ("arm
