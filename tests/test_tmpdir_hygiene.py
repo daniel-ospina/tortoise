@@ -409,12 +409,76 @@ def test_sweep_reclaims_a_dead_marked_root_and_keeps_a_live_one():
         with open(os.path.join(live, ".session-pid"), "w") as fh:
             fh.write(f"pid={os.getpid()}\n")
         reclaimed = sweep_stale_session_roots()
-        assert dead in reclaimed
-        assert not os.path.exists(dead)
+        # A CONCURRENT suite's install-time sweep (`tests/conftest.py`,
+        # `sweep_stale_session_roots()` at import) walks the SAME shared
+        # `ROOT_BASE`, so it can reclaim this root in the window between our
+        # marker write and this call — measured 2026-11-05 on the carve-out
+        # runner, where two shards of one PR share /tmp and the identical
+        # invocation passed in one and failed here with `[]`. What this test
+        # pins is the OUTCOME — a dead-marked root does not survive, a live
+        # one does — never that THIS call is the one that names it, so a
+        # reclaim we did not perform is attributed rather than required.
+        # The relaxation is not vacuous: a sweep that never fires leaves
+        # `dead` on disk, so the assertion below still reds.
+        #
+        # ⛔ ONE assertion, not two (#10610 review at `6a7546064`, note on this
+        # line). The pre-fix shape was `assert dead in reclaimed or not
+        # os.path.exists(dead)` FOLLOWED by `assert not os.path.exists(dead)`;
+        # the second line makes the first reduce to itself, so the `reclaimed`
+        # disjunct could not add coverage and read as if this call's return were
+        # still pinned. The OUTCOME is what is pinned — the call's own
+        # attribution is not, by design (`reclaimed` is kept in the failure
+        # message so a red still says whether this call named the root).
+        assert not os.path.exists(dead), (
+            f"a dead-marked root survived the sweep: {dead} "
+            f"(this call reclaimed {reclaimed!r})")
         assert os.path.exists(live), "a live suite's root must not be reclaimed"
     finally:
         shutil.rmtree(dead, ignore_errors=True)
         shutil.rmtree(live, ignore_errors=True)
+
+
+def test_sweep_names_the_root_it_reclaimed(tmp_path, monkeypatch):
+    """The sweep's RETURN value is pinned, on a base no peer process can walk.
+
+    #10610 review (P2): the test above pins the OUTCOME only, and that relaxation
+    is right — a peer shard's install-time sweep shares `ROOT_BASE` and can
+    reclaim the dead root first (measured 2026-11-05). What it must not do is
+    leave `reclaimed` in a failure message alone: `sweep_stale_session_roots()`
+    is declared `-> list[str]` ("Reclaim roots left by a SIGKILLed suite"), the
+    test above was the ONLY assertion on that return anywhere in the tree (its
+    other caller, `tests/conftest.py`, ignores it), and the outcome check cannot
+    see it — so a refactor that unlinks correctly and returns `[]`, or loses its
+    per-entry attribution, would have been green everywhere.
+
+    Deterministic by construction instead of by luck: the base is this test's own
+    `tmp_path`, which no peer process enumerates, so the sweep below is the only
+    one that can see these roots and its return value is the whole question.
+    """
+    import tests._tmpdir_hygiene as hygiene
+
+    private_base = tmp_path / "root-base"
+    private_base.mkdir()
+    monkeypatch.setattr(hygiene, "ROOT_BASE", str(private_base))
+
+    dead = private_base / "tt_deadnamed"
+    live = private_base / "tt_livenamed"
+    dead.mkdir()
+    live.mkdir()
+    (dead / ".session-pid").write_text("pid=99999999\n")  # > pid_max everywhere
+    (live / ".session-pid").write_text(f"pid={os.getpid()}\n")
+
+    reclaimed = sweep_stale_session_roots()
+
+    # `realpath` on BOTH sides: this base is a real directory on Linux and a
+    # /private/-resolved one on macOS, and the pin is about WHICH root was
+    # named, never about the spelling of the prefix.
+    assert [os.path.realpath(p) for p in reclaimed] == [
+        os.path.realpath(str(dead))], (
+        "the sweep must NAME the root it reclaimed, and only that one: "
+        f"returned {reclaimed!r} for a dead {dead!r} beside a live {live!r}")
+    assert not dead.exists(), "a named root must actually be gone"
+    assert live.exists(), "a live suite's root must not be reclaimed"
 
 
 # ── #1005 (epic #1647 E2E-7): the RUN-scoped root registry ─────────────────

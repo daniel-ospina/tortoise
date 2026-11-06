@@ -1454,9 +1454,11 @@ def _registry_anchor() -> TortoiseSDK:
     string AND the ``TORTOISE_DB_PATH`` pin (see ``_registry_probe_identity``;
     a change in either closes the stale handle and rebuilds, so a test's private
     lane, a per-test path re-bind or a process reconfiguration can never be
-    served the old server or the old derived graph), built under
-    ``_KEEPALIVE_LOCK`` so two threads
-    cannot both build one, and closed by ``_reset_registry_probe_sdk()`` (the
+    served the old server or the old derived graph), built OUTSIDE
+    ``_KEEPALIVE_LOCK`` and installed under it with a re-check (so two threads
+    cannot both hold a cached handle and a losing builder closes its own — the
+    lock is deliberately NOT held across the construction, #8867 finding 2),
+    and closed by ``_reset_registry_probe_sdk()`` (the
     suite's isolation hook). Sharing it with the probe is deliberate: both want
     "the one registry connection this process holds", and a second cache would
     be the drift ``_control_plane_source``'s docstring warns about (#2823/#2340).
@@ -20200,7 +20202,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
     # ── 2. Document transcript (D10, ONTOLOGY v3.15 §4.4: a document is a
     # :Source) — deterministic id, replay-safe MERGE. NO content on the
-    # derived path: `summary`/`title` are §4.4 METADATA, and the S1 narrative is
+    # derived path: `summary`/`title` are §4.6 METADATA, and the S1 narrative is
     # ⛔ NOT among them — §9.1/D1 puts it in `public.session_narrative`, and the
     # `s.story_arc` SET this comment used to include is deleted (#10000; see 2b).
     # Doc_status is retired (§9.5 Q3). ──
@@ -20246,7 +20248,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # SHAPE-KEYED projection `record_projection._narrative_statements` (any
     # record naming its session and carrying `story_arc`), whose production
     # producer below (2b) is the `SessionNarrated` carrier — unchanged, and the
-    # only PRODUCER this path contributes. `summary`/`title` stay: they are §4.4
+    # only PRODUCER this path contributes. `summary`/`title` stay: they are §4.6
     # metadata, not the prose.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
@@ -35482,6 +35484,80 @@ _REGISTRY_PROBE_URI: str | None = None
 #: and the empty `GET /v1/organizations` in `test_onboarding_endpoints.py`.
 #: In production the pin is constant, so this costs nothing there.
 _REGISTRY_PROBE_PATH: str | None = None
+#: The cached handle and the identity it was built under, published as ONE
+#: immutable tuple — the READER's view of the cache (#11001 review).
+#:
+#: ⛔ WHY ONE GLOBAL AND NOT THE THREE SCALARS ABOVE. The install path stores
+#: `_REGISTRY_PROBE_SDK = sdk` and then `_REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
+#: = identity` as SEPARATE statements, and the fast path reads them with NO lock
+#: held (it must not take one: `_make_sdk`'s embedded branch holds
+#: `_KEEPALIVE_LOCK` across a construction plus `_get_proj()`, so a probe that
+#: waited on it would stall on a connect). Two stores are not one atomic event,
+#: so a reader landing between them saw the NEW handle paired with the OUTGOING
+#: identity: it read its own identity (still the old pin), then the freshly
+#: installed `_REGISTRY_PROBE_SDK`, then the not-yet-updated `_REGISTRY_PROBE_URI`
+#: — all three agreed with each other and it was served a handle built for a
+#: DIFFERENT graph. That is exactly the #9334 wrong-graph class this cache
+#: exists to prevent, on the auth path.
+#: Publishing `(identity, sdk)` as one tuple makes the switch atomic: a reader
+#: reads it once and either matches the identity it holds or misses and builds.
+#: ⛔ THE SAME RULE APPLIES TO CLEARING IT, IN THE OPPOSITE DIRECTION:
+#: `_reset_registry_probe_sdk` drops the tuple **first**, before the mirrors and
+#: before the close, so a lock-free reader stops being served the handle that
+#: call is about to close (a reader that already took the tuple before the clear
+#: can still race the close — that residue needs refcounting and is not load-
+#: bearing: reset is a teardown/isolation hook, not a request path).
+#: The three scalars are kept as MIRRORS so nothing that introspects them breaks.
+#: They are written under the lock. The fast path never reads them. The in-lock
+#: retire target reads them UNDER the lock, where they cannot be stale and agree
+#: with this tuple.
+_REGISTRY_PROBE_CACHE: tuple[tuple[str, str], TortoiseSDK] | None = None
+
+#: The INVALIDATION GENERATION of the probe cache: bumped by every
+#: `_reset_registry_probe_sdk` (#10962 review finding 1).
+#:
+#: ⛔ WHY A FENCE AND NOT JUST THE LOCK. Construction deliberately runs OUTSIDE
+#: `_KEEPALIVE_LOCK` (#8867 finding 2), so a builder holds NOTHING while it
+#: builds — and the build is not microseconds, it is the whole `_get_proj()`
+#: (a connect plus nine `CREATE INDEX` statements). On `main` the construction
+#: ran INSIDE the lock, so a reset arriving against a NON-EMPTY cache blocked
+#: until the builder installed, then cleared AND closed that handle. That mutual
+#: exclusion — incomplete even then — was the whole of the #5049 rule-4 contract.
+#: ⛔ SAY WHAT `main` ACTUALLY DID, because it is what makes the fence a repair
+#: rather than a restoration: `_reset_registry_probe_sdk` there returns BEFORE
+#: taking the lock when the cache is EMPTY (`if _REGISTRY_PROBE_SDK is None:
+#: return`), so a reset issued while a builder held the lock against an empty
+#: cache never blocked at all and the builder installed afterwards. Moving the
+#: build out of the lock WIDENED that hole from "a reset that finds an empty
+#: cache" to "any reset that arrives during a build"; it did not create it. At
+#: this head a reset that runs while a
+#: builder is inside `_make_sdk`/`_get_proj()` RETURNS FIRST (the lock is free),
+#: and the builder then takes the lock, finds nothing to match (`cached_entry is
+#: None` — the reset just emptied it), falls into the `else` branch whose only
+#: question is "does an entry match my identity?" and never "was the cache
+#: invalidated since I started?", and INSTALLS the handle it built under the
+#: PREVIOUS test's monkeypatched `_make_sdk`. The teardown hook has returned, the
+#: cache is repopulated, and the next test's fast path is served it: exactly the
+#: #5049 order-dependence the reset exists to prevent, and the mirror — on the
+#: BUILDER side — of the reader-side torn publication (#11001 review) this cache
+#: was introduced to close.
+#:
+#: So: an attempt records this value BEFORE it starts building and, if the value
+#: moved, discards its own handle (closed un-installed, exactly as the ambiguous-
+#: identity branch already does) and rebuilds. That is the generation/epoch
+#: fence the field converges on for "a loader that started before an
+#: invalidation finishes after it", and the #2172 lock discipline is untouched:
+#: no lock is taken across the construction, and the check is one integer
+#: compare inside the install lock the builder already takes.
+_REGISTRY_PROBE_EPOCH: int = 0
+
+#: How many times `_registry_probe_sdk` will rebuild a handle whose identity did
+#: not hold still for the WHOLE construction (see the stability rule there).
+#: Bounded on purpose: the identity churn this exists for is a `monkeypatch`
+#: landing mid-build, which settles immediately, so a second attempt is enough
+#: in practice. A process whose identity NEVER settles must not spin here — it
+#: gets one un-cached handle and an honest warning instead of an unbounded loop.
+_REGISTRY_PROBE_BUILD_ATTEMPTS = 3
 
 
 def _registry_probe_identity() -> tuple[str, str]:
@@ -35501,65 +35577,272 @@ def _reset_registry_probe_sdk() -> None:
     Used by tests: the cache is a PROCESS global, so a test that monkeypatches
     `_make_sdk`/`TortoiseSDK` must not inherit a handle an earlier test built
     (#5049 rule 4). The close runs OUTSIDE `_KEEPALIVE_LOCK` so a slow close
-    cannot block a concurrent construction (the #2172 lock discipline)."""
+    cannot block a concurrent construction (the #2172 lock discipline).
+
+    ⛔ THIS IS AN INVALIDATION BARRIER FOR A BUILD ALREADY IN FLIGHT, not only
+    a clear of what is cached (#10962 review finding 1). `_REGISTRY_PROBE_EPOCH`
+    is bumped HERE, under the lock and BEFORE the clear-stores, so a builder
+    that recorded the old value discards its own handle instead of installing
+    it: "the reset returned" then means "no handle built before this call is in
+    the cache" — the #5049 rule-4 contract `main`'s in-lock construction used to
+    give by mutual exclusion.
+
+    ⛔ AND THE BUMP IS UNCONDITIONAL — there is no "nothing cached, so there is
+    nothing to do" fast path. The dangerous case is EXACTLY the empty cache: a
+    builder in flight has installed nothing yet, so a reset that finds nothing
+    to clear would return without invalidating, and that builder would install
+    the handle it began before the reset. Skipping the gate costs one
+    uncontended lock acquisition per teardown; keeping it costs the contract."""
     global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
-    if _REGISTRY_PROBE_SDK is None:
-        return
+    global _REGISTRY_PROBE_CACHE, _REGISTRY_PROBE_EPOCH
     with _KEEPALIVE_LOCK:
-        sdk, _REGISTRY_PROBE_SDK = _REGISTRY_PROBE_SDK, None
+        _REGISTRY_PROBE_EPOCH += 1
+        # ⛔ CLEAR THE TUPLE **FIRST** — the mirror of the install rule. The
+        # fast path reads ONLY the tuple and holds no lock, so if the tuple were
+        # cleared last (behind the three scalar stores) a reader would keep
+        # being served the very handle this call is about to CLOSE: the same
+        # torn-publication window as the install path, pointing the other way
+        # and ending in a use-after-close instead of a wrong-graph pairing
+        # (#11001 review, round 8).
+        entry, _REGISTRY_PROBE_CACHE = _REGISTRY_PROBE_CACHE, None
+        sdk = entry[1] if entry is not None else _REGISTRY_PROBE_SDK
+        _REGISTRY_PROBE_SDK = None
         _REGISTRY_PROBE_URI = None
         _REGISTRY_PROBE_PATH = None
+    # Best-effort, and `None` when the cache was already empty (the bump above
+    # is unconditional, so this call no longer implies a handle existed).
+    _close_registry_probe_handle(sdk)
+
+
+def _registry_probe_sdk() -> TortoiseSDK:
+    """The process-lifetime registry SDK behind `list_graphs()` (#4661).
+
+    URI mode only — the embedded caller keeps its fresh handle. A construction
+    FAILURE is not cached: the exception propagates to
+    `_registry_existing_graphs`'s never-raise wrapper and the next probe
+    retries, so the fail-open contract is unchanged.
+
+    ⛔ CONSTRUCTION RUNS OUTSIDE `_KEEPALIVE_LOCK` (#8867 finding 2). It used
+    to run INSIDE it, on the claim that the lock then guarantees "two worker
+    threads cannot both build one and leak the loser". That claim was the bug:
+    the lock's own contract (`_KEEPALIVE_LOCK`'s declaration, #2172) says "the
+    lock is never held across a per-request fresh-SDK construction", because
+    `_make_sdk`'s EMBEDDED branch takes that SAME lock and `threading.Lock` is
+    not reentrant. URI mode never re-entered, so the window was only reachable
+    when `TORTOISE_DB_URI` looked set to this caller and unset to `_make_sdk`'s
+    own re-read — which the test suite does continuously via
+    `monkeypatch.delenv`. When it fires, the probe thread SELF-DEADLOCKS while
+    still holding `_KEEPALIVE_LOCK`, and the hang cascades process-wide:
+    `_probe_sdk` holds `_PROBE_SDK_LOCK` across its own `_make_sdk`, so
+    `_probe_sdk_reset()` blocks forever — and `_lifespan` calls that on app
+    startup, so the app never starts.
+
+    MEASURED 2026-11-05 (CI run 42025169439, required check `test (d)`, nodeid
+    `tests/test_body_cap_sweep.py::TestAgentSignupCap::test_agent_signup_empty_
+    no_ct_mints_200`): pytest-timeout fired at 4m40s inside the `embedded_client`
+    fixture's `TestClient.__enter__`, the shard stopped at `1253 passed` for the
+    following 16 minutes, and the leg died at its 26m watchdog with "failure set
+    unobservable". The dump's frames were exactly this deadlock:
+    `_registry_anchor` → `_registry_probe_sdk` → `_make_sdk` (blocked entering
+    `_KEEPALIVE_LOCK`) alongside `_probe_sdk` (holding `_PROBE_SDK_LOCK`, same
+    block) and `_lifespan` → `_probe_sdk_reset` (blocked on `_PROBE_SDK_LOCK`).
+
+    So the shape is: build first (nothing held), install under the lock with a
+    re-check. A peer that won the race keeps its handle and the loser closes
+    its OWN — a loser is never installed and never leaked, which is the
+    invariant the old code wanted, and the lock is never held across a
+    construction the stack can call back into.
+
+    ⛔ THE CACHED IDENTITY MUST HOLD STILL FOR THE WHOLE BUILD. `_make_sdk`
+    re-reads `TORTOISE_DB_URI` itself, so the identity read BEFORE the build and
+    the one read AFTER it bracket the value the construction actually used —
+    which is why the pair, not either read alone, names the handle. Recording
+    ONLY the post-build read is a fail-open, and it was measured: the window it
+    has to cover is not the microseconds between two reads, it is the whole
+    `_get_proj()` (a connect plus nine `CREATE INDEX` statements), so a pin
+    re-bound inside that window filed a handle built for the PREVIOUS test's
+    path-derived graph under the NEW pin. The auth path trusts this cache, so
+    it then read a graph the test never seeded — exactly the #9334 symptoms, and
+    exactly the two reds of CI run 42069864951: `assert 403 == 404` on
+    `tests/test_invites_http.py::TestInviteCreate::test_unknown_team_404`
+    (shard (g)) and the empty `GET /v1/organizations` in
+    `tests/test_onboarding_endpoints.py::TestOnboardingTeam::
+    test_create_team_then_session_key_mint_registry` (shard (f)).
+
+    So: build, re-read, and CACHE ONLY IF BOTH READS AGREE. That is strictly
+    stronger than either single-read shape — a SINGLE, non-reverting drift landing
+    anywhere inside (before `_make_sdk`'s own read, or after it during `_get_proj()`)
+    makes the two reads disagree, and a handle whose identity is ambiguous is CLOSED
+    and never installed, then rebuilt. A reconfiguration therefore costs one extra
+    build, and the CACHED path can never serve a wrong graph: the pair is
+    published as one immutable tuple (`_REGISTRY_PROBE_CACHE`), so a reader
+    that is not building sees either the old pairing or the new one, never a
+    mixture — the two-store window this docstring's claim used to outrun.
+    Production never rebinds the pin, so the retry path is inert there.
+
+    ⛔ THE PAIR DOES NOT SEE A REVERTING DRIFT, AND THAT IS A DECLARED RESIDUAL.
+    `A → B → A` inside ONE build leaves both reads at `A` while `_make_sdk`'s own
+    read — the one the handle was actually built against — saw `B`, so the two
+    agree and a graph-B handle is CACHED under identity `A`. Nothing else here
+    covers it: `_REGISTRY_PROBE_EPOCH` tracks RESETS, not pin drift, and
+    `_build_registry_probe_handle` does not report what `_make_sdk` read. The
+    structural close is to capture the URI in the SAME frame as `_make_sdk`'s own
+    read and return it, so all three reads are of the value the construction used;
+    that is not worth a signature change for a window no production caller can
+    enter (the pin never rebinds there, and the suite's `monkeypatch` reverts are
+    paired with `tests/conftest.py`'s `_reset_registry_probe_sdk()`, whose epoch
+    bump makes the builder discard). It is live only for a caller that writes
+    `TORTOISE_DB_URI` directly and reverts it inside one build without a reset.
+
+    ⛔ AND THE IDENTITY HOLDING STILL IS NOT ENOUGH — the cache can also be
+    INVALIDATED while the handle is being built (#10962 review finding 1).
+    `_reset_registry_probe_sdk` is a teardown/isolation hook whose contract is
+    "a test that monkeypatches `_make_sdk`/`TortoiseSDK` must not inherit a
+    handle an earlier test built" (#5049 rule 4), and because the build holds no
+    lock a reset can complete DURING it. An identity that never moved still
+    passes the stability rule, so the stability rule alone would install a
+    handle whose build began before the reset — repopulating the cache the reset
+    had just emptied, with a handle built under the monkeypatch it was clearing.
+    So each attempt records `_REGISTRY_PROBE_EPOCH` before it builds and refuses
+    to install when the generation moved, closing its own handle and rebuilding
+    — the same un-installed-and-closed disposition the ambiguous-identity branch
+    uses, so nothing leaks.
+
+    ⛔ OWNERSHIP OF THE LAST-RESORT HANDLE (residual, declared not fixed). When
+    the identity never holds still for a single build, the handle returned from
+    the un-cached fallback below is **nobody's to close**: `_reset_registry_probe_sdk`
+    closes the CACHED handle only, so that one connection lives for the life of
+    the process. It cannot be closed here (the caller is still using it) and it
+    must not be parked for `_reset` (closing a handle a caller may still hold is
+    the close-under-use hazard #8867 finding 1 owns). Unreachable in production,
+    where the pin never rebinds; reached only by the churn leg, whose handle is a
+    spy.
+    """
+    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
+    global _REGISTRY_PROBE_CACHE
+    for _attempt in range(_REGISTRY_PROBE_BUILD_ATTEMPTS):
+        identity = _registry_probe_identity()
+        # The invalidation generation this attempt is building FOR (#10962
+        # review finding 1). Recorded BEFORE the build, so a reset landing
+        # anywhere inside it — the whole `_get_proj()`, not the microseconds
+        # between two reads — makes this attempt's handle un-installable.
+        epoch = _REGISTRY_PROBE_EPOCH
+        # ONE read, one atomic publication (#11001 review). Never the three
+        # scalars: they are written as separate statements and a lock-free
+        # reader can land between them (see `_REGISTRY_PROBE_CACHE`).
+        cached_entry = _REGISTRY_PROBE_CACHE
+        if cached_entry is not None and cached_entry[0] == identity:
+            return cached_entry[1]
+
+        sdk = _build_registry_probe_handle()
+        if _registry_probe_identity() != identity:
+            # The pin/URI moved while the handle was being built, so which graph
+            # it addresses is AMBIGUOUS — `_make_sdk` may have read either
+            # value. Never install an ambiguous pairing: close ours and rebuild
+            # against whatever the process now resolves to.
+            _close_registry_probe_handle(sdk)
+            continue
+        retired = None
+        stale = False
+        with _KEEPALIVE_LOCK:
+            # ⛔ THE INVALIDATION FENCE COMES FIRST (#10962 review finding 1).
+            # A reset that ran while we were building moved the generation: our
+            # handle was built for a cache state that no longer exists (and may
+            # have been built under a monkeypatch the reset was clearing away),
+            # so it is NOT installable — whatever we found in the tuple below is
+            # irrelevant, and installing would repopulate a cache the reset had
+            # already emptied. Same disposition as the ambiguous-identity branch
+            # above: close ours un-installed and rebuild.
+            if epoch != _REGISTRY_PROBE_EPOCH:
+                stale = True
+            else:
+                # Under the lock the tuple and the mirrors agree (every writer
+                # holds this lock), so the decision reads ONE authority: the
+                # tuple.
+                cached_entry = _REGISTRY_PROBE_CACHE
+                if cached_entry is not None and cached_entry[0] == identity:
+                    # A peer installed a matching handle while we were building.
+                    # Keep ITS handle (one cached handle per identity, as
+                    # before) and close ours — the loser closes its own, so
+                    # nothing leaks.
+                    retired, sdk = sdk, cached_entry[1]
+                else:
+                    # The configured server OR the embedded path pin changed — a
+                    # reconfiguration event, not a request event (the embedded
+                    # anchor evicts on drift the same way, #1502). Drop the
+                    # handle: reusing it would probe a graph this process no
+                    # longer resolves to.
+                    retired = (cached_entry[1] if cached_entry is not None
+                               else _REGISTRY_PROBE_SDK)
+                    _REGISTRY_PROBE_SDK = sdk
+                    _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = identity
+                    # The atomic publication — LAST, so a lock-free reader that
+                    # misses it falls through and builds rather than pairing the
+                    # new handle with the outgoing identity (#11001 review).
+                    _REGISTRY_PROBE_CACHE = (identity, sdk)
+        if stale:
+            # Closed OUTSIDE the lock (#2172), exactly like the retire path.
+            _close_registry_probe_handle(sdk)
+            continue
+        if retired is not None:
+            # Closed OUTSIDE the lock (#2172): a slow close must not block a
+            # concurrent construction, and a close under the lock is the
+            # close-under-use hazard #8867 finding 1 owns.
+            _close_registry_probe_handle(retired)
+        return sdk
+
+    # The identity never held still for a single build, or the cache was
+    # invalidated on every attempt (a reset landing inside each build — the
+    # fence above, #10962 review finding 1). INSTALL nothing — and
+    # note the word, because it is not the same as caching nothing (#10962
+    # round-6 obs 2): this fallthrough declines to ADD an entry and leaves
+    # `_REGISTRY_PROBE_CACHE` exactly as it found it, so a handle cached earlier
+    # under a STABLE identity survives untouched. That is the correct outcome,
+    # not an oversight — a churning identity can never equal the one that entry
+    # is filed under, so it cannot be matched to this build, and evicting it
+    # would close a handle a concurrent caller may still be using (#8867
+    # finding 1's close-under-use hazard). An un-cached handle can mislead only
+    # the call that built it, never every later caller. Say so, and hand back
+    # one built for the identity the process resolves to right now.
+    _logger.warning(
+        "registry probe: %d consecutive builds were discarded — the identity "
+        "(TORTOISE_DB_URI / TORTOISE_DB_PATH) did not hold still, or the cache "
+        "was invalidated mid-build — serving an UN-CACHED handle",
+        _REGISTRY_PROBE_BUILD_ATTEMPTS,
+    )
+    return _build_registry_probe_handle()
+
+
+def _close_registry_probe_handle(sdk: TortoiseSDK | None) -> None:
+    """Close a probe handle we are NOT installing (discarded, retired, failed).
+
+    Best-effort by contract: the probe's callers are fail-open, so a close that
+    raises must never become the probe's answer (#4661).
+    """
+    if sdk is None:
+        return
     try:  # noqa: SIM105
         sdk.close()
     except Exception:
         pass
 
 
-def _registry_probe_sdk() -> TortoiseSDK:
-    """The process-lifetime registry SDK behind `list_graphs()` (#4661).
+def _build_registry_probe_handle() -> TortoiseSDK:
+    """Build ONE registry probe handle and bind it eagerly. Never cached here.
 
-    URI mode only — the embedded caller keeps its fresh handle. Construction
-    (and the eager `_get_proj()` that binds the projection) runs under
-    `_KEEPALIVE_LOCK`, so two worker threads cannot both build one and leak
-    the loser. A construction FAILURE is not cached: the exception propagates
-    to `_registry_existing_graphs`'s never-raise wrapper and the next probe
-    retries, so the fail-open contract is unchanged."""
-    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
-    identity = _registry_probe_identity()
-    uri, path_pin = identity
-    cached = _REGISTRY_PROBE_SDK
-    if (cached is not None and uri == _REGISTRY_PROBE_URI
-            and path_pin == _REGISTRY_PROBE_PATH):
-        return cached
-    with _KEEPALIVE_LOCK:
-        cached = _REGISTRY_PROBE_SDK
-        if (cached is not None and uri == _REGISTRY_PROBE_URI
-                and path_pin == _REGISTRY_PROBE_PATH):
-            return cached
-        if cached is not None:
-            # The configured server OR the embedded path pin changed — a
-            # reconfiguration event, not a request event (the embedded anchor
-            # evicts on drift the same way, #1502). Drop the handle: reusing it
-            # would probe a graph this process no longer resolves to.
-            try:  # noqa: SIM105
-                cached.close()
-            except Exception:
-                pass
-            _REGISTRY_PROBE_SDK = None
-            _REGISTRY_PROBE_URI = None
-            _REGISTRY_PROBE_PATH = None
-        sdk = _make_sdk(namespace="registry")
-        try:
-            sdk._get_proj()
-        except Exception:
-            try:  # noqa: SIM105
-                sdk.close()
-            except Exception:
-                pass
-            raise
-        _REGISTRY_PROBE_SDK = sdk
-        _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = identity
-        return sdk
+    `_get_proj()` IS the connect (and the nine `CREATE INDEX` statements
+    `_ensure_registry_indexes` issues), so it runs before the caller may install
+    the handle: a handle that cannot bind is closed and the failure re-raised,
+    which is the #4661 "a construction FAILURE is not cached" contract — the
+    next probe retries instead of inheriting one outage for the process.
+    """
+    sdk = _make_sdk(namespace="registry")
+    try:
+        sdk._get_proj()
+    except Exception:
+        _close_registry_probe_handle(sdk)
+        raise
+    return sdk
 
 
 def _registry_existing_graphs() -> set[str] | None:

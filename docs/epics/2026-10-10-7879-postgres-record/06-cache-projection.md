@@ -202,7 +202,7 @@ word lexicon — still projects.
 replaced the derivation: the capture now writes `summary` = a display DESCRIPTOR
 over the session's topic lexicon and `_searchText` = `", ".join(topics)`, both
 from the SAME list in one statement. So on a post-#10000 row `_search_text` is not
-a CHOSEN utterance — it is the token lexicon (in a word-delimited script; a space-less CJK run can reach it whole, i.e. the field can BE the turn's prose verbatim, while a Thai run fragments at its combining marks, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
+a CHOSEN utterance — it is the token lexicon (a §4.6 metadata value, not the S1 narrative, per `STORAGE-ARCHITECTURE.md:527`; in a word-delimited script; a space-less CJK run can reach it whole, i.e. the field can BE the turn's prose verbatim, while a Thai run fragments at its combining marks, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
 declared on, which makes dropping it an UN-INDEXING of every restored session on
 the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
 projected when the row proves the derivation, and declined otherwise — and the
@@ -260,6 +260,54 @@ each has a NEGATIVE leg in the suite:
 disabled this exclusion on the corpus #9914 targets"*. Here the cost is worse —
 the prose guard would strip a document's own frontmatter summary and its
 title-derived `_searchText`, silently un-indexing it in the cache.
+
+#### The identity is read AS THE NODE WILL CARRY IT — the `props` tail included
+
+`props` is written to the node with its property names **unmapped** (the tail is
+seeded first and a column value overwrites the same coordinate; an episodic
+Source's declined names are popped), so it can carry identity, not only
+prose: a row whose `source_kind` column is NULL while the tail holds
+`sourceKind='agentSession'` produces a node `is_episodic_source_node` calls a
+captured session. A predicate reading the **columns alone** therefore answered
+*"document"* for a node the reconciler classified as a session — R1 (*"from any
+row shape"*) failing **open**, with nothing red: the column door never fired,
+the prose landed. Nothing reddened — not because the reconciler filed it under
+some other heading, but because it **cannot see** it: it builds its record side
+through this same projector, so the re-projected record carries the prose too,
+`keep` includes `record_props` (`record_reconcile.py:449-451`, `:540`), and the
+pair compares **equal**. That is the same hazard the `props`-tail filter below
+exists for, defeated from the other side (#10867 review).
+
+So `_is_episodic_source_row` reads a **merged view** (columns + decoded tail,
+`_row_identity_view`), which is what makes it agree with
+`is_episodic_source_node` on every shape — the agreement legs pin it. Two
+bounds, both deliberate:
+
+* **a COLUMN value wins** the same coordinate, preserving the asymmetry above:
+  an ambiguous row is read as a DOCUMENT and keeps its prose (the pre-existing
+  defect) rather than stripping a document's metadata. ⛔ **That rule is the NODE
+  MAP's rule too**, and it has to be the *same* rule: `_props_from_row` seeds
+  the map from the tail and lets the column loop overwrite it. Resolving the
+  collision only in the identity read left the node map's winner to the row's
+  MAPPING ORDER, and the DDL declares `props` **last**, so on a real `SELECT *`
+  row the TAIL won `sourceKind` while the predicate read the COLUMN — the two
+  functions disagreed and R1 failed open exactly on the conflicting shape
+  (#10867 review ISSUE 1). `_source_row`'s `sorted()` keys put `props` BEFORE the
+  identity columns it can collide with (`props`, `source_kind`, `title`, `url` —
+  indices 27, 33, 39, 42 of 45), so every agreement leg ran on the one ordering real rows
+  do not have; the pin now
+  has a legs pair that builds the row in `SELECT *` order and one that builds the
+  same record both ways and requires the SAME node map;
+* **only the KIND can travel *for a row that can become a node***, because `url` is the
+  label's CONTRACT KEY — `node_from_row` refuses a NULL one (`UnprojectableRecord`, and
+  the schema's own CHECK `chk_source_node_key_is_contract_key` — `url IS NOT NULL AND
+  node_key = url`), so the tail's `url` is **unreachable**, never **absent**. ⚠️ The
+  bound is REACHABILITY, not the predicate: `_row_identity_view` does fill a NULL `url`
+  from the tail, so on the predicate alone `url=None` + `props={"url": "session:abc"}`
+  **is** episodic and the tail decides the arm. Pinned by
+  `test_a_tail_only_url_DOES_decide_the_arm_but_never_reaches_a_node`
+  (`tests/test_10853_session_source_prose.py`) so a later audit cannot read this bullet
+  as "the predicate cannot answer that way" and skip the shape.
 
 ### Costs, named rather than implied
 

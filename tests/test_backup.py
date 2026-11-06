@@ -5,9 +5,10 @@ import json
 import logging
 import os
 import tempfile
+import traceback
 from pathlib import Path
 
-import pytest  # noqa: F401
+import pytest
 from tortoise.backup import _bgsave, backup, restore
 
 
@@ -186,6 +187,12 @@ class _RecordingConnection:
         return "Background saving started"
 
 
+#: The function under test. ``_bgsave`` is the ONLY place ``tortoise/backup.py``
+#: constructs a FalkorDB client (``backup.py:903``), so "was ``_bgsave`` on the
+#: stack" is the exact question "did the code under test build this client".
+_SUT_FUNC = "_bgsave"
+
+
 def _install_fake_falkordb(monkeypatch, instances, exc=None):
     """Replace ``falkordb.FalkorDB`` with a recorder so no socket is opened."""
 
@@ -193,10 +200,152 @@ def _install_fake_falkordb(monkeypatch, instances, exc=None):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             self.connection = _RecordingConnection(exc)
+            # WHAT separates "a client the code under test built" from "a
+            # client some live worker from an earlier file in this shard
+            # built": the recorder is PROCESS-wide (the fake replaces
+            # ``falkordb.FalkorDB`` for EVERY constructor in the process), so
+            # membership in ``instances`` says nothing about who asked. The
+            # CONSTRUCTION STACK does, and it exists only here, so it is
+            # recorded here — that is what lets ``_snapshot_client`` restore
+            # the count pin #2974 shipped with without reviving the flake.
+            frames = traceback.extract_stack()
+            self.stack_files = tuple(
+                f.filename.replace("\\", "/") for f in frames)
+            self.stack_funcs = tuple(f.name for f in frames)
+            self.constructed_by_the_code_under_test = _SUT_FUNC in self.stack_funcs
             instances.append(self)
 
     monkeypatch.setattr("falkordb.FalkorDB", _FakeFalkorDB)
     return _FakeFalkorDB
+
+
+def _snapshot_client(instances):
+    """The ONE constructed client that was actually asked to ``BGSAVE``.
+
+    ``instances`` is a RECORDER, not a scope: the fake replaces
+    ``falkordb.FalkorDB`` for every constructor in the process, so machinery
+    that outlives the test that started it (a live indexer/capture worker from
+    an earlier file in the same shard) can build a client INSIDE this test's
+    window and land in the list first. Selecting by INDEX therefore asserted
+    about the wrong client and reddened the lane order-dependently — measured
+    in CI shard ``test (h)`` (run 42046356881, job 127334541115, head
+    ``f24717b33``): ``manifest["bgsave"] == "ok"`` while
+    ``instances[0].connection.commands == []`` — a client was constructed
+    first that this test never asked to snapshot (its captured setup log shows
+    the previous file's ``test_auth_…`` projection still live).
+
+    Selecting by the RECORDED COMMAND is what these tests mean: the snapshot
+    was issued, exactly once, against the client under test. A foreign client
+    is not this test's business in EITHER direction — neither its endpoint nor
+    its COMMANDS (see below) — because it is not the code under test.
+
+    ⛔ THE COUNT PIN IS NOT DROPPED, IT MOVED (#11038 review finding 1). The
+    assertion this replaced — ``len(instances) == 1`` — answered "how many
+    clients exist in this process", which is not the question: it reddened on
+    a worker that had nothing to do with the snapshot, AND deleting it was a
+    new FALSE PASS in the one pin guarding #2974. A second client built
+    against the embedded ``localhost:16379`` defaults — the exact endpoints
+    the fix exists to stop the snapshot path from dialing — became invisible,
+    because nothing asserted another constructor's ``host``/``port`` at all.
+    So the count is asserted over the RIGHT population: the clients whose
+    CONSTRUCTION STACK names ``_bgsave``, i.e. the ones the code under test
+    actually built.
+
+    A foreign client is required to do NOTHING here — neither its ENDPOINT nor
+    its COMMANDS are assertable, and asserting either re-creates the very
+    order-dependent flake this helper exists to remove (#11038 review finding
+    1, P3, at ``871fc03fc``). The recorder is process-wide, so a live
+    ``session_indexer`` worker legitimately dials whatever URI IT was handed
+    (``session_indexer.py:236-238`` parses it per call), which in CI is the
+    docker lane's own ``localhost`` — and the first thing that worker does
+    after connecting is ISSUE A COMMAND on that client. A `cmds == []` sweep
+    over every non-subject client therefore reds
+    `test_bgsave_dials_the_configured_uri_not_localhost` (and the two other
+    callers) with a message that names the endpoint pin while the endpoint was
+    never wrong: the #10010-review-P2 false-failure class, in the direction
+    this helper was written to eliminate. It also bought no coverage for
+    #2974: the endpoint of the client that MATTERS is pinned exactly, by
+    kwargs, in each test that calls this, and "the snapshot went to a client
+    the code under test built" is asserted by ``subjects[0] is
+    snapshotted[0]`` above. That sweep was the only assertion in this helper
+    that could fail for a reason outside the code under test.
+    """
+    recorded = [(i, list(i.connection.commands)) for i in instances]
+    snapshotted = [i for i, cmds in recorded if cmds == [("BGSAVE",)]]
+    assert len(snapshotted) == 1, (
+        "exactly one constructed client must be asked to BGSAVE; recorded "
+        f"{[(i.kwargs.get('host'), i.kwargs.get('port'), cmds) for i, cmds in recorded]}")
+
+    subjects = [i for i in instances if i.constructed_by_the_code_under_test]
+    assert len(subjects) == 1, (
+        "exactly one client must be constructed by the code under test "
+        f"(`_bgsave`); it built {len(subjects)}: "
+        f"{[(i.kwargs.get('host'), i.kwargs.get('port')) for i in subjects]} — a "
+        "second one is a #2974 regression (a fallback to the embedded "
+        "``localhost:16379`` defaults that nothing else would notice)")
+    assert subjects[0] is snapshotted[0], (
+        "the client `_bgsave` constructed is not the one that received the "
+        "BGSAVE — the snapshot went to a handle the code under test did not "
+        "build, so its endpoint is unpinned")
+    return snapshotted[0]
+
+
+def test_the_restored_count_pin_reds_on_a_second_client_from_the_code_under_test(
+        monkeypatch):
+    """The count pin has TEETH: a SECOND `_bgsave`-built client must red.
+
+    Non-vacuity for the #11038 review finding 1 fix. The pin is only worth
+    having if the shape it guards actually fails: `backup.py` building a
+    second client against the embedded ``localhost:16379`` defaults while the
+    first one does the snapshot. That is precisely what a #2974 fallback looks
+    like, and it is invisible to the recorded-command selector alone because
+    the stray client is never asked to BGSAVE.
+    """
+    instances: list = []
+    fake = _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://cloud.example.com:6379/tortoise")
+    assert _bgsave() == "ok"
+    stray = fake(host="localhost", port=16379)
+    assert stray.constructed_by_the_code_under_test is False, (
+        "guard: a construction from THIS test's own frame is not a subject — "
+        "attribution is by the construction stack, not by list membership")
+    # …now make it the regression shape: a second client `_bgsave` built.
+    stray.constructed_by_the_code_under_test = True
+
+    with pytest.raises(AssertionError,
+                       match="exactly one client must be constructed by"):
+        _snapshot_client(instances)
+
+
+def test_a_foreign_client_issuing_commands_still_leaves_the_pin_green(
+        monkeypatch):
+    """Non-vacuity for #11038 review finding 1 (P3): a worker must not red it.
+
+    The recorder is process-wide, so a live worker from an earlier file in the
+    shard can construct a client INSIDE this test's window and immediately
+    issue a command on it. Under the pre-fix `cmds == []` sweep that reddened
+    the #2974 endpoint pin with a message naming the endpoint, i.e. a
+    false-failure produced outside the code under test. The pin must read the
+    client `_bgsave` built and nothing else.
+    """
+    instances: list = []
+    fake = _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://cloud.example.com:6379/tortoise")
+    assert _bgsave() == "ok"
+
+    # The foreign worker: its own URI, its own client, the first command any
+    # client issues after connecting.
+    worker = fake(host="localhost", port=6379)
+    worker.connection.execute_command("PING")
+    assert worker.connection.commands == [("PING",)]
+
+    client = _snapshot_client(instances)
+    assert client.kwargs["host"] == "cloud.example.com", (
+        "the endpoint pin must read the client `_bgsave` built, never a "
+        "foreign client's")
+    assert client.connection.commands == [("BGSAVE",)]
 
 
 def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
@@ -213,7 +362,7 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     status = _bgsave()
 
     assert status == "ok"
-    assert len(instances) == 1, "exactly one client must be constructed"
+    client = _snapshot_client(instances)
     # #3065: the socket pair comes from the product's shared resolver
     # (``projection._bounded_server_socket_kwargs``), not from literals — the
     # 5s/10s pair that used to be pinned here was the pre-#2850 hardcoded
@@ -232,7 +381,7 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     # == Retry(NoBackoff(), 0)` is True), but ``Retry.__eq__`` also spans the
     # ``supported_errors`` set, so folding it into the dict would couple this
     # pin to a vendor default that has nothing to do with #2969.
-    kwargs = dict(instances[0].kwargs)
+    kwargs = dict(client.kwargs)
     retry = kwargs.pop("retry")
     assert kwargs == {
         "host": "falkordb-cloud.example.com",
@@ -250,7 +399,7 @@ def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
     assert retry._backoff.__class__.__name__ == "NoBackoff", (
         "the pin is the `Retry(NoBackoff(), 0)` idiom, not zero retries "
         "with some other backoff (#2969)")
-    assert instances[0].connection.commands == [("BGSAVE",)]
+    assert client.connection.commands == [("BGSAVE",)]
 
 
 def test_bgsave_explicit_uri_argument_wins_over_env(monkeypatch):
@@ -263,9 +412,10 @@ def test_bgsave_explicit_uri_argument_wins_over_env(monkeypatch):
     status = _bgsave("docker://:pw@cli-host:6379/tortoise")
 
     assert status == "ok"
-    assert instances[0].kwargs["host"] == "cli-host"
-    assert instances[0].kwargs["port"] == 6379
-    assert instances[0].kwargs["password"] == "pw"
+    client = _snapshot_client(instances)
+    assert client.kwargs["host"] == "cli-host"
+    assert client.kwargs["port"] == 6379
+    assert client.kwargs["password"] == "pw"
 
 
 def test_bgsave_connection_failure_is_loud(monkeypatch, caplog):
@@ -352,7 +502,10 @@ def test_backup_manifest_records_bgsave_ok(monkeypatch, tmp_path):
 
     manifest = json.loads((target / "manifest.json").read_text())
     assert manifest["bgsave"] == "ok"
-    assert instances[0].connection.commands == [("BGSAVE",)]
+    client = _snapshot_client(instances)
+    assert client.connection.commands == [("BGSAVE",)], (
+        "the manifest's 'ok' must be EVIDENCE: exactly one BGSAVE reached a "
+        "constructed client — never merely assumed")
 
 
 def test_resolve_db_endpoint_is_the_shared_canonical_resolver():
