@@ -168,7 +168,7 @@ steps: **12 m in-step watchdog + ~1 m setup/provision ≈ 13 m; × 1.5 = 19.5 �
 `.[test,postgres]` downloads (`python-ci.yml:4664` — the `Install package + the postgres extra` step
 in `test-record-postgres`; `[embeddings]`/torch deliberately absent) are a rounding error beside the
 shared archive it now only restores. The cap is
-**20**, which is `main`'s own value *re-derived here* rather than inherited — keeping the raised
+**20** — what `main` carried before #10962 raised it, re-derived here rather than inherited — keeping the raised
 cap would pin a per-PR concurrency slot at 50 m (#3239) against a SUM that can no longer occur.
 
 That also retires the arm-2 ranking this row used to carry. Arm 2 exists for a job that pays the
@@ -323,8 +323,8 @@ in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mod
 kill that loses the pass/fail summary. TWO caps have moved since, both on the post-step arm:
 `test-d14-hosted-api` 20 → 40 → 50 (#10182, re-sized in #10212) and `test-track-b` 10 → 30 (the
 same class: an `actions/setup-python cache: pip` save). ⚠ `test-record-postgres` was raised 20 → 50
-on 2026-11-05 from the first measured false-kill and then **put back to 20** when #11063 made the
-job restore-only and removed the save that raise was derived from — see the note under the table.
+on 2026-11-05 from the first measured false-kill; #11063 then made the job restore-only and removed
+the save that raise was derived from, and the cap is **put back to 20 by this change** — see the note under the table.
 
 `python-ci.yml` is now capped on **every** job, and `tests/test_ci_selection.py` asserts both
 that and the derived-required-context invariant, so the next added leg cannot silently inherit

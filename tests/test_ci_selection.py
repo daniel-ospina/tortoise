@@ -11781,16 +11781,26 @@ def _wall_clock_cap_claims(text: str, job: str, cap: int) -> list[str]:
     arm-2 arithmetic of OTHER rows, and attributing that reds on `test-d14-hosted-api`'s
     own worked example.
 
-    Excused by the PARAGRAPH: that same wrap means the historical `20 → 50` raise and
-    its own revert marker sit on adjacent lines ("…was raised 20 → 50 … and then
-    **put back to 20**"), and a revert marker anywhere in the paragraph is the record
-    being honest about a past value rather than contradicting the code. The pre-fix
-    defect is NOT excused: its paragraph never mentions the revert at all.
+    Excused by a revert marker that NAMES the shipped cap: that same wrap means the historical
+    `20 → 50` raise and its own revert marker sit on adjacent lines ("…was raised 20 → 50 … and
+    then **put back to 20**"), and a revert naming the cap the workflow ships is the record being
+    honest about a past value rather than contradicting the code. The pre-fix defect is NOT
+    excused: its paragraph never mentions a revert at all. ⛔ The marker is matched TOGETHER with
+    `cap`, not as a bare word anywhere in the paragraph — a paragraph-wide skip swallowed every
+    claim in it, and was measured letting `put back to 30` through (which now reds).
+
+    ⛔ DECLARED RESIDUAL: a NEW false claim APPENDED to a paragraph that already carries a valid
+    `put back to {cap}` marker is still excused, because the excuse is attributed per PARAGRAPH and
+    no lexical arm can tell "was raised 20 → 50, put back to 20" (a coherent triple) from "its cap
+    is 20 → 50" sitting beside it — measured, still green. Closing that needs the claim and its
+    revert attributed as a pair, which this predicate cannot do. Stated rather than left to be
+    discovered, the same way the sibling pin declares its ±2-line window.
     """
     offenders: list[str] = []
-    reverted = ("put back", "revert")
+    revert_naming_cap = re.compile(
+        rf"(?:put\s+back|revert\w*)[^.\n]{{0,80}}?\b{cap}\b", re.IGNORECASE)
     for first, block in _doc_paragraphs(text):
-        if any(word in "\n".join(block).lower() for word in reverted):
+        if revert_naming_cap.search("\n".join(block)):
             continue
         named = [index for index, line in enumerate(block) if job in line]
         if not named:

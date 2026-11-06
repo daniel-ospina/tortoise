@@ -4607,9 +4607,9 @@ jobs:
     #   12m in-step pytest watchdog + ~1m setup/provision = ~13m
     #   ->  x1.5 = 19.5  ->  20
     #
-    # — which is `main`'s own value, derived here rather than inherited. The WORK
-    # is ~194s for the 70-test collection (above), so this bounds a runaway, not a
-    # measurement-thin step, and the post step that used to justify more is gone.
+    # — what `main` carried before #10962 raised it, re-derived rather than
+    # inherited. The WORK is ~194s for the 70-test collection (above), so this
+    # bounds a runaway, not a measurement-thin step, and the POST step is gone.
     timeout-minutes: 20
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
@@ -4648,7 +4648,7 @@ jobs:
         # Nothing is lost by not saving here: the key is SHARED
         # (`pip-<os>-<hash uv.lock>`) and is written on EVERY run by `test`
         # (90m cap, unconditional), `test-slow` (60m) and `test-d14-hosted-api`
-        # (40m) — all three have the headroom this job does not. This job only
+        # (50m) — all three have the headroom this job does not. This job only
         # ever READ it, which is what `actions/cache/restore@` still does.
         uses: actions/cache/restore@v4
         continue-on-error: true
