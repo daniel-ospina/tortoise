@@ -16769,18 +16769,20 @@ def test_real_manifest_has_no_duplicate_entries():
     # #3381: two files were each registered twice — one entry added by two
     # different PRs fixing the same drift independently. A same-surface
     # duplicate is invisible to select() (surfaces are unioned), but it is a
-    # GATE FAILURE, not a note: `--integrity` reports it as
-    # `manifest drift: ['<surface>: <name>']`, because `main()` composes
-    # `_manifest_contract_issues` — and so `duplicate_entries` — into its
-    # `problems` list. (`integrity()` ITSELF does not: it returns only the
-    # `missing` list, which is why that distinction is spelled out here.) The
-    # same job's `registry_integrity` step reports
-    # `duplicate entry ... at <surface>[]`, so the REQUIRED `manifest-integrity`
-    # leg reds either way — see `duplicate_entries`' own docstring (#5373), which
-    # is the authority here. Pin its absence where
-    # CI will actually see it. (This comment said "reported non-fatally … never
-    # as a gate failure" until #11285; that was true in the #3381 era and has
-    # been false since #5373 made the duplicate a gate failure.)
+    # GATE FAILURE, not a note: `--integrity` reds on it, emitting BOTH shapes in
+    # ONE report — a `duplicate entry '<name>' at .surfaces.<surface>[] (lines N,
+    # M)` element (via `duplicate_mapping_key_issues`, the walk shared with
+    # `tools/registry_integrity.py`) AND a trailing `<surface>: <name>` element
+    # (via `_manifest_contract_issues` -> `duplicate_entries`) — because `main()`
+    # composes all of them into `problems`. (`integrity()` ITSELF does not: it
+    # returns only the `missing` list, which is why that distinction is spelled
+    # out here. The same job's separate `registry_integrity` step reports the
+    # duplicate-entry form as well, so neither step is the only place it appears.)
+    # See `duplicate_entries`' own docstring (#5373), the authority here. Pin
+    # its absence where CI will actually see it. (This comment said "reported
+    # non-fatally … never as a gate failure" until #11285; that was true in the
+    # #3381 era and has been false since #5373 made the duplicate a gate
+    # failure.)
     # Call the production detector rather than reimplementing it, so this pin
     # cannot drift from the real semantics (e.g. cross-surface dual
     # registration is deliberate and must stay allowed).

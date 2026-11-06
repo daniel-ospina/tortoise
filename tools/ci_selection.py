@@ -4150,10 +4150,18 @@ def duplicate_entries(manifest: dict) -> list[str]:
     selection and to :func:`integrity` (which only asks "is it classified?").
 
     #5373: this is a GATE FAILURE, not a note. `config/ci-surfaces.yml` carries
-    `merge=union`, which keeps BOTH sides' lines for a conflicting hunk — so a
-    duplicate same-surface entry is exactly what union emits when two lanes append
-    the same registration, and a note would let it in silently. Cross-surface (dual)
-    registration is still deliberate; only same-surface repeats are reported.
+    `merge=union`, which keeps BOTH sides' lines for a conflicting hunk. Note the
+    qualifier, because it is what makes a duplicate diagnosable: union is a
+    line-SET union, so BYTE-IDENTICAL additions DEDUPE — two lanes appending the
+    same registration verbatim do NOT produce two rows (`tools/registry_integrity.py`
+    records the same rule). Union emits a duplicate when the same entry is written
+    on DIFFERING lines, e.g. with a different trailing comment, and a note would
+    let that in silently. Cross-surface (dual) registration is still deliberate;
+    only same-surface repeats are reported.
+
+    ⛔ So a duplicate row is NOT proof that a union merge ran — three rows of the
+    same byte-identical line come from independent appends on bases that already
+    carried the previous row (#3153, 2026-11-06), not from the merge driver.
 
     Each offending name is reported ONCE however many times it repeats, so the
     count is a count of distinct problems.
