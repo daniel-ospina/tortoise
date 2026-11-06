@@ -9571,7 +9571,15 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
     covers only one of them:
 
     * a total ABOVE the census (`61` against the shipped empty census) is refused by
-      the ceiling, which is now `len(census)` rather than the 61-Object population;
+      the EQUALITY check (`drops_total != len(census)`), NOT by a ceiling sized to
+      the census — `_count(ceiling=gate_objects)` bounds it by the 61-Object
+      population, and 61 is inside that bound. ⛔ The ceiling is deliberately NOT
+      `len(census)`: that was the P1 at `05761cf29`, where a census is
+      ATTACKER-SIZED, so it bound nothing while DROPPING the population bound
+      (62 and 100 fabricated keys were ACCEPTED beside `objects: 61`). A lane that
+      "restores" `ceiling=len(gate_census)` here re-opens that measured forgery, and
+      the assertion below is worded on the equality check's own message so the two
+      designs cannot be confused again;
     * a total BELOW the census (`0` against a one-name census) passes every bound
       and is refused only by the equality check — the direction a ceiling can never
       see, and the one that keeps a real drop from vanishing out of the note.
@@ -9590,7 +9598,17 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
-    assert "drops_total" in capsys.readouterr().err
+    # ⛔ The EQUALITY check is the one that must refuse this, and the assertion says
+    # so by quoting its message: `_count` also names `drops_total` in its own
+    # refusal, so a bare `"drops_total" in err` stayed green when the ceiling was
+    # `len(gate_census)` — the `05761cf29` P1 this pin was written to prevent
+    # (verified: reverting the ceiling to `len(gate_census)` keeps the bare form
+    # green while the forgery it re-opens is accepted).
+    assert "value_gate_drops` census holds 0" in capsys.readouterr().err, (
+        "a drops_total above the census was not refused by the EQUALITY check — "
+        "a refusal from `_count`'s population message means the ceiling was "
+        "re-sized to the census, which is the attacker-sized bound "
+        "`05761cf29` removed")
 
     # ARM 2 — the opposite direction, which only the equality check can refuse: one
     # REAL Object in the census, zero claimed in the total. The name must be one of
