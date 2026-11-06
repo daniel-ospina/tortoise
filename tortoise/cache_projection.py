@@ -161,7 +161,13 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      CREATES is a PREVENTION route — its write is additive
      (`MERGE … SET n += $props`, :func:`node_statement`) and `summary` is
      declined on this door, so a node that ALREADY carries the old pair keeps
-     it. Anything else needs an explicit property clear (#11070).
+     it. ⛔ That is the INCREMENTAL path only (`project_records` on a live graph):
+     ``record-restore`` / ``rebuild_from_record`` WIPE first
+     (``_wipe_all_nodes``, *"unconditional and whole-graph"*), so a FULL restore
+     CLEARS the pair rather than preserving it — measured by
+     ``test_the_record_restore_writes_no_story_arc_on_any_node`` arm (3), which
+     creates a legacy node carrying the prose, restores, and asserts the total
+     prose size is 0. Anything else needs an explicit property clear (#11070).
    A **fifth** declared exception is :data:`CACHE_FORBIDDEN_COLUMNS` (#10394),
    and it is the one that is NOT per-row: a COLUMN the record holds as authority
    and the cache must never materialise, because §9.1/D1 places the text in
