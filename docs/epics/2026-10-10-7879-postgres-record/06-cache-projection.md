@@ -185,35 +185,55 @@ to have none.
 * **No migration-safety surface** (owner scope ruling, 2026-10-10).
 * **No public surface change.**
 
-## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853)
+## §9.1/D1 at the projection door — an EPISODIC Source carries no turn prose (#10853), except the space-less-run residual named below
 
 **A declared narrowing** of the field set — the only one — in the opposite
 direction from the three widening exceptions the module names
 (`FOLD_ON_CREATE_DEFAULTS`, `DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`):
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
-when the Source is a captured session, so
-`cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to project them onto
-the node. The record keeps the values (the row is not mutated), and `topics` —
-the capture's word lexicon — still projects.
+when the Source is a captured session **and the row holds the pre-#10000
+derivation**, so `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to
+project them onto the node. The record keeps the values (the row is not mutated,
+and they are retrievable by a column read — `record_serve.read_node`,
+`record-text`; there is no record-side text INDEX), and `topics` — the capture's
+word lexicon — still projects.
 
-⛔ **No in-tree verb reads the declined pair back** (#10867 review, P2).
-`record_serve.read_node` returns *this* projector's map — the narrowed one — and
-`record-text` reads `public.session_narrative`, a different table holding the
-session-level summary, never `public.source.summary`. The only read is a direct
-`SELECT summary, _search_text FROM public.source WHERE url = …`, and there is no
-record-side text INDEX. Stated in the negative because the opposite was written
-here first and it is the load-bearing half of "safe to decline".
+⭐ **The decision is per ROW, from the row's own values (#10965).** #10000
+replaced the derivation: the capture now writes `summary` = a display DESCRIPTOR
+over the session's topic lexicon and `_searchText` = `", ".join(topics)`, both
+from the SAME list in one statement. So on a post-#10000 row `_search_text` is not
+a CHOSEN utterance — it is the token lexicon (in a word-delimited script; a space-less CJK run can reach it whole, i.e. the field can BE the turn's prose verbatim, while a Thai run fragments at its combining marks, the residual named in `sdk._session_source_metadata`, #10852) — and it is the only field the Source FTS index is
+declared on, which makes dropping it an UN-INDEXING of every restored session on
+the recovery door rather than a §9.1/D1 measurement. `_search_text` is therefore
+projected when the row proves the derivation, and declined otherwise — and the
+proof is TWO terms, never a shape test and never the join alone: the stored text
+IS `", ".join(topics)`, **and** `summary` is that same join behind
+`SESSION_SOURCE_SUMMARY_PREFIX`. ⛔ The join by itself is not enough, and this is
+measured rather than reasoned: a pre-#10000 capture wrote `summary` = the
+transcript's first substantive utterance and derived `_searchText` FROM it, so on
+a transcript whose utterance is itself a comma-space list (`"milk, eggs, bread,
+cheese, apples, oranges"`) the legacy row matches the join word for word, and a
+join-only test re-indexed its prose with nothing red (#10852 review, P2). The
+display column is the WITNESS that the derivation is the post-#10000 one; it is
+READ and never projected. Every row that cannot prove both terms — including one
+whose `summary` is absent, empty, or unprefixed — is declined (fail-closed: a
+session that stays un-indexed on this door until one of the clearing routes below
+re-derives it — visible and named here, against prose on a node, which nothing
+reds). The prefix has ONE home,
+`tortoise/session_source_display.py` (a leaf module that imports nothing): the
+projection may not import the capture to obtain it, and a second literal is how
+two doors come to disagree about what a derived row looks like. `summary` itself
+stays declined on every row: restoring it would put the whole descriptor on the
+node for no retrieval gain, since the Source FTS index is declared on
+`_searchText` — a stated residual, not an oversight.
 
 Why it lives here rather than only in the capture: every record-sourced read and
 rebuild goes through `cache_projection.node_from_row` — `tortoise record-restore`
 and `rebuild_from_record` materialise a node with it, and
 `record_serve.read_node` answers with the same map because its contract is
 that a served node and a rebuilt node cannot drift. So a row written by a build
-that still placed the key either re-creates the prose **whatever build is reading
-it** or makes the served answer disagree with the rebuild — the one-way
-divergence #10853 measured. Sweeping the existing rows instead would decay: at
-this head the capture still writes the value, so the next capture of the same
-session writes it straight back.
+that still placed the sentence re-creates the prose **whatever build is reading
+it** — the one-way divergence `#10853` measured.
 
 ### Which rows are EPISODIC — two identity arms, and three flags that are NOT signals
 
@@ -289,136 +309,79 @@ bounds, both deliberate:
   (`tests/test_10853_session_source_prose.py`) so a later audit cannot read this bullet
   as "the predicate cannot answer that way" and skip the shape.
 
-### Three costs, named rather than implied
+### Costs, named rather than implied
 
-* the **journal fold** still projects the value until #10000's capture-side change
-  lands, so the two rebuild paths disagree on that one column until then — in the
-  ruling's direction, and it does **not** converge on its own (see the obligation
-  below);
-* graph-side FTS over a session Source's own utterances goes with the prose. The
-  value survives in the record (retrievable by a column read; there is no
-  record-side text index), and #10000 replaces the capture's summary with a topic
-  lexicon;
+* the **journal fold** projects the pair the capture wrote and the record fold now
+  projects the same post-#10000 pair, so the two rebuild paths agree on
+  `_searchText`; they disagree only on `summary` (declined on the record door);
+* graph-side FTS survives on a post-#10000 row — the lexicon is restored — and
+  goes, with the prose, on a legacy one, where there is no non-prose value to
+  keep. A legacy session therefore stays un-indexed on the recovery door, and
+  ⛔ **a RE-CAPTURE does NOT repair it** — this is the claim `#10852` measured
+  as FALSE and retracted from the PR's other artifacts, so it is stated here in
+  the corrected form: re-capturing an already-captured session id is the
+  `#2104`/`#1727` no-op replay, so `_materialize_session_source` — whose only
+  production caller sits behind the fresh-capture gate — **never runs** and the
+  stale pair survives (pinned by
+  `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`).
+  The ONE route that DOES clear it is a retry of a prior FAILED capture — that
+  arm re-runs the mint for the SAME node (`url = session:<id>`), so the
+  capture's `SET`s overwrite the pair. Two routes that read like repairs are NOT
+  (`#10852` review, P3): a capture under a NEW `session_id` MERGEs a DIFFERENT
+  node and leaves the old one alone, and a record-sourced re-projection is a
+  **prevention** route, not a clearing one (see the next bullet). Clearing an
+  existing node's pair otherwise needs an explicit property clear — `#11070`'s
+  work, not a replay's;
 * `python -m tortoise record-reconcile` builds its RECORD side through the same
-  projector, so its truth side omits what the cache holds. **The population is not
-  "legacy"**: at this head the capture still writes and journals the pair, so
-  every session this build captures would report `field_mismatches` forever — the
-  "signal indistinguishable from noise" the reconciler's own docstring grades P1.
-  So `scan_cache_view` marks the pair CACHE-OWNED for an episodic Source
-  (`cache_projection.episodic_source_prose_properties()`) and the run counts it
-  under its own `graph_only` bucket: visible, and not a divergence against a
-  record that is correct. The graph side is repaired by a record-sourced
-  re-projection (`record-restore` / `rebuild_from_record`, which re-materialise
-  through this projector) — **for a node the projection CREATES**. The write is
-  additive (`MERGE … SET n += $props`, `cache_projection.node_statement`), so a
-  node that ALREADY carries the pair keeps it across a re-projection; the
-  narrowing stops the pair being written, it does not clear an existing one.
-  Both verbs also refuse **non-test server graphs**: `rebuild_from_record` runs
-  `_assert_test_graph`, which rejects any server graph name that is not
-  `test_`/`tortoise_test_` prefixed — every production name (`org_<org_id>`)
-  among them. ⚠️ That is a NAME check, not a supervision one: an EMBEDDED
-  projection (`path=`) is exempt, and an embedded DB is a persistent user
-  database (`python -m tortoise rebuild --db <path>`), so a rebuild there does
-  run. Clearing a populated cache's stale pair needs an explicit property clear, and the sweep is
-  #10000's capture change.
-
-### Obligation: `#10852` DELETES this rule, it does not converge with it
-
-`#10852` replaces the capture's `summary` with a TOPIC LEXICON descriptor and
-derives `_searchText` from `topics` — §4.6 metadata, not the S1 narrative (§9.1/D1
-prose), which is
-what `docs/architecture/STORAGE-ARCHITECTURE.md:527` rules (*"`summary`/`title`
-stay on the node"*). The narrowing above is keyed on the ROW's IDENTITY, so it
-cannot tell that provenance from the prose: it would decline both, on the
-record→cache door only (the live journal fold keeps them), and the reconciler
-subtraction would keep that out of the mismatch count. So this rule is correct
-for a pre-fix row and **wrong** for a post-`#10852` one, and it must not outlive
-it — `#10852` deletes `_EPISODIC_SOURCE_PROSE_COLUMNS`, both guard doors in
-`_props_from_row`, `episodic_source_prose_properties`,
-**`episodic_source_declined_properties`**, `is_episodic_source_node`, the
-`scan_cache_view` subtraction, and **`record_serve.parity_difference`'s decline**,
-and adds a leg that a lexicon `summary` + a topics-derived `_searchText` SURVIVE
-the door with the rebuilt session Source still Source-FTS-indexed. Recorded as a
-follow-up obligation on #10853.
-
-**SEVEN touch points, not five — and two of them are callers rather than
-enumerations** (#10867 review, ISSUE 2). An obligation that named only the
-projection's own names was a trap in both directions:
-
-* `episodic_source_declined_properties` (`cache_projection.py:1593`) is a
-  **caller** of `episodic_source_prose_properties`, so deleting the latter alone
-  leaves `NameError` on the `props` tail for every episodic row;
-* `record_serve.parity_difference` (`record_serve.py:1138-1144`) imports **both**
-  `episodic_source_declined_properties` and `is_episodic_source_node` — the
-  tree's SECOND record↔cache comparison instrument. A partial deletion is an
-  `ImportError` on every `Source` comparison, loud today only because three legs
-  the obligation did not list exist; and the other direction is worse — if
-  `is_episodic_source_node` survives, `parity_difference` keeps explaining the
-  pair away for every session `Source` after `#10852`, so a REAL projection gap
-  on a lexicon `summary`/`_searchText` reddens as "explained". That is the
-  "declared asymmetry and a real gap as the same signal" class this PR grades
-  P1, and it is precisely how a rule outlives its own correctness.
-
-So the check is not "were the names in this list deleted" but **"does any
-reference survive"**: after the deletion, re-run
-`grep -rn 'episodic_source_prose_properties\|episodic_source_declined_properties\|_EPISODIC_SOURCE_PROSE_COLUMNS\|is_episodic_source_node' tortoise/ tests/`
-and expect **no** hits outside the new lexicon-SURVIVES legs (#10867 review
-ISSUE 2, from the external pass: removal guides converge on *enumerate every
-reference — including test, documentation and CI callers — then re-run the
-search to prove zero*, because a hand-kept list is what goes stale).
+  projector, so its truth side HOLDS `_searchText` for a post-#10000 row — and
+  the cache-owned partition keeps every name the record side holds, so a drifted
+  `_searchText` is compared and reds. `summary`, and a legacy row's whole pair,
+  are CACHE-OWNED for an episodic Source
+  (`cache_projection.episodic_source_prose_properties()`) and counted under their
+  own `graph_only` bucket: visible, and not a divergence against a record that is
+  correct. The graph side of a legacy node is repaired by a record-sourced
+  re-projection (`record-restore` / `rebuild_from_record`) — **for a node the
+  projection CREATES**: the write is additive (`MERGE … SET n += $props`), and
+  `summary` is declined on this door, so a node that ALREADY carries the pair
+  keeps it across a re-projection — the projection produces a prose-free node
+  only where none existed, which PREVENTS the defect rather than clearing it.
 
 ### The pin
 
-`tests/test_10853_session_source_prose.py`: the drop; the narrowness of the drop;
-**the DROP SET itself** (every `public.source` column non-NULL, and
-`set(projected_properties("source")) - set(node.props)` is EXACTLY
-`{"summary", "_searchText"}` — the leg that reds when the set is WIDENED, which
-nothing else did until #10867 review round 9: adding `title` left every leg and
-the whole 443-test neighbourhood green while the door stripped a record-held
-property);
-the reconciler counting the declined pair as `graph_only` (not divergence) while a
-DOCUMENT with a differing summary is still counted field by field;
-**`tests/test_record_serve.py` — the SECOND instrument** (the served-read parity
-check, `record_serve.parity_difference`; it is in the `#10852` obligation above,
-so it is pinned here rather than only in the epic prose):
-`test_parity_explains_the_episodic_source_decline_instead_of_reddening` (the
-declined pair is EXPLAINED, and the explained set is drawn from the projection's
-own declaration rather than a list the test curates — so a name added to the
-decline needs no test edit), `test_parity_reddens_on_the_same_names_for_a_document_source`
-(the negative direction: a `corpus://` document of kind `agentSession` that
-carries a differing `summary`/`_searchText` still REDDENS, i.e. the decline is
-scoped to the identity arms and cannot explain away a real gap), and
-`test_parity_explains_only_the_declined_names_on_a_session_source` (scoped by
-NAME too: the identity opens the decline, it does not blanket the comparison);
-ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline, then one per
-term that must not be a signal: a transcript document carrying a `session_id`, a
-`corpus://` permalink stamped `agentSession`, a document stamped `is_episodic`);
-the row/node predicate-agreement legs, including the tail-carried identity, and
-TWO legs for the ORDER the row arrives in (`_row_in_select_star_order`: the tail
-is the last column in the DDL, so a real row iterates it last — the ordering in
-which the tail used to win the node map while the predicate read the column, the
-collision review #10867 raised as ISSUE 1), plus the falsy edge that proves the
-rule is ONE rule (`None` is the only silence — an empty `url` column is a value,
-and the identity view no longer fills it from the tail); the
-`props`-tail legs (prose AND the `sourceKind` identity, plus the negative that a
-tail-carried kind alone does not strip a `corpus://` document); and the record row
-that must not be mutated. Mutation-checked, one at a time: each identity arm, EACH
-OF THE TWO DOORS (the column loop and the `props` tail — the tail filter undoes
-only the keys the tail added, so neither door subsumes the other), the tail read in
-the predicate (column-only reds **3** legs — the two identity-view legs and the
-`tail-only url decides the arm` leg that `916f32741` added), WIDENING THE DROP SET (`+"title"` reds the
-drop-set leg and only it), the column-wins seeding (writing the tail last again
-reds the `SELECT *`-order leg and the order-independence leg, and nothing else),
-the label gate,
-the call-time resolution of the placement spellings, and each of the three flags
-re-added — every one reds at least the leg that names it, plus the row/node
-agreement shape that exists to catch exactly that drift.
+`tests/test_10853_session_source_prose.py`, the `#10853` arms: the drop; the
+narrowness of the drop; the reconciler counting the declined pair as `graph_only`
+(not divergence) while a DOCUMENT with a differing summary is still counted field
+by field; ONE LEG PER ARM; the FOUR negative legs (a plain-document baseline,
+then one per term that must not be a signal: a transcript document carrying a
+`session_id`, a `corpus://` permalink stamped `agentSession`, a document stamped
+`is_episodic`); the row/node predicate-agreement legs; the `props`-tail leg; and
+the record row that must not be mutated. Mutation-checked, one at a time: each
+identity arm, EACH OF THE TWO DOORS (the column loop and the `props` tail — the
+tail filter undoes only the keys the tail added, so neither door subsumes the
+other), the label gate, the call-time resolution of the placement spellings, and
+each of the three flags re-added — every one reds at least the leg that names it,
+plus the row/node agreement shape that exists to catch exactly that drift.
 
-The parity half is mutation-checked the same way, in `record_serve.py`'s
-decline — measured at `a7f5b6a58`, one mutation at a time, `-k parity`:
-DROPPING the explanation (`declined = frozenset()`) reds **2**
-(`test_parity_explains_the_episodic_source_decline_instead_of_reddening`,
-`test_parity_explains_only_the_declined_names_on_a_session_source`), and
-DROPPING THE IDENTITY GATE (explain for every `Source`) reds **1**
-(`test_parity_reddens_on_the_same_names_for_a_document_source`) — the direction
-that matters, because it is the one that would silence a real document gap.
+and, in the same file, the SIX `#10965`/`#10852` arms of the per-row decision:
+`test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on` (the
+restored `_searchText` is the lexicon, and the index really is declared on it);
+`test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name`
+(four near-miss shapes that only LOOK like the derivation are still dropped, plus
+the legacy control); `test_a_list_shaped_legacy_utterance_is_not_mistaken_for_the_lexicon`
+(the JOIN ALONE is not the derivation — a legacy utterance that is itself a
+comma-space list satisfies it word for word, and only the display prefix tells the
+two apart; it reds with the witness removed, while every other legacy leg stays
+green); `test_the_witness_fails_closed_on_every_unprovable_summary` (absent,
+empty, unprefixed, prefixed-plus-more → all declined, with the live derivation's
+own row kept as the control); `test_the_display_summary_stays_declined_and_the_residual_is_named`
+(the stated residual, pinned so it cannot become an accident); and
+`test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row` (a restored
+`_searchText` that drifts from the record REDS instead of hiding in `graph_only`).
+
+The `#10852` prose-retraction arms live in `tests/test_10000_source_prose.py`:
+`test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node` (the write
+site's comment) and `test_a_re_capture_does_not_heal_a_pre_fix_node` (the stale
+pair SURVIVES a replay); and this section is itself guarded, in both directions,
+by `tests/test_10000_cache_projection_doc_pin.py` — the doc is the fourth
+artifact to have carried the retracted premise, and its guard is DB-free and
+registered in `tier1` because a docs-only edit runs `tier1` only.
