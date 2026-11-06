@@ -937,6 +937,19 @@ def test_kill9_warm_db_aof_carries_post_save_writes(monkeypatch):
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
     monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
+    # ⛔ The SUBJECT here is DURABILITY — does the AOF carry the post-RDB-save
+    # writes across a SIGKILL — not latency. The reopen below restarts the
+    # embedded daemon, which replays the AOF, and the product's read bound
+    # (``projection._DB_SOCKET_TIMEOUT_DEFAULT`` = 10 s) decides that restart on
+    # a contended host: measured 2026-11-05 on run 42076633842, this test redded
+    # at the `fresh = FalkorProjection()` line with
+    # `redis.exceptions.TimeoutError: Timeout reading from socket` — the boot
+    # window does NOT retry it, because #10447 retries only REFUSED connects,
+    # not a server that accepted the connection and has not answered yet. Pin
+    # the read bound through the documented knob (its ceiling is 60 s) so a
+    # latency budget stops deciding a durability assertion. The 8/8 assertion
+    # is untouched — a lost write still fails it.
+    monkeypatch.setenv("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", "60")
     from tortoise.projection import FalkorProjection
 
     # Graceful close → RDB saved
