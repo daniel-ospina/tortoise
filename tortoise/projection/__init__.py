@@ -13002,6 +13002,20 @@ class FalkorProjection(
         # wrong engine (there is no #7951 re-assert in this engine).
         from tortoise.session_source_migration import reconcile_after_replay
         reconcile_after_replay(self, engine="rebuild")
+        # #11070: the same class, one node-property over. A pre-#10852 capture's
+        # `SourceCreated` record carries the transcript's first utterance in
+        # `summary`/`_searchText`, so this replay re-mints the §9.1/D1 prose that
+        # the repair exists to remove. Trailing sweep, after every pass, exactly
+        # like the identity reconciler above — and for the same reason: a
+        # graph-only repair is undone by the next wipe (#2296). Never raises.
+        # ⛔ With no record handle it is PLAN-ONLY: a replay engine has none, and
+        # the clear arm is destructive AND not self-correcting (its output is no
+        # longer a candidate), so clearing here would un-index the population
+        # irreversibly and report census==0 — a false PASS. It logs the count; the
+        # CLI run, which has the record, is what heals it (#11070 review, P1).
+        from tortoise import session_source_prose_migration as sspm
+
+        sspm.reconcile_after_replay(self, engine="rebuild")
         # #4653: re-establish the watermark captured above. DEGRADES, never
         # raises — this runs after the wipe (#2943 "no loss without proof").
         try:
@@ -17724,6 +17738,15 @@ class FalkorProjection(
         # `reconcile_after_replay`.
         from tortoise.session_source_migration import reconcile_after_replay
         reconcile_after_replay(self, engine="rebuild_all")
+        # #11070: rebuild-DETECTED, not repaired. The pre-#10852 `SourceCreated`
+        # record still holds the utterance, so THIS replay re-mints the prose
+        # pair — and with no record handle the hook is PLAN-ONLY (writes
+        # nothing), so a rebuild does not restore the repair. Re-run the CLI with
+        # `--record-dsn` after any rebuild (`session_source_prose_migration`
+        # docstring: REBUILD DETECTION, NOT REBUILD REPAIR). Never raises.
+        from tortoise import session_source_prose_migration as sspm
+
+        sspm.reconcile_after_replay(self, engine="rebuild_all")
 
         # ── #4653: re-establish the event-log watermark ───────────────
         # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is

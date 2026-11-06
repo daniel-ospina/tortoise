@@ -2646,6 +2646,13 @@ surfaces:
   # reason: `cache_projection.py` is the subject and this is the arm that pins
   # the new rule, so a change to it runs here rather than going silently green.
   - test_10853_session_source_prose.py
+  # #11070: the pre-#10852 `:Source` prose REPAIR
+  # (`tortoise/session_source_prose_migration.py`) and the census predicate it
+  # has to reach zero with. `session_source_prose_migration.py` matches no named
+  # SOURCE_PATTERN, so it falls through to `core` — registering the guard on the
+  # same surface as the #10853 narrowing above is what makes the repair's own
+  # suite run on a change to the module alone, instead of going silently green.
+  - test_11070_source_prose_repair.py
   # #4197: the saved-backlog ledger (`tortoise/capture_backlog.py`) and its
   # CLI surface (`tortoise/__main__.py`). `capture_backlog.py` matches no
   # named SOURCE_PATTERN, so it falls through to `core` — registering the
@@ -10518,6 +10525,10 @@ durations:
   # cannot have measured it — the flat `DEFAULT_FAST_WEIGHT` is the only honest
   # row. `tools/ci_timing.py --refresh-durations` replaces it.
   test_10853_session_source_prose.py: 2.0  # unmeasured — new in #10853
+  # #11070: new in this PR, same reason as the row above — unmeasured, and the
+  # flat `DEFAULT_FAST_WEIGHT` is the only honest row until the refresher can
+  # sample it.
+  test_11070_source_prose_repair.py: 2.0  # unmeasured — new in #11070
   # #5140 finding 8: the relabel migration's own suite (live-FalkorDB cases on
   # per-test graphs; two of the functions are parametrised, so the collected
   # count is larger than the function count — deliberately not restated here,
