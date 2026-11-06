@@ -2341,7 +2341,28 @@ assert_eq "$RC" 0 "78p. a stamp 120s AHEAD (inside the grace) is usable, not cor
 assert_not_contains "$(cat "$LOG")" "in the future" "78p. it does NOT file a future-stamp incident"
 assert_not_match "$OUT" 'was -[0-9]+m ago' "78p. the run does NOT publish an impossible negative age"
 assert_contains "$OUT" "inside the 300s skew grace" "78p. it names the skew instead"
+# the exact second count carries fixture->NOW drift, so pin the SIGN and shape
+assert_not_match "$OUT" '-[0-9]+s AHEAD' "78p. the magnitude is never NEGATIVE (a flipped sign would print -120s AHEAD)"
+assert_match "$OUT" '[1-9][0-9]*s AHEAD' "78p. the magnitude is a positive count"
 assert_contains "$OUT" "0m ago" "78p. the age is clamped to 0m"
+
+# ── 78q. #10234 review P2 (round 18): the published value is SCRUBBED and BOUND ──
+# Round 13 added `redact_truncate "$newest" 80` because that value is app-controlled
+# and reaches a PUBLIC issue body — but 78i's fixture ("not-a-timestamp", 15 chars,
+# no credential shape) is byte-identical before and after redaction, so replacing
+# `$(redact_truncate "$newest" 80)` with `${newest}` shipped green (mutation M11).
+# A secret-SHAPED, over-long value pins both halves: scrubbed AND truncated.
+SECRET_TS="ghp_$(python3 -c 'print("A"*100)')"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$SECRET_TS"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78q. an unparseable secret-shaped timestamp reds"
+# the raw 100-char token must NOT be republished
+if grep -qF "$SECRET_TS" "$LOG" 2>/dev/null; then bad "78q. the raw secret-shaped value reached the issue body"; else ok "78q. the raw value does not reach the issue body"; fi
+assert_file_match "$LOG" 'could not be parsed' "78q. the cause is still reported"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
