@@ -1933,8 +1933,18 @@ def test_the_floor_citations_RESOLVE_to_what_they_claim_at_this_head():
       citation stays the liveness anchor: the canonical citation of this span is
       always token-bearing and always present.
 
-    Discriminating: shift a cited span, reword the sibling's phrasing away, or state a
-    different span on any token-bearing line of this file, and it reddens.
+    ⚠ The derivation arm and the two below it OVERLAP ON PURPOSE and none of the three may
+    be deleted as redundant: the derivation arm is `origin/main`'s own independent pin
+    (written after rounds eleven to sixteen above), and each catches a shape the others
+    cannot — the derivation reds a span that is WIDE ENOUGH to contain the sentence but is
+    not the sentence's own extent, naming the number to write, while the last two red a
+    citation this file states ANYWHERE ELSE (reworded, appended to another docstring, or
+    re-introduced under a synonym) that the derivation cannot see, because it reads the ONE
+    coordinate in `tools/ci_check_repair.py`.
+
+    Discriminating: shift a cited span, reword the sibling's phrasing away, widen the
+    cited span while staying on the sentence, or state a different span on any
+    token-bearing line of this file, and it reddens.
     """
     root = Path(__file__).resolve().parents[1]
     src = (root / "tools" / "ci_check_repair.py").read_text()
