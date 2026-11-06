@@ -372,10 +372,29 @@ def _provenance_problems(
     problem, which is what a step that guarantees its own history wants (fail CLOSED);
     the default arm reds only on a PROVEN defect, because this gate is documented as safe
     to run anywhere and `checkout@v4` defaults to `fetch-depth: 1`.
+
+    ⛔ A MISSING `cut_at_commit` is such a PROVEN defect (`#11057` review FINDING 1): the
+    presence half of this rule has to live in THIS copy, because `surface_manifest.py`'s
+    `_read_manifest` — which does refuse absence — is the copy the PR can edit.
     """
     sha = str(doc.get("cut_at_commit") or "")
     if not sha:
-        return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
+        # ⛔ #11057 review FINDING 1: ABSENCE is a PROVEN defect here, never a deferral.
+        # This used to return `[], None` with the note "its SHAPE is `_read_manifest`'s
+        # refusal, one verdict" — but `_read_manifest` lives in `tools/surface_manifest.py`,
+        # which is exactly the copy this file is pinned INSTEAD OF because the PR under test
+        # can edit it. So the presence half of the rule was enforced only by the un-pinned
+        # copy, and a PR that DELETED the field kept this required leg green: this copy
+        # answers "no sha ⇒ nothing to check". Same fail-open as a bogus sha, reached by
+        # removing the evidence rather than corrupting it — and deleting is a smaller edit
+        # than forging. Clone-shape independent, so it reds in BOTH arms (`strict=` is not
+        # consulted: absence is never "unprovable", it is the record being missing).
+        return [
+            "the frozen surface baseline records no `cut_at_commit`: it must name the "
+            "default-branch commit the baseline was cut against (a 7-40 char hex commit "
+            "sha), because that is the only provenance a reader can independently verify. "
+            "Re-cut the baseline (`cut --commit <sha-in-main>`), never delete the field"
+        ], None
     if not _is_object_id(sha):
         # #11057 review P1: a REF NAME passes every probe below (a ref resolves, and a branch
         # is its own ancestor), so this copy of the gate would verify a record naming no

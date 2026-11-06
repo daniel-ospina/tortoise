@@ -3158,6 +3158,63 @@ def test_the_guard_grades_the_same_two_questions_from_its_own_copy(tmp_path):
     assert cannot is None, "a malformed record is a PROVEN defect, never an \"unprovable\""
 
 
+def test_the_pinned_guard_reds_a_baseline_with_NO_cut_commit():
+    """#11057 review FINDING 1 — the pinned copy FAILED OPEN on an ABSENT record.
+
+    `tools/surface-guard.py` is the one gate CI restores from the base ref, and it used to
+    answer `[], None` — PASS — when `cut_at_commit` was gone, on the rationale that the
+    field's SHAPE is `_read_manifest`'s refusal. But `_read_manifest` lives in
+    `tools/surface_manifest.py`, the copy a PR CAN edit (that is what the pin exists for),
+    so the presence half of this rule was enforced only by the un-pinned copy: a PR that
+    DELETED the field kept the REQUIRED `surface-guard` leg green while the two questions
+    this arm asks went unasked. Deleting the evidence is a smaller edit than forging it.
+
+    Both absences are refused, and neither is ever reported as "unprovable" — a record that
+    names no commit is a defect in every clone, not a limit of this one.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "surface_guard_pinned_absence", ROOT / "tools" / "surface-guard.py"
+    )
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    doc = _manifest()
+    doc.pop("cut_at_commit")
+    problems, cannot = guard._provenance_problems(doc)
+    assert problems and "records no `cut_at_commit`" in problems[0], (problems, cannot)
+    assert cannot is None, "an absent record is a PROVEN defect, never an \"unprovable\""
+
+    # `cut_at_commit: null` / `` is the same defect reached by emptying the field instead of
+    # deleting it, and it must not be treated as "nothing to check" either.
+    for empty in (None, ""):
+        doc["cut_at_commit"] = empty
+        problems, cannot = guard._provenance_problems(doc)
+        assert problems and "records no `cut_at_commit`" in problems[0], (empty, problems)
+        assert cannot is None, empty
+
+
+def test_the_required_guard_leg_reds_a_baseline_that_deletes_the_record(tmp_path):
+    """The same defect end-to-end, through the gate CI actually runs (`--manifest`).
+
+    The unit arm above pins the branch; this pins the VERDICT a green CI tick would have
+    carried: the guard's own `main` must `die` on the un-pinned copy's favourite bypass —
+    strip `cut_at_commit` from `config/surface-manifest.yml` — instead of exiting 0 with the
+    rest of the baseline unchanged (which is exactly what it did before this fix). The
+    message is asserted, not just the exit code: a red from a sibling check would otherwise
+    make this test pass while the provenance arm stayed asleep.
+    """
+    doc = _manifest()
+    doc.pop("cut_at_commit")
+    result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
+    assert result.returncode == 1, (
+        "the PINNED guard passed a baseline with no recorded cut commit — the presence "
+        f"half of the rule is then enforced only by the copy a PR can edit:\n{result.stdout}"
+    )
+    assert "records no `cut_at_commit`" in result.stdout, result.stdout
+
+
 def test_a_ref_name_is_not_a_cut_commit_even_when_every_probe_says_yes(checker, tmp_path, monkeypatch):
     """#11057 review P1 — the gate accepted a REF NAME and reported the record VERIFIED.
 
