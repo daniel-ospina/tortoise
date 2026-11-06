@@ -123,6 +123,40 @@ def wait_state(state_dir, pr, want, timeout=STALL_BUDGET_S, pred=None):
     return st
 
 
+def not_merged(state_dir, pr, st, want=rd.MERGED) -> str:
+    """Why a wait gave up: the state, its REASON and the rail's own words.
+
+    ⛔ `STALL_BUDGET_S` FIXES THE BOUND; THIS FIXES THE OTHER HALF OF THE SAME RED.
+    `assert wait_state(...).state == rd.MERGED` published `- merged` / `+ waiting`
+    and nothing else, so the 2026-11-06 shard could not be read from its own log:
+    nothing said whether the rail never ran, never printed, or printed and was
+    scoped out, and settling that took fetching the job's `--durations` table and
+    cross-referencing a sibling test. These are the three artifacts that answer it,
+    rendered at the point of failure. Diagnostic only: no assertion moves.
+    """
+    art = rd.artifact_path(state_dir, "o/r", pr)
+    try:
+        text = art.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = "(the artifact is unlinked)"
+    logp = rd.read_field(text, "LOG")
+    if not logp:
+        tail = "(the artifact names no LOG)"
+    else:
+        try:
+            lines = Path(logp).read_text(encoding="utf-8", errors="replace").splitlines()
+            tail = "\n".join(lines[-10:]) or "(the log is empty)"
+        except OSError as exc:            # unreadable is a finding, not a crash
+            tail = f"(the log is unreadable: {exc})"
+    # ⛔ A LIVE `waiting` READ CARRIES NO REASON (the rail is simply still alive), so
+    # the reason is rendered only when there is one — `waiting ()` reads as a bug.
+    detail = (f" ({st.reason})" if st is not None and st.reason else "")
+    return (f"never reached `{want}` within {STALL_BUDGET_S:.0f}s — last read: "
+            f"{st.state if st is not None else 'absent'}{detail}\n"
+            f"--- artifact ---\n{text}"
+            f"--- rail log tail ---\n{tail}")
+
+
 def wait_field(path: Path, key: str, timeout=10.0) -> str:
     end = time.time() + timeout
     while time.time() < end:
@@ -157,7 +191,8 @@ def test_start_returns_immediately_and_collect_sees_it_waiting(tmp_path, monkeyp
     st = wait_state(sd, 7, rd.WAITING)
     assert st.state == rd.WAITING, st.as_dict()
     assert st.line().startswith("RAIL(#7, waiting,")
-    assert wait_state(sd, 7, rd.MERGED).state == rd.MERGED
+    st = wait_state(sd, 7, rd.MERGED)
+    assert st.state == rd.MERGED, not_merged(sd, 7, st)
 
 
 def test_the_wait_budget_exceeds_the_largest_measured_stall(tmp_path, monkeypatch):
@@ -271,7 +306,8 @@ def test_a_killed_wrapper_does_not_lose_a_live_rail(tmp_path, monkeypatch):
     st = rd.collect(sd, "o/r", 75)
     assert st.state != rd.LOST, st.as_dict()   # pre-fix: `lost` while it was merging
     st = wait_state(sd, 75, rd.MERGED)
-    assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
+    assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234", (
+        not_merged(sd, 75, st))
     assert st.exit_code is None
     assert "EXIT line was never written" in st.reason
 
@@ -2159,7 +2195,8 @@ def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path
     assert ln.pid > 0, "the rail did not start without `gh`"
     assert ln.head == "unreadable", ln.head
     assert "HEAD=unreadable" in Path(ln.artifact).read_text(encoding="utf-8")
-    assert wait_state(sd, 21, rd.MERGED).state == rd.MERGED
+    st = wait_state(sd, 21, rd.MERGED)
+    assert st.state == rd.MERGED, not_merged(sd, 21, st)
 
 
 def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypatch):
