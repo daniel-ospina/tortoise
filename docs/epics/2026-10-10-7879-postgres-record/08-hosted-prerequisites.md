@@ -120,8 +120,8 @@ narrowed PRIMARY exception — an author-set prior is a non-reconstructible inpu
 `tortoise/record_projection.py` (1,824 lines): a declarative mutation algebra with one registry entry
 per journal record type, totality as a registry property, idempotence by statement shape
 (`INSERT … ON CONFLICT (org_id, graph_id, node_key) DO UPDATE`), and the property→column decision
-**read from the migrations on disk** rather than restated (`RECORD_MIGRATIONS`,
-`tortoise/record_projection.py:172`; `table_columns()`, `refused_props_names()`).
+**read from the migrations on disk** rather than restated (`RECORD_MIGRATIONS` in
+`tortoise/record_projection.py`; `table_columns()`, `refused_props_names()`).
 
 `EntityMutated op=rename` is the remaining **declared refusal** (`PointsMerged` was one until
 `#9892`: it projects now — one hard delete per loser, the graph fold's own `DETACH DELETE`),
@@ -130,12 +130,17 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 
 ### A3. The write path — **EXISTS, WIRED, and measured working end-to-end**
 
-| piece | file:line |
+| piece | where — cited by SYMBOL, never by line |
 |---|---|
-| the seam | `tortoise/record_writer.py:920` (`write_live_record`), `:654` (`_default_connect`) |
-| arming surface | `tortoise/record_writer.py:232` — `TORTOISE_RECORD_DSN`, **default OFF** |
-| production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py:939`, `tortoise/sdk.py` (`_emit_event`) |
-| tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py:110`; by-value on the hosted REST lane |
+| the seam | `tortoise/record_writer.py` — `write_live_record`, `_default_connect` |
+| arming surface | `tortoise/record_writer.py` — `RECORD_DSN_ENV` (`TORTOISE_RECORD_DSN`), **default OFF** |
+| production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py` (`_emit_event`), `tortoise/sdk.py` (`_emit_event`) |
+| tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py`; by-value on the hosted REST lane |
+
+⛔ **Symbols, not line numbers, on purpose.** Every number this table used to carry had drifted onto
+unrelated text — a bare `)`, a `contextvars` line, a tuple member, a blank line — because a line
+number in a living module is a claim that decays on the next merge. A symbol cannot re-stale. That is
+the rule `docs/00_index.md` records for `sdk.py`, applied here where it was still missing.
 
 **Measured (§G, run 2): the SDK's public capture path wrote layers 1–3 into a real Postgres** — layer 4 is views, and
 the run left `subject` 0 and `relation` 0 (A8, R4, R5), so it does **not** demonstrate edge or Subject
@@ -253,7 +258,7 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 workflow's secret-provisioning step (the runbook's Secrets Matrix row already landed with #9600 — see
 A8), and **leave `TORTOISE_RECORD_SINGLE_TENANT` unset** — unset is already multi-tenant, which is
 what makes the env tenant pair be refused rather than silently used
-(`tortoise/record_writer.py:577`; setting `=0` only restates the default).
+(`RECORD_SINGLE_TENANT_ENV` in `tortoise/record_writer.py`; setting `=0` only restates the default).
 > ⚠️ **The user is `tortoise_record_app`, NOT `postgres`** — corrected by R6's decision
 > ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md), #9554). `postgres` is the
 > **table owner** and bypasses RLS, which would make §4's tenancy decision unimplemented for the one
@@ -299,7 +304,7 @@ any re-arming. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere an
 `push` trigger on `supabase/**` runs the drift checks, not the apply — so the record tables will
 land on the next dispatch
 whether or not R1 has happened. Two couplings to respect: the record reader is **name-gated** on
-`RECORD_MIGRATIONS` (`record_projection.py:172`, no glob) so a **new** `.sql` is invisible to the
+`RECORD_MIGRATIONS` (`record_projection.py`, no glob) so a **new** `.sql` is invisible to the
 image until its name is added there; and `deploy-hosted.yml` deliberately does **not** trigger on
 `supabase/migrations/**` for that reason.
 **What it blocks:** any write at all; and a schema change that silently no-ops in the image.
@@ -862,7 +867,7 @@ wrong store.
 
 ### R10 — Connection pooling on the record write path · **S/M** · ops + code · **FOLLOW**
 
-**What:** `_default_connect` (`record_writer.py:654`) opens **one connection, one transaction per
+**What:** `_default_connect` opens **one connection, one transaction per
 journal record**, and the module states the cost in place: *"~one connection + commit and ~4 ms of
 plan materialization"* — `table_columns()` is **deliberately uncached**, so every record re-reads the
 migrations. No pool exists.
