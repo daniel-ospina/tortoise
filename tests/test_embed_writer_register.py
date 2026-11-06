@@ -29,7 +29,7 @@ is the product home; this file is its proof.
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
-| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and the shapes it cannot are NAMED in `UNDECIDABLE_WRITE_SHAPES` and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
+| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and the shapes it cannot are NAMED (`UNDECIDABLE_WRITE_SHAPES` in the instrument, `INVISIBLE_SHAPES` below for the forms neither the regex nor the AST pass decides) and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
 | `test_the_live_guard_has_teeth_on_an_INJECTED_writer` | the same guard, driven through **DISCOVERY** (`probe._embedding_writers` on an injected tree) rather than through set arithmetic | the guard goes vacuous when the tree's population is all-declared (the `#10541` guard's own lesson), or the discovery filter regresses and stops seeing a writer — in EITHER the clause shape or the container-key shape (`#11274`) |
 | `test_the_register_names_the_shapes_its_discovery_cannot_see` | `#11274` — the guard is exactly as wide as discovery, so discovery's blind spots are NAMED rather than implied | the instrument stops naming a shape it cannot decide, claims to decide one it cannot (or the reverse), or the register's docstring stops scoping its claim to the mechanism |
 | `test_the_instrument_and_the_product_declare_the_same_writers` | `04-plan.md` §6.2 — *"the instrument and the product cannot disagree about which writer a row is about"* | a class changes in one place, the census keeps an entry the register dropped, or the register invents one the instrument does not find |
@@ -241,8 +241,8 @@ def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
     what "an undeclared writer cannot bypass silently" means for this population once the census is
     not the only place the answer lives.
 
-    ⛔ What this does NOT claim: that discovery is exhaustive. A writer whose store the regex cannot
-    spell (`SET n += $p`, `rec["embedding"] =`, an inline property map, `SET n = $map`, a clause
+    ⛔ What this does NOT claim: that discovery is exhaustive. A writer whose store neither the regex
+    nor the AST pass can decide (`SET n += $p`, an inline property map, `SET n = $map`, a clause
     held in a module constant) is ABSENT from the census, so it does not red here — the `#10541`
     guard's own inherited lesson, and the reason an earlier version of this docstring ("a writer
     added tomorrow reds HERE") overstated the guard. The blind spot is stated in
@@ -352,13 +352,12 @@ def test_the_instrument_and_the_product_declare_the_same_writers():
         f"{sorted(set(census) - declared)}"
     )
     # ⛔ `declared - _writers_outside_the_gate()`, NOT `declared - set(census) - outside`. The old
-    # arithmetic could fire on ONE key only: census(19) is a SUBSET of declared(20), so
-    # `declared - set(census) == {tortoise.session_indexer::main}` - subtracting the static census
-    # removed every writer that had a row BEFORE staleness was tested, which is why a writer
-    # repaired so it no longer stores outside the gate (the case this arm exists for) was masked.
-    # The repair restores the direction the failure message claims; on the live sets at this head
-    # both expressions yield `[]` (`declared == _writers_outside_the_gate()`, 20 == 20), so it
-    # changes no verdict today.
+    # arithmetic subtracted the static census FIRST, so it removed every writer that had a census row
+    # before staleness was tested — which is why a writer repaired so it no longer stores outside the
+    # gate (the case this arm exists for) was masked, and only a declared writer the census does not
+    # carry could ever fire it. The repair restores the direction the failure message claims. How many
+    # writers that is stays a shape here and not a number: a count nobody re-derives is the rot class
+    # this file deletes elsewhere.
     stale = declared - _writers_outside_the_gate()
     assert not stale, (
         "the register declares writers the instrument no longer finds outside the gate "

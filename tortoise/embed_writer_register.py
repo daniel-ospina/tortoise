@@ -369,14 +369,19 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`#5004` carrier contract, not a producer: the key stays PRESENT so an explicit "
             "`None` means 'this id has no vector', and a foreign vector is restored verbatim "
             "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its "
-            "own entry). ⛔ The caller vector is NOT refused by the SDK — `create_point`/"
-            "`update_point` store one VERBATIM by a recorded decision "
+            "own entry). ⛔ A caller-supplied `embedding` is NOT refused by the SDK — "
+            "`create_point`/`update_point` store one VERBATIM by a recorded decision "
             "(`tortoise.sdk::_sanitize_props` rejects the embedding IDENTITY props, not "
             "`embedding` itself; `_create_map[\"embedding\"]` is assigned AFTER the props "
-            "loop from `_embedding_expr`; PR `#3018` review P2), so this door is "
-            "tenant-reachable through the MCP tools and this row is its JOURNAL-side half. "
-            "The gate-side half is a `gated` classification and therefore OUTSIDE this "
-            "register's population — see the closure-claim caveat below",
+            "loop from `_embedding_expr`; PR `#3018` review P2), so a TENANT can supply one "
+            "on those paths. ⚠️ But this row is not their journal half: no `add_point` call "
+            "site in the tree passes an `embedding` (`extractor.run`'s sites, reached from "
+            "`capture_session`; `ingest`'s resolution event; `docs_miner`), so what this "
+            "branch guards is an INTERNAL producer's `fields`, not a tenant vector. The "
+            "tenant doors' journal half is `tortoise.sdk::_emit_event`'s "
+            "`clean.setdefault(\"embedding\", None)`; their gate-side half is a `gated` "
+            "classification and therefore OUTSIDE this register's population — see the "
+            "closure-claim caveat above",
             "#5004",
         ),
     ),
@@ -510,13 +515,16 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: the gate does not see": the ``unresolved_write`` set PLUS the ``ungated`` write path
 #: (`tortoise.session_indexer::main`). A ``gated`` writer needs no declaration: the gate decides it.
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
-#: docstring: the census's discovery is a source-text regex, and writers it cannot spell (a
-#: map-merge, a dict-key form, an inline property map, a clause held in a module constant or
-#: an INTERPOLATED property name) are ABSENT from this population rather than declared here — one
+#: docstring: the census's discovery is a source-text regex PLUS the AST pass that decides the
+#: LITERAL container key (`rec["embedding"] = …`), and writers neither can spell (a map-merge, a
+#: COMPUTED dict-key form (`d[KEY] = v`), an inline property map, a clause held in a module constant
+#: or an INTERPOLATED property name) are ABSENT from this population rather than declared here — one
 #: is live in `tortoise/` today (`cache_projection::node_statement`), and `#11274` NAMES the shape
 #: discovery will not decide (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
-#: `tests/test_embed_writer_register.py::test_every_writer_the_instrument_finds_outside_the_gate_is_declared`
-#: holds that population in both directions.
+#: Forward — every writer outside the gate is declared:
+#: `tests/test_embed_writer_register.py::test_every_writer_the_instrument_finds_outside_the_gate_is_declared`.
+#: Reverse — no declaration outlives its writer:
+#: `tests/test_embed_writer_register.py::test_the_instrument_and_the_product_declare_the_same_writers`.
 EMBED_WRITER_CLASSES: Mapping[str, WriterClass] = load(_DECLARATIONS)
 
 

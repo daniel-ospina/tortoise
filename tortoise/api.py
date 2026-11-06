@@ -382,9 +382,15 @@ class EventAPI:
         # (The SDK surface does NOT refuse a caller-supplied `embedding`: `create_point`
         # and `update_point` store one VERBATIM by a recorded decision (PR #3018 review
         # P2 — see `tortoise.sdk::_sanitize_props`, which rejects the embedding IDENTITY
-        # props but deliberately not `embedding` itself). So this path is reachable from
-        # the MCP/SDK surfaces too, and the carry-with-no-attestation below is the ONLY
-        # reason a foreign vector cannot forge an attestation here.)
+        # props but deliberately not `embedding` itself). ⛔ But a vector cannot arrive
+        # HERE from those surfaces: no `add_point` call site in the tree passes an
+        # `embedding` (`extractor.run`'s sites via `capture_session`, `ingest`'s
+        # resolution event, `docs_miner`), so this branch guards the fields of INTERNAL
+        # producers rather than a tenant vector. Two guards — not one — keep a foreign
+        # vector from minting a claim it has not earned: the carry-with-no-attestation
+        # below (it cannot carry OUR attestation) and the `_forged` refusal a few lines
+        # down (the identity/marker keys that would let it FORGE one are rejected
+        # outright).)
         if "embedding" in fields:
             # The key stays PRESENT in both branches: an explicit None is the
             # journal saying "this id has no vector", which the replay must

@@ -5948,8 +5948,6 @@ surfaces:
   # named SOURCE_PATTERNS entry — some OTHER `tortoise/*.py` paths do and REPLACE the fallback, which
   # is why the census's own tree-walk relies on the push-to-main full sweep for those modules),
   # so a diff touching only the register selects `core` and nothing else. Registered
-  # module reached through the `core` fallback (`tortoise/` matches no named SOURCE_PATTERNS
-  # entry), so a diff touching only the register selects `core` and nothing else. Registered
   # beside its two siblings because the three guard one seam from three sides:
   # `test_embed_gate_5008.py` the predicate, `test_dod_5090_probe.py` (also `core`) the
   # instrument's census, and this file the PRODUCT's declaration — which is what #11086 (arming
