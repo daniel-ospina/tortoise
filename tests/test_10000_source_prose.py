@@ -52,7 +52,7 @@ MARKER = "TURNZEBRA10000SOURCEPROSE"
 #:
 #: ⛔ WHY A PHRASE AND NOT THE BARE MARKER. The shipped derivation is a TOPIC
 #: LEXICON, and a session's own words legitimately appear in it as single
-#: comma-joined tokens (§4.4 metadata, which is what keeps a capture findable —
+#: comma-joined tokens (§4.6 metadata, which is what keeps a capture findable —
 #: #3518). A bag of words can never contain a SPACE, so this needle is
 #: unreachable by the lexicon by construction, while every prose route carries
 #: it: the pre-fix verbatim copy, a lower-casing writer, a truncating writer.

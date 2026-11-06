@@ -3763,10 +3763,17 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: surface is a `setup-python cache: pip` argument rather than an `actions/cache` step of its own.)
 #: ⚠ Named by ROW, not by section: all four sit in §2 today, and a §-number would re-stale on the
 #: next section this doc gains — the same failure mode as the citations themselves.
+#: ⚠ All four numbers were re-anchored TWICE: once when #10962's merge first brought the workflow
+#: forward, and again after `origin/main`'s 113 further commits moved every one of them (the
+#: falkor/torch row by −59, the three `test-record-postgres`-era rows by +48…+56 — measured, not
+#: guessed). The doc ALSO names the same constructs in prose (`Install package + the postgres extra`,
+#: the `Cache pip dependency caches (#7612)` step's `with:` block, `install-cpu-torch` in the
+#: `test-concurrency-falkor` install step) so a reader has a grep-able handle that outlives any
+#: number — the number is the checkable claim, the construct name is the map.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4617", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:4674", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2941-2946", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4609-4611", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:4666-4668", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
     ("python-ci.yml:3222", ("cache: pip",)),
 )
 

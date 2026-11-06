@@ -3754,6 +3754,19 @@ def _public_filters(filters: Any) -> dict:
     return {k: v for k, v in filters.items() if k not in PRIVATE_FILTER_KEYS}
 
 
+# ⚠️ DOC NOTE (#10063) — the docstring below opens with "structural exact-match
+# retrieval", and since #10063's fix that phrase is very slightly NARROW for
+# exactly two keys: `extractedFrom` / `extractedFromAll` answer through a UNION
+# (property equality OR `(n)-[:extractedFrom]->(:Source {url: $k})`), so a ref
+# carried only by a fold's `:Source` edge matches too. Every match is still an
+# EXACT one (no normalization, no prefix/fuzzy), which is why the served text is
+# left standing rather than reworded: its opening is mirrored as the catalog
+# `description` in `tortoise/tool_registry.py`, as the `job:` row in
+# `config/surface-manifest.yml` and in the rendered `docs/product/mcp-sdk-surface.md`,
+# so a reword is a surface-manifest re-cut — the surface gate's own artifact,
+# which a documentation note must not move. Recorded here, in-tree, instead of
+# only in a PR comment nobody greps (the
+# `tests/test_orient_direct_consolidation.py:186-189` precedent).
 def tortoise_query(kind: str | None = None,
                    filters: Any = None,
                    text: str | None = None,
@@ -5853,6 +5866,46 @@ def _overview_section(section: str, entity_id: str | None,
                   f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"})
 
 
+def _row_section_envelope(result: Any) -> Any:
+    """Give a ROW-returning ``overview`` section the wire shape its alias ships.
+
+    #10085: ``tortoise_overview`` is annotated ``-> Any``, so FastMCP derives NO
+    output schema for it, and its ``Tool.convert_result``
+    (``fastmcp/tools/base.py``) carries ``structured_content`` ONLY for a dict
+    return when no schema is declared. A section that returns ROWS therefore
+    reached a client as a bare text block — measured through the ChatGPT
+    connector as ``{"text": "[\\"org_…\\"]"}``, a JSON string the model had to
+    parse twice — while its own alias ``tortoise_list_graphs`` (annotated
+    ``-> list[str]``, i.e. FastMCP's ``x-fastmcp-wrap-result`` envelope) shipped
+    ``{"result": [...]}``. Same payload, two wire shapes — and the tool the
+    SERVED DOCS tell users to call was the broken one, so "which graph did my
+    write land in" came back as an opaque blob.
+
+    The envelope is built here the way FastMCP builds it for a
+    wrap-annotated tool: the rows' compact JSON in ``content``
+    (``ensure_ascii=False`` and ``,``/``:`` separators, matching
+    ``pydantic_core.to_json``) and ``structured_content = {"result": rows}``
+    plus the same ``wrap_result`` meta claim, which is what a client that
+    unwraps keys off.
+
+    A MAPPING section is returned UNTOUCHED: with no output schema a dict
+    return already ships structured content, so wrapping it would change a
+    shape that works — and would nest a caller's payload one level deeper.
+    """
+    if not isinstance(result, (list, tuple)):
+        return result
+    rows = list(result)
+    from mcp.types import TextContent
+    return ToolResult(
+        content=[TextContent(type="text",
+                             text=json.dumps(rows, default=str,
+                                             ensure_ascii=False,
+                                             separators=(",", ":")))],
+        structured_content={"result": rows},
+        meta={"fastmcp": {"wrap_result": True}},
+    )
+
+
 def tortoise_overview(section: str | None = None,
                       entity_id: str | None = None,
                       days: int = 30,
@@ -5917,8 +5970,17 @@ def tortoise_overview(section: str | None = None,
     if not isinstance(section, str):
         return _SafeError({"error": f"overview: section must be a string, got "
                                     f"{type(section).__name__}"})
-    return _overview_section(section.strip().lower(), entity_id, days, limit,
-                             domain=domain, point_kinds=point_kinds)
+    result = _overview_section(section.strip().lower(), entity_id, days, limit,
+                               domain=domain, point_kinds=point_kinds)
+    # #10085: a ROW section (a list) needs the structured payload its own alias
+    # ships; see `_row_section_envelope`. Deliberately written as `return
+    # result` for the non-row case rather than wrapping both arms: this return
+    # is a NAME assigned from `_overview_section`, which is the shape
+    # `tests/test_mcp_refusal_telemetry_9084.py`'s served-tool walk follows to
+    # prove a refusal cannot escape as a plain dict.
+    if not isinstance(result, (list, tuple)):
+        return result
+    return _row_section_envelope(result)
 
 
 def tortoise_graph_overview(section: str | None = None,
