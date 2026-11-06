@@ -8753,8 +8753,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     warnings: list[str] = []
     # #10997: the run-level identity state the mint gate reads, and the two
     # populations it reports. `held` is what this run did NOT mint and did NOT
-    # drop (I2); `held_drained` is what a PREVIOUS run held and this one
-    # committed, exactly once.
+    # drop (I2). `held_drained` is this run's DRAIN of what a previous run held —
+    # one entry per ATTEMPT, each carrying its own `committed` flag, because a
+    # drain can legally be released again (the #2552 prune discarded the Point,
+    # so the item is HELD again). ⛔ The run-level numbers say which is which:
+    # `stats["held_drained"]` counts the entries that COMMITTED and
+    # `stats["held_drain_attempted"]` counts the attempts — a census that reads
+    # "committed" while nothing committed is a false signal on the epic's own
+    # acceptance ("the held count returns to zero"), which is why the two are
+    # never collapsed into one number (#10997 review round 3).
     _lookup = _failure_policy.lookup_state(search)
     held: list[dict] = []
     held_drained: list[dict] = []
@@ -9859,6 +9866,28 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     #: leaking the memory I2 forbids leaking, while printing "COMMITTED".
     _pending_confirm: list[tuple[str, str, str]] = []
     if hold_store is not None and _lookup == _failure_policy.LOOKUP_RESOLVED:
+        # ⛔ RECLAIM BEFORE READING (#10997 review round 3): `claim` is a STATE, and
+        # the only thing that makes it recoverable is something that acts on it.
+        # A drain killed between `claim` and the settle leaves a record no later
+        # code path releases — `pending()` is this loop's entire input, so the item
+        # would be invisible to EVERY later drain (the I2 loss the store exists to
+        # prevent, one state further along). This is the idle reclaim scan SQS and
+        # Redis Streams converged on, bounded well above a live drain's own runtime.
+        try:
+            _reclaimed = hold_store.reclaim_stale()
+        except Exception as exc:  # a reclaim sweep must not sink the whole run
+            _reclaimed = []
+            warnings.append(
+                "hold store RECLAIM FAILED (#10997): the drain could not reclaim "
+                "claims left by an interrupted run "
+                f"({type(exc).__name__}: {exc}); those items stay claimed until a "
+                "later run can reclaim them")
+        else:
+            if _reclaimed:
+                warnings.append(
+                    f"hold store RECLAIMED (#10997): {len(_reclaimed)} item(s) left "
+                    "CLAIMED by a drain that never finished were returned to "
+                    "pending and are drained by this run")
         try:
             _drainable = hold_store.pending()
         except Exception as exc:  # a store read must not sink the whole run
@@ -10229,7 +10258,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "warnings": warnings,
         "minted_kinds": minted,
         "held": held,                  # #10997: HELD — never minted (I1), never dropped (I2)
-        "held_drained": held_drained,  # held items THIS run committed, exactly once
+        "held_drained": held_drained,  # DRAIN ATTEMPTS this run, each with its own "committed" flag (not a committed count)
         "hold": {"store_supplied": hold_store is not None,
                  "store": (hold_store.summary()
                            if hold_store is not None else None)},
@@ -10241,7 +10270,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # ref named by two operators is ONE held item (one store key).
             "held": len({r.get("key") or (r["content"], r["where"])
                          for r in held}),
-            "held_drained": len(held_drained),
+            # #10997 review round 3: the COMMITTED subset, not `len(held_drained)`.
+            # A run that drains, mints and then PRUNES every endpoint reported
+            # `held_drained=N` with `committed: False` on all N — a census that
+            # reads as success on the epic's own acceptance ("the held count
+            # returns to zero") while nothing was committed. The attempt count is
+            # kept beside it rather than dropped, so the two facts stay readable.
+            "held_drained": sum(1 for e in held_drained if e["committed"]),
+            "held_drain_attempted": len(held_drained),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
             "merges": len(merges),

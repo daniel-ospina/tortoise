@@ -264,6 +264,61 @@ class TestTheHoldIsDrainable:
             "a resolved identity came back into the drainable population")
 
 
+class TestTheDrainCensus:
+    """Review round 3 (MINOR): the run-level number must mean COMMITTED.
+
+    `stats["held_drained"]` was `len(held_drained)` — the ATTEMPT count — while
+    its own comment and the docstring said "committed". A run that drains, mints
+    and then PRUNES every endpoint therefore reported `held_drained=N` with
+    `committed: False` on all N: a census that reads as success on the epic's own
+    acceptance ("the held count can return to zero") while nothing committed. The
+    truth was already on each entry; these two arms pin WHICH number is which and
+    stop the fix from being satisfied by reporting zero always.
+    """
+
+    #: An embed the drain will attempt in full and commit NONE of: a MITIGATES
+    #: with no target edge drops its own guard, so both endpoint refs are held,
+    #: and on the resolved run both are minted, pruned and released again.
+    _ORPHANED: ClassVar[dict] = {
+        "entities": [], "events": [], "points": [], "chain_notes": [],
+        "link_before_create": [],
+        "operators": [{"src": "orphan claim alpha", "dst": "orphan claim beta",
+                       "op_type": "MITIGATES", "strength": 0.3}],
+    }
+
+    def test_the_run_level_count_is_committed_not_attempted(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        v2.execute_embed(self._ORPHANED, {}, session_id="s1", hold_store=store)
+        assert len(store.pending()) == 2, store.summary()
+
+        pruned = v2.execute_embed(
+            {"entities": [], "events": [], "points": [], "chain_notes": [],
+             "link_before_create": [], "operators": []},
+            _search(True), session_id="s2", hold_store=store)
+        assert len(pruned["held_drained"]) == 2, pruned["held_drained"]
+        assert all(e["committed"] is False for e in pruned["held_drained"])
+        assert pruned["stats"]["held_drained"] == 0, (
+            "the run reported a COMMITTED drain count over entries that all say "
+            f"committed=False: {pruned['stats']}")
+        assert pruned["stats"]["held_drain_attempted"] == 2, (
+            "the attempt count was dropped instead of separated — the run drained "
+            f"two items and committed none: {pruned['stats']}")
+
+    def test_a_committed_drain_counts_in_both_readings(self, tmp_path):
+        """The positive control: commit ONE item and both numbers must say one.
+
+        Without this arm a `stats["held_drained"] = 0` constant would satisfy the
+        test above, which is the vacuity the census exists to avoid.
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
+        second = v2.execute_embed(_EMBED, _search(True), session_id="s2",
+                                  hold_store=store)
+        assert [e["committed"] for e in second["held_drained"]] == [True]
+        assert second["stats"]["held_drained"] == 1, second["stats"]
+        assert second["stats"]["held_drain_attempted"] == 1, second["stats"]
+
+
 class TestTheDrainCarriesTheEdge:
     """⛔ Review P0/P1: the drain must carry the EDGE, and must not resolve an
     item the #2552 prune then discards.
@@ -454,3 +509,85 @@ class TestTheStoreExactlyOnce:
         a.hold(hold.HOLD_ENDPOINT, "a ref")
         assert hold.open_store("graph-a").pending()[0]["content"] == "a ref"
         assert b.pending() == [], "two graphs must not share one hold set"
+
+
+class TestAClaimedItemIsReclaimable:
+    """#10997 review round 3 (MINOR): `claimed` was recoverable in name only.
+
+    The module promised a crashed drain's item was *"recoverable (`release`)
+    instead of stuck forever"* — but every `release` call site lived in the SAME
+    in-process drain, and `pending()` lists only PENDING. A kill/OOM between
+    `claim` and the settle therefore removed the item from the drain's entire
+    input POPULATION with nothing left to act on it, forever: the I2 loss this
+    store exists to prevent, one state further along. These arms pin the reclaim
+    scan (SQS visibility timeout / Redis `XAUTOCLAIM`'s shape) and the timestamp
+    that makes it possible.
+    """
+
+    def test_a_claim_is_timestamped_and_its_age_is_readable(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        store.hold(hold.HOLD_ENDPOINT, "a ref")
+        key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
+        assert store.claim(key) is True
+        rec = store.get(key)
+        assert isinstance(rec.get("claimed_at"), float), rec
+        assert rec.get("attempts") == 1, rec
+        # A LIVE claim is not stale under the shipped idle bound, and IS stale
+        # under a zero bound — so the scan reads the bound, not a constant.
+        assert [r["key"] for r in store.stale_claims(60.0)] == []
+        assert [r["key"] for r in store.stale_claims(0.0)] == [key]
+
+    def test_a_claim_left_by_a_dead_drain_goes_back_to_pending(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        store.hold(hold.HOLD_ENDPOINT, "a ref")
+        key = hold.hold_key(hold.HOLD_ENDPOINT, "a ref")
+        store.claim(key)  # …and then the process dies: nothing releases it.
+        assert store.pending() == []
+        assert store.reclaim_stale(0.0) == [key]
+        assert [r["key"] for r in store.pending()] == [key], (
+            "a claim left by a dead drain was never returned to the drainable "
+            "population — the item is invisible to every later run, forever")
+        assert store.get(key)["state"] == hold.HOLD_PENDING
+        assert store.get(key)["attempts"] == 1, (
+            "the attempt counter was lost across the reclaim — a key that keeps "
+            "being claimed and dying must stay legible")
+
+    def test_an_undatable_claim_is_reclaimed_rather_than_hidden_forever(self, tmp_path):
+        """A record claimed BEFORE claims were timestamped carries no `claimed_at`.
+
+        It cannot be shown to be live, so treating it as live is the permanent
+        leak the scan exists to end — the reclaim population includes it.
+        """
+        path = tmp_path / "hold.jsonl"
+        path.write_text(
+            '{"key": "k_old", "kind": "operator_endpoint", "content": "a ref",'
+            ' "state": "claimed"}\n', encoding="utf-8")
+        store = hold.HoldStore(path)
+        assert [r["key"] for r in store.stale_claims()] == ["k_old"]
+        assert store.reclaim_stale() == ["k_old"]
+        assert store.get("k_old")["state"] == hold.HOLD_PENDING
+
+    def test_a_run_reclaims_and_commits_what_a_crashed_drain_claimed(
+            self, tmp_path, monkeypatch):
+        """The end-to-end consequence: the item is not lost to the crash.
+
+        Run 1 holds it; a drain claims it and is killed (nothing settles the
+        claim); run 2 resolves and — because it reclaims first — drains and
+        COMMITS the item instead of never seeing it.
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        first = v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
+        key = first["held"][0]["key"]
+        assert store.claim(key) is True  # the crashed drain — and nothing else
+        assert store.pending() == []
+
+        monkeypatch.setattr(hold, "HOLD_CLAIM_IDLE_SECONDS", 0.0)
+        second = v2.execute_embed(_EMBED, _search(True), session_id="s2",
+                                  hold_store=store)
+        assert any("RECLAIMED" in w for w in second["warnings"]), second["warnings"]
+        assert [e["key"] for e in second["held_drained"]] == [key], (
+            "a claim left by a dead drain was never reclaimed, so the item was "
+            f"silently lost: {second['held_drained']}")
+        assert second["held_drained"][0]["committed"] is True
+        assert store.get(key)["state"] == hold.HOLD_RESOLVED
+        assert store.get(key)["minted_id"] == second["held_drained"][0]["point_id"]

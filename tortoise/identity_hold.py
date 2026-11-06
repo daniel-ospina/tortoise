@@ -73,6 +73,18 @@ The record is an APPEND-ONLY log (one JSON object per line, last line per key
 wins), so a crash mid-write loses at most the line being written and never
 rewrites history; ``hold``/``claim``/``confirm``/``release`` are the four
 transitions and nothing else mutates the file.
+
+A CLAIMED RECORD IS RECLAIMABLE, NOT MERELY RECOVERABLE
+======================================================
+``claimed`` is a state, not a lock, and the promise that makes is only kept if
+something actually acts on it: an in-process failure returns the claim through
+``release``, and a claim left behind by a process that DIED (kill, OOM, a
+container evicted mid-drain) is returned by :meth:`HoldStore.reclaim_stale` —
+an idle scan over claims older than :data:`HOLD_CLAIM_IDLE_SECONDS`, the same
+shape ``XAUTOCLAIM`` and the SQS visibility timeout converged on. Without that
+scan the state would be honest and useless: ``pending()`` is the drain's entire
+input, so a claim nothing releases is an item no later drain can see — the I2
+loss this module exists to prevent, one state further along.
 """
 from __future__ import annotations
 
@@ -80,12 +92,14 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
 __all__ = [
     "HOLD_CLAIMED",
+    "HOLD_CLAIM_IDLE_SECONDS",
     "HOLD_ENDPOINT",
     "HOLD_PENDING",
     "HOLD_RESOLVED",
@@ -105,13 +119,27 @@ KINDS: tuple[str, ...] = (HOLD_ENDPOINT,)
 #: ``pending``   held, never minted. The population a drain may act on.
 #: ``claimed``   a drain has taken it and is minting. Not actionable by a second
 #:               drain — this is the exactly-once guard, and it is a STATE rather
-#:               than a lock so a crashed drain's item is recoverable
-#:               (``release``) instead of stuck forever.
+#:               than a lock so a claim is recoverable instead of stuck forever.
+#:               Two paths do the recovering, and BOTH exist (#10997 review round
+#:               3): ``release`` when the drain itself knows the mint produced
+#:               nothing, and :meth:`HoldStore.reclaim_stale` when the drain is
+#:               GONE — a kill/OOM between ``claim`` and the settle leaves a
+#:               record no in-process code will ever release, and a state that
+#:               only ``pending`` is drained from would hide it permanently.
 #: ``resolved``  minted, and bound to the id it minted. Terminal.
 HOLD_PENDING = "pending"
 HOLD_CLAIMED = "claimed"
 HOLD_RESOLVED = "resolved"
 HOLD_STATES: tuple[str, ...] = (HOLD_PENDING, HOLD_CLAIMED, HOLD_RESOLVED)
+#: How long a CLAIMED record may stay claimed before a later drain may reclaim it.
+#: The standard shape for a claim-then-acknowledge queue (SQS visibility timeout,
+#: Redis Streams ``XAUTOCLAIM``): without an idle bound, a consumer that dies
+#: between ``claim`` and ``confirm`` removes the item from the drainable
+#: population FOREVER — the I2 loss this module exists to prevent, one state
+#: further along. 15 minutes is deliberately far above any drain's own runtime (a
+#: mint plus a settle), so a live drain is not raced; the store is per-PROCESS
+#: anyway (see ``HoldStore``), so the bound only has to cover a restart.
+HOLD_CLAIM_IDLE_SECONDS = 900.0
 #: The bucket `summary()` uses for a record whose `state`/`kind` is missing — a
 #: torn or hand-edited line is COUNTED, never raised over (a census must not be
 #: able to sink the run that reports it).
@@ -183,6 +211,10 @@ class HoldStore:
     instance (the module's `_STORES` registry), which is the exclusion this class
     can actually offer; a deployment that writes the same file from two processes
     must serialise them itself. Stated here rather than implied.
+
+    A claim left by a process that DIED is recovered by :meth:`reclaim_stale` (an
+    idle scan over the record's own ``claimed_at``), never by a second writer
+    deciding on its own that the claim looks abandoned.
     """
 
     def __new__(cls, path: str | Path) -> HoldStore:
@@ -277,12 +309,20 @@ class HoldStore:
 
         The exactly-once guard: only ``pending`` is claimable, so a second drain —
         or a second pass of this drain — cannot mint the same identity twice.
+
+        ⛔ The claim is TIMESTAMPED, and that is what makes ``claimed`` a state
+        rather than a lock (#10997 review round 3): without ``claimed_at`` no
+        later run can tell a crashed drain's leftover from a live one, so the item
+        stays invisible to every ``pending()`` forever. ``attempts`` is carried
+        beside it so a census can show a key that keeps being claimed and dying.
         """
         with self._lock:
             rec = self._records.get(key)
             if rec is None or rec.get("state") != HOLD_PENDING:
                 return False
-            self._transition({**rec, "state": HOLD_CLAIMED})
+            self._transition({**rec, "state": HOLD_CLAIMED,
+                              "claimed_at": time.time(),
+                              "attempts": int(rec.get("attempts", 0) or 0) + 1})
             return True
 
     def confirm(self, key: str, minted_id: str) -> dict[str, Any]:
@@ -306,7 +346,9 @@ class HoldStore:
 
         A claim whose mint produced nothing must not leak the item out of
         ``pending`` — that would be the leak this module exists to prevent, one
-        state further along.
+        state further along. This is the arm the DRAIN itself can take (it knows
+        its mint produced nothing); a drain that is GONE cannot, which is what
+        :meth:`reclaim_stale` is for.
         """
         with self._lock:
             rec = self._records.get(key)
@@ -314,6 +356,48 @@ class HoldStore:
                 return False
             self._transition({**rec, "state": HOLD_PENDING})
             return True
+
+    def stale_claims(
+            self, min_idle: float | None = None) -> list[dict[str, Any]]:
+        """CLAIMED records no live drain can still own — the reclaim population.
+
+        A record is stale when its ``claimed_at`` is at least ``min_idle`` old, and
+        ALSO when it carries no readable ``claimed_at`` at all: an un-datable claim
+        cannot be shown to be live, and treating it as live is exactly the
+        permanent leak this scan exists to end (a record written before claims
+        were timestamped is the realistic instance).
+
+        ``min_idle`` defaults to :data:`HOLD_CLAIM_IDLE_SECONDS` and is resolved at
+        CALL time, not as a bound default argument — a caller (or a test) that
+        adjusts the module constant must change this sweep, and a default
+        parameter would silently freeze the value read at import.
+        """
+        idle = HOLD_CLAIM_IDLE_SECONDS if min_idle is None else float(min_idle)
+        now = time.time()
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            for rec in self._records.values():
+                if rec.get("state") != HOLD_CLAIMED:
+                    continue
+                try:
+                    age = now - float(rec.get("claimed_at"))
+                except (TypeError, ValueError):
+                    age = None
+                if age is None or age >= idle:
+                    out.append(dict(rec))
+        return out
+
+    def reclaim_stale(self, min_idle: float | None = None) -> list[str]:
+        """Release every stale claim back to PENDING; returns the keys released.
+
+        The reclaim half of the ``claimed`` state — call it BEFORE reading
+        ``pending()``, or a crashed drain's item stays invisible for another run.
+        """
+        released: list[str] = []
+        for rec in self.stale_claims(min_idle):
+            if self.release(rec["key"]):
+                released.append(rec["key"])
+        return released
 
     # ── reads ──────────────────────────────────────────────────────────────
     def get(self, key: str) -> dict[str, Any] | None:
