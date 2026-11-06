@@ -5551,7 +5551,9 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
     above the item — `strict` included, so a false PASS in `issue_process_lint`:
 
         `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
-            `origin/main` `[]` both arms; the gated head `[100]` in both.
+            `origin/main` `[]` both arms at `1177c6708` (`[100]` at the branch point `80c912244`,
+            so in `strict` the gate restored a fail-open that predates this branch); the gated head
+            `[100]` in both.
 
     ⚠️ The gate protected exactly ONE body, and it is DECLARED, not pinned as correct:
         `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`
