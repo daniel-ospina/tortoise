@@ -7866,10 +7866,14 @@ def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
     `actual` is the file's `^def test_` count — the SAME instrument the row names,
     so a file that collects a different number through `parametrize` is not silently
     re-based. That case is NOT hypothetical and the earlier "(none here; the two rows
-    that cite it both say so explicitly)" was FALSE when measured at this head: **10**
-    rows cite the instrument, and `test_7949_capstone_measure.py` — one of them — has
-    `parametrize` uses, **205** `^def test_` definitions and **235** collected items, so
-    its row's "205 cases at this merge head" is the def-count and NOT what pytest runs.
+    that cite it both say so explicitly)" was FALSE **when measured at `2ffc5db19`**:
+    **10** rows cited the instrument then, and `test_7949_capstone_measure.py` — one of
+    them — has `parametrize` uses, **205** `^def test_` definitions and **235** collected
+    items at that commit, so its row's "205 cases at this merge head" was the def-count
+    and NOT what pytest runs. That count has moved since (re-derive it rather than
+    reading it here: `grep -c '^def test_'`); the measurement is named by COMMIT on
+    purpose, because a hand-carried present-tense count is the defect this guard is
+    about (#10610 review at `1c2130dd9`, P3).
     The instrument is a WEIGHT, so the def-count is the right operand; the point is that
     this guard reads that operand and nothing else. `None`
     means the row weighs a file that is not there, which a citation may not do.

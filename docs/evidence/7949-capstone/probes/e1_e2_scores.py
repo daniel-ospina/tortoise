@@ -898,10 +898,21 @@ def read_off_arms(repo: Path, floors: dict) -> list[dict]:
     computed from the SET of pairings, so two copies of a single OFF reading can
     only ever agree — they make E1 look DECIDED off one realization, which is
     the pseudoreplication the two-realization design exists to rule out. The
-    producers mint a fresh `capstone_off_<head8>_<stamp>` per run, so identical
-    graphs are a duplicated record, not a replicate; and an artifact that names
-    no graph at all cannot be told apart from a duplicated one, so it is refused
-    as an absent provenance on the same rule as `as_written`'s.
+    identity is the POPULATION, not the graph name: the producers mint a fresh
+    `capstone_off_<head8>_<stamp>` per run, but a re-stamped copy of ONE population
+    is still one realization, so a shared `graph` alone is neither necessary nor
+    sufficient (#10610 review at `2ffc5db19` — `graph` was a one-character-wide
+    identity and a one-second epoch bump forged a second "realization"). What is
+    compared is the `object_names` list, order-insensitively; and an artifact that
+    names no graph at all cannot be told apart from a duplicated one, so it is
+    refused as an absent provenance on the same rule as `as_written`'s.
+
+    ⚠️ The no-duplicate rule below is justified as "a census no producer can
+    write", and that premise comes from the WRITE DOOR, not from the query:
+    `capstone_measure.census()` reads `MATCH (n:Object) RETURN n.name` with no
+    `DISTINCT` and drops falsy names, so uniqueness is supplied by
+    `add_object` → `resolve_or_mint`, which refuses a second live carrier of one
+    name. The query alone would not guarantee it (#10610 review at `1c2130dd9`).
     """
     arms: list[dict] = []
     for name in OFF_ARMS:
@@ -1878,7 +1889,11 @@ def score(repo: Path = _ROOT) -> dict:
     # measured. The ceiling is this same run's `objects` (`e1_gate_drops.py:84`
     # writes `len(drops)`, and `drops` is keyed by object name), and the head loop has
     # already refused a record whose `objects` disagrees with the ON arm's census.
-    gate_record = _read_json(repo / EVIDENCE / GATE_DROPS)
+    # ⛔ The gate-drops record is REUSED, not re-read (#10610 review at
+    # `1c2130dd9`, P3): `gates_record` above is the read whose graph and census were
+    # already validated, and re-reading the path gave the `drops_total` ceiling and
+    # `objects` a DIFFERENT parse of the same file than the census they bound.
+    gate_record = gates_record
     gate_objects = _count(f"{EVIDENCE / GATE_DROPS}", "objects",
                           gate_record.get("objects"))
     # ⛔ THE CEILING WAS A BOUND, NOT A RECONCILIATION (#10610 review at

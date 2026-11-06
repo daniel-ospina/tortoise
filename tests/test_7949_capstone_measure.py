@@ -8612,7 +8612,7 @@ def test_a_gate_drops_census_that_lists_a_member_twice_is_refused(tmp_path, caps
     assert len(set(names)) == len(names), (
         "the SHIPPED gate-drops census already carries a duplicate — re-derive this pin")
     assert bare and len(bare) < len(names), (len(bare), len(names))
-    non_bare = [n for n in names if n not in bare][0]
+    non_bare = next(n for n in names if n not in bare)
     record["object_names"] = bare + [non_bare] * (len(names) - len(bare))
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
