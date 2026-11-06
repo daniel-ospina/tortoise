@@ -4607,7 +4607,16 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         r"\b(?:is|was)\s+(?:\d+\s+commits?\s+before"
         r"|(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)"
         r"|the\s+parent\s+of)\s+the\s+tree"
-        r"|\b(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)\s+the\s+tree",
+        r"|\b(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)\s+the\s+tree"
+        # ⛔ …AND THE COMPACT SPELLING, which names the true tree DIRECTLY instead of
+        # saying "the tree" and hoping the sha follows (#11191 review r11, P1 — MEASURED
+        # false RED and a regression against `origin/main`). Requiring the literal words
+        # "the tree" accepted the long form and refused its twin one word shorter:
+        #   "`ff6379eb2` is the #9601 merge, an ancestor of `047c91f7a`, the tree
+        #    immediately before #9548."                              -> REFUSED (must pass)
+        # Same relation, same referent; a reword must not flip the verdict.
+        r"|\b(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)\s+`?" + _TRUE_TREE
+        + r"|\b(?:is|was)\s+\d+\s+commits?\s+before\s+`?" + _TRUE_TREE,
         re.I,
     )
     #: A parenthetical, dash-delimited or comma-delimited INCISE — an ASIDE, i.e. a
@@ -5228,6 +5237,52 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
             """True when THIS phrase occurrence's claim is corrected, denied or refuted."""
             clause, clause_end = _clause_containing(norm, phrase.start())
             own = _occurrence_span(norm, phrase, clause, clause_end)
+
+            def _asserts_false_tree(_text: str) -> bool:
+                """True when `_FALSE_TREE` is ASSERTED in `_text`, not merely REFUTED in it.
+
+                A correction names the false tree in order to reject it — "…reads 10
+                lines, not the 5 stated at `ff6379eb2`" — and that sentence is the one
+                this pin's own failure message recommends, so refusing it is the
+                false-RED class this file exists to avoid (#11191 review r11, P1). A
+                mention with no refutation in front of it is still the claim.
+                """
+                for _m in re.finditer(re.escape(_FALSE_TREE), _text, re.I):
+                    _lead = _text[max(0, _m.start() - 44) : _m.start()].lower()
+                    if re.search(
+                        r"\b(?:not|never|rather\s+than|instead\s+of|unlike"
+                        r"|as\s+opposed\s+to|was\s+wrong\s+about)\b"
+                        r"[^.;\u2014\u2013]{0,34}$",
+                        _lead,
+                    ):
+                        continue
+                    return True
+                return False
+
+            def _copulated_to_phrase(_clause: str) -> bool:
+                """True when a NON-true sha-shaped token in `_clause` is copulated to the phrase.
+
+                Used to withhold the ancestry exemption: a TRUE kinship written beside a
+                false copula is an alibi, not a correction (#11191 review r11, P2 —
+                MEASURED: it took the pin GREEN on the real §A8 cell). The copula's object
+                must be a TREE NOUN, so "`ff6379eb2` IS AN ANCESTOR OF the tree before
+                #9548" — the truthful kinship this exemption exists for — is not mistaken
+                for a copula it is not.
+                """
+                for _m in _SHA_LIKE_RE.finditer(_clause):
+                    _tok = _m.group(0).lower()
+                    if _TRUE_TREE.startswith(_tok) or _tok.startswith(_TRUE_TREE):
+                        continue
+                    if re.match(
+                        r"`?\s*(?:,?\s*[^.;\u2014\u2013]{0,20}?)?\s*"
+                        r"(?:is|was|means|denotes|refers?\s+to)\b"
+                        r"\s+(?:the\s+|a\s+|an\s+)?(?:tree|commit|merge|branch|sha|tip)\b"
+                        r"[^.;\u2014\u2013]{0,40}?\bbefore\s+#9548",
+                        _clause[_m.end() :],
+                        re.I,
+                    ):
+                        return True
+                return False
             # 1. A REFUTATION of the predication — "… is false|wrong|…", or a
             #    demonstrative carrying it into the next clause ("— that is wrong").
             if _REFUTED_AFTER.match(norm, phrase.start()):
@@ -5610,6 +5665,19 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                         _ANCESTRY_OF_TREE.search(clause) is not None
                         and _TRUE_TREE in clause.lower()
                         and _FALSE_TREE not in clause.lower().replace(_ref, "", 1)
+                        # ⛔ …AND IT MAY NOT SHELTER A COPULA (#11191 review r11, P2 —
+                        # MEASURED, and this arm is what introduced it). The kinship
+                        # exemption is an ALIBI when the clause asserts the equivalence
+                        # first and then adds a true kinship beside it:
+                        #   "`ff6379eb2` is the tree immediately before #9548, an
+                        #    ancestor of the tree `047c91f7a`."                -> ACCEPTED
+                        # — and that sentence injected into the REAL §A8 cell left the pin
+                        # GREEN, i.e. the exemption disabled the pin on the one artefact it
+                        # guards. A third tree rides the same alibi. So the exemption is
+                        # withheld when ANY non-true tree-shaped token in this clause is
+                        # copulated to the phrase; the truthful ancestries all name their
+                        # tree OUTSIDE such a copula, so none of them is touched.
+                        and not _copulated_to_phrase(clause)
                     )
                 )
             # ⛔ …AND THE REFERENT MAY FOLLOW THE PHRASE, but ONLY as an APPOSITIVE
@@ -5640,7 +5708,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 # denial spelling is asked through the same helper as the no-referent
                 # arm so the two cannot disagree about what a figure IS.
                 return not (
-                    _states_a_figure(_between) or _FALSE_TREE in _tail.lower()
+                    _states_a_figure(_between) or _asserts_false_tree(_tail)
                 )
             # 5. NO TREE IS NAMED. A figure dated to the phrase with no referent is the
             #    r4 defect verbatim (#11191 review, A1); a sentence that attributes
@@ -6788,6 +6856,55 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         "the ancestry relation exempts a clause that ALSO re-asserts the equivalence — the "
         "exemption is per OCCURRENCE like every other arm, and a true sha named beside the "
         "false claim does not make the claim true (#11191 review r11, P1)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` is the tree immediately before #9548, an ancestor of the tree "
+        "`047c91f7a`."
+    ), (
+        "the ancestry exemption shelters a COPLA asserted first — a true kinship added "
+        "beside the equivalence bought it a pass, and injected into the REAL §A8 cell it "
+        "took the pin GREEN, i.e. the exemption disabled the pin on the artefact it "
+        "guards (#11191 review r11, P2). This control REPLACES one that could not fail "
+        "for its stated reason: `_CLAUSE_DELIM` split the earlier spelling at `, and`, so "
+        "the equivalence landed in a different clause and the assertion was red whether "
+        "or not the arm existed — which is how this class survived a round that "
+        "believed it was covered"
+    )
+    assert _refuses_before_9548(
+        "`c5cbcbb4f` is the tree immediately before #9548, an ancestor of the tree "
+        "`047c91f7a`."
+    ), (
+        "a THIRD tree rides the same ancestry alibi — the exemption must be withheld for "
+        "any non-true sha copulated to the phrase, not only the two the class names "
+        "(#11191 review r11, P2)"
+    )
+    # …and the truthful kinships must stay green in every spelling, or the copula gate
+    # becomes the false RED that costs the pin its place. The object test is what keeps
+    # `IS AN ANCESTOR OF the tree` from being read as the copula it is not.
+    assert not _refuses_before_9548(
+        "`ff6379eb2` is the #9601 merge, an ancestor of `047c91f7a`, the tree immediately "
+        "before #9548."
+    ), (
+        "the COMPACT kinship spelling is refused — the relation required the literal words "
+        "\"the tree\" after the kinship noun, so its twin one word shorter red while the "
+        "long form passed; a reword must not flip the verdict (#11191 review r11, P1)"
+    )
+    assert not _refuses_before_9548(
+        "The tree before #9548, `047c91f7a`, reads 10 lines, not the 5 stated at "
+        "`ff6379eb2`."
+    ), (
+        "the sentence this pin's OWN failure message recommends is refused — naming the "
+        "false tree in order to REFUTE it is a correction, and a lane that follows the "
+        "pin's advice must not land RED (#11191 review r11, P1)"
+    )
+    assert _refuses_before_9548(
+        "The tree before #9548 returns 5 lines at `ff6379eb2`, and `047c91f7a` is "
+        "unrelated."
+    ), (
+        "the refutation test becomes an ALIBI in the other direction: a genuinely ASSERTED "
+        "false tree must still be refused once `_asserts_false_tree` replaces the bare "
+        "substring test — the exemption is for a REFUTATION in front of the token, not for "
+        "any sentence that mentions it (#11191 review r11, P1)"
     )
     # ⛔ THE ANAPHORA RESIDUAL, PINNED AS A CHARACTERISATION — NOT AS CORRECT BEHAVIOUR
     # (#11191 review r11, P3 — the PR body states this residual but the CODE did not, and
