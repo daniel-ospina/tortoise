@@ -10688,12 +10688,21 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
             ("_DEFAULT_ON_CACHE_ACTIONS", _DEFAULT_ON_CACHE_ACTIONS),
             ("_CACHE_WRITING_ACTIONS", _CACHE_WRITING_ACTIONS),
             ("_GENERIC_CACHE_WRITE_INPUTS", _GENERIC_CACHE_WRITE_INPUTS)):
-        _bad = sorted(k for k in _table if k != k.lower())
+        # ⛔ VALUES AS WELL AS KEYS (#11065 round 4, NEW-2). `_SUPPORTED_CACHE_VALUES` is a
+        # dict of id -> frozenset of package managers, and the MANAGER is compared against a
+        # lower-cased `cache:` value (`_val in _SUPPORTED_CACHE_VALUES[_action]`). So a
+        # mixed-case manager such as `"Pipenv"` is exactly as unreachable as a mixed-case
+        # key: `cache: pipenv` then reads GREEN while setup-python arms its unbounded
+        # post-step save. Keys-only was a measured false negative.
+        _members = list(_table)
+        _members += [v for _vals in getattr(_table, "values", lambda: ())() for v in _vals]
+        _bad = sorted(m for m in _members if m != m.lower())
         assert not _bad, (
-            f"{_table_name} has mixed-case member(s) {_bad}. Every lookup lower-cases the "
-            "action id before matching, so a member that is not already lower-case can "
-            "NEVER match — the arm is silently inert and this pin certifies a workflow it "
-            "cannot see. Lower-case the member (#11065 review round 3, NEW-1).")
+            f"{_table_name} has mixed-case member(s) {_bad}. Every lookup lower-cases BOTH "
+            "the action id AND the `cache:` manager value before matching, so a member that "
+            "is not already lower-case can NEVER match — the arm is silently inert and this "
+            "pin certifies a workflow it cannot see. Lower-case the member "
+            "(#11065 review round 3 NEW-1, round 4 NEW-2).")
     # ⛔ `astral-sh/setup-uv` is a THIRD mechanism, and it is the opposite polarity: there is
     # no `actions/setup-uv` (a nonexistent id keys a set on nothing), and the real action's
     # cache is ON BY DEFAULT — `enable-cache: auto`, `save-cache: true` (v7 action.yml:32-52)
@@ -10703,7 +10712,8 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # post-step save of `~/.cache/uv` — the payload this PR bounds — so PRESENCE is the
     # arming unless the step states an explicit off (#11065 cycle 8 review, P2).
     # ⚠️ `auto` resolves to OFF when `RUNNER_ENVIRONMENT !== "github-hosted"`
-    # (`src/utils/inputs.ts:173-176`), and `python-ci.yml:790-795` records that
+    # (`src/utils/inputs.ts:61-66`, at the **v7** ref this repo actually uses), and
+    # `python-ci.yml:790-795` records that
     # `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the SELF-HOSTED pool — which is
     # the runner class the measured incident ran on. So on this repo's own pool the bare
     # form is inert, and this arm is CONSERVATIVE there rather than derived; it is derived
@@ -10720,7 +10730,12 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         `actions/cache` spelling (measured GREEN over a composite arming
         `setup-python`+`cache: pip` — cycle 8 review round 2).
         """
-        _with = step.get("with") or {}
+        # ⛔ INPUT NAMES ARE CASE-INSENSITIVE AT RUNTIME (#11065 round 4, NEW-4). The toolkit
+        # reads `INPUT_<NAME.toUpperCase()>`, so `Cache: pip` and `Cache-To: type=gha` are the
+        # SAME inputs as `cache:` / `cache-to:` — and reading the raw dict made them read
+        # GREEN. That is a fail-open on the exact #11063 mechanism, so normalise the map ONCE
+        # here and read every input name from it.
+        _with = {str(_k).strip().lower(): _v for _k, _v in (step.get("with") or {}).items()}
         # ⛔ ACTION IDS RESOLVE CASE-INSENSITIVELY (#11065 delta review, P3-1).
         # `Actions/Setup-Python@v5` + `cache: pip` measured GREEN against a
         # case-sensitive table — a fail-open spelled with a capital letter. Every table
@@ -10871,7 +10886,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "set is #7612's payload (140 wheels, ~3.2 GB, 93-219 s per job cold) and "
         "`install-cpu-torch` installs it with `pip`, so every shard would then "
         "re-download it, which is what #7612 removed")
-    pip_restores = [s for s in pip_steps if _uses_of(s) == "actions/cache/restore@v4"]
+    pip_restores = [s for s in pip_steps if _uses_of(s).split("@")[0].strip().lower() == "actions/cache/restore"]
     assert len(pip_restores) == 1, (
         "the `test` job's pip cache reader must be exactly one "
         f"`actions/cache/restore@v4` (found {len(pip_restores)} of {len(pip_steps)})")
@@ -10975,7 +10990,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert uv_steps, (
         "the `test` job no longer touches ~/.cache/uv at all — every shard would "
         "then resolve and download its deps cold, which is what #7612 removed")
-    uv_restores = [s for s in uv_steps if _uses_of(s) == "actions/cache/restore@v4"]
+    uv_restores = [s for s in uv_steps if _uses_of(s).split("@")[0].strip().lower() == "actions/cache/restore"]
     assert len(uv_restores) == 1, (
         "the `test` job's uv cache reader must be exactly one "
         f"`actions/cache/restore@v4` (found {len(uv_restores)} of {len(uv_steps)})")
@@ -11015,7 +11030,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "populates a key this job never reads, so the exact-hit path dies and "
         "every run pays a full bounded write. Same string, or the pin certifies "
         "nothing about the hit path it exists to protect.")
-    assert _uses_of(uv_save) == "actions/cache/save@v4", (
+    assert _uses_of(uv_save).split("@")[0].strip().lower() == "actions/cache/save", (
         f"the uv writer must be the EXPLICIT `actions/cache/save@v4` step, not "
         f"{_uses_of(uv_save)!r} — an implicit `actions/cache@` save runs as a POST "
         "step that can be neither bounded nor ordered (#10182/#11063)")
@@ -11161,14 +11176,27 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     for _sentence in re.split(r"(?<=[.;])\s+", _prose):
         if "#7612" not in _sentence or "~/.cache/uv" not in _sentence:
             continue
-        # ⛔ A PURE NEGATION ASSERTS THE CORRECT FACT and must not red (#11065 round 3,
-        # NEW-4): `#7612's payload … is NOT in ~/.cache/uv` is true, and this arm's contract
-        # is "must not PLACE it there", which a negation does not do. Demanding
-        # `~/.cache/pip` in a negated sentence reddened correct prose while the message
-        # claimed the opposite. `re.IGNORECASE` is load-bearing: prose shouts (`NOT`, `NEVER`)
-        # and a case-sensitive test let the shout through as an affirmative claim.
-        if re.search(r"\b(not|never|isn't|aren't|no longer)\b", _sentence, re.IGNORECASE):
-            continue
+        # ⛔ THE NEGATION ESCAPE IS WITHDRAWN (#11065 round 4, NEW-1 — measured). Round 3
+        # reddened a PURE NEGATION — `#7612's payload … is NOT in `~/.cache/uv`` is true, so
+        # that was a false block — and the fix skipped any sentence carrying a negator. That
+        # escape is SENTENCE-WIDE, so it also excused three FALSE claims, each measured GREEN:
+        # `… is in `~/.cache/uv`, not `~/.cache/pip``, `… is in `~/.cache/uv` (this placement
+        # is not negotiable)`, `… is not pip's; it is in `~/.cache/uv``. A fail-open outranks a
+        # false block, so the escape goes and the false block is accepted: fail-closed plus a
+        # message naming the remedy beats a prose parser this blocker PR should not grow.
+        #
+        # THREE DISCLOSED RESIDUALS, stated rather than half-solved:
+        #  (i)   a pure negation reds — say where the payload IS (`~/.cache/pip`) and it
+        #        passes, which is what the message already prescribes.
+        #  (ii)  `… is in `~/.cache/uv`, not `~/.cache/pip`` reads GREEN, because the assertion
+        #        below is a PRESENCE test on `~/.cache/pip`, not a claim about which path the
+        #        payload is attributed to. This is a residual of the sentence-scoped form, and
+        #        it is GREEN with the escape and without it — verified both ways.
+        #  (iii) a false claim that never names `#7612` is out of contract: this arm pins that
+        #        ISSUE's attribution, not torch prose in general.
+        # None is reachable in the shipped text — the block contains no `#7612's payload`
+        # today (`grep -c` -> 0) — so this arm guards a future edit, and every shape it does
+        # decide, it fails CLOSED on.
         assert "~/.cache/pip" in _sentence, (
             "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB torch wheel "
             "set) to `~/.cache/uv`. It is not there: `install-cpu-torch` installs torch "
@@ -11375,7 +11403,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "sibling jobs carry `hf-embedding-cache-v2-<os>`'s writer, one of them on "
         "this job's own `python == 'true'` gate, so this job's save buys nothing "
         "(#11063/#10327)")
-    hf_restores = [s for s in hf_here if _uses_of(s) == "actions/cache/restore@v4"]
+    hf_restores = [s for s in hf_here if _uses_of(s).split("@")[0].strip().lower() == "actions/cache/restore"]
     assert len(hf_restores) == 1 and hf_restores[0].get("continue-on-error") is True, (
         "the HF restore must be exactly one `actions/cache/restore@v4` with "
         "`continue-on-error: true`")
