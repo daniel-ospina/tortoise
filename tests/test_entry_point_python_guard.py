@@ -966,8 +966,81 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
             f"package module (its relative / `tools.*` import dies): {message!r}"
         )
 
+    # ★ #11342: the refusal must not report SUCCESS. The assertions above pin
+    # what the message SAYS; without this one a guard that prints the full,
+    # attributable message and then `raise SystemExit(0)` passes every check in
+    # this file while telling every caller the tool ran clean — the fail-OPEN
+    # shape this whole census exists to prevent (measured: `SystemExit(0)`
+    # satisfied `_guard_or_fail` and every attribution assertion). Shape-generic
+    # on purpose: it stays silent about WHICH non-zero code a file chooses
+    # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins the three
+    # sites where that choice is a contract decision, not a style one).
+    assert refusal.value.code != 0, (
+        f"{rel}: the guard refused but exited 0 — a refusal that reports success "
+        f"is indistinguishable from the tool having run: {message!r}"
+    )
+
     monkeypatch.setattr(sys, "version_info", (*FLOOR, 0))
     exec(code, namespace)  # at the floor the guard must be inert
+
+
+#: The refusal code each of the three `#4053`/`#11342` sites CHOOSES, and the
+#: verdict code it spares. `SystemExit(<message>)` exits 1 in CPython, so for two
+#: of these files an old interpreter was reported as the tool's own verdict —
+#: `gen_placement_table --check` prints `STALE` and returns 1, and
+#: `test_design_map_check` documents 1 as "violations" while reserving 2 for the
+#: map that could not be read. `cache_evict` is the exception BECAUSE its 1 is
+#: already a usage code (`CACHE_EVICTION_EXIT_USAGE`), its verdicts being 2/3/4.
+#:
+#: The census above cannot assert this: which non-zero code a file picks is a
+#: per-tool contract decision, not a property of the guard shape. Pinning it here
+#: is what makes the decision survive the next rebase — #11342 was filed after a
+#: branch rewrite silently reverted this exact fix, with the whole census green.
+REFUSAL_CODES: dict[str, int] = {
+    "tools/gen_placement_table.py": 2,
+    "tools/test_design_map_check.py": 2,
+    "tools/cache_evict.py": 1,
+}
+
+#: Run a tool as a script under a faked pre-3.12 interpreter. `version_info` is
+#: replaced before `runpy` executes the file, so the file's OWN guard node runs
+#: and nothing below it does — no old interpreter and no real work needed.
+_FORCED_39 = (
+    "import runpy, sys\n"
+    "sys.version_info = (3, 9, 6, 'final', 0)\n"
+    "runpy.run_path(sys.argv[1], run_name='__main__')\n"
+)
+
+
+@pytest.mark.parametrize("rel", sorted(REFUSAL_CODES))
+def test_the_refusal_exit_code_is_the_one_the_tool_can_spare(rel):
+    """★ #11342: an environment refusal must not wear a VERDICT's exit code.
+
+    Measured as a real process, not by reading the guard node's `.code` alone: the
+    whole point is the status a CI step or a lane branches on. The expected code
+    is asserted exactly rather than "non-zero", because for the two drift/
+    violation gates the collision is specifically with **1** — an exact pin is
+    what reds if the `#4053` shape is ever reverted to
+    `raise SystemExit(<message>)`, whose CPython exit status is 1.
+    """
+    expected = REFUSAL_CODES[rel]
+    probe = subprocess.run(
+        [sys.executable, "-c", _FORCED_39, str(ROOT / rel)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == expected, (
+        f"{rel}: an old interpreter must exit {expected}, got {probe.returncode} "
+        f"(stderr={probe.stderr!r}) — 1 is this tool's own VERDICT code (STALE / "
+        f"violations), so an environment refusal must not wear it"
+    )
+    assert ">= 3.12" in probe.stderr and rel in probe.stderr, (
+        f"{rel}: the refusal must stay attributable on stderr: {probe.stderr!r}"
+    )
+    assert "Traceback" not in probe.stderr, (
+        f"{rel}: a refusal must not be a traceback: {probe.stderr!r}"
+    )
 
 
 @pytest.mark.parametrize("path", _dash_m_corpus(), ids=_rel)
