@@ -476,7 +476,7 @@ def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
 # ── The discovery blind spot (pinned, not merely documented) ────────────────
 
 #: The shapes `_EMBED_WRITE` cannot spell, one scratch module each. Kept as data so the assertion
-#: below reads as the limitation it is measuring, not as four hand-written cases.
+#: below reads as the limitation it is measuring, not as hand-written cases.
 INVISIBLE_SHAPES = {
     "map_merge": 'def w(tx, p):\n    tx.query("SET n += $p", {"p": p})\n',
     "inline_property_map": (
@@ -507,7 +507,8 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
     """`#11274` row 1, in the direction that makes SILENCE distinguishable from coverage.
 
     The guard above discovers through `probe.embedding_writers()`, whose `_EMBED_WRITE` is a
-    source-text regex. Four Cypher shapes store a vector it cannot spell, so a writer using one is
+    source-text regex (plus the AST pass `_writes_an_embedding`). Every shape in `INVISIBLE_SHAPES`
+    stores a vector one of them cannot spell, so a writer using one is
     ABSENT from the census — not unclassified, absent — and every other test in this file is green.
     That limitation is stated in the register's module docstring; this test is what keeps the
     statement from rotting:
@@ -517,8 +518,10 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
       caveat and the register's population are now stale, and the newly-visible writer must be
       declared.
 
-    Measured here (not asserted from the regex's text): the positive control is detected, all four
-    invisible shapes are absent from the map entirely.
+    Measured here (not asserted from the regex's text): the positive control is detected, and every
+    invisible shape below is absent from the map entirely. ⚠️ The count is deliberately NOT stated
+    here or in the dict above — it re-staled twice while this PR was being reviewed, and a number
+    nobody re-derives is exactly what the suite is meant to catch rather than carry.
     """
     controls = {
         "clause": 'def w(tx, e):\n    tx.query("SET n.embedding = $e")\n',

@@ -66,17 +66,20 @@ write shapes `tools/dod_5090_probe.py` can *decide*, not by "every writer". `#11
 `tortoise.sdk::_write_capture_turns` — invisible when this module was first written — is in the
 census), and it named the shape it deliberately will not decide:
 `UNDECIDABLE_WRITE_SHAPES` (`SET n += $p` — whether the merged map carries a vector is DATA FLOW,
-not syntax). Measured at this head, four further shapes are still ABSENT from the census — not
+not syntax). Measured at this head, further shapes are still ABSENT from the census — not
 unclassified, absent, which is why the guard in `tests/test_embed_writer_register.py` stays green
 for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace
 (`SET n = $map`), a property name INTERPOLATED into the clause, and the container-HELPER /
 COMPUTED-KEY forms a regex and a literal-slice test both miss
-(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and two of those four are **live**: the
-interpolation in `tortoise.cache_projection::node_statement` and the helper in
-`tortoise.sdk::_emit_event`. ⚠️ Its direct analogue `tortoise.sdk::_journal_event_raw_write` is
+(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and three of those are **live**: the
+interpolation in `tortoise.cache_projection::node_statement`, the helper in
+`tortoise.sdk::_emit_event`, and the computed key in `tortoise.sdk::update_point`. The full list is
+`tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which is the authority: a count written
+here re-stales with every shape added, so this paragraph names forms and does not count them.
+⚠️ Its direct analogue `tortoise.sdk::_journal_event_raw_write` is
 visible for a DIFFERENT reason — `_EMBED_WRITE` matches the `embedding=None` in its SIGNATURE — so
-it is not evidence that a literal subscript is what gets a carrier seen; the writer that genuinely
-owes its visibility to `#11274`'s AST pass is `tortoise.sdk::_write_capture_turns`. A writer is also
+it is not evidence that a literal subscript is what gets a carrier seen; the writers that genuinely
+owe their visibility to `#11274`'s AST pass are the container-key instances declared here. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
 *named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
 module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
