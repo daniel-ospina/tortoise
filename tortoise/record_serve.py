@@ -1157,7 +1157,7 @@ def parity_difference(cache_props: Mapping[str, Any],
       still carries them — the legacy population, and every session the current
       capture wrote — is CACHE-HELD, not a gap. ⛔ "cache-held", never
       "cache-owned": the record DOES hold this pair, so the term reserved for what
-      the record cannot hold (`record_reconcile.ReconciliationResult.graph_only_total`)
+      the record cannot hold (`record_reconcile.RecordReconcileResult.graph_only_total`)
       would tell an operator there is nothing to repair (#10394 review, cycle 9).
       Scoped by the node's own
       identity, never by the label alone: a transcript DOCUMENT Source keeps its
