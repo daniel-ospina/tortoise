@@ -150,7 +150,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools import ci_verdict  # noqa: E402  (path set up above)
-from tools.mergify_config_guard import GuardUnreadable  # noqa: E402
+from tools.mergify_config_guard import (  # noqa: E402  (path set up above)
+    # One definition of the PR-scoped triggers, never a second copy that could drift.
+    PR_TRIGGERS,
+    GuardUnreadable,
+)
 from tools.required_set import (  # noqa: E402  (path set up above)
     RequiredSet,
     RequiredSetConfigError,
@@ -1197,15 +1201,30 @@ class Probe:
     #: Newest attempt per ``(app, workflow, job)`` — ``None`` = the surface was unreadable.
     groups: tuple[ci_verdict.GroupVerdict, ...] | None = None
     groups_raw: str = ""
+    #: The WORKFLOW RUNS on this head (``actions/runs?head_sha=``), read by the same call
+    #: that produced ``groups`` — ``None`` = unreadable. Carried because a merge-time
+    #: context's ABSENCE has two causes and only the run listing separates them: a job
+    #: with unmet ``needs`` has no check-run yet, so "not created YET" and "this workflow
+    #: never ran here" look identical in ``groups``.
+    head_runs: tuple[Mapping[str, Any], ...] | None = None
     #: Required ENTRY contexts — must be green at the PR head. ``None`` = unreadable.
     #: Derived from ``.mergify.yml``'s ``queue_conditions`` (see `tools.required_set`).
     required: tuple[str, ...] | None = None
-    #: Required MERGE-TIME contexts (``merge_conditions``). Settled by Mergify on
-    #: ``mergify/merge-queue/<sha>``, so at a PR head they are DEFERRED, not missing —
-    #: measured 2026-11-04, every sampled PR head carried ZERO ``python-ci-gate`` runs.
+    #: Required MERGE-TIME contexts (``merge_conditions``). Mergify settles them on
+    #: ``mergify/merge-queue/<sha>``, so an author head that carries no run of the
+    #: emitting workflow leaves them DEFERRED rather than missing. ⛔ DEFERRED is decided
+    #: by that EVIDENCE, never by absence alone: re-measured 2026-11-05, ``python-ci-gate``
+    #: DOES report on author heads (``queued``, ``success`` and ``failure`` all observed),
+    #: and a ``needs``-gated job that has not started has no check-run at all — so
+    #: absence is also what a PENDING aggregate looks like, which is a FAIL here.
     #: ``None`` = unreadable, and it is kept SEPARATE from ``required`` because
     #: conflating the two is the permanent false NOT-READY this split exists to end.
     required_deferred: tuple[str, ...] | None = None
+    #: ``merge-time context -> workflow FILES that emit it`` (the record's ``emitters``
+    #: projection, via `tools.required_set.RequiredSet.emit_files`). An empty answer for a
+    #: required name means the emission is UNATTRIBUTABLE, which fails the gate rather than
+    #: falling through to DEFERRED.
+    merge_emit_files: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     required_raw: str = ""
     #: ``record-review.sh --check-carry`` verdict token and exit code.
     review_token: str | None = None
@@ -1308,6 +1327,78 @@ def _gate_token(group: ci_verdict.GroupVerdict) -> str:
     return ""
 
 
+def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
+    """Explain an ABSENT merge-time context: ``(failure token or "", seen note)``.
+
+    A ``merge_conditions`` name is authoritative on the QUEUE branch, so an author head
+    that carries no trace of it is genuinely DEFERRED. The trap is that the two causes of
+    absence are invisible in `groups`:
+
+      * the workflow never ran on this head — the check does not exist by design here;
+      * the workflow DID run and this job's `needs` are not satisfied yet — GitHub has
+        created **no check-run at all** for a dependent job, so a PENDING aggregate looks
+        exactly like an absent one (vendor behaviour, `needs`, GitHub Actions workflow
+        syntax).
+
+    Those two need OPPOSITE verdicts, and this module's own rule decides which: *"In-flight
+    is a FAIL here, not a wait: a head whose checks have not concluded is not ready now."*
+    So a head that carries a PR-triggered run of the emitting workflow is a FAIL — the
+    aggregate is pending, or its legs already concluded and it never posted — and only a
+    head with no such run defers.
+
+    ⛔ THE MEASUREMENT THAT DROVE THIS: `python-ci-gate` reports on author heads
+    (`queued` 11097, `completed/success` 11100, `completed/failure` 11096), and head
+    `92299555219e` of PR 11113 carried `test (g)` RED with the aggregate absent. An
+    unconditional DEFERRED graded that head PASS over a red required suite.
+
+    ⛔ UNATTRIBUTABLE IS A FAIL, NOT A DEFER. If the committed record carries no emitter
+    for a required name, "did that workflow run here?" cannot be asked at all, and the
+    DEFERRED arm would be a PASS built on no evidence. The remedy is the one the guard
+    already documents for this projection: `tools/mergify_config_guard.py --recut`
+    rewrites `emitters`.
+    """
+    files = probe.merge_emit_files.get(context) or ()
+    if not files:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(no emitter recorded for {context} — the committed "
+            "record's `emitters` cannot say which workflow should have posted it, so its "
+            "absence cannot be read as DEFERRED; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    if probe.head_runs is None:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's workflow runs could not be read, so "
+            "absence cannot be told apart from a pending aggregate)"
+        )
+    matched = [_run_file(run) for run in probe.head_runs if _run_emits(run, files)]
+    if matched:
+        return "missing", (
+            f"{context}=MISSING(its workflow {matched[0]!r} ran on this head, so the "
+            "aggregate is pending creation or never posted — absence is not deferral)"
+        )
+    return "", f"{context}={DEFERRED}(no {'/'.join(files)} run on this head)"
+
+
+def _run_file(run: Mapping[str, Any]) -> str:
+    """`.github/workflows/python-ci.yml` -> `python-ci.yml` (what `emitters` records)."""
+    return str(run.get("path") or "").rsplit("/", 1)[-1]
+
+
+def _run_emits(run: Mapping[str, Any], files: tuple[str, ...]) -> bool:
+    """Did this run come from one of the workflows that emit the context, on a PR?
+
+    The event filter is load-bearing in the other direction: `head_sha` also lists
+    `push`/`workflow_dispatch` runs, and a `push` run of the same sha is NOT evidence
+    that the PR-triggered aggregate was created. An absent `event` is not filtered out —
+    the documented API always returns it, so a payload without one must not silently
+    downgrade a FAIL to a DEFER.
+    """
+    if _run_file(run) not in files:
+        return False
+    event = run.get("event")
+    return not isinstance(event, str) or event in PR_TRIGGERS
+
+
 def check_gates(probe: Probe) -> Check:
     """Every required ENTRY context must have a newest attempt concluded ``success``.
 
@@ -1406,15 +1497,28 @@ def check_gates(probe: Probe) -> Check:
                 failed.append(f"{token}:{context}")
 
     # ── MERGE-TIME contexts (`.mergify.yml` `merge_conditions`) ─────────────
-    # ABSENT at the head is the normal, correct state — DEFERRED, not FAIL(missing) —
-    # because Mergify evaluates them on the queue branch. But if one DID run on this
-    # head and is red (or still in flight), that is real evidence about the tree and
-    # it fails the gate: deferral is about WHERE the check is authoritative, not a
-    # licence to ignore a measured red.
+    # ABSENCE AT THE HEAD IS NOT AUTOMATICALLY "DEFERRED". Mergify evaluates these on
+    # the queue branch, but that says nothing about whether the check was CREATED here
+    # yet — and an Actions job with unmet `needs` has no check-run at all, so a PENDING
+    # aggregate and a workflow that never ran on this head are indistinguishable from
+    # `groups` alone. Re-measured 2026-11-05: `python-ci-gate` DOES report on author
+    # heads (`queued` on PR 11097, `success` on 11100, `failure` on 11096), and PR
+    # 11113's head had `test (g)` red with the aggregate absent. Grading that "absent"
+    # as DEFERRED is a PASS arm over evidence nobody read, and it contradicts this
+    # function's own rule that an in-flight check is a FAIL, not a wait — the verdict
+    # would depend on whether GitHub had created the check-run object yet.
+    #
+    # So absence is attributed with `_merge_time_absence`: DEFERRED only when no
+    # PR-triggered run of the EMITTING WORKFLOW happened on this head; a FAIL when it
+    # did (its aggregate is pending or never posted — both are non-green), and a FAIL
+    # when the emission cannot be attributed at all.
     for context in probe.required_deferred or ():
         groups = by_job.get(context) or []
         if not groups:
-            seen.append(f"{context}={DEFERRED}")
+            token, note = _merge_time_absence(probe, context)
+            seen.append(note)
+            if token:
+                failed.append(f"{token}:{context}")
             continue
         for group in sorted(groups, key=lambda g: g.check_id or 0, reverse=True):
             seen.append(f"{context}={group.status}/{(group.conclusion or 'null')}#{group.check_id}")
@@ -2160,13 +2264,18 @@ def _read_required_contexts(workdir: Path) -> tuple[RequiredSet, str]:
 
 def _read_check_groups(
     gh: Gh, head: str, repo: str
-) -> tuple[tuple[ci_verdict.GroupVerdict, ...], str]:
+) -> tuple[tuple[ci_verdict.GroupVerdict, ...], tuple[Mapping[str, Any], ...], str]:
     """Newest attempt per ``(app, workflow, job)`` — delegated to ``ci_verdict``.
 
     The FETCH goes through this module's bounded, cached ``Gh`` reader; the GROUPING and
     the completeness check (``collect_items`` refuses a truncated listing) stay in
     ``ci_verdict``, which is the repo's single authoritative check-run reading (#5042).
     Nothing about what counts as a group or an attempt is re-derived here.
+
+    The RUNS are returned as well as the groups, from the SAME read: they are what lets a
+    consumer tell a merge-time context's absence-with-a-pending-aggregate from
+    absence-because-the-workflow-never-ran, and a second, independent run read could
+    disagree with the check-run payload it is paired with.
     """
     check_url = ci_verdict.CHECK_RUNS_URL.format(repo=repo, sha=head)
     run_url = ci_verdict.RUNS_URL.format(repo=repo, sha=head)
@@ -2188,7 +2297,7 @@ def _read_check_groups(
         f"in-flight={counts.get(ci_verdict.GROUP_IN_FLIGHT, 0)} "
         f"absent={counts.get(ci_verdict.GROUP_ABSENT, 0)}) commit-verdict={verdict.verdict}"
     )
-    return verdict.groups, raw
+    return verdict.groups, tuple(runs), raw
 
 
 def _read_tree(gh: Gh, pr: int, head: str, workdir: Path) -> tuple[bool | None, str]:
@@ -2628,9 +2737,21 @@ def collect_probe(
     else:
         probe.required = required.queue_names
         probe.required_deferred = required.merge_names
-    probe.groups, probe.groups_raw = _try(
-        gh, lambda g: _read_check_groups(g, head, repo), surface="check-runs"
-    )
+        # Only the MERGE-TIME names need attribution: an entry context's absence is
+        # already a FAIL(missing), so its emitter file would never be consulted.
+        probe.merge_emit_files = {
+            name: required.emit_workflows(name) for name in required.merge_names
+        }
+    try:
+        probe.groups, probe.head_runs, probe.groups_raw = _read_check_groups(gh, head, repo)
+    except RateLimited:
+        raise
+    except (ReadError, ci_verdict.SurfaceReadError) as exc:
+        # One failed read means BOTH are unknown: the groups and the run listing come from
+        # the same call, and an absence graded against a half-read surface is how a
+        # pending aggregate would read as a deferral.
+        probe.groups, probe.head_runs = None, None
+        probe.groups_raw = f"check-runs: {exc}"
     (
         probe.review_token,
         probe.review_exit,

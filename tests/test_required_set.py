@@ -64,6 +64,7 @@ def _tree(
     *,
     rules: list[dict[str, Any]] | None = None,
     required_contexts: list[str] | None = None,
+    emitters: dict[str, Any] | None = None,
     write_record: bool = True,
 ) -> Path:
     """A minimal tree carrying `.mergify.yml` + the committed snapshot.
@@ -90,9 +91,13 @@ def _tree(
             )
         record = root / RECORD_REL
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(
-            json.dumps({"required_contexts": required_contexts}, indent=2), encoding="utf-8"
-        )
+        payload: dict[str, Any] = {"required_contexts": required_contexts}
+        # `emitters` is written by `mergify_config_guard --recut`; a case that omits it is
+        # modelling a record that predates that projection, which must DEGRADE (see
+        # `test_a_record_without_emitters_degrades_to_unattributed`).
+        if emitters is not None:
+            payload["emitters"] = emitters
+        record.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return root
 
 
@@ -367,3 +372,64 @@ def test_derive_from_ref_refuses_a_non_utf8_blob(tmp_path: Path) -> None:
     _git(tmp_path, "commit", "-m", "config")
     with pytest.raises((RequiredSetUnreadable, GuardUnreadable)):
         derive_from_ref(tmp_path, "HEAD")
+
+
+# ── the emitter projection: WHICH WORKFLOW should have posted the check ─────
+
+
+def test_emit_files_project_the_records_emitters_to_workflow_files(tmp_path: Path) -> None:
+    """`emitters: name -> [[workflow_file, job_key]]` becomes `name -> (workflow_file,)`.
+
+    A consumer needs the FILE, because that is the only handle an Actions RUN offers
+    (`workflow_runs[].path` is `.github/workflows/<file>`). Revert the projection to return
+    the `[file, job]` pairs unsplit and this reds.
+    """
+    _tree(
+        tmp_path,
+        emitters={
+            HEAVY: [["python-ci.yml", HEAVY]],
+            "docs": [["ci.yml", "docs"], ["docs-copy.yml", "docs"]],
+        },
+    )
+    required = derive_from_config(tmp_path)
+    assert required.emit_workflows(HEAVY) == ("python-ci.yml",)
+    # Several workflows may emit one effective name — all of them are attribution.
+    assert required.emit_workflows("docs") == ("ci.yml", "docs-copy.yml")
+    # A name the record does not attribute is `()` — a real answer, never "nothing emits it".
+    assert required.emit_workflows("never-heard-of-it") == ()
+
+
+def test_a_record_without_emitters_degrades_to_unattributed(tmp_path: Path) -> None:
+    """An older record must not become a REFUSAL — but it must not be read as attribution.
+
+    `emitters` is not the witness the required set rests on (`required_contexts` is), so
+    its absence cannot turn a readable record into an unreadable one. It must still be
+    visibly EMPTY, because the consumer's rule is "no attribution => FAIL, never DEFER":
+    a degrade that returned a guessed workflow file would make the fail-open invisible.
+    """
+    _tree(tmp_path)  # no `emitters` key at all
+    required = derive_from_config(tmp_path)
+    assert required.snapshot_agrees is True
+    assert required.emit_files == ()
+    assert required.emit_workflows(HEAVY) == ()
+
+
+def test_emit_files_are_read_from_the_protected_ref(tmp_path: Path) -> None:
+    """The attribution follows the PROTECTED ref, like every other byte in this module.
+
+    Attribution is what decides DEFERRED (a PASS arm), so a branch that rewrote
+    `emitters` to point at a workflow that never runs on a PR head would otherwise be
+    able to switch the merge-time check's absence from FAIL to DEFERRED in the same diff
+    it uses to judge itself.
+    """
+    (tmp_path / MERGIFY_REL).parent.mkdir(parents=True, exist_ok=True)
+    _tree(tmp_path, emitters={HEAVY: [["python-ci.yml", HEAVY]]})
+    _git(tmp_path, "init", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "config")
+
+    # The "PR": re-point the attribution at a workflow nothing runs.
+    _tree(tmp_path, emitters={HEAVY: [["never-runs.yml", HEAVY]]})
+
+    assert derive_from_config(tmp_path).emit_workflows(HEAVY) == ("never-runs.yml",)
+    assert derive_from_ref(tmp_path, "HEAD").emit_workflows(HEAVY) == ("python-ci.yml",)

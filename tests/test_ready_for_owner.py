@@ -2158,11 +2158,40 @@ class _FakeGh:
         return self._match("pulls/{n}")
 
 
+def _workflow_run(
+    workflow_file: str,
+    *,
+    event: str = "pull_request",
+    status: str = "in_progress",
+    run_id: int = 5,
+) -> dict[str, Any]:
+    """One `workflow_runs[]` entry, in the shape attribution reads.
+
+    `path` is the handle `emitters` records (`python-ci.yml`); `event` is what separates a
+    PR run (evidence the aggregate was created) from a `push` run of the same sha (not).
+    """
+    return {
+        "id": run_id,
+        "workflow_id": 7,
+        "path": f".github/workflows/{workflow_file}",
+        "event": event,
+        "status": status,
+        "conclusion": None if status != "completed" else "success",
+    }
+
+
 def _gh_payloads(
-    *, check_runs: list[dict[str, Any]] | None = None, body: str = ""
+    *,
+    check_runs: list[dict[str, Any]] | None = None,
+    body: str = "",
+    runs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Canned `gh` payloads, ordered SPECIFIC → GENERAL (first substring match wins)."""
     crs = check_runs if check_runs is not None else _check_runs_for(REQUIRED)
+    # No `path`/`event` by default: the run listing exists to ATTRIBUTE a merge-time
+    # context's absence, and the green fixture never has one absent. Cases that do
+    # exercise attribution pass `runs=` explicitly (see `_workflow_run`).
+    workflow_runs = runs if runs is not None else [{"id": 5, "workflow_id": 7}]
     return {
         "/files?per_page": [
             {"filename": "tortoise/sdk.py"},
@@ -2175,8 +2204,8 @@ def _gh_payloads(
         # signal that the derivation path was silently replaced by an API read again.
         "check-runs": {"total_count": len(crs), "check_runs": crs},
         "actions/runs": {
-            "total_count": 1,
-            "workflow_runs": [{"id": 5, "workflow_id": 7}],
+            "total_count": len(workflow_runs),
+            "workflow_runs": workflow_runs,
         },
         "commits/": {"commit": {"committer": {"date": "2026-11-04T11:30:00Z"}}},
         "/comments": [],
@@ -2242,26 +2271,154 @@ def test_collect_probe_wires_a_green_world_into_a_READY_verdict(
 def test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MEASURED 2026-11-04: **0 of 6** sampled open PR heads carried a `python-ci-gate` run.
+    """DEFERRED is decided by EVIDENCE, not by absence: no run of `python-ci.yml` here.
 
-    Mergify evaluates `merge_conditions` on `mergify/merge-queue/<sha>`, so absence at
-    an author head is the queue working as designed. Against a FLAT required set (the
-    protection API's shape, which has no entry/merge split) that absence can only read
-    as `FAIL(missing)` — NOT-READY for every PR forever, which is the class of
-    disagreeing readiness verdict this instrument exists to end (#10962).
+    Mergify evaluates `merge_conditions` on `mergify/merge-queue/<sha>`, so a head where
+    the emitting workflow NEVER RAN is the queue working as designed. Against a FLAT
+    required set (the protection API's shape, which has no entry/merge split) that absence
+    can only read as `FAIL(missing)` — NOT-READY for every PR forever, which is the class
+    of disagreeing readiness verdict this instrument exists to end (#10962).
 
-    This is the discriminating case: revert the split and the gates check reds.
+    ⛔ THE PREMISE OF THIS CASE WAS CORRECTED (#10991 review, issue 1). It used to assert
+    that absence ALONE is deferral, citing "0 of 6 sampled heads carried python-ci-gate"
+    — a sample taken while the matrix was still running. Re-measured 2026-11-05 the
+    aggregate reports on author heads (`queued` 11097, `success` 11100, `failure` 11096),
+    and a `needs`-gated job that has not started has NO check-run at all. So this fixture
+    must also carry the run listing, and it now asserts the reason the answer is DEFERRED:
+    nothing from `python-ci.yml` ran on this head.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=[_workflow_run("docs.yml", event="pull_request")],
+        ),
+    )[0]
+    assert probe.required_deferred == MERGE_TIME_REQUIRED
+    assert probe.merge_emit_files == {MERGE_TIME_REQUIRED[0]: ("python-ci.yml",)}
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw
+    assert "no python-ci.yml run on this head" in gates.raw
+    assert verdict.ready is True, [(c.name, c.reason, c.raw) for c in verdict.checks]
+
+
+def test_a_pending_merge_time_aggregate_is_a_FAIL_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ ISSUE 1 (P1, fail-open): `python-ci.yml` ran here, so the aggregate is PENDING.
+
+    A `needs`-gated job has no check-run until its prerequisites finish (GitHub Actions
+    workflow syntax), so a pending aggregate is INDISTINGUISHABLE from an absent one in
+    `groups`. Grading that absence DEFERRED returned `PASS` / exit 0 on a head where the
+    required suite had not concluded — while the very same state one moment later (the
+    check-run created as `queued`) FAILS as in-flight. The verdict depended on scheduling
+    timing, not on evidence.
+
+    On the pre-fix code (`seen.append(f"{context}={DEFERRED}"); continue`) this case reads
+    `gates.passed is True` and REDs — that mutation is the fix, and it is the only one
+    this test permits.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=[_workflow_run("python-ci.yml", status="in_progress")],
+        ),
+    )[0]
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "missing:python-ci-gate" in gates.reason
+    assert "MISSING" in gates.raw and "pending creation" in gates.raw
+    assert verdict.ready is False, [(c.name, c.reason, c.raw) for c in verdict.checks]
+
+
+def test_the_measured_false_READY_shape_reds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ The CONCRETE head the review measured: PR 11113 `92299555219e`.
+
+    All six ENTRY contexts green, `test (g)` `completed/failure` on the same head, and
+    `python-ci-gate` absent because its `needs` were unsatisfied. The pre-fix gate
+    reported `READY-FOR-OWNER` on that head. A red leg inside the required suite's own
+    workflow must never be invisible to the readiness answer.
+    """
+    legs = _check_runs_for((*ENTRY_REQUIRED, "test (g)"))
+    for run in legs:
+        if run["name"] == "test (g)":
+            run["conclusion"] = "failure"
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=legs,
+            runs=[_workflow_run("python-ci.yml")],
+        ),
+    )[0]
+    verdict = rfo.evaluate(probe)
+    gates = next(c for c in verdict.checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "missing:python-ci-gate" in gates.reason
+    assert verdict.ready is False, [(c.name, c.reason, c.raw) for c in verdict.checks]
+
+
+def test_a_push_run_of_the_same_sha_is_not_evidence_the_aggregate_was_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`head_sha` lists `push` runs too, and a push run is not a PR run.
+
+    Attributing it would fail a genuinely deferred merge-time context on any head that was
+    also pushed — a false NOT-READY bought with no evidence. The event filter is the ONLY
+    difference between this case and the pending-aggregate case above.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=[_workflow_run("python-ci.yml", event="push")],
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw
+
+
+def test_an_unattributable_merge_time_context_is_a_FAIL_not_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ No emitter recorded => "did its workflow run here?" cannot be ASKED.
+
+    The record carries `emitters` for every effective check-run name; a name the config
+    requires but the record cannot attribute leaves the absence unexplained. Falling
+    through to DEFERRED there would restore the exact fail-open this fix closes, so it is
+    a FAIL with the remedy named (`--recut` rewrites `emitters`).
     """
     probe = _collect(
         monkeypatch,
         _gh_payloads(check_runs=_check_runs_for(ENTRY_REQUIRED)),
     )[0]
-    assert probe.required_deferred == MERGE_TIME_REQUIRED
-    verdict = rfo.evaluate(probe)
-    gates = next(c for c in verdict.checks if c.name == "gates")
-    assert gates.passed is True, gates.raw
-    assert "DEFERRED(merge-time)" in gates.raw
-    assert verdict.ready is True, [(c.name, c.reason, c.raw) for c in verdict.checks]
+    probe.merge_emit_files = {}
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason
+    assert "--recut" in gates.raw
+
+
+def test_an_unreadable_run_listing_cannot_turn_absence_into_a_deferral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A HALF-READ surface must not defer: no run listing, no attribution, no PASS.
+
+    The groups and the runs come from one call, so this state is not reachable through
+    `collect_probe` — which is exactly why it is pinned here rather than left to a
+    comment: `Probe` is a plain dataclass and every condition is a pure function of it.
+    """
+    probe = _collect(monkeypatch, _gh_payloads(check_runs=_check_runs_for(ENTRY_REQUIRED)))[0]
+    probe.head_runs = None
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert "unattributable:python-ci-gate" in gates.reason
 
 
 def test_a_merge_time_check_that_ran_and_red_here_still_fails(

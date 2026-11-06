@@ -35,9 +35,26 @@ THE CONTRACT THIS IMPLEMENTS — `.mergify.yml`'s own header, clause 1
         `merge_conditions` gates the MERGE (evaluated against the queue branch)
 
     A `merge_conditions` name is therefore **DEFERRED** at a PR head, not missing:
-    Mergify evaluates it on `mergify/merge-queue/<sha>`. Measured 2026-11-04, all
-    six sampled open PR heads carried ZERO `python-ci-gate` runs — so a consumer
-    that treats absence as `FAIL(missing)` reports NOT-READY for every PR forever.
+    Mergify evaluates it on `mergify/merge-queue/<sha>`, so a consumer that treats
+    absence as `FAIL(missing)` reports NOT-READY for every PR forever.
+
+    ⛔ BUT "DEFERRED" IS NOT "ABSENT", AND THE FIRST MEASUREMENT SAID THE WRONG THING.
+    This docstring used to conclude, from "all six sampled open PR heads carried ZERO
+    `python-ci-gate` runs" (2026-11-04), that the aggregate NEVER reports at an author
+    head. That sample was taken while the matrix was still running, and it cannot tell
+    "never runs at a head" from "not scheduled/created YET". Re-measured 2026-11-05,
+    `python-ci-gate` DOES report on author PR heads — as `queued` (PR 11097) and
+    `completed` with BOTH `success` (PR 11100) and `failure` (PR 11096). An Actions job
+    with unmet `needs` (and this one has `if: always()` + a 14-way `needs:`) has NO
+    check-run at all, so absence is also exactly what a PENDING aggregate looks like.
+
+    The two states need different verdicts — a pending aggregate is IN FLIGHT (the gate's
+    own rule is "in flight is a FAIL here, not a wait"), while a workflow that never ran
+    on this head really is deferred — and only the EMITTING WORKFLOW separates them. That
+    is why `RequiredSet.emit_files` exists: it carries the record's `emitters`
+    projection so a consumer can ask "did a PR-triggered run of that workflow happen on
+    this head?". A consumer with no attribution must NOT read `DEFERRED` — that is a PASS
+    arm over evidence nobody read.
 
     `branch_protection_injection_mode` DECIDES what the entry gate IS (`.mergify.yml`
     clause 4: *"Read the mode before reasoning about the list"*), so the mode is
@@ -86,9 +103,26 @@ uses for its own clause checks, not a second parser that could drift from it.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first (D9 shape), before any later guard could run.
+# The refusal names the invocation that actually works. This module is a LIBRARY (no
+# `__main__` block), but it is addressed by PATH — `tools` has an `__init__.py`, yet
+# `_expected_invocation` only treats a file three or more segments deep as a package
+# module, so the working form here is `uv run python tools/required_set.py` and NOT
+# `-m tools.required_set` (which the guard's own `test_expected_invocation_matches_...`
+# pins). Naming the wrong form would replace an unattributed failure with a refusal
+# that sends the operator to an invocation that does not resolve.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/required_set.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/required_set.py`"
+    )
+
 import dataclasses
 import json
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,6 +162,19 @@ class RequiredSet:
     source: str
     queue_names: tuple[str, ...] = ()
     merge_names: tuple[str, ...] = ()
+    #: ``effective check-run name -> the workflow FILES whose jobs emit it``, taken from
+    #: the committed record's ``emitters`` projection (it is written by
+    #: `mergify_config_guard --recut`, so it is always present in a re-cut record).
+    #: Stored as a tuple of pairs, not a dict, so this frozen dataclass stays HASHABLE —
+    #: a dict field would raise `TypeError` from the generated `__hash__`.
+    #:
+    #: ⛔ WHY IT IS HERE AT ALL: a consumer that reads a merge-time context as ABSENT must
+    #: answer "is the aggregate not created YET, or does its workflow never run at a
+    #: head?" — and only the emitting workflow can separate those (an Actions job with
+    #: unmet `needs` has no check-run at all, so absence is what a PENDING aggregate looks
+    #: like). Without this map the only reachable answer is "DEFERRED", which is a PASS
+    #: arm over evidence nobody read.
+    emit_files: tuple[tuple[str, tuple[str, ...]], ...] = ()
     snapshot_agrees: bool | None = None
     # `branch_protection_injection_mode` — LOAD-BEARING, never assumed. Under
     # `merge` (set here) the required contexts are injected for the MERGE only, so
@@ -143,6 +190,18 @@ class RequiredSet:
     @property
     def overlap(self) -> tuple[str, ...]:
         return tuple(n for n in self.queue_names if n in set(self.merge_names))
+
+    def emit_workflows(self, name: str) -> tuple[str, ...]:
+        """The workflow FILES that emit check-run ``name``, or ``()`` if unattributed.
+
+        ``()`` is a real answer and must be treated as one: it means the committed
+        record carries no emitter for a name the config REQUIRES, so "did that workflow
+        run at this head?" cannot be asked at all.
+        """
+        for recorded, files in self.emit_files:
+            if recorded == name:
+                return files
+        return ()
 
 
 def _snapshot_names(root: Path) -> tuple[str, ...] | None:
@@ -164,6 +223,43 @@ def _snapshot_names(root: Path) -> tuple[str, ...] | None:
     if not isinstance(names, list) or not all(isinstance(n, str) and n for n in names):
         return None
     return tuple(names)
+
+
+def _snapshot_emitters(root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """``emitters`` from the committed record, projected to ``name -> workflow FILES``.
+
+    The record stores ``[[workflow_file, job_key], …]`` per effective check-run name
+    (`mergify_config_guard._emitter_map`); a consumer only needs the FILES, because that
+    is what an Actions run's ``path`` can be matched against.
+
+    A malformed or absent projection degrades to ``()`` rather than raising: this map is
+    not the witness the required set rests on (``required_contexts`` is), so it must not
+    be able to turn a readable record into a refusal — but the CONSUMER must treat the
+    empty answer as "cannot attribute", never as "nothing can emit it".
+    """
+    path = root / RECORD_REL
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    emitters = doc.get("emitters") if isinstance(doc, dict) else None
+    if not isinstance(emitters, dict):
+        return ()
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for name, entries in sorted(emitters.items()):
+        if not isinstance(name, str) or not name or not isinstance(entries, list):
+            continue
+        files: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, (list, tuple)) or not entry:
+                continue
+            workflow = entry[0]
+            # Basename only: an Actions run's `path` is `.github/workflows/<basename>`.
+            if isinstance(workflow, str) and workflow and workflow not in files:
+                files.append(workflow)
+        if files:
+            out.append((name, tuple(files)))
+    return tuple(out)
 
 
 def derive_from_config(root: Path) -> RequiredSet:
@@ -335,6 +431,7 @@ def derive_from_config(root: Path) -> RequiredSet:
         source=f"{MERGIFY_REL} (queue_conditions union merge_conditions)",
         queue_names=q,
         merge_names=m,
+        emit_files=_snapshot_emitters(root),
         snapshot_agrees=agrees,
         mode=mode,
     )
