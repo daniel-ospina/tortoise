@@ -236,9 +236,8 @@ def _snapshot_client(instances):
 
     Selecting by the RECORDED COMMAND is what these tests mean: the snapshot
     was issued, exactly once, against the client under test. A foreign client
-    issuing commands is NOT tolerated — that would be a real signal, so it
-    still fails here — but a foreign client that sends nothing is simply not
-    this test's business.
+    is not this test's business in EITHER direction — neither its endpoint nor
+    its COMMANDS (see below) — because it is not the code under test.
 
     ⛔ THE COUNT PIN IS NOT DROPPED, IT MOVED (#11038 review finding 1). The
     assertion this replaced — ``len(instances) == 1`` — answered "how many
@@ -252,14 +251,24 @@ def _snapshot_client(instances):
     CONSTRUCTION STACK names ``_bgsave``, i.e. the ones the code under test
     actually built.
 
-    A foreign client is still required only to send nothing, deliberately: its
-    ENDPOINT is not assertable here. The recorder is process-wide, so a live
+    A foreign client is required to do NOTHING here — neither its ENDPOINT nor
+    its COMMANDS are assertable, and asserting either re-creates the very
+    order-dependent flake this helper exists to remove (#11038 review finding
+    1, P3, at ``871fc03fc``). The recorder is process-wide, so a live
     ``session_indexer`` worker legitimately dials whatever URI IT was handed
     (``session_indexer.py:236-238`` parses it per call), which in CI is the
-    docker lane's own ``localhost`` — asserting the subject's endpoint over
-    foreign clients would re-create the order-dependent flake in the mirror
-    direction. The endpoint of the client that MATTERS is pinned exactly, by
-    kwargs, in each test that calls this.
+    docker lane's own ``localhost`` — and the first thing that worker does
+    after connecting is ISSUE A COMMAND on that client. A `cmds == []` sweep
+    over every non-subject client therefore reds
+    `test_bgsave_dials_the_configured_uri_not_localhost` (and the two other
+    callers) with a message that names the endpoint pin while the endpoint was
+    never wrong: the #10010-review-P2 false-failure class, in the direction
+    this helper was written to eliminate. It also bought no coverage for
+    #2974: the endpoint of the client that MATTERS is pinned exactly, by
+    kwargs, in each test that calls this, and "the snapshot went to a client
+    the code under test built" is asserted by ``subjects[0] is
+    snapshotted[0]`` above. That sweep was the only assertion in this helper
+    that could fail for a reason outside the code under test.
     """
     recorded = [(i, list(i.connection.commands)) for i in instances]
     snapshotted = [i for i, cmds in recorded if cmds == [("BGSAVE",)]]
@@ -278,13 +287,6 @@ def _snapshot_client(instances):
         "the client `_bgsave` constructed is not the one that received the "
         "BGSAVE — the snapshot went to a handle the code under test did not "
         "build, so its endpoint is unpinned")
-
-    for inst, cmds in recorded:
-        if inst is snapshotted[0]:
-            continue
-        assert cmds == [], (
-            "a client constructed during this test received commands but was "
-            f"not the snapshot client: {cmds}")
     return snapshotted[0]
 
 
@@ -314,6 +316,36 @@ def test_the_restored_count_pin_reds_on_a_second_client_from_the_code_under_test
     with pytest.raises(AssertionError,
                        match="exactly one client must be constructed by"):
         _snapshot_client(instances)
+
+
+def test_a_foreign_client_issuing_commands_still_leaves_the_pin_green(
+        monkeypatch):
+    """Non-vacuity for #11038 review finding 1 (P3): a worker must not red it.
+
+    The recorder is process-wide, so a live worker from an earlier file in the
+    shard can construct a client INSIDE this test's window and immediately
+    issue a command on it. Under the pre-fix `cmds == []` sweep that reddened
+    the #2974 endpoint pin with a message naming the endpoint, i.e. a
+    false-failure produced outside the code under test. The pin must read the
+    client `_bgsave` built and nothing else.
+    """
+    instances: list = []
+    fake = _install_fake_falkordb(monkeypatch, instances)
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "redis://cloud.example.com:6379/tortoise")
+    assert _bgsave() == "ok"
+
+    # The foreign worker: its own URI, its own client, the first command any
+    # client issues after connecting.
+    worker = fake(host="localhost", port=6379)
+    worker.connection.execute_command("PING")
+    assert worker.connection.commands == [("PING",)]
+
+    client = _snapshot_client(instances)
+    assert client.kwargs["host"] == "cloud.example.com", (
+        "the endpoint pin must read the client `_bgsave` built, never a "
+        "foreign client's")
+    assert client.connection.commands == [("BGSAVE",)]
 
 
 def test_bgsave_dials_the_configured_uri_not_localhost(monkeypatch):
