@@ -71,11 +71,11 @@ claim and not an assertion:
 
 - **O:** move the authority for *"this writer is legitimately exempt"* out of a read-only measurement script
   and into the product, so "no silent bypass" is a property of the system rather than of a report.
-- **I:** a runtime-resolvable register in `tortoise/` keyed `module::symbol`; **three** writers that today
-  carry **no declared exemption** classified (`hosted_backup::restore_graph`,
+- **I:** a runtime-resolvable register in `tortoise/` keyed `module::symbol`; **three** writers that
+  carried **no declared exemption** classified (`hosted_backup::restore_graph`,
   `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`); **zero** `bypass`; a
   duplicated key **raises**.
-- **T:** a check that **must change** when this lands (the "zero unclassified" condition is **already true at HEAD** — `tools/dod_5090_probe.py` reported 15 of 15 writers classified, 6 recognised producers / 9 exempt / 0 bypasses, so it could not distinguish completion from a no-op — and since `#11274` widened discovery to the container-key shape the census reads 19 of 19, 6 recognised producers / 13 exempt / 0 bypasses): the **three writers with no declared exemption** (`hosted_backup::restore_graph`, `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`) resolve to a register entry **imported from `tortoise/`**, and the probe's own declaration table is **no longer the only source** — i.e. the probe reads the product's register instead of owning one. DoD rows 1–2 are
+- **T:** a check that **must change** when this lands (the "zero unclassified" condition is **already true at HEAD** — at the plan head `641e5f1b37` the probe reported **15 of 15** UNKNOWN-labelled writers classified, 6 recognised producers / 9 exempt / 0 bypasses, so it could not distinguish completion from a no-op; since `#11274` widened discovery to the container-key shape the same census reads **19 of 19** UNKNOWN-labelled writers, 6 recognised producers / 13 exempt / 0 bypasses — the `N of M` denominator is the instrument's own: it counts the writers it LABELLED, not every writer discovery walks): the **three writers that carried no declared exemption** (`hosted_backup::restore_graph`, `projection.entities::_event_plain_merge`, `projection::_rebuild_all_replay`) now resolve to a register entry **imported from `tortoise/`** — **landed**, `#11085` — and the check's second half is still open: the probe's own declaration table must stop being **the only source**, i.e. the probe must read the product's register instead of owning one. DoD rows 1–2 are
   re-scored with the reading stated; the register is a leaf module with a cycle-safety note.
 - **Complexity:** standard · **Blocked by:** none · **Blocks:** **C3** (arming the gate before the register
   exists would make three undeclared writers bypass silently — that ordering is the reason this is not one issue).
