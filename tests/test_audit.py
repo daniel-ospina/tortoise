@@ -544,14 +544,24 @@ def test_cli_error_paths_clean_one_line(case, capsys, monkeypatch, tmp_path):
 def test_mcp_registry_entry_and_http_allowlist():
     """tortoise_audit is a read-only registry entry wired to the SDK audit()
     method; the HTTP allow-list is derived (both surfaces pick it up)."""
-    from tortoise.tool_registry import TOOL_REGISTRY, get_http_allowed
+    from tortoise.tool_registry import (
+        RETIRED_USE_INSTEAD,
+        TOOL_REGISTRY,
+        get_http_allowed,
+    )
 
-    entry = next((t for t in TOOL_REGISTRY if t.name == "tortoise_audit"), None)
-    assert entry is not None
-    assert entry.sdk_method == "audit"
-    assert entry.http_policy is True
+    # #4282: the `audit` DOOR retired into the `graph_overview` container, so the
+    # registry entry that carries the capability is the container's — same risk tier,
+    # same HTTP exposure. Asserting the old name would assert the surface shape the
+    # owner-approved target removes; the capability is asserted on the door it lands on.
+    entry = next((t for t in TOOL_REGISTRY
+                  if t.name == "tortoise_graph_overview"), None)
+    assert entry is not None, "the graph_overview container must be registered"
+    assert 'section="audit"' in RETIRED_USE_INSTEAD["tortoise_audit"], (
+        "audit must be retired INTO the container's audit section")
+    assert entry.http_policy is True, "an HTTP audit read must stay reachable"
     assert entry.annotations.readOnlyHint is True
-    assert "tortoise_audit" in get_http_allowed()
+    assert "tortoise_graph_overview" in get_http_allowed()
 
 
 def test_mcp_handler_registered_on_server():

@@ -643,7 +643,7 @@ Tortoise ships a first-class migration path: **`tortoise export` → hosted impo
    tortoise team info       # hosted team + usage
    ```
 
-   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts: total points + per-gate breakdown) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
+   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_graph_overview(section="structure")` (counts: total points + per-gate breakdown; `tortoise_summarize_structure` retired into it, #4282) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
 
 ### Fallback: manual replay
 
