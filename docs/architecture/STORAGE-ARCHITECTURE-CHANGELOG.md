@@ -2105,8 +2105,9 @@ occurrence (one property the projection declines to write), NOT as a `field_mism
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
 a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE class lacks a non-destructive repair (nothing writes
-the column, so no in-place route can exist); the declined pair has one, shipped —
+whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE class lacks a repair that RESTORES the value (nothing writes
+the column, so there is nothing to re-derive it from — `#10017`'s purge is itself IN PLACE, it just clears
+the value); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
 
