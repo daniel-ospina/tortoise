@@ -2381,3 +2381,78 @@ def test_a_gloss_ending_on_an_auxiliary_cannot_carry_a_clause_subject_past_the_b
         "Refs #100 (a) — not closing it.\n",
     ):
         assert L.classify_pr(honest, 1) == [], honest
+# --- review round 24: one list grammar read by three readers, and one object slot -------------------
+
+
+def test_the_ampersand_separator_is_read_by_ALL_three_readers():
+    """Measured at `b45bb9cf31c5` (review round 24, P2) — the FALSE POSITIVE direction.
+
+    `CLAIM_RE` admitted `and|or|&` while `_REF_LIST` and `_REF_RUN_GAP_RE` admitted only `and|or`, so
+    the invariant those two constants state about themselves ("ONE definition, read by CLAIM_RE,
+    `_REF_LIST` and `_REF_RUN_GAP_RE`") did not hold:
+
+        Refs #100 & #200 — deliberately not closing them.   -> claimed #100, declined #200, FLAGGED
+        Refs #100 and #200 — deliberately not closing them. -> clean
+
+    An author who declined, warned, only because of how they spelled the conjunction. Either all
+    three readers admit `&` or none does; the control on the next line is the twin spelling.
+    """
+    assert L.claims("Refs #100 & #200 — deliberately not closing them.\n", 1)["declined"] == [100, 200]
+    assert L.claims("Refs #100 & #200\n", 1)["weak"] == [100, 200]
+    assert L.claims("Refs #100 and #200 — deliberately not closing them.\n", 1)["declined"] == [100, 200]
+
+
+@pytest.mark.parametrize("body", [
+    "Refs #100 — not closing a closing one.\n",
+    "Refs #100 — does not close a closing one.\n",
+    "Refs #100 — not closing the closing ref.\n",
+])
+def test_naming_the_reference_by_its_kind_works_in_EITHER_spelling(body):
+    """Measured at `b45bb9cf31c5` (review round 24, P3) — the FALSE POSITIVE direction.
+
+    `_CLOSING_OBJ` (the object that names the reference by its KIND — `a closing one`, `the closing
+    ref`) sits in alternative (a)'s object slot only, so round 19's sentence read two ways depending
+    on which negation spelling the author used. Round 19 fixed it for the spelling it tested; this
+    pins the other three cells of the same 2 × N.
+    """
+    assert L.claims(body, 1)["declined"] == [100], body
+    assert L.classify_pr(body, 1) == [], body
+
+
+def test_a_decline_on_a_WRAPPED_lists_own_line_is_found():
+    """Measured at `b45bb9cf31c5` (review round 24, P2) — the FALSE POSITIVE direction.
+
+    Every ref of a claim-list match was looked up against the line the CLAIMING KEYWORD sits on, so a
+    decline written on a continuation ref's own line was discarded and a markdown reflow flipped the
+    verdict on the same sentence:
+
+        Refs #100, #200 — #100 is deliberately not Closes.      -> declined [100], flags [200]
+        Refs #100,\\n#200 — #100 is deliberately not Closes.      -> flagged BOTH (before this fix)
+
+    The claim reader already spans the break (`test_a_wrapped_list_is_still_one_list`), so the
+    decline reader now looks at every line the match covers. The named-ref form and its one-line
+    control must agree — which is the assertion below.
+    """
+    wrapped = "Refs #100,\n#200 — #100 is deliberately not Closes.\n"
+    flat = "Refs #100, #200 — #100 is deliberately not Closes.\n"
+    assert L.claims(wrapped, 1)["declined"] == L.claims(flat, 1)["declined"] == [100]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(wrapped, 1)] == [[200]]
+
+
+def test_a_plural_decline_across_a_wrapped_list_is_a_DECLARED_residual():
+    """`Part of #10085,\\n#10063 — deliberately not closing them.` declines `#10063` and still flags
+    `#10085` (review round 24, P2, declared not fixed).
+
+    The plural run-back that `them` needs is computed per LINE by `_decline_targets`, so it cannot
+    reach a ref on the line above — closing it means teaching the run-back to walk a wrapped list,
+    which is a change to the target RESOLUTION rather than to a separator, and it lands in the
+    class-A direction if it walks one line too far. The named form works and is pinned above
+    (`deliberately not closing #100 and #200`), so the honest author has a spelling that declines;
+    the pronoun across a wrap is the residual. Pinned so the state is a decision, not a silence.
+    """
+    body = "Part of #10085,\n#10063 — deliberately not closing them.\n"
+    assert L.claims(body, 1)["declined"] == [10063]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[10085]]
+    # …and the named spelling of the SAME sentence does decline both, on either layout.
+    assert L.claims("Part of #10085,\n#10063 — deliberately not closing #10085 and #10063.\n",
+                    1)["declined"] == [10063, 10085]

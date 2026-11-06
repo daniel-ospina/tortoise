@@ -353,8 +353,13 @@ _REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
 # `0e785300b`, review P2). A list separator is a comma or a conjunction, and nothing else.
 # `_LIST_SEP` and `_GLOSS` are defined above `CLAIM_RE` — the claim grammar reads them too.
 _REF_LIST = (rf"(?:{_REF_OBJ})"
-             rf"(?:(?:{_GLOSS},{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
-             rf"|{_GLOSS}(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))#\d{{1,7}})*")
+             rf"(?:(?:{_GLOSS},{_LIST_SEP}(?:(?:and|or|&){_LIST_SEP})?"
+             rf"|{_GLOSS}(?:{_LIST_SEP}(?:and|or|&){_LIST_SEP}))#\d{{1,7}})*")
+# ⛔ `&` IS ONE OF THE SEPARATORS HERE TOO (review round 24, P2). `CLAIM_RE` admitted
+# `and|or|&` while this list and `_REF_RUN_GAP_RE` admitted only `and|or`, so the invariant stated
+# two lines below ("ONE definition, read by CLAIM_RE, `_REF_LIST` and `_REF_RUN_GAP_RE`") did not
+# hold: `Refs #100 & #200 — deliberately not closing them.` claimed #100, declined #200, and flagged
+# the author, while the `and` twin was clean. Either all three readers admit `&` or none does.)
 # The INVERSION of `_REF_LIST`'s separator: what may sit BETWEEN two references of the same list.
 # It exists so the plural (`them`) declaration clears the run it NAMES without sweeping in a
 # previous sentence's claim — see `_ref_run_back`. The separator is the list grammar's own (a
@@ -362,8 +367,8 @@ _REF_LIST = (rf"(?:{_REF_OBJ})"
 # cannot drift apart; bare whitespace is excluded because `#100 #200` is not an English list and
 # the conservative reading of an ambiguous gap is to END the run.
 _REF_RUN_GAP_RE = re.compile(
-    rf"^{_GLOSS}(?:,{_LIST_SEP}(?:(?:and|or){_LIST_SEP})?"
-    rf"|{_GLOSS}(?:{_LIST_SEP}(?:and|or){_LIST_SEP}))$",
+    rf"^{_GLOSS}(?:,{_LIST_SEP}(?:(?:and|or|&){_LIST_SEP})?"
+    rf"|{_GLOSS}(?:{_LIST_SEP}(?:and|or|&){_LIST_SEP}))$",
     re.IGNORECASE,
 )
 _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
@@ -419,7 +424,7 @@ DECLINE_RE = re.compile(
     # (`Refs #1234 — non-closing reference, see the review.`), and `_REASON_TAIL`'s `[^#\n]*$` keeps a
     # reason that names a reference from buying the decline.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-|{_CONTRACTION})(?:{_EMPH})?{_DET}(?P<stem_b>{_CLOSING_STEM})"
-    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}(?:$|[.;]|,{_REASON_TAIL})"
+    rf"(?P<obj_b>{_EMPH}(?:{_DET}{_REF_LIST}|{_CLOSING_OBJ}))?(?:{_DECLINE_TAIL}(?:$|[.;]|,{_REASON_TAIL})"
     rf"|(?P<reason_b>{_REASON_TAIL}))",
     re.IGNORECASE,
 )
@@ -799,7 +804,12 @@ def _claims_in(text: str, own_number: int | None = None,
         line_starts.append(line_starts[-1] + len(line))
     for m in CLAIM_RE.finditer(text):
         line_no = sum(1 for st in line_starts if st <= m.start()) - 1
-        declined_here = decline_targets.get(line_no, ())
+        # Every line the CLAIM MATCH covers, so a decline written on a continuation ref's own line is
+        # seen (see the note at the ref loop).
+        last_line_no = sum(1 for st in line_starts if st <= m.end()) - 1
+        declined_here_default: set[int] = set()
+        for ln in range(line_no, last_line_no + 1):
+            declined_here_default |= set(decline_targets.get(ln, ()))
         word = re.sub(r"\s+", " ", (m.group("kw") or m.group("ckw")).lower())
         # The claiming word governs its WHOLE same-line list (F3) — but a list continuation is a
         # CLAIM, never a RESOLUTION. GitHub credits only the FIRST ref of a closing keyword (its
@@ -808,10 +818,21 @@ def _claims_in(text: str, own_number: int | None = None,
         # `Closes #12, #13` reported CLEAN on work nothing closed, which is the #10534 hole this
         # arm exists to shut (review P2). A continuation of a resolving word is still CLAIMED, so
         # it lands in `weak` and is still flagged.
-        refs = [(m.group("qual"), int(m.group("num")), False)]
-        refs += [(c.group("qual"), int(c.group("num")), True)
+        # ⛔ THE DECLINE IS LOOKED UP ON THE REF'S OWN LINE, NOT THE KEYWORD'S (review round 24, P2).
+        # `line_no` is where the CLAIMING WORD sits; a continuation ref can be on the next line, and a
+        # decline written THERE was discarded — so a markdown reflow flipped the verdict on the same
+        # sentence: `Part of #10085,\n#10063 — deliberately not closing them.` flagged both refs while
+        # the unwrapped one-liner declined them. Each ref now resolves its own line.
+        refs = [(m.group("qual"), int(m.group("num")), False, m.start("num"))]
+        more_start = m.start("more") if m.group("more") else m.end()
+        refs += [(c.group("qual"), int(c.group("num")), True, more_start + c.start("num"))
                  for c in CONTINUATION_RE.finditer(m.group("more") or "")]
-        for qual, num, continued in refs:
+        for qual, num, continued, pos in refs:
+            # The ref's OWN line, UNION every line the claim match covers: a named decline on the
+            # continuation line (`Refs #100,\n#200 — #100 is deliberately not Closes.`) names a ref
+            # that sits on the line above, and looking at only one of the two lines drops it.
+            declined_here = decline_targets.get(
+                sum(1 for st in line_starts if st <= pos) - 1, set()) | declined_here_default
             if own_number is not None and num == own_number:
                 continue  # a PR quoting its own number from a review is not claiming an issue
             if qual and repo is None:
