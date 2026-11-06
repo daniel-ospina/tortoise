@@ -183,8 +183,30 @@ def _applier_steps() -> list[dict]:
     return list(jobs[0][1].get("steps") or [])
 
 
-#: The command roots that mutate the HOSTED project.
-_MUTATING_ROOTS = ("supabase db push", "supabase functions deploy", "supabase migration repair")
+#: The command roots that mutate the HOSTED project — the v3 CONSENT TABLE, not just the three the
+#: applier happens to run today (#11104 review P2). It was narrower by measurement: adding
+#: `supabase config push`, `supabase secrets unset …` or `supabase db reset --linked` to the applier
+#: job left the suite green, because `_mutating_steps_with_job` — which enforces "the body IS its
+#: invocation", no `|| true`, no `set +e` — only ever examines a step whose command starts with one
+#: of these roots. `config push` and `secrets set/unset` are the plausible next additions to THIS
+#: workflow: it exists to sync schema, and it already prints a `secrets set` remedy. None of these
+#: appears as an executed command today, so widening the tuple introduces no false RED.
+_MUTATING_ROOTS = (
+    "supabase db push",
+    "supabase db reset",
+    "supabase db pull",
+    "supabase db diff",
+    "supabase functions deploy",
+    "supabase functions delete",
+    "supabase migration repair",
+    "supabase migration up",
+    "supabase migration down",
+    "supabase migration squash",
+    "supabase secrets set",
+    "supabase secrets unset",
+    "supabase config push",
+    "supabase config pull",
+)
 
 #: A shell `run:` body can turn a failing apply into a green one. Enumerating the swallow tokens is
 #: unbounded and was measured defeated by `|| exit 0`, `|| echo …`, `|| { …; exit 0; }`, `| tee p`
