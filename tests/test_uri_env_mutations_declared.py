@@ -558,6 +558,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # monkeypatch auto-restores at teardown (no lane leak).
     "test_4125_legacy_session_source_migration.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*\w+\)'],
+    # #11070: the operator-CLI arms are driven against a deliberately UNREACHABLE
+    # docker URI — `open_projection` is faked at both sites, so the value is a
+    # placeholder that is never dialled, not a lane choice. Two sites, one intent.
+    # DELIBERATE_URI.
+    "test_11070_source_prose_repair.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:x@127\.0\.0\.1:1/none"\)'],
     "test_server_hygiene_gate.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      # the URI literal sits on the FOLLOWING line at
                                      # :251 (`setenv(` then the string), so the site's
