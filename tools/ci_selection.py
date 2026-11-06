@@ -60,6 +60,7 @@ import json
 import math
 import os
 import re
+from collections.abc import Hashable
 from pathlib import Path
 
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
@@ -3361,9 +3362,295 @@ def _normalize_surfaces(manifest: dict) -> dict:
     return manifest
 
 
-def load_manifest() -> dict:
+class DuplicateManifestKeyError(ValueError):
+    """A manifest mapping repeats a key, so the loader silently collapsed it.
+
+    YAML requires a mapping's keys to be unique (YAML 1.2.2 §3.2.1.3: "each of
+    the keys is unique"), but **PyYAML does not enforce it**: its own
+    ``BaseConstructor.construct_mapping`` is ``mapping[key] = value`` and the
+    module carries the comment *"we do not check for duplicate keys, because
+    it's too CPU-expensive"* (pyyaml 6.0.3, ``yaml/constructor.py``). So a
+    repeated key is not an error to the parser — it is a **silent overwrite**,
+    and the LAST row wins.
+
+    That is not hypothetical here. A ``git merge`` of two branches that both
+    touched ``durations`` unions the two blocks as TEXT, so the map ends up
+    holding a stale row beside the refreshed one and the parser keeps whichever
+    came second (#10717). Measured 2026-11-03 on #10790: merging ``origin/main``
+    produced **24** duplicate keys, and ``uv run python tools/ci_selection.py
+    --integrity`` printed ``✅ integrity: all test files classified`` — the
+    duplicates are gone by the time that check holds a dict. One of them
+    silently reverted the PR's own ``test_mcp_bridge.py`` weight (23.8 -> 2.0),
+    which is the exact "false PASS" shape a gate exists to prevent.
+
+    ``--integrity`` was not the only guard on that file, and this is **not** the
+    first check to see the shape: ``tools/registry_integrity.py`` reads the
+    registry through ``yaml.compose`` (the raw node graph, before any
+    constructor) and already refuses a duplicate mapping key at any depth; it
+    runs as a step of the SAME ``manifest-integrity`` job
+    (``.github/workflows/python-ci.yml``), so that merge would have reddened
+    there. The two are complements, and which is authoritative for what is a
+    deliberate split rather than an accident of two lanes:
+
+    * ``tools/registry_integrity.py`` is authoritative for the FILE AS TEXT —
+      the unioned document, its duplicate sequence entries and its malformed
+      shapes. It is the validator ``.gitattributes`` pairs with ``merge=union``
+      (#5373).
+    * this refusal is authoritative for READERS — the parse every consumer
+      reaches (``load_manifest``/``--integrity``, ``ci_manifest._load``,
+      ``register``), so a consumer that never passes through the CI job still
+      refuses the shape instead of packing by a silently collapsed map.
+    * ⛔ ONE READER IS A DELIBERATE EXCEPTION, and it has to stay NAMED as one:
+      ``ci_timing._manifest_of`` parses with the plain ``yaml.safe_load`` (see
+      its LENIENT-ON-PURPOSE note in ``tools/ci_timing.py``). Raising there was
+      tried in #10790 and reverted, because it pre-empted
+      ``ci_timing.integrity_problems``' composed
+      ``duplicate_mapping_key_issues(text=…)`` walk, which NAMES the key as a
+      red instead of a could-not-evaluate. It is not a consumer of this parse;
+      its own write path is guarded by that walk.
+
+    So the refusal belongs at the PARSE *as well*, not only in a check composed
+    onto a dict that has already lost the information: every reader that goes
+    through this parse gets it, and no future entry point can be half-wired.
+
+    What this refuses is a repeat among a mapping's OWN pairs. A ``<<:`` merge
+    key that overrides an inherited key is **not** a duplicate: the YAML merge
+    type is defined as "each of its key/value pairs is inserted into the
+    current mapping, **unless the key already exists in it**"
+    (https://yaml.org/type/merge.html, Example 1's ``# Override``), so the
+    document's own pair deliberately wins and both gates must accept it.
+
+    "Own pair" is decided by OBJECT IDENTITY, never by position or count (see
+    ``_NoDuplicateKeyLoader.flatten_mapping``): a count is short by one per
+    ``<<:`` entry and misreads a mapping that arrived already flattened through
+    a merge chain, so either counting scheme false-REDs legal documents (#10790
+    review r3 P2).
+    """
+
+    def __init__(self, issues: list[str]) -> None:
+        self.issues = issues
+        super().__init__("; ".join(issues))
+
+
+_DUP_KEY_LOADER: object = None
+
+
+def _duplicate_key_loader():
+    """A ``yaml.SafeLoader`` subclass that RECORDS a repeated mapping key.
+
+    Built lazily and cached, because this module imports its third-party
+    dependencies locally (``uv`` supplies pyyaml via the dev group). A
+    subclass rather than a re-implementation: it inherits the same type
+    resolution the whole manifest depends on (``166.0`` stays a ``float``, a
+    quoted stamp stays a ``str``) and overrides only the mapping constructor.
+    A repeat is recorded only among a mapping's OWN pairs, so a ``<<:`` merge
+    override — legal by the YAML merge type — is not reported. "Own" is
+    recorded by object identity in ``flatten_mapping``, because after that call
+    the inherited and document-written pairs sit side by side and no count can
+    tell them apart. The merge KEY is one of those own pairs, though: two ``<<:``
+    in one mapping is a repeat and is refused (``merge_key_repeats``), because the
+    flatten deletes the key nodes and the repeat would otherwise be the one
+    duplicate this loader could not see. That repeat is recorded in
+    ``flatten_mapping``, where the ``<<`` nodes still exist — a count taken in
+    ``construct_mapping`` misses a nested anchor that a later sibling merges,
+    because the parent's flatten strips that anchor's ``<<`` keys first (#10790
+    review r7 P3).
+    """
+    global _DUP_KEY_LOADER
+    if _DUP_KEY_LOADER is not None:
+        return _DUP_KEY_LOADER
     import yaml  # local import (uv provides pyyaml via the dev group)
-    return _normalize_surfaces(yaml.safe_load(MANIFEST.read_text()))
+
+    class _NoDuplicateKeyLoader(yaml.SafeLoader):
+        def __init__(self, stream) -> None:
+            super().__init__(stream)
+            self.duplicate_keys: list[tuple[str, int, int]] = []
+            # id(MappingNode) -> the pair objects a `<<:` merge inserted into it.
+            self.inherited_pairs: dict[int, list[tuple]] = {}
+            #: `<<` keys repeated inside ONE mapping — a key repeat the flatten
+            #: would otherwise erase (it deletes the merge key nodes).
+            self.merge_key_repeats: list[tuple[int, int]] = []
+
+        def flatten_mapping(self, node):
+            """Record WHICH pairs a `<<:` merge inserted — by object identity.
+
+            `SafeConstructor.flatten_mapping` deletes the `<<` entry (or
+            entries) and PREPENDS the merged pairs into `node.value`, so
+            afterwards the inherited and document-written pairs sit side by side
+            in one list. Counting them apart does NOT work, in two independent
+            ways, and both false-RED a legal document in the required
+            `manifest-integrity` job (#10790 review r3 P2):
+
+            * a count taken before the call is short by one per `<<:` entry
+              (`len(node.value) - own_pairs == len(merge) - n_merge_keys`), so
+              the LAST merged pair(s) are classified as document-written and a
+              legal override of that key is refused — measured: the shipped pin
+              with its anchor rows swapped raised `duplicate mapping key
+              'weight': line 6 repeats line 3`, naming the pair inside the
+              anchor; and
+            * a count is also wrong for a mapping that was flattened by its
+              PARENT before this node was constructed. `flatten_mapping`
+              recurses into the merged value node, and pyyaml completes nested
+              mappings from its generator queue AFTER the shallower ones, so an
+              anchor nested under an earlier key and merged by a later sibling
+              arrives here already collapsed, its `<<` gone — every inherited
+              pair then looks document-written. Measured on the count-based
+              repair: `group: {base: &b {x: 1}, mid: &m {<<: *b, x: 2}}` +
+              `top: {<<: *m, y: 3}` raised `duplicate mapping key 'x': line 6
+              repeats line 3`, which `yaml.safe_load` accepts as `mid == {'x':
+              2}`.
+
+            Identity is the property that survives both: `merge.extend(
+            value_node.value)` copies the tuple REFERENCES, so an inherited pair
+            is the very object the anchor's node holds. `before` keeps the
+            document's own pairs alive across the call, so no `id` can be
+            recycled.
+
+            Only a document-written pair can be a duplicate: a `<<:` key the
+            document then overrides is the merge type's documented purpose
+            (yaml.org/type/merge.html, "unless the key already exists in it",
+            Example 1 `# Override`), and `yaml.safe_load` resolves it to the
+            document's own value — which is exactly what this loader must keep
+            doing. A duplicate INSIDE an anchored mapping is still caught — but
+            NOT because that MappingNode "is constructed on its own, with no
+            merge in play": a parent's merge flattens it FIRST, and it is the
+            inherited/own split by object identity that keeps its two own rows
+            tellable apart. (That same recursion is why the merge-KEY count had
+            to move into this method — see the paragraph below.)
+
+            A repeated merge KEY (two `<<:` in one mapping) is recorded HERE,
+            not in `construct_mapping`, because this is the last moment the
+            key nodes exist: `super().flatten_mapping` DELETES them. The
+            distinction is not cosmetic — the same recursion that flattens a
+            parent also flattens the anchor it merges, and pyyaml completes
+            nested mappings from its generator queue AFTER the shallower ones,
+            so an anchored mapping merged by a later sibling reaches its own
+            `construct_mapping` already stripped of every `<<` and no count
+            there can see the repeat (measured pre-fix: a repeat inside
+            `outer.inner: &m` merged by `top: {<<: *m}` was ACCEPTED while
+            `tools/registry_integrity.py`, the sibling step of the same
+            required job, refused it — #10790 review r7 P3). Every MappingNode
+            is flattened with its merge keys intact at least once, so `before`
+            is where all shapes converge.
+            """
+            before = list(node.value)
+            before_ids = {id(pair) for pair in before}
+            # The `<<` key is a key like any other, so TWO of them in one
+            # mapping is a duplicate (YAML 1.2.2 §3.2.1.3) — and
+            # `tools/registry_integrity.py`, the sibling step of the same
+            # required job, refuses it from the raw node graph. Recording it
+            # before the flatten (which deletes the key nodes) is what keeps
+            # the two required gates in agreement on EVERY shape, including a
+            # nested anchor flattened first by a later sibling. A document can
+            # still merge several mappings with `<<: [*a, *b]`.
+            merge_key_lines = [
+                key_node.start_mark.line + 1 for key_node, _ in before
+                if key_node.tag == "tag:yaml.org,2002:merge"]
+            if len(merge_key_lines) > 1:
+                self.merge_key_repeats.append(
+                    (merge_key_lines[0], merge_key_lines[-1]))
+            super().flatten_mapping(node)
+            self.inherited_pairs.setdefault(id(node), []).extend(
+                pair for pair in node.value if id(pair) not in before_ids
+            )
+
+        def construct_mapping(self, node, deep=False):
+            if isinstance(node, yaml.MappingNode):
+                # A `<<` repeat is recorded in `flatten_mapping`, which reads
+                # the merge key nodes BEFORE `super()` deletes them. Counting
+                # them here instead is what let a repeat inside an anchor
+                # survive: a nested anchor merged by a later sibling is
+                # flattened (and stripped) by its parent before it is
+                # constructed, so this list would be empty and the sibling
+                # required gate would disagree (#10790 review r7 P3).
+                self.flatten_mapping(node)
+                inherited = {
+                    id(pair) for pair in self.inherited_pairs.get(id(node), ())}
+            else:  # pragma: no cover - SafeConstructor only maps MappingNodes
+                inherited = set()
+            seen: dict[object, int] = {}
+            mapping = {}
+            for pair in node.value:
+                key_node, value_node = pair
+                key = self.construct_object(key_node, deep=deep)
+                if not isinstance(key, Hashable):
+                    # `BaseConstructor.construct_mapping` refuses an unhashable
+                    # key with THIS exception, and re-implementing the loop
+                    # without the arm made the same document raise a bare
+                    # `TypeError: unhashable type: 'list'` instead — a
+                    # different exception type for the same input, which any
+                    # caller catching pyyaml's own error would not see, and a
+                    # divergence from the `safe_load` parity the docstrings
+                    # above claim (#10790 review note 1). Guarded before the
+                    # `inherited` branch because BOTH arms put `key` in a dict.
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping", node.start_mark,
+                        "found unhashable key", key_node.start_mark)
+                if id(pair) in inherited:
+                    # Introduced by `<<:`: an inherited pair, never a repeat of
+                    # one this document wrote, so it cannot be data loss.
+                    mapping[key] = self.construct_object(value_node, deep=deep)
+                    continue
+                line = key_node.start_mark.line + 1
+                if key in seen:
+                    self.duplicate_keys.append((str(key), seen[key], line))
+                else:
+                    seen[key] = line
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
+
+    _DUP_KEY_LOADER = _NoDuplicateKeyLoader
+    return _DUP_KEY_LOADER
+
+
+def parse_manifest_text(text: str) -> dict:
+    """The manifest text as a mapping, refusing a duplicate mapping key.
+
+    The strict parse of ``config/ci-surfaces.yml`` — the path every READER of
+    this file takes, with ONE deliberate EXCEPTION: ``ci_timing._manifest_of``
+    parses with the plain ``yaml.safe_load`` so that
+    ``ci_timing.integrity_problems`` can NAME a duplicate key as a red instead
+    of raising. The readers that take THIS path are
+    ``load_manifest``/``--integrity``, ``ci_manifest._load`` and ``register``
+    (see ``DuplicateManifestKeyError`` for the division of labour and the
+    reason the exception exists). It is not the only
+    guard on the file: ``tools/registry_integrity.py`` reads the same text with
+    ``yaml.compose`` (the raw node graph, no constructor) and is the
+    authoritative validator for the union-merge shape that ``.gitattributes``
+    pairs with ``merge=union`` (#5373). This one exists so that a reader which
+    never passes through that CI step still gets the same refusal by
+    construction rather than packing by a silently collapsed map (see
+    ``DuplicateManifestKeyError`` for the division of labour).
+
+    Raising here rather than returning issues is deliberate: an issue list is
+    something a caller must remember to compose (``ci_manifest.map_issues`` is
+    hand-maintained for exactly that reason, and its own docstring records the
+    drift it has already suffered), while an exception cannot be forgotten by a
+    reader that was never written.
+    """
+    loader = _duplicate_key_loader()(text)
+    try:
+        parsed = loader.get_single_data()
+    finally:
+        loader.dispose()
+    if loader.duplicate_keys or loader.merge_key_repeats:
+        raise DuplicateManifestKeyError([
+            f"duplicate mapping key '<<': line {last} repeats line {first} "
+            f"— YAML requires a mapping's keys to be unique (1.2.2 §3.2.1.3) "
+            f"and the merge key is one of them; merge several mappings with "
+            f"`<<: [*a, *b]` instead of repeating the key"
+            for first, last in loader.merge_key_repeats
+        ] + [
+            f"duplicate mapping key {key!r}: line {line} repeats line {first} "
+            f"— a YAML loader keeps only the LAST value, so one of the two rows "
+            f"(usually a stale union-merge copy) is silently discarded"
+            for key, first, line in loader.duplicate_keys
+        ])
+    return parsed
+
+
+def load_manifest() -> dict:
+    return _normalize_surfaces(parse_manifest_text(MANIFEST.read_text()))
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
@@ -3818,11 +4105,20 @@ def duplicate_mapping_key_issues(
     text: str | None = None,
     shown: str | None = None,
 ) -> list[str]:
-    """#5373: a duplicate MAPPING key — invisible to every reader in this module.
+    """#5373: a duplicate MAPPING key — the walk that answers for the FILE AS TEXT.
 
-    :func:`load_manifest` goes through ``yaml.safe_load``, which keeps only the
+    ⛔ THE PREMISE IN THIS PARAGRAPH IS DATED, NOT CURRENT, and the distinction is
+    the whole point of keeping it: when this walk was written,
+    :func:`load_manifest` went through ``yaml.safe_load``, which keeps only the
     LAST of two duplicate keys, so ``integrity()``/``duplicate_entries()`` and
-    every selection path are structurally blind to the class. Meanwhile
+    every selection path were structurally blind to the class. **That stopped
+    being true in #10790**: ``load_manifest`` is now
+    ``_normalize_surfaces(parse_manifest_text(...))``, and
+    :func:`parse_manifest_text` RAISES :class:`DuplicateManifestKeyError`, so the
+    reader side refuses the shape by construction. What still needs THIS walk is
+    the other question — a document as TEXT, and the refresher's in-memory
+    ``text=`` pre-write check (below), where the graded document is not a path
+    anything parsed yet. Meanwhile
     ``tools/ci_timing.py --refresh-durations`` updates the FIRST occurrence in
     the TEXT (its own contract,
     ``tests/test_ci_timing.py::test_durations_bridge_updates_a_quoted_key_instead_of_appending_a_duplicate``),
@@ -3998,9 +4294,14 @@ def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
 
 
 def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
-    """Load + register in one call (CLI entry)."""
-    import yaml
-    manifest = _normalize_surfaces(yaml.safe_load(manifest_path.read_text()))
+    """Load + register in one call (CLI entry).
+
+    The load is ``parse_manifest_text`` and not a bare ``yaml.safe_load``
+    (#10790 review 1): a manifest whose map already collapsed a duplicate must
+    refuse rather than be edited around a stale row, exactly as every other
+    in-tool reader does.
+    """
+    manifest = _normalize_surfaces(parse_manifest_text(manifest_path.read_text()))
     return register_tests(manifest_path, tests_dir, surface, manifest)
 
 
@@ -6849,7 +7150,16 @@ def main() -> int:
                          "pytest")
     args = ap.parse_args()
 
-    manifest = load_manifest()
+    # #10790: a duplicate mapping key is an OBSERVED defect, so it must be a
+    # named RED (exit 1) rather than the traceback (also non-zero, but with no
+    # diagnosis) that an uncaught raise would leave. See
+    # `DuplicateManifestKeyError` for why the refusal lives at the parse.
+    try:
+        manifest = load_manifest()
+    except DuplicateManifestKeyError as exc:
+        for issue in exc.issues:
+            print(f"x {issue}", file=sys.stderr)
+        return 1
 
     if args.integrity:
         missing = integrity(manifest)

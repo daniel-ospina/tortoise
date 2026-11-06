@@ -49784,11 +49784,22 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
 # unwrapped would make the reader cover the lane that keeps both claims and skip
 # the lane that deletes one.
 #
-# Wrapped here, at module scope, rather than by inserting lines inside the method:
+# Wired here, at module scope, rather than by inserting lines inside the method:
 # `sdk.py`'s line numbers are cited by the #7949 capstone bundle (`:15484`,
-# `:15765`, …) and a hook inside the method re-stales them.  `functools.wraps`
-# keeps the name, docstring and signature, so every `self._extract_session_llm`
-# call site and every test that inspects the method resolve to the wrapper.
+# `:15765`, …) and a hook inside the method re-stales them.
+#
+# ⛔ LAZY, not at import (review P2, measured): binding the real wrapper at
+# module scope made `import tortoise.sdk` eagerly import `tortoise.extractor_v2`
+# — measured `'tortoise.extractor_v2' in sys.modules` = True here against False
+# on `main`, pulling `value_gate`/`vet_gate`/`near_dup_merge`/`failure_policy`
+# with it. That contradicts this repo's own documented policy for this module
+# (`hosted_api` keeps the same import function-local because "`extractor_v2` is
+# a documented cold-start cost", which is why `:17466` and `:38136` do it that
+# way). So the installed attribute is a ONE-SHOT lazy entry: the first call pays
+# the import, rebinds the class attribute to the real wrapper, and every later
+# call goes straight there. `functools.wraps` keeps the name, docstring and
+# signature, so every `self._extract_session_llm` call site and every test that
+# inspects the method resolve to the wrapper.
 #
 # The import is FUNCTION-local and the wiring is one module-level CALL, not a
 # module-level `import`: a bare import down here is `E402` (module level import
@@ -49796,11 +49807,24 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
 # the import block would shift every line of this file, re-staling the same
 # #7949 cites the wrapper exists to leave alone.
 def _wire_vocabulary_gap_run_reader_10626() -> None:
-    """Rebind the M2 entry through the #10626 run-level reader (once)."""
-    from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+    """Insist the M2 entry runs through the #10626 reader, paying on FIRST CALL."""
+    import functools
 
-    TortoiseSDK._extract_session_llm = _scope_run(
-        TortoiseSDK._extract_session_llm)
+    original = TortoiseSDK._extract_session_llm
+    wired: list = []
+
+    @functools.wraps(original)
+    def _lazy_entry(self, *args, **kwargs):
+        if not wired:
+            from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+
+            wired.append(_scope_run(original))
+            # Bind for every later call, so the lazy hop is paid ONCE per
+            # process and not on every capture.
+            TortoiseSDK._extract_session_llm = wired[0]
+        return wired[0](self, *args, **kwargs)
+
+    TortoiseSDK._extract_session_llm = _lazy_entry
 
 
 _wire_vocabulary_gap_run_reader_10626()
