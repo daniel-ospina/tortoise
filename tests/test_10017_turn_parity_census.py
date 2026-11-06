@@ -1670,6 +1670,69 @@ def test_a_log_read_that_DIES_mid_file_REFUSES_too(tmp_path, monkeypatch):
     assert "LOST-STORE shape" not in message, message
 
 
+def test_an_UNLISTABLE_log_directory_REFUSES_rather_than_reading_as_empty(
+        tmp_path):
+    """⛔ #11113 review cycle 9, P2: `[]` means "no logs", so it must not be
+    reachable from a directory the gate could not LIST.
+
+    `_jsonl_names` answers `[]` on any error, which is the right answer for the
+    DIAGNOSIS callers. But `_one_replayable_log` refuses on `len(names) != 1`,
+    so an unlistable directory collapsing to `[]` made "I could not ask"
+    indistinguishable from "nothing is adjacent". The strict mode is the pin:
+    drop it and this test reds.
+
+    Pinned at the helper, not through `read_graph_turns`: the store's own
+    redislite sidecars live in this directory, so denying the listing by mode
+    also denies the BIND and the arm is never reached (measured — a `0o111`
+    directory fails at `census_lost.db.settings` first).
+    """
+    if os.geteuid() == 0:                       # root lists through the mode
+        pytest.skip("chmod 0111 does not deny a root lister")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "session-events.jsonl").write_text(
+        '{"event_type": "SessionStarted", "session_id": "s1"}\n')
+    os.chmod(shared, 0o111)                     # traverse, cannot list
+    try:
+        with pytest.raises(tpc.CensusError) as exc:
+            tpc._jsonl_names(str(shared), strict=True)
+        assert "could not be LISTED" in str(exc.value), str(exc.value)
+        # The lenient default is UNCHANGED: the diagnosis callers still word a
+        # message rather than raising out of an unrelated code path.
+        assert tpc._jsonl_names(str(shared)) == []
+        # A directory that is GONE is still a genuine negative in BOTH modes.
+        assert tpc._jsonl_names(str(tmp_path / "gone"), strict=True) == []
+    finally:
+        os.chmod(shared, 0o700)                 # let teardown clean up
+    # ...and the ARM must actually ask strictly, or the mode above is dead code.
+    src = (Path(__file__).resolve().parent.parent
+           / "tools" / "turn_parity_census.py").read_text(encoding="utf-8")
+    assert "_jsonl_names(events_dir, strict=True)" in src
+
+
+def test_a_DANGLING_symlink_log_is_an_ABSENCE_not_a_refusal(tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 9: "unreadable" and "gone" are different answers.
+
+    Cycle 9 made every `OSError` from the open refuse, to stop an `EACCES` log
+    certifying a 0-node store CLEAN. But `ENOENT` is the opposite case: the name
+    `listdir` reported has nothing behind it (a dangling symlink, or a log the
+    writer rotated or deleted in the window between the listing and the open) —
+    so there IS no record, and the correct answer is the arm's NEGATIVE. The
+    sibling `_jsonl_names` already answers `[]` for that same errno one frame
+    up; refusing here was an over-block whose message pointed the operator at a
+    file that does not exist.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    link = tmp_path / "session-events.jsonl"
+    try:
+        link.symlink_to(tmp_path / "gone-away.jsonl")     # target never exists
+    except (OSError, NotImplementedError) as exc:          # pragma: no cover
+        pytest.skip(f"symlinks unavailable here: {exc}")
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
 def test_a_SYMLINKED_log_is_still_replayable_because_recovery_follows_it(
         tmp_path, monkeypatch):
     """⛔ `O_NOFOLLOW` made this arm FAIL OPEN — measured, #11113 review cycle 6.

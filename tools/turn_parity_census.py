@@ -1198,8 +1198,10 @@ def _jsonl_names(events_dir: str, *, strict: bool = False) -> list[str]:
     ⛔ `strict=True` re-raises instead of answering `[]` (#11113 review cycle 9,
     P2). `[]` means "no logs here", and one caller refuses on that answer — so
     an UNLISTABLE directory must not be indistinguishable from an empty one.
-    The lenient default exists for the DIAGNOSIS callers, which only word a
-    message and never decide a verdict.
+    The directory is derived from the store's own path (the store exists in it),
+    so it is expected to be there; when it cannot be LISTED, that is "I could
+    not ask". The lenient default exists for the DIAGNOSIS callers, which only
+    word a message and never decide a verdict.
     """
     try:
         return sorted(n for n in os.listdir(events_dir) if n.endswith(".jsonl"))
@@ -1207,8 +1209,6 @@ def _jsonl_names(events_dir: str, *, strict: bool = False) -> list[str]:
         return []                 # the directory is gone: nothing is adjacent
     except OSError as exc:
         if strict:
-            # `_find_local_jsonl_dir` only returns a directory it has just
-            # LISTED, so an unlistable one now is "could not ask".
             raise CensusError(
                 f"the event-log directory beside the store ({events_dir!r}) "
                 f"could not be LISTED ({type(exc).__name__}: {exc}) — so "
@@ -1262,10 +1262,13 @@ def _one_replayable_log(events_dir: str) -> str | None:
     with a readable log REFUSED while the identical store with the same log at
     mode 000 RETURNED (`nodes={}`) and certified `CLEAN` — the same false PASS
     the sidecar branch above was just fixed for, one record over. It is also a
-    divergence from the predicate this function claims to mirror: `recover_from_log`
-    opens with a plain `open()`, so `EACCES` RAISES there and recovery REFUSES.
-    It raises `CensusError` instead, for the reason the presence check states
-    three functions up: in a gate, "I could not ask" is not "it is absent".
+    divergence from the predicate this function claims to mirror:
+    `recover_from_log` CATCHES that `OSError` and answers
+    `{"recovered": False, "reason": "event log unreadable: …"}`
+    (`tortoise/consistency.py`), i.e. recovery DECLINES on this state rather
+    than replaying it. It raises `CensusError` instead, for the reason the
+    presence check states three functions up: in a gate, "I could not ask" is
+    not "it is absent".
     """
     import stat
 
@@ -1275,6 +1278,13 @@ def _one_replayable_log(events_dir: str) -> str | None:
     path = os.path.join(events_dir, names[0])
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        # The NAME vanished between the listing and the open (a dangling
+        # symlink, a log rotated or deleted by the writer that shares this
+        # directory). That IS an absence — and the sibling `_jsonl_names`
+        # answers `[]` for the same errno one frame up, so refusing here would
+        # both over-block and hand the operator a file that does not exist.
+        return None
     except OSError as exc:
         # `os.listdir` has just proved this name EXISTS, so an unopenable one is
         # NOT an absence — see the third-answer rule in the docstring.
@@ -1297,10 +1307,14 @@ def _one_replayable_log(events_dir: str) -> str | None:
             raw = fh.read()
     except OSError as exc:
         # The same third answer, one frame down: a read that DIES mid-file is
-        # "could not ask", not "nothing to replay".
+        # "could not ask", not "nothing to replay". The handler also covers the
+        # HANDLE preparation around the read (`fstat`, `dup`, `fdopen`, e.g. an
+        # `EMFILE`), so the message names both and does not claim a read that
+        # may not have been attempted; the refusal is right either way.
         raise CensusError(
             f"the single event log beside the store ({path!r}) could not be "
-            f"READ to completion ({type(exc).__name__}: {exc.strerror or exc}) "
+            f"READ to completion, or its handle could not be prepared "
+            f"({type(exc).__name__}: {exc.strerror or exc}) "
             "— so whether recovery would replay it is UNKNOWN, not answered. "
             "An unreadable log is not an absent one, so --expect-empty must "
             "not certify a graph whose replayability this gate could not "
