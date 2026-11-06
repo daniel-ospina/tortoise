@@ -309,7 +309,10 @@ only when that **last** entry closed — `a6e20f05b` (#10717), the same fold tha
 history under the misnumbered `#10620` (`:132`, "now EMPTY (#10620 closed its last entry)"). That is the
 project's "a pin that outlives its defect" rule, applied at the LAST entry rather than the first. The
 difference that earns this one: a **derived** check cannot go empty, because it is closed over the migration set
-rather than over a hand-kept vocabulary.
+rather than over a hand-kept vocabulary. ⚠️ **`#11075`'s body states the ONE-STEP version** of that provenance
+today — *"records that `_SCHEMA_DISAGREEMENTS` was emptied and then made 'gone rather than parked' **when #9264
+closed**"* — a third live carrier in that body beside its `carve_out:` order and its `_COLUMN_RE` "**does**
+capture" claim; this section and §7.1 of the plan are authoritative until the body is corrected.
 
 **Layer:** `unit` + `contract` (DB-free; the declared types are read from the migration files). Registration is
 a **surface** entry plus a `durations:` row, exactly like the DB-free migration-reading precedent
