@@ -4517,6 +4517,15 @@ surfaces:
   # network, no real model.
   - test_5095_s3_identity_policy.py
   - test_extractor_v2.py
+  # #10999: S5 Job 1's entity↔entity channel — the contract clause, the D5
+  # shape gate over the new section, and `_assemble_relations`' three rules
+  # (an endpoint resolves to an entity THIS emission produced or is dropped
+  # and named, never minted; a predicate must be a DECLARED verb; a duplicate
+  # triple collapses). Its subject is `tortoise/extractor_v2.py` — the default
+  # `core` surface — and nothing else selects it, so it is registered here or
+  # `--integrity` reports it as drift. Hermetic: `execute_embed` driven
+  # directly with a two-entity emission — no model, no graph, no network.
+  - test_10999_batch_story_relations.py
   # #2684 (Slice B): the value-span census — the wave's per-question T leg
   # ("the value-bearing evidence is verbatim-present") measured over the
   # COMMITTED #7947 arms receipts with the shipped `_carries_value` /

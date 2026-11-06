@@ -676,6 +676,18 @@ def _referenced_entity_names(embed_list: object,
                 for r in refs:
                     if isinstance(r, Mapping) and r.get("name"):
                         names.add(_norm(r["name"]))
+    # #10999: an entity an entity↔entity relation NAMES is referenced. The
+    # per-item scan above reads `about_entities`/`slots` only, so an entity
+    # whose sole tie to the emission is a relation's endpoint looked
+    # unreferenced and could be DISCARDed — and S5 would then drop the
+    # relation as unresolvable, one stage after this guard authorised it.
+    for rel in embed_list.get("relations") or []:
+        if not isinstance(rel, Mapping):
+            continue
+        for side in ("src", "dst"):
+            ref = rel.get(side)
+            if isinstance(ref, str) and ref.strip():
+                names.add(_norm(ref))
     return names
 
 

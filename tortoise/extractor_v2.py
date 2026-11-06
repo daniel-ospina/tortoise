@@ -1715,6 +1715,7 @@ OUTPUT_CONTRACT = """{
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
+  "relations": [{"src": str, "dst": str, "predicate": str, "semantics": str|null}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states ("the retry storm weakened the deadline rule", "A changed because of B"). src/dst are entity NAMES that must ALSO appear in entities[] above — an endpoint is never invented here, and one this emission does not produce is DROPPED. predicate must be a declared relation verb (the same vocabulary create_operator accepts); semantics is the optional closed Layer-2 meaning (ONTOLOGY §8). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
   "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
@@ -3580,6 +3581,12 @@ def _merge_key(section: str, item: dict) -> tuple:
                 _norm(str(item.get("op_type"))),
                 _norm(te.get("src")), _norm(te.get("dst")),
                 _norm(str(te.get("op_type"))))
+    if section == "relations":
+        # E4 (#10999): an entity↔entity relation's identity is its
+        # (src, dst, predicate) triple — the same edge stated twice is ONE
+        # relation, and the semantics rides along on the survivor.
+        return ("relation", _norm(item.get("src")), _norm(item.get("dst")),
+                _norm(item.get("predicate")))
     if section == "chain_notes":
         return ("chain", _norm(item.get("chain")), _norm(item.get("finding")))
     if section == "link_before_create":
@@ -3601,7 +3608,7 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
     through by reference — unknown fields ride through untouched (E1/E3).
     None sections and non-dict entries are tolerated (skipped).
     """
-    sections = ("entities", "events", "points", "operators",
+    sections = ("entities", "events", "points", "operators", "relations",
                 "chain_notes", "link_before_create", "retractions")
     out: dict = {}
     for section in sections:
@@ -5349,7 +5356,16 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
     """D3: rewrite the embed list's entity names + about_entities/slot refs
     to the canonical existing name (deep copy — the caller keeps the raw
     S2/S4 list for provenance). Operator endpoints reference CONTENT, not
-    names — untouched."""
+    names — untouched.
+
+    #10999: ``relations[].src/dst`` ARE names, so they are rewritten too. Left
+    out, every narrative relation whose endpoint the graph already knows —
+    i.e. the COMMON real case, since resolution only fires when S3 found
+    candidates — would name the pre-resolution spelling and S5 would drop it
+    as unresolvable. The rename is why the channel must be threaded here and
+    not merely case-folded at the endpoint: casefold absorbs a spelling
+    variant, not a canonicalisation.
+    """
     import copy
     out = copy.deepcopy(embed_list or {})
     name_map = {k: v.get("name", k) for k, v in (resolution_map or {}).items()}
@@ -5371,6 +5387,14 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
                     for s in slots.get(role) or []:
                         if isinstance(s, dict) and s.get("name") in name_map:
                             s["name"] = name_map[s["name"]]
+    # #10999: the entity↔entity channel names its endpoints, so a renamed
+    # entity must be renamed here too (see the docstring).
+    for rel in out.get("relations") or []:
+        if not isinstance(rel, dict):
+            continue
+        for side in ("src", "dst"):
+            if isinstance(rel.get(side), str) and rel[side] in name_map:
+                rel[side] = name_map[rel[side]]
     return out
 
 
@@ -8593,6 +8617,166 @@ def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \
     return (dst, src)
 
 
+# ── S5 Job 1 (#10999): the batch's own story — entity↔entity relations ───
+#
+# The batch is a UNIT of work with its own narrative: what it was for, what it
+# concluded. Until this channel existed the pipeline could carry what the story
+# STORED (points, entities, events) and never what it CONCLUDED — a relation
+# between two entities that only the narrative states ("the retry storm
+# weakened the deadline rule", "A changed because of B"). Those conclusions are
+# EDGES, which is why the channel is entity↔entity and not more prose: #10000's
+# P0 keeps the narrative TEXT out of the graph (§9.1/D1 — the story lives in
+# Postgres, the graph indexes what was extracted from it), so the one shape of
+# "the story" that may legitimately enter the graph is a typed relation.
+#
+# Three rules, each an indicator on #10999:
+#   1. an endpoint must resolve to an entity THIS emission produced — it is
+#      NEVER minted (an unresolved endpoint is dropped and the warning NAMES
+#      it; this is S5 Job 1's declared fail-OPEN direction — the nodes still
+#      commit, and the reading is re-derivable from the same narrative);
+#   2. the predicate must be a DECLARED relation verb (the same vocabulary
+#      `sdk.create_operator` validates against). An invented verb re-opens
+#      #2766 (`predicate-not-in-allowlist`), so it is dropped, named; and when
+#      the declared set cannot be read at all the relation is KEPT with a
+#      warning — the gate fails open on its own uncertainty rather than
+#      destroying data it could not judge;
+#   3. duplicate triples collapse, first wins, so re-finalising the same batch
+#      cannot duplicate the story.
+
+
+def _declared_relation_predicates() -> frozenset[str] | None:
+    """The relation verbs an entity↔entity relation may carry, or ``None``
+    when the declared set cannot be read (the caller keeps the relation and
+    warns). Imported lazily: ``pack_registry``/``domain_loader`` are not
+    module-level dependencies of this pipeline."""
+    try:
+        from tortoise.domain_loader import _get_registry
+        from tortoise.pack_registry import CORE_OPERATOR_LABELS
+        declared = set(CORE_OPERATOR_LABELS)
+        reg = _get_registry()
+        if reg is not None:
+            declared |= {r.get("predicate") for r in reg.list_relations()
+                         if isinstance(r, dict) and r.get("predicate")}
+        return frozenset(declared)
+    except Exception:
+        return None
+
+
+def _resolve_relation_endpoint(name: str, exact: set[str],
+                               folded: dict[str, list[str]]) -> str | None:
+    """The emitted entity an endpoint names, or ``None`` (never a new one).
+
+    Exact name first; then a UNIQUE case-insensitive match. An ambiguous
+    case-fold (two entities differing only in case) resolves to ``None`` —
+    guessing which one the story meant would attribute an edge to the wrong
+    node, which is worse than the missing edge this channel exists to fix."""
+    if name in exact:
+        return name
+    hits = folded.get(name.casefold()) or []
+    return hits[0] if len(hits) == 1 else None
+
+
+def _assemble_relations(embed_list: dict, payload_entities: list[dict],
+                        warnings: list[str]) -> tuple[list[dict], int]:
+    """Validate the emission's entity↔entity relations. Returns
+    ``(kept, dropped_count)``.
+
+    ``payload_entities`` is the FINAL entity list this emission produced (post
+    frequency gate, post dedup) — resolving against the raw embed list would
+    admit an endpoint whose own entity never commits, i.e. an edge to nothing.
+    """
+    raw = embed_list.get("relations")
+    if not raw:
+        return [], 0
+    if not isinstance(raw, list):
+        # A MISTYPED section is a drop, not a no-op: every relation in it is
+        # lost, so it must reach `connections_incomplete` (the reporting
+        # discipline rule 1 rests on) rather than only a shape warning.
+        n = len(raw) if isinstance(raw, (dict, tuple)) else 1
+        warnings.append(f"relations section is {type(raw).__name__}, not a "
+                        "list — ignored")
+        warnings.append(
+            f"connections_incomplete (#10999): {n} narrative relation(s) "
+            "dropped, 0 carried — the items still commit (S5 Job 1 fails "
+            "open)")
+        return [], n
+
+    exact = {str(e.get("name") or "").strip()
+             for e in payload_entities if isinstance(e, dict)}
+    exact.discard("")
+    folded: dict[str, list[str]] = {}
+    for n in exact:
+        folded.setdefault(n.casefold(), []).append(n)
+
+    declared = _declared_relation_predicates()
+    kept: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    dropped = 0
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            warnings.append(f"non-dict relation entry {item!r} skipped")
+            dropped += 1
+            continue
+        src = str(item.get("src") or "").strip()
+        dst = str(item.get("dst") or "").strip()
+        predicate = str(item.get("predicate") or "").strip()
+        if not (src and dst and predicate):
+            warnings.append(
+                f"relations[{i}] is missing src/dst/predicate "
+                f"({src!r}, {dst!r}, {predicate!r}) — dropped")
+            dropped += 1
+            continue
+        if src.casefold() == dst.casefold():
+            warnings.append(f"relations[{i}] is a self-relation "
+                            f"('{_clip(src, 40)}') — dropped")
+            dropped += 1
+            continue
+        r_src = _resolve_relation_endpoint(src, exact, folded)
+        if r_src is None:
+            warnings.append(
+                f"relations[{i}] endpoint '{_clip(src, 40)}' does not resolve "
+                "to an entity this emission produced — dropped, NOT minted "
+                "(#10999: an endpoint is never invented)")
+            dropped += 1
+            continue
+        r_dst = _resolve_relation_endpoint(dst, exact, folded)
+        if r_dst is None:
+            warnings.append(
+                f"relations[{i}] endpoint '{_clip(dst, 40)}' does not resolve "
+                "to an entity this emission produced — dropped, NOT minted "
+                "(#10999: an endpoint is never invented)")
+            dropped += 1
+            continue
+        if declared is not None and predicate not in declared:
+            warnings.append(
+                f"relations[{i}] predicate '{_clip(predicate, 40)}' is not a "
+                "declared relation verb — dropped (#2766: an entity↔entity "
+                "relation may not carry an invented predicate)")
+            dropped += 1
+            continue
+        if declared is None:
+            warnings.append(
+                f"relations[{i}] predicate '{_clip(predicate, 40)}' could not "
+                "be checked against the declared vocabulary (registry "
+                "unreadable) — kept, unverified")
+        key = (r_src.casefold(), r_dst.casefold(), predicate.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        rel = {"src": r_src, "dst": r_dst, "predicate": predicate}
+        semantics = item.get("semantics")
+        if isinstance(semantics, str) and semantics.strip():
+            rel["semantics"] = semantics.strip()
+        kept.append(rel)
+
+    if dropped:
+        warnings.append(
+            f"connections_incomplete (#10999): {dropped} narrative relation(s) "
+            f"dropped, {len(kept)} carried — the items still commit (S5 Job 1 "
+            "fails open)")
+    return kept, dropped
+
+
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
@@ -9804,6 +9988,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "surviving operator — dropped rather than committing an "
                 "unsupported claim Point")
 
+    # ── S5 Job 1 (#10999): the batch's own story ──────────────────────────
+    # The narrative's entity↔entity relations, validated against the entities
+    # THIS emission produced. RESULT-level, not payload-level — the Layer-1
+    # commit payload does not grow for a channel no writer materialises yet
+    # (the D8 record-level convention the retractions/merges/noops records
+    # already follow). Materialising these as Object→Object edges is #11001's
+    # job, which owns the operator-vs-structural verdict
+    # (`pack_registry.relation_write_paths`) — this issue supplies its
+    # transport, and nothing here re-derives that decision.
+    payload_relations, relations_dropped = _assemble_relations(
+        embed_list, payload_entities, warnings)
+
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
     # refs (resolved with the never-guess discipline) produce deletions.
@@ -9895,6 +10091,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "link_before_create": link_before_create,
         "warnings": warnings,
         "minted_kinds": minted,
+        "relations": payload_relations,   # #10999 — RESULT-level (see above)
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
@@ -9907,6 +10104,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_degraded": bool((search or {}).get("degraded")),
             "chain_notes": len(chain_notes),
             "supersessions": len(supersessions),
+            "relations": len(payload_relations),      # #10999
+            "relations_dropped": relations_dropped,   # #10999
         },
     }
 
@@ -10726,6 +10925,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                   "supersessions": [], "noops": [], "deletions": [],
                   "merges": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
+                  # #10999: no relations when S5 itself failed — the channel
+                  # is S5's output and nothing upstream can stand in for it.
+                  "relations": [],
                   "minted_kinds": [], "stats": {}}
     result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
         "notes": chain_enforcer_notes,
@@ -12162,6 +12364,10 @@ _OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
     "events": ("content", "eventKind"),
     "points": ("content",),
     "operators": ("src", "dst", "op_type"),
+    # #10999: the entity↔entity channel. `semantics` is optional so it is NOT
+    # a required key here — an absent/None optional rides through as an
+    # unknown key, which this gate accepts (see the docstring below).
+    "relations": ("src", "dst", "predicate"),
     "chain_notes": ("chain", "finding", "action"),
     "link_before_create": ("searched_for", "found"),
     "retractions": ("content", "id"),  # content | id — either satisfies

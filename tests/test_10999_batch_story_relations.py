@@ -1,0 +1,338 @@
+"""#10999 — S5 Job 1: the batch's own story reaches the graph.
+
+The batch is a unit of work with its own narrative: what it was for, what it
+concluded. Before this channel the pipeline could carry what the story
+STORED (points, entities, events) and never what it CONCLUDED — an
+entity↔entity relation only the narrative states ("A changed because of B").
+Those conclusions are EDGES; the story's TEXT stays out of the graph
+(#10000's P0, §9.1/D1), so a typed relation is the one shape of "the story"
+that may legitimately be carried.
+
+Every test here is offline and deterministic — no model, no graph, no network.
+`execute_embed` is S5, the batch-finalise boundary, and it is driven directly.
+
+Red-first evidence (measured on `origin/main` before this change, 277a559b1a):
+    $ git show origin/main:tortoise/extractor_v2.py | grep -c '_assemble_relations'
+    0
+    $ ... | sed -n '/^OUTPUT_CONTRACT/,/^}/p' | grep -c relations
+    0
+    $ ... | sed -n '/^_OUTPUT_SCHEMA/,/^}/p' | grep -c relations
+    0
+  (`grep -c relations` over the WHOLE file is NOT 0 — the word appears in
+  unrelated prose comments — so the citations above are scoped to the
+  contract, the schema and the helper, which is what this change adds.)
+  The contract has no entity↔entity channel there, so
+  `test_contract_advertises_the_relations_channel` cannot pass, and
+  `_assemble_relations` does not exist (every S5 test would AttributeError).
+"""
+
+from __future__ import annotations
+
+import copy
+
+import pytest
+
+from tortoise import extractor_v2 as v2
+
+#: A two-entity emission plus ONE relation the narrative states. Deliberately
+#: minimal: the relation's endpoints are the two entities the same emission
+#: produced, which is the channel's whole contract.
+EMISSION = {
+    "entities": [
+        {"name": "Retry Storm", "kind": "core:event"},
+        {"name": "Deadline Rule", "kind": "core:rule"},
+    ],
+    "events": [],
+    "points": [],
+    "operators": [],
+    "relations": [
+        {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL",
+         "semantics": "supports"},
+    ],
+}
+
+
+def _run(emission):
+    return v2.execute_embed(copy.deepcopy(emission), {}, session_id="s-10999")
+
+
+# ── 1. the contract carries the channel ──────────────────────────────────
+
+def test_contract_advertises_the_relations_channel():
+    """The channel exists in the prompt contract AND in the flag-on variant.
+
+    A channel absent from the contract is a channel the model is never told
+    about — which is the structural reason the graph holds tens of thousands
+    of `aboutObject` edges and zero edges between two Objects (#10999).
+    """
+    assert '"relations"' in v2.OUTPUT_CONTRACT
+    assert '"relations"' in v2.OUTPUT_CONTRACT_CORE_ONLY
+    # the four clauses the channel's validation actually enforces
+    for clause in ('"src": str, "dst": str, "predicate": str', "entities[]",
+                   "DROPPED", "declared relation verb"):
+        assert clause in v2.OUTPUT_CONTRACT, clause
+
+
+def test_shape_gate_covers_the_new_channel():
+    """The D5 structural schema parses a relations item and REFUSES one with
+    no predicate — the channel is validated, not merely advertised."""
+    ok, issues = v2._validate_output_shape(
+        {"relations": [{"src": "A", "dst": "B", "predicate": "IMPL"}]})
+    assert ok and not issues
+
+    ok, issues = v2._validate_output_shape(
+        {"relations": [{"src": "A", "dst": "B"}]})
+    assert not ok
+    assert any("missing required key 'predicate'" in i for i in issues), issues
+
+
+# ── 2. the story lands, between the two resolved entities ────────────────
+
+def test_a_stated_relation_lands_between_the_two_emitted_entities():
+    """The issue's own indicator: a narrative stating "A changed because of B"
+    produces a relation between A and B.
+
+    Both endpoints resolve to the entities THIS emission produced — the
+    relation is not a per-item aggregate of the emission's entities, it names
+    the pair the story asserted.
+    """
+    result = _run(EMISSION)
+
+    assert result["relations"] == [
+        {"src": "Retry Storm", "dst": "Deadline Rule",
+         "predicate": "IMPL", "semantics": "supports"}
+    ]
+    assert result["stats"]["relations"] == 1
+    assert result["stats"]["relations_dropped"] == 0
+    # the channel is RESULT-level: the Layer-1 commit payload does not grow
+    # for a channel no writer materialises yet (that is #11001's transport).
+    assert "relations" not in result["payload"]
+    # and #10000's P0 is untouched — the story's PROSE pair is not written.
+    assert "story_arc" not in result["payload"] or not result["payload"][
+        "story_arc"]
+
+
+def test_an_absent_channel_adds_nothing():
+    """Non-vacuity's control arm: with no relations the result is empty and
+    no `connections_incomplete` warning is invented."""
+    emission = copy.deepcopy(EMISSION)
+    del emission["relations"]
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations"] == 0
+    assert not [w for w in result["warnings"] if "connections_incomplete" in w]
+
+
+# ── 3. zero minting: an unresolved endpoint is dropped and NAMED ─────────
+
+def test_unresolved_endpoint_is_dropped_and_named_never_minted():
+    """An endpoint naming something this emission did not produce is dropped
+    with a warning that NAMES it — never materialised.
+
+    A minted endpoint would be an unsupported assertion in the memory layer:
+    the worst failure this channel could introduce, and the exact hazard the
+    S3 identity issue (#10997) exists to close on the other end.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Ghost Rule",
+                              "predicate": "IMPL"}]
+    result = _run(emission)
+
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    named = [w for w in result["warnings"] if "Ghost Rule" in w]
+    assert named, result["warnings"]
+    assert "NOT minted" in named[0]
+    # ⛔ the mint pin: no entity beyond the emission's own two was created
+    assert {e["name"] for e in result["payload"]["entities"]} == {
+        "Retry Storm", "Deadline Rule"}
+    # ...and the failure is REPORTED, not silent (S5 Job 1 fails open).
+    assert any("connections_incomplete" in w for w in result["warnings"])
+
+
+def test_undeclared_predicate_is_dropped_and_named():
+    """An invented verb re-opens #2766, so it is dropped and named."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "vibesWith"}]
+    result = _run(emission)
+
+    assert result["relations"] == []
+    assert any("vibesWith" in w and "not a declared relation verb" in w
+               for w in result["warnings"]), result["warnings"]
+
+
+def test_self_relation_and_malformed_item_are_dropped():
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [
+        {"src": "Retry Storm", "dst": "Retry Storm", "predicate": "IMPL"},
+        {"src": "Retry Storm"},          # no dst / no predicate
+        "not-a-dict",
+    ]
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 3
+
+
+# ── 4. endpoint resolution is unique-or-nothing ──────────────────────────
+
+def test_case_insensitive_endpoint_resolves_to_the_emitted_spelling():
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "retry storm", "dst": "DEADLINE RULE",
+                              "predicate": "IMPL"}]
+    result = _run(emission)
+    assert [(r["src"], r["dst"]) for r in result["relations"]] == [
+        ("Retry Storm", "Deadline Rule")]
+
+
+def test_ambiguous_case_fold_resolves_to_nothing():
+    """Two entities differing only in case: guessing which one the story
+    meant would attribute the edge to the WRONG node."""
+    emission = copy.deepcopy(EMISSION)
+    emission["entities"] = [
+        {"name": "Deadline Rule", "kind": "core:rule"},
+        {"name": "deadline rule", "kind": "core:rule"},
+        {"name": "Retry Storm", "kind": "core:event"},
+    ]
+    emission["relations"] = [{"src": "Retry Storm", "dst": "DEADLINE RULE",
+                              "predicate": "IMPL"}]
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+
+
+# ── 5. idempotence: finalising the same batch twice is ONE story ─────────
+
+def test_finalising_the_same_batch_twice_does_not_duplicate_the_story():
+    """The duplicate the issue is really about: the same narrative emitted
+    twice (an S2/S4 union, a retry, a re-finalise) is ONE relation."""
+    first = _run(EMISSION)
+    second = _run(EMISSION)
+    assert first["relations"] == second["relations"]
+    assert len(first["relations"]) == 1
+    # the commit id is stable across the two finalisations (nothing in the
+    # channel leaks into the payload's canonical form)
+    assert (first["payload"]["client_commit_id"]
+            == second["payload"]["client_commit_id"])
+
+
+def test_intra_emission_duplicate_triples_collapse_first_wins():
+    """The SAME triple stated twice is ONE relation, and the collapse is a
+    silent SKIP, not a gate drop — `relations_dropped` must stay 0.
+
+    The duplicate's predicate carries the SAME case on purpose: a case
+    variant (`impl`) would be refused by the case-SENSITIVE declaredness
+    check first, so the test would pass with the dedupe deleted.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [
+        {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL",
+         "semantics": "supports"},
+        {"src": "retry storm", "dst": "deadline rule", "predicate": "IMPL"},
+    ]
+    result = _run(emission)
+    assert len(result["relations"]) == 1
+    assert result["relations"][0]["semantics"] == "supports"
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_a_mistyped_section_is_counted_as_dropped():
+    """A mapping instead of a list loses EVERY relation, so it must reach the
+    `connections_incomplete` report — not only a shape warning."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = {"src": "Retry Storm"}
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("connections_incomplete" in w for w in result["warnings"])
+
+
+def test_a_relation_survives_entity_resolution():
+    """#10999 review P1: the D3 stage renames entities, so the channel's
+    endpoints must be renamed with them.
+
+    Resolution fires exactly when S3 found candidates — i.e. for entities the
+    graph ALREADY knows, the common real case. Left unthreaded, the relation
+    would name the pre-resolution spelling and S5 would drop it as
+    unresolvable.
+    """
+    resolved = v2._apply_entity_resolution(
+        EMISSION, {"Retry Storm": {"name": "Retry Storm (2024-05)"}})
+    assert resolved["relations"][0]["src"] == "Retry Storm (2024-05)"
+
+    result = _run(resolved)
+    assert [(r["src"], r["dst"]) for r in result["relations"]] == [
+        ("Retry Storm (2024-05)", "Deadline Rule")]
+    assert result["stats"]["relations_dropped"] == 0
+
+
+# ── 6. the S2 ∪ S4 union dedupes on the triple ───────────────────────────
+
+def test_merge_embed_lists_unions_relations_by_triple():
+    s2 = {"relations": [{"src": "A", "dst": "B", "predicate": "IMPL"}]}
+    s4 = {"relations": [
+        {"src": "A", "dst": "B", "predicate": "IMPL", "semantics": "supports"},
+        {"src": "B", "dst": "A", "predicate": "NAND"},
+    ]}
+    merged = v2.merge_embed_lists(s2, s4)
+    assert len(merged["relations"]) == 2
+    # S4's graph-informed version wins on the collision (E4 semantics)
+    assert merged["relations"][0]["semantics"] == "supports"
+
+
+# ── 7. non-vacuity by MUTATION ───────────────────────────────────────────
+
+def test_mutation_the_mint_pin_is_live(monkeypatch):
+    """Mutation: make the endpoint resolver accept ANY name (the resolver
+    removed) and the zero-mint test above must go red.
+
+    This is what stops the mint pin being a tautology — if the resolution step
+    were deleted, the endpoint would be carried verbatim and no test would
+    notice.
+    """
+    monkeypatch.setattr(v2, "_resolve_relation_endpoint",
+                        lambda name, exact, folded: name)
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Ghost Rule",
+                              "predicate": "IMPL"}]
+    result = _run(emission)
+    # the mutated resolver CARRIES the unresolved endpoint — i.e. the assertion
+    # in `test_unresolved_endpoint_is_dropped_and_named_never_minted` is
+    # measuring the resolution, not an empty list.
+    assert result["relations"] == [
+        {"src": "Retry Storm", "dst": "Ghost Rule", "predicate": "IMPL"}]
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_mutation_the_predicate_gate_is_live(monkeypatch):
+    """Mutation: widen the declared vocabulary and the undeclared-predicate
+    drop disappears — the gate is measuring the vocabulary."""
+    monkeypatch.setattr(v2, "_declared_relation_predicates",
+                        lambda: frozenset({"vibesWith"}))
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "vibesWith"}]
+    result = _run(emission)
+    assert [r["predicate"] for r in result["relations"]] == ["vibesWith"]
+
+
+def test_mutation_the_union_arm_is_live():
+    """Mutation: drop `relations` from the union's section list and the union
+    test loses its second relation."""
+    s2 = {"relations": [{"src": "A", "dst": "B", "predicate": "IMPL"}]}
+    merged = v2.merge_embed_lists(s2, {})
+    assert "relations" in merged, (
+        "the S2∪S4 union must carry the channel, or S4's gap additions and "
+        "S2's own relations are silently discarded")
+
+
+@pytest.mark.parametrize("predicate", ["IMPL", "NAND", "supports", "causes",
+                                       "hasPart", "dependsOn"])
+def test_core_predicates_are_accepted(predicate):
+    """The core vocabulary is accepted end-to-end (a negative-only gate would
+    pass every test above while rejecting every real relation)."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": predicate}]
+    result = _run(emission)
+    assert [r["predicate"] for r in result["relations"]] == [predicate]
