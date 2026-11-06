@@ -48,6 +48,39 @@ M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly
   M76 the endpoint door is a DENY-LIST again .......... KILLED   M77 argv SHAPE check removed (-X POST) ...... KILLED
   M78 `scope_for` skips the empty repo/branch check ... KILLED   M79 shape guard back AFTER the flag loop .. KILLED
   M80 refusal message states SUCCESS cond.............. KILLED   M81 `_gh_reader` projects (R2 reopened).... KILLED
+  M82 404->negative mapping disabled ................. KILLED   M83 negative lane removed (no own TTL) ..... KILLED
+  M84 negative allow-list widened to ANY body ........ KILLED   M85 `_validate_negative` unwired ........... KILLED
+  M86 protection ROUTE guard deleted ................. KILLED   M87 stderr spelling return deleted ......... KILLED
+⛔ M82-M85 are the round-18 fix lane's numbering (the documented-negative work, #11047). Each was
+RUN against this head, and each states what it does NOT cover:
+  M82 (`_gh_reader`'s `neg = spec.negative` forced to `None`, i.e. the 404 falls back through the
+  fault path): **2 failed, 336 passed** — the two arms that assert the unprotected answer is a
+  VALUE, one at the reader and one through `main()`. It does not cover the mapping's WORDING: an
+  arm asserting a paraphrase of the sentinel would survive this and is deliberately absent.
+  M83 (`_negative_ttl` returns `None`, so a negative is stored in the key's own 1800 s lane):
+  **1 failed, 337 passed** — the arm that reads at an age the key's ceiling would still serve and
+  asserts a second reader call. This is the arm the WHOLE short-TTL claim rests on, and it is
+  boundary-exact (`age == NEGATIVE_ANSWER_TTL_S` is EXPIRED, one second less is a hit).
+  M84 (the allow-list widened to any JSON body — the pre-fix "looks like a 404" shape): **1
+  failed, 337 passed** — the `Not Found` arm. ⛔ IT DOES NOT COVER THE STDERR SPELLING, and the
+  first cut of this row claimed that form "is only reached in the M82/M84 runs" — MEASURED FALSE,
+  in the reassuring direction: under M82 `_is_documented_negative` is never CALLED at all, and under
+  M84 the body arm returns True before the stderr line runs, so no arm in the suite exercised it and
+  deleting that `return` left the suite green. M87 is the arm that closes it.
+  M85 (`_validate_negative(key, spec)` deleted from `_assert_every_key_projects`): **1 failed, 337
+  passed** — and this one was ADDED because the mutation SURVIVED the first cut of these tests
+  (337 passed, green, with the import-time hook gone): the two declaration arms called the
+  validator DIRECTLY, so the function was pinned and the wiring its own docstring promises was
+  not. A direct call is never the guard.
+  M86 (`_is_documented_negative`'s `_PROTECTION_SEGMENTS` comparison deleted, so any key whose
+  negative is declared would take the mapping off ANY route): **1 failed, 338 passed** — the direct
+  route arm. ⛔ ADDED FOR THE SAME REASON AS M85: it SURVIVED the previous cut (338 passed), because
+  the `repo.metadata` arm is refused by that key's `negative=None` BEFORE the route comparison runs.
+  A parametrized arm that passes for an unrelated reason is not coverage, and the arm now says so
+  in its own comment.
+  M87 (the measured `gh: Branch not protected (HTTP 404)` stderr return replaced with `False`):
+  **2 failed, 337 passed** — the stderr-drained reader arm and the direct helper arm. Also SURVIVED
+  the previous cut, for the reason recorded under M84.
 ⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
 parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
 satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
@@ -1488,6 +1521,244 @@ def test_required_set_null_is_the_legitimate_no_checks_answer() -> None:
         "contexts": [],
         "checks": [],
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# 11b. THE DOCUMENTED NEGATIVE — `404 Branch not protected` is an ANSWER, not a read failure
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+#: The UNPROTECTED-branch response, byte for byte as measured on this repo
+#: (`gh api repos/daniel-ospina/tortoise/branches/quota-discipline-2/protection` → rc=1).
+_UNPROTECTED_BODY = json.dumps(
+    {
+        "message": "Branch not protected",
+        "documentation_url": "https://docs.github.com/rest/branches/branch-protection",
+        "status": "404",
+    }
+).encode()
+_UNPROTECTED_STDERR = b"gh: Branch not protected (HTTP 404)\n"
+
+
+def _proc(returncode: int, *, stdout: bytes = b"", stderr: bytes = b""):
+    """A stand-in for `subprocess.run`'s CompletedProcess, with gh's real field names."""
+
+    class Proc:
+        pass
+
+    p = Proc()
+    p.returncode = returncode
+    p.stdout = stdout
+    p.stderr = stderr
+    return p
+
+
+def test_an_unprotected_branch_is_the_documented_negative_not_a_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ THE COMMON CASE OF THE MERGE-GATING KEY, and it used to be reported as a FAULT.
+
+    An unprotected branch has no protection rules, so GitHub answers `404 Branch not protected`
+    rather than an empty required set. Raising `Unreadable` for that turned the legitimate answer
+    ("this branch requires no checks") into "I could not read" — indistinguishable from an outage,
+    on the merge-gating key, and re-spent on every poll. It is a VALUE now.
+    """
+    monkeypatch.setattr(
+        C.subprocess,
+        "run",
+        lambda cmd, **kw: _proc(1, stdout=_UNPROTECTED_BODY, stderr=_UNPROTECTED_STDERR),
+    )
+    raw = C._gh_reader("o/r", "unprotected")("repo.required_set")
+    # The sentinel travels the key's OWN projection, so the answer has the one documented shape.
+    assert json.loads(C._project("repo.required_set", raw)) == {"contexts": [], "checks": []}
+    # ⛔ THE STDERR SPELLING, END TO END. Measured: the body arm returns first on every arm that
+    # reaches here, so deleting the stderr return left the suite GREEN (338 passed) — this call is
+    # the one that reds it. `gh`'s prose is the ONLY identifier when stdout is empty.
+    monkeypatch.setattr(
+        C.subprocess, "run", lambda cmd, **kw: _proc(1, stdout=b"", stderr=_UNPROTECTED_STDERR)
+    )
+    raw = C._gh_reader("o/r", "unprotected")("repo.required_set")
+    assert json.loads(C._project("repo.required_set", raw)) == {"contexts": [], "checks": []}
+
+
+def test_the_documented_negative_is_pinned_on_ONE_ROUTE_and_in_BOTH_spellings() -> None:
+    """⛔ THE ROUTE GUARD, PINNED DIRECTLY — because the arm below could not fail for it.
+
+    Measured: deleting the `_PROTECTION_SEGMENTS` comparison inside `_is_documented_negative` left
+    the suite at **338 passed**, because the `repo.metadata` arm below is refused by that key's
+    `negative=None` BEFORE the comparison ever runs. That is this file's own "fence that could not
+    fail for the bug it names" class, so the route is asserted on the helper as well as through it.
+    """
+    argv = C.INVARIANTS["repo.required_set"].argv
+    # The negative, on the one route that can answer it.
+    assert C._is_documented_negative(argv, _UNPROTECTED_BODY, _UNPROTECTED_STDERR) is True
+    # ⛔ THE SAME BODY, OFF THE PROTECTION ROUTE — not the negative.
+    assert (
+        C._is_documented_negative(
+            ("api", "repos/{repo}"), _UNPROTECTED_BODY, _UNPROTECTED_STDERR
+        )
+        is False
+    )
+    # The stderr spelling with the body DRAINED, and a different 404's prose refused.
+    assert C._is_documented_negative(argv, b"", _UNPROTECTED_STDERR) is True
+    assert C._is_documented_negative(argv, b"", b"gh: Not Found (HTTP 404)\n") is False
+
+
+def test_the_unprotected_answer_is_a_VALUE_the_CLI_exits_0_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⛔ NON-RETRYABLE BY CONSTRUCTION: an answer, not a `REFUSED`.
+
+    #11052's decision asks for "a distinct non-retryable verdict". The verdict is `0` with the
+    answer on stdout — nothing about it looks transient, so no caller retries it into the pool that
+    this module exists to protect.
+    """
+    monkeypatch.setattr(
+        C.subprocess,
+        "run",
+        lambda cmd, **kw: _proc(1, stdout=_UNPROTECTED_BODY, stderr=_UNPROTECTED_STDERR),
+    )
+    out = _Out()
+    monkeypatch.setattr(C.sys, "stdout", out)
+    rc = C.main(
+        [
+            "--key",
+            "repo.required_set",
+            "--repo",
+            "o/r",
+            "--branch",
+            "unprotected",
+            "--cache-dir",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0, "an unprotected branch must not be reported as a read failure"
+    assert json.loads(out.buffer.getvalue()) == {"contexts": [], "checks": []}
+
+
+def test_the_negative_is_cached_on_its_OWN_short_ttl_not_the_keys(tmp_path: Path) -> None:
+    """⛔ BOTH HALVES OF THE DECISION, MEASURED — the sentinel AND its own short TTL.
+
+    A negative is falsified by ONE human edit (someone PROTECTS the branch), so it must not sit
+    behind the key's 30-minute ceiling: at an age the ceiling would still have served, this MUST go
+    back to `gh`. The positive lane keeps its full ceiling — the two entries coexist.
+    """
+    calls: list[str] = []
+
+    def neg_reader(key: str) -> bytes:
+        calls.append(key)
+        return C._NO_REQUIRED_CHECKS_BODY
+
+    def pos_reader(key: str) -> bytes:
+        calls.append(key)
+        return RAW["repo.required_set"](1)
+
+    assert json.loads(
+        _read("repo.required_set", now=1000.0, reader=neg_reader, cache_dir=tmp_path)
+    ) == {"contexts": [], "checks": []}
+    assert len(calls) == 1
+    # Fresh ONE SECOND SHORT of the negative's ttl — served from its own lane, no reader call.
+    _read(
+        "repo.required_set",
+        now=1000.0 + C.NEGATIVE_ANSWER_TTL_S - 1,
+        reader=neg_reader,
+        cache_dir=tmp_path,
+    )
+    assert len(calls) == 1
+    # ⛔ EXPIRED BY ITS OWN TTL at an age the key's 1800 s ceiling would still have served it.
+    _read(
+        "repo.required_set",
+        now=1000.0 + C.NEGATIVE_ANSWER_TTL_S,
+        reader=pos_reader,
+        cache_dir=tmp_path,
+    )
+    assert len(calls) == 2, "the negative was served past its own short ttl"
+    # And the POSITIVE answer still lives on the long lane at an age the negative could not reach.
+    _read(
+        "repo.required_set",
+        now=1000.0 + C.NEGATIVE_ANSWER_TTL_S + 1700,
+        reader=pos_reader,
+        cache_dir=tmp_path,
+    )
+    assert len(calls) == 2, "the positive answer lost its own 30-minute lane"
+
+
+@pytest.mark.parametrize(
+    ("key", "stdout", "stderr"),
+    [
+        # ⛔ THE ALLOW-LIST BOUNDARY. A DIFFERENT 404 on the SAME route — a repo or branch the
+        # token cannot see — must stay a read failure: mapping it to "no required checks" would
+        # answer a merge gate with "nothing is required" about a branch it never read.
+        (
+            "repo.required_set",
+            json.dumps(
+                {"message": "Not Found", "documentation_url": "https://x", "status": "404"}
+            ).encode(),
+            b"gh: Not Found (HTTP 404)\n",
+        ),
+        # ⛔ A KEY WITH **NO DECLARED NEGATIVE** STAYS FAIL-CLOSED. Note the MECHANISM, measured:
+        # this arm is refused by `repo.metadata`'s `negative=None` before the route comparison runs,
+        # so it does NOT pin the route guard — the helper is asserted directly for that, above.
+        ("repo.metadata", _UNPROTECTED_BODY, _UNPROTECTED_STDERR),
+    ],
+)
+def test_the_documented_negative_is_an_ALLOW_LIST_of_one(
+    monkeypatch: pytest.MonkeyPatch, key: str, stdout: bytes, stderr: bytes
+) -> None:
+    """The mapping is ONE documented message, and only a key that DECLARES a negative takes it."""
+    monkeypatch.setattr(C.subprocess, "run", lambda cmd, **kw: _proc(1, stdout=stdout, stderr=stderr))
+    with pytest.raises(C.Unreadable):
+        C._gh_reader("o/r", "main")(key)
+
+
+def test_a_negative_ttl_at_or_above_the_keys_ceiling_is_refused() -> None:
+    """⛔ The short TTL is a DECLARATION GUARD, not a convention: at the key's own ceiling a
+    falsifiable "nothing is required" would be cached for 30 minutes."""
+    spec = C.Invariant(
+        ttl_s=1800,
+        argv=C.INVARIANTS["repo.required_set"].argv,
+        projection="probe-v1",
+        project=C._project_required_set,
+        negative=C.NegativeAnswer(body=C._NO_REQUIRED_CHECKS_BODY, ttl_s=1800, why="probe"),
+    )
+    with pytest.raises(C.TtlNotPermitted):
+        C._validate_negative("repo.required_set", spec)
+
+
+def test_the_negative_declaration_guard_is_WIRED_INTO_the_import_check() -> None:
+    """⛔ A DIRECT CALL TO `_validate_negative` IS NOT THE GUARD ITSELF.
+
+    Measured: deleting the `_validate_negative(key, spec)` line from `_assert_every_key_projects`
+    left the whole suite GREEN (337 passed), because the two arms above call the validator by hand
+    and so pin the FUNCTION while the import-time hook its docstring promises went unpinned. This
+    arm runs the hook, so it reds when the wiring is removed.
+    """
+    bad = C.Invariant(
+        ttl_s=1800,
+        argv=C.INVARIANTS["repo.required_set"].argv,
+        projection="probe-v1",
+        project=C._project_required_set,
+        negative=C.NegativeAnswer(body=C._NO_REQUIRED_CHECKS_BODY, ttl_s=1800, why="probe"),
+    )
+    saved = C.INVARIANTS["repo.required_set"]
+    C.INVARIANTS["repo.required_set"] = bad
+    try:
+        with pytest.raises(C.TtlNotPermitted):
+            C._assert_every_key_projects()
+    finally:
+        C.INVARIANTS["repo.required_set"] = saved
+
+
+def test_a_negative_body_the_keys_own_projection_REFUSES_is_not_declared() -> None:
+    """A sentinel the projection does not understand would be a second answer SHAPE — the exact
+    class of body this key's `_require_shape` history exists to refuse."""
+    spec = C.Invariant(
+        ttl_s=1800,
+        argv=C.INVARIANTS["repo.required_set"].argv,
+        projection="probe-v1",
+        project=C._project_required_set,
+        negative=C.NegativeAnswer(body=b'{"message": "oops"}', ttl_s=60, why="probe"),
+    )
+    with pytest.raises(C.TtlNotPermitted):
+        C._validate_negative("repo.required_set", spec)
 
 
 @pytest.mark.parametrize(

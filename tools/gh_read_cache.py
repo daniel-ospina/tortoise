@@ -108,6 +108,36 @@ EXPIRED, and a future stamp is a MISS). Anything else is a MISS — and on a MIS
 :class:`Unreadable`. "I could not read" must stay distinguishable from "I read X": collapsing those
 two is exactly how a drained pool produced artifacts that looked like measurements.
 
+A NEGATIVE ANSWER IS AN ANSWER, NOT A FAULT
+-------------------------------------------
+`GET /repos/{repo}/branches/{branch}/protection` answers **404 `Branch not protected`** for the
+common case — a branch with no protection rules. Measured on this repo against an unprotected
+branch: `gh` rc=1, stderr `gh: Branch not protected (HTTP 404)`, stdout
+`{"message":"Branch not protected","documentation_url":"…","status":"404"}`. Raising
+:class:`Unreadable` for that is fail-closed in the wrong direction: "this branch requires no
+checks" became "I could not read", indistinguishable from an outage, on the MERGE-GATING key, and
+re-spent on every poll.
+
+#11052's recorded decision already names the honest representation — *"a distinct non-retryable
+verdict + a negative sentinel on its own short TTL"* — so that PAIR is a declared spec field
+(:class:`Invariant`'s ``negative``), not a branch inside the freshness arithmetic:
+
+  * the SENTINEL is a body the key's OWN projection already understands
+    (``{"required_status_checks": null}`` → ``{"contexts": [], "checks": []}``), so a negative
+    takes the same shape as a real "no required checks" answer. It is not a shape the projection
+    has to GUESS about — the NULL arm is already pinned — and it never teaches the projection to
+    infer an empty set from an absence;
+  * the VERDICT is non-retryable because it is a VALUE: ``read()`` returns it and the CLI exits 0.
+    Nothing about it looks like a transient fault, so nothing retries it into the pool;
+  * the TTL is the negative's OWN and is SHORTER than the key's (:data:`NEGATIVE_ANSWER_TTL_S`),
+    because a negative is falsified by one human edit — someone PROTECTS the branch — while the
+    key's 30-minute ceiling is priced for an answer that no one is changing.
+
+It lives in a SECOND cache LANE (its own filename digest, its own TTL), never as a second freshness
+rule: ``_load``'s single ``0 <= age < ttl`` comparison is untouched. Every way the lane can be wrong
+is a MISS — a stale, torn or absent negative entry costs one live read, never a wrong answer —
+which is the only reason a second lane is affordable here at all.
+
 USAGE
     import gh_read_cache as C
 
@@ -118,6 +148,19 @@ USAGE
     uv run python tools/gh_read_cache.py --key repo.required_set --repo owner/name --branch main
     uv run python tools/gh_read_cache.py --key repo.labels --repo owner/name --ttl 900   # tighten only
     uv run python tools/gh_read_cache.py --purge
+
+⛔ INVALIDATION IS ALL-OR-NOTHING, AND THAT IS A STATED LIMIT, NOT AN OVERSIGHT.
+``--purge`` removes EVERY entry in the cache dir; there is no per-key and no per-scope invalidation
+verb — ``main()`` accepts only ``--key``/``--ttl``/``--repo``/``--branch``/``--cache-dir``/
+``--no-cache``/``--list``/``--purge``, and the last two are all-or-nothing and print-and-exit. So an
+operator who must force ONE fresh
+read drops the whole box-wide cache and takes a burst of live calls from exactly the pool this
+module exists to protect. The same boundary means an entry written under an OLDER identity shape
+(the filename carries key + scope + projection + argv + TTL) is never reclaimed by a newer read —
+it is simply never consulted again, and only ``--purge`` clears it. Neither is a fail-open (a
+stale-but-in-TTL hit is still provably fresh, and an unreachable entry is a MISS), but the cost of a
+single-key invalidation is currently paid by every other key, so state it here rather than let the
+next lane infer a per-entry verb that does not exist.
 
 Stdlib only. No network beyond the reader the caller supplies.
 """
@@ -157,7 +200,9 @@ from urllib.parse import quote
 __all__ = [
     "GLOBAL_KEYS",
     "INVARIANTS",
+    "NEGATIVE_ANSWER_TTL_S",
     "MutableReadRefused",
+    "NegativeAnswer",
     "TtlNotPermitted",
     "Unreadable",
     "declare_invariant",
@@ -461,6 +506,45 @@ class Invariant:
     argv: tuple[str, ...]
     projection: str
     project: Callable[[Sequence[Any]], Any]
+    # ⛔ THE DOCUMENTED NEGATIVE, WHEN THE KEY HAS ONE. `None` for every key whose "no rules"
+    # answer is an ordinary empty body; declared only where the API answers a 404 instead. See
+    # the module docstring's "A NEGATIVE ANSWER IS AN ANSWER, NOT A FAULT".
+    negative: NegativeAnswer | None = None
+
+
+@dataclass(frozen=True)
+class NegativeAnswer:
+    """A DOCUMENTED negative answer that this key may legitimately return.
+
+    ``body`` is a RAW response body the key's OWN ``project`` already understands, so the negative
+    is recognised (and stored) through the projection that is already pinned — never through a
+    second, special-cased shape. ``ttl_s`` is the negative's own, and it must be SHORTER than the
+    key's: a positive answer is priced for "nobody edits this", and a negative is falsified by one
+    edit in the other direction.
+    """
+
+    body: bytes
+    ttl_s: int
+    why: str
+
+
+# ⛔ THE ONE ROUTE WITH A DOCUMENTED NEGATIVE. Named once, so the mapping in `_gh_reader` and the
+# endpoint allow-list below cannot drift apart. The SEGMENTS are what the endpoint allow-list matches
+# (exact tuple equality); the PATH is what an `argv` carries (`gh api` takes ONE path argument).
+_PROTECTION_SEGMENTS: tuple[str, ...] = ("repos", "{repo}", "branches", "{branch}", "protection")
+_PROTECTION_ROUTE: str = "/".join(_PROTECTION_SEGMENTS)
+
+# The sentinel BODY, in the shape GitHub itself sends for a protected branch with no required
+# checks — so it travels `_project_required_set`'s ALREADY-PINNED `required_status_checks: null`
+# arm. ⛔ A sentinel that only a special case understood would be a second answer shape, and this
+# key's whole failure history is shapes the projection did not recognise.
+_NO_REQUIRED_CHECKS_BODY: bytes = b'{"required_status_checks": null}'
+
+# ⛔ 60 s, NOT the key's 1800 s ceiling, and this number is the SAFETY of the negative: a stale
+# negative reads as "nothing is required", which is the fail-OPEN direction on the merge-gating key.
+# A protection rule is added by a human edit, so 60 s bounds the window in which this tool can
+# report "no required checks" about a branch that has just acquired some.
+NEGATIVE_ANSWER_TTL_S: int = 60
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -479,11 +563,26 @@ INVARIANTS: dict[str, Invariant] = {
         project=_project_repo_metadata,
     ),
     # The REQUIRED SET only. Changes when a protection rule is edited: human-paced.
+    # ⛔ THIS KEY ANSWERS A 404 IN THE COMMON CASE, and it needs a negative for exactly that reason:
+    # an UNPROTECTED branch has no protection rules, so GitHub answers `404 Branch not protected`
+    # (measured — see the module docstring). #11052 declined to declare this key at all *because of*
+    # that 404, and its recorded decision says what the follow-up must be: a distinct non-retryable
+    # verdict plus a negative sentinel on its own short TTL. That is `negative=` below, so declaring
+    # the key here is that follow-up and not a reversal of the decision.
+    # ⛔ Why it is worth having at all: it is the MERGE-GATING key. "An unprotected branch requires
+    # no checks" is a real answer that a gate may act on, and reporting it as a read failure makes
+    # the honest answer unreachable while a retry loop spends the pool this module protects.
     "repo.required_set": Invariant(
         ttl_s=30 * 60,
-        argv=("api", "repos/{repo}/branches/{branch}/protection"),
+        argv=("api", _PROTECTION_ROUTE),
         projection="required-set-v1",
         project=_project_required_set,
+        negative=NegativeAnswer(
+            body=_NO_REQUIRED_CHECKS_BODY,
+            ttl_s=NEGATIVE_ANSWER_TTL_S,
+            why="an UNPROTECTED branch has no protection rules, and GitHub answers that with "
+            "`404 Branch not protected` rather than an empty required set",
+        ),
     ),
     # The label NAMES. Human-paced.
     "repo.labels": Invariant(
@@ -802,7 +901,7 @@ def ttl_for(key: str) -> int:
 # would read ONE fixed repo for every scope, which is guard 1's failure with the wrong subject.
 _INVARIANT_ENDPOINTS: tuple[tuple[str, ...], ...] = (
     ("repos", "{repo}"),
-    ("repos", "{repo}", "branches", "{branch}", "protection"),
+    _PROTECTION_SEGMENTS,
     ("repos", "{repo}", "labels"),
     ("repos", "{repo}", "actions", "workflows"),
     ("repos", "{repo}", "actions", "runners"),
@@ -941,6 +1040,42 @@ def declare_invariant(
     )
 
 
+def _validate_negative(key: str, spec: Invariant) -> None:
+    """The declared NEGATIVE must be projectable BY THIS KEY, and must be SHORTER-lived than it.
+
+    ⛔ Both halves are load-bearing. A sentinel the key's own projection cannot read would make
+    :func:`_is_negative_answer` raise (or, worse, never match), i.e. a declared negative that
+    silently does not exist while the registry says it does. A negative TTL at or above the key's
+    would put a falsifiable "nothing is required" behind a TTL priced for an unchanged answer.
+    Checked at IMPORT, so a broken declaration refuses to load instead of failing on a live read.
+    """
+    neg = spec.negative
+    if neg is None:
+        return
+    if not isinstance(neg.body, (bytes, bytearray)) or not bytes(neg.body):
+        raise TtlNotPermitted(
+            f"{key!r} declares a negative answer with no body ({neg.body!r}). The sentinel IS the "
+            f"answer, so an empty one would store an empty read."
+        )
+    if not isinstance(neg.ttl_s, int) or isinstance(neg.ttl_s, bool) or neg.ttl_s <= 0:
+        raise TtlNotPermitted(f"{key!r} declares a non-positive negative ttl_s ({neg.ttl_s!r})")
+    if neg.ttl_s >= spec.ttl_s:
+        raise TtlNotPermitted(
+            f"{key!r} declares a {neg.ttl_s}s NEGATIVE ttl at or above its own {spec.ttl_s}s "
+            f"ceiling. A negative can be falsified by one edit while the positive is priced for "
+            f"an answer nobody is changing, so the negative must be the SHORTER of the two."
+        )
+    # The sentinel must travel the key's OWN projection — the same function `read()` applies — so
+    # "is this the declared negative" is answerable by comparing projected values.
+    try:
+        spec.project([json.loads(bytes(neg.body))])
+    except Exception as exc:
+        raise TtlNotPermitted(
+            f"{key!r} declares a negative body its own projection refuses ({exc}). The sentinel "
+            f"must be a body this key already understands, never a second answer shape."
+        ) from exc
+
+
 def _assert_every_key_projects() -> frozenset[str]:
     """Import-time guard (2): no key may cache a whole body. Returns the KEYS it checked.
 
@@ -951,6 +1086,7 @@ def _assert_every_key_projects() -> frozenset[str]:
     checked: set[str] = set()
     for key, spec in INVARIANTS.items():
         _validate_spec(key, spec.argv, spec.projection, spec.project)
+        _validate_negative(key, spec)
         # ⛔ THE OBJECT ID IS THE PROOF. A literal `frozenset(INVARIANTS)` reproduces the key SET and
         # survived the whole suite (measured). It cannot reproduce `id(spec)` — so this value can
         # only be produced by a loop that actually visited the registry.
@@ -1239,6 +1375,34 @@ def scope_for(key: str, repo: str, branch: str) -> str:
     return f"{repo}@{branch}"
 
 
+def _negative_ttl(key: str, effective: int) -> int | None:
+    """The NEGATIVE lane's TTL for this key at this call's ceiling, or ``None`` if it has none.
+
+    ``min()`` and not the declared value: a caller asking for a TIGHTER ttl than the negative's own
+    must not get the wider one. When the two are equal the lane collapses into the ordinary one,
+    which is why the caller skips the second lookup.
+    """
+    neg = INVARIANTS[key].negative
+    if neg is None:
+        return None
+    return min(int(neg.ttl_s), effective)
+
+
+def _is_negative_answer(key: str, projected: bytes) -> bool:
+    """True IFF the PROJECTED payload is this key's declared negative, not a read of the endpoint.
+
+    ⛔ THE VALUE DECIDES THE LANE, NOT THE READER'S RETURN TYPE. ``_gh_reader`` hands back the
+    sentinel BODY and ``read()`` projects it, so the comparison is against the declared body put
+    through the key's OWN projection — the same function a caller uses. A caller supplying its own
+    reader therefore cannot opt this key into a 60-second negative unless it returns a body that
+    projects to the declared negative, which is exactly the answer that TTL is priced for.
+    """
+    neg = INVARIANTS[key].negative
+    if neg is None:
+        return False
+    return bytes(projected) == _project(key, bytes(neg.body))
+
+
 def read(
     key: str,
     *,
@@ -1326,6 +1490,22 @@ def read(
     hit = _load(path, key, scope, now=now, ttl_s=effective)
     if hit is not None:
         return hit
+    # ⛔ THE NEGATIVE LANE — a SEPARATE, SHORTER-lived entry for the same subject, and NOT a second
+    # freshness rule: `_load`'s single `0 <= age < ttl` comparison is untouched, this call simply
+    # asks it a different question. A miss falls through to the live read exactly like a positive
+    # miss does, so every way this lane can be wrong (stale, torn, absent) costs one call and never
+    # a wrong answer.
+    neg_ttl = _negative_ttl(key, effective)
+    if neg_ttl is not None and neg_ttl != effective:
+        hit = _load(
+            Path(cache_dir) / _cache_path(key, scope, ttl_s=neg_ttl).name,
+            key,
+            scope,
+            now=now,
+            ttl_s=neg_ttl,
+        )
+        if hit is not None:
+            return hit
 
     # MISS. ⛔ THE STALE ENTRY IS NOT CONSULTED AGAIN. If the reader fails we raise; serving the
     # expired payload here would answer a question that was never asked of GitHub.
@@ -1342,18 +1522,29 @@ def read(
     # it before the store — not only in `_gh_reader` — is what makes "no key caches a whole body"
     # true for EVERY caller, and it means a hit and a miss return identically-shaped bytes.
     payload = _project(key, bytes(payload))
+    # ⛔ A NEGATIVE IS STORED IN ITS OWN LANE, AT ITS OWN TTL. Storing it in the key's lane would
+    # cache "no required checks" for the full 30 minutes — a fail-OPEN window on the merge-gating
+    # key for a branch that can acquire a protection rule in one human edit.
+    lane_ttl = effective
+    if neg_ttl is not None and _is_negative_answer(key, payload):
+        lane_ttl = neg_ttl
+    store_path = (
+        path
+        if lane_ttl == effective
+        else Path(cache_dir) / _cache_path(key, scope, ttl_s=lane_ttl).name
+    )
     # ⛔ A CACHE-WRITE FAILURE MUST NOT FAIL A SUCCESSFUL READ. The value in hand was just read from
     # GitHub and is as fresh as anything can be; failing to STORE it is a lost optimisation, not a
     # lost answer. Fail-closed governs what may be SERVED from disk, never what may be RETURNED
     # after a live read — conflating them would turn a full disk into a total gh outage.
     try:
-        _store(path, _envelope(key, scope, payload, now=now, ttl_s=effective))
+        _store(store_path, _envelope(key, scope, payload, now=now, ttl_s=lane_ttl))
     except OSError as exc:
         # ⛔ A WRITE FAILURE STILL RETURNS THE VALUE (it was just read live), but it must NOT be
         # silent: an unwritable cache dir turns this tool into a PASS-THROUGH that burns the pool as
         # before, and a caller cannot tell that from a cold cache. Warn once per process, on stderr,
         # exactly as the other non-caching path does.
-        _warn_write_failed(path, exc)
+        _warn_write_failed(store_path, exc)
     return payload
 
 
@@ -1395,6 +1586,45 @@ def decode_pages(raw: bytes) -> list[Any]:
     return docs
 
 
+def _is_documented_negative(argv: Sequence[str], stdout: bytes, stderr: bytes) -> bool:
+    """True IFF `gh` said, in ONE of its documented spellings, that a branch has no protection rules.
+
+    ⛔ AN ALLOW-LIST OF ONE, ON THE ONE ROUTE THAT CAN ANSWER IT. This module's endpoint door has
+    three recorded spellings of the same deny-list mistake (see :data:`_INVARIANT_ENDPOINTS`), so the
+    question asked here is "is this THE documented negative?" and never "does this look like a
+    404?". A DIFFERENT 404 on this route — `Not Found` for a repo or a branch the token cannot see
+    — must stay :class:`Unreadable`: mapping it to "no required checks" would answer a merge gate
+    with "nothing is required" about a branch it never read, which is the exact false PASS the rest
+    of this module refuses.
+
+    Both forms below are the shapes MEASURED against an unprotected branch on this repo; an
+    unrecognised spelling maps to nothing and stays fail-closed, so a gh upgrade can only ever make
+    this narrower, never wrong.
+    """
+    args = list(argv) if isinstance(argv, (list, tuple)) else []
+    if len(args) != 2 or args[0] != "api" or not isinstance(args[1], str):
+        return False
+    if tuple(args[1].split("/")) != _PROTECTION_SEGMENTS:
+        return False
+    # The BODY first: it is the API's own document, so comparing JSON FIELDS cannot be broken by
+    # `gh`'s human-readable prose changing. Measured shape:
+    #   {"message":"Branch not protected","documentation_url":"https://…","status":"404"}
+    try:
+        doc = json.loads((stdout or b"").decode("utf-8", "replace") or "null")
+    except ValueError:
+        doc = None
+    if (
+        isinstance(doc, dict)
+        and doc.get("message") == "Branch not protected"
+        and str(doc.get("status")) == "404"
+    ):
+        return True
+    # The stderr spelling, verbatim as measured (`gh api repos/…/branches/…/protection` on an
+    # unprotected branch): `gh: Branch not protected (HTTP 404)`. Kept as a SECOND recognised form
+    # because it is what a live probe shows even when the body has been drained from stdout.
+    return stderr.strip() == b"gh: Branch not protected (HTTP 404)"
+
+
 def _gh_reader(repo: str, branch: str):
     def _read(key: str) -> bytes:
         spec = INVARIANTS.get(key)
@@ -1413,6 +1643,18 @@ def _gh_reader(repo: str, branch: str):
         except (OSError, subprocess.SubprocessError) as exc:
             raise Unreadable(f"{' '.join(cmd)} could not run: {exc}") from exc
         if proc.returncode != 0:
+            # ⛔ A DOCUMENTED NEGATIVE IS AN ANSWER, AND IT IS MAPPED BEFORE THE FAULT PATH. An
+            # unprotected branch must never become `Unreadable` — that reported the legitimate
+            # answer ("this branch requires no checks") as "I could not read", on the MERGE-GATING
+            # key, and re-spent a call on every poll. The sentinel is the key's OWN declared one, so
+            # a key that declares no negative falls through to the refusal below unchanged.
+            neg = spec.negative
+            if neg is not None and _is_documented_negative(
+                spec.argv,
+                getattr(proc, "stdout", b"") or b"",
+                getattr(proc, "stderr", b"") or b"",
+            ):
+                return bytes(neg.body)
             raise Unreadable(
                 f"{' '.join(cmd)} exited {proc.returncode}: "
                 f"{(proc.stderr or b'').decode('utf-8', 'replace').strip()[:300]}"
