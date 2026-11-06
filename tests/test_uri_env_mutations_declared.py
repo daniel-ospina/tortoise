@@ -223,7 +223,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_hard_reject.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hosted_api.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',  # #1686: register/provision journal tests force the embedded lane (the delenv IS the point)
                              r'monkeypatch\.setenv\(\s*$',  # #2251: URI-mode namespace-derivation envelope tests force the docker branch of _make_sdk/_registry_anchor with a RECORD-ONLY __init__ spy (the setenv IS the point — the (db_path=None, namespace=...) construction contract is pinned without touching a server)
-                             r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],  # #4661: the registry-probe connection-reuse tests force the URI branch, where the URI string IS the cache key (and `_make_sdk` is faked, so no server is contacted) — DELIBERATE_URI
+                             r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$',  # #4661: the registry-probe connection-reuse tests force the URI branch, where the URI string IS the cache key (and `_make_sdk` is faked, so no server is contacted) — DELIBERATE_URI
+                             r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*\S'],  # #10962: the SAME registry-probe tests written with the value INLINE (`setenv("TORTOISE_DB_URI", uri_a)`). Declared by SHAPE-of-call, not by line wrapping: the #4661 arm above requires the value on the next line, so four single-line sites red-ed `test_uri_env_mutations_declared` on the required `test (g)` shard while the code was correct — a suppression keyed on source LAYOUT rather than on (file, mutation form), which is exactly the anti-pattern the tooling literature names (layout belongs to the formatter; the guard should triage by file + rule). The intent is byte-identical to #4661's: the URI string IS the cache key, `_make_sdk` is faked so no server is contacted, and every site takes the fixture-param `monkeypatch`, which pytest auto-undoes at teardown — no lane leak. `\s*\S` matches an inline value and nothing else: the next-line form is already the arm above, and no other inline-value `TORTOISE_DB_URI` setenv exists in this file (all 20 other sites are multi-line or `delenv`).
     "test_index_cli.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_index_restore.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_issue_4010_sessions_unlimited.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #4010: resolver/clearing unit tests force the embedded lane (db_path-pinned store; the delenv IS the point — no lane leak, monkeypatch auto-undo)
@@ -2584,6 +2585,23 @@ def test_declaration_path_rejects_undeclared():
         "test_index_restore.py", 'os.environ.pop("TORTOISE_DB_URI", None)')
     assert _is_declared(
         "test_hosted_api.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
+    # #10962: the registry-probe tests' INLINE setenv form is declared too.
+    # The pre-fix declaration required the value on the next line (`,\s*$`),
+    # so the four single-line sites below were undeclared and red-ed the
+    # required `test (g)` shard on correct code. Pinned on the exact shapes
+    # the census produces (`_MUTATION_RE` yields the stripped LINE), so a
+    # future narrowing of this arm fails HERE rather than on CI.
+    for inline in ('monkeypatch.setenv("TORTOISE_DB_URI", uri_a)',
+                   'monkeypatch.setenv("TORTOISE_DB_URI", stable)',
+                   'monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/spin-0")'):
+        assert _is_declared("test_hosted_api.py", inline), (
+            f"the inline-value setenv form {inline!r} must be declared for "
+            "test_hosted_api.py (#10962) — it is the same deliberate URI "
+            "branch #4661 declares, differing only in line wrapping")
+    # …and the inline arm is NOT a blanket license: an inline setenv in a
+    # file with no registry-probe declaration stays undeclared.
+    assert not _is_declared(
+        "test_unknown.py", 'monkeypatch.setenv("TORTOISE_DB_URI", uri_a)')
     assert _is_declared(
         "test_directional_impl.py", 'os.environ["TORTOISE_DB_URI"] = _uri')
     # #9061: a declaration is bound to ONE module. Before the bare-name lookup
