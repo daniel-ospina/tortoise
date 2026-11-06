@@ -23,7 +23,8 @@ system of record for every layer; FalkorDB is a derived hot cache.** The one exc
 inside that window (2026-11-05T04:54Z), while **#10671 was already closed and the `search_keys` narrowing had
 already landed in the batch fold `a6e20f05b` when the first reading was taken** (both 2026-11-03), so two were
 stale before the window opened, not during it. Two more were **simply wrong** (#10620 is an unrelated docs PR;
-the detection machinery this plan first called "existing" does not exist in code). §9's log records the review
+the detection machinery this plan first called "existing" **did not exist where it was measured** — it landed
+later, by #10726, and §7.1 states which half of that correction still holds). §9's log records the review
 rounds that corrected a **claim in this plan**, with the commit that landed each — **from row 6 onward; the
 bound is deliberately unstated, since a range written "6–N" had to be re-edited every time a row landed** —
 while §1.1 / §7.1–7.2 carry the corrections themselves, so the next lane does not re-derive them. **A round
@@ -416,32 +417,44 @@ value the column's **declared** type cannot hold.
   nobody reads says so. Not process-only machinery.
 - **Ratio:** one test plus a declared-type reader; no fixtures re-encoding a schema.
 
-### 7.1 ⛔ Correction: the mechanism this plan called "existing" does not exist
+### 7.1 ⛔ Correction: the mechanism this plan called "existing" did not exist where it was measured
 
-Review cycle 1 measured it: **`grep -rn jsonb_columns` returns zero code hits.** #10671 proposed that reader and
-was **closed unmerged**, so nothing landed. What *does* exist points the other way:
+⚠️ **Review cycle 1 measured `grep -rn jsonb_columns` → zero code hits, and that was TRUE at the commit it
+measured (`3ac6b1636`) — it is FALSE at this head.** `git grep -c jsonb_columns -- '*.py'` → **29 hits across 2
+files**; `jsonb_columns()` is defined at `tortoise/record_projection.py:1607`, landed by `e74361912` (#10726's fold
+batch), which is in this branch through `f1aa7362b`. So #10671's reader **did** land, by another route, together
+with the parsers this section said had to be built. **What survives — and is the reason this section still
+exists — is the narrower claim about `_COLUMN_RE` itself, below.**
 
-- `tortoise/record_projection.py` states that a **forward migration narrowing a column's TYPE** is a form *"the
-  readers do not parse this form, and deliberately"*. ⚠️ **Precisely:** `_COLUMN_RE` **matches** the declared type
+What *does* remain true of `_COLUMN_RE`:
+
+- ⚠️ **A comment in `tortoise/record_projection.py` (`:222-226`) still says a **forward migration narrowing a
+  column's TYPE** is a form *"the readers do not parse this form, and deliberately"* — and **that comment is
+  stale at this head**, because `_ALTER_COLUMN_TYPE_RE` (`:1529`) parses exactly that form. It is quoted here
+  because it is the sentence this plan's cycle-1 correction was built on. §7.1's own subject is narrower:
+  `_COLUMN_RE` **matches** the declared type
   in a **non-capturing** group, and `columns = {m.group(1) …}` keeps only the **name** — so there is nothing
-  being discarded, and the type must be **lifted into a capture group**. So *type extraction is nearly there*
-  and must be captured, not built; **the genuinely new work is the `ALTER COLUMN … TYPE` form, the widened type
-  vocabulary, and the value→declared-type predicate.** And `_COLUMN_RE`'s type vocabulary is a **hardcoded
+  being discarded, and the type is **not** captured *by `_COLUMN_RE`*. At this head the capture exists in a
+  **separate** pattern (`_COLUMN_TYPE_RE`, `:1502`), not in `_COLUMN_RE`, so anything reusing `_COLUMN_RE` for
+  the type still has to lift it. And `_COLUMN_RE`'s type vocabulary is a **hardcoded
   seven-term allow-list** (`text|jsonb|integer|boolean|bigint|double precision|timestamptz`), so a
   derivation built on it **silently skips any column of another type** — which is why #11075's closure target
   ("a column added to a migration with no expectation reds") holds **only for types that vocabulary
   admits**, and the issue says so.
 
-**Consequence for #11075, and it is the sharp one:** an implementer who follows "reuse `jsonb_columns()`" reads
-`search_keys jsonb` from the *original* migration, and the pin **reds on the current, correct tree** — whose
-obvious repair is to exempt the column or revert the narrowing, i.e. **re-create the outage the pin exists to
-prevent.**
+**Consequence for #11075, and it is now the OPPOSITE of what this section first drew:** it said an implementer who
+follows "reuse `jsonb_columns()`" would read `search_keys jsonb` from the *original* migration and **red a
+correct tree**. Measured at this head, **`jsonb_columns()` returns 11 names and `search_keys` is not one of them** —
+because the reader applies `_ALTER_COLUMN_TYPE_RE` over the base `CREATE TABLE`. Reusing it is therefore
+**correct and cheap**, and the warned outage **cannot occur**; the earlier warning was true of a tree in which the
+ALTER form did not exist.
 
-**What is actually new work, stated once so the two documents cannot disagree:** the declared type must be
-**captured from the existing match** (`_COLUMN_RE` already matches it — above), the **`ALTER COLUMN … TYPE`
-form must be built**, the **type vocabulary must be widened** past its hardcoded seven terms, and the
-**value→declared-type predicate is new**. That mix of "capture one, build three" is why #11075's `db` domain is
-**complex** rather than standard.
+**What is actually new work, restated for this head:** the declared-type **capture and the `ALTER COLUMN … TYPE`
+form have landed** (`_COLUMN_TYPE_RE` `:1502`, `_ADDED_COLUMN_TYPED_RE` `:1513`, `_ALTER_COLUMN_TYPE_RE` `:1529`),
+so the earlier "capture one, build three" is **satisfied for the jsonb question**. What remains is the **type
+vocabulary** — still a hardcoded seven-term allow-list — and the **value→declared-type predicate** for types
+outside it. #11075's `db` domain stays **complex** on that narrower remainder, not on the four items this section
+first enumerated.
 
 ### 7.2 ⛔ Correction: this class-detector was deliberately deleted once
 
@@ -454,7 +467,7 @@ at the LAST entry. #11075 must say so, and say why a **migration-derived** check
 cannot outlive its defect in that way. Without that paragraph the next lane reads #11075 as re-litigating a
 recorded removal. ⚠️ **And #11075's body carries the ONE-STEP version of that provenance today** — *"records that
 `_SCHEMA_DISAGREEMENTS` was emptied and then made 'gone rather than parked' **when #9264 closed**"* — which makes
-it a **third** live carrier in that one body, beside its `carve_out:` registration order and its `_COLUMN_RE`
+it a **fourth** live carrier in that one body, beside its `carve_out:` registration order and its `_COLUMN_RE`
 "**does** capture" claim; the same one-line correction is owed to it, and §7.1's and this section's text are
 authoritative until it lands.
 
@@ -474,7 +487,7 @@ authoritative until it lands.
 - [ ] #10683 carries the `OVERRIDES:` line **and** the three factual corrections from §6
 - [ ] #11075's body passes the issue-creation body lint (Objective present; ≥2 observable Indicators; ≥1 Target
       each) and carries a verification checklist derived from S1/S2
-- [ ] #11075's body names the missing reader and the deliberately-deleted vocabulary (§7.1, §7.2)
+- [ ] #11075's body names the **reader that was missing when it was filed** — it exists at this head — and the deliberately-deleted vocabulary (§7.1, §7.2)
 - [ ] the capstone (#9567) is named as the Verify-stage gate; **no second capstone is filed**; its #9548
       dependency and #9559's `D11/D12`-only conditionality are both drawn
 - [ ] criterion 3 is recorded as **WAIVED by §2.0**, never as met
@@ -511,3 +524,4 @@ authoritative until it lands.
 | 23 | the fresh-context review at `602f5fa75` — the round that caught a word boundary, a snapshot three hours too late, and a marker the table's own convention requires | **Three P2, all mechanical, and the first and third were produced by the round before.** (1) ⚠️ **A missing space made the enumeration's closing claim render as one word.** `:158` read *"of the eleven\*\*only the append-only migration…"*, so the CommonMark delimiter run opened bold against the letter `n` and the rendered text read **"elevenonly"** — the fix that sentence exists to make, jamming the two halves together. `markdownlint-cli2` reports **0 issues** on it, so no CI leg would have caught it; a CommonMark render did, and the document now carries no `[word]<strong>` or `[word]<em>` boundary anywhere. (2) ⚠️ **The §5 preamble counted `#10683` as closed *at* `3ac6b1636`, and it closed 3h34m AFTER that commit.** `git show -s --format=%cI 3ac6b1636` → `2026-11-05T12:56:58Z`; `#10683` → `closed_at 2026-11-05T16:31:00Z`. The snapshot is therefore **22 open / 2 closed** (#10185 `04:54:01Z`, #10671 `11-03`), with `#10683` closed later that day and `#9548` since, giving the live **20 open / 4 closed** — and §5 row 6 now says *"OPEN at `3ac6b1636` — CLOSED 2026-11-05T16:31Z"* so the table agrees with its own header. (3) ⚠️ **Row 17 stated the classification row 22 falsified in the present tense and carried no in-place marker**, though the same cell demands one (*"it is corrected in place there, not only here"*) and row 12 does carry one. It is marked now. **The lesson at this point in the loop:** a fix is not complete until the ARTIFACT is re-read *and re-rendered* — the last two rounds' defects were both introduced by the previous round's fix, in the clause that fix was about. |
 | 24 | the fresh-context review at `d3fca77af` — the round where the count was right in the paragraph and short in the sentence that closes it | **Three P2, all citation/count defects, none in a measurement.** (1) ⚠️ **The "nothing carries it" clause still said "the two test files above"** (`:169`) while the paragraph names **three** — `test_record_searchkeys_10620.py`, `test_supabase_cli_pin_10593.py`, and `test_9548…`, the last of which round 22 had just promoted to a correction target. The clause was written when the enumeration was nine, and the round that made it eleven edited the closing claim above it but not this one; `:159`'s *"both test files included"* carried the same under-count. Both now say three. (2) ⚠️ **Rows 19(2) and 20 still asserted the §5 snapshot as `21 open / 3 closed`**, which row 23(2) had already falsified (`#10683` closed 3h34m after `3ac6b1636` → **22 open / 2 closed**), and neither carried the in-place marker the table's convention requires. Both are marked now. ⚠️ **The pattern in the log itself: a fix to the paragraph does not reach the sentence that CLOSES the paragraph, and a fix to a live section does not reach the log rows that recorded the earlier version of it.** Every round of this loop has now found its defect either one clause after the fix or one table row below it — the sweep has to be document-wide, over both the live prose and the log, and it is the only thing that has actually converged. (3) ⚠️ **`gate item (17)` of `#10864`'s Indicators was a dangling citation** — that field has three items, `(1)`–`(3)`, and the one the sentence describes is **`(3)`**. A false pointer in the row whose subject is false pointers. |
 | 25 | the fresh-context review at `1da4cd150` — the round whose findings were both in the row the round before had just written | **Two P2, both introduced by row 24's own edit, and both fixed.** (1) ⚠️ **Row 20 listed the §5 snapshot figure under "everything else reproduces at this head" and then marked it wrong in the same sentence** — a figure cannot both reproduce and be false. It is now outside the "reproduces" list, which the sentence names as the one exception. (2) ⚠️ **Row 19's inserted marker left no sentence terminator**, so the render read `…22 open / 2 closed (3) ⚠️ Row 18(3)…` and absorbed the next finding's enumerator into the snapshot clause; a full stop separates them now. ⛔ **Mitigation adopted rather than another round of the same fix:** a new log row may state what was FOUND and what was CHANGED, but it does not restate counts, figures or enumerations that live in the body — every restatement is a second site that has to stay in sync, and most of this log's recent defects were exactly that. The body is authoritative; rows 1–24's restatements are kept only because each was verified when written, and the ones later falsified carry in-place markers. |
+| 26 | the fresh-context review at `fcbf1d739` — the round that found the epic's load-bearing mechanism section describing a tree three commits older than the one it ships into | **One P1, and it is the merge-induced class this log has graded four times, now in §7.1.** ⚠️ **§7.1 opened with `grep -rn jsonb_columns` returning *zero code hits* and concluded that the reader and the `ALTER COLUMN … TYPE` form had to be built — but #10726's fold batch, which this branch merged in `f1aa7362b`, landed exactly that reader.** `jsonb_columns()` is defined at `tortoise/record_projection.py:1607`, with `_COLUMN_TYPE_RE`, `_ADDED_COLUMN_TYPED_RE` and `_ALTER_COLUMN_TYPE_RE` beside it; measured at this head it returns 11 names and **`search_keys` is not one of them**, so the section's *sharpest* warning — that reusing the reader would read the superseded `jsonb` and red a correct tree — was the opposite of the truth. ⚠️ **What survives, and is now the whole of §7.1:** `_COLUMN_RE` itself still matches the declared type in a **non-capturing** group, so a consumer of *that* pattern must lift it; and the type vocabulary is still a hardcoded seven-term allow-list. The rest — capture, the ALTER form, the reader — has landed, so *"capture one, build three"* is satisfied and `#11075`'s remainder is the vocabulary plus the value→declared-type predicate for types outside it. Fixed in §7.1, in §0's one-sentence verdict, in §8's checklist item, in §7.2's carrier count for `#11075`'s body (a **fourth** contradicted statement there: *"zero code hits"*), and in `01-test-design.md` §10's twin paragraph. ⚠️ **The general lesson, and it is the same one the base commit keeps making:** a merge that brings the branch *forward* brings it forward in the FILE SYSTEM too — every section that says "X does not exist" must be re-measured after a base merge, not only the sections that cite line numbers. |

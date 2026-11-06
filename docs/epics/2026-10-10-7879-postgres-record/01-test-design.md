@@ -292,14 +292,17 @@ cannot accept. A pin here is what would have caught #9264 before #10593 repeated
 earned: the failure produced a two-day silent row loss, and deleting the check makes the *product* worse, not the
 process.
 
-⚠️ **The reader this pin needs does NOT exist — this delta's first draft said it did.** `grep -rn jsonb_columns`
-returns **zero code hits**: #10671 proposed that mechanism and was **closed unmerged**. What exists points the
-other way — `tortoise/record_projection.py` states that a forward migration narrowing a column's TYPE is a form
-*"the readers do not parse this form, and deliberately"*, and its `_COLUMN_RE` matches the type and then keeps only the
-column **name**. So #11075 must **capture** the declared type from that existing match, **build** the
-`ALTER COLUMN … TYPE` form, **widen** the type vocabulary past its hardcoded seven terms, and add the
-**value→declared-type predicate** — closed over the migration set, or it reads the superseded `jsonb` declaration
-and reds on the current, correct tree.
+⚠️ **The reader this pin needs did NOT exist where this delta measured — and DOES exist at the head this plan
+now ships.** `grep -rn jsonb_columns` returned **zero code hits** at `3ac6b1636`, and at this head
+`git grep -c jsonb_columns -- '*.py'` returns **29 hits across 2 files**: `jsonb_columns()` is defined at
+`tortoise/record_projection.py:1607`, landed by `e74361912` (#10726's fold batch) and in this branch through
+`f1aa7362b`. So #11075 must **not** rebuild it: `_COLUMN_TYPE_RE` (`:1502`), `_ADDED_COLUMN_TYPED_RE` (`:1513`)
+and `_ALTER_COLUMN_TYPE_RE` (`:1529`) already exist, and `jsonb_columns()` already applies the narrowing —
+measured at this head it returns 11 names and **`search_keys` is not one of them**. What remains new is the
+**type vocabulary** (still a hardcoded seven-term allow-list) and the **value→declared-type predicate** for
+types outside it. `_COLUMN_RE` itself still matches the type in a **non-capturing** group, so a consumer of
+`_COLUMN_RE` must lift it — the fact §7.1 of the plan states, and the only part of the old paragraph that still
+holds.
 
 ⚠️ **And a detector of this class was deliberately removed once.**
 `tests/test_9078_record_written_by_production_path.py` records a TWO-step removal, not one: #9264 closed with only
