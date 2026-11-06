@@ -5464,3 +5464,70 @@ def test_an_item_whose_CONTENT_is_a_bare_marker_leaves_NO_paragraph():
     assert keyword_types(leaf) == {"html_block"}, leaf
     assert cl.parse_closing_refs(leaf) == [100], leaf
     assert cl.parse_closing_refs(leaf, None, strict=True) == [100], leaf
+
+
+def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
+    """A leaf-block state this module GUESSED must not outrank the `strict` arm's own contract.
+
+    `strict` is the PASS arm — `classify` refuses `lands` on it, and `issue_process_lint` reads the
+    carrier body through it — so its documented rule is "blank every indented line". `_html_here` is
+    THIS MODULE's HTML-block state machine, and an OVER-OPEN guess (the unsafe direction for a PASS
+    arm: it believes a leaf block is open where the renderer has none) must not be able to exempt
+    that line from the arm whose whole contract is to blank it. The state machine errs in BOTH
+    directions — see `> > - item` + `>` + `> >   <span>` + a wide-gap marker, where it reads
+    `_html_here=False` over an open `html_block` — so the premise is the direction that matters
+    here, not an invariant. The exempting term was a shared prefix on the `indented_code` branch, so
+    it took `strict` with it:
+
+        `-` + `    code` + `<br />` + `     -     Closes #100`
+            renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
+            `main` before #11186 `[]` in `strict`; after #11186 `[100]` — a FALSE PASS.
+
+    The mechanism is the strict arm's own declared over-blank feeding the guess: `strict` blanks
+    `    code`, so no paragraph looks open, so `<br />` is read as a legal type-7 opener (§4.6: type
+    7 cannot interrupt a paragraph), and the block it invents then exempts the marker line below it
+    — a line the renderer puts inside a real `<li>`'s code block.
+
+    ⛔ BOTH LENIENT ASSERTIONS BELOW ARE THE DECLARED #11156 RESIDUAL, NOT "a real claim": the
+    renderer puts this keyword in `<pre><code>`, so a lenient credit here is the raw-HTML fail-open
+    that round 44/45 PINNED as policy (`test_an_HTML_blocks_own_text_is_READ_not_hidden`). They are
+    asserted so the fix cannot move them silently — not because the renderer says the close is real.
+    "Protects a real close" is true only of the `leaf` control, where the block's own text is the
+    marker at column 0.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "-\n    code\n<br />\n     -     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert "#100" not in cl.strip_code(body, strict=True), body
+    # …and the LENIENT arms keep the term. This is the DECLARED #11156 residual (the renderer puts
+    # the keyword in `<pre><code>`, so a lenient credit is a fail-open), pinned here only so the fix
+    # cannot move it silently — see the docstring.
+    assert cl.parse_closing_refs(body) == [100], body
+    assert "#100" in cl.strip_code(body, indented_code=True), body
+    # …the CONTROL the fix must not touch: a wide-gap marker line inside a REAL html block is still
+    # credited in every arm (round 44 pinned the policy: an html block does not hide its own text).
+    leaf = "<pre>\n-     Closes #100\n"
+    assert keyword_types(leaf) == {"html_block"}, leaf
+    assert cl.parse_closing_refs(leaf) == [100], leaf
+    assert cl.parse_closing_refs(leaf, None, strict=True) == [100], leaf
+    assert "#100" in cl.strip_code(leaf, indented_code=True), leaf
+    # …and an html block's OWN OPENER line is never blanked by `strict`: it is where the state is
+    # LEARNED, so blanking it would destroy the block (and every later `_html_here` answer).
+    opener = "- a\n    <div>\n<br />\n2.     Closes #100\n"
+    assert cl.parse_closing_refs(opener, None, strict=True) == [100], opener
+    # ⛔ THE DECLARED TRADE, PINNED (reviewer A, P1 — it must not ship undeclared or unpinned).
+    # `strict` blanks an html block's own INDENTED text again, which is round 30's recorded "a PASS
+    # arm blanks every indented line" choice and exactly what `main` did before #11186. The renderer
+    # says PROSE here (a `<div>`'s raw text is visible), so the close is still READ by the lenient
+    # and `indented_code` arms — `classify` downgrades it to a warning rather than hiding it. If
+    # round 44/45's "read, not hidden" should extend to a block's INDENTED text, that is a REOPEN of
+    # the round-30 choice, homed on #11156 — the assertion below is what a reopen must change.
+    indented_html = "<div>\n    Closes #100\n"
+    assert keyword_types(indented_html) == {"html_block"}, indented_html
+    assert cl.parse_closing_refs(indented_html) == [100], indented_html
+    assert cl.parse_closing_refs(indented_html, None, strict=True) == [], indented_html
