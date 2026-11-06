@@ -101,7 +101,12 @@ turns land in the assembled context (ctx@40) with A1+A4+A5 on — the
 lexical-trio class needs the vector leg (A2), a documented runtime
 prerequisite (embeddings extra), not a code defect. Acceptance fixtures:
 `tests/test_ask_retrieval_levers.py` (gold-turn-in-context on the vector
-lane; pool-membership + cap-review assertions on the degraded lane).
+lane; pool-membership + cap-review assertions on the degraded lane) — the
+dataset-backed arms in that file are **opt-in** (`TORTOISE_LME_BENCH=1`),
+because the cached LongMemEval-S file being present on the box is not a
+property of the change under test: without the opt-in they skip with a reason
+that names the variable (#11056 — an ambient `$HOME` cache used to run a
+minutes-per-question bench inline in the fast gating shard).
 
 **Strong-model 500-Q config (the toutable benchmark, ready to run):** the
 500-Q LongMemEval-S baseline (run_protocol step 5) with the STRONG reader
