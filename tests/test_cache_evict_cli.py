@@ -416,3 +416,30 @@ def test_a_SUCCESSFUL_delete_whose_after_state_is_UNMEASURED_reports_2(wired, tm
         "the delete SUCCEEDED; only the after-state is unmeasured")
     assert code == 2, ("a run that removed nodes must never report 3 ('nothing was "
                        "removed')")
+
+
+def test_a_cache_already_inside_its_budget_reports_0(wired, tmp_path, capsys):
+    """⛔ The exit-code table's ROW 0 — the last arm with no assertion.
+
+    Measured before this test: deleting the `if report.verdict == "CLEAN": return
+    CACHE_EVICTION_EXIT_CLEAN` arm left all 14 CLI tests green, so a refactor could
+    report a nothing-to-do run as 2 ("may have evicted") — a false alarm on the one
+    reading a scheduler acts on without looking, and the only arm of the split nothing
+    protected.
+    """
+    _client, _unused = wired
+    report = _parity_report(tmp_path, instrument="tools/turn_parity_census.py")
+
+    code = cache_evict.main(_argv(
+        # The fake cache holds exactly 10 nodes and the budget IS 10, so the pass finds
+        # the cache inside its bound and evicts nothing.
+        "--population", "turn", "--max-nodes", "10", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(report), "--parity-graph", "tortoise",
+        "--execute", "--confirm-graph", "tortoise"))
+
+    body = json.loads(capsys.readouterr().out)
+    assert body["metric"]["verdict"] == "CLEAN", body["metric"]
+    assert body["metric"]["nodes_evicted"] == 0
+    assert code == 0, ("a cache already inside its budget must report 0, not 2 — a "
+                       "scheduler acts on this without reading the body")
