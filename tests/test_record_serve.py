@@ -689,8 +689,12 @@ def test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention():
     (#11184 review, P3): with the record side supplied the way this module says
     to supply it (``read_node`` → ``node_from_row``'s map),
     ``not_projectable``/``declined`` cannot reach the ``invented`` loop at all —
-    both are absent from that map by construction. So this arm guards the shape
-    a RAW-SQL audit is handed, exactly as the sibling arm below does; the
+    both are absent from that map by construction. So this arm guards a record
+    side that carries the DECLINED name — the population a RAW-SQL audit also
+    produces, which additionally reds on the record's COLUMN spellings
+    (``source_kind`` vs ``sourceKind``, measured) and is therefore NOT this
+    arm's shape; the raw-row sibling is the arm ABOVE,
+    ``test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention``. The
     sanctioned path needs no explanation arm because it cannot produce the name.
     """
     from tortoise.cache_projection import episodic_source_declined_properties, node_from_row

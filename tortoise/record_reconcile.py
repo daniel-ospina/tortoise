@@ -46,18 +46,21 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   property the cache holds that the partition did not judge, which is a
   DIFFERENT (larger) set than the one this bullet's earlier title named. Two
   facts make a name cache-held — it is outside its label's placement, AND the
-  record side does not carry it — so two populations reach it that are not the
-  one §17.5 owns: (a) the EP and derived scalars §17.5 places on the cache
+  record side does not carry it — so the populations that reach it include
+  THREE DECLARED classes PLUS one that no declaration names, and all four are
+  listed in one place here: the EP and derived scalars §17.5 places on the cache
   (``ep_alpha``/``ep_beta``/``ep_dirty``/``content_hash``/``confidence``/…),
-  which the record schema REFUSES by name and so can never hold, and (b) any
-  property a SECOND WRITER put on a placed node, which the record does not
-  carry — §17.1's chokepoint signature, reported rather than detected here (its
+  which the record schema REFUSES by name and so can never hold; the pair the
+  projection DECLINES; the NOT-PROJECTABLE columns; and — the undeclared one —
+  any property a SECOND WRITER put on a placed node, which the record does not
+  carry, §17.1's chokepoint signature, reported rather than detected here (its
   repair is *find the writer*, and ``verdict()`` stays ``clean``; measured at
   `#10394`'s review). They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
-  count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
-  here — (b) is declared by nothing, which is why it reads ``clean`` — and the
-  three differ in what repairs them: §17.5's cache-owned scalars,
+  count (the ``form_normalized`` precedent). ⚠️ The three DECLARED classes
+  differ in what repairs them, and the undeclared fourth is why ``verdict()``
+  can still read ``clean`` while the population is reported: §17.5's
+  cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair); the projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
@@ -398,14 +401,19 @@ class RecordReconcileResult:
     report: ReconciliationReport
     declaration: ResidencyDeclaration
     not_hot: int = 0
-    #: Properties the CACHE holds that this projection will not judge — §17.5's
-    #: EP/derived scalars (the record schema refuses them by name), PLUS the pair
-    #: the §9.1/D1 narrowing declines for an EPISODIC Source
+    #: Properties the CACHE holds that this projection will not judge — THREE
+    #: DECLARED omission classes PLUS one population no declaration names — as
+    #: ``(name, node count)``. The declared three: §17.5's EP/derived scalars
+    #: (the record schema refuses them by name), the pair the §9.1/D1 narrowing
+    #: declines for an EPISODIC Source
     #: (``cache_projection.episodic_source_prose_properties()``, which the RECORD
-    #: does hold), PLUS the NOT-PROJECTABLE columns
+    #: does hold), and the NOT-PROJECTABLE columns
     #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
-    #: and the cache must not materialise, ``#10394``) — as
-    #: ``(name, node count)``. Kept OUT of ``field_mismatches``
+    #: and the cache must not materialise, ``#10394``). The undeclared fourth:
+    #: any property a SECOND WRITER put on a placed node that the record does not
+    #: carry — no declaration names it, so it is reported here and
+    #: :meth:`verdict` stays ``clean`` (`#10394`'s review; the repair is *find the
+    #: writer*). Kept OUT of ``field_mismatches``
     #: (counting them
     #: made the clean verdict unreachable on a journal-projected cache) and kept
     #: as its OWN count (a comparison that declines to judge a field has to say
@@ -494,9 +502,10 @@ def reconcile_record_and_cache(
     refuses by name) is NOT a field mismatch and is reported as its own named
     ``graph_only`` count instead. ⚠️ ``placed`` also omits the pair the §9.1/D1
     narrowing DECLINES for an EPISODIC Source — which the record DOES hold — so
-    a ``graph_only`` name has three possible repairs, one per omission class:
-    none (schema-refused), a record-sourced re-projection (declined), or the
-    graph-side purge for a not-projectable column (below).
+    a ``graph_only`` name has one repair per population: none (schema-refused),
+    a record-sourced re-projection (declined), the graph-side purge for a
+    not-projectable column (below), or *find the writer* for the undeclared
+    second-writer population the partition also counts.
 
     ⛔ AND A THIRD OMISSION, from `#10394`: `cache_projection.
     CACHE_FORBIDDEN_COLUMNS` subtracts the NOT-PROJECTABLE class from
@@ -571,7 +580,8 @@ def _partition_cache_owned(
     """Split the cache side into what is COMPARED and what is CACHE-HELD.
 
     ⛔ "cache-held" is the whole not-compared side, and it carries THREE
-    omission classes (see the module docstring's (5) and :meth:`verdict`);
+    DECLARED omission classes PLUS one population no declaration names (see the
+    module docstring's (5) and :meth:`verdict`);
     "cache-owned" is §17.5's term for only ONE of them — the scalars the
     record CANNOT hold — so it is not the name of this partition.
 
