@@ -1441,7 +1441,17 @@ _RESIDUAL_OPENNESS = (
     # never was, closed` splits into clauses that each carry only half of it
     # (#11258 review `P2`, measured).
     r"\bnot\b[^.;]{0,30}\bclosed\b",
-    r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
+    # ⛔ THE CONTRACTION ARM IS THE WHOLE AUXILIARY FAMILY, not `isn't` alone
+    # (#11258 review round 8 `P2`, MEASURED). `isn'?t closed` was added beside
+    # `not closed` for the `is` auxiliary and nothing else, so every OTHER
+    # contracted auxiliary escaped: `wasn't closed`, `hasn't been closed`,
+    # `hadn't been closed`, `weren't closed` all GREEN while their uncontracted
+    # twins RED. That is the same defect the `fuses`→`fused` inflection fix
+    # records one class over — an arm reaching the subject but not the form the
+    # lane writes — and it is NOT one of the disclosed uncatchable shapes: these
+    # are phrased with `closed`, a word this arm exists to read.
+    r"\b(?:is|are|was|were|has|have|had|does|do|did|would|should|could|must|"
+    r"need|ca|wo)n['\u2019]?t\b[^.;]{0,30}\bclosed\b",
     # ⛔ `never … closed`, `<aux> yet to be closed`, `far from closed` and
     # `anything but closed` assert the gap is open for the same reason `not …
     # closed` does — but they are in the ANCHORED arm and NOT here, because unlike
@@ -2002,6 +2012,14 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half remains open",
     "the adjacency gap is not closed",
     "the ADJACENCY half has not yet been closed",
+    # round 8 (#11258 review round 8 `P2`, MEASURED): the CONTRACTED auxiliary. The
+    # uncontracted twins above and below RED; the contractions were GREEN because
+    # the arm carried `isn't` and only `isn't`. Each is a plain reopening a lane
+    # appends — `wasn't closed` says the gap is open in the past tense.
+    "the ADJACENCY half wasn't closed.",
+    "the ADJACENCY half hasn't been closed.",
+    "the ADJACENCY half hadn't been closed.",
+    "the ADJACENCY half weren't closed.",
     "the ADJACENCY result is unclosed",
     # the SPELLING clause is honest; a `;`/`, and`-joined second clause is not
     "the SPELLING gap is not closed and `minute` no longer fuses",
@@ -2370,6 +2388,32 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "current length on purpose: at `>= 22` against a 35-entry list THIRTEEN "
         "deletions were free, so the honest closures this branch added could be "
         "deleted with both tests GREEN (#11258 review round 7 `P2`, measured).")
+    # ⛔ AND THE OVER-BLOCK LEDGER IS PINNED BY SHAPE TOO (#11258 review round 8
+    # `P2`, MEASURED): it had a fail-closed re-measurement (`now_accepted == []`)
+    # and nothing else, so substituting entry 5 with a DUPLICATE of entry 1 left
+    # five entries, all still refused, and the proof GREEN — the `minute` cost, the
+    # one a lane is most likely to meet, silently dropped from the ledger. Same
+    # defect the two lists above already carry a fix for; the ledger needed it too.
+    assert len(set(_RESIDUAL_REFUSED_TRUTHFUL)) == len(
+        _RESIDUAL_REFUSED_TRUTHFUL), (
+        "the over-block ledger has duplicate entries — a duplicate pays for a "
+        "dropped cost while the count stays constant")
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 5, (
+        "the over-block ledger SHRANK below its floor — each entry is a measured "
+        "cost of a rule that cannot be widened without a coverage regression; "
+        "re-derive the ledger rather than deleting shapes")
+    for required in (
+            # the unit-token waiver cost — the one a lane actually meets, because
+            # the row's surviving gap IS the unit-spelling class
+            "the remaining gap is the SPELLING case for `minute`, which is open by design.",
+            # the comma forms: the veto slot cannot cross a comma
+            "the ADJACENCY half is CLOSED, not open.",
+            "the ADJACENCY half is judged, not open.",):
+        assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
+            f"the over-block ledger no longer carries {required!r} — that shape's "
+            "refusal is the measured price of a specific rule; if it is no longer "
+            "refused, move it into `_RESIDUAL_TRUTHFUL_STATEMENTS` instead of "
+            "dropping it silently")
     for required in (
             # the issue's own mutation, and the append-point arm
             "the ADJACENCY half is open again",
@@ -2388,6 +2432,11 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             "the ADJACENCY gap was never closed.",
             "the time-unit half has yet to be closed",
             "the ADJACENCY half is anything but closed.",
+            # ⛔ THE CONTRACTED AUXILIARY (#11258 review round 8 `P2`, MEASURED):
+            # `isn't` was the ONLY contraction the arm read, so every other one was
+            # GREEN while its uncontracted twin RED. This entry keeps the family
+            # shape (not just the `is` member) from being narrowed back.
+            "the ADJACENCY half hasn't been closed.",
             # ⛔ AND ONE SHAPE PER ARM/PATTERN THAT HAS FEW EXCLUSIVE PROOFS. The
             # round-6 fix covered `_RESIDUAL_CLOSED_VERDICT` and left the rest:
             # `_SPELLING_FLOOR` had NO membership entry and exactly ONE exclusive
