@@ -866,13 +866,14 @@ class TestAPartialExtractionIsNotDone:
 #: A ``file:line`` coordinate in prose. The filename-anchored half is the census
 #: pin's OWN predicate, imported rather than re-spelled: two spellings for one
 #: question drift, and this file's first version proved it — it matched only the
-#: contiguous ``ingest.py:<n>`` form, so ``config/ci-surfaces.yml` (`:10481`)``
-#: and a ranged coordinate walked through a guard that claimed to ban both. The
+#: contiguous ``ingest.py:<n>`` form, so the split spelling
+#: (``config/ci-surfaces.yml` (`:<n>`)``) and a ranged coordinate walked through a
+#: guard that claimed to ban both. The
 #: second alternative is the bare backticked continuation (``:`<n>` ``), which
 #: the census never needed because its cells always name the file. That half is
 #: SIX digits wide on purpose: the first version stopped at four, and this file's
-#: own subject is a row at `config/ci-surfaces.yml:10481` — five digits — so the
-#: natural short form (a bare ``(`:<n>`)`` after the filename was named a
+#: own subject is a `durations` row past line 10000, which is five digits — so
+#: the natural short form (a bare ``(`:<n>`)`` after the filename was named a
 #: sentence earlier) walked through a guard that claims to ban it.
 #: The THIRD alternative closes the census half's extension blind spot: the
 #: imported predicate reaches only `.py`/`.yml`/`.yaml`, so a docstring citing
