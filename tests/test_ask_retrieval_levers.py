@@ -98,9 +98,19 @@ def _bench_opted_in() -> bool:
     path is deterministic on every runner and the run path is where someone
     opted in. Nothing is weakened: with the opt-in set the bench still runs
     end to end wherever the dataset is cached.
+
+    ⛔ AN EXPLICIT OFF OUTRANKS THE PATH ARM, and this is not decoration. Without
+    it the gate still has no authoritative "no": a fleet box that exports
+    `TORTOISE_LME_DATASET` (the ordinary way someone points the bench at a
+    dataset) re-arms the measured 1,252 s bench in the fast gating shard, and
+    `TORTOISE_LME_BENCH=0` is silently ignored — the same accident class this
+    gate exists to remove, one indirection shallower. With the OFF in place the
+    only way to arm it is a spelling that asks for it.
     """
-    return (os.environ.get(_BENCH_OPT_IN_ENV) == "1"
-            or bool(os.environ.get("TORTOISE_LME_DATASET")))
+    flag = (os.environ.get(_BENCH_OPT_IN_ENV) or "").strip()
+    if flag == "0":
+        return False
+    return flag == "1" or bool(os.environ.get("TORTOISE_LME_DATASET"))
 
 
 def _bench_questions() -> dict[str, dict]:
@@ -278,6 +288,17 @@ def test_the_bench_is_armed_explicitly_never_by_an_ambient_home_cache(
     monkeypatch.setenv("TORTOISE_LME_DATASET", str(dataset))
     assert _bench_opted_in() is True
     assert set(_recorded_questions()) == {qid}
+
+    # ARM 4 — an explicit OFF OUTRANKS the dataset-path arm. Without this arm
+    # the gate has no authoritative "no": a box that exports
+    # TORTOISE_LME_DATASET re-arms the 1,252 s bench from a spelling that reads
+    # as a refusal, and CI cannot turn it off. Fails RED on the pre-ARM-4 code.
+    monkeypatch.setenv(_BENCH_OPT_IN_ENV, "0")
+    assert dataset.exists(), "arm 4 must bite on a PRESENT dataset path"
+    assert _bench_opted_in() is False
+    assert _recorded_questions() == {}
+    with pytest.raises(pytest.skip.Exception):
+        _bench_questions()
 
 
 # ── Indicator 1 / Target 0: 4 gold-turn-in-context fixtures ────────────────
