@@ -1340,6 +1340,28 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
     + _UNIT_TOKEN.pattern,
     re.I)
 
+#: ⛔ THE WAIVER withholds on ITS OWN SET, which is `_RESIDUAL_CLASS_ANCHOR` PLUS
+#: every spelling the unit arm reads and the anchor does not name (#11258 review
+#: round 5 `P1`, MEASURED). The unit arm was widened to the row's whole family;
+#: the anchor it is withheld by was not, so 9 of the arm's spellings (`units?`,
+#: `unit word`, `mos`, `mi`, `millisec(s)`, `kg`, `m`, `s`) never reached it when
+#: the sentence also said `spelling`: `` the SPELLING gap is open because `kg` is
+#: no longer fused `` was WAIVED (GREEN) while the same shape with `minute` RED —
+#: the waiver is applied per sentence, so one word defeated the gate, the same
+#: class as round 3's finding one layer in.
+#: ⛔ WIDEN THIS SET, NOT `_RESIDUAL_CLASS_ANCHOR`: the anchor also arms
+#: `_RESIDUAL_ANCHORED_OPENNESS`, and adding these spellings to it reds 29 of the
+#: 32 truthful statements (measured) — the withholding set is the narrow surface.
+#: The `(?<!['’])` guards are what keep the bare `m`/`s` alternatives from
+#: arming on a contraction: `\b` treats `'` as a boundary, so without them
+#: `I'm confident … is no longer fused` and `the pair's refusal … is no longer
+#: fused` RED (measured — a false block on the artifact's own vocabulary).
+_RESIDUAL_WAIVER_WITHHOLD = re.compile(
+    _RESIDUAL_CLASS_ANCHOR.pattern
+    + r"|\b(?:units?|unit\s+word|kg|mi|mos|millisec|millisecs)\b"
+    + r"|(?<!['\u2019])\b[ms]\b",
+    re.I)
+
 #: The anchors that mark a claim about the CLOSED gap, and — because the
 #: honest-SPELLING waiver reads THIS set — the words that withhold that waiver.
 #: ⛔ `carve-out` IS IN IT, and that is a deliberate OVER-BLOCK: prefixing a
@@ -1469,7 +1491,8 @@ _RESIDUAL_OPENNESS = (
     r"time[- ]unit)\b[^.;]{0,80}?\bno\s+longer\s+(?:fused|fusing)\b",
     r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
     r"week|weeks|month|months|mos|year|years|mile|miles|mi|millisecond|"
-    r"milliseconds|millisec|millisecs|min|mins|ms|sec|secs|hr|hrs|km|kg|m|s)"
+    r"milliseconds|millisec|millisecs|min|mins|ms|sec|secs|hr|hrs|km|kg|"
+    r"(?<![\'\u2019])\bm\b|(?<![\'\u2019])\bs\b)"
     r"\b[^.;]{0,80}?\b(?:is|are|remains?|stays?|was|were)\b[^.;]{0,80}?"
     r"\bno\s+longer\s+(?:fused|fusing)\b",
     r"\bunclosed\b",
@@ -1837,7 +1860,7 @@ def _is_honest_spelling(text: str) -> bool:
     over-block, which this artifact prefers to the fail-open it replaces.
     """
     return ("spelling" in text
-            and not _RESIDUAL_CLASS_ANCHOR.search(text))
+            and not _RESIDUAL_WAIVER_WITHHOLD.search(text))
 
 
 def test_the_registry_row_names_the_residual_that_still_stands():
@@ -2059,12 +2082,15 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # one of the four membership-pinned ones — `len` and uniqueness both held and
     # the test stayed GREEN). These close the remaining five class-word
     # alternatives. ⛔ NOT EVERY alternative is pinned — measured by deleting one at
-    # a time: the 6 class words, `units?`, `minute`, `km`, and (round 4) `kg`,
-    # `mi`, `mos`, `millisec`, `m` each lose a RED; the remaining plain-English
-    # spellings (`second(s)`, `hour(s)`, `day(s)`, `week(s)`, `month(s)`,
-    # `year(s)`, `mile(s)`, `millisecond(s)`, `min`, `ms`) do NOT, so a tidying
-    # pass that collapses `second|seconds` still gets no signal. Said here rather
-    # than implied (#11258 review round 4 `P2`).
+    # a time (#11258 review round 5 `P2`, MEASURED): 5 of the 6 class words lose a
+    # RED — `time[- ]unit` does NOT, because its proof shape `the time-unit half is
+    # no longer fused` is caught by the unit arm's `units?` matching inside the
+    # token, so that alternative is pinned by nothing and its mutation pins nothing
+    # exclusively — plus `units?`, `minute`, `km`, `kg`, `mi`, `mos`, `millisec`,
+    # `m` in the unit arm. The remaining 27 spellings (including `second(s)`,
+    # `hour(s)`, `min`, `ms`, `s`) do NOT lose a RED, so a tidying pass that
+    # collapses `second|seconds` still gets no signal. Said here rather than
+    # implied.
     "the half is no longer fused",
     "the carve-out is no longer fused",
     "the value class is no longer fused",
@@ -2091,6 +2117,14 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # which the 20-char bound read as GREEN on the unit side and RED on the
     # class-word side.
     "`minute` is, after the widen landed, no longer fused",
+    # ⛔ THE WAIVER'S OWN FALSIFIERS (#11258 review round 5 `P1`, MEASURED): the
+    # unit arm was widened but the waiver's WITHHOLDING set was not, so prefixing
+    # the shape with the row's own disclosure word made it invisible —
+    # `` the SPELLING gap is open because `kg` is no longer fused `` was WAIVED
+    # while the same shape with `minute` RED. These three run the waiver path.
+    "the SPELLING gap is open because `kg` is no longer fused",
+    "the SPELLING gap is open because `mi` is no longer fused",
+    "the SPELLING gap is open because `mos` is no longer fused",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -2232,12 +2266,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 78, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 81, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ The floor is "
         "kept within ONE arm's proof set of the current length on purpose: at a "
         "#11258 round-6 reviewer-measured 49, twenty-one deletions were permitted "
-        "while `_RESIDUAL_CLOSED_VERDICT` is six shapes, so the whole arm plus every "
+        "while `_RESIDUAL_CLOSED_VERDICT` is three patterns (two exclusively covered — "
+        "the same three are duplicated inside `_RESIDUAL_ANCHORED_OPENNESS`), so the arm plus every "
         "proof of it could be deleted with both tests GREEN.")
     assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 30, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
@@ -2256,9 +2291,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             "the ADJACENCY half is not only open, it is unfused.",
             # ⛔ THE CLOSED-VERDICT ARM (round 4/5, #11258 round-6 review `P1`
             # MEASURED): with the floor's old slack this arm had NO membership
-            # entry — emptying `_RESIDUAL_CLOSED_VERDICT` AND deleting its six
+            # entry — emptying `_RESIDUAL_CLOSED_VERDICT` AND deleting its TWO
             # exclusively-covered shapes left BOTH tests GREEN, because the floor
-            # permitted 21 deletions and the arm is 6.
+            # permitted 21 deletions and the arm is three patterns (two of them
+            # exclusively covered).
             "the ADJACENCY gap was never closed.",
             "the time-unit half has yet to be closed",
             "the ADJACENCY half is anything but closed.",
