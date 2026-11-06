@@ -1031,10 +1031,14 @@ class CacheProjectionError(RuntimeError):
 
 
 class PlacementTableUnavailable(CacheProjectionError):
-    """The placement table could not be resolved — a fault in the INSTALL.
+    """The placement table could not be resolved — an INSTALL or CALLER-PATH fault.
 
-    Raised on EVERY arm that leaves the runtime without a property namespace,
-    all of them packaging faults and none a record fault (#10663):
+    Raised on EVERY arm that leaves the runtime without a property namespace.
+    Arms 1-5 are packaging faults and none of them is a record fault (#10663);
+    arm 6 is a caller-supplied path, which is neither an install nor a record
+    fault (the preamble says so because a docstring that calls every arm an
+    install fault would contradict the one arm whose purpose is to keep a bad
+    path from being read as a broken install):
 
     1. **neither carrier** — no packaged table (:data:`PACKAGED_PLACEMENT_TABLE`)
        AND no source document (:data:`PLACEMENT_DOC`);
@@ -1062,8 +1066,9 @@ class PlacementTableUnavailable(CacheProjectionError):
        ⚠️ The doc arm is NOT at full parity: a doc has no `_row_count` and no
        per-row provenance, so a row LINE the parser cannot match is dropped
        silently (`parse_placement_rows` skips it). What catches that is
-       `tests/test_record_schema_placement.py`'s ABSOLUTE count
-       (`EXPECTED_TOTALS`: 192/29/0, 221 names) — NOT `test_cache_projection.py`,
+       `tests/test_record_schema_placement.py`'s ABSOLUTE count —
+       `EXPECTED_TOTALS` (192 primary / 29 derived / 0 unclassified) and
+       `EXPECTED_TOTAL_NAMES` (221) — NOT `test_cache_projection.py`,
        which derives from the same doc through the same regex and so shrinks with
        it (its unclassified-column pin catches a lost PRIMARY row only, via the
        migrations). Stated because an unqualified "refuses exactly like the
