@@ -139,8 +139,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
   legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
-  who does not want the wipe — and it has NO non-destructive route: nothing
-  writes the column any more, so no in-place repair can exist. That is WHERE IT
+  who does not want the wipe — and it has NO route that RESTORES the value:
+  nothing writes the column any more, so there is nothing to re-derive it from.
+  ⛔ Not "no in-place repair": ``#10017``'s purge IS in place, and so is a
+  targeted clear — what is missing is a route that KEEPS the value. That is WHERE IT
   DIFFERS from the declined pair, which does have one, shipped:
   ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
   ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
