@@ -737,10 +737,13 @@ mechanisms:
       THE DISCRIMINATOR — how the rule tells a droppable identifier from a
       retainable state value: it carries no identifier CLASSIFIER. What it judges
       is a token's trailing numeric CORE, whatever letters precede it (`x4` reads
-      as `4`, so `x4`/`5` and `x4 ms`/`5000 ms` ARE judged), and the one shape
-      where the identifier's own letters enter the identity is residual (d2)
-      below, where a `k` tail over a known unit is folded and SCALED (`x4k`+`ms`
-      → `4000 ms`). It judges
+      as `4`, so `x4`/`5` and `x4 ms`/`5000 ms` ARE judged). The identifier's own
+      letters enter the identity only where a `k` TAIL is read as a magnitude
+      prefix, and that happens in TWO shapes: BARE, where the ×1000 is closed by
+      arm (i) with no unit folded (`x4k` against `4000` TOLERATES, and
+      `_composed_identity` DECLINES it because `k` is already a known unit), and
+      over a KNOWN UNIT, which is residual (d2) below (`x4k`+`ms` → `4000 ms`).
+      It judges
       VALUES over the engine's own bindings, in three tolerances (#10360 lane
       record): (i) value identity, not string identity — a numeric core with its
       SIGN and its UNIT kept, so ``4.20``/``4.2``,
