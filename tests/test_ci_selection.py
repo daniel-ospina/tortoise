@@ -9739,8 +9739,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
 
 
 def test_the_test_job_carries_no_unbounded_cache_post_step():
-    """#11063: the `test` job must carry NO unbounded cache post step, and its one
-    writer must be bounded twice — in SIZE and in TIME.
+    """#11063: the `test` job must carry NO unbounded cache post step, and each
+    dependency-cache writer must be bounded twice — in SIZE and in TIME.
 
     MEASURED (run 42000057137, job `test (d)` 127165076497, runner
     `pi-runner-vm-6`, 90 m cap): the uv+pip restore MISSED
@@ -9837,8 +9837,45 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         return _uses_of(step).split("@")[0] in {"actions/cache", "actions/cache/save"}
 
     # ── No implicit save may come back: that is the defect itself ──────────────
+    # Enumerated by MECHANISM, never by one spelling (#11065 cycle 3, review finding).
+    # `actions/cache@` is only the FIRST way to acquire an unbounded post-step save:
+    #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
+    #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
+    #       the 3.6 GB half, in a post step with no timeout. It is used one job away
+    #       (`python-ci.yml:3106`), so this is a live shape, not a hypothetical;
+    #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
+    #       call `actions/cache` for us — expanded ONE level below.
+    # A `uses:`-prefix scan alone reads GREEN over both.
+    _CACHE_INPUTS = frozenset({"cache", "cache-dependency-path"})
+    _CACHE_CAPABLE = frozenset({
+        "actions/setup-python", "actions/setup-node", "actions/setup-uv",
+    })
     implicit = [(s.get("name"), s.get("uses")) for s in steps
                 if _uses_of(s).startswith("actions/cache@")]
+    for s in steps:
+        if _uses_of(s).split("@")[0] in _CACHE_CAPABLE:
+            armed = sorted(k for k in (s.get("with") or {}) if k in _CACHE_INPUTS)
+            assert not armed, (
+                f"the `test` job's step {s.get('name')!r} arms a cache save through "
+                f"{s.get('uses')!r} ({armed}). A `cache:` input installs that "
+                "action's OWN UNBOUNDED post-step save — charged against the job's "
+                "`timeout-minutes` exactly as #11063's was — so it is the defect one "
+                "spelling over. Keep the cache an explicit, BOUNDED "
+                "`actions/cache/save@` for a key this job owns.")
+        uses = _uses_of(s)
+        if uses.startswith("./"):
+            _root = Path(__file__).resolve().parent.parent
+            for _ext in ("action.yml", "action.yaml"):
+                _manifest = _root / uses / _ext
+                if _manifest.exists():
+                    _body = _manifest.read_text(encoding="utf-8")
+                    assert ("actions/cache@" not in _body
+                            and "actions/cache/save@" not in _body), (
+                        f"the `test` job's step {s.get('name')!r} delegates to the "
+                        f"composite action {uses!r}, whose body carries its own cache "
+                        "write — an implicit, UNBOUNDED post step one indirection away "
+                        "from this scan (#11063)")
+                    break
     assert not implicit, (
         f"the `test` job still carries implicit post-step cache SAVE(s) {implicit}. "
         "That post step is UNBOUNDED and is charged against the job's "
@@ -10122,12 +10159,20 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "the `OVERRIDES:` block does not name the cache directory it governs "
         "(`~/.cache/uv`) or its only writer (`uv sync --frozen`), so its reason "
         "is unattributable — restate it against the uv-side payload.")
-    assert "#7612's payload" not in overrides, (
-        "the `OVERRIDES:` block still attributes #7612's payload (the 3.2 GB "
-        "torch wheel set) to `~/.cache/uv`. It is not there: `install-cpu-torch` "
-        "installs torch with `pip`, so it lives in `~/.cache/pip`, which this "
-        "job only restores. `--ci` would drop the DEV-GROUP registry wheels "
-        "`uv sync --frozen` re-resolves — say that instead (#11065 cycle 7).")
+    # Test the ATTRIBUTION, not the phrase (#11065 cycle 3, review finding). A bare
+    # substring ban reddened a CORRECT edit — a sentence saying the 3.2 GB torch
+    # wheels are #7612's payload and live in `~/.cache/pip` — because it matched the
+    # words rather than the claim. What is forbidden is one line asserting the payload
+    # SITS in `~/.cache/uv`.
+    for _ln in overrides.splitlines():
+        if "#7612's payload" in _ln:
+            assert "~/.cache/uv" not in _ln, (
+                "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB "
+                "torch wheel set) to `~/.cache/uv`. It is not there: "
+                "`install-cpu-torch` installs torch with `pip`, so it lives in "
+                "`~/.cache/pip`, which this job only restores. `--ci` would drop "
+                "the DEV-GROUP registry wheels `uv sync --frozen` re-resolves — "
+                f"say that instead (#11065 cycle 7). Offending line: {_ln.strip()!r}")
     assert prune.get("continue-on-error") is True, (
         "the uv prune must be `continue-on-error: true` — a prune that cannot run "
         "only leaves a bigger archive for a save that is bounded on its own")
@@ -10238,10 +10283,24 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
 
     # Any DEPENDENCY-cache write kept in this job must be explicit AND bounded: an
     # unbounded save is the defect (#11063) — it killed a green shard at the cap.
-    # Scoped to `~/.cache` on purpose, so the arm cannot be read as covering the
-    # `Save pytest last-failed state (#6142)` write, which is still an explicit
-    # unbounded `actions/cache/save@v4` (disclosed in the PR body, payload
-    # measured at 23 s, OUT OF SCOPE here — #11065 cycle 2, closing note).
+    #
+    # ⛔ The one writer OUTSIDE `~/.cache` is admitted BY NAME, never by omission
+    # (#11065 cycle 3, review finding). The previous scope was a `~/.cache` substring
+    # test, so a NEW unbounded save on any other path — `~/.cargo`, `node_modules`, a
+    # repo-relative tree — read GREEN: the exact #11063 shape, one path over. Naming
+    # the admitted exception makes the NEXT writer red instead of invisible.
+    _ADMITTED_OUTSIDE_CACHE = "Save pytest last-failed state (#6142)"
+    _outside = {s.get("name") for s in steps
+                if _is_writer(s) and "~/.cache" not in _path_of(s)}
+    assert _outside <= {_ADMITTED_OUTSIDE_CACHE}, (
+        "the `test` job carries cache write(s) on a path outside `~/.cache` that "
+        f"this pin does not admit: {sorted(_outside - {_ADMITTED_OUTSIDE_CACHE})}. "
+        f"The only admitted one is {_ADMITTED_OUTSIDE_CACHE!r} (`.pytest_cache`, "
+        "payload measured at 23 s, `continue-on-error`, independent owner in "
+        "tests/test_ci_last_failed.py). Any OTHER unbounded save is the #11063 "
+        "defect — it is charged against the job cap and withholds a REQUIRED check "
+        "on a green shard. Give it an explicit positive `timeout-minutes` and add "
+        "it here, or restore it read-only.")
     for s in (st for st in steps if _is_writer(st)
               and "~/.cache" in _path_of(st)):
         bound = s.get("timeout-minutes")

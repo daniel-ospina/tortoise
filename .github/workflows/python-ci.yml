@@ -1944,7 +1944,7 @@ jobs:
         if: always()
         uses: ./.github/actions/falkordb-teardown
 
-      # ─────────── The ONLY cache writer this job carries, bounded twice (#11063)
+      # ─────────── The ONLY `~/.cache` writer this job carries, bounded twice (#11063)
       #
       # An explicit step, not an `actions/cache` POST step: a post step cannot be
       # ordered against anything else in the job, which is half of why the

@@ -117,9 +117,18 @@ def _bench_opted_in() -> bool:
     # (`tests/test_ask_regression_llm.py:62`) arms on `== "1"` only, so every other spelling is
     # off there; this predicate keeps the explicit path as an opt-in, so it must enumerate the
     # OFF spellings instead. Armed ONLY by a spelling that asks for it.
-    if flag.lower() in {"0", "false", "no", "off"}:
+    # ⛔ DENY-BY-DEFAULT: the set of "off" spellings is OPEN, the set of ARMING
+    # spellings is not. A blacklist (`0/false/no/off`) was still a fail-open: with
+    # `TORTOISE_LME_DATASET` exported, `disabled`, `none`, `n`, `2` and the empty
+    # string all ARMED the measured 1,252 s inline bench in the fast gating shard —
+    # a refusal that reads as a refusal and does the opposite, which is the exact
+    # failure #11056 exists to remove (#11065 cycle 3, review finding). So the
+    # predicate is inverted: anything set that is not an ARMING spelling is an OFF.
+    # An UNSET flag is not a veto — the dataset path alone still arms it (ARM 3).
+    _ARMING = {"1", "true", "yes", "on"}
+    if flag and flag.lower() not in _ARMING:
         return False
-    return flag == "1" or bool(os.environ.get("TORTOISE_LME_DATASET"))
+    return flag.lower() in _ARMING or bool(os.environ.get("TORTOISE_LME_DATASET"))
 
 
 def _bench_questions() -> dict[str, dict]:
@@ -283,7 +292,13 @@ def test_the_bench_is_armed_explicitly_never_by_an_ambient_home_cache(
     assert dataset.exists(), "the fixture must be present for arm 1 to bite"
     assert _bench_opted_in() is False
     assert _recorded_questions() == {}
-    with pytest.raises(pytest.skip.Exception):
+    # ⛔ `match=` is load-bearing: a bare `pytest.raises(pytest.skip.Exception)`
+    # accepts ANY skip, so the two prereqs could be SWAPPED — or the dataset-absent
+    # branch deleted outright — with this pin still green (#11065 cycle 3, review
+    # finding; both mutations were measured green). `_bench_questions()`'s own
+    # docstring says these "must never read as" each other; ARM 1 and ARM 6 are what
+    # enforce it.
+    with pytest.raises(pytest.skip.Exception, match="not armed"):
         _bench_questions()
 
     # ARM 2 — the flag alone arms it, with TORTOISE_LME_DATASET unset.
@@ -306,7 +321,7 @@ def test_the_bench_is_armed_explicitly_never_by_an_ambient_home_cache(
     assert dataset.exists(), "arm 4 must bite on a PRESENT dataset path"
     assert _bench_opted_in() is False
     assert _recorded_questions() == {}
-    with pytest.raises(pytest.skip.Exception):
+    with pytest.raises(pytest.skip.Exception, match="not armed"):
         _bench_questions()
 
     # ARM 5 — every ORDINARY "off" spelling is an off, not just the literal "0" (review
@@ -323,6 +338,20 @@ def test_the_bench_is_armed_explicitly_never_by_an_ambient_home_cache(
             f"one (#11056)"
         )
         assert _recorded_questions() == {}, f"{off_spelling!r} must not reach the dataset"
+
+    # ARM 6 — the OTHER prerequisite is reported as itself (#11065 cycle 3, review
+    # finding). ARMED, with the dataset file pointed at a path that is not there: the
+    # skip must name the DATASET, never "not armed". Without this arm the two branches
+    # could be swapped, or the dataset branch deleted, with ARM 1 still green.
+    # `_CACHED_DATASET` is the module global `_recorded_questions()` actually reads, so
+    # this arm moves IT (moving only the env var would leave the present fixture in
+    # place and the arm would pass for the wrong reason).
+    monkeypatch.setenv(_BENCH_OPT_IN_ENV, "1")
+    monkeypatch.delenv("TORTOISE_LME_DATASET", raising=False)
+    monkeypatch.setattr(mod, "_CACHED_DATASET", tmp_path / "absent-dataset.json")
+    assert _bench_opted_in() is True, "ARM 6 must be an ARMED run to isolate the dataset arm"
+    with pytest.raises(pytest.skip.Exception, match="dataset absent"):
+        _bench_questions()
 
 
 # ── Indicator 1 / Target 0: 4 gold-turn-in-context fixtures ────────────────
