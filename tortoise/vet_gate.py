@@ -714,10 +714,22 @@ def _referenced_entity_names(embed_list: object,
     # `_endpoint_fold_keys`' pair cannot be called here. The index below is
     # `_norm(name).casefold()` with two probes — NOT the emitter's two-key pair —
     # so "the identity rule has one home" holds for the two RESOLVER stages and
-    # NOT for this guard. Measured over a 14x20 spelling matrix: 0 S5-resolvable
-    # pairs are left unprotected, 2 are over-protected ('Straße  X' /
-    # 'STRASSE X'), and over-protecting is this guard's declared safe direction —
-    # it can keep an entity whose relation S5 then drops, never mint a wrong edge.
+    # NOT for this guard.
+    #
+    # The DIRECTION is a property, not a measurement: keying on
+    # `casefold(_norm(name))` makes this match a WIDENING of the emitter's pair,
+    # because either fold-equality the emitter resolves on survives the extra
+    # step — `_norm`-equal implies `casefold`-equal, and `casefold(x) ==
+    # casefold(y)` implies `casefold(_norm(x)) == casefold(_norm(y))` (verified
+    # exhaustively over the Unicode table: `casefold(c) == casefold(c.lower())`
+    # for every codepoint, so the lower step never widens the fold away; and two
+    # casefold-equal strings have identical whitespace, so `_norm`'s collapse is
+    # the same on both). So over-protection — keeping an entity whose relation S5
+    # then drops — is this guard's ONLY divergence direction, and it is its
+    # declared safe one. It can keep too much; it cannot mint a wrong edge.
+    # ⚠️ No count belongs in this comment: a count of protected/unprotected pairs
+    # is a property of the spelling SAMPLE, not of the code (a dense matrix turns
+    # the same 0 into dozens). The invariant above is what a reader can rely on.
     if not relation_endpoints:
         return names
     emitted: dict[str, set[str]] = {}
@@ -1181,14 +1193,26 @@ def apply_vet(embed_list: Mapping[str, Any],
         # a miss).
         if ref_name not in layer1_referenced \
                 and name.casefold() in held_folded:
-            # The append is skipped, and the reference is recorded so the Layer-1
-            # surfaces `_rewrite_entity_references` actually rewrites
-            # (`about_entities`, `slots`) name the held spelling. ⛔ It does NOT
-            # rewrite a RELATION endpoint: `_iter_items` walks
-            # `entities`/`events`/`points` only, so `relations[].src/dst` keep
-            # the spelling as written and rely on S5's own endpoint fold — a
-            # future consumer of `embed_list["relations"]` that matches EXACTLY
-            # would see the unreconciled name.
+            # The append is skipped: restoring the prior copy would put two
+            # Objects in the emission and make S5's fold index ambiguous.
+            # The held spelling IS recorded, so `_rewrite_entity_references`
+            # re-spells every item-level reference to it (`about_entities`,
+            # `slots`). It does NOT rewrite a RELATION endpoint: `_iter_items`
+            # walks `entities`/`events`/`points` only, so `relations[].src/dst`
+            # keep the spelling as written and rely on S5's own endpoint fold —
+            # a consumer of `embed_list["relations"]` that matched EXACTLY would
+            # see the unreconciled name, which is S5's declared drop, not this
+            # guard's silent rewrite.
+            # WARNING: this assignment is NOT inert, and a comment claiming it
+            # was is exactly why it is documented here: `layer1_referenced` is
+            # snapshotted BEFORE the restore appends, so a restored entity row
+            # that ITSELF carries `about_entities`/`slots` is walked by that pass
+            # and gets reconciled here (measured by an independent verifier:
+            # pre-change the row read 'Straße', with the assignment removed it
+            # read 'STRASSE'). No payload differs either way —
+            # `Entity(extra="forbid")` rejects such a row in both trees — so
+            # this is bookkeeping, kept so a comment-only round does not change
+            # the guard's behaviour.
             canonical[ref_name] = held_folded[name.casefold()]
             continue
         original = prior_entities.get(name)
@@ -1238,16 +1262,30 @@ def apply_vet(embed_list: Mapping[str, Any],
             held = held_folded.get(name.casefold())
             if held:
                 canonical[ref_name] = held
-                # ⚠️ RESIDUAL (review round 10, P3, NOT fixed here): this
-                # re-spelling emits no warning. It is deliberate — payload
-                # identity is EXACT, so the reference as written would fail
-                # Layer-1 — but the held spelling may be a DIFFERENT entity
-                # (Layer-1 identity is `(name, kind)`), and the doctrine 50
-                # lines above says "guessing is worse than a miss". The arm was
-                # not reproduced by probe at 4ff6f2310 (to_restore carried the
-                # reference and `held_folded` held the sibling, yet this branch
-                # produced neither a rewrite nor a warning), so the disclosure
-                # is left as a follow-up rather than claimed as fixed.
+                # ⚠️ RESIDUAL (P3, NOT fixed here, and REACHABLE — reproduced
+                # by probe, see below): this re-spelling emits no warning. It is
+                # deliberate — payload identity is EXACT, so the reference as
+                # written would fail Layer-1 (a 422 that loses the WHOLE
+                # session) — but the held spelling may be a DIFFERENT entity
+                # (Layer-1 identity is `(name, kind)`, and `held_folded` carries
+                # no kind), so the doctrine 50 lines above says "guessing is
+                # worse than a miss". The trade is deliberate and declared, not
+                # accidental.
+                #
+                # ⛔ The arm IS reachable, and this comment used to claim the
+                # opposite ("not reproduced by probe") because the probe passed
+                # `prior={}`: `apply_vet` early-returns above unless Rule 4 is
+                # entered (`discarded_ids` or `prior_texts` or
+                # `prior_entities`), so that probe never ran this code at all.
+                # The working probe (measured on this arm): entities
+                # `[{"name": "Straße"}]`, a POINT whose `about_entities` is
+                # `["STRASSE"]`, and `prior={"removed_entities":
+                # {"Unrelated": {...}}}` (prior CANNOT supply `strasse`) → the
+                # point's `about_entities` becomes `["Straße"]` with
+                # `warnings == []`. The reference is item-level because that is
+                # the only place a reference is a Layer-1 surface at all —
+                # `payload` carries no top-level `about_entities`, and
+                # `_iter_items`/`validate_layer1` both read the per-item key.
             else:
                 warnings.append(
                     "vet: ⚠️ a surviving candidate references entity "

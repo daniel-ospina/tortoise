@@ -136,15 +136,27 @@ def test_the_shape_gate_defers_the_relations_section_to_s5():
 
 
 def test_s5_owns_every_relations_mistype_the_gate_defers():
-    """The deferral is only sound because S5 COUNTS every one of those shapes
-    (the reporting discipline rule 1 rests on) — no mistype is silent."""
-    cases = [
-        {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL"},
-        [{"src": "Retry Storm", "dst": "Deadline Rule"}],
-        [{"src": "Retry Storm", "dst": None, "predicate": "IMPL"}],
-        [42],
-    ]
-    for relations in cases:
+    """The deferral is only sound because S5 HANDLES every one of those shapes
+    (the reporting discipline rule 1 rests on) — no mistype is silent.
+
+    A one-object mistype encodes ONE relation and is RECOVERED: the same value
+    is kept when it rides beside a usable list, so the section arm must not drop
+    it (`_relation_candidates`, one rule for both arrivals). The rest are
+    dropped and counted. Either way the shape is named.
+    """
+    # recovered: one relation OBJECT where a list was asked for
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = {"src": "Retry Storm", "dst": "Deadline Rule",
+                             "predicate": "IMPL"}
+    result = _run(emission)
+    assert [(r["src"], r["dst"]) for r in result["relations"]] == [
+        ("Retry Storm", "Deadline Rule")], result["warnings"]
+    assert result["stats"]["relations_dropped"] == 0, result["warnings"]
+    assert any("not a list" in w for w in result["warnings"]), result["warnings"]
+
+    for relations in ([{"src": "Retry Storm", "dst": "Deadline Rule"}],
+                      [{"src": "Retry Storm", "dst": None, "predicate": "IMPL"}],
+                      [42]):
         emission = copy.deepcopy(EMISSION)
         emission["relations"] = relations
         result = _run(emission)
@@ -1011,18 +1023,24 @@ def test_a_relation_endpoint_restores_an_entity_an_earlier_pass_removed():
         ("Retry Storm", "Deadline Rule")]
 
 
-def test_a_single_relation_object_where_a_list_was_asked_for_counts_as_one():
+def test_a_single_relation_object_where_a_list_was_asked_for_is_ONE_relation():
     """The realistic mistype is ONE relation object as the whole section value.
-    `len(dict)` counts its three KEYS, so the counter added to make the report
-    honest over-reported 3 lost relations for 1.
+
+    `len(dict)` counted its three KEYS, so the honest counter over-reported 3
+    lost relations for 1. Round 11 settles the other half: one object is ONE
+    relation, so `_relation_candidates` RECOVERS it rather than dropping it —
+    the identical value is kept when it rides beside a usable list, and the
+    census may not depend on which side of the merge a value arrived on.
     """
     emission = copy.deepcopy(EMISSION)
     emission["relations"] = {"src": "Retry Storm", "dst": "Deadline Rule",
                              "predicate": "IMPL"}
     result = _run(emission)
-    assert result["relations"] == []
-    assert result["stats"]["relations_dropped"] == 1
-    assert any("connections_incomplete" in w for w in result["warnings"])
+    assert [(r["src"], r["dst"], r["predicate"])
+            for r in result["relations"]] == [
+        ("Retry Storm", "Deadline Rule", "IMPL")], result["warnings"]
+    assert result["stats"]["relations_dropped"] == 0, result["warnings"]
+    assert any("not a list" in w for w in result["warnings"]), result["warnings"]
 
 
 # ── 11. round-6 review of the merged head (delta c5da11b4c) ───────────────
@@ -1282,7 +1300,9 @@ def test_the_union_carries_a_one_object_relations_section_to_s5():
     Iterating a dict yields its KEYS, all filtered out by the `isinstance(item,
     dict)` comprehension, and the section was then written as an empty list — so
     S5's counted-drop arm saw "no relations" and the record reported nothing
-    lost. The mistyped value must reach S5 as it arrived.
+    lost. The mistyped value must reach S5 as it arrived; round 11 adds that S5
+    then RECOVERS it (one relation object = one relation), by the same rule the
+    identical value gets when it rides beside a usable list.
     """
     merged = v2.merge_embed_lists(
         {"entities": [{"name": "Retry Storm", "kind": "core:rule"},
@@ -1293,9 +1313,10 @@ def test_the_union_carries_a_one_object_relations_section_to_s5():
     assert merged["relations"] == {"src": "Retry Storm", "dst": "Deadline Rule",
                                    "predicate": "IMPL"}
     result = _run(merged)
-    assert result["relations"] == []
-    assert result["stats"]["relations_dropped"] == 1
-    assert any("connections_incomplete" in w for w in result["warnings"])
+    assert [(r["src"], r["dst"]) for r in result["relations"]] == [
+        ("Retry Storm", "Deadline Rule")], result["warnings"]
+    assert result["stats"]["relations_dropped"] == 0, result["warnings"]
+    assert any("not a list" in w for w in result["warnings"]), result["warnings"]
 
 
 def test_the_restore_does_not_duplicate_an_entity_already_held_in_another_case():
@@ -1527,16 +1548,23 @@ def test_a_mistyped_section_beside_a_usable_list_is_still_counted():
     """P2: a mistyped S2 `relations` must not vanish because S4 carried a real
     list. The union's dict filter iterated the mapping's KEYS — zero items — so
     the whole side was lost with `relations_dropped == 0` and no warning."""
-    # (a) the single-object mistype encodes ONE relation and is recovered.
+    # (a) the single-object mistype encodes ONE relation and is recovered — and
+    # the S4 triple is DIFFERENT, so `2 kept` discriminates: with the mistyped
+    # side filtered away this reads 1 kept and would pass either way (the
+    # round-10 fixture used the SAME triple, so the dedupe collapsed both copies
+    # and the assertion could not tell recovery from loss).
     merged = v2.merge_embed_lists(
         {"entities": copy.deepcopy(EMISSION["entities"]),
          "relations": {"src": "Retry Storm", "dst": "Deadline Rule",
-                       "predicate": "IMPL"}},
+                       "predicate": "NAND"}},
         {"relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
                         "predicate": "IMPL"}]})
     result = _run(merged)
-    assert len(result["relations"]) == 1, result["relations"]
-    assert result["stats"]["relations_dropped"] == 0
+    assert sorted((r["src"], r["dst"], r["predicate"])
+                  for r in result["relations"]) == [
+        ("Retry Storm", "Deadline Rule", "IMPL"),
+        ("Retry Storm", "Deadline Rule", "NAND")], result["relations"]
+    assert result["stats"]["relations_dropped"] == 0, result["warnings"]
     # (b) when its endpoints do not resolve it is COUNTED and named, not lost.
     merged = v2.merge_embed_lists(
         {"entities": copy.deepcopy(EMISSION["entities"]),
@@ -1548,6 +1576,51 @@ def test_a_mistyped_section_beside_a_usable_list_is_still_counted():
     assert result["stats"]["relations_dropped"] == 1
     assert any("does not resolve" in w for w in result["warnings"]), \
         result["warnings"]
+
+
+def test_a_mistype_is_judged_the_same_way_WHEREVER_it_arrives():
+    """Round-11 P3: the census depended on the ARRIVAL, not the value.
+
+    Measured at the parent head: a one-object mistype was KEPT beside a usable
+    list and DROPPED as the whole section; a mapping of two relations counted 1
+    beside a list and 2 as the section; `{}` counted 1 beside a list and 0 as
+    the section. One value judged two ways means `relations_dropped` answers a
+    question about the merge shape, not about the story. Both arrivals now go
+    through `_relation_candidates`.
+    """
+    entities = copy.deepcopy(EMISSION["entities"])
+    cases = [
+        # a one-object mistype: ONE relation, recovered in both arrivals
+        {"src": "Retry Storm", "dst": "Deadline Rule", "predicate": "IMPL"},
+        # a mapping OF relations: one loss per entry in both arrivals
+        {"a": {"src": "Retry Storm"}, "b": {"src": "Deadline Rule"}},
+        # an empty mapping loses nothing, in both arrivals
+        {},
+    ]
+
+    def beside_a_list(value):
+        return _run(v2.merge_embed_lists(
+            {"entities": copy.deepcopy(entities), "relations": value},
+            {"relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
+                            "predicate": "NAND"}]}))
+
+    def as_the_section(value):
+        emission = copy.deepcopy(EMISSION)
+        emission["entities"] = copy.deepcopy(entities)
+        emission["relations"] = value
+        return _run(emission)
+
+    for value in cases:
+        beside, section = beside_a_list(value), as_the_section(value)
+        assert beside["stats"]["relations_dropped"] == \
+            section["stats"]["relations_dropped"], (value, beside["stats"],
+                                                    section["stats"])
+
+    # ...and the recovered case actually carries its edge in BOTH arrivals:
+    # one kept as the section, and the S4 triple plus it beside a list.
+    assert [(r["src"], r["dst"]) for r in as_the_section(cases[0])["relations"]] \
+        == [("Retry Storm", "Deadline Rule")]
+    assert len(beside_a_list(cases[0])["relations"]) == 2
 
 
 def test_a_non_dict_relation_entry_reaches_S5s_census():
@@ -1588,6 +1661,32 @@ def test_an_unverifiable_predicate_is_clamped(monkeypatch):
                               "predicate": "x" * 5000 + "\nDROP"}]
     result = _run(emission)
     kept = result["relations"][0]["predicate"]
-    assert len(kept) == v2._UNVERIFIED_TEXT_CAP, len(kept)
+    assert len(kept) <= v2._UNVERIFIED_TEXT_CAP, len(kept)
     assert "\n" not in kept
     assert any("clamped" in w for w in result["warnings"]), result["warnings"]
+
+
+def test_a_SHORT_unverifiable_value_cannot_carry_a_control_character(monkeypatch):
+    """Round-11 P3: the cap bounded LENGTH only, so a 3-char `"a\\nb"` passed
+    with its newline intact while the comment claimed control characters were
+    kept out — #10000's prose surface is not only long text, and the row above
+    could not see it (its newline sits past the 64-char cut).
+
+    Both unverified call sites are driven: `predicate` (registry unreadable) and
+    `semantics` (closed Layer-2 set unreadable), because they share the helper.
+    """
+    import tortoise.pack_registry as pack_registry
+    monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
+    monkeypatch.setattr(pack_registry, "SEMANTICS_VALUES", frozenset())
+    monkeypatch.setattr(pack_registry, "SEMANTICS_TRANSITION", {})
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "a\nb",
+                              "semantics": "supports\x0bthe\x00claim"}]
+    result = _run(emission)
+    rel = result["relations"][0]
+    assert rel["predicate"] == "a b", repr(rel["predicate"])
+    assert "\x00" not in rel["semantics"] and "\x0b" not in rel["semantics"], \
+        repr(rel["semantics"])
+    assert any("control characters" in w for w in result["warnings"]), \
+        result["warnings"]
