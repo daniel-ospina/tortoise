@@ -693,9 +693,13 @@ unfirable (block at the top of §10).
 >
 > ⚠️ **"S2.2 VET and S2.3 CLASSIFY already exist in the code" is NOT the test that the successor
 > exists.** §4.0 gives S2.2 VET the coverage question whose answer S4's removal relies on, and both
-> stages are present in the tree (`_vet_gate.apply_vet`, `kind_classifier.classify_items`) — but both
-> are wired into `extract_session_v2` **behind flags that default OFF** (`TORTOISE_VET`,
-> `TORTOISE_CLASSIFY_LATER`), so on the default arm neither has run at all; and presence is not
+> stages are present in the tree (`_vet_gate.apply_vet`, `kind_classifier.classify_items`) — and
+> `classify_items` is wired into `extract_session_v2` **behind a flag that defaults OFF**
+> (`TORTOISE_CLASSIFY_LATER`), so on the default arm it has never run. `apply_vet` is a different
+> case **since `#10996`**: `TORTOISE_VET` still defaults OFF, but the S2.2 **mechanical** half
+> (`TORTOISE_VALUE_GATE`) defaults **ON**, so the VET pass — and `apply_vet` — DOES run on the
+> default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
+> 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
 > sufficiency, because the fold's **remedy** half is unimplemented in both. VET's **coverage signal**
 > only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1

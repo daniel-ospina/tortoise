@@ -48,7 +48,7 @@ The epic has no end-user UI. Its four **acting users** are the agent (writer), t
 | a mention promoted to a node | SF2/SF3 | candidate `discarded` by the referentiality rule (recorded with `rule_id` + `counterfactual`) |
 | a narrative that is degraded, not empty | SF1 | run `degraded`, re-narrated **once** |
 | an unchecked item committed | SF7 | candidate `held` |
-| a candidate classified that consolidation will delete | SF4 | the candidate is not classified (§10996) |
+| a candidate classified that consolidation will delete | SF4 | **withdrawn** — no `DELETE` verdict is producible (`classify_consolidation` returns ADD/NOOP/UPDATE/MERGE, D5); whoever introduces a producer owes the prune (§10996) |
 | an unresolved lookup read as new | SF5 | candidate `held` with `lookup_state: unresolved` |
 | a partial run | SF8 | run `failed`, journal unchanged for the run |
 | a connection that could not be wired | SF6 | run `degraded`, `connections_incomplete` recorded |
@@ -136,7 +136,7 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 | **T9** | E2E-8 | a partial against-graph check | the run commits | the item is held; held/committed/discarded are three distinct counts | #10998 | SF7 |
 | **T10** | E2E-6 | the frozen corpus, all doors | the census runs | ≥5 doors; every cell carries a writer symbol; an unmeasured door reads `UNMEASURED`; the artifact re-derives | #10995 | SF12 |
 | **T11** | E2E-1 (record) | a **referentiality** DISCARD | the run | it carries `rule_id` **naming the referentiality rule** and a `counterfactual` that **names the removed mention** — ⚠️ the generic `rule_id`/`counterfactual` already exist on every DISCARD, so the assertion must key on those two specifics or it passes today | #10996 | SF3 |
-| **T12** | E2E-1 (order) | a candidate consolidation will `DELETE` | classification runs | it is **not** classified | #10996 | SF4 |
+| **T12** | E2E-1 (order) | a candidate consolidation will `DELETE` — ⛔ **withdrawn** (`#10996`): no `DELETE` verdict is producible (D5; see :51), so this `given` is unconstructible today and the case stands only as the shape to re-open if a producer lands | classification runs | it is **not** classified | #10996 | SF4 |
 | **T13** | E2E-4 (vocabulary) | `dev:issue` **and** `dev:initiative` | `expand_kind` | `dev:issue` includes `WorkItem`; `dev:initiative` exists and expands; the classifier index carries parents; **and** an initiative narrative classifies to `dev:initiative`, not `dev:theme`/`dev:epic` | #11000, #11001 | SF4, SF13 |
 | **T14** | E2E-1 (retry) | a poor batch verdict | the run | exactly one re-narrate; a tie keeps the first narrative | #11002 | SF1, SF3 |
 | **T15** | E2E-7 | all **seven** shipped packs | the census reads **both** declaration surfaces (`relations` **and** `hierarchies`) | per pack: declared / writable / written **declared counts**; the four `pm` relations are named as unwritable (or resolved); the effective **direction per row** is reported; `funds` resolves to `(->, IMPL)` and `produces` to `(<-, IMPL)` — i.e. **neither is renamed away by `SEMANTICS_TRANSITION` any more**; and `ownedBy` accepts a Subject **or** an Object | #11083 | SF15 |

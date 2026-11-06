@@ -652,10 +652,15 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
     def test_an_undeclared_read_tool_reaching_one_fails(self, monkeypatch):
         import tool_surface_capabilities as tsc
 
-        # Pretend `query` were an out-of-boundary mutator: the read tools that
-        # reach it are not declared, so the arm must fire for them.
+        # Pretend the accessor `tortoise_query` reaches were an out-of-boundary
+        # mutator: it is NOT declared, so the arm must fire for it. #10602 moved
+        # that tool off `sdk.query` (no LIMIT in its Cypher) onto
+        # `paginated_query`, which is the accessor its handler actually reaches now
+        # — probing `query` tests a binding that no longer exists and passes
+        # vacuously. This is the third copy of the probe (two live in
+        # test_tool_registry.py); the key must move in ALL of them.
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "query",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert any("out-of-boundary mutation" in v and "tortoise_query" in v

@@ -1538,15 +1538,33 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
     the E2a<->gate-drops pair. The ON run's own `# graph:` line was parsed for
     nothing, so an after share from graph A beside E2a counts from graph B passed
     every check: the head is equal, and both before graphs still name it.
+
+    ⛔ THE GRAPH MUST DIFFER BY ITS EPOCH, NOT BY A NON-NUMERIC TAIL (`#10996`
+    review). The fixture used `capstone_on_54922a800_other`, whose HEAD TOKEN is
+    still the right one — but `_names_head` requires the last segment to be a
+    numeric epoch, so `other` fails the shape test and `score()`'s
+    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1769`) refused it
+    FIRST. With `pass` in place of that guard the earlier mutation runs showed
+    it, and with the guard live the assertion below was satisfied by ITS message
+    — which also contains the graph string. So this pin was measuring the wrong
+    guard, and deleting the identity check it is named for left the suite green.
+    An epoch-differing graph (`…_1793378319` vs the log's `…_1793378318`) passes
+    the head guard and can ONLY be refused by the identity check, which is what
+    the assertion now keys on.
     """
     repo = _copied_bundle(tmp_path)
     log = repo / "docs/evidence/9889/on-arm.log"
-    log.write_text(re.sub(r"^# graph: \S+", "# graph: capstone_on_54922a800_other",
+    other = "capstone_on_54922a800_1793378319"
+    log.write_text(re.sub(r"^# graph: \S+", f"# graph: {other}",
                           log.read_text(), count=1, flags=re.MULTILINE))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
-    assert "capstone_on_54922a800_other" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert other in err, err
+    assert "come from different runs" in err, (
+        "the refusal came from another guard — this pin is about the graph "
+        f"IDENTITY check (`after[\"graph\"] != e2a_record[\"graph\"]`): {err}")
 
 
 def test_the_scores_probe_refuses_a_record_that_does_not_name_the_on_head(
@@ -1753,6 +1771,7 @@ def test_a_graph_names_the_head_in_the_heads_own_position(tmp_path, capsys):
     head = record["graph"].split("_")[-2]
     assert head.startswith("54922a800"), head
     record["graph"] = "capstone_off_9152448d_" + head[:8]
+    _shipped_arm(record)          # …so the ONLY defect is the graph's position
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
@@ -2479,8 +2498,11 @@ def test_the_measured_arm_is_forced_in_process_and_restored():
         with measure.measured_arm() as arm:
             assert arm["TORTOISE_VET"] == "1", arm
             assert arm["TORTOISE_CLASSIFY_LATER"] == "1", arm
-            # pinned OFF so the arm is a function of the probe, not the shell
-            assert arm["TORTOISE_VALUE_GATE"] is None, arm
+            # pinned OFF so the arm is a function of the probe, not the shell —
+            # and pinned to "0", not to absence: since #10996 an UNSET value gate
+            # is the ON arm, so a pop would print a header that denies the arm
+            # (#10996 review P2). The shell held "1" and it must not survive.
+            assert arm["TORTOISE_VALUE_GATE"] == "0", arm
             assert os.environ["TORTOISE_VET"] == "1"
         assert os.environ["TORTOISE_VET"] == "0"
         assert os.environ["TORTOISE_CLASSIFY_LATER"] == "0"
@@ -7650,6 +7672,20 @@ def _bundle(tmp_path: Path) -> Path:
     return repo
 
 
+def _shipped_arm(record: dict) -> dict:
+    """Give a mutated before record the arm the SHIPPED probe writes.
+
+    ⛔ SINCE `#10996` AN ABSENT `TORTOISE_VALUE_GATE` IS THE ON SPELLING (`#10996`
+    review cycle 2, P1), and the driver refuses it on its own — before the guard a
+    test below is about can speak. `e1_paired_arm.off_arm_readback` therefore
+    PINs the key to `"0"` and reads it back, so that is what a record produced by
+    the shipped probe carries. Setting it here keeps each fixture to exactly ONE
+    defect, which is what these pins are written to discriminate.
+    """
+    record["arm"]["TORTOISE_VALUE_GATE"] = "0"
+    return record
+
+
 @pytest.mark.parametrize("key", ["TORTOISE_VET", "TORTOISE_CLASSIFY_LATER",
                                   "TORTOISE_VALUE_GATE",
                                   "TORTOISE_S2_DECISION_SEAM"])
@@ -8810,6 +8846,7 @@ def test_a_before_arm_with_no_graph_is_refused(tmp_path, capsys):
     record = json.loads(path.read_text())
     assert record["graph"] == "capstone_off_54922a800_1793379347"   # ships with one
     record.pop("graph")
+    _shipped_arm(record)          # …so the ONLY defect is the absent graph
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
@@ -8852,6 +8889,7 @@ def test_a_before_arm_that_names_another_pin_is_refused(tmp_path, capsys):
         record = json.loads(path.read_text())
         assert field not in record, (label, "the shipped arm predates the pin")
         record[field] = value
+        _shipped_arm(record)      # …so the ONLY defect is the pin it names
         path.write_text(json.dumps(record))
         with pytest.raises(SystemExit) as refused:
             scores_probe.score(repo)
@@ -8884,6 +8922,7 @@ def test_a_blank_before_corpus_pin_is_not_an_absent_one(blank, tmp_path, capsys)
     path = repo / "docs/evidence/9889/e1-paired-off-arm-2.json"
     record = json.loads(path.read_text())
     record["fixtures_hash"] = blank
+    _shipped_arm(record)          # …so the ONLY defect is the blank pin
     path.write_text(json.dumps(record))
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
@@ -8956,6 +8995,7 @@ def test_a_before_arm_that_carries_the_frozen_pin_reads_pin_checked(tmp_path):
         path = repo / f"docs/evidence/9889/e1-paired-off-arm-{index + 1}.json"
         record = json.loads(path.read_text())
         record["fixtures_hash"] = value
+        _shipped_arm(record)      # a re-recorded pair pins the gate explicitly too
         path.write_text(json.dumps(record))
     scored = scores_probe.score(repo)
     block = scored["before_arm_provenance"]
@@ -8965,6 +9005,252 @@ def test_a_before_arm_that_carries_the_frozen_pin_reads_pin_checked(tmp_path):
         assert "fixtures_hash" in arm["pin_fields_present"], arm
         assert arm["fixtures_hash"] is not None, arm
     assert block["limitation"].startswith("closed:"), block["limitation"]
+
+
+def test_the_default_on_key_set_is_the_one_whose_default_moved():
+    """`_DEFAULT_ON_VARS` is DERIVED from the resolvers, never restated.
+
+    ⛔ THE WHOLE FIX TURNS ON WHICH KEY MOVED (`#10996` review cycle 2, P1). The
+    driver stops reading ABSENCE as an OFF spelling for exactly the switches whose
+    UNSET value is now ON — no more (that would refuse genuine control arms whose
+    switches still default off) and no fewer (that would leave the hole open for
+    the one key that moved). So the literal is pinned against the real resolvers:
+    with the flags CLEARED, `value_gate.value_gate_enabled()` must be True and
+    `s2_decision_seam.seam_enabled()` must be False, and the tuple must be the set
+    that reads ON. If a future flag joins the default-ON family, the producer
+    sets move and this reds instead of the driver silently keeping the old one.
+    """
+    from tortoise import s2_decision_seam, value_gate
+
+    cleared = {key: os.environ.pop(key, None)
+               for key in scores_probe._ARM_OFF_VARS}
+    try:
+        assert value_gate.value_gate_enabled() is True, (
+            "the S2.2 mechanical half must read ON with the flag unset — that is "
+            "the default this driver's absence rule is about")
+        assert s2_decision_seam.seam_enabled() is False, (
+            "the seam is a paid call and still defaults OFF, so absence remains a "
+            "genuine OFF spelling for it")
+        reads_on_when_unset = {
+            key for key, arm in (("TORTOISE_VALUE_GATE",
+                                  value_gate.value_gate_enabled()),
+                                 ("TORTOISE_S2_DECISION_SEAM",
+                                  s2_decision_seam.seam_enabled()))
+            if arm}
+    finally:
+        for key, value in cleared.items():
+            if value is not None:
+                os.environ[key] = value
+    assert reads_on_when_unset == set(scores_probe._DEFAULT_ON_VARS), (
+        scores_probe._DEFAULT_ON_VARS, reads_on_when_unset)
+    assert set(scores_probe._DEFAULT_ON_VARS) <= set(scores_probe._ARM_OFF_VARS), (
+        "a switch this driver does not check cannot need the absence rule")
+
+
+def test_a_before_arm_that_expresses_the_value_gate_by_absence_is_refused(
+        tmp_path, capsys):
+    """A record the SHIPPED producer could write may not say OFF by leaving it out.
+
+    ⛔ `#10996` review cycle 2, P1: `_is_truthy(None)` is False, so an absent
+    `TORTOISE_VALUE_GATE` certified the before arm OFF — while the post-flip
+    reader resolves absence to ON and runs the predicate inside it. The pair this
+    driver scores (`after <= 0.50 x before`) could then be TWO gate-armed arms and
+    still be reported as a decided E1. `e1_paired_arm.off_arm_readback` pins the
+    key explicitly now, so a record carrying a pin field and spelling the gate as
+    absent is not a shipped shape and is refused.
+
+    Non-vacuity, run rather than reasoned: the SAME record with the shipped `"0"`
+    scores (`read_off_arms` returns it), so the refusal is caused by the absence
+    and not by some other defect in the fixture.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert scores_probe._is_absent_pin(record["arm"]["TORTOISE_VALUE_GATE"])
+    record["head"] = scores_probe._PRE_FLIP_HEAD     # the shipped probe's pin field
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "CARRIES" not in err, err
+    assert ("records TORTOISE_VALUE_GATE as ABSENT" in err
+            or "`arm` block records TORTOISE_VALUE_GATE as ABSENT" in err), err
+    assert "TORTOISE_VALUE_GATE=0" in err, err
+
+    # …and the same record, shipped-shaped, is ACCEPTED: the refusal is the absence.
+    _shipped_arm(record)
+    path.write_text(json.dumps(record))
+    assert scores_probe.score(repo)["e1"]["decidable"] is False
+
+
+def test_a_before_arm_at_another_head_cannot_express_the_value_gate_by_absence(
+        tmp_path, capsys):
+    """The legacy licence is a HEAD, so removing the pin fields is not enough.
+
+    The two committed arms predate the pin fields AND name the pre-`#10996`
+    campaign head, and both halves are required: a record that merely LOOKS old
+    (no `head`/`fixtures_hash`/… because someone stripped them) but names another
+    head was measured by code that could be post-flip, so its absent value gate
+    cannot be read as OFF. Without this half the licence degenerates into a
+    spelling rule anyone can satisfy by deleting four keys.
+    """
+    repo = _bundle(tmp_path)
+    path = repo / "docs/evidence/9889/e1-paired-off-arm-1.json"
+    record = json.loads(path.read_text())
+    assert scores_probe._is_absent_pin(record["arm"]["TORTOISE_VALUE_GATE"])
+    # Legacy SHAPE (no pin fields), a head from after the flip's campaign.
+    record["graph"] = "capstone_off_9152448d_1793378986"
+    path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "records TORTOISE_VALUE_GATE as ABSENT" in err, err
+    assert scores_probe._PRE_FLIP_HEAD[:9] in err, err
+
+
+def test_the_after_arm_at_another_head_cannot_express_the_value_gate_by_absence(
+        tmp_path, capsys):
+    """`<unset>` on the ON log is a legacy spelling too, and bound to the same head.
+
+    `capstone_measure.measured_arm` now writes `TORTOISE_VALUE_GATE=0` and reads it
+    back, so the committed `<unset>` is an artifact of the pre-flip producer. A log
+    from ANY OTHER head that still spells it absent is refused: its pinned-OFF
+    switch was in fact armed, so the ON half of the pair is the value-gate arm —
+    the easier side of E1's bar under a label that never declared it.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert "TORTOISE_VALUE_GATE=<unset>" in text, text[:400]
+    other = "9f3c1d7e8a2b4c5d6e7f8091a2b3c4d5e6f70819"
+    text = re.sub(r"^# head: \S+", f"# head: {other}", text, count=1,
+                  flags=re.MULTILINE)
+    text = re.sub(r"^# graph: \S+", f"# graph: capstone_on_{other[:8]}_1793378318",
+                  text, count=1, flags=re.MULTILINE)
+    log.write_text(text)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "arm readback records TORTOISE_VALUE_GATE as ABSENT" in err, err
+
+
+def test_the_on_log_graph_must_name_its_own_head(tmp_path, capsys):
+    """The legacy licence reads the LOG's head, so the log's graph must agree.
+
+    ⛔ `#10996` review (blocking finding on the first cut): the licence, the
+    before-arm graph check and the after arm's own `# graph:`/`# head:` pair all
+    key off the log's `# head:` line, so a log whose `# graph:` named a DIFFERENT
+    run would sail through every later check on a head it merely shares — the
+    head would be `54922a800` while the after share came from another graph. That
+    is the same class of hole `_names_head` was hardened for at `#10610`
+    (`75bfd9c6`), one level out.
+
+    The guard had no pin when it landed: deleting it left this file green. This
+    is that pin, and it is one defect per fixture — the head is untouched, only
+    the graph moves.
+    """
+    repo = _bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    text = log.read_text()
+    assert "# head: 54922a800" in text, text[:400]
+    other = "9152448d"
+    text = re.sub(r"^# graph: capstone_on_(\w+)_",
+                  f"# graph: capstone_on_{other}_", text, count=1,
+                  flags=re.MULTILINE)
+    log.write_text(text)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "does not name its own `# head:` line" in err, err
+    assert other in err, err
+
+
+def test_the_committed_legacy_absence_is_disclosed_in_the_record(tmp_path):
+    """The licence is READ, not trusted: every arm that needed it is named.
+
+    A residual that lives only in the driver is one a reader of
+    `e1-e2-scores.json` cannot see, and that file is what the row builder
+    consumes. So the record says, beside the numbers, which arms were read as OFF
+    on the campaign-head licence and what closes it.
+    """
+    record = scores_probe.score(_bundle(tmp_path))
+    block = record["value_gate_pin"]
+    assert block["default_on_keys"] == list(scores_probe._DEFAULT_ON_VARS), block
+    assert block["legacy_head"] == scores_probe._PRE_FLIP_HEAD, block
+    assert block["after"]["pin"] == "legacy-absent", block["after"]
+    assert scores_probe._PRE_FLIP_HEAD[:9] in block["after"]["basis"], block
+    assert [arm["pin"] for arm in block["before"]] == [
+        "legacy-absent", "legacy-absent"], block["before"]
+    assert [arm["artifact"] for arm in block["before"]] == [
+        "docs/evidence/9889/e1-paired-off-arm-1.json",
+        "docs/evidence/9889/e1-paired-off-arm-2.json",
+    ], block["before"]
+    assert "#7949" in block["limitation"], block["limitation"]
+    assert "TORTOISE_VALUE_GATE=0" in block["limitation"], block["limitation"]
+    # No number moves: the licensed pair still scores the outcome it shipped with.
+    assert record["e1"]["outcome"] == "REFUSED", record["e1"]
+    # …and a re-recorded pair needs no licence, so the disclosure cannot survive it.
+    repo = _bundle(tmp_path / "pinned")
+    for index in (1, 2):
+        path = repo / f"docs/evidence/9889/e1-paired-off-arm-{index}.json"
+        arm_record = json.loads(path.read_text())
+        _shipped_arm(arm_record)
+        path.write_text(json.dumps(arm_record))
+    log = repo / "docs/evidence/9889/on-arm.log"
+    log.write_text(log.read_text().replace(
+        "TORTOISE_VALUE_GATE=<unset>", "TORTOISE_VALUE_GATE=0", 1))
+    pinned = scores_probe.score(repo)["value_gate_pin"]
+    assert pinned["after"]["pin"] == "explicit", pinned
+    assert [arm["pin"] for arm in pinned["before"]] == ["explicit", "explicit"], (
+        pinned["before"])
+
+
+def test_the_legacy_head_really_predates_the_flip():
+    """The licence's PREMISE, checked at the commit it licences.
+
+    `_PRE_FLIP_HEAD` is admitted as "a head where absence really was OFF". That is
+    a claim about the code AT THAT COMMIT, so it is read there — `git show` the
+    resolver, not the working tree — and the flip's own default is required to be
+    ABSENT from it. A test that read today's file would prove nothing about the
+    records; one that hardcoded the answer would be the inert trust token this
+    whole change removes. If the campaign head ever turns out to carry the flip,
+    this reds and the licence has to be narrowed instead of silently widening.
+
+    ⛔ READABLE-IN-THIS-CLONE IS NOT THE PREMISE. CI's `test` job checks this repo
+    out with a bare `actions/checkout@v4` (`python-ci.yml`, default
+    `fetch-depth: 1`), where an ANCESTOR commit does not exist by construction —
+    so a hard failure here would red every CI run for the checkout alone, reported
+    as a defect in the change. It SKIPS in that case, naming what is unchecked,
+    exactly as `test_no_legacy_token_path.py` does for the same `git show <sha>:…`
+    read. A skip is not a pass: the licence premise is UNCHECKED on a shallow
+    clone, and this says so rather than passing silently as if it had checked.
+    """
+    head = scores_probe._PRE_FLIP_HEAD
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{head}:tortoise/value_gate.py"],
+            cwd=_REPO, capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        pytest.skip(
+            f"{head[:9]} (the licensed pre-flip head) is not in this clone's "
+            f"history ({exc.__class__.__name__}) — a `fetch-depth: 1` checkout "
+            "cannot contain an ancestor, so the licence premise is UNCHECKED "
+            "here, not disproved. Re-derive it on a full clone: "
+            "`git fetch --unshallow origin` (or the worktree this branch was "
+            "written in).")
+    source = shown.stdout
+    assert 'os.environ.get(ENV_FLAG, "1")' not in source, (
+        f"{head[:9]} already carries the post-`#10996` default — the legacy "
+        "licence for an ABSENT value gate no longer holds at this head")
+    assert "os.environ.get(ENV_FLAG)" in source, (
+        f"{head[:9]} does not read the flag the way the licence assumes")
+    # …and the flip is what changed it, so the two heads genuinely differ.
+    assert 'os.environ.get(ENV_FLAG, "1")' in (_REPO / "tortoise/value_gate.py"
+                                               ).read_text()
 
 
 def test_the_arm_key_sets_are_the_producers():
@@ -9087,6 +9373,10 @@ def test_the_readmes_floor_provenance_claim_matches_the_code(monkeypatch,
     monkeypatch.setattr(probe, "backend_ready", lambda: (True, "ok"))
     for key in (*probe.ARM_KEYS, probe.SEAM_KEY):
         monkeypatch.delenv(key, raising=False)
+    # #10996: the OFF arm's value gate is EXPLICIT — an unset default-ON switch is
+    # refused by the driver now, and that refusal would pre-empt the floor refusal
+    # this test is about.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
     with pytest.raises(SystemExit) as refused:
         probe.main(["--graph", "g", "--out", str(tmp_path / "off.json")])
@@ -9874,3 +10164,96 @@ def test_the_rules_block_states_the_boundary_the_code_enforces():
         "the E1 bullet argues BOTH sides of the boundary — it still carries the "
         "pre-fix window `0 < m < 1` beside the guard it justifies "
         f"(inclusive_at_zero={inclusive_at_zero}): {bullet!r}")
+
+
+# ── the bundle's re-run recipe states the arm the PROBE now sets ──────────────
+#
+# `#10996` changed what `capstone_measure.measured_arm()` writes: the two OFF
+# switches are set to an EXPLICIT `"0"` instead of being popped, because an unset
+# `TORTOISE_VALUE_GATE` is now the ON arm. `docs/evidence/9889/README.md` was
+# updated with its producer; this bundle's README was not, so the two bundles
+# taught opposite contracts and this one still said the probe pins the switches
+# "unset" — the exact pre-fix behaviour, and an invitation for the next lane to
+# restore the pop. The committed log's `<unset>` is HISTORY (it predates the
+# flip); the RECIPE must not reproduce it.
+
+_RE_RUN_RECIPE_STALE_ARM = (
+    "`TORTOISE_VALUE_GATE` **and** `TORTOISE_S2_DECISION_SEAM` unset",
+    "pins TORTOISE_VALUE_GATE and TORTOISE_S2_DECISION_SEAM unset",
+    "TORTOISE_VALUE_GATE=<unset> TORTOISE_S2_DECISION_SEAM=<unset>",
+)
+
+
+def test_the_re_run_recipe_states_the_arm_the_probe_actually_sets():
+    """One contract for both bundles: OFF means `"0"`, not absence (#10996).
+
+    Red-first by construction — all three phrases were present when this pin was
+    written — and the failure it exists to catch is a READER following the recipe
+    and measuring the ON arm under a log that declares OFF.
+    """
+    readme = README_DOC.read_text()
+
+    for phrase in _RE_RUN_RECIPE_STALE_ARM:
+        assert phrase not in readme, (
+            f"the bundle's re-run recipe still says the probe pins the switches "
+            f"UNSET ({phrase!r}) — since #10996 absence is the ON arm, so a "
+            "reader following this recipe measures the treatment under the "
+            "control's label. The committed log's `<unset>` is history; the "
+            "recipe must say `=0`")
+
+    assert 'to an EXPLICIT `"0"`' in readme, (
+        "the README must STATE that capstone_measure pins the two OFF switches "
+        "to an explicit \"0\" — a corrected recipe whose reason is not written "
+        "down is the one the next lane reverts")
+
+
+def test_the_control_arm_definition_names_the_frozen_records_divergence():
+    """The frozen pre-registration and this bundle must not silently disagree.
+
+    Review cycle 4 (P2): `PRE-REGISTRATION.md` §3 still defines CONTROL as "the
+    selection flags unset … their default is OFF". Since `#10996` an unset
+    `TORTOISE_VALUE_GATE` is the TREATMENT, so that bullet is the PRE-flip
+    definition — and this bundle's README now says the opposite (`"0"`, not
+    `<unset>`), leaving two definitions of one arm in the same bundle.
+
+    The frozen record is NOT amended here: editing a registered arm definition
+    after an evidence log exists is §8's owner decision, and the committed
+    artifacts genuinely ran OFF at their pre-flip heads. What a lane owes is that
+    the divergence is STATED where the arm is read — this pin holds the statement
+    in place, and holds the frozen bullet itself un-rewritten, so neither side can
+    drift into quiet agreement with the other.
+    """
+    bundle = (_REPO / "docs" / "evidence" / "7949-capstone")
+    doc = (bundle / "E1-E2.md").read_text()
+    prereg = (bundle / "PRE-REGISTRATION.md").read_text()
+
+    for phrase in (
+        "`PRE-REGISTRATION.md` §3 still DEFINES the control arm as the flags ABSENT",
+        "definition is now the pre-`#10996` one",
+        "left unamended here on purpose",
+        "a re-take sets `TORTOISE_VALUE_GATE=0`",
+    ):
+        assert phrase in doc, (
+            f"E1-E2.md no longer states the frozen record's divergence "
+            f"({phrase!r}) — without it the bundle carries two definitions of "
+            "the control arm and a reader takes whichever one they read first")
+
+    assert "their default is OFF" in prereg, (
+        "PRE-REGISTRATION.md §3 no longer carries the pre-#10996 CONTROL "
+        "definition — if it WAS amended, this pin and the E1-E2.md disclosure "
+        "must move together (and the amendment needs a §8 Deviations entry plus "
+        "a re-cut `document_sha256`, which is the owner's call, not a silent edit)")
+
+    # ⛔ The disclosure is inside a BLOCKQUOTE, and the paragraph it was added to
+    # was mid-sentence here (review-cycle-4's staging caught it: the insertion
+    # split "…even against an explicit" from "`TORTOISE_VET=0`…", leaving a
+    # truncated claim above and an orphaned fragment below — merge-damage prose in
+    # the one artifact this round exists to make readable). Both halves must stay
+    # adjacent and quoted.
+    assert ("> `TORTOISE_S2_DECISION_SEAM` would arm the pass even against an explicit\n"
+            "> `TORTOISE_VET=0`") in doc, (
+        "the arm-table paragraph was broken across the disclosure — the sentence "
+        "ends mid-clause and a fragment resumes after the blockquote")
+    assert ">\n> ⛔ **`PRE-REGISTRATION.md`" in doc, (
+        "the disclosure must be a separate quoted paragraph, not wedged into a "
+        "sentence")

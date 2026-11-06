@@ -45,6 +45,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
@@ -163,14 +165,48 @@ def test_the_off_arm_refuses_every_switch_that_arms_the_passes(monkeypatch):
 
 
 def test_the_off_arm_reads_back_all_four_switches(monkeypatch):
-    """The record must NAME every switch, so a reader sees what was consulted."""
+    """The record must NAME every switch, so a reader sees what was consulted.
+
+    `#10996`: the OFF arm sets ``TORTOISE_VALUE_GATE=0`` EXPLICITLY — the other
+    three stay absent, whose unset value is still OFF. The value gate is the one
+    switch whose ABSENT value is the ON arm, so it is asserted here as ``"0"``
+    and not as ``None``; the pin below is what keeps that distinction alive.
+    """
     for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
 
     arm = e1_paired_arm.off_arm_readback()
 
     assert set(arm) == {*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY}
-    assert set(arm.values()) == {None}
+    assert arm["TORTOISE_VALUE_GATE"] == "0"
+    assert {k: v for k, v in arm.items() if k != "TORTOISE_VALUE_GATE"} == \
+        dict.fromkeys([k for k in arm if k != "TORTOISE_VALUE_GATE"])
+
+
+def test_the_off_arm_PINS_a_DEFAULT_ON_switch_left_unset(monkeypatch):
+    """`#10996` review P1: an unset default-ON switch read as the OFF arm.
+
+    Measured before the fix: with only the four keys cleared,
+    ``value_gate.value_gate_enabled()`` was ``True`` inside an arm this driver
+    labelled OFF, so the pre-registered CONTROL was scored with the `#4899`
+    predicate armed — a fabricated before/after pair, silently. The driver now
+    PINS the switch to `0` and reads it back (a set, truthy value is still
+    refused above), so the label matches the resolved state.
+    """
+    from tortoise import value_gate
+
+    assert e1_paired_arm.DEFAULT_ON_KEYS == ("TORTOISE_VALUE_GATE",)
+    for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+        monkeypatch.delenv(key, raising=False)
+    assert value_gate.value_gate_enabled() is True  # the default we must pin away
+
+    arm = e1_paired_arm.off_arm_readback()
+
+    assert arm["TORTOISE_VALUE_GATE"] == "0", arm
+    assert value_gate.value_gate_enabled() is False, (
+        "the arm is labelled OFF while the resolved predicate is ON — the "
+        "fabricated-pair defect this pin exists for")
 
 
 def test_the_off_arm_accepts_an_explicit_zero(monkeypatch):
@@ -181,6 +217,39 @@ def test_the_off_arm_accepts_an_explicit_zero(monkeypatch):
     arm = e1_paired_arm.off_arm_readback()
 
     assert set(arm.values()) == {"0"}
+
+
+def test_the_off_arm_accepts_every_OFF_spelling_the_pipeline_honours(monkeypatch):
+    """The refusal is an ALLOW-LIST, not a deny-list of the spellings I typed.
+
+    Pre-fix, `off_arm_readback` computed "is this switch armed?" as
+    ``v not in (None, "", "0")``, so every OTHER OFF spelling the pipeline
+    honours — `false`, `no`, `off`, `FALSE` — was REFUSED as "the shell armed
+    this arm" and the run could not be taken at all. That is the deny-list class
+    `#10610` removed from the scorer (`_ARM_OFF_STATES` -> `_TRUTHY`), surviving
+    in the driver that PRODUCES the arm the scorer reads.
+
+    Asserted on the RESOLVED predicate as well as the spelling: the claim is that
+    these values are the OFF arm, and only `value_gate` can confirm it.
+    """
+    from tortoise import value_gate
+
+    off_spellings = ("0", "false", "no", "off", "FALSE", "Off", " ", "")
+    for spelled in off_spellings:
+        for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+            monkeypatch.setenv(key, spelled)
+        arm = e1_paired_arm.off_arm_readback()
+        assert value_gate.value_gate_enabled() is False, (
+            f"{spelled!r} is an OFF spelling the pipeline honours, so the arm is "
+            f"OFF and the driver must not refuse it: {arm}")
+
+    # …and the other direction still fires: a truthy value IS refused.
+    for truthy in ("1", "true", "yes", "on", "TRUE"):
+        for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+            monkeypatch.setenv(key, "0")
+        monkeypatch.setenv("TORTOISE_VALUE_GATE", truthy)
+        with pytest.raises(SystemExit, match="REFUSED"):
+            e1_paired_arm.off_arm_readback()
 
 
 # ── e1_paired_arm: the before-share is refused when E1's own record refuses it ─
@@ -803,3 +872,31 @@ def test_the_section_the_e1_probe_cites_really_carries_the_sentence_it_quotes():
     assert " ".join(quote.split()) in " ".join(doc.split()), (
         "the probe's quoted refusal must be the one §3.2 states, not a paraphrase of it"
     )
+
+
+def test_the_arm_drivers_truthiness_copy_is_the_repos_contract():
+    """The mirrored vocabulary in the PRODUCER must be `tortoise.env_truthy`'s.
+
+    Review cycle 4 (P3), measured not asserted: `off_arm_readback`'s refusal now
+    runs on `_is_truthy`, and widening the repo's `TRUTHY` by `"y"` left the
+    scorer's pinned mirror RED but this file's copy GREEN — the driver then
+    accepted `TORTOISE_VALUE_GATE=y` as the OFF arm (`_is_truthy("y")` False in
+    the copy, `is_truthy("y")` True in the pipeline). For
+    `TORTOISE_S2_DECISION_SEAM` that is a billable call inside an arm this file
+    declares OFF, which is the exact concern `DEFAULT_ON_KEYS`' comment raises.
+
+    `tests/test_7949_capstone_measure.py::test_the_arm_vocabulary_is_the_repos_
+    truthiness_contract` holds the SCORER's copy to the contract; this holds the
+    DRIVER's, because a second unpinned mirror is how the two directions of one
+    comparison drift apart.
+    """
+    from tortoise.env_truthy import FALSY, TRUTHY, is_truthy
+
+    assert set(e1_paired_arm._TRUTHY) == set(TRUTHY), (
+        e1_paired_arm._TRUTHY, sorted(TRUTHY))
+    for sample in [*sorted(TRUTHY), *sorted(FALSY), "off", "OFF", " off ", "",
+                   "  ", None, "disabled", "true", "TRUE", "1", "0", 1, 0]:
+        assert e1_paired_arm._is_truthy(sample) == is_truthy(sample), (
+            f"the arm driver reads {sample!r} as truthy="
+            f"{e1_paired_arm._is_truthy(sample)} but the repo's contract says "
+            f"{is_truthy(sample)}")

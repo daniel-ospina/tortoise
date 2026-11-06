@@ -309,13 +309,21 @@ E3_RULE = (
 #: the probe printed an ON arm while measuring the default OFF one.
 ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 
-#: A flag the arm PINS OFF so the measured population is a function of THIS file,
-#: not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
+#: The flags the arm PINS OFF so the measured population is a function of THIS
+#: file, not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
 #: switches S2.2 on (``extractor_v2._value_gate_enabled``), so an ambient value
 #: would silently change the arm between two runs of the same probe — and
 #: ``TORTOISE_S2_DECISION_SEAM`` (#5087) is a THIRD switch for S2.2 (it arms the
 #: arbiter, so ``_vet_enabled`` is True), which would arm a network call and a
 #: spend inside an arm this file declares OFF.
+#:
+#: ⛔ These are pinned to ``"0"``, NOT popped (`#10996` review): popping produced
+#: an OFF arm only while the flag defaulted OFF, and an ABSENT
+#: ``TORTOISE_VALUE_GATE`` is now the ON arm (the S2.2 mechanical half defaults
+#: ON). Measured at the review head: inside ``measured_arm()`` the header printed
+#: ``TORTOISE_VALUE_GATE=<unset>`` while ``value_gate.value_gate_enabled()`` was
+#: True — a re-take of a committed log would have measured a population that
+#: includes the predicate, at a header claiming it was pinned off.
 ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
@@ -404,7 +412,9 @@ def measured_arm():
         for key in ARM_ON:
             os.environ[key] = "1"
         for key in ARM_OFF:
-            os.environ.pop(key, None)
+            # explicit falsy, never absent — `#10996`: an unset default-ON
+            # switch is the ON arm, so a pop would be a lie in the header below.
+            os.environ[key] = "0"
         observed = {key: os.environ.get(key) for key in keys}
         for key in ARM_ON:
             if observed[key] != "1":
@@ -429,8 +439,9 @@ def arm_header(observed: dict[str, str | None]) -> str:
         value = observed.get(key)
         parts.append(f"{key}={value if value not in (None, '') else '<unset>'}")
     return (" ".join(parts) + " (set/pinned IN-PROCESS for this pass and read "
-            "back from os.environ after setting; the deployed config leaves "
-            "both passes OFF)")
+            "back from os.environ after setting; the deployed config sets none "
+            "of them — since #10996 the value gate defaults ON, so the pinned 0 "
+            "is what makes this arm OFF)")
 
 
 def arm_record(observed: dict[str, str | None]) -> dict:

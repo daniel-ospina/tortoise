@@ -53,6 +53,27 @@
   "TORTOISE_VALUE_GATE": "<unset>",
   "TORTOISE_S2_DECISION_SEAM": "<unset>"
  },
+ "value_gate_pin": {
+  "default_on_keys": [
+   "TORTOISE_VALUE_GATE"
+  ],
+  "legacy_head": "54922a800f96858935b58ef250da569a4896df44",
+  "after": {
+   "pin": "legacy-absent",
+   "basis": "legacy log @ 54922a800 (produced by the pre-`#10996` `capstone_measure`, which popped the pin instead of setting it; the shipped producer writes TORTOISE_VALUE_GATE=0 and reads it back)"
+  },
+  "before": [
+   {
+    "artifact": "docs/evidence/9889/e1-paired-off-arm-1.json",
+    "pin": "legacy-absent"
+   },
+   {
+    "artifact": "docs/evidence/9889/e1-paired-off-arm-2.json",
+    "pin": "legacy-absent"
+   }
+  ],
+  "limitation": "`TORTOISE_VALUE_GATE` is recorded as ABSENT in every arm here, and since `#10996` an absent value gate is the ON arm. These records predate the flip, so absence really was OFF when they were taken, and they are admitted only on that licence (the producer pins the key explicitly now, so a NEW record cannot express OFF this way). Re-recording the pair at the shipped probes \u2014 `TORTOISE_VALUE_GATE=0` written and read back \u2014 is what closes the residual; that is a re-take of E1's arms and belongs to #7949, not to this record."
+ },
  "bars_source": "docs/evidence/7949-capstone/preregistration.json#criteria + #denominator_floors, parsed by capstone_measure.parse_bars \u2014 the same reader the scoring probe uses, so this record and that row cannot read two bars",
  "denominators": {
   "e1_objects": 30,
