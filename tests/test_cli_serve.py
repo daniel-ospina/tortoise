@@ -810,7 +810,7 @@ def test_key_create_wildcard_bind_prints_lan_note(
     the printed wildcard URL is unusable for clients, and the note used to
     fire only on full defaults (suppressed exactly when needed most).
     Wildcard + non-default port must also show it."""
-    _db, _key, env, cli_sdk = local_db  # noqa: RUF059
+    _db, _key, env, cli_sdk = local_db
     # The fixture's own embedded server is left alive on purpose (its close()
     # cannot prove "last client" here) — the subprocess must not care.
     cli_sdk.close()
@@ -832,7 +832,7 @@ def test_key_create_default_bind_still_prints_mirror_hint(
 ):
     """The defaults case keeps the mirror hint (pass --bind/--port to match
     a custom serve setup) — regression guard for the elif branch."""
-    _db, _key, env, cli_sdk = local_db  # noqa: RUF059
+    _db, _key, env, cli_sdk = local_db
     # Same contract as the wildcard test: the fixture's server stays alive
     # (fail-closed teardown guard), and the subprocess runs on its own db.
     cli_sdk.close()
