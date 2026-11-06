@@ -187,9 +187,11 @@ was: the save this row pays on a key change is the SHARED archive, not its own d
 ⚠ **What this measurement does NOT settle: the `~9 m` save term the other rows use.** That figure
 comes from the `test-d14-hosted-api` incident (#10182) and is not re-measured here; 15.9 m is a
 different runner on a different day, so it does not by itself falsify it — but it does show a
-3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, `test`'s
-53 m — which still clears its 90 m by 37 m here and by 26 m at the `~20 m` re-derivation — and the `test-carve-out` /
-`test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below) are
+3.6 GB save can cost TWICE that, and the rows derived from `~9 m` (`test-slow`'s 60 m, and the
+`test-carve-out` / `test-concurrency-falkor` / `test-d14-hosted-api` headroom statements below —
+⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived its SUM on a MEASURED
+~7.3 m startup plus an 8 m cache-write term, and split its payload so that job no longer writes
+the 3.6 GB archive at all — see its row below, which is the authority for it) are
 optimistic by ~7 m against the censored 15.9 m and by ~11 m against the completed ~20 m — so the
 re-derivation owed below should use the ~20 m figure (at which `test-slow` is ~11 m PAST its cap,
 not merely level with it). Re-deriving them is owed and is
@@ -222,8 +224,24 @@ read the cap against the SUM of the job's caps, not against its median.
 Every other row was checked against that rule. The discriminating fact is **not** that the
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
-SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 27 m per-shard
-watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
+SUM. `test` clears it with room to spare: 10 m last-failed pre-phase + the emitted **26 m** per-shard
+watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
+(`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
+suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
+whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
+90, x 1.5 = 86.5**. The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
+(3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
+is now read from the shared `pip-<os>-<hash uv.lock>` key that FOUR other jobs write, while
+`~/.cache/uv` keeps exactly one writer here, bounded in ACCUMULATION (`uv cache prune` — it drops entries no environment reaches, not a single environment's set) and in time
+(`timeout-minutes: 7`, `continue-on-error`, fail-open to a MISS). A SINGLE 3.88 GB write still does
+not fit — but on the measured rates, not on an assumption: this run's degraded uplink was 0.9 MB/s
+sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner
+class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11036, job 127280762096,
+`Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
+~57 m+ degraded against the ~10.4 m of room the SUM leaves. Splitting the payload is what brings it
+inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
+that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were
