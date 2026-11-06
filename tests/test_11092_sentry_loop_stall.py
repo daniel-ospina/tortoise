@@ -653,13 +653,19 @@ def test_the_real_sdk_builds_an_event_with_no_source_context(real_sentry) -> Non
     ``test_init_turns_source_context_off`` pins a kwarg captured by the FAKE SDK,
     so a ``sentry-sdk`` bump that keeps the key accepted while no longer reading
     it would leave that pin green while the per-frame source read — the outage —
-    came back. ``with_locals`` → ``include_local_variables`` is the precedent this
-    very module already relies on for #2863, and it is the SAME major that removes
-    both options (`sentry-sdk` 3.x drops ``include_source_context`` and
-    ``include_local_variables`` for ``data_collection=``), while
-    ``pyproject.toml`` declares ``sentry-sdk>=2.0`` with no upper bound. So assert
-    on the BUILT event: the frames a real exception produces must carry no
-    ``context_line``/``pre_context``.
+    came back. That is not hypothetical: ``with_locals`` is the option #2863's fix
+    originally used, and the SDK retired it in favour of
+    ``include_local_variables`` (it is absent from the installed SDK's option
+    set). ``pyproject.toml`` declares
+    ``sentry-sdk>=2.0`` with no upper bound, so another rename is reachable. (As
+    of 2.74.0 — the current release — ``include_source_context`` and
+    ``include_local_variables`` are still accepted and carry no deprecation
+    marker in the vendor tree; ``data_collection`` coexists with them. Do not
+    claim a removal that has not happened — the reason to assert on the BUILT
+    event is that a kwarg echo cannot detect one when it does.)
+
+    So assert on the BUILT event: the frames a real exception produces must carry
+    no ``context_line``/``pre_context``.
 
     The control below is the falsifier: the same observation point on a client
     built with source context ON must SEE those keys, so a zero is a fact about

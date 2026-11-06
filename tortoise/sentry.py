@@ -21,10 +21,15 @@ _enabled = False
 _service = "tortoise-hosted-api"
 
 # Exceptions the PROCESS-WIDE filter treats as "not an application error": no
-# event is built for them from ANY path, because this is the set `init()` derives
-# `ignore_errors` from. ⚠️ The request layer is a SEPARATE and broader set, and a
-# reset admitted there still delivers one event — see
-# `REQUEST_LAYER_DISCONNECT_NAMES`; do not read this header as covering it.
+# event is DELIVERED for them from ANY path, because this is the set `init()`
+# derives `ignore_errors` from. ⚠️ DELIVERED, not "built": `_is_ignored_error`
+# runs inside `Client.capture_event`, i.e. AFTER `event_from_exception` has
+# serialized every frame and only before `_prepare_event` — the event is still
+# constructed, which is exactly why `include_source_context=False` above is
+# required too. Reading this as "no event is built" is the misconception this
+# branch exists to correct. ⚠️ The request layer is a SEPARATE and broader set,
+# and a reset admitted there still delivers one event — see
+# `REQUEST_LAYER_DISCONNECT_NAMES`.
 # #11092: a peer hanging up is routine (a health probe timing out, a browser tab
 # closed, a dropped fetch). Routing it through the unhandled-exception handler
 # built a full event — including the per-frame source read that
