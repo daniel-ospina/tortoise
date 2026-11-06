@@ -3473,8 +3473,8 @@ jobs:
         # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
         # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
         # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
-        # (floor-clamped, `carve_shards: 3`) + ~1.5m setup/provision, i.e. ~9m
-        # of headroom against a ~9m COLD save and none at all against a slow
+        # (floor-clamped, `carve_shards: 3`) + a 10m embedder cap + ~1m setup
+        # ≈ 30m — no headroom before a save, and none at all against a slow
         # one. Raising the cap instead would re-open #3239's stale-head
         # exposure (the cap IS that exposure) and buy finite headroom under an
         # UNBOUNDED term — the save has no timeout of its own.
