@@ -4467,12 +4467,23 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         """
         if not re.search(r"\bbefore\s+#9548", sentence, re.I):
             return False
-        if "047c91f7a" in sentence:
-            return False  # names the TRUE pre-#9548 tree — a correction, not the defect
         # ADJACENT-anchored, not "anywhere in the sentence": the PRE-FIX cell carries
         # "not empty and not one" AFTER the false clause, which is exactly what
         # satisfied a whole-sentence test (the trap the manifest denial is windowed for).
-        return not re.search(r"\bnot\b[^.]{0,60}?before\s+#9548", sentence, re.I)
+        if re.search(r"\bnot\b[^.]{0,60}?before\s+#9548", sentence, re.I):
+            return False  # an adjacent denial IS a correction
+        # ⛔ THE SHA MUST OCCUPY THE SLOT, NOT MERELY APPEAR (#11064 review r19, P3).
+        # `if "047c91f7a" in sentence` exempted ANY mention, so
+        # `` `ff6379eb2` — the tree before #9548 — reads 5 lines, unlike `047c91f7a`. ``
+        # PASSED: the false claim plus a decorative sha. "Also present elsewhere" is
+        # not "absent here", and the swap is the whole defect — so a sentence that
+        # names `ff6379eb2` as that tree is refused BEFORE the exemption is consulted.
+        if re.search(r"ff6379eb2[^.]{0,40}?before\s+#9548", sentence, re.I):
+            return True
+        return not (
+            re.search(r"before\s+#9548[^.]{0,40}?047c91f7a", sentence, re.I)
+            or re.search(r"047c91f7a[^.]{0,40}?before\s+#9548", sentence, re.I)
+        )
 
     # ... and a cell that still NAMES the phrase must DENY the equivalence. Deleting
     # the clause is equally correct, so both shapes pass — what may not pass is the
@@ -4527,6 +4538,18 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "the arm refuses a DENIAL-shaped correction — `is not what ... means` is a "
         "repair, and banning that phrasing reds the fix (#11064 review r17, P3):\n  "
         + "\n  ".join(_refused_denials)
+    )
+    # … and must RED on the false claim plus a DECORATIVE sha — the residual
+    # fail-open the substring exemption left, measured at r19 (#11064 review r19,
+    # P3): the swap is the defect, and a mention elsewhere in the sentence does not
+    # un-make it.
+    assert _refuses_before_9548(
+        "`ff6379eb2` — the tree before #9548 — reads 5 lines, unlike `047c91f7a`."
+    ), (
+        "the sha exemption is a substring test again: a sentence that still calls "
+        "`ff6379eb2` the tree before #9548 passes because it also mentions "
+        "`047c91f7a` — 'also present elsewhere' is not 'absent here' (#11064 review "
+        "r19, P3)"
     )
     # … and must NOT red on any of the three truthful corrections the r17 review
     # measured RED before the exemption.
