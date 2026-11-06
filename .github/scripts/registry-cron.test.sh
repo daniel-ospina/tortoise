@@ -1971,6 +1971,12 @@ assert_file_match "$DRIVER" 'curl -sS -m "\$SWEEP_TIMEOUT_S"' "78d. the sweep PO
 # one continued command — so it passed against the code it was meant to disprove.
 # Assert on the whole file instead.
 assert_not_match "$(cat "$DRIVER")" 'curl[^|]*-m 600' "78d. no literal 600s ceiling survives anywhere in the driver"
+# #10234 review P2 (round 5): the knob is only reachable because the WORKFLOW
+# binds it — Actions passes only what `env:` enumerates (the #3146 lesson this
+# same workflow documents). Nothing else asserts that line exists, so a later
+# workflow edit could silently disconnect ops' documented variable.
+assert_file_match "$SCRIPT_DIR/../workflows/registry-backup-cron.yml" 'SWEEP_TIMEOUT_S: \$\{\{ vars\.SWEEP_TIMEOUT_S \}\}' "78d. the workflow BINDS the knob (Actions passes only what env: enumerates)"
+assert_file_match "$SCRIPT_DIR/../workflows/registry-backup-cron.yml" 'timeout-minutes: 45' "78d. the job ceiling is 45 min (the knob's 1800s upper bound fits inside it)"
 
 # ── 78d-ii. #10234 review P2: a non-numeric knob must not go green ─────────
 # It is passed straight to `curl -m`; a bad value makes curl reject the option

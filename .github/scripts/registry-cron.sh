@@ -754,7 +754,7 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
 #   http             rc 0 with a body (the HTTP code is then meaningful)
 # The SWEEP leg (#5028) deliberately keeps its own `rc -eq 28` test: its STATUS
 # vocabulary (`driver_timeout`/`empty_response`) is that shipped contract, and
-# the `transport_error` case it cannot yet express is the sweep's own
+# the `transport_error` case it now expresses itself (see the sweep shape classifier below) is the sweep's own
 # incident-body truthfulness gap, tracked by #5114. Routing it through this
 # helper would unify nothing — it consumes one token of the four.
 leg_shape() { # <curl_rc> <body> -> shape label on stdout
@@ -1800,19 +1800,21 @@ case "$RUN_STATUS" in
           "the driver got no report from POST /v1/internal/backups/sweep after ${SWEEP_ELAPSED}s (curl exit ${CURL_RC}, status=${RUN_STATUS_SAFE}), and the last COMPLETED sweep is ${timeout_age_min}m old (> ${DRIVER_DOWN_MIN}m). Unlike a bare budget timeout this IS coverage evidence: no sweep has landed inside the declared driver-down window, so sweeps have stopped completing. Last known last_sweep=${LAST_SWEEP_SAFE}." ""
         NO_COVERAGE=1
       else
-        # #10234 review P1 (round 3): a fresh completion stamp proves the ROLL-UP
-        # finished — `last_sweep_at` is written unconditionally before the outcome
-        # is computed (backup_sweep.py:1842 precedes the status assignment) — so
-        # it does not prove the POOL is servable. The direct-R2 leg, measured in
-        # THIS run, is the independent evidence, and it has three stale causes of
-        # which only one (a stale archive, STALE_TEAM_COUNT>0) files anything.
-        # A POOL_STALE with NO stale-archive count means "unparseable archive
-        # timestamp" (:1145) or "team prefix with no default archive at all"
-        # (:1171) — a pool problem that measured nothing stale. Backups are then
-        # not restorable, and calling this run healthy would be an unbounded
-        # green. Surface it through LOUD (the pool's own signal) rather than by
-        # filing SWEEP_NO_COVERAGE, so the false claim #10234 is about is not
-        # resurrected.
+        # #10234 review P1 (round 3) / P2 (round 4): a fresh completion stamp
+        # proves the ROLL-UP finished — `last_sweep_at` is written unconditionally
+        # before the outcome is computed (backup_sweep.py:1842 precedes the status
+        # assignment) — so it does not prove the POOL is servable. Of the three
+        # direct-R2 stale causes, exactly ONE has no healthy reading: an archive
+        # timestamp that cannot be parsed (:1148), i.e. the pool's AGE is
+        # unmeasurable. That one reds. The other two are deliberately NOT gated
+        # here: "team prefix present but no default archive" (:1183) is precisely
+        # what a team whose DEFAULT graph is legitimately empty looks like while a
+        # CUSTOM graph archives — this leg is DEFAULT-only by design (#2375), and
+        # the `no_teams|no_work` arm above RESOLVES SWEEP_NO_COVERAGE on that
+        # shape. Reding it (which round 3 did) would red every timeout run forever
+        # for a healthy custom-only team, so 78h pins it GREEN.
+        # The incident for the unparseable cause is filed by the pooled POOL_STALE
+        # site, which already set LOUD; this arm only explains the verdict.
         if [ "${POOL_UNPARSEABLE:-0}" = "1" ]; then
           # The incident itself was filed by the pooled POOL_STALE site above
           # (which already set LOUD), so this run is RED regardless; this line
