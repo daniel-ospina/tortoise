@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:a16a87705858c45504dc4138c39647f3db8176ba06245cd436290abe9fc07c79",
+  "document_sha256": "sha256:40b33f818f44ea5d4a2f6e674494e33cc061267668d5be29a3ba2639a132a671",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -282,7 +282,7 @@
     "E1b": {
       "corpus": "tests/eval/write_path",
       "claim": "anti-gaming control: planted units survive the deterministic m2 lane (90/90 at this fixtures_hash)",
-      "not_a_proof_of": "anything about the v2 door — the m2 lane writes no relation edges at all",
+      "not_a_proof_of": "anything about the v2 door — the m2 lane is a DIFFERENT extractor whose operator edges come from its own relation model (tortoise/extractor.py), not from the v2 lane's connect step",
       "lane": "m2"
     },
     "E2a": {
@@ -296,15 +296,15 @@
       "not_a_proof_of": "the fleet's atomicity on a real capture"
     },
     "E3": {
-      "corpus": "fleet-capture",
+      "corpus": "the run's own door-written graph",
       "claim": "every derived node from a door-written graph carries a version anchor (a structural property of the writer)",
-      "not_a_proof_of": "any content claim — E3 is shape, not extraction quality"
+      "not_a_proof_of": "any content claim — E3 is shape, not extraction quality; it is also not a fleet-population claim, since the graph it counts is whichever graph the run wrote"
     },
     "E4": {
       "corpus": "tests/eval/write_path",
-      "claim": "operator edges are wired and persisted on the registered bar (15)",
-      "not_a_proof_of": "the fleet's connect step: the m2 lane's operator figure is structural (2/15), not a product claim",
-      "lane": "m2"
+      "claim": "5 of 15 planted operator edges are wired and persisted against the registered bar (15), read from the receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json)",
+      "not_a_proof_of": "the fleet's graph: this is the fixture corpus, and the row is graded through the v2 door on it (not on the m2 lane) — a fleet claim needs a captured corpus",
+      "lane": "v2"
     },
     "E5": {
       "corpus": "tests/eval/write_path",

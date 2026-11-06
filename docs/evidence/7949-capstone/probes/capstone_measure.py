@@ -360,8 +360,12 @@ DOOR_LANE = "v2"
 #: * ``TORTOISE_SESSION_EXTRACTOR`` — ``m2`` is the OTHER extractor; only
 #:   ``unset`` is the default the fleet runs, and the log must state which one
 #:   this was.
-#: * ``TORTOISE_EXTRACTOR=v1`` — the v1 dispatch in ``sdk.py`` bypasses the v2
-#:   extractor entirely (a route off this door).
+#: * ``TORTOISE_EXTRACTOR=v1`` — read by ``sdk.commit_session`` (``sdk.py``), NOT
+#:   by ``capture_session``: the acceptance path dispatches on
+#:   ``TORTOISE_SESSION_EXTRACTOR`` alone, so this pin is DEFENSIVE for any
+#:   commit the probe performs, not a route off the capture door. Said plainly
+#:   because the #10983 review found the earlier "a route off this door"
+#:   rationale claimed a reach this variable does not have on this path.
 #: * ``TORTOISE_LABEL_ORDER=shuffle`` — NOT a behaviour seam (#10983): it is a
 #:   render DIAGNOSTIC that reorders the kind lists per call, i.e. it makes two
 #:   runs of this probe differ for a reason that is not the arm. Pinned off.
@@ -504,6 +508,22 @@ def measured_arm():
                 f"{leaked_lane!r} after being unset. A capture taken under "
                 f"another lane measures a DIFFERENT door (#10983), so this pass "
                 f"writes no table")
+        # EVERY other pinned-off switch, re-read and refused on a leak. The lane
+        # has its own message above (it changes the door); these change what the
+        # run MEASURES through the same door, and the #10983 review found them
+        # popped, printed in the ``door:`` line, and never checked — so the
+        # header's "read back" claim was one var wider than the code. A pin that
+        # cannot fail is a declaration, not a control.
+        for key in door_off:
+            if key == DOOR_LANE_ENV:
+                continue
+            leaked = observed.get(key)
+            if leaked not in (None, ""):
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned UNSET, but it "
+                    f"reads back {leaked!r} after being popped. It changes what "
+                    f"this run measures through the same door, so the arm cannot "
+                    f"be declared (#10983) and this pass writes no table")
         for key, expected in DOOR_PINNED_ON:
             if observed.get(key) != expected:
                 raise SystemExit(

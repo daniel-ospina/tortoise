@@ -249,10 +249,10 @@ never made.
 | row | corpus that carries it | the claim it supports | it is NOT a proof of |
 |---|---|---|---|
 | **E1** | `tests/eval/write_path` (fixture, this hash) | `^the <X>` share falls ≥50% **on this corpus**, both arms, same commit | that the fleet's graph volume falls |
-| **E1b** | `tests/eval/write_path` **on the `m2` lane** | the anti-gaming control: planted units survive the deterministic lane (90/90 at this hash) | anything about the v2 door — the `m2` lane writes no relation edges at all |
+| **E1b** | `tests/eval/write_path` **on the `m2` lane** | the anti-gaming control: planted units survive the deterministic lane (90/90 at this hash) | anything about the v2 door — the `m2` lane is a *different extractor* whose operator edges come from its own relation model (`tortoise/extractor.py`), so its figures are not the v2 lane's |
 | **E2a / E2b** | `tests/eval/write_path` (fixture) | value-bearing units survive; claims are not fused | the fleet's correctness, which needs a capture through the door |
-| **E3** | any graph **written through the door** (shape, not content) | every derived node carries a version anchor | a content claim: it is a structural property of the writer |
-| **E4** | `tests/eval/write_path` gold, **graded on the `m2` baseline** | operator edges wired/persisted on the registered bar (15) | the fleet's connect step: the m2 lane has no relation extraction, so its operator figure is structural, not product |
+| **E3** | the run's **own door-written graph** (shape, not content) | every derived node carries a version anchor | a content claim: it is a structural property of the writer; nor a fleet-population claim, since the graph it counts is whichever graph the run wrote |
+| **E4** | `tests/eval/write_path`, graded **through the v2 door** (the receipt the probe selects by `corpus_hash`) | 5 of 15 planted operator edges are wired and persisted against the registered bar (15) | the fleet's graph: this is the fixture corpus. ⚠️ It is **not** an `m2` row — the selected receipt (`w2b-operator-2026-10-24-8503-b.json`) records `extract_session_v2` |
 | **E5** | `tests/eval/write_path` (fixture, §10) | the raw-vs-narrative premise, measured on this corpus | a fleet-corpus premise: a different corpus is a different measurement |
 | **any fleet-graph claim** | **`fleet-capture`** — a real capture through the door | what the fleet's write path actually produces | nothing yet: this registration pins no fleet-capture corpus, and one must be registered **before** such a number is scored |
 
@@ -270,8 +270,7 @@ The difference is measured, and it is **structural, not a matter of degree**: th
 **no `:Object` at all** on this session and **5.5×** the `:Point`s, because it is a *different
 extractor*, not a different seam of the same one.
 
-⇒ **A number measured on one lane is not a number about the other.** That is exactly why the `m2`
-columns in §1.6.3 must not be read as fleet facts, and why the door is pinned structurally (§1.6.1)
+⇒ **A number measured on one lane is not a number about the other.** That is exactly why the `m2` column in §1.6.3 (E1b) must not be read as a fleet fact, and why the door is pinned structurally (§1.6.1)
 as well as measured here — a control measures the two lanes *as they are today*, while the pin is
 what stops the selector moving tomorrow.
 

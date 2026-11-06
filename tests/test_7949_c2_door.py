@@ -40,11 +40,17 @@ WHAT THIS PINS — and the polarity that makes it worth having
 4. **The acceptance probe cannot silently take another door** — the lane and the
    two prompt-rendering switches are pinned and READ BACK inside
    ``measured_arm``, and a leak refuses the run (``capstone_measure``).
-5. **The negative control, measured** — the same corpus session through both
-   lanes. The measurement is recorded verbatim in the assertion message because
-   its *result* is the finding: under the shipped offline mock seam the two
-   lanes are **indistinguishable**, so the mock is lane-blind and may never be
-   the control, and no acceptance number may be produced under it.
+5. **The negative control, measured and DIFFERENT** — the same corpus session
+   through both lanes. The measurement is recorded verbatim in the assertion
+   message because its *result* is the finding: under the shipped offline mock
+   seam the two lanes are **structurally different** (`v2` mints 1 `:Object` and
+   27 `:Point`s on `wp01_quarry_debug`; `m2` mints **no `:Object` at all** and
+   149 `:Point`s), so the mock is NOT lane-blind and a number measured on one
+   lane is not a number about the other. §1.6.4 of the registration carries the
+   same table. ⚠️ This item said the opposite until the #10983 review: a
+   lane-blind mock was *believed* during the first pass, and repeating that in
+   the suite's own header contradicted the test below, which measures the
+   difference.
 
 Everything here is DB-light (one embedded capture per arm), network-free and
 LLM-free (the ``TORTOISE_SESSION_LLM_MOCK=1`` offline seam).
@@ -274,20 +280,34 @@ def test_s5_means_embed_in_this_module_never_connect():
 
 
 def test_the_connect_stage_has_a_named_call_site_or_no_claim():
-    """§2 R10's positive half: the v4 CONNECT step is a writer, not a label.
+    """§2 R10's positive half: the v4 CONNECT step is a CALL SITE, not a label.
 
-    The capstone's E4 row is about operator edges being *wired and persisted*.
-    Pinned here as an executable fact rather than a doc claim: the embed step's
-    operator path is a real function, so "CONNECT ran" is checkable at a call
-    site instead of by log text.
+    The capstone's E4 row is about operator edges being *wired and persisted*,
+    so the claim needs a call site — not a function whose name happens to
+    contain "operator". The two halves are pinned separately because they live
+    in different modules: ``extractor_v2`` only *emits* the payload's operator
+    list, while the PERSISTENCE happens on the SDK side, where
+    ``_extract_session_v2`` hands that list to ``apply_payload_operators``.
+
+    ⛔ The previous version of this test matched any function NAME containing
+    "operator" in ``extractor_v2``. The only two matches were a pure helper
+    (``_operator_endpoint_surfaces``) and a prune (``_prune_held_operators``),
+    so it stayed GREEN with the operator wiring deleted — a name grep cannot
+    prove a writer exists. Found in the #10983 review; fixed by resolving the
+    real call site.
     """
-    names = set(_funcs(EXTRACTOR))
-    writers = [n for n in names
-               if re.search(r"apply_payload_operators|_emit_operators|"
-                            r"operator", n)]
-    assert writers, (
-        "no operator-writing function remains in extractor_v2 — the E4 "
-        "CONNECT claim would then have no call site to name (#7949 §2 R10)")
+    v2_src = _source(EXTRACTOR)
+    assert re.search(r'"operators"\s*:\s*payload_operators', v2_src), (
+        "extractor_v2 no longer builds the payload's operator list — the "
+        "emitter half of CONNECT is gone, so E4 has no operator data to "
+        "persist (#7949 §2 R10)")
+
+    body = _resolve(SDK, "_extract_session_v2")
+    assert "apply_payload_operators(" in body, (
+        "sdk._extract_session_v2 no longer CALLS apply_payload_operators — the "
+        "v2 lane would emit operator edges that nothing persists, and E4's "
+        "'wired and persisted' claim would have no call site to name "
+        "(#7949 §2 R10)")
 
 
 # ── 4. the acceptance probe cannot silently take another door ─────────────
@@ -337,6 +357,41 @@ def test_the_probe_refuses_a_leaked_lane(monkeypatch):
     assert "lane" in str(exc.value).lower(), exc.value
 
 
+def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
+    """Every pinned-off switch is re-read and refused, not only the lane.
+
+    ⛔ Found in the #10983 review: ``DOOR_PINNED_OFF`` pops three vars, but the
+    refusal block checked only the lane, so an unpoppable ``TORTOISE_EXTRACTOR``
+    or ``TORTOISE_LABEL_ORDER`` was recorded in ``observed``, printed in the
+    ``door:`` line, and silently accepted — while the registration said "every
+    one is written in-process, read back, and a run whose read-back disagrees is
+    refused". A pin that cannot fail is a declaration, not a control, so each
+    non-lane member is exercised here.
+    """
+    probe = _load_probe()
+
+    class _Unpoppable(dict):
+        """Accepts the pin, refuses to apply it — the value leaks back out."""
+
+        def pop(self, key, default=None):
+            return self.get(key, default)
+
+    others = [k for k in probe.DOOR_PINNED_OFF if k != probe.DOOR_LANE_ENV]
+    assert others, (
+        "DOOR_PINNED_OFF pins only the lane — the other switches are back to "
+        "being declarations (see the #10983 review)")
+    for key in others:
+        env = _Unpoppable(os.environ)
+        env[key] = "leaked"
+        monkeypatch.setattr(probe, "os", type(
+            "os", (), {"environ": env})())
+        with pytest.raises(SystemExit) as exc, probe.measured_arm():
+            pass
+        assert "REFUSED" in str(exc.value) and key in str(exc.value), (
+            f"a leaked {key} was accepted: the run would declare a pinned-off "
+            f"seam it did not actually run (got {exc.value})")
+
+
 def test_the_probe_records_the_door_in_the_log_and_the_machine_record():
     """Target 1 & 3: the seam set is recorded IN THE RUN, not inferred later."""
     probe = _load_probe()
@@ -358,6 +413,40 @@ def test_the_probe_records_the_door_in_the_log_and_the_machine_record():
     assert any(row["default"] == "on" for row in record["seams"])
 
 
+def test_the_PUBLISHED_ledgers_are_the_codes_not_a_second_transcription():
+    """The two PUBLISHED copies of the ledger must match the CODE, row for row.
+
+    ``test_the_seam_ledger_is_the_codes_not_the_issues`` compares the code
+    against a literal in THIS file. That leaves the two artifacts a reader
+    actually sees — ``probe.SEAM_LEDGER`` (what every acceptance log prints) and
+    ``preregistration.json``'s ``door.seams`` (what the record states) — compared
+    to nothing at all. Set either copy's ``TORTOISE_VALUE_GATE`` default back to
+    ``"off"`` and all 14 tests still passed, re-publishing exactly the false
+    ledger #10996 created. That is the drift this PR exists to correct, so it is
+    pinned here rather than described.
+    """
+    probe = _load_probe()
+    published_probe = {env: default
+                       for env, _where, default, _seam in probe.SEAM_LEDGER}
+    record = json.loads(REGISTRATION.read_text(encoding="utf-8"))
+    published_json = {row["env"]: row["default"]
+                      for row in record["door"]["seams"]}
+
+    expect = {}
+    for env, where, _default, _seam in probe.SEAM_LEDGER:
+        module, _, resolver = where.partition(".")
+        expect[env] = "on" if _default_of(module, resolver) else "off"
+
+    assert published_probe == expect, (
+        "probe.SEAM_LEDGER is not the code's ledger — every acceptance log "
+        f"prints it verbatim:\n  published: {published_probe}\n  code:      "
+        f"{expect}")
+    assert published_json == expect, (
+        "preregistration.json door.seams is not the code's ledger — the "
+        f"registration states it as the record:\n  published: "
+        f"{published_json}\n  code:      {expect}")
+
+
 def test_the_registration_records_the_door_and_the_corpus_attribution():
     """The corpus decision lives in the REGISTRATION, not in prose (#10983)."""
     record = json.loads(REGISTRATION.read_text(encoding="utf-8"))
@@ -376,8 +465,13 @@ def test_the_registration_records_the_door_and_the_corpus_attribution():
         "preregistration.json carries no corpus-row attribution — 'which "
         "corpus carries which row' is the decision #10983 exists to write down")
     for crit, entry in rows.items():
-        assert entry["corpus"] in {"tests/eval/write_path", "fleet-capture"}, (
-            f"row {crit} names an unknown corpus {entry['corpus']!r}")
+        assert entry["corpus"] in {
+            "tests/eval/write_path",         # the registered fixture corpus
+            "fleet-capture",                 # pinned by NOBODY yet: may not be scored
+            "the run's own door-written graph",  # E3: shape of whatever the run wrote
+        }, (
+            f"row {crit} names an unknown corpus {entry['corpus']!r} — a carrier "
+            f"nobody defined is the prose this block exists to replace")
         assert entry["claim"] and entry["not_a_proof_of"], (
             f"row {crit} states no claim / no boundary — an attribution "
             f"without a falsifier is prose again")
