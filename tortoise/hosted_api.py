@@ -17163,7 +17163,10 @@ def declared_capture_write_count(body: SessionRequest) -> int:
 def capture_ingest_charge_bytes(body: SessionRequest) -> int:
     """The stored BYTES one capture is charged against its org's ingest window.
 
-    ``max(re-serialized request body, nodes it will leave behind × 1024)``.
+    ``max(re-serialized request body, declared_capture_write_count(body) × 1024)``
+    — the node term is the CAPTURE CHAIN the request leaves behind, not every
+    node it can write: the extracted non-episodic Points/entities/operators are
+    bounded by the ``max_points`` gate, not by this charge (see the block above).
 
     * the **payload term** is the whole ``SessionRequest`` as serialized
       (``model_dump_json()``), i.e. the transcript text plus metadata — the
