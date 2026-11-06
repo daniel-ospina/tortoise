@@ -6,7 +6,7 @@ drives a real FalkorDB, so it is `uri_requiring`, and `ci_selection` subtracts a
 suite, a change to the DELETE gate would merge on a green PR with **no executor test
 executed at all** — the silent-green class this repo treats as a defect.
 
-Everything here is decision logic that needs no engine: the four refusal gates, the
+Everything here is decision logic that needs no engine: the five refusal gates, the
 fail-closed config, and the dry run. The engine-dependent cases (a bounded cache, a
 re-read from the record, a lease held across a real delete, a recycled node id) stay in
 the live suite, where they can be wrong in ways a fake cannot reproduce.
@@ -58,8 +58,13 @@ class _FakeGraph:
         delete_removes: int | None = None,
         peer_takes: int = 0,
         fail_delete: bool = False,
+        name: str | None = "g",
     ) -> None:
         self.nodes = nodes
+        #: The graph this handle SAYS it is. `evict`'s gate 5 refuses a handle that
+        #: cannot name its graph, or names one other than the census's — so the fake
+        #: must model the identity every real handle carries (`falkordb.Graph.name`).
+        self.name = name
         #: Raise INSIDE the `DETACH DELETE` statement, to pin that a store fault during
         #: the delete still returns the record of what was already removed and marks the
         #: effect UNVERIFIED (the CLI reads that flag to avoid reporting "nothing went").
@@ -165,7 +170,7 @@ def _record(candidate: Candidate) -> bool:
 
 
 # --------------------------------------------------------------------------------------
-# the four refusal gates
+# gates 1-2 — the census and the licence
 # --------------------------------------------------------------------------------------
 @pytest.mark.parametrize("verdict", [
     "REFUSED", "UNBOUNDED",
@@ -837,3 +842,111 @@ def test_a_MIXED_selection_aborts_rather_than_sweeping_the_other_population():
     assert report.verdict == "REFUSED"
     assert "mixed selection" in report.reason, report.reason
     assert graph.mutating == [], f"a mixed selection mutated: {graph.mutating}"
+
+
+# --------------------------------------------------------------------------------------
+# GATE 5 — the graph. The licence is scoped to the graph the CENSUS measured.
+# --------------------------------------------------------------------------------------
+def test_a_plan_for_one_graph_never_deletes_from_another():
+    """`Assessment.state.graph_name` was never read by the executor.
+
+    The census makes the graph binding REQUIRED (`load_parity_report(graph_name=…)`,
+    #11097) precisely because "a CLEAN census of graph A licensed evicting graph B".
+    The executor is the half that DELETES, so it must re-check the binding at the last
+    hop — otherwise a licence measured on one graph is applied to whatever handle the
+    caller passed.
+    """
+    graph = _FakeGraph(nodes=10, name="graph_b")
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False, policy=EvictionPolicy(max_nodes=2),
+    )
+    assert report.verdict == "REFUSED"
+    assert "graph_b" in report.reason and "'g'" in report.reason
+    assert graph.deletes == [], "swept a graph the census never measured"
+    assert graph.mutating == []
+
+
+def test_a_handle_that_cannot_name_its_graph_is_refused():
+    """A duck-typed stub is exactly the handle most likely to point at the wrong graph.
+
+    "I cannot tell which graph this is" is not "it matches" — the same doctrine
+    `_read_statement` applies to a handle with no read-only verb.
+    """
+    graph = _FakeGraph(nodes=10, name=None)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False, policy=EvictionPolicy(max_nodes=2),
+    )
+    assert report.verdict == "REFUSED"
+    assert "does not name its graph" in report.reason
+    assert graph.deletes == []
+
+
+def test_an_assessment_with_no_graph_binding_is_refused():
+    """`CacheState.graph_name` is a required field, but an empty one binds nothing."""
+    def _unbound():
+        a = _assessment()
+        a.state = _state(graph_name="")
+        return a
+
+    graph = _FakeGraph(nodes=10)
+    report = evict(
+        _unbound(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: _candidates(10)[:limit],
+        record_probe=_record, dry_run=False, policy=EvictionPolicy(max_nodes=2),
+    )
+    assert report.verdict == "REFUSED"
+    assert "did not bind a graph name" in report.reason
+    assert graph.deletes == []
+
+
+# --------------------------------------------------------------------------------------
+# the bound cannot be smuggled past `EvictionPolicy.__post_init__`
+# --------------------------------------------------------------------------------------
+def test_a_foreign_policy_object_cannot_lower_the_bound_to_zero():
+    """`policy or EvictionPolicy.resolve()` accepted ANY object.
+
+    `EvictionPolicy.__post_init__` floors `max_nodes` at 1 *because* a bound of zero
+    empties the cache one batch at a time. An object that merely LOOKS like a policy
+    skips that validation entirely, so the only defence is an `isinstance` check.
+    """
+    from types import SimpleNamespace
+
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False,
+        policy=SimpleNamespace(max_nodes=0, batch_size=100, max_passes=10),
+    )
+    assert report.verdict == "REFUSED", "a bound of zero was honoured"
+    assert "EvictionPolicy" in report.reason
+    assert graph.deletes == [], "a fabricated bound emptied the graph"
+
+
+# --------------------------------------------------------------------------------------
+# a duplicated licence entry TIGHTENS
+# --------------------------------------------------------------------------------------
+def test_a_duplicated_licence_entry_takes_the_smaller_proven_count():
+    """Last-wins let a second entry WIDEN a licence the first had already bounded."""
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(evictable=[
+            {"population": POPULATION, "nodes": 2},
+            {"population": POPULATION, "nodes": 10},
+        ]),
+        _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=100, max_passes=5),
+    )
+    assert len(report.deleted) == 2, (
+        f"evicted {len(report.deleted)} on a licence whose smaller proof was 2"
+    )

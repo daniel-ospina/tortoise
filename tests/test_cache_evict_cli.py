@@ -40,6 +40,12 @@ class _Graph:
     #: unreachable from this harness.
     NODES = 10
 
+    #: The graph this handle SAYS it is — `evict`'s gate 5 refuses a handle that cannot
+    #: name its graph, or names one other than the census's. `BASE`'s `--graph` is
+    #: `tortoise`, and the fake instance's only graph is `tortoise`, so a real handle here
+    #: would answer the same name (`falkordb.Graph.name`).
+    name = "tortoise"
+
     def __init__(self, *, fail_delete: bool = False, delete_removes: int | None = None,
                  fail_recount: bool = False):
         self.statements: list[str] = []
