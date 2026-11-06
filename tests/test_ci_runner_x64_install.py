@@ -3744,16 +3744,15 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 
 
 #: Files OUTSIDE the two runbooks that cite `python-ci.yml:<line>` for the `test-slow` header's
-#: refusal-cost paragraph. On the `main` this landed against, `:1891` was inside that paragraph but was
-#: its SECOND line, not its opener (`:1890` there, and the opener is what the pin below requires), and
-#: #6744's +70-line insert in the `test` job's `strategy` block moved the whole block — so
-#: a reader (or a fixer) sent to `:1891` never found the refusal it was sent to read, and NOTHING
-#: read either file, so the drift shipped green. The numbers keep moving — every insert above the
-#: paragraph, in either direction, moves it, and the anchors are NOT the same line (the opener the
-#: pin below requires is not the `Do NOT change it back` prohibition, and neither is `:1891`). ⛔ No
-#: current number is restated here on purpose: three attempts to keep it live went stale on the
-#: next merge, so the pin reads the citation from the FILE and resolves it against the workflow.
-#: Trust a red, not this note.
+#: refusal-cost paragraph. The number those two files carried landed on the `Do NOT change it back`
+#: prohibition — ~30 lines BELOW the paragraph's OPENER, which is the line the pin below requires —
+#: and #6744's insert in the `test` job's `strategy` block then moved the whole block on top of
+#: that, so a reader (or a fixer) sent there never found the refusal it was sent to read. NOTHING
+#: read either file, so the drift shipped green. ⛔ No current number is restated here on purpose:
+#: every insert above the paragraph, in either direction, moves it, and the anchor the pin requires
+#: is not the prohibition; three attempts to keep a live number in this note went stale on the next
+#: merge. The pin reads the citation from the FILE and resolves it against the workflow — trust a
+#: red, not this note.
 _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
 
 #: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
@@ -3816,11 +3815,11 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     """Refs OUTSIDE the installer map were only range-checked, so they drifted silently.
 
     The runbook cites `.github/workflows/*.yml`, `scripts/ci_runner_gate.sh` and `config.sh` by line
-    number, and the installer map pin above can only see refs INSIDE its own bullet. Measured at
-    this head: `mirror-images.yml:92` cited the arm64 comment while the file had moved it to `:104`
-    (this PR adds 12 net lines above it), and `python-ci.yml:1556` / `:1544-1546` were ALREADY stale
-    on `main` (the cited comment sits at `:1761`). Each still passed the only check they had — `1 <=
-    n <= EOF` — which an offset-shifted number always passes.
+    number, and the installer map pin above can only see refs INSIDE its own bullet. Measured when
+    this pin was written: `mirror-images.yml` cited the arm64 comment at `:92` while the file had
+    moved it to `:104` (this PR adds 12 net lines above it), and two `python-ci.yml` refs were
+    ALREADY stale on `main` — the cited comment sat ~200 lines below the number. Each still passed
+    the only check they had — `1 <= n <= EOF` — which an offset-shifted number always passes.
 
     Mutation: revert any of the five refs to its pre-fix number -> RED with the line it actually
     hit. A ref that lands two files away is worse than none: a fixer sent there edits workflow
@@ -3917,10 +3916,9 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # block (`python-ci.yml:748`) and 15/12 further down, so both numbers now land on unrelated
     # comments (`:1844` on a host-wide `ps`-count note, `:1911` on the presence-form header) — and
     # NOTHING red, because the only cross-file-ref gate in the repo read `ci-runner-x64.md` alone.
-    # ⚠ Both figures are measured at the head that wrote them; the numbers have moved since, which
-    # is the whole point. On `origin/main` the two anchors sit at `:1850`/`:1917`; at this head they
-    # are `:1920`/`:1987`. The pin reads the citation from the file, so a reader should not treat
-    # either pair above as current — and a fixer re-anchoring should trust the red, not this note.
+    # ⚠ No coordinate from any head is restated here: every pair this note has carried went stale on
+    # the next merge, which is the whole point. The pin reads the citation from the FILE and resolves
+    # it against the workflow, so a fixer re-anchoring should trust the red, not this note.
     # Both sentences are load-bearing there: the first carries the "ARM64 VMs resolve
     # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at 32m12s
     # of a 30m budget" measurement the section argues a fold-routing decision on.
@@ -3958,18 +3956,18 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
 
     # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
     # `.github/workflows/ci.yml:1506` and `.github/actionlint.yaml:32` both cite the same refusal
-    # paragraph, and both were exactly right on `main` (`python-ci.yml:1891`). The +70-line insert
-    # into the `test` job's `strategy` block moved that line to `:1961` at the pre-rebase head
-    # (`:1967` here), and neither file is read by any gate — the identical "no gate reads it, so it
-    # drifts green" hole that put `batch-integration.md` in this pin one round earlier. Both
-    # sentences are load-bearing:
+    # paragraph, and neither file is read by any gate — the identical "no gate reads it, so it drifts
+    # green" hole that put `batch-integration.md` in this pin one round earlier. When that citation
+    # was written the number landed on the `Do NOT change it back` prohibition, ~30 lines past the
+    # paragraph's OPENER that the checker requires — written from a remembered offset, not derived —
+    # and every insert above it since has moved it further. Both sentences are load-bearing:
     # `ci.yml:1506` is why the #10237 canary exists at all (the required legs CANNOT be routed to
     # the pool), and `actionlint.yaml:32` is the only record of why declaring a label is not a way
     # to make a required leg schedulable.
     #
-    # Mutation: revert either number to its pre-#6744 value (`:1891`) -> RED naming the line it
-    # actually hit, which at THIS head is the `test` job's `orphan-bound.sh --count` invocation
-    # (`:1891`); the FalkorDB-teardown comment that `:1891` used to land on is now `:1897-1898`.
+    # Mutation: revert either number to its pre-#6744 value -> RED naming the line it actually hit.
+    # No line number is restated in this note on purpose: the checker below resolves the citation
+    # from the FILE and compares it to the sentence, so trust the red rather than this prose.
     workflow_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
     for rel in _REFUSAL_CITATION_SITES:
         text = (REPO_ROOT / rel).read_text()
@@ -3981,8 +3979,8 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         assert not problems, f"{rel} sends the reader past the sentence it means: " + "; ".join(problems)
 
     # Non-vacuity, executable: the SAME checker must reject the pre-fix citation, so a pass on the
-    # real files cannot be it matching nothing. `:1891` is the number both files carried on `main`
-    # (and the number this round corrected) — measured, not invented.
+    # real files cannot be it matching nothing. `:1891` is one of the numbers those two files
+    # carried before this round corrected them; the control only needs it to NOT be the opener.
     assert _refusal_citation_problems(
         "The required legs CANNOT be routed here: `python-ci.yml:1891` — refused.", workflow_lines
     ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
