@@ -160,17 +160,21 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
 # `tests/test_battery_parity_mabench_tortoise.py`'s BATTERY_PARITY_TORTOISE_E2E.
 _BENCH_OPT_IN_ENV = "TORTOISE_LME_BENCH"
 
-# One full LongMemEval haystack is seeded per question, and the loop arm seeds
-# three in a SINGLE item — which is the item measured over the 300s repo default.
-# A bench arm that legitimately needs longer must SAY so (pyproject.toml's
-# `timeout = 300` block: "A leg that needs a longer single item must SAY so …
-# `@pytest.mark.timeout(N)` on the test"), so these four declare their budget
-# instead of relying on the gate's.
+# One full LongMemEval haystack is seeded per question. The loop arm this file
+# USED to carry seeded three of them in a SINGLE item, and that one item is what
+# crossed the 300s repo default; it is now parametrized one question per item
+# (`_POOL_MEMBERSHIP_QIDS` below), so what is left to justify is PER-ITEM
+# headroom on a loaded runner — 181-188 s warm, 294.31 s for `ceb54acb` under
+# load — not an aggregate in one item. A bench arm that legitimately needs
+# longer must SAY so (pyproject.toml's `timeout = 300` block: "A leg that needs
+# a longer single item must SAY so … `@pytest.mark.timeout(N)` on the test"), so
+# these four declare their budget instead of relying on the gate's.
 _BENCH_ITEM_BUDGET_S = 900
 
 _BENCH_SKIP_REASON = (
     "bench prerequisite: the corpus-scale ask-lever arms seed a full "
-    "LongMemEval haystack per question and exceed the repo-wide 300s budget, "
+    "LongMemEval haystack per question and measure 181-188 s warm, 294.31 s for "
+    "one question under load — at the repo-wide 300s budget — "
     f"so they run only when opted in — set {_BENCH_OPT_IN_ENV}=1 with "
     f"{_CACHED_DATASET} present"
 )
