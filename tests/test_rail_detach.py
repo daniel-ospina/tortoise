@@ -967,23 +967,32 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
     above).
 
     Non-vacuity, and ⛔ THE CARRIER IS NOT THE ONE THIS DOCSTRING USED TO NAME (#10963
-    review, measured). The identity is enforced at THREE sites THIS CASE DEPENDS ON, and the
-    count is scoped deliberately: `_repo_key` decides repo identity at nine call sites in
-    `tools/rail_detach.py` (`_record_names_repo`, `_names_this_repo`, the `collect` CLI
-    resolution, and `launch`'s own `art_key` attestation among them — `:2115` is the site
-    that actually fires in the `launch`-alone experiment below). THIS case's
+    review, measured). `_repo_key` decides repo identity at many call sites, so a SITE
+    COUNT is not the claim worth making — it rots and it overstates. What is stated here
+    is the SENSITIVITY, measured one revert at a time against THIS case alone:
+
+        revert `launch`'s `repo = _repo_key(...)`          -> RED
+        revert `_slug`'s `return _repo_key(repo)...`        -> GREEN
+        revert the record-side scan in `_candidate_records` -> GREEN
+        revert `_slug` AND `launch` together                -> GREEN
+        revert all three                                    -> RED
+
+    So exactly ONE site is individually necessary — `launch`'s — and THIS case's
     spelling-insensitivity is carried by the RECORD side, not the write side:
     `_waiting_record` → `_candidate_records` (`tools/rail_detach.py`) globs
     `rail-*-{pr}.md` and canonicalises each record's OWN `REPO=` line, so a record
     written under a different spelling is found by its CONTENT.
+    * The `launch`-alone revert reds this case through `launch`'s own `art_key`
+      attestation — the `if art_key and art_key != repo: raise Refused(...)` call, cited
+      by SYMBOL and not by line, per the ruling this file already carries
+      (`_names_this_pr`'s comment: *"a line cite re-stales every time that file grows"*).
+      That refusal (the artifact path is occupied by another repo's record) fires FIRST,
+      so the `ALREADY LIVE` message is absent — which is the discriminant for this arm.
     * Reverting BOTH write-side canonicalisers — `launch`'s `repo = _repo_key(...)`
       and `_slug`'s `return _repo_key(repo).replace("/", "-")` — leaves this case
-      GREEN (measured): the content scan still refuses the second spelling. The
+      GREEN (measured above): the content scan still refuses the second spelling. The
       earlier text here claimed the opposite and its recipe, followed, would have
       removed the real carrier on the belief that the two named sites were it.
-    * Reverting `launch`'s site ALONE reds this case (the record is written under the
-      raw spelling, so the shared-path refusal fires first and `ALREADY LIVE` is
-      absent) — the write-side sites are pinned by their own cases too.
     * The content scan is pinned by THREE sibling cases —
       `test_a_record_written_under_an_older_spelling_still_blocks`,
       `test_a_torn_record_cannot_certify_or_shadow_a_live_rail` and
