@@ -23003,13 +23003,19 @@ class TortoiseSDK:
         # gap, out of #2030 scope.)
         warnings: list[dict] = []
         if label:
-            from tortoise.domain_loader import _get_registry
             from tortoise.enforcement import emit_violation, warning_for_relation
-            from tortoise.pack_registry import CORE_OPERATOR_LABELS
-            reg = _get_registry()
-            declared = set(CORE_OPERATOR_LABELS)
-            if reg is not None:
-                declared |= {r.get("predicate") for r in reg.list_relations()}
+            from tortoise.pack_registry import (
+                CORE_OPERATOR_LABELS,
+                declared_relation_predicates,
+            )
+            # ONE home for the declaration set — see
+            # `pack_registry.declared_relation_predicates` (#2766). An
+            # unreadable union falls back to the core vocabulary alone: this
+            # check is warn-not-block (#1934) and must never raise into the
+            # write path.
+            declared = declared_relation_predicates()
+            if declared is None:
+                declared = CORE_OPERATOR_LABELS
             # #4937: MITIGATES is NOT a built-in operator label — it is absent
             # from both legs above, so a caller spelling it here gets the
             # undeclared-relation warning instead of a silent peer spelling of

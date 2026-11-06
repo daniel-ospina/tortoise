@@ -8706,17 +8706,20 @@ def _canonicalize_nand_direction(src: str, dst: str, turns: dict) -> \
 def _declared_relation_predicates() -> frozenset[str] | None:
     """The relation verbs an entity↔entity relation may carry, or ``None``
     when the declared set cannot be read (the caller keeps the relation and
-    warns). Imported lazily: ``pack_registry``/``domain_loader`` are not
-    module-level dependencies of this pipeline."""
+    warns).
+
+    The derivation lives in ONE home — :func:`pack_registry.
+    declared_relation_predicates`, beside ``CORE_OPERATOR_LABELS`` — because
+    ``pack_registry`` records the defect a second derivation IS: "the declared
+    registry, the writer, the validator and the discoverable API each derived
+    the relation vocabulary independently" (#2766). ``sdk.create_operator``
+    reads the same helper, and ``test_10999_batch_story_relations.
+    test_the_declared_vocabulary_has_one_home`` pins the two callers together,
+    so a vocabulary edit cannot land in one of them only.
+    """
     try:
-        from tortoise.domain_loader import _get_registry
-        from tortoise.pack_registry import CORE_OPERATOR_LABELS
-        declared = set(CORE_OPERATOR_LABELS)
-        reg = _get_registry()
-        if reg is not None:
-            declared |= {r.get("predicate") for r in reg.list_relations()
-                         if isinstance(r, dict) and r.get("predicate")}
-        return frozenset(declared)
+        from tortoise.pack_registry import declared_relation_predicates
+        return declared_relation_predicates()
     except Exception:
         return None
 
@@ -8799,6 +8802,17 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 bucket.append(n)
 
     declared = _declared_relation_predicates()
+    # Case-folded view of the declared vocabulary, carrying the DECLARED
+    # spelling as the canonical form. The union's own identity (`_merge_key`)
+    # folds the predicate, so S2's `IMPL` and S4's `impl` are ONE item and "S4
+    # wins"; a case-SENSITIVE membership test then dropped the survivor and
+    # blamed the model for an invented verb it never invented — an edge lost to
+    # a capital letter, in the one arm that was not fold-tolerant. `sorted` so
+    # a fold collision resolves identically on every run (`frozenset` order is
+    # hash-seed dependent).
+    folded_declared: dict[str, str] = {}
+    for _verb in sorted(str(d) for d in (declared or ())):
+        folded_declared.setdefault(_verb.casefold(), _verb)
     # The closed Layer-2 vocabulary, imported lazily for the same reason as
     # `declared` above. An unreadable vocabulary yields an empty set, and an
     # EMPTY set must never be read as "nothing is valid" — that would drop
@@ -8807,6 +8821,15 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
         from tortoise.pack_registry import SEMANTICS_TRANSITION, SEMANTICS_VALUES
     except Exception:
         SEMANTICS_TRANSITION, SEMANTICS_VALUES = {}, frozenset()
+    # Both Layer-2 maps are consulted folded, for the same reason as the
+    # predicate gate: a case variant is the same word to every other stage.
+    folded_transition: dict[str, str] = {}
+    for _old in sorted(str(k) for k in (SEMANTICS_TRANSITION or {})):
+        folded_transition.setdefault(_old.casefold(),
+                                     SEMANTICS_TRANSITION[_old])
+    folded_semantics: dict[str, str] = {}
+    for _meaning in sorted(str(s) for s in (SEMANTICS_VALUES or ())):
+        folded_semantics.setdefault(_meaning.casefold(), _meaning)
     kept: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     dropped = 0
@@ -8845,14 +8868,19 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 "(#10999: an endpoint is never invented)")
             dropped += 1
             continue
-        if declared is not None and predicate not in declared:
-            warnings.append(
-                f"relations[{i}] predicate '{_clip(predicate, 40)}' is not a "
-                "declared relation verb — dropped (#2766: an entity↔entity "
-                "relation may not carry an invented predicate)")
-            dropped += 1
-            continue
-        if declared is None:
+        if declared is not None:
+            canonical_verb = folded_declared.get(predicate.casefold())
+            if canonical_verb is None:
+                warnings.append(
+                    f"relations[{i}] predicate '{_clip(predicate, 40)}' is "
+                    "not a declared relation verb — dropped (#2766: an "
+                    "entity↔entity relation may not carry an invented "
+                    "predicate)")
+                dropped += 1
+                continue
+            # record the DECLARED spelling (a fold variant is the same verb)
+            predicate = canonical_verb
+        else:
             warnings.append(
                 f"relations[{i}] predicate '{_clip(predicate, 40)}' could not "
                 "be checked against the declared vocabulary (registry "
@@ -8873,13 +8901,16 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
             # (as `sdk.create_operator` does); an out-of-vocabulary token drops
             # the KEY and keeps the RELATION (the endpoints and the verb are
             # still the story's own assertion), and is named.
-            if semantics in SEMANTICS_TRANSITION:
+            _retired = (SEMANTICS_TRANSITION.get(semantics)
+                        or folded_transition.get(semantics.casefold()))
+            if _retired is not None:
                 _original = semantics
-                semantics = SEMANTICS_TRANSITION[semantics]
+                semantics = _retired
                 warnings.append(
                     f"relations[{i}] semantics '{_clip(_original, 40)}' is "
                     f"retired — recorded as '{semantics}' (#7852)")
-            if SEMANTICS_VALUES and semantics not in SEMANTICS_VALUES:
+            _canonical_semantics = folded_semantics.get(semantics.casefold())
+            if SEMANTICS_VALUES and _canonical_semantics is None:
                 warnings.append(
                     f"relations[{i}] semantics '{_clip(semantics, 40)}' is not "
                     "in the closed Layer-2 vocabulary — dropped from the "
@@ -8887,7 +8918,7 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
             else:
                 # Including the unreadable-vocabulary case (`SEMANTICS_VALUES`
                 # empty): an import failure must never strip every meaning.
-                rel["semantics"] = semantics
+                rel["semantics"] = _canonical_semantics or semantics
         kept.append(rel)
 
     if dropped:
@@ -12502,6 +12533,9 @@ _OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
 _SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
     "name": (str,), "kind": (str,), "content": (str,),
     "eventKind": (str,), "src": (str,), "dst": (str,),
+    "predicate": (str,),   # #10999: a shape error must not read as a
+    # vocabulary error downstream (`_assemble_relations` would report a
+    # non-string as "not a declared relation verb")
     "op_type": (str,), "chain": (str,), "finding": (str,),
     "action": (str,), "searched_for": (str,), "found": (bool,),
     "id": (str,),

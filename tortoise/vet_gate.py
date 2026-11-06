@@ -1036,6 +1036,14 @@ def apply_vet(embed_list: Mapping[str, Any],
         return dict(base), warnings
 
     referenced = _referenced_entity_names(base, discarded_ids)
+    # The Layer-1 half of the same set, and the ONLY half a downgrade may
+    # truthfully cite as "Layer-1 referential integrity". A relation endpoint
+    # protects its entity (the edge is the story's assertion and would vanish
+    # with it) but the channel is RESULT-level: no Layer-1 reference names the
+    # entity, so it cannot produce a 422 — the same reasoning that excludes it
+    # from the Rule-4 restore leg below (#10999).
+    layer1_referenced = _referenced_entity_names(
+        base, discarded_ids, relation_endpoints=False)
     removed_entity_names: set[str] = set()
     removed_context: set[str] = set()      # norm CONTENT of removed points/events
     # norm entity name -> the spelling that must win in a reference. Populated
@@ -1076,10 +1084,21 @@ def apply_vet(embed_list: Mapping[str, Any],
                     # entity name rewritten verbatim would CREATE the 422 the
                     # reconciliation exists to prevent.
                     canonical[name] = str(item.get("name") or "").strip()
-                    warnings.append(
-                        f"vet: entity {str(item.get('name'))!r} was DISCARDed "
-                        "but is referenced by a surviving candidate — kept "
-                        "(Layer-1 referential integrity)")
+                    if name in layer1_referenced:
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is referenced by a surviving "
+                            "candidate — kept (Layer-1 referential integrity)")
+                    else:
+                        # A relation endpoint is the entity's only tie to the
+                        # emission. The edge is kept, the 422 claim is not:
+                        # `relations` never enters the Layer-1 payload.
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is named by a surviving "
+                            "entity↔entity relation — kept (the relation is "
+                            "the story's own assertion; this is NOT a "
+                            "Layer-1 reference)")
                     kept.append(item)
                     continue
                 if name:
