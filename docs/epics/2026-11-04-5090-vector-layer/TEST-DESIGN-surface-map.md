@@ -237,21 +237,24 @@ so the PR body says so. ⚠️ **A residual worth stating, measured rather than 
 population pin lives inside the tool an editor edits, and `--self-test` mutates only the **document**,
 so it cannot see a pin edit at all. The two therefore cover different surfaces, and the honest limit is:
 
-- **Two places beyond the row itself** — delete a surface row, **every mention of it** (R1/R4/R5 all
-  referentially check what they read, so a row cannot go alone) *and* drop it from `SURFACES` — stays
-  **green on both arms** (measured: `14 surface(s) · CLEAN`, exit 0, *and* `11/11 refused`, exit 0).
-  This is the case the paragraph above measures: deleting the row *without* its mentions is already a
-  violation, so the **pin is the only edit the arm cannot see**. That is because only three surfaces
-  (SF2, SF10, SF13) have a self-test case naming them, so the mutation population is untouched for the
-  other twelve.
-- **Three places** — for one of those three, also delete the cases that name it (SF13 has three: two
-  delete-row cases and the `#11088` child-row case) — drops the population below the floor and reds the
-  arm (measured: `8 mutation(s) registered, at least 11 required`, exit 1).
+- **Two places beyond the row itself, for a surface no self-test case names** — delete a surface row,
+  **every mention of it** (R1/R4/R5 all referentially check what they read, so a row cannot go alone)
+  *and* drop it from `SURFACES` — stays **green on both arms** (measured on SF5 and on SF12:
+  `14 surface(s) · CLEAN`, exit 0, *and* `11/11 refused`, exit 0). Twelve of the fifteen surfaces are in
+  this class, and it is the case the paragraph above measures: deleting the row *without* its mentions
+  is already a violation, so the **pin is the one edit the arm cannot see**.
+- **For SF2, SF10 or SF13 — the three surfaces a case names — the arm reds one step EARLIER.** Delete
+  the row those cases target and the cases become `UNTESTABLE` rather than "not caught" (measured on
+  SF13: `self-test: 2/11 mutation(s) NOT caught — the checker is a rubber stamp`, exit 1), before any
+  case is deleted.
+- **The floor is what stops the green being bought back.** Also deleting the cases that name the surface
+  (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `8 mutation(s)
+  registered, at least 11 required`, exit 1 — so a shrink is red once it touches a named surface, but
+  `MIN_SELF_TEST_MUTATIONS` is not the first thing to fire, and it reds a shrunk population instead of
+  printing a reassuring `self-test: 0/0 … not a rubber stamp`.
 
-So the claim this arm supports is narrower than "a silent shrink is impossible": a shrink is
-**silent for a surface no case names**, and a reviewer sees it only in the row-and-pin diff. What the
-floor does add is that the *third* edit cannot buy back the green — `MIN_SELF_TEST_MUTATIONS` reds a
-shrunk population instead of printing a reassuring `self-test: 0/0 … not a rubber stamp`.
+So the claim this arm supports is narrower than "a silent shrink is impossible": for a surface no case
+names, a shrink is **silent**, and a reviewer sees it only in the row-and-pin diff.
 
 This is what lets **#11089** cite the map as its checklist: the capstone walks `SF1…SF15`, and a
 deleted row, a blanked layer, or a consistently-shrunk population reds the check instead of quietly
