@@ -448,7 +448,7 @@ Suites run at `80c912244`, through `tools/test_lane.py run` (private lane contai
 - **It does not re-open `#5333`.** The **design** decision is recorded in `#10069` and in
   `EXTRACTOR-V4-ARCHITECTURE.md` §*G5's destructive half*, and this record does not challenge it: no
   pass may remove, archive or withdraw a committed row except through the one journaled lifecycle fold,
-  or through the D7 `ObjectSuperseded` arm. `#5333` is **OPEN** because that records the design half
+  or through the D7 `ObjectSuperseded` arm where a visible successor exists. `#5333` is **OPEN** because that records the design half
   only — the **authorisation** (task 1) is still the owner's, so no reading here treats it as given.
   That is why A2's remaining path must be non-destructive.
 
