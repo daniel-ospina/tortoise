@@ -193,7 +193,7 @@ import re
 import subprocess
 import time
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
@@ -748,9 +748,15 @@ def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
     return consumed, i - start, i
 
 
-@dataclass(frozen=True)
+@dataclass
 class _ListItem:
     """One OPEN list item, in BOTH spaces a dedent can be measured in.
+
+    ⛔ NOT `frozen`, AND THAT IS LOAD-BEARING: `has_content` is UPDATED in place when the first
+    content line arrives, and the lane's other identity tests are `container is prev_container`
+    (`_lazy_indent`, `_dropped_quote_is_lazy`) — replacing the object with `dataclasses.replace`
+    would keep the FLAG right and silently break the CONTAINER comparison, which reads as "this line
+    left the item" and over-blanks. Nothing hashes or compares these by value.
 
     * `depth` — the blockquote depth the marker line was written at;
     * `rest_col` — the item's CONTENT column after that line's blockquote prefix,
@@ -1564,7 +1570,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             # test above and pops the item), which is exactly the distinction the renderer makes.
             # `blank_carried` reads this to decide whether the `<li>` survives the blank line.
             if rest.strip() and list_items and not list_items[-1].has_content:
-                list_items[-1] = replace(list_items[-1], has_content=True)
+                list_items[-1].has_content = True
             # The container THIS line sits in, captured BEFORE the line can push its own
             # item: an indented code block's first line is very often itself a list marker
             # (`    - [ ] x`), and reading the stack after the push measures that line
