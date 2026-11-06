@@ -114,6 +114,29 @@ head, and each states what it does NOT cover:
   SILENT DROP, which is the pre-fix defect one line below where it was fixed. ⛔ IT SURVIVED THE
   FIRST CUT of this round for exactly that reason: the arm tested the three SUPPORTED values and
   never a malformed one, so the hazard lived in the shape and not in the behaviour.
+⛔ M94-M96 are round 20's numbering (the review at `1217611e7` found two SURVIVORS, #11047). Both
+were measured SURVIVING on that head and are KILLED here; each row states what it does NOT cover:
+  M94 (`_negative_ttl`'s `min()` removed, i.e. `return int(neg.ttl_s)`): **1 failed, 346 passed** —
+  `test_a_TIGHTENED_ttl_is_never_served_the_WIDER_negative`. ⛔ IT SURVIVED THE PREVIOUS HEAD (344
+  passed) because every shipped key asks at its own 1800 s ceiling, where `min()` is
+  INDISTINGUISHABLE from the declared value; it is observable only at `ttl_s <
+  NEGATIVE_ANSWER_TTL_S`, i.e. a documented `--ttl` tighten. Measured on the mutant before the arm
+  existed: `read(..., ttl_s=10)` at `age=59` SERVED a 59-second-old `{"contexts": [], "checks": []}`
+  — "this branch requires no checks" — on the merge-gating key, in the fail-OPEN direction. It does
+  not cover a negative TTL WIDER than the key's ceiling (refused at the declaration door, M91/M85).
+  M95 (`_validate_negative`'s empty-body branch deleted): **1 failed, 346 passed** —
+  `test_a_negative_with_NO_body_is_refused_BY_NAME`. ⛔ SURVIVED THE PREVIOUS HEAD (344 passed): the
+  deletion is behaviourally SURVIVABLE, because the projectability check below it refuses `b""` too,
+  so only a `match=` on the MESSAGE makes it lethal. `match=` is the point, not decoration — that
+  line is the whole operator-facing detail on a `REFUSED` read, the M80 row's class.
+  M96 (`_door(a.key)` deleted from the `--no-cache` live path): **1 failed, 346 passed** —
+  `test_the_CLI_live_paths_walk_the_DOOR_and_name_the_REAL_fault`. ⛔ THE PRE-FIX BEHAVIOUR IS
+  MEASURED, not asserted: `--no-cache --key pr.state` answered `no argv is declared for 'pr.state'`
+  (exit 1) — a REGISTRY-shaped fault for an R4 refusal. It does not cover the SIBLING live path (the
+  global-key fallback where `scope_for` cannot name a credential), and that gap is STRUCTURAL, not
+  an oversight: `_door` is called there too, but every key that can reach that branch is in
+  `GLOBAL_KEYS` and therefore already a DECLARED invariant, so no test can make that particular call
+  observable — deleting it would leave the suite green and the path unchanged.
 ⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
 parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
 satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
@@ -1386,6 +1409,24 @@ def test_a_cached_entry_stops_matching_when_the_shipped_projection_changes(
 
 
 # ── the CLI, which was entirely untested ──────────────────────────────────────────────────
+class _Err:
+    """Stands in for sys.stderr so a CLI refusal can be ASSERTED rather than eyeballed.
+
+    The refusal line IS the whole operator-facing detail on a failed read, so the arms that pin it
+    need the text, not a stream that pytest captures.
+    """
+
+    def __init__(self) -> None:
+        self.buffer = __import__("io").BytesIO()
+
+    def write(self, s: str) -> int:
+        self.buffer.write(s.encode())
+        return len(s)
+
+    def flush(self) -> None:
+        return None
+
+
 class _Out:
     """Stands in for sys.stdout so `main()`'s `sys.stdout.buffer.write` works under pytest."""
 
@@ -1635,6 +1676,52 @@ def test_the_documented_negative_is_pinned_on_ONE_ROUTE_and_in_BOTH_spellings() 
     assert C._is_documented_negative(argv, b"", b"gh: Not Found (HTTP 404)\n") is False
 
 
+def test_the_CLI_live_paths_walk_the_DOOR_and_name_the_REAL_fault(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⛔ THE LIVE PATHS ARE THE ONES THAT SPEND A CALL, so they walk the same door `read()` does.
+
+    Both CLI live exits (`--no-cache`, and the global-key fallback where `scope_for` cannot name a
+    credential) call `reader(key)` directly, so `read()`'s door never ran on them. The refusal still
+    happened — `_gh_reader` refuses an undeclared key before `subprocess.run` — but it was reported
+    as `no argv is declared for 'pr.state'`: a REGISTRY-shaped fault that sends a triaging lane
+    hunting a missing registration, when the true reason is R4's (mutable-state vocabulary), and it
+    skipped guard 2 on the path that actually spends the call (the M80 message row's class).
+    """
+
+    def explode(cmd, **kw):  # the door must refuse BEFORE any call is made
+        raise AssertionError(f"the door let a live call through: {cmd}")
+
+    monkeypatch.setattr(C.subprocess, "run", explode)
+    for key, needle in (
+        ("pr.state", "mutable read"),
+        ("acme.whatever", "is not a declared invariant"),
+    ):
+        err = _Err()
+        out = _Out()
+        monkeypatch.setattr(C.sys, "stderr", err)
+        monkeypatch.setattr(C.sys, "stdout", out)
+        rc = C.main(
+            [
+                "--no-cache",
+                "--key",
+                key,
+                "--repo",
+                "o/r",
+                "--branch",
+                "main",
+                "--cache-dir",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 1, f"{key} must be REFUSED, not read live"
+        assert needle in err.buffer.getvalue().decode(), (
+            f"{key} was refused with the wrong reason: {err.buffer.getvalue()!r} — the message IS "
+            f"the whole operator-facing detail, so it must name the refusal that fired"
+        )
+        assert b"no argv is declared" not in err.buffer.getvalue()
+
+
 def test_the_unprotected_answer_is_a_VALUE_the_CLI_exits_0_on(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1714,6 +1801,39 @@ def test_the_negative_is_cached_on_its_OWN_short_ttl_not_the_keys(tmp_path: Path
     assert len(calls) == 2, "the positive answer lost its own 30-minute lane"
 
 
+def test_a_TIGHTENED_ttl_is_never_served_the_WIDER_negative(tmp_path: Path) -> None:
+    """⛔ `--ttl` IS A TIGHTEN, and a tighten must never widen the negative lane.
+
+    `_negative_ttl` returns `min(int(neg.ttl_s), effective)` for exactly this: a caller asking for
+    10 s must not be handed a 60-second-old `{"contexts": [], "checks": []}` — "this branch
+    requires no checks" — on the MERGE-GATING key, in the fail-OPEN direction.
+
+    ⛔ MEASURED, NOT ASSERTED: dropping the `min()` (`return int(neg.ttl_s)`) left the WHOLE suite
+    green (344 passed) before this arm existed, because every shipped key asks at its own 1800 s
+    ceiling, where `min()` is indistinguishable from the declared value. It is only observable at
+    `ttl_s < NEGATIVE_ANSWER_TTL_S`, which is a documented tighten, so this arm stores at the
+    DEFAULT ceiling and then reads 30 s later asking for 10 s.
+    """
+    calls: list[str] = []
+
+    def neg_reader(key: str) -> bytes:
+        calls.append(key)
+        return C._NO_REQUIRED_CHECKS_BODY
+
+    # Stored at the key's default ceiling, on the negative's own 60 s lane.
+    assert json.loads(
+        _read("repo.required_set", now=1000.0, reader=neg_reader, cache_dir=tmp_path)
+    ) == {"contexts": [], "checks": []}
+    assert len(calls) == 1
+    # 30 s of age, asked for under a 10 s ttl: the answer is OLDER THAN THE ASK, so it is a MISS
+    # and must go back to `gh` — the negative's own 60 s must not override the caller's 10 s.
+    _read("repo.required_set", now=1030.0, ttl_s=10, reader=neg_reader, cache_dir=tmp_path)
+    assert len(calls) == 2, (
+        "a 30-second-old negative was served to a caller that asked for 10 seconds — `--ttl` is a "
+        "TIGHTEN, and the fail-OPEN direction on a merge gate is the one this lane exists to close"
+    )
+
+
 @pytest.mark.parametrize(
     ("key", "stdout", "stderr"),
     [
@@ -1778,6 +1898,25 @@ def test_the_negative_declaration_guard_is_WIRED_INTO_the_import_check() -> None
             C._assert_every_key_projects()
     finally:
         C.INVARIANTS["repo.required_set"] = saved
+
+
+def test_a_negative_with_NO_body_is_refused_BY_NAME() -> None:
+    """⛔ THE EMPTY-BODY BRANCH IS ITS OWN GUARD, and its MESSAGE is the fence.
+
+    Deleting the branch is behaviourally survivable — the projectability check below it refuses `b""`
+    too — so a bare `pytest.raises(TtlNotPermitted)` arm could not tell the two apart and the branch
+    SURVIVED its own mutation. `match=` is what makes the deletion lethal: an operator reading
+    `REFUSED — …` must be told the sentinel is EMPTY, not that the key's projection dislikes it.
+    """
+    spec = C.Invariant(
+        ttl_s=1800,
+        argv=C.INVARIANTS["repo.required_set"].argv,
+        projection="probe-v1",
+        project=C._project_required_set,
+        negative=C.NegativeAnswer(body=b"", ttl_s=60, why="probe"),
+    )
+    with pytest.raises(C.TtlNotPermitted, match="declares a negative answer with no body"):
+        C._validate_negative("repo.required_set", spec)
 
 
 def test_a_negative_body_the_keys_own_projection_REFUSES_is_not_declared() -> None:

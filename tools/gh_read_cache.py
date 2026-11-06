@@ -1448,6 +1448,29 @@ def scope_for(key: str, repo: str, branch: str) -> str:
     return f"{repo}@{branch}"
 
 
+def _door(key: str) -> Invariant:
+    """THE DOOR, walked by every path that can cache an entry OR spend a live call.
+
+    Two questions, one implementation, because a second copy of a guard is not a guard:
+
+    1. ``ttl_for()`` — may this key be cached AT ALL? An undeclared or mutable key raises
+       ``MutableReadRefused`` naming **that** fault, which is the whole operator-facing detail on a
+       refused read. ⛔ The CLI's live paths used to skip this and answer an undeclared/mutable key
+       with ``no argv is declared for …`` — a registry-shaped fault, so a lane triaging
+       ``--no-cache --key pr.state`` went looking for a missing registration instead of learning the
+       key is deliberately refused as mutable (the same class as the M80 refusal-message row).
+    2. the spec's own two invariants (guard 2 and the negative's short-TTL rule), RE-CHECKED at run
+       time — the import-time check runs once, so a spec inserted straight into ``INVARIANTS``
+       afterwards would otherwise be read, cached and served with no projection, or with a negative
+       priced at the key's own ceiling.
+    """
+    ttl_for(key)  # raises MutableReadRefused for a mutable/undeclared key
+    spec = INVARIANTS[key]
+    _validate_spec(key, spec.argv, spec.projection, spec.project)
+    _validate_negative(key, spec)
+    return spec
+
+
 def _negative_ttl(key: str, effective: int) -> int | None:
     """The NEGATIVE lane's TTL for this key at this call's ceiling, or ``None`` if it has none.
 
@@ -1532,16 +1555,16 @@ def read(
     # Defence in depth for guard 2: the IMPORT-TIME check runs once, so a spec inserted straight
     # into INVARIANTS afterwards (bypassing declare_invariant) would otherwise be read and cached
     # with no projection at all. Cheap, and it makes guard 2 hold on the path that actually runs.
-    _spec = INVARIANTS[key]
-    _validate_spec(key, _spec.argv, _spec.projection, _spec.project)
     # ⛔ AND THE NEGATIVE'S OWN TWO INVARIANTS, ON THIS PATH TOO — the SAME defence-in-depth, for
     # the SAME bypass. Measured on a spec inserted straight into INVARIANTS after import: a negative
     # priced at the key's own 1800 s ceiling was accepted and ``read()`` SERVED it — one reader call
     # across 1700 s of a merge-gating key, i.e. exactly the 30-minute fail-OPEN window
     # :func:`_validate_negative` and the whole negative lane exist to prevent. The import check runs
     # once and cannot see a spec that arrives later, so the short-TTL guarantee is enforced here,
-    # where the read actually happens.
-    _validate_negative(key, _spec)
+    # where the read actually happens. Both halves live in :func:`_door` so the CLI's live paths —
+    # which spend a call WITHOUT going through this function — walk the SAME door rather than a
+    # second copy of it.
+    _spec = _door(key)
     # ⛔ A repo-scoped key derived from an EMPTY repo yields `"@main"`, which passes the
     # non-empty-scope test and then spends one call from the very pool this module exists to
     # protect, on `gh api repos/` (a guaranteed 404) reported as a GitHub fault.
@@ -1807,11 +1830,18 @@ def main(argv: list[str] | None = None) -> int:
         if a.key in GLOBAL_KEYS:
             print(f"gh_read_cache: live read (not cached) — {exc}", file=sys.stderr)
             try:
+                # ⛔ THE DOOR RUNS ON THIS PATH TOO. `read()` is not on it, so without this the
+                # defence-in-depth above (guard 2, the negative's short TTL) does not exist here
+                # and a spec injected into INVARIANTS after import is spent on a live call.
+                _door(a.key)
                 # ⛔ PROJECTED, like every other exit path. `--no-cache` means "bypass the cache",
                 # NOT "change the document": emitting the raw body here gave one key two output
                 # schemas, so a caller written against the documented shape read NO required checks
                 # from a live body that named one.
                 sys.stdout.buffer.write(_project(a.key, reader(a.key)))
+            except (MutableReadRefused, TtlNotPermitted) as r_exc:
+                print(f"gh_read_cache: REFUSED — {r_exc}", file=sys.stderr)
+                return 1
             except Unreadable as r_exc:
                 print(f"gh_read_cache: REFUSED — {r_exc}", file=sys.stderr)
                 return 1
@@ -1821,7 +1851,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.no_cache:
         try:
+            # ⛔ THE DOOR RUNS HERE TOO — see `_door`. Without it this path answered a mutable key
+            # with `no argv is declared for 'pr.state'`, a registry-shaped fault that sends a
+            # triaging lane hunting a missing registration instead of the deliberate R4 refusal,
+            # AND skipped guard 2 / the negative's TTL on the one path that spends a call.
+            _door(a.key)
             sys.stdout.buffer.write(_project(a.key, reader(a.key)))
+        except (MutableReadRefused, TtlNotPermitted) as exc:
+            print(f"gh_read_cache: REFUSED — {exc}", file=sys.stderr)
+            return 1
         except Unreadable as exc:
             print(f"gh_read_cache: REFUSED — {exc}", file=sys.stderr)
             return 1
