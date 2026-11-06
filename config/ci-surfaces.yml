@@ -5262,13 +5262,15 @@ surfaces:
   # manifest YAML plus the two modules, no DB, no graph, no network.
   # ⛔ THIS ROW IS THE SINGLE SURVIVOR OF A THREE-ROW DUPLICATE, and it survived
   # TWO independent dedupes that each kept a different row: this branch's
-  # (`#10032`) and `main`'s own (`80c912244`, #11212's review P0). The tree at
-  # the merge base `af864a42a` carried three identical `core` entries; each side
-  # reduced that to one, and this merge therefore had to choose between the two
-  # survivors — it keeps THIS one, and the note below records the append class.
+  # (`#10032`) and `main`'s own, in the #11212 squash `80c912244`. The tree at this
+  # branch's PRE-REBASE base `af864a42a` carried three identical `core` entries —
+  # `80c912244`, which is the merge base at this head, carried one. Each side
+  # reduced three to one independently and kept a different row, so the rebase had
+  # to choose between the two survivors; it keeps THIS one, and the net
+  # `surfaces.core` multiset is identical to `main`'s (835 entries / 835 unique).
   # ⛔ THREE LANES REGISTERED THIS SAME ROW and the manifest only takes one:
-  # #11210 (`7bfbc4669`) and #11222 (`eee753b48`) each added the identical entry
-  # while this one was in flight, so `--integrity` reported
+  # #11210 (`7bfbc4669`), #11211 (`aa414b4d5`) and #11222 (`eee753b48`) each added
+  # the identical entry while this one was in flight, so `--integrity` reported
   # `duplicate entry 'test_pack_hierarchy_11001.py' at .surfaces.core[]` and the
   # REQUIRED `manifest-integrity` leg went red again — on the REPAIR. The copies
   # are deduped to this one; the append class (a conflict-free replay duplicating

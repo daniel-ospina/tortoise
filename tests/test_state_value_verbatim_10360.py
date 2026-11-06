@@ -1274,12 +1274,14 @@ _ADJACENCY_CLOSED_CLAIM = (
 )
 
 
-#: The ONE exemption for the full adjacency scan in the trailing region: a
-#: sentence that discloses the still-open SPELLING class AND names no unit at all.
-#: The unit-token arm is what keeps an appended reopening from hiding behind the
-#: word `spelling` (review cycle 8, MEASURED: scanning the tail with the NARROW
-#: subset instead let 7 end-appended reopenings PASS, e.g. "except `minute`, which
-#: is open again" — the shape the block's own comment calls the likeliest edit).
+#: The exemption `_is_honest_spelling` grants: a sentence that discloses the
+#: still-open SPELLING class AND names no class anchor at all. The anchor arm is
+#: what keeps an appended reopening from hiding behind the word `spelling`
+#: (review cycle 8, MEASURED: scanning the tail with the NARROW subset instead let
+#: 7 end-appended reopenings PASS, e.g. "except `minute`, which is open again" —
+#: the shape the block's own comment calls the likeliest edit).
+#: ⛔ It is NOT scoped to a trailing region any more: since #11223 the scan covers
+#: the whole residual region, so the waiver applies wherever the sentence sits.
 _UNIT_TOKEN = re.compile(
     r"\b(minute|minutes|second|seconds|hour|hours|day|days|week|weeks|month|"
     r"months|year|years|mile|miles|percent|pct|millisecond|milliseconds|"
@@ -1332,7 +1334,10 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
 #: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
 #: a reopening phrased with none of these words passes — MEASURED, still GREEN at
 #: this revision: "the ADJACENCY half went back to being unjudged", "`minute` is
-#: once more outside the closed set" and "adjacency is unjudged again". ⛔ EVERY
+#: once more outside the closed set", "adjacency is unjudged again", and the
+#: coordinator form of the row's own vocabulary, "the ADJACENCY half is unjudged
+#: and fails open" (the clause split leaves the anchor in one clause and the
+#: phrase in the next — see `_RESIDUAL_FAIL_OPEN`). ⛔ EVERY
 #: ENTRY HERE IS A CLAIM LIKE ANY OTHER and must be re-measured when the arms
 #: change: "`minute` is back in the open set" sat on this list for one revision
 #: and is RED again (it is mutation #28), because the anchored arm reads an object
@@ -1353,7 +1358,12 @@ _RESIDUAL_OPENNESS = (
     r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
-    r"\bopen\s+again\b",
+    # ⛔ NEGATION IS NOT A REOPENING, and this arm is the UNANCHORED one — so it is
+    # where a plain `not` would otherwise reach an `open` phrase: `the ADJACENCY
+    # gap is not open again` DENIES the gap and it red before this pair was added
+    # (#11258 review `P2`, measured). `not closed` is deliberately NOT guarded —
+    # there the negation ASSERTS the gap is open, which is the whole arm.
+    r"(?<!\bnot\s)(?<!\bnever\s)\bopen\s+again\b",
 )
 
 #: The ANCHORED arm: `<verb> … open` and the opening verb. ⛔ NO HYPHEN EXCEPTION —
@@ -1363,6 +1373,25 @@ _RESIDUAL_OPENNESS = (
 _RESIDUAL_OPEN_VERBS = (
     r"is|are|was|were|remain|remains|remained|stay|stays|stayed|"
     r"keep|keeps|kept|hold|holds|held")
+
+#: `<verb> open` with the verb NEGATED is a DENIAL of the gap, not a reopening:
+#: `the ADJACENCY half is not open` closes it. The veto sits directly after the
+#: verb so it can only ever speak about THIS predicate — `is unjudged and never
+#: closed` is still read by the `not … closed` arm, where the negation asserts the
+#: gap is open (#11258 review `P2`, measured: seven honest denials red before it).
+
+#: `fails open` (no hyphen) is the row's OWN vocabulary for the same thing, and it
+#: is read CLAUSE-anchored rather than by adding `fails?` to the verb list above:
+#: MEASURED, that addition reds the real row on its own honest `(d)` — *“`_value_
+#: bindings` fuses nothing and the pair fails open”* — whose clause *“the pair
+#: fails open”* names no class, while *“the ADJACENCY half fails open”* does. So
+#: the anchor requirement is what separates the lane's reopening from the row's
+#: disclosure. ⛔ STILL LEAKING, stated rather than implied: the coordinator form
+#: *“the ADJACENCY half is unjudged and fails open”* stays GREEN, because the
+#: clause split leaves the anchor in the first clause and the phrase in the
+#: second — the same shape as the row's honest sentence, so no clause-scoped rule
+#: can separate them (#11258 review `P2`).
+_RESIDUAL_FAIL_OPEN = re.compile(r"\bfails?\s+open\b", re.I)
 
 #: The gap between the verb and `open` may hold an OBJECT ("keeps the gap open"),
 #: a participle ("is held open"), adverbs or a parenthetical ("remains, in
@@ -1376,14 +1405,22 @@ _RESIDUAL_OPEN_VERBS = (
 #: (`is unjudged and open` GREEN — round 3, measured); this bound blocks the
 #: coordinator only when a subject and a verb follow it.
 _RESIDUAL_ANCHORED_OPENNESS = (
-    rf"\b({_RESIDUAL_OPEN_VERBS})\b"
+    rf"\b({_RESIDUAL_OPEN_VERBS})\b(?!\s*(?:not|never)\b|n't\b)"
     r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
     r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,30}?"
     r"(?:fail-)?open(?!\w)",
     # ⛔ A NEGATED reopening is a DENIAL of one: `(d2) does not reopen (d)'s
     # ADJACENCY result` is the row's own truthful scope boundary (#11223 fix
-    # direction 2), so the lookbehind is what keeps it out of the scan.
-    r"(?<!\bnot\s)(?<!\bnever\s)\bre-?open",
+    # direction 2), so the lookbehinds are what keep it out of the scan. They are
+    # SIX fixed-width forms rather than two because a one-token window read only
+    # `not reopen` / `never reopen` and refused every honest denial that puts a
+    # word between them — `has not been re-opened`, `has never been reopened`,
+    # `doesn't reopen` all red (#11258 review `P2`, measured). A variable-width
+    # window is unavailable (a Python lookbehind must be fixed-width) and the flat
+    # text has already been whitespace-collapsed to single spaces, so enumerating
+    # the forms is exact rather than approximate.
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bre-?open",
 )
 
 #: The floor for an EXEMPT sentence — one that discloses the still-open SPELLING
@@ -1397,7 +1434,8 @@ _RESIDUAL_ANCHORED_OPENNESS = (
 _SPELLING_FLOOR = (
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
     r"\bunclosed\b",
-    r"(?<!\bnot\s)(?<!\bnever\s)\bre-?open",
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bre-?open",
 )
 
 #: The row that FOLLOWS the residual list. The proof test anchors its append point
@@ -1485,6 +1523,15 @@ def _residual_reopening_claims(text: str) -> list[str]:
             m = re.search(pattern, scan)
             if m is not None:
                 claims.append(f"{m.group(0)!r} in sentence {sentence.strip()!r}")
+                break
+        # ⛔ THE UNHYPHENATED `fails open` IS CLAUSE-ANCHORED (`_RESIDUAL_FAIL_OPEN`):
+        # it can only be read when THIS clause names the class, which is what keeps
+        # the row's own `the pair fails open` disclosure green while a lane's
+        # `the ADJACENCY half fails open` reds (#11258 review `P2`).
+        for clause in re.split(r";|,?\s+(?:and|but)\s+", scan):
+            m = _RESIDUAL_FAIL_OPEN.search(clause)
+            if m is not None and _RESIDUAL_CLASS_ANCHOR.search(clause):
+                claims.append(f"{m.group(0)!r} in clause {clause.strip()!r}")
                 break
     return claims
 
@@ -1661,6 +1708,16 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY gap is unjudged, and open.",
     "the ADJACENCY gap remains unjudged and open.",
     "the ADJACENCY half is unjudged but open.",
+    # round 4 (#11258 review `P2`): the row's OWN vocabulary for this gap, used by
+    # a lane instead of a disclosure. `is fail-open` was already read; these are the
+    # UNHYPHENATED verb form, which `_RESIDUAL_FAIL_OPEN` reads CLAUSE-anchored so
+    # the row's own `the pair fails open` stays green. ⛔ The coordinator form
+    # (`… is unjudged and fails open`) is NOT here: it stays GREEN and is disclosed
+    # as a residual on `_RESIDUAL_FAIL_OPEN` rather than asserted as covered.
+    "the ADJACENCY half fails open.",
+    "the time-unit half fails open.",
+    "the carve-out fails open.",
+    "the value class fails open.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -1677,6 +1734,16 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the SPELLING gap is not closed.",
     "(d2) does not reopen (d)'s ADJACENCY result — the unit word IS fused.",
     "an unknown unit still fails open on purpose.",
+    # ⛔ HONEST DENIALS, and they are here because they were FALSE BLOCKS: each one
+    # red the scan before the negation guards above (#11258 review `P2`, measured).
+    # A false block is how a guard gets deleted, so the surface is executable
+    # rather than argued — every entry below must stay GREEN.
+    "the ADJACENCY half is not open.",
+    "the ADJACENCY gap is not open again.",
+    "the carve-out is not open to a second reading.",
+    "the carve-out has never been reopened.",
+    "the ADJACENCY half has not been re-opened.",
+    "it doesn't reopen (d)'s ADJACENCY result.",
     "splitting it would re-open that false refusal on every two-group decimal.",
     "that needs the owner's decision reopened there, not a rung bolted on here.",
 )
@@ -1699,7 +1766,7 @@ def _with_appended(text: str, sentence: str) -> str:
 
 
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
-    """#11223: the pin's own proof list, executable — 39 REDs and 10 passes.
+    """#11223: the pin's own proof list, executable — 43 REDs and 16 passes.
 
     The pin above asserted a scan whose bounds were the `(d)` block; measured on
     the row at `af864a42a` that block is 10,019 chars and does NOT contain the
