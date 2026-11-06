@@ -50,7 +50,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
   ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
   REFUSES by name and so can never hold — the one §17.5 owns; (b) any property a
-  SECOND WRITER put on a placed node, which the record does not carry — §17.1's
+  SECOND WRITER put on a placed node, OR on a cache-only node the record does
+  not own at all (``scan_cache_view`` fills ``placed`` for every cache node it
+  reads, so such a node's out-of-placement names are bucketed too), which the
+  record does not carry — §17.1's
   chokepoint signature, DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
   `#11221`); and the two declared classes below, which the record's TABLE holds
@@ -66,8 +69,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
   count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
-  here — (b) is declared by nothing — and every one of the four reads ``clean``
-  (the whole bucket is partitioned out of ``field_mismatches``), while the
+  here — (b) is declared by nothing — and every one of them is BUCKETED rather
+  than compared (⛔ not "every one reads clean": a property on a cache-only node
+  is bucketed while the node itself is an ``extra_in_cache`` divergence, so that
+  pair reads DIVERGENT), while the
   three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair); the projection-DECLINED pair an EPISODIC Source's

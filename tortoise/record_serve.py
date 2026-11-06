@@ -1201,9 +1201,15 @@ def parity_difference(cache_props: Mapping[str, Any],
 
     ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
     the record's answer here is the projection's own map
-    (``cache_projection.node_from_row``, the same map ``read_node`` returns), so
-    the declined pair is absent by construction — exactly the shape the
+    (``cache_projection.node_from_row``, the same map ``read_node`` returns), and
+    the declined pair is absent from it by construction on every row where the
+    decline applies — ``summary`` on every row of the EPISODIC Source class,
+    ``_searchText`` too unless #10965 relaxes it — exactly the shape the
     comparison must not redden on.
+    ⛔ NOT on every row: since #10965 a post-#10000 episodic row PROJECTS
+    ``_searchText``, so there the name is PRESENT in that same map and this arm
+    is OPERATIVE on the sanctioned path — the measured false GREEN the
+    ``invented``-loop comment below describes (filed as ``#11233``).
 
     ⚠️ A field BOTH sides carry is always compared, refused name or not. That is
     what keeps a caller's own re-derivation honest: the served endpoint puts a
