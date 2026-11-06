@@ -200,7 +200,8 @@ uv run python docs/evidence/7949-capstone/probes/e1_gate_drops.py \
 pass condition** (`#11201`). The pass judges three sections (`entities`,
 `events`, `points`: `vet_gate.SECTIONS`), and `#10996`'s Step-4 condition is
 written over **points+events**. The probe now takes `--sections`
-(`objects,points,events`, and that is its DEFAULT), records per-section
+(`objects,events,points` — all three sections the pass judges, and that is its
+DEFAULT), records per-section
 candidate counts and drops, and marks a section that yielded no candidates
 `measured: false` / `coverage_complete: false` instead of printing a zero over
 it:

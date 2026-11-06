@@ -374,6 +374,49 @@ def test_the_mechanical_predicate_drops_a_claim_and_its_entity_together(monkeypa
         "the downgrade must be recorded, not silent")
 
 
+def test_e1_gate_drops_aggregates_include_the_unconditional_objects_census(
+        monkeypatch, tmp_path):
+    """`--sections points,events` must NOT publish aggregates that omit objects.
+
+    The objects half is censused whether or not it is requested (its legacy keys
+    are), so it is part of `candidates_total`/`drops_across_sections` too —
+    otherwise `coverage_complete: true` could sit beside a
+    `drops_across_sections` smaller than the `drops_total` on the same line, and
+    the `else` branch that fixes it would have no test at all.
+    """
+    exit_code, record = _measure(
+        monkeypatch, tmp_path,
+        population={"objects": ["#4118", "a/b/c.py", "the deploy rail"],
+                    "points": ["closes #4118", "the lease fix"],
+                    "events": ["the retro", "#99"]},
+        sections="points,events")
+
+    assert exit_code == 0
+    assert set(record["sections"]) == {"points", "events"}, (
+        "only the requested sections are censused")
+    assert record["candidates_total"] == 7, record["candidates_total"]
+    assert record["drops_across_sections"] == 4, record["drops_across_sections"]
+    assert record["drops_across_sections"] > record["drops_total"]
+
+
+def test_e1_gate_drops_refuses_a_request_that_yields_no_candidates(
+        monkeypatch, tmp_path, capsys):
+    """A selected-empty request is a zero denominator even when objects exist.
+
+    `candidates_total` counts the unconditional objects census, so guarding the
+    refusal on it would let `--sections points,events` exit 0 over two empty
+    sections — "measured" for exactly the reading Step 4 is written over.
+    """
+    exit_code = _run_gate_drops(
+        monkeypatch, tmp_path,
+        population={"objects": ["#4118", "the deploy rail"],
+                    "points": [], "events": []},
+        sections="points,events")
+
+    assert exit_code == 2
+    assert "no selected section yields candidate text" in capsys.readouterr().out
+
+
 def test_the_points_census_excludes_the_classes_the_pass_never_saw():
     """A `:Point` is not automatically a VET candidate — the query must say so.
 

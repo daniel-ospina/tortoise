@@ -333,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
           f"controls alive={record['predicate_alive']} "
           f"across sections: {record['drops_across_sections']} "
           f"coverage_complete={record['coverage_complete']}")
-    if not record["candidates_total"]:
+    if not any(block["candidates"] for block in record["sections"].values()):
         print("REFUSED: no selected section yields candidate text — 0 drops "
               "would be a zero-denominator reading, not a result")
         return 2
