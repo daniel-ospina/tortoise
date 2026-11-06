@@ -3662,9 +3662,17 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
         # census, `_s4_malformed_sections`, still reports the drop).
         raw_s2, raw_s4 = s2.get(section), s4.get(section)
         if section == "relations" and not any(
-                isinstance(raw, (list, tuple)) for raw in (raw_s2, raw_s4)):
+                isinstance(raw, (list, tuple)) and raw
+                for raw in (raw_s2, raw_s4)):
+            # An EMPTY list is not a carrier: `s4 = {"relations": []}` is the
+            # normal "no gaps" delta, and letting it count left the S2 mistype
+            # coerced away with `relations_dropped == 0` — the silent loss this
+            # commit exists to close, still live in the commonest shape. The
+            # mistype is drawn from NON-list values only, so an empty list is
+            # never mistaken for one.
             mistyped = next((raw for raw in (raw_s4, raw_s2)
-                             if raw is not None), None)
+                             if raw is not None
+                             and not isinstance(raw, (list, tuple))), None)
             if mistyped is not None:
                 out[section] = mistyped
                 continue

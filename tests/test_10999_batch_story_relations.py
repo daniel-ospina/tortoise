@@ -407,10 +407,44 @@ def test_finalising_the_same_batch_twice_does_not_duplicate_the_story():
     second = _run(EMISSION)
     assert first["relations"] == second["relations"]
     assert len(first["relations"]) == 1
-    # the commit id is stable across the two finalisations (nothing in the
-    # channel leaks into the payload's canonical form)
-    assert (first["payload"]["client_commit_id"]
-            == second["payload"]["client_commit_id"])
+
+
+def test_the_channel_never_reaches_the_payload_nor_its_canonical_id():
+    """#10000 (P0) — the payload boundary, pinned so the pin can FAIL.
+
+    The assertion this replaces compared the `client_commit_id` of two runs of
+    `_run(EMISSION)` — the same deterministic function over the same
+    deep-copied input — so no mutation of this channel could ever change it,
+    including the one it was cited for (agent-infra#3442 rule 3: an assertion
+    whose value cannot vary under any mutation of the diff). The PR body cited
+    it as a second pin on the P0 while `assert "relations" not in result[
+    "payload"]` was doing all the work.
+
+    This pin varies the INPUT instead of re-running the same code: the same
+    batch WITH the channel and WITHOUT it. `compute_client_commit_id` hashes an
+    explicit argument list, so the two ids agree only while the channel stays
+    out of the canonical payload — add `relations` to the payload dict AND to
+    that argument list and the ids diverge HERE, which is the mutation the dead
+    version left green.
+    """
+    with_channel = _run(EMISSION)
+    without_channel_emission = copy.deepcopy(EMISSION)
+    without_channel_emission["relations"] = []
+    without_channel = _run(without_channel_emission)
+
+    # NON-VACUITY: the two runs differ in the channel and in nothing else, so
+    # an id that agrees here agrees because the channel is excluded — not
+    # because the two inputs were the same object.
+    assert with_channel["relations"], "the channel must be non-empty here"
+    assert without_channel["relations"] == []
+
+    assert "relations" not in with_channel["payload"]
+    assert "relations" not in without_channel["payload"]
+    assert (with_channel["payload"]["client_commit_id"]
+            == without_channel["payload"]["client_commit_id"]), (
+        "the relation channel reached the commit payload's canonical form — "
+        "#10000 (P0): the story's TEXT stays out of the graph, and a typed "
+        "relation is RESULT-level (D8), never part of the client_commit_id")
 
 
 def test_intra_emission_duplicate_triples_collapse_first_wins():
@@ -637,6 +671,37 @@ def test_mutation_the_predicate_gate_is_live(monkeypatch):
                               "predicate": "vibesWith"}]
     result = _run(emission)
     assert [r["predicate"] for r in result["relations"]] == ["vibesWith"]
+
+
+def test_an_unreadable_vocabulary_fails_OPEN_and_names_the_relation(monkeypatch):
+    """The ONE route by which an invented predicate reaches the channel.
+
+    `_declared_relation_predicates()` returns `None` when the pack registry
+    cannot be read, and `_assemble_relations` then KEEPS the relation with a
+    warning — #10999 §4.4's declared fail-open ("Job 1 fails **open** … a
+    quality problem in the reading, re-derivable from the same narrative"), not
+    a fail-closed gate. Nothing in the suite reached this arm: the only other
+    `_declared_relation_predicates` monkeypatch widens the set, so deleting the
+    `else:` arm, flipping it to a drop, or keeping SILENTLY all left the suite
+    green — i.e. the entire residual risk of #2766 was unpinned prose.
+
+    Pins the direction AND the naming, so a later "tightening" to fail closed
+    reds here instead of silently destroying relations it could not judge.
+    """
+    monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "vibesWith"}]
+    result = _run(emission)
+
+    assert len(result["relations"]) == 1, result["warnings"]
+    assert result["relations"][0]["predicate"] == "vibesWith"
+    assert result["stats"]["relations_dropped"] == 0, result["warnings"]
+    assert any("vibesWith" in w and "unverified" in w
+               for w in result["warnings"]), (
+        "a kept-but-uncheckable predicate must be NAMED as unverified, or the "
+        "fail-open is indistinguishable from a passing gate: "
+        f"{result['warnings']}")
 
 
 def test_mutation_the_union_arm_is_live():
@@ -1279,17 +1344,31 @@ def test_a_mistyped_section_never_displaces_a_valid_list_from_the_other_side():
         {"entities": "garbage"})
     assert [e["name"] for e in merged2["entities"]] == ["A"]
 
-    # and when NEITHER side carries a list, the mistype rides through (S5 counts)
+    # and when NEITHER side carries a NON-EMPTY list, the mistype rides through
+    # (S5 counts) — an EMPTY list is the normal "no gaps" delta, not a carrier
     merged3 = v2.merge_embed_lists({"relations": {"src": "A"}},
                                    {"relations": {"src": "B"}})
     assert merged3["relations"] == {"src": "B"}
+    merged4 = v2.merge_embed_lists(
+        {"relations": {"src": "A", "dst": "B", "predicate": "IMPL"}},
+        {"relations": []})
+    assert merged4["relations"] == {"src": "A", "dst": "B",
+                                    "predicate": "IMPL"}
+    assert v2.execute_embed(copy.deepcopy(merged4), {},
+                            session_id="s-e")["stats"]["relations_dropped"] == 1
 
 
-def test_the_restore_guard_still_reconciles_a_divergent_fold_reference():
-    """Round-7 P1 (a regression the VGATE verifier caught): skipping the append
-    for an already-held entity also skipped `canonical`, so a Layer-1 reference
-    written in the divergent fold was never re-spelled and `validate_layer1`
-    rejected the payload ("about_entities reference unknown entities")."""
+def test_a_layer1_reference_is_restored_exactly_not_re_pointed_at_a_sibling():
+    """Round-7 P2 (re-review): the duplicate-guard must NOT skip a LAYER-1
+    reference.
+
+    Payload identity is EXACT (`(str(name).strip(), kind)`), so when `prior` can
+    supply the very spelling a point's `about_entities` names, restoring it is
+    correct; re-pointing the reference at a casefold sibling would silently
+    attribute the statement to a DIFFERENT entity — and a Layer-1-valid payload
+    surfaces nothing. Measured pre-fix: the reference was rewritten to
+    `Straße` with no warning.
+    """
     emission = {
         "entities": [{"name": "Straße", "kind": "core:rule"}],
         "points": [{"content": "a point", "about_entities": ["STRASSE"]}],
@@ -1297,6 +1376,29 @@ def test_the_restore_guard_still_reconciles_a_divergent_fold_reference():
     }
     prior = {"removed_entities": {
         "strasse": {"name": "STRASSE", "kind": "core:rule"}}}
-    out, _warns = vg.apply_vet(emission, {}, prior=prior)
-    assert [e["name"] for e in out["entities"]] == ["Straße"]
-    assert out["points"][0]["about_entities"] == ["Straße"]
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Straße", "STRASSE"]
+    assert out["points"][0]["about_entities"] == ["STRASSE"]
+    assert any("restored" in w for w in warns), warns
+
+
+def test_a_relation_endpoint_already_held_in_another_case_is_reconciled():
+    """...while a RELATION endpoint whose entity the pass already holds is the
+    same entity: no second copy, and the endpoint spelling is reconciled to the
+    held name (so the edge survives and nothing names an absent spelling)."""
+    emission = {
+        "entities": [{"name": "Straße", "kind": "core:rule"},
+                     {"name": "Other", "kind": "core:rule"}],
+        "points": [], "events": [], "operators": [],
+        "relations": [{"src": "STRASSE", "dst": "Other",
+                       "predicate": "IMPL"}],
+    }
+    prior = {"removed_entities": {
+        "strasse": {"name": "STRASSE", "kind": "core:rule"}}}
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Straße", "Other"]
+    assert not [w for w in warns if "restored" in w], warns
+    # the endpoint is resolved by S5's fold, so the edge survives with the
+    # emission's own spelling
+    assert [(r["src"], r["dst"]) for r in _run(out)["relations"]] == [
+        ("Straße", "Other")]
