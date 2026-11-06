@@ -3927,9 +3927,13 @@ def test_an_HTML_blocks_own_text_is_READ_not_hidden():
         `<div>` + `-     Closes #100`      renderer `html_block` (text), `origin/main` `[100]`, before `[]`
 
     Measured at the pre-fix head over the 32-opener grid (indents 0-8, every marker, gaps 1-9): 90
-    lost closes per opener family. Types 2-6 (and 7) END at the next blank line (§4.6), so the state
-    needs no closer scan — the control below that puts a blank line before the marker line stays
-    CODE, and a FENCE inside nothing is still blanked.
+    lost closes per opener family.
+
+    ⛔ EACH TYPE ENDS ITS OWN WAY, AND THIS PARAGRAPH USED TO SAY OTHERWISE (round 46 review, P3).
+    §4.6: types 2-5 end at `-->`, `?>`, `>`, `]]>`, type 1 at its closing tag, and only types 6 and 7
+    at a blank line — following the old sentence here is exactly what re-opened round 44's 600-body
+    fail-open. The controls below pin both halves: a type-6 block ends at a blank line, and a
+    self-closed `<!-- c -->` is over before the next line.
     """
     md = MarkdownIt("commonmark")
 
@@ -4052,3 +4056,31 @@ def test_the_shallower_reopened_quote_lazy_case_is_a_DECLARED_residual():
     control = "- > > q\n  > y\n  >     -     Closes #100\n"
     assert [t.type for t in md.parse(control) if "Closes #100" in getattr(t, "content", "")] == ["inline"]
     assert cl.parse_closing_refs(control) == [100]
+
+
+def test_the_opener_allowance_inside_a_CONTAINER_is_a_DECLARED_residual():
+    """Round 46 review (P3) — a LOST close, pre-existing and not a regression, pinned not waved through.
+
+    §4.6 allows an HTML block to open at 0-3 spaces PAST the containing block's content column, but
+    `_HTML_BLOCK_INTERRUPT_RE`, `_HTML_TYPE1_TAG_RE` and `_HTML_TYPE7_RE` all anchor ` {0,3}` at the
+    start of `rest`, which still carries the item's content columns — so an opener at container-
+    relative 0-3 but raw 4-5 is invisible, and the wide-gap marker line below it is blanked:
+
+        `- item` + `    <div>` + `  -     Closes #100`    renderer `html_block`
+            head `[]`, `origin_main` `[100]` — 9,072 such bodies in the review's grid, ALL of them
+            already `[]` at the previous head (so: parity, not a regression, and the LOST-CLOSE
+            direction, never a false PASS)
+
+    The fix is the same `content_col` treatment `_fence_open` already uses (measure the allowance
+    from the containing block's content column), and it is deliberately NOT taken here: it touches
+    every opener predicate at once, on the last leg of a 46-round review, for a direction that
+    cannot produce a false PASS. Pinned with its renderer answer so the next lane starts from the
+    measurement rather than from this docstring.
+    """
+    item_relative = "- item\n\n    <div>\n  -     Closes #100\n"
+    md = MarkdownIt("commonmark")
+    assert [t.type for t in md.parse(item_relative)
+            if "Closes #100" in getattr(t, "content", "")] == ["html_block"]
+    assert cl.parse_closing_refs(item_relative) == [], "DECLARED residual"
+    # The control: at the TOP level the same opener is inside the allowance and IS read.
+    assert cl.parse_closing_refs("   <div>\n-     Closes #100\n") == [100]
