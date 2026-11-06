@@ -421,17 +421,29 @@ def test_the_UNDECLARED_second_writer_population_is_reported_but_never_divergenc
 
     Three omission classes are DECLARED (§17.5's cache-owned scalars, the
     §9.1/D1 declined pair, the NOT-PROJECTABLE columns); a property a SECOND
-    WRITER put on a placed node is named by nothing, which is why the census in
-    the module docstring reads "THREE DECLARED classes plus one that no
-    declaration names". `_partition_cache_owned` has no class list at all — its
-    rule is mechanical, ``outside the placement AND absent from the record`` —
-    so both halves of that rule are pinned here:
+    WRITER put on a placed node is named by nothing, which is why the census is
+    FOUR populations. The module docstring's own wording is "THREE DECLARED
+    classes arrive here — (b) is declared by nothing", and ``graph_only_total``'s
+    is "THREE DECLARED omission classes plus one undeclared population" — each
+    quoted from its own home rather than paraphrased into one attributed to the
+    header, because a quote is only checkable where it actually is.
+
+    `_partition_cache_owned` has no class list at all — its rule is mechanical,
+    ``outside the placement AND absent from the record`` — and BOTH halves are
+    pinned HERE, one arm each:
 
     * the undeclared name is REPORTED (not silently swallowed, and not a
       ``field_mismatches`` entry, which would make the clean verdict unreachable
       on a cache a second writer has touched);
     * the CONTROL keeps the partition from amnestying real divergence: the same
-      out-of-placement name, held by the RECORD, is still COMPARED.
+      out-of-placement name, held by the RECORD, is still COMPARED;
+    * and the THIRD arm pins the PLACEMENT half, which the first two CANNOT:
+      both of them hold with the placement term deleted, because in each the
+      outcome is decided by the record term alone (MEASURED — a mutant
+      ``keep = set(record_props)`` leaves them green). A cache property INSIDE
+      the placement that the record does not carry is a projection gap, and with
+      the placement term gone it is partitioned out as cache-held and the pair
+      reads ``clean`` — the false PASS this arm exists to red.
     """
     placed = {"Point:p1": frozenset({"id"})}
 
@@ -454,6 +466,24 @@ def test_the_UNDECLARED_second_writer_population_is_reported_but_never_divergenc
     assert held.graph_only == (), held.graph_only
     assert held.report.field_mismatches == 1, held.report.render()
     assert held.verdict() == rr.VERDICT_DIVERGENT
+
+    # THIRD ARM — the PLACEMENT half of the two-term rule. `title` is INSIDE the
+    # record's placement (so the schema says the record can carry it) and ABSENT
+    # from this record row, while the cache has it: a projection gap, which must
+    # stay COMPARED. Partition it out and the pair reads `clean` — measured
+    # against a mutant `keep = set(record_props)`, where THIS arm reds and the
+    # two above stay green.
+    in_placement = rr.reconcile_record_and_cache(
+        {"Point:p1": {"id": "p1"}},
+        {"Point:p1": {"id": "p1", "title": "X"}},
+        placed={"Point:p1": frozenset({"id", "title"})})
+    assert in_placement.graph_only == (), (
+        "a cache property INSIDE the record's placement was partitioned out as "
+        "cache-held, so a projection that wrote a field the record PLACES and "
+        "does not carry now reads clean — the placement half of the two-term "
+        f"rule is gone: {in_placement.graph_only}")
+    assert in_placement.report.field_mismatches == 1, in_placement.report.render()
+    assert in_placement.verdict() == rr.VERDICT_DIVERGENT
 
 
 # ── 5. the trigger exists in production ───────────────────────────────────
