@@ -49,6 +49,8 @@ module is built from those two declarations and the legs below pin both.
 
 from __future__ import annotations
 
+import pytest
+
 from tortoise.session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 
 #: The transcript slice a pre-fix capture left on the node.
@@ -75,16 +77,39 @@ class _RecordingGraph:
 
     #: The columns the census read projects (it must NOT pull `embedding`, so the
     #: graph is asked for these by name and the fake answers in the same order).
-    COLUMNS = ("url", "sourceKind", "summary", "_searchText", "topics", "sessionId")
+    COLUMNS = ("url", "sourceKind", "summary", "_searchText", "topics",
+               "sessionId", "turn_max_index")
 
-    def __init__(self, rows):
+    #: The server's ``TIMEOUT_MAX`` for this fake, in ms. ``0`` = uncapped, which
+    #: is FalkorDB's own default. A NON-ZERO value makes the fake REFUSE an
+    #: over-cap request exactly as the server does — the canonical docker test
+    #: lane runs ``TIMEOUT_MAX 30000`` (``tools/test_lane.py``), and a fake that
+    #: silently ignored ``timeout`` let a 60 000 ms request ship that could never
+    #: execute there (#11152 review P1: the census raised on every run).
+    TIMEOUT_CAP_ERR = ("The query TIMEOUT parameter value cannot exceed the "
+                       "TIMEOUT_MAX configuration parameter value")
+
+    def __init__(self, rows, *, timeout_cap=0, config_get_raises=False):
         self._rows = rows
+        self.timeout_cap = timeout_cap
+        self.config_get_raises = config_get_raises
         self.statements: list[tuple[str, dict]] = []
+        self.requested_timeouts: list[int | None] = []
+
+    def config_get(self, name):
+        """The server's own answer — the module asks before it guesses."""
+        if self.config_get_raises:
+            raise RuntimeError("this server cannot be asked")
+        assert name == "TIMEOUT_MAX"
+        return self.timeout_cap
 
     def query(self, cypher, params=None, timeout=None):
         if any(m in cypher for m in self.WRITE_MARKERS):
             self.statements.append((cypher, dict(params or {})))
             return _Result([("session:whatever",)])
+        self.requested_timeouts.append(timeout)
+        if self.timeout_cap and timeout and int(timeout) > int(self.timeout_cap):
+            raise RuntimeError(self.TIMEOUT_CAP_ERR)
         return _Result([tuple(props.get(c) for c in self.COLUMNS)
                         for (props,) in self._rows])
 
@@ -187,7 +212,7 @@ def test_the_census_reaches_zero_on_a_graph_holding_only_healthy_sources():
 
 def _reader(transcript):
     """A record reader that answers with ``transcript`` for any session."""
-    def read(session_id):
+    def read(session_id, turn_max_index=None):
         return transcript
     return read
 
@@ -237,7 +262,8 @@ def test_the_clear_arm_leaves_topics_alone():
     graph = _RecordingGraph([
         (_session_node(topics=["rebuild", "friday", "weekly"]),)])
     m.reconcile_session_source_prose(
-        graph, read_transcript=_reader(None), dry_run=False)
+        graph, read_transcript=_reader(None), dry_run=False,
+        clear_without_record=True)
 
     statement, params = graph.writes[0]
     assert "topics" not in statement, (
@@ -260,7 +286,8 @@ def test_neither_arm_writes_topics():
     for transcript in (None, "User: friday migration plan"):
         graph = _RecordingGraph([(_session_node(),)])
         m.reconcile_session_source_prose(
-            graph, read_transcript=_reader(transcript), dry_run=False)
+            graph, read_transcript=_reader(transcript), dry_run=False,
+            clear_without_record=True)
         statement, params = graph.writes[0]
         assert "topics" not in statement, f"wrote `topics` (transcript={transcript!r})"
         assert "topics" not in params
@@ -367,17 +394,23 @@ def test_a_record_that_spoke_and_states_zero_turns_is_not_reported_as_no_record(
 
 
 def test_the_repair_clears_the_pair_when_the_record_does_not_answer():
-    """No record → no invented lexicon, and the §9.1 prose still goes.
+    """No record → no invented lexicon. The CLEAR itself must be asked for.
 
-    Clearing is not a new state: the writer itself produces ``summary=''`` and a
-    bare ``_searchText`` for a text-less capture, so the repair does not mint a
-    shape no writer reaches.
+    Clearing is not a new state — the writer itself produces ``summary=''`` and a
+    bare ``_searchText`` for a text-less capture — but it is NOT self-correcting:
+    the cleared node stops matching the census, so a later run cannot find it to
+    re-derive the lexicon. It is therefore taken only when
+    ``clear_without_record`` is set (#11152 review P2: the CLI gated this arm on
+    "a DSN was supplied", which a wrong or empty record scope satisfies while
+    every session reads as "no answer" — one bad DSN from un-indexing a
+    tenant's whole Source population).
     """
     from tortoise import session_source_prose_migration as m
 
     graph = _RecordingGraph([(_session_node(),)])
     report = m.reconcile_session_source_prose(
-        graph, read_transcript=_reader(None), dry_run=False)
+        graph, read_transcript=_reader(None), dry_run=False,
+        clear_without_record=True)
 
     assert report["repaired"] == []
     assert report["no_record"] == ["session:s-11070"]
@@ -388,6 +421,44 @@ def test_the_repair_clears_the_pair_when_the_record_does_not_answer():
     # `coalesce($st, s._searchText)` with `$st` None, and FalkorDB drops a null
     # property). `''` would be a state no writer reaches.
     assert params["st"] is None
+
+
+def test_the_default_arm_leaves_an_unanswered_node_ALONE():
+    """⛔ The default must not destroy what the record cannot replace.
+
+    Same graph and same reader as the test above; only the flag differs. Without
+    it the node is REPORTED and NOT written, so the operator sees the count the
+    default refused instead of discovering it after the fact.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=_reader(None), dry_run=False)
+
+    assert report["no_record"] == ["session:s-11070"]
+    assert report["left_alone"] == ["session:s-11070"]
+    assert graph.writes == [], "the default cleared a node it could not re-derive"
+
+
+def test_a_run_with_no_reader_says_SO_and_not_that_the_record_was_silent():
+    """⛔ "nobody asked" is not "the record did not answer" (#11152 review P2).
+
+    The CLI's documented step 1 supplies no reader, so folding the two together
+    told the operator the record had failed for N sessions they had never opened
+    — sending them hunting a DSN or row-level-security problem that does not
+    exist, and pointing at the destructive arm as the only remaining option.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)])
+    report = m.reconcile_session_source_prose(graph, dry_run=True)
+
+    assert report["no_reader"] == ["session:s-11070"]
+    assert report["no_record"] == [], (
+        "a record that was never opened was reported as having not answered")
+    assert report["left_alone"] == ["session:s-11070"]
+    assert graph.writes == []
 
 
 def test_the_repair_is_dry_by_default_and_writes_nothing():
@@ -526,3 +597,102 @@ def test_the_prose_never_reaches_the_re_derived_summary():
     assert report["candidates"] == ["session:s-11070"]
     healed = graph.writes[0][1]
     assert healed["sum"] != "ok" or healed["st"] != "ok"
+
+
+# ── the read the census makes must SURVIVE a capped server ──────────────────
+#
+# #11152 review P1, reproduced on a real FalkorDB: the module requested a 60 000
+# ms timeout, and a server whose TIMEOUT_MAX is 30 000 REFUSES the statement
+# outright, so `census()` raised on every run against the canonical docker test
+# lane — the module could not execute at all. The suite was green over it because
+# the fake ignored `timeout`, which is the one parameter that decides whether the
+# module runs. These three tests make the fake behave like the server.
+
+
+def test_a_requested_timeout_above_the_servers_cap_is_CLAMPED_not_refused():
+    """The census must run on a server that caps TIMEOUT (the lane runs 30 000)."""
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)], timeout_cap=30_000)
+    assert m.CACHE_READ_TIMEOUT_MS > 30_000, (
+        "this test is vacuous unless the module's own request exceeds the cap")
+
+    found = m.find_session_sources_carrying_prose(graph)
+
+    assert [n["url"] for n in found] == ["session:s-11070"]
+    assert graph.requested_timeouts == [30_000], (
+        "the request must be clamped to the server's own TIMEOUT_MAX")
+
+
+def test_a_request_under_the_cap_is_honoured_as_written():
+    """Clamped, never flattened: an uncapped/capable server gets what was asked."""
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)], timeout_cap=0)  # 0 = uncapped
+    m.find_session_sources_carrying_prose(graph)
+    assert graph.requested_timeouts == [m.CACHE_READ_TIMEOUT_MS]
+
+
+def test_a_server_that_cannot_be_asked_still_reads_the_census():
+    """A server that fails `config_get` must not turn the census into an error.
+
+    Second line of defence: on the cap error the read is retried with NO explicit
+    timeout, which the server's own policy bounds. Any OTHER exception is the
+    query's and still propagates — asserted here so a bare `except: retry` cannot
+    hide a real failure.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(),)], timeout_cap=30_000,
+                            config_get_raises=True)
+    found = m.find_session_sources_carrying_prose(graph)
+
+    assert [n["url"] for n in found] == ["session:s-11070"]
+    assert graph.requested_timeouts == [m.CACHE_READ_TIMEOUT_MS, None], (
+        "the retry must carry NO timeout, not the refused one again")
+
+    class _Broken(_RecordingGraph):
+        def query(self, cypher, params=None, timeout=None):
+            raise RuntimeError("some other server failure")
+
+    with pytest.raises(RuntimeError, match="some other server failure"):
+        m.find_session_sources_carrying_prose(_Broken([]))
+
+
+def test_the_census_read_carries_the_sessions_live_turn_end():
+    """⛔ The tail witness must ride the SAME scan (#11152 review P2).
+
+    `record_read.session_turns`'s third PARTIAL shape — a transcript that stops
+    BELOW the session's live id-space end — is invisible to the row set and to
+    `turn_count`; the mark is its ONLY witness. A reader built without it returns
+    that shape as COMPLETE, so the repair would derive a lexicon from half a
+    transcript and call it a repair.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(turn_max_index=7),)])
+    found = m.find_session_sources_carrying_prose(graph)
+    assert found[0]["turn_max_index"] == 7
+
+    seen = {}
+
+    def read(session_id, turn_max_index=None):
+        seen["tmi"] = turn_max_index
+        return "User: friday migration plan"
+
+    m.reconcile_session_source_prose(graph, read_transcript=read, dry_run=True)
+    assert seen["tmi"] == 7, (
+        "the reconciler called the reader without the session's turn_max_index")
+
+
+def test_a_reader_that_takes_one_argument_is_tolerated_and_SAID_SO():
+    """The degraded shape must not crash the run — and must not pass silently."""
+    from tortoise import session_source_prose_migration as m
+
+    graph = _RecordingGraph([(_session_node(turn_max_index=7),)])
+    report = m.reconcile_session_source_prose(
+        graph, read_transcript=lambda sid: "User: friday migration plan")
+
+    assert report["repaired"] == ["session:s-11070"]
+    assert "turn_max_index" in report["notes"]["session:s-11070"], (
+        "a one-argument reader silently drops the tail witness")

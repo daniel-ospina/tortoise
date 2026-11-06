@@ -48,8 +48,15 @@ guess opens an EMPTY graph"), and so does this one.
 The clear-only arm (no record) is CORRECT for §9.1/D1 — the prose does not belong
 on a node — but a replay engine's trailing sweep does NOT take it (that sweep is
 plan-only and writes nothing), and it leaves the session un-findable through the
-Source FTS index until a run WITH the record re-derives it. Because that arm is destructive and not self-correcting (the second
-run finds no candidates), it must be asked for BY NAME: ``--clear-without-record``.
+Source FTS index until a run WITH the record re-derives it. Because that arm is
+destructive and not self-correcting (the second run finds no candidates), it
+must be asked for BY NAME: ``--clear-without-record``. ⛔ That is enforced
+PER NODE, not on whether a DSN string was supplied (#11152 review P2): a DSN
+with an empty or wrong scope satisfies "a DSN exists" while the record answers
+for NOBODY, and a gate keyed on the string alone would take the clear arm for
+the whole population and still print ``Repair complete.``. A candidate the
+record cannot replace is therefore LEFT ALONE by default, counted in
+``left_alone``, and named on stderr.
 
 Idempotent: a re-run finds no candidates.
 """
@@ -116,7 +123,9 @@ def main() -> int:
                          "cache graph name is NOT the record's scope)")
     ap.add_argument("--clear-without-record", action="store_true",
                     help="allow the destructive clear-only arm (no lexicon "
-                         "re-derived). Required when no record scope is given.")
+                         "re-derived) on EVERY candidate. Without it, a "
+                         "candidate the record cannot replace is REPORTED and "
+                         "LEFT ALONE. Required when no record scope is given.")
     ap.add_argument("--assert-clean", action="store_true",
                     help="exit 1 if any candidate remains (dry run only) — the "
                          "step-3 verification; without it a dry run always exits 0")
@@ -190,14 +199,15 @@ def main() -> int:
         proj = open_projection(uri, graph_name)
         if args.repair:
             report = reconcile_session_source_prose(
-                proj.g, read_transcript=read_transcript, dry_run=False)
+                proj.g, read_transcript=read_transcript, dry_run=False,
+                clear_without_record=args.clear_without_record)
         else:
             # ONE census read: hand the reconciler what the detail print needs,
             # instead of scanning every Source twice.
             found = find_session_sources_carrying_prose(proj.g)
             report = reconcile_session_source_prose(
                 proj.g, read_transcript=read_transcript, dry_run=True,
-                found=found)
+                found=found, clear_without_record=args.clear_without_record)
             report["candidate_detail"] = found
     finally:
         if proj is not None:
@@ -225,7 +235,20 @@ def main() -> int:
     print(f"candidates: {len(report['candidates'])}  "
           f"re-derived from the record: {len(report['repaired'])}  "
           f"record spoke, 0 turns: {len(report.get('empty_sessions') or [])}  "
-          f"record did not answer: {len(report['no_record'])}")
+          f"record did not answer: {len(report['no_record'])}  "
+          f"never asked (no reader): {len(report.get('no_reader') or [])}  "
+          f"LEFT ALONE: {len(report.get('left_alone') or [])}")
+    if report.get("left_alone"):
+        # ⛔ Named, not silent. The destructive arm is deliberately NOT taken on
+        # these, so the operator must see the count that the default refused and
+        # the flag that would take it — a report that hides this reads as a
+        # clean run that repaired less than it should have.
+        print(f"⚠️ {len(report['left_alone'])} candidate(s) were NOT written: the "
+              f"record could not supply a replacement, and clearing is "
+              f"irreversible (a second run cannot find the node to re-derive "
+              f"it). Re-run with --record-dsn (and --org-id/--graph-id) to "
+              f"re-derive, or with --clear-without-record to take the "
+              f"clear-only arm deliberately.", file=sys.stderr)
     for node in report.get("candidate_detail") or []:
         print(f"          {node['url']}: summary={node['summary_bytes']}B "
               f"_searchText={node['search_text_bytes']}B session={node['session_id']}")

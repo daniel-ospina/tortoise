@@ -66,13 +66,16 @@ and ``sdk._source_search_text``. They are imported LAZILY, inside the call:
 ``sdk`` imports ``cache_projection``, so a module-level import here would be a
 layering inversion the day anything on that path imports this module.
 
-A node whose record DOES NOT ANSWER is still repaired — the pair is cleared —
-and reported under ``no_record``, because §9.1/D1 says the prose does not belong
-on a graph node whether or not a lexicon can replace it. The cleared shape is
-the writer's own: ``summary=''`` and an ABSENT ``_searchText``, which is exactly
-what a text-less capture leaves (``s._searchText=coalesce($st, s._searchText)``
-with ``$st`` None). It never INVENTS a lexicon — that is the constraint, and it
-is why the two arms are reported separately.
+A node whose record DOES NOT ANSWER is reported under ``no_record``, and its
+pair is cleared ONLY when the caller asks for that by name
+(``clear_without_record=True``) — because §9.1/D1 says the prose does not belong
+on a graph node whether or not a lexicon can replace it, while a CLEAR cannot be
+undone by a second run (the cleared node stops matching the census, so nothing
+re-derives it later). The cleared shape is the writer's own: ``summary=''`` and
+an ABSENT ``_searchText``, which is exactly what a text-less capture leaves
+(``s._searchText=coalesce($st, s._searchText)`` with ``$st`` None). It never
+INVENTS a lexicon — that is the constraint, and it is why the arms are reported
+separately.
 
 ⛔ ``topics`` IS NOT PART OF THE PROSE PAIR AND IS NEVER WRITTEN — not in either
 arm. The pre-fix writer proves it: it derived ``topics`` from
@@ -132,7 +135,22 @@ __all__ = [
 #: the same rule ``record_reconcile.scan_cache_view`` states: a ``LIMIT`` would
 #: need its own truncation detection to stay honest, and a silently truncated
 #: read UNDERCOUNTS the population this module exists to drive to zero.
+#:
+#: ⛔ THIS IS A REQUEST, NOT A GUARANTEE. FalkorDB refuses a query whose
+#: ``TIMEOUT`` parameter exceeds the server's ``TIMEOUT_MAX``, and that cap is a
+#: DEPLOYMENT setting — the canonical docker test lane runs
+#: ``TIMEOUT_MAX 30000`` (``tools/test_lane.py:LANE_FALKORDB_ARGS``), so a bare
+#: 60 000 here raised ``ResponseError: The query TIMEOUT parameter value cannot
+#: exceed the TIMEOUT_MAX configuration parameter value`` on every run against
+#: it: the census could never execute, and ``--repair`` wrote the pair and then
+#: died in ``census_after``. Measured, not inferred (#11152 review P1).
+#: :func:`_effective_timeout_ms` clamps the request to the server's own cap.
 CACHE_READ_TIMEOUT_MS = 60_000
+
+#: The subset of ``FalkorDB``'s error text that means "your requested timeout is
+#: above MY cap" — not "the query ran long". Matched as a substring because the
+#: message is the server's, and it is the only signal that separates the two.
+_TIMEOUT_CAP_ERR = "TIMEOUT parameter value cannot exceed"
 
 #: The property names this repair reads. ⛔ It WRITES only the pair — see
 #: :data:`_REPAIR_PAIR`.
@@ -146,7 +164,9 @@ _TOPICS = "topics"
 #: corpus — and this read runs on every replay engine's trailing sweep.
 _SOURCE_ROWS = (
     "MATCH (s:Source) "
-    "RETURN s.url, s.sourceKind, s.summary, s._searchText, s.topics, s.sessionId"
+    "OPTIONAL MATCH (sess:Session {id: s.sessionId}) "
+    "RETURN s.url, s.sourceKind, s.summary, s._searchText, s.topics, "
+    "       s.sessionId, sess.turn_max_index"
 )
 #: THE ONE WRITE — the pair, and nothing else, in both arms.
 #:
@@ -265,7 +285,8 @@ def _session_id(props: Mapping[str, Any]) -> str | None:
     ``s.sessionId`` is the capture's own property; a legacy bare-filename node
     has none, and its url carries no id (:func:`derive_session_source_url` is
     the inverse direction), so there is nothing to read the record BY. That
-    node is repaired (cleared) and reported — it is never attributed to a guess
+    node is reported (``no_record``, with a note) and left alone unless
+    ``clear_without_record`` is set — it is never attributed to a guess
     (#4125's attribution rule).
     """
     sid = props.get("sessionId")
@@ -278,14 +299,71 @@ def _session_id(props: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _server_timeout_cap(g) -> int | None:
+    """The server's ``TIMEOUT_MAX``, or ``None`` when it cannot be asked.
+
+    ``0`` means UNCAPPED, which FalkorDB reports as such — it is not "a cap of
+    zero milliseconds", so it is folded into ``None`` here.
+
+    ⛔ Asking beats guessing: the cap is a deployment setting (the docker test
+    lane runs 30000, a self-host may run anything), and a module constant that
+    only holds on one of them is the defect this function exists to close. A
+    server that cannot answer is NOT an error — the retry in
+    :func:`_read_source_rows` is the second line of defence.
+    """
+    for handle in (getattr(g, "connection", None), g):
+        getter = getattr(handle, "config_get", None)
+        if getter is None:
+            continue
+        try:
+            cap = getter("TIMEOUT_MAX")
+        except Exception:  # an unaskable server is not a failure
+            continue
+        try:
+            cap = int(cap)
+        except (TypeError, ValueError):
+            continue
+        return cap if cap > 0 else None
+    return None
+
+
+def _effective_timeout_ms(g, requested_ms: int) -> int:
+    """*requested_ms*, clamped DOWN to the server's own ``TIMEOUT_MAX``.
+
+    Clamped, never dropped: the bound this module promises stays a bound. On an
+    uncapped server (``TIMEOUT_MAX 0``, the FalkorDB default) the request is
+    honoured as written.
+    """
+    cap = _server_timeout_cap(g)
+    if cap is None or requested_ms <= cap:
+        return int(requested_ms)
+    return int(cap)
+
+
 def _read_source_rows(g, timeout_ms: int) -> list[dict]:
-    rows = g.query(_SOURCE_ROWS, timeout=int(timeout_ms)).result_set
+    requested = int(timeout_ms)
+    effective = _effective_timeout_ms(g, requested)
+    try:
+        rows = g.query(_SOURCE_ROWS, timeout=effective).result_set
+    except Exception as exc:  # discriminated immediately below
+        # ⛔ SECOND LINE OF DEFENCE, and only for the CAP class. A server that
+        # will not answer `config_get` (an older build, a proxy, a seam in a
+        # test) still REFUSES an over-cap request, and "the census cannot run
+        # anywhere" is the defect being fixed — so on exactly that message the
+        # read is retried with NO explicit timeout, which is bounded by the
+        # server's own policy instead of by ours. Any other exception is the
+        # query's, and belongs to the caller.
+        if _TIMEOUT_CAP_ERR not in str(exc):
+            raise
+        rows = g.query(_SOURCE_ROWS).result_set
     out: list[dict] = []
     for row in rows or ():
         if not row:
             continue
+        tmi = row[6] if len(row) > 6 else None
         props = {"url": row[0], _KIND: row[1], _SUMMARY: row[2],
-                 _SEARCH_TEXT: row[3], _TOPICS: row[4], "sessionId": row[5]}
+                 _SEARCH_TEXT: row[3], _TOPICS: row[4], "sessionId": row[5],
+                 "turn_max_index": tmi if isinstance(tmi, int) else None}
         out.append(props)
     return out
 
@@ -305,6 +383,13 @@ def find_session_sources_carrying_prose(
         out.append({
             "url": props.get("url"),
             "session_id": _session_id(props),
+            # The session's LIVE id-space end, read in the SAME scan. It is the
+            # only witness for the one PARTIAL shape `record_read` cannot see
+            # from the row set (a refused HIGHEST turn), so a reader built
+            # without it serves a truncated transcript as COMPLETE — and a
+            # lexicon derived from half a transcript is the fabricated
+            # descriptor this module refuses to write (#11152 review P2).
+            "turn_max_index": props.get("turn_max_index"),
             "summary_bytes": len(summary.encode("utf-8")) if isinstance(summary, str) else 0,
             "search_text_bytes": (len(search_text.encode("utf-8"))
                                   if isinstance(search_text, str) else 0),
@@ -322,8 +407,19 @@ def census(g, *, timeout_ms: int = CACHE_READ_TIMEOUT_MS) -> int:
 
 
 def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
-                       ) -> Callable[[str], str | None]:
+                       ) -> Callable[..., str | None]:
     """A transcript reader over the RECORD, for :func:`reconcile_session_source_prose`.
+
+    Takes ``(session_id, turn_max_index)``. ⛔ ``turn_max_index`` is NOT optional
+    decoration: the record's own read names it as the ONLY witness for one of
+    the three PARTIAL shapes — a transcript that stops BELOW the session's live
+    id-space end, which is invisible to the row set itself (a refused HIGHEST
+    turn; ``record_read.session_turns``'s third PARTIAL bullet). Passing
+    ``None`` there makes that shape come back ``COMPLETE``, so the caller would
+    write a lexicon derived from half a transcript — the fabricated descriptor
+    this whole reader exists to refuse. The census reads the mark off the
+    ``:Session`` node in the same scan it already makes; a caller that truly
+    cannot name it passes ``None`` and accepts the degraded answer knowingly.
 
     ``None`` means THE RECORD DID NOT ANSWER for those turns — which is not the
     same as "the session has no turns" (``TurnAnswer.NO_ACCOUNT`` and
@@ -334,11 +430,12 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
     instead. A PARTIAL answer is refused for the same reason — a lexicon built
     from half a transcript is a fabricated descriptor.
     """
-    def read(session_id: str) -> str | None:
+    def read(session_id: str, turn_max_index: int | None = None) -> str | None:
         from tortoise.record_read import session_turns
 
         answer = session_turns(conn, org_id=org_id, graph_id=graph_id,
-                              session_id=session_id)
+                              session_id=session_id,
+                              turn_max_index=turn_max_index)
         if not answer.answered:
             # NO_ACCOUNT, CONTRADICTION, or a PARTIAL set — the record did not
             # answer for the WHOLE session, and a lexicon built from half a
@@ -379,10 +476,11 @@ def _derive(transcript: str | None) -> dict:
 
 def reconcile_session_source_prose(
         g, *,
-        read_transcript: Callable[[str], str | None] | None = None,
+        read_transcript: Callable[..., str | None] | None = None,
         dry_run: bool = True,
         timeout_ms: int = CACHE_READ_TIMEOUT_MS,
-        found: list[dict] | None = None) -> dict:
+        found: list[dict] | None = None,
+        clear_without_record: bool = False) -> dict:
     """Clear the pre-#10852 prose pair on every episodic session ``:Source``.
 
     Idempotent and re-runnable: the output is not a candidate (:func:`carries_
@@ -402,6 +500,19 @@ def reconcile_session_source_prose(
                       turns — cleared, and NOT a record/scope problem,
       ``no_record``   urls whose pair was CLEARED because the record did not
                       ANSWER (never a fabricated lexicon),
+      ``no_reader``   urls this run never asked the record about at all — a
+                      reader was not supplied. ⛔ NOT folded into
+                      ``no_record``: collapsing "nobody asked" into "the record
+                      was silent" sends an operator hunting a DSN or a
+                      row-level-security problem that does not exist, which is
+                      the inverse of the conflation #10000 review fixed one
+                      bucket over,
+      ``left_alone``  urls NOT written at all because the record could not
+                      supply a replacement and ``clear_without_record`` is
+                      False. Clearing is the arm that cannot be undone by a
+                      second run (the second run finds no candidate), so it is
+                      taken only when ASKED FOR BY NAME — the same rule #4125's
+                      operator CLI states for its own destructive arm,
       ``notes``       url -> why a candidate was handled the way it was,
       ``census_before``  the population, measured,
       ``census_after``   the population re-MEASURED after the writes; equal to
@@ -421,37 +532,73 @@ def reconcile_session_source_prose(
         "repaired": [],
         "empty_sessions": [],
         "no_record": [],
+        "no_reader": [],
+        "left_alone": [],
         "notes": {},
         "census_before": len(found),
         "census_after": len(found),
         "dry_run": bool(dry_run),
+        "timeout_ms": _effective_timeout_ms(g, timeout_ms),
     }
     for node in found:
         url = node["url"]
         if not isinstance(url, str) or not url:
             continue
         sid = node["session_id"]
-        # THREE answers, and they are not two: "" is the record SAYING the
-        # session has no turns (TurnAnswer.EMPTY), None is the record NOT
-        # ANSWERING (NO_ACCOUNT / CONTRADICTION / a PARTIAL set — a lexicon built
-        # from half a transcript would be a fabricated descriptor). Collapsing
-        # them sent an operator hunting a DSN or row-level-security problem for a
-        # session whose record had spoken.
-        transcript = None
-        if sid is not None and read_transcript is not None:
-            transcript = read_transcript(sid)
-        elif sid is None:
+        # FOUR answers, and they are not three. "" is the record SAYING the
+        # session has no turns (TurnAnswer.EMPTY); None is the record NOT
+        # ANSWERING (NO_ACCOUNT / CONTRADICTION / a PARTIAL set); and NO READER
+        # is a third thing — nobody asked — which must never be reported as the
+        # record's silence (#11152 review P2). Collapsing the first two sent an
+        # operator hunting a DSN or row-level-security problem for a session
+        # whose record had spoken; collapsing the third does the same for a
+        # record that was never opened.
+        asked = read_transcript is not None and sid is not None
+        transcript: str | None = None
+        if asked:
+            try:
+                transcript = read_transcript(sid, node.get("turn_max_index"))
+            except TypeError:
+                # A reader declared as ``read(session_id)`` — the one-argument
+                # shape. Degraded (no turn-end witness), and said so in the
+                # notes rather than crashing the run.
+                transcript = read_transcript(sid)  # type: ignore[call-arg]
+                report["notes"][url] = (
+                    "the reader takes one argument, so the session's "
+                    "turn_max_index was not supplied — a PARTIAL set that "
+                    "stops below the id-space end cannot be detected by it")
+        elif read_transcript is None:
+            report["no_reader"].append(url)
+            report["notes"].setdefault(
+                url, "no transcript reader was supplied, so the record was "
+                     "never asked; the pair is left alone unless "
+                     "clear_without_record is set")
+        else:
             report["notes"][url] = (
                 "no session id is derivable from this node (a pre-#4005 "
                 "bare-filename url, or none), so the record cannot be read BY "
-                "session — the pair is cleared, never re-derived")
-        values = _derive(transcript)
-        if transcript is None:
+                "session — the pair is left alone unless clear_without_record "
+                "is set")
+        if asked and transcript is None:
             report["no_record"].append(url)
+        if transcript is None:
+            # ⛔ THE ARM THAT CANNOT BE UNDONE BY A SECOND RUN. A clear is not
+            # self-correcting: the damaged node no longer matches the census, so
+            # the next run cannot find it to re-derive. It is therefore taken
+            # ONLY when asked for by name — an empty or wrong record scope reads
+            # as "no answer" for EVERY session (#10000 review P0-1), and a
+            # default that destroys on that answer is one bad DSN away from
+            # un-indexing a tenant's whole Source population.
+            if not clear_without_record:
+                report["left_alone"].append(url)
+                continue
+            values = _derive(None)
         elif transcript == "":
             report["empty_sessions"].append(url)
+            values = _derive("")
         else:
             report["repaired"].append(url)
+            values = _derive(transcript)
         if dry_run:
             continue
         # ⛔ `updatedAt` is deliberately NOT written: the reconciler must not
@@ -473,7 +620,7 @@ def reconcile_session_source_prose(
 
 
 def reconcile_after_replay(projection, *, engine: str,
-                           read_transcript: Callable[[str], str | None] | None = None
+                           read_transcript: Callable[..., str | None] | None = None
                            ) -> dict | None:
     """End-of-replay-sweep entry point for the whole-journal replay engines.
 
@@ -521,8 +668,11 @@ def reconcile_after_replay(projection, *, engine: str,
                 engine, len(report["candidates"]))
         else:
             logger.info(
-                "%s: cleared the pre-#10852 prose pair on %d session Source(s) "
-                "(%d re-derived from the record, %d cleared with no record "
-                "answer) (#11070)", engine, len(report["candidates"]),
-                len(report["repaired"]), len(report["no_record"]))
+                "%s: repaired the pre-#10852 prose pair on %d of %d session "
+                "Source(s) (%d re-derived from the record, %d the record did "
+                "not answer, %d left alone) (#11070)", engine,
+                len(report["repaired"]) + len(report["empty_sessions"]) +
+                (len(report["no_record"]) - len(report.get("left_alone") or [])),
+                len(report["candidates"]), len(report["repaired"]),
+                len(report["no_record"]), len(report.get("left_alone") or []))
     return report
