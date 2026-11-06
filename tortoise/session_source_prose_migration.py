@@ -472,7 +472,13 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
         # missing or mis-scoped record at all (see the module note on
         # ``_TAIL_WITNESS_HINT``). Recorded on the closure so the caller can name
         # it without changing the ``str | None`` contract.
-        read.reasons[session_id] = (answer.kind, answer.reason)  # type: ignore[attr-defined]
+        #
+        # ``getattr``, not attribute access: this module needs only ``answered``
+        # and ``turns`` from the answer, and a seam (a test double, an older
+        # ``TurnAnswer``) that omits the diagnostic fields must not turn a
+        # correct read into an AttributeError.
+        read.reasons[session_id] = (getattr(answer, "kind", ""),  # type: ignore[attr-defined]
+                                    getattr(answer, "reason", ""))
         if not answer.answered:
             # NO_ACCOUNT, CONTRADICTION, or a PARTIAL set — the record did not
             # answer for the WHOLE session, and a lexicon built from half a
