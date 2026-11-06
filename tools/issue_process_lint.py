@@ -263,12 +263,23 @@ CLAIM_RE = re.compile(
     # claimed nothing once comments were blanked instead of deleted, a silent drop).
     rf"(?P<mid>[^\n#]{{0,16}}?|[ \t]+)"
     rf"|(?P<ckw>satisf(?:y|ies|ied)|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b"
-    # ⚠️ The spelling is the SEPARATOR ITSELF (`\s*:?\s*`), not a character class that happens to
-    # admit the same characters: a class also admits `::` (and `: :`), so `Closes:: #100`
-    # manufactured a resolution `tools/closes_landing.py` does not credit — 33 divergences across
-    # a keyword × separator sweep, ALL doubled-colon, ALL in the class-A direction (round 22, P3).
-    # A class cannot express "at most one colon", so it is written the way the other grammar does.
-    rf"(?P<cmid>\s*:?\s*))"
+    # ⚠️ The spelling is the SEPARATOR ITSELF, not a character class that happens to admit the same
+    # characters: a class also admits `::` (and `: :`), so `Closes:: #100` manufactured a resolution
+    # `tools/closes_landing.py` does not credit — 33 divergences across a keyword × separator sweep,
+    # ALL doubled-colon, ALL in the class-A direction (round 22, P3). A class cannot express "at most
+    # one colon", so it is written the way the other grammar does.
+    # ⛔ AND IT IS THE *STRICT* SPELLING, NOT THE LENIENT ONE (round 26, P2 — the #10534 false PASS).
+    # `closes_landing` ships TWO separators and says which question each backs (`:212-222`): LENIENT
+    # (`\s*`) backs the FINDING arms, STRICT (`[ \t]*:?[ \t]*\n?[ \t]*`) backs **every PASS**,
+    # because `\s` matches a BLANK LINE and `"Closes\n\n#100"` is a shape no GitHub doc shows firing.
+    # This lint's `NOTHING FLAGGED` IS a pass, so it may not rest on a shape the sibling grammar
+    # refuses to pass on — spelled lenient, the two disagreed in the class-A direction, crediting a
+    # close GitHub never performs:
+    #     `Refs #100\n\nCloses\n\n#100 is the umbrella, not this PR.`  -> NOTHING FLAGGED, rc 0
+    #     while `closes_landing.parse_closing_refs(body, strict=True) == []`
+    # ONE line break is still admitted — that is a WRAPPED claim, not a paragraph break. The
+    # narrowing can only cost a resolution this lint used to credit, never invent one.
+    rf"(?P<cmid>[ \t]*:?[ \t]*\n?[ \t]*))"
     # A COMMA-CONTINUED list is claimed in full: `Part of #10085, #10063` claims BOTH, and
     # reading only the first dropped every subject after it (F3) — measured on three open PRs
     # (#11038, #11065, #11093). A CONJUNCTION / OXFORD-comma list is the SAME list: admitting only
@@ -410,7 +421,30 @@ _CLOSING_OBJ = rf"{_DET}{_CLOSING_STEM}{_EMPH}{_REF_LIST}"
 # must contain NO `#`, so a reason clause can never sweep a claim into the decline —
 #     `Refs #100 — deliberately not closing this issue because #300 must land.`  -> FLAGGED
 # which is correct: that sentence names a live claim in the same breath as the decline.
-_REASON_TAIL = rf"(?:{_EMPH}(?:because|since|as|intended)\b|[ \t]*\()[^#\n]*$"
+# ⛔ AND THE REASON MAY BE AN APPOSITIVE (round 26, P3). The tail admitted an INTRODUCED reason
+# (`because`/`since`/`as`/`intended`), a parenthetical, `;` and `.` — but not the appositive, which is
+# how the same reason is most naturally written. So the author answered the question the block asks
+# and was pointed at bureaucracy for it (the direction this module ranks worse than the defect):
+#     `Refs #100 — not closing it — measurement only.`   -> rc 3, FLAGGED
+#     `Refs #100 — not closing it; measurement only.`    -> clean (already admitted)
+# ⛔ THE DASH FORM ONLY, AND A BARE COMMA IS DELIBERATELY NOT ADMITTED (measured, not assumed). A
+# bare `,` in this token is offered by the `(?P<reason_b>…)` slot AFTER the object, so it also
+# matched round 12's PINNED NEGATIVE — ordinary prose whose comma opens a NEW CLAUSE, not an
+# appositive:
+#     `Refs #1234 — non-closing reference, see the review.`  -> declined, rc 0  (the false PASS
+#                                                              round 12 exists to prevent)
+# `non-closing reference` and `not closing it` are the SAME object shape (`_REF_LIST` admits both
+# `reference` and `it`), and `measurement only.` is a noun phrase while `see the review.` is a
+# clause — telling those apart needs a clause/NP grammar, not a punctuation class. So the comma
+# form stays a DECLARED RESIDUAL (declared here, pinned by
+# `test_an_honest_decline_may_carry_its_reason_as_an_APPOSITIVE`) rather than costing a pinned
+# false PASS. The dash is unambiguous: nothing in round 12's population uses it to open a clause.
+# The structural rule is UNCHANGED and is what keeps this a one-shape widening: the tail may contain
+# NO `#`, so a reason can never sweep a live claim into the decline
+# (`Refs #100 — not closing it — #300 must land first.` stays FLAGGED, pinned).
+_REASON_TAIL = (rf"(?:{_EMPH}(?:because|since|as|intended)\b"
+                rf"|[ \t]*\("
+                rf"|{_EMPH}[—–])[^#\n]*$")
 # ⛔ THE NEGATION HAS CONTRACTED FORMS TOO (round 22, P2). Alternative (b) admitted `does not` / `not`
 # / `no ` / `non-` and no contraction, so the most natural spelling of the honest decline was flagged
 # while its uncontracted twin declined — a false positive on exactly the honesty the block asks for:
@@ -537,6 +571,10 @@ CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULT
 # The TICKED subset, for the follow-up comment that proves a criterion. Derived from the same marker
 # class on purpose: a second spelling of "is this a task item" is how the two readers drift.
 TICKED_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[xX]\]", re.MULTILINE)
+# Any ATX heading at line start — the terminator of a `## Satisfies` SECTION (see
+# `_satisfies_sections`). Deliberately ANY level, not only `<= 2`: a `### criteria` or a later
+# `### Claim` opens a new section, and a box under it is that section's list.
+_ATX_HEADING_ANY_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]", re.MULTILINE)
 IN_FLIGHT_RE = re.compile(
     r"^[ \t]*(?:[-*+][ \t]+)?[\s*_`]*IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE
 )
@@ -914,17 +952,41 @@ def has_satisfies_checklist(comment_bodies: list[str]) -> bool:
     # format inside a fence is an example, not a checklist: matched against the raw bodies it
     # silently cleared the arm it exists to raise, on an issue with WIP and no real criteria (F2).
     stripped = [strip_code(b)[0] for b in comment_bodies]
-    headings = [bool(SATISFIES_HEADING_RE.search(s)) for s in stripped]
-    boxes = [bool(CHECKBOX_RE.search(s)) for s in stripped]
     ticked = [bool(TICKED_RE.search(s)) for s in stripped]
-    for i, has_heading in enumerate(headings):
-        if not has_heading:
+    for i, text in enumerate(stripped):
+        sections = _satisfies_sections(text)
+        if not sections:
             continue
-        if boxes[i]:
+        if any(CHECKBOX_RE.search(section) for section in sections):
             return True
         if any(ticked[i + 1:]):
             return True
     return False
+
+
+def _satisfies_sections(text: str) -> list[str]:
+    """Every `## Satisfies` SECTION of ONE comment: from the heading to the next ATX heading.
+
+    ⛔ "THE HEADING'S OWN COMMENT" IS VACUOUS AT BODY GRANULARITY (round 26, P2). Round 25 replaced
+    a population-wide `any(headings) and any(boxes)` with "a box in the HEADING's own comment",
+    which closed the CROSS-comment case — but `classify_issue` passes the issue's OWN BODY as ONE
+    element, and a body carrying both an unrelated task list and a criteria-less `## Satisfies`
+    heading is a single comment. So the arm still cleared the defect it exists to report:
+
+        `## Verification` + `- [ ]`s + `## Satisfies` + `To be derived.`   (ONE comment)
+        -> has_satisfies_checklist TRUE -> classify_issue [] -> rc 0
+
+    That is the round-25 note's own population ("most often a `## Verification` check-list in the
+    issue's own BODY, which 8 of the 40 newest open issue bodies carry"), so this is the same fix
+    completed rather than a second rule. A section ends at the next ATX heading of ANY level: a
+    box under a LATER heading is that section's list, not this one's criteria.
+    """
+    sections: list[str] = []
+    for match in SATISFIES_HEADING_RE.finditer(text):
+        remainder = text[match.end():]
+        nxt = _ATX_HEADING_ANY_RE.search(remainder)
+        sections.append(remainder[: nxt.start()] if nxt else remainder)
+    return sections
 
 
 def _marker_rest(line: str) -> str:

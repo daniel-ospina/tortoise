@@ -2521,3 +2521,166 @@ def test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts(
     # An UNticked list in a later comment is some other checklist, not this one's criteria.
     assert [f.arm for f in L.classify_issue([inv, "## Satisfies\n\nTo be derived.\n",
                                             "- [ ] unrelated\n"], 1)[0]] == [L.ARM_ISSUE]
+
+
+# --- review round 26: four findings, each pinned from BOTH directions ----------------------
+# The fresh-context review at `afd6de51dba1` returned 2 × P2 and 2 × P3. Every case below was RED
+# against that head's own tool before the fix, and each rule gets a pair — the shape that must be
+# FLAGGED and the honest sentence that must stay CLEAN — because this series' measured failure mode
+# is a widening that trades one direction of error for the other. The four are independent: two are
+# false PASSes (the #10534 direction, which this module ranks worst) and two are false positives on
+# exactly the honesty the process block asks authors to write.
+
+def test_a_closing_keyword_across_a_blank_line_does_not_resolve_a_claim():
+    """F1 (P2), the #10534 false PASS — `closes_landing`'s OWN doctrine, applied to the PASS direction.
+
+    `tools/closes_landing.py` ships TWO separators and says which question each backs (`:212-222`):
+    LENIENT (`\\s*`) backs the FINDING arms, STRICT (`[ \\t]*:?[ \\t]*\\n?[ \\t]*`) backs **every
+    PASS**, because `\\s` matches a BLANK LINE — so `"Closes\\n\\n#100"` is a claim to report but
+    cannot buy a pass. This lint's CLEAN verdict is a PASS ("nothing to say"), and it spelled the
+    resolving keyword's separator with the LENIENT form, so it credited a close GitHub will not
+    perform:
+
+        `Refs #100\\n\\nCloses\\n\\n#100 is the umbrella, not this PR.`  -> NOTHING FLAGGED, rc 0
+        while `parse_closing_refs(body, strict=True) == []`                (nothing closes #100)
+
+    Both sides are pinned: `#100` is claimed by `Refs`, so the lenient reading resolves it and the
+    strict reading does not.
+    """
+    for closing in ("Closes", "Fixes", "Resolves"):
+        body = f"Refs #100\n\n{closing}\n\n#100 is the umbrella, not this PR.\n"
+        assert L.claims(body)["closing"] == [], (closing, L.claims(body))
+        assert [f.arm for f in L.classify_pr(body, 999)] == [L.ARM_PR], closing
+    # The strict oracle, so this pin tracks the sibling grammar rather than a second opinion.
+    from tools.closes_landing import parse_closing_refs
+    assert parse_closing_refs("Refs #100\n\nCloses\n\n#100\n", None, strict=True) == []
+    # CONTROLS — the shapes that must KEEP resolving, so the narrowing is not a blanket ban:
+    for ok in ("Closes #100\n",              # one space
+               "Closes: #100\n",             # GitHub's colon form
+               "Closes\n#100\n",             # ONE line break is not a paragraph break
+               "Closes\t#100\n"):            # a tab is whitespace, not a blank line
+        assert L.claims(ok)["closing"] == [100], ok
+        assert L.classify_pr("Refs #100\n\n" + ok, 999) == [], ok
+    # …and `Satisfies` is the SAME separator, so it narrows with it.
+    assert L.claims("Refs #100\n\nSatisfies\n\n#100\n")["satisfies"] == []
+    assert L.claims("Satisfies #100: 2\n")["satisfies"] == [100]
+
+
+def test_the_checklist_belongs_to_the_satisfies_SECTION_not_the_whole_comment():
+    """F2 (P2), arm 2's FALSE PASS — the round-25 fix closed the CROSS-comment case only.
+
+    `classify_issue` passes the issue's own body as ONE element, and round 25's predicate asks
+    "is there a box in the HEADING's own comment" — which is vacuous at body granularity, so an
+    unrelated task list in the SAME body still satisfied it. That is the exact population the
+    round-25 note cites ("most often a `## Verification` check-list in the issue's own BODY, which
+    8 of the 40 newest open issue bodies carry"):
+
+        one comment: `## Verification` + `- [ ]`s + `## Satisfies` + "To be derived."
+        -> has_satisfies_checklist TRUE, classify_issue [] , rc 0
+
+    The predicate is now the box in the `## Satisfies` SECTION (heading to the next ATX heading).
+    """
+    inv = "IN FLIGHT: 3.2c — branch feat/census — box cell-4 — since 2026-11-05T09:00Z"
+    same_comment = ("## Verification\n\n- [ ] the guard holds\n- [ ] the census writes nothing\n"
+                    "\n## Satisfies\n\nTo be derived.\n")
+    assert L.has_satisfies_checklist([same_comment]) is False
+    assert [f.arm for f in L.classify_issue([same_comment, inv], 1)[0]] == [L.ARM_ISSUE]
+    # A box AFTER the heading is still some later section's list, not this one's criteria.
+    later_section = "## Satisfies\n\nTo be derived.\n\n## Verification\n\n- [ ] the guard holds\n"
+    assert L.has_satisfies_checklist([later_section]) is False
+    assert [f.arm for f in L.classify_issue([later_section, inv], 1)[0]] == [L.ARM_ISSUE]
+    # CONTROLS — a real checklist under the heading, in the same comment, still clears the arm.
+    for real in ("## Satisfies\n\n- [ ] a\n- [ ] b\n",
+                 "## Satisfies #11077: 2\n\n- [ ] a\n",
+                 "## Satisfies\n\n* [ ] a\n\n### a sub-heading inside the section\n\n+ [ ] b\n"):
+        assert L.has_satisfies_checklist([real]) is True, real
+        assert L.classify_issue([real, inv], 1)[0] == [], real
+    # …and the cross-comment arm round 25 added is untouched.
+    assert L.has_satisfies_checklist(["## Satisfies\n\nTo be derived.\n", "- [x] a\n"]) is True
+
+
+def test_an_honest_decline_may_carry_its_reason_as_an_APPOSITIVE():
+    """F3 (P3), a false positive on the sentence the block asks for.
+
+    `_REASON_TAIL` admitted an introduced reason (`because`/`since`/`as`/`intended`), a
+    parenthetical, `;` and `.` — but not the appositive, which is how the same reason is most
+    naturally written. The author answers the question the block asks and is pointed at
+    bureaucracy for it (the direction the module's docstring ranks worse than the defect):
+
+        `Refs #100 — not closing it — measurement only.`   -> FLAGGED
+        `Refs #100 — not closing it; measurement only.`    -> CLEAN   (already admitted)
+
+    The structural rule is unchanged and is what keeps this a ONE-SHAPE widening: the tail may
+    contain NO `#`, so a reason can never sweep a live claim into the decline.
+
+    ⚠️ THE COMMA FORM IS A DECLARED RESIDUAL, NOT A FIX, and this test records WHY. Admitting a
+    bare `,` in `_REASON_TAIL` was measured, not assumed: it also matched round 12's PINNED
+    NEGATIVE, whose comma opens a new CLAUSE rather than an appositive —
+        `Refs #1234 — non-closing reference, see the review.`  -> declined, rc 0  (the false PASS
+                                                                  round 12 exists to prevent)
+    `non-closing reference` and `not closing it` are the SAME object shape (`_REF_LIST` admits both
+    `reference` and `it`) and `measurement only.` is a noun phrase while `see the review.` is a
+    clause, so telling them apart needs a clause-vs-NP grammar, not a punctuation class. A P3 false
+    positive does not buy a category-A false PASS, so the dash form is admitted and the comma form
+    is left flagged and declared. The convention's own comma form (`deliberately not closing it,
+    measurement only.`) is already clean through alternative (a)'s comma clause-end.
+    """
+    for honest in ("Refs #100 — not closing it — measurement only.\n",
+                   "Refs #100 — deliberately not closing it — measurement only.\n",
+                   "Refs #100 — deliberately not closing it, measurement only.\n",
+                   "Refs #100, #200 — deliberately not closing them — measurement only.\n"):
+        assert L.classify_pr(honest, 1) == [], honest
+    # The DECLARED residual, pinned so it reads as a decision rather than an oversight.
+    assert [f.arm for f in L.classify_pr("Refs #100 — not closing it, measurement only.\n", 1)] \
+        == [L.ARM_PR], "the comma appositive is a declared residual (see the docstring)"
+    # CONTROLS — the `[^#\\n]*$` guard still refuses a tail that names a live claim, and the
+    # round-12 negatives (prose about a DIFFERENT subject) are still flagged.
+    for flagged in ("Refs #100 — not closing it — #300 must land first.\n",
+                    "Refs #100 — not closing it, and #300 is separate.\n",
+                    "Refs #1234 — the sprint is not closed.\n",
+                    "Refs #1234 — the estimate does not close the delta.\n",
+                    "Refs #1234 — non-closing reference, see the review.\n"):
+        assert [f.arm for f in L.classify_pr(flagged, 1)] == [L.ARM_PR], flagged
+
+
+def test_the_marker_spelling_the_block_ships_is_the_one_the_lint_reads():
+    """F4 (P3), a silent miss caused by this PR's OWN shipped block.
+
+    The block pre-fills `### Claim: `IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>` …`
+    (`agent_finding.yml` / the doc's byte-equal copy). It is unreadable TWICE over: the marker is
+    inside an inline CODE SPAN (`strip_code` blanks it — the quote-is-not-a-claim doctrine), and it
+    sits behind a `### Claim: ` prefix, which `IN_FLIGHT_RE` does not anchor through. So a lane
+    that copies the block and substitutes the placeholders produces NO marker, and arm 2's whole
+    population is skipped without a word.
+
+    The fix is at the SOURCE, not in the doctrine: the block now puts the marker on its OWN line in
+    PLAIN TEXT, so the spelling it teaches is the spelling the lint reads. The code-span rule is
+    untouched — a marker a comment QUOTES inside backticks or a fence is still not evidence.
+    """
+    # The block's own marker line, with placeholders substituted the way a lane would.
+    live = "IN FLIGHT: 4282 — branch fix/x — box cell-3 — since 2026-11-05T09:00Z"
+    assert L.in_flight_markers([live]) == ["4282 — branch fix/x — box cell-3 — since 2026-11-05T09:00Z"]
+    # The parsed template line, read out of the template itself, produces a marker once the
+    # placeholders are substituted — i.e. the block does not teach an unreadable spelling.
+    template = yaml.safe_load(
+        (ROOT / ".github" / "ISSUE_TEMPLATE" / "agent_finding.yml").read_text(encoding="utf-8"))
+    value = [b for b in template["body"] if b.get("id") == "working_process"][0]["attributes"]["value"]
+    marker_lines = [ln for ln in value.splitlines() if "IN FLIGHT:" in ln]
+    assert marker_lines, "the block no longer mentions the marker at all"
+    for line in marker_lines:
+        assert "`" not in line, (
+            f"the block spells the marker inside an inline code span, which strip_code blanks: "
+            f"{line!r}")
+        assert line.startswith("IN FLIGHT:"), (
+            f"the block puts prose before the marker, which IN_FLIGHT_RE does not anchor through: "
+            f"{line!r}")
+    substituted = "\n".join(
+        ln.replace("<ids>", "4282").replace("<b>", "fix/x").replace("<c>", "cell-3")
+          .replace("<UTC>", "2026-11-05T09:00Z") for ln in marker_lines)
+    assert L.in_flight_markers([substituted]), (
+        f"the block's own marker line yields no marker after substitution: {substituted!r}")
+    # CONTROLS — the quote-is-not-a-claim doctrine still holds, both ways it was already pinned.
+    assert L.in_flight_markers(["`IN FLIGHT: 4282 — branch fix/x`"]) == []
+    assert L.in_flight_markers(["```\nIN FLIGHT: 4282 — branch fix/x\n```"]) == []
+    # …and the unsubstituted template is still not a claim.
+    assert L.in_flight_markers(["IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>"]) == []

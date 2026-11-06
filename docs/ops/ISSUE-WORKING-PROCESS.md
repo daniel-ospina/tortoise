@@ -61,7 +61,8 @@ This issue states a PROBLEM. Its completion criteria do not exist yet — SCOPIN
 7. PR body: `Satisfies #<N>: <ids>` for partial work · `Closes #<N>` ONLY on the last unchecked criterion · no-issue PRs write neither.
 8. REVIEW skills/code-review/SKILL.md (fresh context), findings fixed before the record; six ENTRY checks; rail from a linked worktree.
 9. CLOSE: tick proved criteria in the `## Satisfies` comment; close only when all ticked; read the closure back.
-### Claim: `IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>` appended to the issue's `<!-- p01-status -->` comment.
+### Claim: append this line to the issue's `<!-- p01-status -->` comment
+IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>
 ```
 
 ## Why each step is where it is
@@ -76,7 +77,12 @@ This issue states a PROBLEM. Its completion criteria do not exist yet — SCOPIN
   note was left", never as "nobody is on this": the claim surface is `who_is_on.py`.
   For the same reason `tools/issue_process_lint.py`'s WIP arm reads only the textual `IN FLIGHT:`
   marker and **prints how many subjects carried none**, because `0 markers read` and `0 issues with
-  WIP` are different claims.
+  WIP` are different claims. ⚠️ **Spell the marker as the block does: PLAIN TEXT, on its own line.**
+  A marker inside an inline code span is blanked before the scan (the quote-is-not-a-claim rule, the
+  same one that makes `` `gh pr view #1234` `` a quotation), and a marker behind prose
+  (`### Claim: IN FLIGHT: …`) is not anchored at line start — either spelling produces **no marker
+  at all**, silently, and the arm then has nothing to say. Both are unit-pinned against this block,
+  so changing the block's spelling without changing the lint reds the suite.
 - **§3 research from zero only.** A lane continuing existing work inherits the research; a lane
   starting from scratch owes the three sources, external included.
 - **§4 the checklist is SCOPING's output, and it is a comment.** `skills/issue-scoping/SKILL.md`
