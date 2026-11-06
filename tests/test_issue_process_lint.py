@@ -2392,6 +2392,78 @@ def test_a_gloss_ending_on_an_auxiliary_cannot_carry_a_clause_subject_past_the_b
         "Refs #100 (a) — not closing it.\n",
     ):
         assert L.classify_pr(honest, 1) == [], honest
+
+
+def test_a_gloss_with_a_MID_CLAUSE_auxiliary_cannot_carry_the_subject_either():
+    r"""Round 27, P2 — the SAME class-A silent drop as the case above, one word over.
+
+    The discriminator was END-anchored (`[\W_]*\)` after the auxiliary), so a gloss whose auxiliary
+    sat mid-clause slipped past it and still carried the clause subject past the bridge:
+
+        Refs #1234 (the sprint is, apparently) — not closed.   -> declined=[1234], CLEAN  # #1234 dropped
+        Refs #1234 — the sprint is not closed.                 -> flagged                  # the control
+
+    The residual was DECLARED in the code and nowhere else, so the merge record certified a residual
+    set that did not contain it. `\b{_AUX_TAIL}\b` now refuses the auxiliary anywhere in the gloss.
+    """
+    for dropped in (
+        "Refs #1234 (the sprint is, apparently) — not closed.\n",
+        "Refs #1234 (the outage is, as far as i can tell) — not closed.\n",
+        "Refs #1234 (it did, eventually) — not closed.\n",
+    ):
+        assert L.claims(dropped, 1)["declined"] == [], dropped
+        assert [f.evidence["unresolved"] for f in L.classify_pr(dropped, 1)] == [[1234]], dropped
+
+    # the controls: a gloss naming NO auxiliary still declines, so the narrowing did not delete the
+    # feature — `(2026-11-05.)` is why the tail is anchored on the auxiliary and not on punctuation.
+    for honest in (
+        "Refs #1234 (blind spot) — not closed.\n",
+        "Refs #100 (the parent.) — not closed.\n",
+        "Refs #100 (P3.) — not closed.\n",
+        "Refs #100 (2026-11-05.) — not closed.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+
+
+def test_a_STATE_copula_after_an_agent_subject_is_a_DECLARED_residual():
+    """Round 27, P3 — a CLASS-B false positive, declared rather than fixed, and pinned so the state
+    is a recorded decision instead of a silence the next round can "discover".
+
+    The bridge admits an ACT (`does`/`do`/modals) after a human-agent subject but not a STATE
+    (`is`/`am`/`are`/`was`/`were`), so the same honest decline flips verdict on the auxiliary alone:
+
+        Refs #100 — we do not close it.              -> declines
+        Refs #100 — we are not closing it.           -> FLAGGED
+        Refs #100 — the author does not close the issue.  -> declines
+        Refs #100 — the author is not closing the issue.  -> FLAGGED
+
+    Admitting the state copula after those subjects is NOT a one-line widening: `we are not closed`
+    would then decline too, and that sentence says nothing about #100 — the round-13/round-20
+    class-A hole this narrowing exists to close. Closing it needs the object to be proven to name
+    the reference, which is a change to the target RESOLUTION, not to the bridge; the honest author
+    has spellings that decline (`does not close it`, `not closing #100`). Declared, not guessed at.
+    """
+    # the false-positive direction, pinned as the current (declared) behaviour
+    for flagged in (
+        "Refs #100 — we are not closing it.\n",
+        "Refs #100 — the author is not closing the issue.\n",
+        "Refs #100 — I am not closing it.\n",
+    ):
+        assert L.claims(flagged, 1)["declined"] == [], flagged
+
+    # the ACT spelling of each is the working form, and the class-A hole stays closed
+    for honest in (
+        "Refs #100 — we do not close it.\n",
+        "Refs #100 — the author does not close the issue.\n",
+        "Refs #100 — I do not close it.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+    for about_something_else in (
+        "Refs #100 — we are not closed.\n",
+        "Refs #100 — the PR is not closed.\n",
+        "Refs #100 — the sprint is not closed.\n",
+    ):
+        assert [f.evidence["unresolved"] for f in L.classify_pr(about_something_else, 1)] == [[100]]
 # --- review round 24: one list grammar read by three readers, and one object slot -------------------
 
 

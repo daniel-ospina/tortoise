@@ -241,7 +241,7 @@ _GLOSS = rf"(?:{_SOFT_EMPH}\([^)\n#]{{0,80}}\))?"
 # fixed-width look-behind is not expressible across a variable-length body).
 _AUX_TAIL = (r"(?:is|was|are|were|does|do|did|has|have|had|will|would|should|must|could|can"
              r"|may|might)")
-_GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}[\W_]*\))"
+_GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}(?:[\W_]|$))"
                  rf"[^)\n#]{{0,80}}\))?")
 # ⛔ THE TAIL AFTER THE AUXILIARY IS NOT JUST WHITESPACE (review rounds 23 and 24, P3). `is)` was
 # refused, so `is,)`, `*is*`, `_is_`, `` `is` ``, `is;` and `is.` — the same subject with one
@@ -254,10 +254,18 @@ _GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}[\W_]*\))"
 # in punctuation after a NOUN (`(the parent.)`, `(P3.)`, `(2026-11-05.)`) still decline, because the
 # lookahead is anchored on the auxiliary, not on the punctuation. Widening this only widens
 # REFUSALS, so it cannot cost a claim.
-# ⚠️ DECLARED RESIDUAL, not fixed: an auxiliary in mid-clause (`(the outage is, as far as i can
-# tell)`) still declines. That content does not END on an auxiliary, so it sits outside this
-# discriminator; closing it needs a different mechanism and belongs in its own round, not a patch
-# here.
+# ⛔ THE AUXILIARY IS REFUSED ANYWHERE IN THE GLOSS, NOT ONLY AT ITS END (review round 27, P2). The
+# residual this block used to declare — "an auxiliary in mid-clause still declines" — was the SAME
+# class-A silent drop one word over, and it was live: `(the sprint is, apparently)` does not END on
+# the auxiliary, so it sat outside the end-anchored discriminator and the gloss carried the subject
+# past the bridge:
+#     Refs #1234 (the sprint is, apparently) — not closed.     -> CLEAN, declined=[1234], rc 0
+# A gloss whose content contains an auxiliary ANYWHERE is a clause subject with its verb parked
+# somewhere, so `\b{_AUX_TAIL}(?:[\W_]|$)` now refuses it wherever it appears — the same
+# `[\W_]` tail as below, so the two discriminators agree. `(blind spot)`,
+# `(the parent.)` and `(2026-11-05.)` name no auxiliary and still decline. Like every other change in
+# this block this only widens REFUSALS, so it cannot cost a claim — the worst case is an honest gloss
+# flagged, which is the direction this module prefers.
 # ⛔ A LIST DOES NOT CONTINUE ACROSS A BLANK LINE (review round 22, P3-1). The continuation's separator
 # was `\s`, which includes `\n`, so a conjunction or comma in a FOLLOWING PARAGRAPH continued the
 # list and a legitimate mention was claimed and flagged:
