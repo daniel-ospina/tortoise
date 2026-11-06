@@ -9877,11 +9877,22 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
     with its positive controls alive` — a mechanism claim the artifact contradicts.
 
     Non-vacuity: measured, exit 0 pre-fix and exit 2 here; the shipped `{}`/`0` pair
-    still scores. TWO arms, because the fix has two directions and the ceiling alone
-    covers only one of them:
+    still scores. TWO arms, because the fix has two directions and only the EQUALITY
+    check can see either of them — a ceiling cannot, in the direction below it:
 
     * a total ABOVE the census (`61` against the shipped empty census) is refused by
-      the ceiling, which is now `len(census)` rather than the 61-Object population;
+      the EQUALITY check (`drops_total != len(census)`), NOT by a ceiling sized to
+      the census — `_count(ceiling=gate_objects)` bounds it by the 61-Object
+      population, and 61 is inside that bound. ⛔ The ceiling is deliberately NOT
+      `len(census)`: that was the P1 at `05761cf29`, where a census is
+      ATTACKER-SIZED, so it bound nothing while DROPPING the population bound
+      (62 and 100 fabricated keys were ACCEPTED beside `objects: 61`). A lane that
+      "restores" `ceiling=len(gate_census)` here does NOT by itself re-open that
+      forgery — the `len(census) > objects` check and the `object_names` membership
+      check already refuse those censuses — and saying so would be the same
+      claim-outruns-the-code defect this file exists to catch. What the restore does
+      is move ARM 1's refusal onto `_count`, which is why the assertion below names
+      the EQUALITY guard's own message;
     * a total BELOW the census (`0` against a one-name census) passes every bound
       and is refused only by the equality check — the direction a ceiling can never
       see, and the one that keeps a real drop from vanishing out of the note.
@@ -9900,7 +9911,20 @@ def test_drops_total_must_equal_its_own_drop_census(tmp_path, capsys):
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
-    assert "drops_total" in capsys.readouterr().err
+    # ⛔ The EQUALITY check is the one that must refuse this, and the assertion says
+    # so by quoting its message: `_count` also names `drops_total` in its own
+    # refusal, so a bare `"drops_total" in err` stayed green when the ceiling was
+    # `len(gate_census)`. MEASURED, with that mutant in place: this arm then refuses
+    # through `_count` (`carries drops_total=61 of a population of 0`) while the
+    # fabricated-census forgeries stay refused by the `len(census) > objects` check
+    # — so the restore is a PIN defect and a docstring defect, not a fresh
+    # fail-open, and the assertion's job is to keep the pin pointing at the guard
+    # that actually binds here.
+    assert "value_gate_drops` census holds 0" in capsys.readouterr().err, (
+        "a drops_total above the census was not refused by the EQUALITY check — "
+        "a refusal from `_count`'s population message means the ceiling was "
+        "re-sized to the census, which is the attacker-sized bound "
+        "`05761cf29` removed")
 
     # ARM 2 — the opposite direction, which only the equality check can refuse: one
     # REAL Object in the census, zero claimed in the total. The name must be one of
