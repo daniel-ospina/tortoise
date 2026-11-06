@@ -30,6 +30,7 @@ lane can prove without a project credential.
 from __future__ import annotations
 
 import re
+import shlex
 import tomllib
 from pathlib import Path
 
@@ -42,6 +43,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: arriving as a routine upstream release. Both v2 and v3 are MEASURED to load the committed config
 #: (and both accept `--yes`) — see the argument at `test_the_production_applier_is_version_pinned`.
 _PINNED_CLI_MAJOR = 2
+#: The PRODUCTION Supabase project the applier must apply to. Pinned as a literal on purpose: until
+#: review cycle 11 the only target comparison was "a link step exists", so pointing `env:
+#: SUPABASE_PROJECT_REF` (`:170`) or the link step (`:252`) at another project left the whole battery
+#: GREEN (measured, 32 passed) while `db push --linked` applied production DDL to a DIFFERENT
+#: project — a green run over an unapplied production schema, worse than the dead applier this PR
+#: fixes because nothing is red. A project move is a deliberate change: move this constant in the
+#: same commit so it shows in the diff instead of arriving as a one-token edit.
+_PRODUCTION_PROJECT_REF = "ybetwichurajbfswfeqa"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "supabase-deploy.yml"
 CONFIG = REPO_ROOT / "supabase" / "config.toml"
 
@@ -223,6 +232,12 @@ _QUOTED = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
 _ERRETIT_DISABLED = re.compile(r"(?m)^\s*set\s+\+[A-Za-z]*[eo][A-Za-z]*\b")
 
 
+#: `set -n` (noexec) parses the body and executes NOTHING, then the step exits 0 — ONE CHARACTER
+#: from the allowed `set -e`. Measured at the shell: a body of `set -n` followed by `exit 3` exits 0,
+#: while `set -e` followed by `exit 3` exits 3 (review cycle 11).
+_NOEXEC = re.compile(r"\bset\s+-n\b|\bset\s+-o\s+noexec\b")
+
+
 def _run_body(step: dict) -> str:
     """A step's `run:` body, shell line-continuations joined so a wrapped flag is still one command."""
     return str(step.get("run") or "").replace("\\\n", " ")
@@ -286,13 +301,58 @@ def _mutating_steps_with_job() -> list[tuple[str, dict, dict]]:
 
 
 
+def _strip_shell_comment(line: str) -> str:
+    """Drop one line's UNQUOTED `#` comment (quotes respected).
+
+    Inside a `run: |` block scalar a `#` is LITERAL text (only a plain scalar gets YAML comment
+    stripping). Without this, a flag living only in a comment satisfied the flag assertion while the
+    command applied nothing — the 18-run incident re-created with a green suite (measured, cycle 11)
+    — and a TRAILING comment could smuggle an operator past the control scan.
+    """
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+        i += 1
+    return line
+
+
+#: A `VAR=value` prefix in front of a command (`SUPABASE_ACCESS_TOKEN="$T" supabase …`) — an
+#: ordinary way to scope an env var to one command, and one that must not hide the command from the
+#: guard (measured: the whole flag battery went RED with a message about a missing `db push`).
+_ENV_PREFIX = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
+
+
+def _command_text(line: str) -> str:
+    """One shell line as the command it EXECUTES: comment and `VAR=value` prefix removed."""
+    return _ENV_PREFIX.sub("", _strip_shell_comment(line).strip()).strip()
+
+
 def _commands_in(step: dict) -> list[str]:
-    """The CLI invocations one step runs (shell line-continuations joined, prose skipped)."""
+    """The CLI invocations one step RUNS (continuations joined; prose, comments, env prefixes gone)."""
     return [
-        line.strip()
-        for line in _run_body(step).splitlines()
-        if line.strip().startswith("supabase ")
+        text
+        for text in (_command_text(line) for line in _run_body(step).splitlines())
+        if text.startswith("supabase ")
     ]
+
+
+def _argv(command: str) -> tuple[str, ...]:
+    """One command line as WORDS. A flag is a word, never a substring of a line."""
+    try:
+        return tuple(shlex.split(_strip_shell_comment(command)))
+    except ValueError:  # unbalanced quotes: split on whitespace rather than crash the scan
+        return tuple(_strip_shell_comment(command).split())
 
 
 def _applier_commands() -> list[str]:
@@ -363,8 +423,13 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
     push = [c for c in commands if c.startswith("supabase db push")]
     assert push, "the apply step must still run `supabase db push` (#10896)"
     for cmd in push:
-        assert "--include-all" in cmd, "the apply step must keep `--include-all` (#10896)"
-        assert "--yes" in cmd, (
+        # Asserted on the PARSED argv, never as a substring of the line: inside a `run: |` block
+        # scalar a trailing `#` is LITERAL text, so `db push --linked --include-all   # --yes
+        # lands later` satisfied a substring assertion while CLI v3 would apply NOTHING — measured
+        # GREEN over a broken applier (cycle 11). A flag is a WORD.
+        argv = _argv(cmd)
+        assert "--include-all" in argv, "the apply step must keep `--include-all` (#10896)"
+        assert "--yes" in argv, (
             "`supabase db push` on a hosted target is consent-gated in CLI v3 and cannot prompt "
             "in CI: without `--yes` it applies ZERO migrations (#10896)"
         )
@@ -373,12 +438,12 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # the LOCAL stack (`Target: local stack (127.0.0.1:54322)` → DbConnectError). Either edit is
         # one token, and either leaves a green suite over an applier that did nothing — the exact
         # "reads as a deploy" inversion this module exists to catch.
-        assert not re.search(r"--dry[-_]run", cmd), (
+        assert not [f for f in argv if f.startswith(("--dry-run", "--dry_run"))], (
             f"`--dry-run` must never reach the production applier ({cmd!r}): it prints the plan and "
             f"applies nothing, and it exits 0 — a deploy that looks successful and left the schema "
             f"unapplied (#10896, #3627)"
         )
-        assert "--linked" in cmd, (
+        assert "--linked" in argv, (
             f"the production apply must pass `--linked` ({cmd!r}). On the pinned v2 CLI `db push`'s "
             f"target flags are `--db-url` / `--linked` / `--local` / `--project-ref` — `--remote` is a "
             f"SUBCOMMAND (`db remote`), not a `db push` flag, so accepting it would bless a command that "
@@ -386,13 +451,48 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"(127.0.0.1:54322) on the v3 line, which is exactly the migration this pin defers "
             f"(#10896, #11100)"
         )
-        if "--linked" in cmd:
+        if "--linked" in argv:
             assert any(
                 c.startswith("supabase link") for c in commands
             ), (
                 "`db push --linked` needs a linked project: the workflow must still run "
                 "`supabase link --project-ref …` before it, or the push dies with "
                 "ProjectRefNotLinkedError (#10896)"
+            )
+    # THE TARGET. `db push --linked` applies to whatever `supabase link` bound, and until review
+    # cycle 11 NOTHING read that value: a one-token edit to the job's `env: SUPABASE_PROJECT_REF` or
+    # to the link step's `--project-ref` left the whole battery GREEN (measured, 32 passed) while
+    # production DDL landed on a DIFFERENT project — a green run over an unapplied production schema,
+    # which is worse than the dead applier this PR fixes: nothing is red.
+    for job_name, job in _applier_jobs():
+        declared = str((job.get("env") or {}).get("SUPABASE_PROJECT_REF") or "").strip()
+        assert declared == _PRODUCTION_PROJECT_REF, (
+            f"job {job_name!r} must declare `env: SUPABASE_PROJECT_REF: "
+            f"{_PRODUCTION_PROJECT_REF}` — that is the project `db push --linked` applies to. If "
+            f"the production project is moving deliberately, move _PRODUCTION_PROJECT_REF in the "
+            f"same commit so the change is visible in the diff (#10896)"
+        )
+        targets = [
+            argv[index + 1] if token == "--project-ref" else token.split("=", 1)[1]
+            for step in (job.get("steps") or [])
+            for command in _commands_in(step)
+            if command.startswith("supabase link")
+            for argv in [_argv(command)]
+            for index, token in enumerate(argv)
+            if (token == "--project-ref" and index + 1 < len(argv))
+            or token.startswith("--project-ref=")
+        ]
+        assert targets, (
+            f"job {job_name!r} must run `supabase link --project-ref …` before the apply: the link "
+            f"is what gives `db push --linked` its target, and an unread target is how a green run "
+            f"applies to the wrong project (#10896)"
+        )
+        for target in targets:
+            assert target in ("$SUPABASE_PROJECT_REF", _PRODUCTION_PROJECT_REF), (
+                f"job {job_name!r} links the CLI to {target!r}, which is neither the job's own "
+                f"`$SUPABASE_PROJECT_REF` nor the pinned production project "
+                f"{_PRODUCTION_PROJECT_REF!r}: `db push --linked` would apply production DDL to "
+                f"that project while this run reports success (#10896)"
             )
     fn_deploys = [c for c in commands if c.startswith("supabase functions deploy")]
     assert fn_deploys, "the edge-function deploy steps must still exist (#3627 co-move)"
@@ -450,8 +550,13 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # Comment lines are dropped first, exactly as `_printed_remedies` does: a comment is prose,
         # so the most natural note on this very step ("# NOTE: v3 consent-gates this; keep --yes")
         # must not be read as shell and red a correct step (measured, review cycle 9).
-        body = "\n".join(
-            line for line in _run_body(step).splitlines() if not line.lstrip().startswith("#")
+        body = "\n".join(_strip_shell_comment(line) for line in _run_body(step).splitlines())
+        assert not _NOEXEC.search(body), (
+            f"{where} puts the body in noexec (`set -n` / `set -o noexec`): bash parses and executes "
+            f"NOTHING and the step exits 0, so the apply never runs and the co-move dispatch "
+            f"(#3627) flips the app over an unapplied schema. Measured at the shell: `set -n` then "
+            f"`exit 3` exits 0, while `set -e` then `exit 3` exits 3 — and `set -n` is ONE CHARACTER "
+            f"from the allowed `set -e` (#10896)"
         )
         assert not _ERRETIT_DISABLED.search(body), (
             f"{where} disables errexit (`set +e` / `set +o errexit`): the apply can then fail and "
@@ -495,6 +600,10 @@ def test_printed_remediations_pass_yes_too() -> None:
         ".github/scripts/check-migration-append-only": (
             REPO_ROOT / ".github" / "scripts" / "check-migration-append-only"
         ),
+        # The operator's manual fallback for EXACTLY this incident: `supabase-deploy.yml:53` names it,
+        # yet no test read it and `ci_selection.py --changed-files supabase/README.md` maps it to no
+        # surface at all. Removing `--yes` from its remedies left the suite GREEN (measured, cycle 11).
+        "supabase/README.md": REPO_ROOT / "supabase" / "README.md",
     }
     for name, path in governed.items():
         sites = _printed_remedies(path.read_text(encoding="utf-8"), _REPAIR_REMEDY)
@@ -529,6 +638,29 @@ def test_printed_remediations_pass_yes_too() -> None:
         f"{len(lacking)} of {len(pushes)} printed `supabase db push --linked` remedies lack `--yes` "
         f"({lacking}): CLI v3 consent-gates `db push` and cannot prompt, so the copy-paste apply an "
         f"operator takes from the gate applies nothing and says nothing (#10896)"
+    )
+    # The README's manual-fallback block is the OTHER printed apply path, and it selects its target
+    # with `--project-ref` rather than `--linked`, so `_DB_PUSH_REMEDY` cannot see it (measured: it
+    # stayed GREEN with `--yes` removed, review cycle 11). Its anchor is the COMMAND ROOT at the
+    # start of a line (continuations joined): prose such as "First `supabase db push`: …" does not
+    # start the line with the command, so documentation cannot false-RED and a remedy cannot hide
+    # behind prose.
+    readme = governed["supabase/README.md"].read_text(encoding="utf-8").replace("\\\n", " ")
+    readme_remedies = [
+        line.strip()
+        for line in readme.splitlines()
+        if line.strip().startswith(("supabase db push", "supabase functions deploy"))
+    ]
+    assert readme_remedies, (
+        "supabase/README.md must keep its manual-fallback apply block: it is the operator's "
+        "copy-paste path when the automated co-move has already failed (#3627)"
+    )
+    unconsented = [remedy for remedy in readme_remedies if "--yes" not in remedy]
+    assert not unconsented, (
+        f"supabase/README.md prints {len(unconsented)} manual-fallback command(s) without `--yes` "
+        f"({unconsented}): CLI v3 consent-gates `db push` and `functions deploy` and cannot prompt "
+        f"in a copy-paste, so the documented recovery fails exactly like the bug it recovers from "
+        f"(#10896, #11107)"
     )
 
 
