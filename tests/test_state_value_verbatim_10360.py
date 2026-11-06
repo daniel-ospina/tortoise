@@ -1514,7 +1514,13 @@ _RESIDUAL_NEGATED_OPEN = (
 #: bindings` fuses nothing and the pair fails open”* — whose clause *“the pair
 #: fails open”* names no class, while *“the ADJACENCY half fails open”* does. So
 #: the anchor requirement is what separates the lane's reopening from the row's
-#: disclosure. ⛔ STILL LEAKING, stated rather than implied: the coordinator form
+#: disclosure. ⚠️ THAT SENTENCE IS ONLY HALF TRUE, MEASURED: when the anchor IS the
+#: subject of an honest disclosure — `the numeric side fails open on an unknown
+#: unit`, `the numeric side still fails open on purpose` — the arm REFUSES it, and
+#: the row's own sentence escapes only because its subject (`a unit outside
+#: _UNIT_EQUIV`) carries no anchor (#11258 review round 6 `P2`). That is an
+#: OVER-BLOCK, kept because the alternative is the leak it closes, and recorded
+#: here rather than left to be discovered. ⛔ STILL LEAKING, stated rather than implied: the coordinator form
 #: *“the ADJACENCY half is unjudged and fails open”* stays GREEN, because the
 #: clause split leaves the anchor in the first clause and the phrase in the
 #: second — the same shape as the row's honest sentence, so no clause-scoped rule
@@ -1668,6 +1674,26 @@ def _residual_region(text: str) -> str:
 #: `WHAT THIS CANNOT CATCH` rather than implied to be covered.
 _RESIDUAL_CLAUSE_SPLIT = r";|,?\s+(?:and|but|while|whereas|although|though|yet)\s+"
 
+def _match_is_honest_spelling_disclosure(sentence: str, match) -> bool:
+    """Is `match` a closed verdict INSIDE an honest SPELLING disclosure?
+
+    ⛔ Spans, not clauses. The clause splitter severs these verdicts' own text
+    (`has yet to be closed` splits at `yet`), so a clause-scoped containment test
+    cannot find the honest clause's match — it does not exist. What does hold is the
+    TEXT: if the nearest `spelling` before the match is followed by class-anchor-
+    free prose up to the match, the verdict is about the still-open spelling class,
+    which is honest. `the SPELLING gap has yet to be closed, while the carve-out's
+    ADJACENCY half is CLOSED` passes; `the SPELLING gap is open, and the time-unit
+    half has yet to be closed` reds, because `time-unit` sits between them
+    (#11258 review round 6 `P2`, measured).
+    """
+    head, low = sentence[:match.end()], sentence[:match.end()].lower()
+    at = low.rfind("spelling")
+    if at == -1:
+        return False
+    return not _RESIDUAL_CLASS_ANCHOR.search(head[at:match.start()])
+
+
 def _residual_reopening_claims(text: str) -> list[str]:
     """Every claim in the residual region that REOPENS a gap the row closed.
 
@@ -1702,23 +1728,31 @@ def _residual_reopening_claims(text: str) -> list[str]:
         # waiver (round 2 `P2`). So the honest clauses are REMOVED and what is
         # left is scanned.
         clauses = re.split(_RESIDUAL_CLAUSE_SPLIT, sentence)
+        honest = [c for c in clauses if _is_honest_spelling(c)]
         # ⛔ THE NEGATED CLOSED VERDICTS ARE SCANNED ON THE WHOLE SENTENCE, before any
         # clause surgery, because their own text CONTAINS splitter words:
         # `has yet to be closed` splits at `yet`, `anything but closed` at `but`,
         # and removing an honest `spelling` clause then rejoins the pieces — so the
         # pattern's two halves land in different segments and it never matches
         # (`the SPELLING gap is open, and the time-unit half has yet to be closed`
-        # was GREEN, #11258 review round 5 `P2`, measured). They are ANCHORED, so
-        # the honest `spelling` disclosure (`… the SPELLING gap is not closed`) is
-        # unaffected — it carries no closed-verdict phrase.
+        # was GREEN, #11258 review round 5 `P2`, measured).
+        # ⚠️ AND THAT SENTENCE SCOPE OVER-BLOCKS, measured: it judges the union of
+        # both clauses, so `the SPELLING gap has never been closed, and the
+        # ADJACENCY half is closed by the tables` red even though the closed-
+        # verdict phrase sits inside the HONEST clause — and both halves are true
+        # by this row's own text (#11258 review round 6 `P2`). A match whose span
+        # is contained in an honest clause's own match is a disclosure, not a
+        # reopening, so it is dropped.
         if _RESIDUAL_CLASS_ANCHOR.search(sentence):
             for pattern in _RESIDUAL_CLOSED_VERDICT:
                 m = re.search(pattern, sentence)
-                if m is not None:
-                    claims.append(
-                        f"{m.group(0)!r} in sentence {sentence.strip()!r}")
-                    break
-        honest = [c for c in clauses if _is_honest_spelling(c)]
+                if m is None:
+                    continue
+                if _match_is_honest_spelling_disclosure(sentence, m):
+                    continue
+                claims.append(
+                    f"{m.group(0)!r} in sentence {sentence.strip()!r}")
+                break
         if honest:
             if len(honest) == len(clauses):
                 for pattern in _SPELLING_FLOOR:
@@ -2050,6 +2084,14 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "residual (a) is never closed by any rule in this module.",
     "the remaining gap is the SPELLING case, which is open by design.",
     "the exception it carved is the SPELLING class, still open.",
+    # ⛔ CLOSURE DOCUMENTATION: both halves are TRUE by the row's own text (the
+    # adjacency half is CLOSED, the spelling half is not), and the sentence-level
+    # closed-verdict pass red all four until it learned to recognise a verdict that
+    # sits INSIDE the honest `spelling` disclosure (#11258 review round 6 `P2`).
+    "the SPELLING gap has never been closed, and the ADJACENCY half is closed by the tables.",
+    "the SPELLING gap was never closed (it is open by design), and the ADJACENCY half is closed.",
+    "the SPELLING class is far from closed, and the ADJACENCY half is closed by this table.",
+    "the SPELLING gap has yet to be closed, while the carve-out's ADJACENCY half is CLOSED.",
     # ⛔ ⚠️ AN HONEST CLAUSE THAT NAMES BOTH `spelling` AND THE CARVE-OUT IS NOT
     # HERE, because it is deliberately REFUSED: waiving it is what let one word
     # (`the SPELLING `) turn every reopening on the carve-out GREEN, so the two
@@ -2127,9 +2169,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 49, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 68, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
-        "in the docstrings/comments rather than deleting shapes")
+        "in the docstrings/comments rather than deleting shapes. ⚠️ The floor is "
+        "kept within ONE arm's proof set of the current length on purpose: at a "
+        "#11258 round-6 reviewer-measured 49, twenty-one deletions were permitted "
+        "while `_RESIDUAL_CLOSED_VERDICT` is six shapes, so the whole arm plus every "
+        "proof of it could be deleted with both tests GREEN.")
     assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 22, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage")
@@ -2141,7 +2187,15 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # the clause-anchored `fails open` arm
             "the ADJACENCY half fails open.",
             # the emphatic negations the veto must NOT swallow
-            "the ADJACENCY half is not only open, it is unfused."):
+            "the ADJACENCY half is not only open, it is unfused.",
+            # ⛔ THE CLOSED-VERDICT ARM (round 4/5, #11258 round-6 review `P1`
+            # MEASURED): with the floor's old slack this arm had NO membership
+            # entry — emptying `_RESIDUAL_CLOSED_VERDICT` AND deleting its six
+            # exclusively-covered shapes left BOTH tests GREEN, because the floor
+            # permitted 21 deletions and the arm is 6.
+            "the ADJACENCY gap was never closed.",
+            "the time-unit half has yet to be closed",
+            "the ADJACENCY half is anything but closed.",):
         assert required in _RESIDUAL_REOPENING_MUTATIONS, (
             f"the proof list no longer carries {required!r} — that shape is the "
             "reason its arm exists; a lane reading this list must be able to run "
