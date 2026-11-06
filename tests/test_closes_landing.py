@@ -4820,6 +4820,66 @@ def test_no_ITEM_opens_inside_an_HTML_block_and_none_of_its_text_is_HIDDEN():
         assert "#100" in cl.strip_code(body, indented_code=True), body
         assert cl.parse_closing_refs(body) == [100], body
 
+def test_a_WIDE_GAP_marker_in_a_NEW_blockquote_after_an_HTML_block_is_CODE():
+    """#11287 — round 52's per-line `_html_here`, pinned on the shape the review round reported.
+
+    §4.6's types 1-6 interrupt a paragraph and a type-7 leaf (`<span>`) cannot interrupt one, so the
+    line under `> <span>` is that block's raw TEXT and the block ends once that container does. The
+    marker then arrives in a NEW blockquote, and `2.` + five spaces is §5.2's wide-gap item: one
+    space is the delimiter and the remaining four are the item's indented CODE block —
+
+        `> <span>` + `    x` + `> 2.     Closes #100`
+            renderer: `<blockquote><span></blockquote><pre><code>x</code></pre><blockquote>
+            <ol start="2">…<pre><code>Closes #100`  -> the keyword is CODE, so every arm owes `[]`.
+
+    The round-46..51 heads credited it in ALL FOUR arms (a `_html_here` carried from the
+    container's opener line exempted the marker from the indented-code rule); `origin/main` refused
+    it in the two arms `--pr` uses. Round 52 made `_html_here` the LINE's own answer, and this test
+    reds on the round-51 tree (`1bbc16ce57`) — that is the property it exists to keep.
+
+    ⚠️ Not #11268 (the `indented_code` arm crediting inside a DEEPER blockquote) and not #11156
+    (`strip_code` never blanks raw-HTML content): what is measured here is the HTML block's END,
+    not its text.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "#100" in getattr(t, "content", "")}
+
+    # The two rows #11287 reported: the container ends, then the marker arrives in a new quote.
+    for body in ("> <span>\n    x\n> 2.     Closes #100\n",
+                 "> </pre>\n      x\n> 2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+        assert "#100" not in cl.strip_code(body, indented_code=True), body
+        assert "#100" not in cl.strip_code(body, indented_code=True, strict=True), body
+
+    # The same body WITHOUT an indented line between the opener and the marker: the renderer also
+    # puts the keyword in `<pre><code>`, and BOTH `origin/main` and the series heads credited it —
+    # a pre-existing fail-open the same per-line term closed. Pinned so "refuse this family" is the
+    # recorded answer rather than an accident of the two rows above.
+    pre_existing = "> <span>\nx\n> 2.     Closes #100\n"
+    assert keyword_types(pre_existing) == {"code_block"}, pre_existing
+    assert cl.parse_closing_refs(pre_existing) == [], pre_existing
+    assert cl.parse_closing_refs(pre_existing, None, strict=True) == [], pre_existing
+
+    # CONTROL 1 — the marker NOT in a new blockquote: already refused before the fix, and refused
+    # for the renderer's reason (`<pre><code>`), so this keeps the fix from spreading to shapes that
+    # were never wrong.
+    for body in ("> <span>\n      x\n2.     Closes #100\n",
+                 "x\n      x\n> 2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+
+    # CONTROL 2 — the fix must not have become "blank every wide gap after an HTML block": where
+    # the renderer puts the keyword in PROSE, it is still a close (round 52's own pinned shape).
+    prose = "- a\n    <div>\n<br />\n2.     Closes #100\n"
+    assert keyword_types(prose) == {"html_block"}, prose
+    assert cl.parse_closing_refs(prose) == [100], prose
+    assert cl.parse_closing_refs(prose, None, strict=True) == [100], prose
+
+
 def test_a_fence_that_DROPS_a_NESTED_items_marker_is_still_inside_the_OUTER_one():
     """Round 49 review, P1 — a LOST close, a regression against `origin/main`.
 
