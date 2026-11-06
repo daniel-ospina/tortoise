@@ -220,7 +220,10 @@ to have none.
 direction from the TWO widening exceptions the module declares
 (`DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`). ⛔ `FOLD_ON_CREATE_DEFAULTS` is
 NOT a third widening: it fills a VALUE into a column the record already has
-(`subjectKind`/`objectKind`/`Object.title` are all in `projected_columns`), so
+(`subject_kind` on `Subject`, `object_kind`/`title` on `Object` — all three in
+their own table's `projected_columns`; the fold's KEYS are PROPERTY names like
+`subjectKind` while the columns are the row's snake_case spellings — the two
+namespaces §17.2 keeps apart), so
 the plan's FIELD SET is unchanged by it. §17.2 of `STORAGE-ARCHITECTURE.md` and
 `cache_projection`'s module-docstring point 3 state the full census BY DIRECTION
 — one value-filling, two widening, two narrowing — and this line previously
