@@ -1075,6 +1075,41 @@ class RecordWriter:
             raise RecordWriteError(
                 f"the record write failed after {len(records)} journal "
                 f"record(s) were materialized from position {first_seq} "
+                # ⛔ `str(exc)` IS PART OF THE REPORT (#9548). Logging only
+                # `type(exc).__name__` discarded the one fact a failure had:
+                # 302 live rows were lost and every one of them was named
+                # `InvalidTextRepresentation` — no cause text, no column, no
+                # statement. The cause is chained (`from exc`) AND spelled out
+                # here, because the caller of this seam (`write_live_record`)
+                # logs `str()` of this exception and nothing else.
+                #
+                # ⚠️ THE TRADE-OFF, named rather than absorbed — and stated for the
+                # code that ACTUALLY runs (#10726 review P2: an earlier version of
+                # this note rejected "the primary message only" as the alternative,
+                # which is what `_bounded_cause` already ships). A raw psycopg2
+                # message interpolates its parameters client-side, so the
+                # `LINE`/`DETAIL` it carries can quote a PREFIX of a row's values
+                # (the #9548 case quotes `Token "err4032" is invalid`). That half is
+                # WITHHELD here, not accepted: a driver exception is recognised by
+                # its shape (`diag`/`pgcode`) and only its TERSE protocol message is
+                # kept (`record_projection._primary_message`, which refuses
+                # `DETAIL`/`CONTEXT`/`W`). Nor is the column half lost by that
+                # choice: `replay()` raises `RecordStatementError` carrying
+                # `_failure_line(_statement_attribution(...), _driver_fault(exc))`,
+                # so the statement, its table and its columns ride the projection's
+                # OWN attribution rather than the driver's row dump. The residual
+                # is narrow and named: a driver that exposes NEITHER `diag` nor
+                # `pgcode` is not recognised as one, and its `str(exc)` is logged —
+                # length-bounded by `_bounded_cause`, but not value-withheld. That
+                # residual is accepted, because a lost row nobody can attribute is
+                # the worse failure (§17's own rule — the seam must never drop a row
+                # in silence) and the row is the tenant's own data going to that
+                # tenant's own log.
+                #
+                # ⛔ BOUNDED since #10648: `_bounded_cause` keeps that cause to
+                # the projection's OWN attribution budget rather than logging an
+                # unbounded driver message (one number, one place — see its
+                # docstring), so whatever it carries stays one bounded log line.
                 f"({type(exc).__name__}: {_bounded_cause(exc)})"
             ) from exc
 
@@ -1299,6 +1334,24 @@ def _count_position_unproven() -> None:
     with contextlib.suppress(Exception):
         from . import monitoring
         monitoring.record_position_unproven()
+
+
+def _count_write_applied() -> None:
+    """Count one record write this process COMMITTED. **Never raises.**
+
+    The POSITIVE channel beside the three failure/decline counters siblings
+    above (#9548): without it an armed-and-writing deployment and one that has
+    never been reached both read ``record_write_failures: {}`` on ``/health``,
+    which is exactly how this P0 was closed on an empty object.
+
+    Called AFTER ``connection.commit()`` returns, never at
+    ``RecordWriteOutcome.APPLIED`` — APPLIED means the statements ran, so it
+    would report a write that a later rollback discards. Same swallow as its
+    siblings, for the same reason: the caller's write already persisted.
+    """
+    with contextlib.suppress(Exception):
+        from . import monitoring
+        monitoring.record_write_applied()
 
 
 def _note_unproven_position(record: Mapping[str, Any]) -> None:
@@ -1738,6 +1791,12 @@ def write_live_record(record: Mapping[str, Any], *,
         connection = write.connection
         if connection is not None:
             connection.commit()
+            # AFTER the commit, and only when the seam's OWN connection
+            # committed: this is the record's positive channel (#9548). Every
+            # other record counter is a failure/decline channel, so without
+            # this one `record_write_failures: {}` cannot tell a writing
+            # deployment from one that was never reached.
+            _count_write_applied()
         if seq is None:
             # No position was consumed, so the watermark must not report one
             # as if it had been (a caller advancing `last_seq + 1` must neither

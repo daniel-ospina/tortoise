@@ -252,13 +252,19 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:1584`) and the graph migration
+`_DOC_RETIRED_KEYS` (`projection/entities.py:1974`) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **55** lines across **17**
-files under `tortoise/` at `4f68a2aa7` (`git grep -n ':Document'` → 55 lines,
-`git grep -l ':Document'` → 17 files — the file count is not the line count).
+and the reason is measured: `:Document` occurs on **56** lines across **18**
+files under `tortoise/` (`git grep -n ':Document'` → 56 lines,
+`git grep -l ':Document'` → 18 files — the file count is not the line count).
+It was **55** across **17** when this was first measured at `4f68a2aa7`; the
+line since added is `cache_eviction.py:620`, the census's own note on why node
+labels do not partition the node set — the #10976 deliverable is itself one more
+piece of prose naming the retired label, which is the point rather than an
+accident: this population grows for good reasons, so the figure tracks the tree
+and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
 population this sentence is stated in — every *tracked* file under `tortoise/`,
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
@@ -266,10 +272,11 @@ of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
-and one narrow enough to skip them (`\(\w*:Document`) still matches two RST
-literals. A guard carrying a hand-maintained allowlist of docstrings is a guard
-nobody can trust, so the label claim stays evidence recorded here rather than a
-check that would have to be argued with.
+and one narrow enough to skip them (`\(\w*:Document`) still matches **three**
+lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
+`cache_eviction.py:620` comment. A guard carrying a hand-maintained allowlist of
+docstrings is a guard nobody can trust, so the label claim stays evidence
+recorded here rather than a check that would have to be argued with.
 
 ---
 

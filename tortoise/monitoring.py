@@ -9,6 +9,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import contextvars
+import datetime
 import json
 import logging
 import math
@@ -39,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 _start = time.monotonic()
 _last_ingest: float | None = None
+
+#: Instant (``time.time()``) of the last record write this process COMMITTED, or
+#: ``None`` if it has never committed one. Read through
+#: :func:`record_last_write_at`; see ``RECORD_WRITE_APPLIED_COUNT`` for why the
+#: positive channel needs a second field and not just a count.
+_last_record_write_at: float | None = None
 _sdk = None  # set by register()
 
 # Per-ATTEMPT bound on the deep DB probe (#1384): a stopped FalkorDB (incident
@@ -930,6 +937,38 @@ RECORD_POSITION_UNPROVEN_COUNT = Counter(
     "Armed record writes whose journal append could not prove its position, so "
     "layer 1 got no row until a replay (#9307 review F1)",
 )
+# #9548: the record's POSITIVE channel — writes that actually reached Postgres.
+#
+# WHY a fourth record counter (#9548 review, measured on the deployment): the
+# three above are ALL failure/decline channels, so every read of the record's
+# health was `{}` whether it was writing fine or had never been reached. That is
+# not a cosmetic gap: `{}` was the evidence offered for indicator (b) of #9548
+# (`record_write_failures` = 0) while indicator (a) — "a captured session writes
+# `journal_event` + `point` rows" — had no reader at all, so the P0 was closed on
+# an empty object and reopened when `{}` turned out to mean "no write was
+# attempted". A zero-failure counter is an ABSENCE, and absence is not evidence
+# of success (#9307's own lesson, one channel over; the same reason a monitoring
+# read that could not answer is published as ``None``, never as ``0``).
+#
+# The count is the number of live writes whose transaction this process
+# COMMITTED. It is deliberately NOT `RecordWriteOutcome.APPLIED`: that value says
+# "the plan materialized and every statement ran on the caller's connection" —
+# the seam has not committed at that point, so an APPLIED-but-uncommitted write
+# counted here would report the record working from a transaction that was later
+# rolled back. Single writer: ``record_write_applied`` (the #501/#3677 house
+# shape), called by ``record_writer.write_live_record`` immediately after its own
+# ``commit()`` returns.
+#
+# It is a COUNTER, not a gauge, so the surface answers "has this process ever
+# written, and how many" — which is what a capture-then-read check needs — and
+# it resets with the process, like every other counter here. The companion
+# instant (:func:`record_last_write_at`) is what makes an OLD write
+# distinguishable from a live one, since a counter alone cannot say WHEN.
+RECORD_WRITE_APPLIED_COUNT = Counter(
+    "tortoise_record_writes_applied_total",
+    "Armed record writes whose transaction this process COMMITTED to the record "
+    "(#9548) — the positive channel beside the three failure/decline counters",
+)
 # #4095: an allowlist-dropped telemetry key — the same loss class as the audit
 # drop above, and the exact defect #3821 fixed half-way. #3821's choke point
 # (``hosted_api._report_unregistered``) counts, warns once per site and never
@@ -1743,6 +1782,44 @@ def record_position_unproven() -> None:
 def record_position_unproven_count() -> int:
     """In-process snapshot of ``RECORD_POSITION_UNPROVEN_COUNT``."""
     return _counter_val(RECORD_POSITION_UNPROVEN_COUNT)
+
+
+def record_write_applied() -> None:
+    """Count one record write this process COMMITTED, and stamp its instant.
+
+    The POSITIVE channel (#9548): before it, every record counter was a
+    failure/decline channel, so an armed-and-writing deployment and one that had
+    never been reached both read ``{}`` — which is how indicator (b) of #9548
+    was "evidenced" on an empty object while indicator (a) (does a capture
+    actually write rows?) had no reader anywhere on the deployment.
+
+    Single writer: ``record_writer.write_live_record``, immediately after ITS OWN
+    ``commit()`` returns — not at ``RecordWriteOutcome.APPLIED``, which is
+    "the statements ran on the caller's connection" and precedes the commit.
+    Counted on the same swallow-proof path as the failures (it must never be
+    able to break a write that already persisted).
+    """
+    global _last_record_write_at
+    RECORD_WRITE_APPLIED_COUNT.inc()
+    _last_record_write_at = time.time()
+
+
+def record_write_applied_count() -> int:
+    """In-process snapshot of ``RECORD_WRITE_APPLIED_COUNT`` (committed writes)."""
+    return _counter_val(RECORD_WRITE_APPLIED_COUNT)
+
+
+def record_last_write_at() -> str | None:
+    """When this process last COMMITTED a record write — ISO-8601 UTC, or ``None``.
+
+    ``None`` means "this process has not written since it started", which is a
+    fact and not a zero: paired with ``record_write_applied_count`` it separates
+    a deployment that writes from one that has only ever been armed.
+    """
+    stamp = _last_record_write_at
+    if stamp is None:
+        return None
+    return datetime.datetime.fromtimestamp(stamp, datetime.UTC).isoformat()
 
 
 def record_write_failure_counts() -> dict[str, int]:
@@ -5861,6 +5938,18 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # has to over-claim: this one is the one that says "layer 1 is behind
         # the journal by N records".
         "record_position_unproven": record_position_unproven_count(),
+        # #9548: the POSITIVE pair beside the three failure/decline keys above.
+        # Without it `record_write_failures: {}` is equally consistent with "the
+        # record is writing" and "no write was ever attempted" — the ambiguity
+        # this P0 was closed on and reopened from. ⚠️ `metrics()` builds this dict
+        # inline and has no snapshot read, so the ``None``-on-unread rule is NOT
+        # implemented here: ``record_writes_applied`` is always an int, and
+        # ``record_last_write_at`` is ``None`` only until this process's first
+        # committed write. The all-or-``None`` snapshot lives in
+        # ``hosted_api._record_health`` and is the surface to read when an unread
+        # counter must not be mistaken for a zero.
+        "record_writes_applied": record_write_applied_count(),
+        "record_last_write_at": record_last_write_at(),
         # #7924 review P2: an audit event that reached no durable sink is
         # the same class of failure as a journal write, so it rides THIS
         # payload alongside ``journal_write_failures`` rather than a log line
