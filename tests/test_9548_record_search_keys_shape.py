@@ -121,6 +121,42 @@ def _tenant():
     return (f"org-9548-{token}", f"graph-9548-{token}")
 
 
+class _DriverShapeError(Exception):
+    """psycopg2's ``str()``: the protocol's fields CONCATENATED (#11121).
+
+    Not a stand-in for a driver's behaviour we are guessing at — it is the
+    documented shape. The fields that quote TEXT FROM THE ERROR are the primary
+    ``M`` ("accurate but terse (typically one line)") and the OPTIONAL
+    ``D``/``W``, which quote the DATA (for `22P02` the refused token; for a
+    `CHECK` violation the whole row). libpq builds ``str(exc)`` from those AND
+    from whatever else the server sent — a ``HINT``, an internal query, the
+    ``LINE n:`` position — and psycopg2 concatenates all of it, while
+    ``diag.message_primary`` carries ``M`` alone.
+
+    `_primary_message`/`_driver_fault` exist to keep only the latter, and
+    `record_writer._bounded_cause` can only apply the same narrowing to an
+    exception that carries ``diag``/``pgcode`` — a `RecordStatementError` does
+    not, which is why the encoder of the line is the last place that can
+    withhold. This class is that shape with the withheld value made explicit.
+    """
+
+    pgcode = "22P02"
+
+    class _Diag:
+        message_primary = "invalid input syntax for type json"
+
+    diag = _Diag()
+
+    def __init__(self) -> None:
+        # ⚠️ `GRAPH_KEYS` is deliberately the token in `DETAIL`: it is the SAME
+        # value `_column_pair` withholds by name-and-length, so one assertion
+        # can prove the withhold true of the whole line, not of one half.
+        super().__init__(
+            "invalid input syntax for type json\n"
+            f'DETAIL:  Token "{GRAPH_KEYS}" is invalid.\n'
+            f"CONTEXT:  JSON data, line 1: {GRAPH_KEYS}")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 1. The OLD shape — RED on the pre-fix code, with no database at all
 # ════════════════════════════════════════════════════════════════════════════
@@ -730,6 +766,72 @@ def test_a_message_string_with_a_cause_degrades_instead_of_raising():
         f"the driver's cause is the half the reporter must never replace: {text}")
     assert "backfill row 7" in text, (
         f"a bare message string must still name its subject: {text}")
+
+
+def test_the_cause_form_withholds_the_drivers_detail_and_context():
+    """The cause arm composes `_driver_fault`, not `str(cause)` (#11121).
+
+    ⛔ WHY. `__init__` composed the cause clause as
+    ``type(cause).__name__: {cause}`` — ``str(cause)`` — while the class
+    docstring one page above states, in as many words, that ``str(exc)`` IS NOT
+    CARRIED because on a driver error it is the protocol's fields CONCATENATED:
+    ``DETAIL``/``CONTEXT`` quote the refused row or a prefix of its values. The
+    message arm learned this first (#10648 review P2: `replay()` composes
+    `_failure_line(…, _driver_fault(exc))`); the cause arm kept interpolating, so
+    the withhold
+    documented for the line was true of one arm and false of the other.
+
+    ⛔ AND NOTHING DOWNSTREAM REPAIRED IT — which is why the fix belongs HERE.
+    `record_writer._bounded_cause` narrows only when the OUTER exception carries
+    `diag`/`pgcode`; a `RecordStatementError` carries neither, so pre-fix it took
+    its `str(exc)` branch with the driver's ``DETAIL`` already embedded here —
+    which is what made a leak in this class a leak all the way to the log. The
+    narrowing still runs (those two facts are unchanged); it no longer has a
+    driver ``DETAIL`` to find, because the clause this test pins is composed by
+    `_driver_fault` (#11124 review cycle 4: the tense is the claim).
+
+    This is not a live exposure (no in-tree PRODUCTION caller builds this form:
+    only :func:`replay` raises the class, via the message form; the cause form
+    is built by this module's own tests), and that is exactly why it is pinned —
+    the docstring advertises the form for the caller that logs it (a repair
+    script, a backfill). The five in-tree constructions are all THIS file's
+    pins, which is why the qualifier matters: an unqualified "no in-tree caller"
+    is refuted by its own assertions (#11124 review P3).
+
+    Non-vacuous: restore ``{type(cause).__name__}: {cause}`` and this test reds on
+    the first assertion — the DETAIL token is the SAME string the attribution
+    half withholds, so one value proves both halves of the line at once.
+    """
+    tenant = _tenant()
+    statement = _search_keys_statement(
+        _plan_record(_record(tenant, search_keys=GRAPH_KEYS), tenant))
+    cause = _DriverShapeError()
+    error = record_projection.RecordStatementError(
+        statement, cause, index=0, total=1)
+    text = str(error)
+
+    # The VALUE, by its own spelling: `DETAIL`'s token IS the bound search key.
+    assert GRAPH_KEYS not in text, (
+        "the driver's DETAIL clause reached the failure line — it quotes the "
+        f"refused value, which this same line withholds by name: {text}")
+    assert "DETAIL:" not in text and "CONTEXT:" not in text, (
+        f"the protocol's DATA fields must not be carried: {text}")
+
+    # …and the withhold is the ATTRIBUTION half's, not a blanket silence: the
+    # column is still NAMED (by its Python type — `Statement.attribution()`
+    # reports `value_types()`, not the bound values), so the line still says
+    # which column and which row, which is the whole point of the class.
+    assert "search_keys=str" in text, (
+        f"the attribution half must still name the column: {text}")
+
+    # …and the line stays DIAGNOSABLE: the SQLSTATE and the terse `M` field.
+    assert "22P02" in text, (
+        f"`_driver_fault` carries the SQLSTATE — the datum the pre-fix line did "
+        f"NOT have; the 302 lost rows were reported as nothing but the cause's "
+        f"CLASS NAME (`InvalidTextRepresentation`), and naming no column is "
+        f"what made them unreadable: {text}")
+    assert "invalid input syntax for type json" in text, (
+        f"the driver's PRIMARY message is the other half of the fault: {text}")
 
 
 def test_a_none_pairing_cannot_make_the_reporter_raise():

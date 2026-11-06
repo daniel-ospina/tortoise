@@ -742,6 +742,37 @@ exec {real} "$@"
         self.assertEqual(rc, 0, out)
         self.assertNotIn("pushed/thing", out)
 
+    def test_a_failed_git_remote_refuses_the_inventory_instead_of_answering(self):
+        """The fail-closed guard in `pushed_branch_names` (#8881) had no test.
+
+        With `remotes=[]` — what a FAILED `git remote` used to be read as — the
+        no-prefix arm strips one path component, so a never-pushed branch could
+        be credited as pushed and hidden from `--inventory`: stranded work
+        reported as FREE. The read is therefore refused, and the refusal must
+        reach the caller as INCOMPLETE (exit 2), never as a decided "all clear"
+        (exit 0 — what the pre-fix run answered) and never as exit 1, which is
+        this repo's COLLISION code.
+
+        The shim fails `git remote` but NOT `git remote -v`, so the earlier
+        slug-resolution guard cannot answer for the branch under test.
+        """
+        self.local_branch(f"fix/{ISSUE}-strand")
+        real = shutil.which("git")
+        stub = self.tmp / "gitremote" / "git"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub = self._write_exec(stub, f'''#!/usr/bin/env bash
+if [ "${{1:-}}" = "remote" ] && [ "${{2:-}}" != "-v" ]; then
+  echo "git-shim: refusing the remote list" >&2; exit 128
+fi
+exec {real} "$@"
+''')
+        rc, out = self.run_tool("--inventory", git_bin=stub)
+        self.assertEqual(rc, 2, out)          # INCOMPLETE, never a decided answer
+        self.assertNotEqual(rc, 1, out)       # exit 1 is COLLISION — never a crash
+        self.assertNotIn("Traceback", out)
+        self.assertIn("could not be read", out)
+        self.assertIn("UNKNOWN", out)
+
     def test_inventory_dirty_only_excludes_clean_local_only_branch(self):
         self.local_branch("fix/clean-but-unpushed")
         rc_all, out_all = self.run_tool("--inventory")
@@ -1016,6 +1047,57 @@ exit 0
         self.assertEqual(rc, 2, out)
         self.assertIn("OPEN PULL REQUEST", out)
         self.assertNotIn("unexpected", out)
+
+    def test_a_pr_number_resolves_to_its_work_item_and_answers(self):
+        """#9976: the PR-number shape ANSWERS instead of abstaining.
+
+        The gate resolves an OPEN pull request to the work item(s) it serves
+        (#9957); this verb used to stop at `ANSWER INCOMPLETE: … is an OPEN PULL
+        REQUEST`, so the two verbs disagreed about the same number — which
+        AGENTS.md says they cannot, because this verb reuses the gate's own
+        enumeration. Here the PR's closing reference names ISSUE, so the answer
+        for ISSUE is computed and printed under its own heading, at rc 0.
+        """
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([{
+            "number": 9999,
+            "title": "fix: something unrelated in its title",
+            "body": "",
+            "state": "open",
+            "url": "https://example.invalid/pulls/9999",
+            "headRefName": "feat/some-pr",
+            "mergedAt": None,
+            "closingIssuesReferences": [{"number": ISSUE}],
+        }]))
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("is an OPEN PULL REQUEST — resolved via", out)
+        self.assertIn(f"to #{ISSUE}", out)
+        self.assertIn(f"who is on #{ISSUE}?", out)
+        # It answers — it does not abstain with the old refusal.
+        self.assertNotIn("not a work item", out)
+        self.assertNotIn("INCOMPLETE", out)
+        # …and the resolution is REPORTED, so a reader knows which item answered.
+        self.assertIn("the same resolution the pre-flight uses", out)
+
+    def test_a_pr_number_whose_work_items_cannot_be_resolved_still_refuses(self):
+        """The fail-closed half: no resolvable work item is rc 2, never `nobody`.
+
+        `release_pull_request_work_items` is the gate's own resolver; when it
+        finds nothing there is no work item to answer for, and a half-answer
+        would be worse than the refusal. The gate's own sentence stays first so
+        the shape is recognisable.
+        """
+        (self.gh_dir / "open_prs.json").write_text(json.dumps([{
+            "number": 9999, "title": "fix: nothing names the issue", "body": "",
+            "state": "open", "url": "https://example.invalid/pulls/9999",
+            "headRefName": "feat/some-pr", "mergedAt": None,
+            "closingIssuesReferences": [],
+        }]))
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("OPEN PULL REQUEST", out)
+        self.assertIn("This is NOT", out)
+        self.assertNotIn("ANSWER: nobody", out)
 
     def test_a_control_sequence_in_a_refname_cannot_reach_the_output(self):
         """Ref names are untrusted input and this report NAMES them, so a
@@ -1392,6 +1474,61 @@ exec {self.gh} "$@"
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(f"fix/{ISSUE}-strand", proc.stdout)
+
+    def test_the_ancestry_walk_uses_the_PS_binary_not_git(self):
+        """Cycle-2 review, MEDIUM: `_ancestor_pids(ps_bin, …)` got `git_bin`.
+
+        On Linux `/proc` masks the mistake; on a host WITHOUT procfs the macOS
+        fallback runs `<binary> -o ppid= -p <pid>`, so `git -o ppid= …` fails and
+        the ancestry set collapses to `{getpid()}` — the caller's own `pi`
+        ancestor is then invisible and the verb reports the caller as its own
+        holder (the #10684 defect, one verb over, on macOS). The seam is driven
+        here so the finding cannot come back on any host: the binary handed to
+        `_ancestor_pids` must be the PS binary, never the git one.
+        """
+        import importlib.util
+        from types import SimpleNamespace
+        from unittest import mock as _mock
+
+        cp = _gate_module()
+        spec = importlib.util.spec_from_file_location("who_is_on_ps_binary", TOOL)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        used: list[str] = []
+        captured: list[object] = []
+
+        class _Captured(Exception):
+            pass
+
+        def fake_ancestors(binary, timeout):
+            used.append(binary)
+            return frozenset({424242})
+
+        def fake_preflight(issue, target, gh, git, timeout, **kw):
+            captured.append((kw.get("identity"), kw.get("ps_bin")))
+            raise _Captured("identity captured")
+
+        with _mock.patch.object(
+                cp, "_resolve_target",
+                return_value=(SimpleNamespace(path=None, slug=SLUG), 0)), \
+             _mock.patch.object(cp, "_ambiguity_refusal", return_value=None), \
+             _mock.patch.object(cp, "_ancestor_pids", fake_ancestors), \
+             _mock.patch.object(cp, "run_preflight", fake_preflight):
+            mod.who_holds(ISSUE, None, "gh", "git-binary-not-a-ps", 5.0)
+
+        self.assertEqual(len(used), 1, used)
+        self.assertNotIn("git-binary-not-a-ps", used)
+        self.assertTrue(used[0].endswith("ps"),
+                        f"the ancestry walk was handed {used[0]!r}, not a ps binary")
+        self.assertEqual(captured[0][0].self_pids, frozenset({424242}))
+        # ⛔ THE SAME RESOLUTION MUST REACH `run_preflight` TOO (cycle-3 review).
+        # It defaults to the literal `"ps"`, so `COLLISION_PREFLIGHT_PS` meant two
+        # different things inside one `who_holds` run while `_ps_bin`'s docstring
+        # claimed parity with the gate (which resolves `ps` once and passes it to
+        # BOTH uses, `collision_preflight.py:9840` and `:9860`).
+        self.assertEqual(captured[0][1], used[0],
+                         "run_preflight was not handed the same ps binary")
 
 
 if __name__ == "__main__":

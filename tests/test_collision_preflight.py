@@ -51,6 +51,7 @@ Coverage:
 """
 from __future__ import annotations
 
+import builtins
 import hashlib
 import io
 import json
@@ -64,7 +65,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -539,6 +540,7 @@ SURFACE_ROWS = (
     "local branches",
     "remote branches",
     "local worktrees",
+    "live lane processes",
     "issue assignee/holder",
 )
 
@@ -864,6 +866,17 @@ class CollisionPreflightTest(unittest.TestCase):
         # first on `PATH`; only rows it cannot attribute are dropped, so a test that
         # stands a fake `pi` in a checkout still sees it.
         self.census_dir = write_census_shim(self.tmp / "census-ps")
+        # #1233: the LIVE-LANE surface's two fixtures. An EMPTY queue directory
+        # is a MEASURED absence (it exists and lists nothing); the process table
+        # is a file seam so the answer cannot depend on the host. Both are
+        # overridable per test via `env_extra`.
+        self.lane_queue = self.tmp / "lane-queue"
+        self.lane_queue.mkdir(exist_ok=True)
+        self.ps_rows = self.tmp / "process-table.txt"
+        # One row, and NOT a `pi` — a table with no process at all is refused by
+        # the surface as unmeasurable (no live host prints nothing), so the
+        # "no live lane" fixture must still be a real table.
+        self.ps_rows.write_text("1 0 /sbin/init\n")
         # Where a REBUILD's shadowed `gh`/`cmux` stubs record that they were
         # called, so a test can prove the rebuild ran through THIS path and not
         # the network (see `failing_rebuild_path`).
@@ -1122,6 +1135,16 @@ class CollisionPreflightTest(unittest.TestCase):
                if not k.startswith("COLLISION_PREFLIGHT_")}
         env["GH_STUB_DIR"] = str(self.gh_dir)
         env["HOME"] = str(self.home)
+        # The LIVE-LANE surface (#1233) reads two HOST inputs: the process table
+        # (ambient — see CENSUS_PS_SHIM) and the harness queue at
+        # /home/cmux/orchestrator/bg (ambient too, and with live entries on a
+        # box that dispatches). A test asserting a verdict about a HERMETIC temp
+        # repo must not inherit either — the same rule HOME and GH_STUB_DIR
+        # already follow. Both are pointed at fixtures here; a test that wants a
+        # live lane or a queue entry passes its own via `env_extra`, which is
+        # applied AFTER this block.
+        env["COLLISION_PREFLIGHT_PROCESS_TABLE"] = str(self.ps_rows)
+        env["COLLISION_PREFLIGHT_LANE_QUEUE"] = str(self.lane_queue)
         if env_extra:
             env.update({k: str(v) for k, v in env_extra.items()})
         env["PATH"] = f"{self.census_dir}{os.pathsep}{env.get('PATH', '')}"
@@ -6984,8 +7007,8 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERDICT: CLEAN", out)
         # 7, not 8 — and the shortfall is NAMED, not hidden.
-        self.assertIn("7/8 surfaces queried", out)
-        self.assertNotIn("8/8 surfaces queried", out)
+        self.assertIn("8/9 surfaces queried", out)
+        self.assertNotIn("9/9 surfaces queried", out)
         self.assertIn("advisory surface(s) partial or unqueried", out)
 
     def test_advisory_failure_coexists_with_a_collision_without_escalating(self):
@@ -7584,7 +7607,7 @@ class CollisionPreflightTest(unittest.TestCase):
     def test_every_surface_is_always_evaluated(self):
         _rc, out = self.run_tool()
         self.assert_all_surface_rows(out)
-        self.assertIn("8/8 surfaces queried", out)
+        self.assertIn("9/9 surfaces queried", out)
 
     def test_the_exit_2_header_gives_each_roster_cause_its_own_remedy(self):
         # #9657, raised by the fresh-context review of PR #9571 @ 5a22ed54e. The
@@ -9370,6 +9393,1410 @@ class CollisionPreflightTest(unittest.TestCase):
             time.sleep(0.1)
         self.fail("the process census never saw the fake pi lane — the test cannot "
                   "discriminate process-cwd liveness")
+
+
+# ══ the four bunded tool defects (agent-infra #1233 + tortoise #9976 #10684
+#    #9251 #8881) ═════════════════════════════════════════════════════════
+#
+# Each arm below is the DEFECT'S OWN repro, and each is written so that reverting
+# its fix turns it red: #8881 is driven by a `git` that emits a raw 0xFF byte,
+# #10684/#9251 by a board holder whose pid IS the caller (and a peer's that is
+# not), #1233 by a process table naming the issue and by a live harness queue
+# entry, and the degradation arms by an unreadable table / an unlistable queue.
+class BundledToolDefectTests(CollisionPreflightTest):
+    """The four defects, on the SAME harness as the rest of the suite.
+
+    ⛔ INHERITED TESTS ARE NOT RE-RUN: this subclass redefines nothing it inherits
+    and is collected for its OWN methods only when the parent's names are not
+    shadowed — `unittest` collects inherited tests too, so the parent class is
+    aliased below and the inherited methods are removed after class creation.
+    """
+
+    def _live_non_ancestor_pid(self) -> int:
+        """A pid that is ALIVE but is NOT in the tool's ancestry chain.
+
+        A queue entry or a `pi` row whose pid is the test's OWN pid is exempted
+        as `self` (#10684), so reusing `os.getpid()` would make the "a live lane
+        blocks" arms untestable rather than green. This stands a real process
+        outside the chain, exactly as a peer lane is.
+        """
+        proc = subprocess.Popen(["sleep", "120"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(proc.terminate)
+        return proc.pid
+
+    # ── #8881: an undecodable byte is a NAMED failure, never a traceback ──────
+
+    def test_undecodable_output_is_a_named_failure_not_a_valueerror(self):
+        """`_run` must classify a `UnicodeDecodeError` instead of letting it
+        escape every handler and land on exit 1 (this tool's COLLISION code)."""
+        cp = _tool_module()
+        rc, out, err, timed_out = cp._run(
+            [sys.executable, "-c",
+             "import sys; sys.stdout.buffer.write(b'ok\\xffbad\\n')"],
+            ".", 20.0,
+        )
+        self.assertFalse(timed_out)
+        self.assertEqual(rc, 126, (rc, out, err))
+        self.assertEqual(out, "")
+        self.assertIn("output not decodable as text", err)
+        # ⛔ STRICT DECODING, NOT `errors="replace"`: a replacement character
+        # would hand the caller a plausible-looking ref/slug that then answers
+        # CLEAN — #8881's measured wrong-slug direction.
+        self.assertNotIn("\ufffd", out)
+
+    def test_an_undecodable_git_read_ends_incomplete_never_exit_one(self):
+        """End to end: the pre-flight's own `git for-each-ref` answers a raw byte.
+
+        Pre-fix this was a traceback with NO `VERDICT` line and exit 1, which
+        reads as "another lane is on it". Post-fix it is exit 2 with a named
+        surface note.
+        """
+        real = shutil.which("git")
+        stub = self.tmp / "gitbad" / "git"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        _write_exec(stub, f'''#!/usr/bin/env bash
+if [ "${{1:-}}" = "for-each-ref" ]; then
+  printf 'abc123\\trefs/heads/bad\\xffname\\n'
+  exit 0
+fi
+exec {real} "$@"
+''')
+        rc, out = self.run_tool(git_bin=stub)
+        self.assertNotEqual(rc, 1, out)          # exit 1 is COLLISION — never a crash
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("not decodable as text", out)
+        self.assertNotIn("Traceback", out)
+
+    # ── #10684 / #9251: the holder surface needs a SELF input ────────────────
+
+    def test_a_holder_that_is_the_asking_lane_does_not_block(self):
+        """A board lane whose `pi_pid` is the caller's own pid is the CALLER.
+
+        Pre-fix this is the measured unreachable gate: every `p0-<N>` /
+        `fix-<N>` / `t-<N>` lane reads COLLISION against the lane that authorized
+        it, and the remedy offers no way out.
+        """
+        self.fleet_board(
+            issues={ISSUE: [("lane-self", "branch slug fix/3061-self")]},
+            lanes=[{"label": "lane-self", "live": True, "pi_pid": 424242}],
+        )
+        rc, out = self.run_tool(extra_args=["--self-pid", "424242"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("holder:lane-self", out)
+        self.assertIn("ASING LANE".replace("ASING", "ASKING"), out)
+        self.assertIn("your own work", out)
+        self.assertNotIn("do NOT dispatch", out)
+        self.assertIn("1 your own lane", out)
+
+    def test_the_self_pid_exemption_is_not_a_PEER_exemption(self):
+        """The polarity #10684 must keep: a DIFFERENT live lane still blocks.
+
+        Without this arm the fix could be "demote every holder" and the suite
+        would not notice.
+        """
+        self.fleet_board(
+            issues={ISSUE: [("lane-peer", "branch slug fix/3061-peer")]},
+            lanes=[{"label": "lane-peer", "live": True, "pi_pid": 424242}],
+        )
+        rc, out = self.run_tool(extra_args=["--self-pid", "999999"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("holder:lane-peer", out)
+        self.assertIn("LIVE pi process", out)
+
+    def test_the_DECLARED_self_pid_half_CAN_name_a_peer_by_its_published_pid(self):
+        """The pin the review asked for: the declared half has NO verification.
+
+        ⛔ THIS ASSERTS A LIMIT, NOT A FEATURE, and it is deliberately the
+        UNCOMFORTABLE direction — do not "fix" it into the reassuring one
+        without reopening #8175/#11102. `--self-pid` is a DECLARATION with the
+        same trust model as `--self-branch` (#3504): the tool cannot tell a pid
+        the caller owns from one it merely names, and the value it would name is
+        PUBLISHED (`fleet_state.py who <N>` prints every lane's `session.pi_pid`).
+        So declaring the peer's own `pi_pid` suppresses that peer, here 424242 —
+        the exact pid the sibling polarity test shows BLOCKING when it is not
+        declared.
+
+        Why pin a bypass: the automatic ancestry half is unfalsifiable (it is
+        the half the #10684 fix rests on) and the declared half is not, and BOTH
+        now exist on the deciding surface. Without an arm that states the
+        declared half's reach, a later lane can read the docstring's "cannot
+        hide a peer" as covering the whole flag, tighten the print to match,
+        and re-introduce the false claim the review found — or "harden" the
+        flag by making it verify a pid, which silently breaks the case it exists
+        for (a lane whose ancestry chain the tool cannot read). The two sibling
+        tests together are the contract: undeclared peer BLOCKS, declared peer
+        DOES NOT.
+        """
+        self.fleet_board(
+            issues={ISSUE: [("lane-peer", "branch slug fix/3061-peer")]},
+            lanes=[{"label": "lane-peer", "live": True, "pi_pid": 424242}],
+        )
+        rc, out = self.run_tool(extra_args=["--self-pid", "424242"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("your own work", out)
+        # The remedy cannot claim a total absence of dismissal: the printed
+        # refusal states the two halves' trust models instead.
+        refusal = self.run_tool(extra_args=["--self-pid", "999999"])[1]
+        self.assertIn("NO dismissal switch in TEXT", refusal)
+        self.assertIn("DECLARATION with the same trust model as `--self-branch`",
+                      refusal)
+        self.assertNotIn("nothing here can be hand-edited to clear it", refusal)
+
+    # ── #1233: the LIVE-LANE surface ─────────────────────────────────────────
+
+    def test_a_live_pi_process_naming_the_issue_blocks(self):
+        """The measured defect: a lane that has pushed NOTHING is still a lane."""
+        table = self.tmp / "table-live-pi.txt"
+        table.write_text("1 0 /sbin/init\n777001 1 pi -p dispatch-3061-brief\n")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[live lane processes]", out)
+        self.assertIn("pid:777001", out)
+        self.assertIn("command line names #3061", out)
+        self.assertIn("live `pi` process(es) enumerated", out)
+
+    def test_a_live_harness_lane_for_an_attributed_pr_blocks(self):
+        """The `prd-<owner>-<repo>-<PR>` case: a lane launched BY a PR number.
+
+        The lane never names the ISSUE in its argv, so only the queue can see it —
+        that is the `prd-daniel-ospina-tortoise-11067` collision, reproduced.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7654,
+            "title": "fix(thing): the 3061 shape",
+            "body": "",
+            "state": "open",
+            "url": "https://example.invalid/pulls/7654",
+            "headRefName": "fix/3061-shape",
+            "mergedAt": None,
+            "closingIssuesReferences": [],
+        }])
+        queue = self.tmp / "lane-queue-live"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.started").write_text("0")
+        # `--self-branch` demotes the PR's OWN hit, so a COLLISION here can only
+        # come from the queue arm — otherwise this test would pass even with the
+        # new arm deleted.
+        rc, out = self.run_tool(
+            self_branches=("fix/3061-shape",),
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("lane:prd-test-owner-test-repo-7654", out)
+        self.assertIn("background harness lane is RUNNING for PR #7654", out)
+
+    def test_a_MERGED_pr_naming_the_issue_only_in_its_BODY_still_reaches_the_queue(self):
+        """The closed-PR page is REST-shaped: the BODY is its closing evidence.
+
+        Review of #11105 (P2, fail-open). `_prs_serving_issue` widened the
+        harness-queue arm from the closed-PR sample too, but it read only
+        `closingIssuesReferences` — a field a REST `/pulls` payload never
+        carries — so it answered "not by that arm" for EVERY entry on exactly
+        the page the change extended. The PR surface on that page attributes
+        through `closing_reference(body, issue)` instead
+        (`elif closing_reference(body, issue):`, scan_pr_surface). A merged PR
+        whose TITLE and BRANCH name neither the issue nor `Closes #N` in the
+        body therefore never entered `attributed_prs`, and a live `prd-…` lane
+        for it was invisible: the verdict could be CLEAN while a lane held the
+        work — the precise fail-open the closed-PR feed was added to close.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654,
+            "title": "fix(tools): the bundled shape",
+            "body": "Closes #3061.",
+            "headRefName": "fix/bundled-shape",
+            "state": "closed",
+            "mergedAt": "2026-11-05T12:00:00Z",
+        }])
+        queue = self.tmp / "lane-queue-body-only"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.started").write_text("0")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("lane:prd-test-owner-test-repo-7654", out)
+        self.assertIn("background harness lane is RUNNING for PR #7654", out)
+
+    def test_the_body_arm_carries_the_SURFACES_OWN_imprecision_onto_the_queue(self):
+        """A body that NEGATES the phrase still attributes — the ACCEPTED trade.
+
+        `closing_reference` is a keyword regex and cannot read negation, so a
+        merged PR whose body says "This does NOT close #3061; a follow-up is
+        needed." matches it. Routed through `_prs_serving_issue` that hit reaches
+        the live-lane harness-queue arm, whose row is `strong` and therefore
+        DECIDES the verdict — the same hit the closed-PR surface renders as
+        `(weak) (advisory — cannot block)`.
+
+        That asymmetry is deliberate and must stay in this direction: the surface
+        already accepts it for itself ("a missed duplicate is worse than a false
+        alarm"), and narrowing the arm to restore it would re-open the fail-open
+        the previous commit closed. What must NOT stand is the state a maintainer
+        finds today in the prose — a regex documented as unable to block, wired
+        into an arm that blocks — because the obvious tidy-up (delete the
+        fall-through to match the stated rule) silently restores the fail-open.
+        So this test PINS the trade, and the docstrings state it.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654,
+            "title": "fix(tools): the bundled shape",
+            "body": "This does NOT close #3061; a follow-up is needed.",
+            "headRefName": "fix/bundled-shape",
+            "state": "closed",
+            "mergedAt": "2026-11-05T12:00:00Z",
+        }])
+        queue = self.tmp / "lane-queue-negated-body"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.started").write_text("0")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        # Fail-CLOSED: the negated body still blocks. If this ever flips to 0,
+        # the fail-open is back and the queue arm is blind to body attribution.
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        # …and the refusal names the lane-queue evidence, so the operator can
+        # see WHICH surface decided rather than guessing at the regex.
+        self.assertIn("lane:prd-test-owner-test-repo-7654", out)
+        self.assertIn("background harness lane is RUNNING for PR #7654", out)
+
+    def test_a_body_with_no_closing_keyword_does_not_attribute(self):
+        """The negative control for the trade above: the arm is not a net.
+
+        Same closed PR, same live `prd-…` lane, but the body carries no closing
+        keyword anywhere — so nothing attributes and the verdict stays CLEAN.
+        Without this, the test above would pass even if the fall-through had been
+        replaced by "attribute every closed PR".
+
+        The body DOES name the issue number (`context in #3061`), which is what
+        makes this the control for the predicate rather than for the regex as a
+        whole: `number_present` matches it and `closing_reference` does not, so a
+        future widening from the closing keyword to any number mention reds here
+        (review of #11105, delta review — the sharper control).
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654,
+            "title": "fix(tools): the bundled shape",
+            "body": "Follow-up tracked separately; context in #3061.",
+            "headRefName": "fix/bundled-shape",
+            "state": "closed",
+            "mergedAt": "2026-11-05T12:00:00Z",
+        }])
+        queue = self.tmp / "lane-queue-no-keyword"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.started").write_text("0")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("lane:prd-test-owner-test-repo-7654", out)
+
+    def test_a_finished_harness_lane_does_not_block(self):
+        """An `.end` marker outranks a live pid — a finished lane is not a holder.
+
+        A PID alone is not identity (the research on this surface is explicit),
+        and a launcher pid can outlive the lane it launched.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7654, "title": "fix(thing): the 3061 shape", "body": "",
+            "state": "open", "url": "https://example.invalid/pulls/7654",
+            "headRefName": "fix/3061-shape", "mergedAt": None,
+            "closingIssuesReferences": [],
+        }])
+        queue = self.tmp / "lane-queue-ended"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        (queue / "prd-test-owner-test-repo-7654.end").write_text("1")
+        rc, out = self.run_tool(
+            self_branches=("fix/3061-shape",),
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("lane:prd-test-owner-test-repo-7654", out)
+
+    def test_an_unreadable_process_table_is_incomplete_never_clean(self):
+        """COULD-NOT-LOOK is never NOBODY (the brief's own constraint)."""
+        stub = self.tmp / "psbad" / "ps"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        _write_exec(stub, "#!/usr/bin/env bash\necho 'ps: cannot read' >&2\nexit 127\n")
+        rc, out = self.run_tool(env_extra={
+            # The harness sets the FILE seam; empty it so the `ps` seam is the
+            # one exercised (a set seam wins over `ps` by design).
+            "COLLISION_PREFLIGHT_PROCESS_TABLE": "",
+            "COLLISION_PREFLIGHT_PS": str(stub),
+        })
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("process-table-unreadable", out)
+        self.assertIn("NOT clean", out)
+        # …and the remedy names THIS cause, not the generic gh/board one.
+        self.assertIn("LIVE-LANE surface", out)
+        self.assertNotIn("fix gh auth/network", out)
+
+    def test_an_empty_process_table_is_not_a_clean_scan(self):
+        """A table with no rows is a broken read, not a host running nothing."""
+        empty = self.tmp / "table-empty.txt"
+        empty.write_text("\n")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(empty)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("process-table-unreadable", out)
+
+    def test_the_lane_queue_root_follows_the_DISPATCHERS_home(self):
+        """Cycle-6 review, HIGH: a LITERAL queue root is a false measurement.
+
+        `nonblocking-dispatch.sh` writes `${O:-$HOME/orchestrator}/bg`; the tool
+        read the literal `/home/cmux/orchestrator/bg`. On a cell (`HOME` is
+        `/tmp/cell-home`) that path does not exist, so the arm printed
+        "measured absence — this host runs no background lane queue" about a
+        queue being written one directory away, and a harness lane whose only
+        trace is its queue entry was invisible: CLEAN while it held the work.
+
+        Red under the literal: the entry below is created under $HOME, where the
+        dispatcher writes it, and must be FOUND.
+        """
+        home = self.tmp / "cell-home"
+        queue = home / "orchestrator" / "bg"
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        # ⛔ The seam must be EMPTIED, not merely unmentioned: the suite's
+        # `run_tool` helper exports a default `COLLISION_PREFLIGHT_LANE_QUEUE`
+        # for every test, and an explicit seam wins over the environment (which
+        # is exactly the precedence this test is NOT about). An empty value is
+        # falsy, so the queue roots fall through to the dispatcher's own
+        # resolution. `O`/`ORCHESTRATOR` are emptied too: `pr-doctor` exports `O`
+        # into EVERY worker it spawns, so without this the test would read
+        # `$O/bg` inside a dispatched lane and stop covering `$HOME`.
+        rc, out = self.run_tool(env_extra={
+            "HOME": str(home),
+            "CELL_HOME": str(home),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": "",
+            "O": "",
+            "ORCHESTRATOR": "",
+        })
+        # The hit is what matters: the entry the dispatcher wrote must be FOUND
+        # and attributed. (The overall rc may also be 2 for an unrelated reason —
+        # a relocated HOME makes the fleet board's roster unreadable HERE — so
+        # the assertion is on the arm's own row, not on the verdict code.)
+        self.assertIn("lane:prd-test-owner-test-repo-3061", out)
+        self.assertEqual(1, out.count("lane:prd-test-owner-test-repo-3061"), out)
+        self.assertNotIn("lane queue: NOT PRESENT", out)
+        self.assertNotEqual(rc, 0, out)
+
+    def test_a_lane_queue_under_ANOTHER_candidate_root_still_counts(self):
+        """Cycle-7 review, MEDIUM: one guessed root is not enough.
+
+        `O` is exported into every worker `pr-doctor` spawns but not into every
+        shell, and `ORCHESTRATOR` is set by nobody — so a ladder that picks ONE
+        root and calls a missing one "absent" still reads CLEAN while the entry
+        sits under another candidate. EVERY existing candidate must be read.
+        The direction matters: missing a queue is a false CLEAN (blocking);
+        reading one candidate more is only a false block.
+        """
+        home = self.tmp / "cell-home-2"
+        elsewhere = self.tmp / "o-root"
+        queue = elsewhere / "bg"
+        queue.mkdir(parents=True, exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(env_extra={
+            "HOME": str(home),          # this root does NOT exist
+            "CELL_HOME": str(home),
+            "O": str(elsewhere),        # the writer's root, which does
+            "ORCHESTRATOR": str(self.tmp / "nobody-sets-this"),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": "",
+        })
+        self.assertIn("lane:prd-test-owner-test-repo-3061", out)
+        self.assertNotIn("lane queue: NOT PRESENT", out)
+        self.assertNotEqual(rc, 0, out)
+
+    def test_an_absent_lane_queue_is_a_measured_absence(self):
+        """A macOS box has no /home/cmux — that is a FACT, not a blind read.
+
+        The row must SAY so (so a reader can tell "queried, absent" from "clean"),
+        and it must not manufacture an INCOMPLETE that would make the gate
+        unpassable on every non-harness host.
+        """
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(self.tmp / "no-such-queue")})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        # Cycle-7 review: an absence is only a measurement when the report says
+        # WHICH paths were checked — the seam here is the explicit one.
+        self.assertIn("lane queue: NOT PRESENT —", out)
+        self.assertIn("no-such-queue", out)
+
+    def test_a_lane_queue_that_is_a_FILE_is_incomplete_never_clean(self):
+        """The root EXISTS but is not a directory — that is cannot-look.
+
+        ⛔ RENAMED (review cycle 3, P2): this used to be called
+        `test_an_unlistable_lane_queue_…`, which claimed a branch it never
+        reaches — a regular FILE takes the `not_dirs` arm (`os.stat` succeeds,
+        `S_ISDIR` is False). The genuinely unlistable root — stat succeeds and
+        `os.listdir` refuses — is pinned by the two tests below.
+        """
+        not_a_dir = self.tmp / "queue-is-a-file"
+        not_a_dir.write_text("x")
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(not_a_dir)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-unreadable", out)
+
+    # ── cycle-1 review findings: the arms a green suite did not see ──────────
+
+    def test_a_live_pi_with_an_unreadable_cwd_is_incomplete_never_clean(self):
+        """Review cycle 1, HIGH: cannot-look is not CLEAN.
+
+        A live `pi` candidate whose cwd cannot be read is a lane this surface
+        could not attribute, and that is the NORMAL shape where `lsof` is absent
+        or the process runs under another uid. Writing it into the prose note
+        only left the verdict CLEAN while the row said a lane could not be ruled
+        out. `777002` does not exist, so both `/proc/<pid>/cwd` and `lsof` fail.
+        """
+        table = self.tmp / "table-unreadable-cwd.txt"
+        table.write_text("1 0 /sbin/init\n777002 1 pi\n")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("process-cwd-unreadable", out)
+        self.assertNotIn("9/9 surfaces queried", out)
+        # Cycle-5 review, MEDIUM: the remedy must not name a cause this report
+        # contradicts. An unreadable cwd is NOT a GitHub read, so "fix gh
+        # auth/network" sends the operator to re-authenticate for nothing.
+        self.assertNotIn("fix gh auth/network", out)
+        self.assertIn("which is not a GitHub read", out)
+
+    def test_an_unreadable_queue_pid_is_incomplete_never_clean(self):
+        """Review cycle 1, MEDIUM: an unreadable `.pid` is UNDECIDABLE, not dead.
+
+        `pid=None` used to fall through `_pid_is_alive` as False — so the
+        write-then-flush window at dispatch time (the lane that was JUST started)
+        was rendered as a decided "not live".
+        """
+        queue = self.tmp / "lane-queue-unreadable-pid"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text("")
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("lane-queue-pid-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # Cycle-5 review, MEDIUM: same remedy contradiction, queue side.
+        self.assertNotIn("fix gh auth/network", out)
+        self.assertIn("which is not a GitHub read", out)
+
+    def test_a_queue_reason_does_not_erase_the_process_reason(self):
+        """Cycle-5 review, LOW: `incomplete()` REPLACES `surface.note`.
+
+        A dead `pi` row (a note, no INCOMPLETE) plus an empty `.pid` (INCOMPLETE)
+        reported ONLY `lane-queue-pid-unreadable` — the process arm's own reason
+        vanished, so an operator fixed one cause and re-ran into the other. Both
+        reasons must survive in the same row.
+        """
+        table = self.tmp / "table-dead-pi-plus-bad-pid.txt"
+        # A live non-ancestor `pi` row that names no issue: it contributes a
+        # note ("no live lane names this issue") without a hit.
+        alive = self._live_non_ancestor_pid()
+        table.write_text(f"1 0 /sbin/init\n{alive} 1 pi\n")
+        queue = self.tmp / "lane-queue-both-reasons"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text("")
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_PROCESS_TABLE": str(table),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue),
+        })
+        self.assertEqual(rc, 2, out)
+        self.assertIn("lane-queue-pid-unreadable", out)
+        # The process arm's measured note must still be there, alongside it.
+        self.assertIn("no live lane names this issue", out)
+        self.assertIn("ALSO:", out)
+
+    def test_a_sibling_repo_queue_entry_does_not_block(self):
+        """Review cycle 1, MEDIUM: the queue prefix needs a BOUNDARY.
+
+        With slug `test-owner/test-repo`, a bare `startswith` matched
+        `prd-test-owner-test-repo-EXTRA-3061.pid` — a DIFFERENT repo whose name
+        extends this one with a hyphen — and blocked a legitimate dispatch while
+        naming a queue file that does not exist.
+        """
+        queue = self.tmp / "lane-queue-sibling"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-EXTRA-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("lane:prd-", out)
+
+    def test_the_cwd_arm_sees_a_peer_in_a_sibling_worktree(self):
+        """Review cycle 1, HIGH: the cwd arm must be scoped to the MAIN worktree.
+
+        AGENTS.md prescribes `collision_preflight.py <N> --repo .` run FROM the
+        lane's own worktree — so scoping the cwd arm to `target.path` excluded
+        every peer in a sibling `<hub>/.worktrees/...` directory, and the arm went
+        inert under exactly the documented invocation while reporting a complete
+        scan. The real lane here is a `pi`-named process standing in a SIBLING
+        worktree of the same repo; the tool is asked from a second worktree.
+        """
+        # ⛔ THE WORKTREES MUST LIVE INSIDE THE REPO, like the fleet's own
+        # `<hub>/.worktrees/<lane>` — the helper puts them beside it, which is
+        # not the shape this finding is about.
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        asked_from = worktrees / "asker-3061"
+        peer_wt = worktrees / "peer-3061"
+        for path, branch in ((asked_from, "fix/3061-asker"),
+                             (peer_wt, "fix/3061-peer")):
+            subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                            "-b", branch, str(path), "HEAD"],
+                           cwd=self.repo, check=True, capture_output=True, text=True)
+        pi = peer_wt.parent / "fakebin-pi"
+        pi.mkdir(exist_ok=True)
+        binary = pi / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(peer_wt),
+            env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            # The table SEAM declares the row (`pi` + this pid); its cwd comes
+            # from /proc for the REAL process, which is the point.
+            table = self.tmp / "table-sibling.txt"
+            table.write_text(f"1 0 /sbin/init\n{proc.pid} 1 pi\n")
+            rc, out = self.run_tool(
+                repo_arg=asked_from,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("working directory names #3061", out)
+
+    def test_the_self_pid_exemption_covers_the_callers_own_queue_entry(self):
+        """A lane's own live dispatch entry must not collide with it (#10684).
+
+        Ancestor detection supplies the pid because the queue records the
+        LAUNCHER, and the launcher is an ancestor of the `pi` running this
+        pre-flight.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7654, "title": "fix(thing): the 3061 shape", "body": "",
+            "state": "open", "url": "https://example.invalid/pulls/7654",
+            "headRefName": "fix/3061-shape", "mergedAt": None,
+            "closingIssuesReferences": [],
+        }])
+        queue = self.tmp / "lane-queue-self"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(str(os.getpid()))
+        rc, out = self.run_tool(
+            # The PR's own hit is demoted by the self-branch declaration, so the
+            # ONLY arm that could block here is the queue's — which is the one
+            # the self-pid exemption has to cover.
+            self_branches=("fix/3061-shape",),
+            extra_args=["--self-pid", str(os.getpid())],
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("1 your own", out)
+
+
+    # ── cycle-2 review findings: the arms the green suite still did not see ──
+
+    def test_a_live_pi_whose_ANCESTOR_argv_names_the_issue_blocks(self):
+        """Cycle-2 HIGH: pi REWRITES ITS OWN ARGV, so the number is in the PARENT.
+
+        `pi` sets `process.title`, so every real lane's `cmdline` is exactly
+        `pi`; the issue number lives in the launcher's command line
+        (`fix-one.sh --argv …/argv-11023`). A leaf-argv-only scan therefore
+        returned CLEAN for live lanes on #11023, #10726 and #11105 — the
+        surface's own cited incident shape. The row already carries `ppid`; the
+        ancestor's command line must be read, and the hit must NAME it.
+        """
+        table = self.tmp / "table-ancestor-argv.txt"
+        table.write_text(
+            "1 0 /sbin/init\n"
+            "763363 1 bash -l\n"
+            "763915 763363 bash /home/cmux/orchestrator/state/run-fix-3061.sh\n"
+            "763917 763915 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-3061\n"
+            "777003 763917 pi\n"
+        )
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[live lane processes]", out)
+        self.assertIn("pid:777003", out)
+        # The hit must name the ANCESTOR, so a reader can check the evidence.
+        self.assertIn("ancestor process (pid 763917)", out)
+        self.assertIn("names #3061", out)
+
+    def test_the_ancestor_arm_is_bounded_and_number_exact(self):
+        """The polarity the ancestor arm must keep: no over-attribution.
+
+        A different issue number anywhere in the chain, and the same number far
+        beyond the bounded walk, must both leave the row UNATTRIBUTED — the walk
+        is <= 3 ppid links and boundary-exact (`number_present`), never a
+        substring scan of the whole ancestry.
+        """
+        # (a) a DIFFERENT number one link up is not this issue
+        table = self.tmp / "table-ancestor-other.txt"
+        table.write_text(
+            "1 0 /sbin/init\n"
+            "763917 1 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-30610\n"
+            "777004 763917 pi\n"
+        )
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertNotIn("VERDICT: COLLISION", out)
+        # 777004 does not exist, so its cwd is unreadable -> INCOMPLETE, never
+        # CLEAN: the row is genuinely undecidable, which is the honest answer.
+        self.assertEqual(rc, 2, out)
+        self.assertIn("process-cwd-unreadable", out)
+
+        # (b) the SAME number five links up is outside the bounded walk
+        deep = self.tmp / "table-ancestor-deep.txt"
+        deep.write_text(
+            "1 0 /sbin/init\n"
+            "900001 1 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-3061\n"
+            "900002 900001 bash hop-2\n"
+            "900003 900002 bash hop-3\n"
+            "900004 900003 bash hop-4\n"
+            "900005 900004 bash hop-5\n"
+            "777005 900005 pi\n"
+        )
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(deep)})
+        self.assertNotIn("VERDICT: COLLISION", out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+
+    def test_a_live_pi_whose_ancestor_names_an_ATTRIBUTED_PR_blocks(self):
+        """Cycle-3 HIGH: the launcher names the PR the worker was dispatched for.
+
+        `worker-terminal.sh` generates `run-fix-<N>.sh` / `fix-one.sh --argv
+        …/argv-<N>` for a PR-or-issue number, and GitHub shares ONE number space,
+        so a fixer lane on PR #7654 never names issue #3061 anywhere in its
+        ancestry. Matching only the ISSUE left the measured incident shape (the
+        live lanes on #11023 / #10726 / #11105) attributed to nothing. The PR set
+        this run has already tied to the issue is what the queue arm uses for the
+        same reason; the ancestor arm now uses it too.
+        """
+        self.gh_fixtures(open_prs=[{
+            "number": 7654,
+            "title": "fix(thing): the 3061 shape",
+            "body": "",
+            "state": "open",
+            "url": "https://example.invalid/pulls/7654",
+            "headRefName": "fix/3061-shape",
+            "mergedAt": None,
+            "closingIssuesReferences": [],
+        }])
+        table = self.tmp / "table-ancestor-pr.txt"
+        table.write_text(
+            "1 0 /sbin/init\n"
+            "763917 1 bash /home/cmux/orchestrator/fix-one.sh --argv "
+            "/home/cmux/orchestrator/state/argv-7654\n"
+            "777006 763917 pi\n"
+        )
+        # The PR's OWN hit is demoted by the self-branch declaration, so the only
+        # arm that can block here is the ancestor one.
+        rc, out = self.run_tool(
+            self_branches=("fix/3061-shape",),
+            env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("names PR #7654", out)
+
+    def test_a_non_positive_queue_pid_is_undecidable_never_clean(self):
+        """Cycle-3 MEDIUM: a corrupt `.pid` of `-5` must not read as DEAD.
+
+        `_pid_is_alive` returned False for every non-positive pid, so a lane's own
+        queue entry with `0` or `-5` in it vanished from the arm and the verdict
+        was CLEAN. `os.kill(0, 0)` targets the whole process GROUP and a negative
+        pid is a group selector — neither is a lane, and neither is a DECIDED dead
+        one. Same class as the oversized-pid finding above.
+        """
+        table = self.tmp / "table-nonpositive.txt"
+        table.write_text("1 0 /sbin/init\n")
+        for value in ("-5", "0"):
+            with self.subTest(pid=value):
+                queue = self.tmp / f"lane-queue-nonpositive-{value.strip('-')}"
+                queue.mkdir(exist_ok=True)
+                (queue / "prd-test-owner-test-repo-3061.pid").write_text(value)
+                rc, out = self.run_tool(env_extra={
+                    "COLLISION_PREFLIGHT_PROCESS_TABLE": str(table),
+                    "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue),
+                })
+                self.assertNotIn("Traceback", out)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("VERDICT: INCOMPLETE", out)
+                self.assertIn("lane-queue-pid-unreadable", out)
+                # The wording must name the REAL condition: `-5`/`0` were READ and
+                # are simply not live-process pids, so "unreadable" alone points a
+                # reader at a permissions problem that does not exist (cycle-4
+                # LOW). Reverse pin: the old wording fails this line.
+                self.assertIn("not a live-process pid", out)
+
+    def test_an_oversized_queue_pid_is_undecidable_not_a_traceback(self):
+        """Cycle-2 MEDIUM: `os.kill()` raises `OverflowError` above the C range.
+
+        Nothing handled it, so a queue `.pid` holding a value larger than a C
+        `int` escaped every handler as a traceback with no `VERDICT` line — and
+        exit 1 is this tool's COLLISION code (crash-as-verdict, #8881's exact
+        class). An unrepresentable pid is UNDECIDABLE, so the row is INCOMPLETE.
+        """
+        table = self.tmp / "table-oversized.txt"
+        table.write_text("1 0 /sbin/init\n")
+        queue = self.tmp / "lane-queue-oversized"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text("9" * 30)
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_PROCESS_TABLE": str(table),
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue),
+        })
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-pid-unreadable", out)
+        self.assertIn("not a live-process pid", out)
+        self.assertNotIn("VERDICT: COLLISION", out)
+
+    def test_pid_liveness_is_tri_state_never_an_exception(self):
+        """The unit half of the same finding, so the seam itself is pinned.
+
+        `True` alive / `False` decided-dead / `None` UNDECIDABLE. A pid Python can
+        hold but the kernel cannot (`> INT_MAX`) is the third state, and the
+        queue arm must count it as undecidable rather than have it read as dead
+        (fail-open) or escape as a crash (crash-as-verdict).
+        """
+        cp = _tool_module()
+        self.assertIs(cp._pid_is_alive(os.getpid()), True)
+        self.assertIs(cp._pid_is_alive(None), False)
+        # ⛔ NON-POSITIVE IS UNDECIDABLE, NOT DEAD (cycle-3 review). `os.kill(0, 0)`
+        # targets the whole process GROUP and a negative pid is a group selector;
+        # reading either as a decided-dead lane is the fail-open direction.
+        self.assertIs(cp._pid_is_alive(0), None)
+        self.assertIs(cp._pid_is_alive(-5), None)
+        self.assertIs(cp._pid_is_alive(10 ** 30), None)
+
+    def test_the_process_scan_asks_ps_for_UNTRUNCATED_rows(self):
+        """Cycle-1 HIGH's reverse pin: without `-ww` a lane can be invisible.
+
+        procps truncates the `command=` field at the display width, and it
+        derives that width from `COLUMNS` even when stdout is a pipe (the
+        Debian manpage: repeated `-w` = unlimited width; `COLUMNS`/`--cols`
+        override it). A harness pane exports a narrow `COLUMNS`, so a truncated
+        row read as "not a `pi` row" and the running lane disappeared. The stub
+        below MODELS that truncation rather than asserting the argv alone: it
+        cuts the row at 80 columns unless it was invoked with `-ww`, so with the
+        flag removed the number beyond column 80 is genuinely lost and this test
+        goes red — not merely a string match on the command line.
+        """
+        pid = self._live_non_ancestor_pid()
+        trunc_dir = self.tmp / "ps-truncating"
+        trunc_dir.mkdir(parents=True, exist_ok=True)
+        stub = _write_exec(trunc_dir / "ps", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'wide=0\n'
+            'for a in "$@"; do [ "$a" = "-ww" ] && wide=1; done\n'
+            f'pad=$(printf "x%.0s" $(seq 1 200))\n'
+            f'row="{pid} 1 pi --prompt $pad issue-{ISSUE}"\n'
+            "printf '1 0 /sbin/init\\n'\n"
+            'if [ "$wide" = 1 ]; then printf "%s\\n" "$row"\n'
+            'else printf "%s\\n" "$(printf %s "$row" | cut -c1-80)"; fi\n'
+        ))
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_PROCESS_TABLE": "",
+            "COLLISION_PREFLIGHT_PS": str(stub),
+        })
+        self.assertIn(f"pid:{pid}", out)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_a_git_that_cannot_name_the_common_dir_is_not_a_clean_scan(self):
+        """Cycle-2 residual: a narrowed cwd arm must not read as a clean scan.
+
+        `--path-format=absolute` needs git >= 2.31. When the common dir cannot
+        be resolved the process arm's cwd check falls back to `target.path` —
+        which under the documented `--repo .` invocation is the CALLER'S OWN
+        worktree, so a peer in a sibling `.worktrees/…` is invisible. The
+        fallback stays (the arm keeps its leaf-argv and ancestor recall) but the
+        row now says the scan is NOT complete, so the narrowing cannot be
+        reported as CLEAN.
+        """
+        stub = _write_exec(self.tmp / "git-stub-no-common-dir", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'if [ "${1:-}" = "rev-parse" ]; then\n'
+            '  case "${*:2}" in\n'
+            '    *--git-common-dir*)\n'
+            '      echo "git-stub: refusing --git-common-dir" >&2; exit 128;;\n'
+            "  esac\n"
+            "fi\n"
+            'exec "${REAL_GIT:?REAL_GIT unset}" "$@"\n'
+        ))
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertIn("repo-root-unresolved", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("NOT clean", out)
+        self.assertNotEqual(rc, 0, out)
+        # Cycle-6 LOW: an unresolvable repo root is a LIVE-LANE cause, not a
+        # GitHub read — the generic "fix gh auth/network" remedy contradicts
+        # the row that measured it.
+        self.assertNotIn("fix gh auth/network", out)
+
+    def test_a_git_without_path_format_still_finds_the_MAIN_worktree(self):
+        """The compat half: an old git must not narrow the arm at all.
+
+        A git that refuses `--path-format=absolute` but answers the portable
+        `--git-common-dir` (git < 2.31) is resolvable, so the cross-worktree
+        recall the cycle-1 HIGH restored must survive — and the run must NOT be
+        pushed to INCOMPLETE by the compat gap, which would block every lane on
+        such a host.
+        """
+        stub = _write_exec(self.tmp / "git-stub-old", (
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'case "${1:-} ${2:-}" in\n'
+            '  "rev-parse --path-format=absolute")\n'
+            '    echo "git-stub: unknown option path-format" >&2; exit 129;;\n'
+            "esac\n"
+            'exec "${REAL_GIT:?REAL_GIT unset}" "$@"\n'
+        ))
+        rc, out = self.run_tool(git_bin=stub,
+                                env_extra={"REAL_GIT": shutil.which("git")})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("repo-root-unresolved", out)
+
+    # ── fresh-context review at cbd184875: 3 findings ────────────────────────
+
+    def test_a_digit_like_queue_filename_cannot_crash_into_a_collision(self):
+        """Finding 1, HIGH: `isdigit()` is not a promise that `int()` succeeds.
+
+        `'²'.isdigit()` is True (Unicode `Numeric_Type=Digit`) while
+        `int('²')` raises ValueError (it needs `Decimal`). Nothing catches it:
+        `run_preflight` calls the scanner with no `try`, and `main` catches only
+        `NotAWorkItem`/`RuntimeError` — so pre-fix this run is a TRACEBACK, and
+        an uncaught exception's exit status is 1, which is this tool's
+        EXIT_COLLISION. A corrupt filename read as "another lane is on it" is
+        the crash-as-verdict class (#8881) the bundle closes.
+        """
+        queue = self.tmp / "lane-queue-digit-like"
+        queue.mkdir(exist_ok=True)
+        # A LIVE pid, so nothing but the filename shape decides the outcome.
+        (queue / "prd-test-owner-test-repo-\u00b2.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertNotEqual(rc, 1, out)       # exit 1 is COLLISION — never a crash
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("invalid literal for int()", out)
+        # The unparseable name is SKIPPED, not counted as an entry.
+        self.assertIn("0 entr(ies) for this repo", out)
+
+    def test_a_CLOSED_pr_attributed_to_the_issue_still_makes_its_lane_visible(self):
+        """Finding 2, MEDIUM (false CLEAN): a lane OUTLIVES the PR it serves.
+
+        Both PR-aware arms of the live-lane surface consume ONE set, and it was
+        fed only from the OPEN page. A `pr-doctor`/merge lane still running for a
+        PR that has since merged therefore matched neither the queue key nor an
+        ancestor's `--argv …/argv-<PR>`: the queue entry was live, and the verdict
+        was CLEAN.
+        """
+        self.gh_fixtures(closed_prs=[{
+            "number": 7654, "title": "fix(thing): the 3061 shape", "body": "",
+            "state": "closed", "url": "https://example.invalid/pulls/7654",
+            "headRefName": "fix/3061-shape", "mergedAt": None,
+            "headSha": "a" * 40,
+        }])
+        queue = self.tmp / "lane-queue-closed-pr"
+        queue.mkdir(exist_ok=True)
+        (queue / "prd-test-owner-test-repo-7654.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        rc, out = self.run_tool(
+            env_extra={"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("lane:prd-test-owner-test-repo-7654", out)
+        self.assertIn("PR #7654", out)
+
+    def test_the_callers_OWN_subagent_in_its_own_worktree_does_not_block(self):
+        """Finding 3, MEDIUM (false block): #10684 one layer out.
+
+        A lane's `pi` dispatches a sub-agent through the `task` tool —
+        `spawn(command, args, {detached: true})`, so the child leads its own
+        session but its `ppid` is still the lane's `pi` — and the child INHERITS
+        the lane's working directory, which for a `fix-<N>` / `land-<N>` lane
+        names the issue. The pre-flight the lane then runs (the `--repo .` form
+        AGENTS.md mandates) matched that row on the cwd arm and refused the
+        caller with its own sub-agent.
+
+        A REAL process stands here (its cwd comes from /proc, which is the
+        point); the seam declares its `ppid` as this test's pid, which IS an
+        ancestor of the tool. ⛔ The peer counter-test above keeps the other
+        polarity: an unrelated `pi` in a sibling worktree still blocks.
+        """
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        lane_wt = worktrees / "fix-3061"
+        subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                        "-b", "fix/3061-lane", str(lane_wt), "HEAD"],
+                       cwd=self.repo, check=True, capture_output=True, text=True)
+        fakebin = worktrees / "fakebin-subagent"
+        fakebin.mkdir(exist_ok=True)
+        binary = fakebin / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(lane_wt),
+            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            table = self.tmp / "table-own-subagent.txt"
+            table.write_text(
+                f"1 0 /sbin/init\n{proc.pid} {os.getpid()} pi\n")
+            rc, out = self.run_tool(
+                # `--repo .` FROM the lane's own worktree, exactly as AGENTS.md
+                # prescribes: the sub-agent's cwd and the caller's are the same.
+                repo_arg=lane_wt, cwd=lane_wt,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("own sub-agent(s) exempted", out)
+        self.assertNotIn("do NOT dispatch", out)
+
+    def test_a_same_cwd_process_that_is_NOT_my_child_still_blocks(self):
+        """LOCATION alone is not the exemption — parentage is the other half.
+
+        Review cycle 4 (P2): deleting the parentage term from `_is_own_subagent`
+        (`row[0] not in self_pids`) left the WHOLE file green — 426 passed — and
+        turned every process standing in the caller's exact directory into "my
+        own sub-agent". That is the direction this gate may never fail in: the
+        fleet dispatches lanes along the same edges, so a peer that happens to
+        share the directory would read as mine and the dispatch would be
+        permitted. The row below is that shape — cwd matches the caller's,
+        `ppid` is NOT any of the caller's pids — and it must BLOCK.
+        """
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        lane_wt = worktrees / "fix-3061-samecwd"
+        subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                        "-b", "fix/3061-samecwd", str(lane_wt), "HEAD"],
+                       cwd=self.repo, check=True, capture_output=True, text=True)
+        fakebin = worktrees / "fakebin-samecwd"
+        fakebin.mkdir(exist_ok=True)
+        binary = fakebin / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(lane_wt),
+            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            table = self.tmp / "table-samecwd-not-mine.txt"
+            # ⛔ `ppid = 1`, i.e. NOT an ancestor of the tool: parentage fails.
+            table.write_text(f"1 0 /sbin/init\n{proc.pid} 1 pi\n")
+            rc, out = self.run_tool(
+                repo_arg=lane_wt, cwd=lane_wt,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("own sub-agent(s) exempted", out)
+
+    def test_a_DISPATCHED_lane_in_its_own_worktree_still_blocks(self):
+        """The polarity `_is_own_subagent` must keep: parentage ALONE is not it.
+
+        An orchestrator agent dispatches lanes along its own edges, so a lane can
+        genuinely be a child of a `pi` in the caller's ancestry (the `task` tool,
+        `nonblocking-dispatch.sh`). The exemption therefore also requires the
+        child to stand in the CALLER's directory; a dispatched lane is given its
+        own worktree, so it never matches — and exempting it would be a false
+        CLEAN on the verdict that exists to stop a duplicate dispatch.
+        """
+        worktrees = self.repo / ".worktrees"
+        worktrees.mkdir(exist_ok=True)
+        caller_wt = worktrees / "fix-3061-caller"
+        lane_wt = worktrees / "fix-3061-dispatched"
+        for path, branch in ((caller_wt, "fix/3061-caller"),
+                             (lane_wt, "fix/3061-dispatched")):
+            subprocess.run(["git", "worktree", "add", "-q", "--no-checkout",
+                            "-b", branch, str(path), "HEAD"],
+                           cwd=self.repo, check=True, capture_output=True, text=True)
+        fakebin = worktrees / "fakebin-dispatched"
+        fakebin.mkdir(exist_ok=True)
+        binary = fakebin / "pi"
+        if not binary.exists():
+            shutil.copy("/bin/sleep", binary)
+        proc = subprocess.Popen(
+            ["pi", "120"], cwd=str(lane_wt),
+            env={**os.environ, "PATH": f"{fakebin}:{os.environ.get('PATH', '')}"},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            table = self.tmp / "table-dispatched-lane.txt"
+            table.write_text(
+                f"1 0 /sbin/init\n{proc.pid} {os.getpid()} pi\n")
+            rc, out = self.run_tool(
+                repo_arg=caller_wt, cwd=caller_wt,
+                env_extra={"COLLISION_PREFLIGHT_PROCESS_TABLE": str(table)})
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("own sub-agent(s) exempted", out)
+
+    # ── review cycle 3: the fail-OPEN quadrant, and the isdigit() class ──────
+
+    def test_an_UNEXAMINABLE_lane_queue_root_is_incomplete_never_clean(self):
+        """A queue root that cannot be STATted must never read as ABSENT.
+
+        `os.path.isdir`/`os.path.exists` answer `False` both for "nothing is
+        there" and for "I was refused", so an unreadable ancestor used to take
+        the `absent` arm and the row printed *queried and absent — this host runs
+        no background lane queue* while a LIVE `.pid` sat inside the root. That
+        is fail-OPEN on the one surface that decides whether a harness lane holds
+        the issue.
+
+        A symlink loop is used as the refusal because it fails the `stat` for
+        EVERY uid (a `chmod 000` refusal is covered by the test below, which has
+        to skip where the suite runs as root) — the point is the branch, and the
+        branch must not depend on who the test runs as.
+        """
+        loop = self.tmp / "loop"
+        os.symlink("loop", loop)                     # loop -> loop -> …
+        queue = loop / "bg"
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertNotIn("NOT PRESENT", out)
+
+    def test_an_EACCES_lane_queue_root_is_incomplete_never_clean(self):
+        """The realistic refusal: another uid's queue under a non-traversable parent.
+
+        A lane that runs as a different user than the queue's owner, an NFS or
+        `hidepid` lookup refusal, a `$HOME` whose parent is not `+x` — in every
+        case `stat` raises `PermissionError` while `isdir` merely says `False`.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root ignores mode bits, so EACCES cannot be simulated")
+        hidden = self.tmp / "blk"
+        queue = hidden / "bg"
+        queue.mkdir(parents=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        os.chmod(hidden, 0o000)
+
+        def _restore() -> None:
+            # The temp tree is torn down before cleanups run, so a bare
+            # `os.chmod` cleanup would fail the TEST on a teardown artefact.
+            with suppress(OSError):
+                os.chmod(hidden, 0o700)
+
+        self.addCleanup(_restore)
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_a_lane_queue_root_whose_ENTRIES_cannot_be_listed_is_incomplete(self):
+        """Class 2's LIST half: `stat` succeeds, the enumeration is REFUSED.
+
+        Review cycle 3 (P2): the stat arm above was pinned twice while its
+        sibling — the root is statable but `os.listdir` raises (a `chmod 000`
+        on the root itself, `hidepid`, an NFS refusal) — had NO test at all, so
+        `except OSError: names = []` survived the entire two-file suite while
+        turning a live holder into a measured empty queue. This asserts the
+        refusal is INCOMPLETE even though the `.pid` cannot be named: the
+        whole surface is undecidable, never CLEAN.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root ignores mode bits, so EACCES cannot be simulated; "
+                          "the mocked sibling below pins this branch there")
+        queue = self.tmp / "bg-unlistable"
+        queue.mkdir()
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        os.chmod(queue, 0o000)
+
+        def _restore() -> None:
+            with suppress(OSError):
+                os.chmod(queue, 0o700)
+
+        self.addCleanup(_restore)
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        # ⛔ NOT the absent arm: this root was FOUND, it just could not be read.
+        self.assertNotIn("lane queue: NOT PRESENT", out)
+
+    def test_an_unlistable_root_is_incomplete_even_where_MODE_BITS_are_ignored(self):
+        """The same branch, uid-INDEPENDENT — CI runs as root.
+
+        `chmod 000` is cosmetic for uid 0, so the test above skips there and the
+        LIST refusal would go unpinned in CI. Patching `os.listdir` for the
+        single refused root pins the same fail-closed polarity without relying
+        on mode bits at all.
+        """
+        cp = _tool_module()
+        queue = self.tmp / "bg-unlistable-mocked"
+        queue.mkdir()
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        real_listdir = os.listdir
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(str(queue)):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_listdir(path, *a, **k)
+
+        with mock.patch.dict(
+                os.environ, {"COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)}), \
+                mock.patch.object(cp.os, "listdir", side_effect=_refuse):
+            entries, absent, why = cp._lane_queue_entries("test-owner/test-repo")
+        self.assertIsNone(entries, why)
+        self.assertFalse(absent, why)
+        self.assertIn("could not be listed", why)
+
+    # ── the FLEET LITERAL is OPTIONAL; a caller's own roots are NOT ────────
+
+    def _queue_env_without_seam(self, home: Path) -> dict:
+        """An env where the candidate LADDER is actually walked.
+
+        `run_tool`/`tool_env` always pin `COLLISION_PREFLIGHT_LANE_QUEUE`, which
+        short-circuits the ladder to one candidate — so the ladder's own
+        classification can only be reached with the seam UNSET and `O` /
+        `CELL_HOME` removed (both are ambient on a cell and would add real,
+        live roots to a hermetic assertion).
+        """
+        return {
+            k: v for k, v in os.environ.items()
+            if k not in ("O", "CELL_HOME", "COLLISION_PREFLIGHT_LANE_QUEUE")
+        } | {"HOME": str(home)}
+
+    def test_an_unreadable_FLEET_FALLBACK_queue_is_not_a_blind_spot(self):
+        """Review P2: an unusable hardcoded literal must not block EVERY run.
+
+        The literal `/home/cmux/orchestrator/bg` is the one candidate that is not
+        derived from the caller's environment. On a box where `/home/cmux` is
+        another user's `0750` home, a caller who is not `cmux` gets EACCES on it
+        — and once an unstatable candidate became INCOMPLETE (the fail-OPEN fix
+        this bundle ships), that made the gate PERMANENTLY INCOMPLETE for every
+        such uid, blocked by a stranger's home directory.
+
+        Pre-fix: `_lane_queue_entries` returns `(None, False, why)` here — the
+        run is INCOMPLETE with nothing about the caller's own work in it. The
+        assert on `entries == []` is what goes red on the old code.
+        """
+        cp = _tool_module()
+        home = self.tmp / "fallback-home"
+        home.mkdir()
+        real_stat = os.stat
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(cp.DEFAULT_LANE_QUEUE):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *a, **k)
+
+        with mock.patch.dict(os.environ, self._queue_env_without_seam(home),
+                            clear=True), \
+                mock.patch.object(cp.os, "stat", side_effect=_refuse):
+            entries, absent, why = cp._lane_queue_entries("test-owner/test-repo")
+        self.assertEqual(entries, [], why)
+        self.assertTrue(absent, why)
+        self.assertIn("could not be examined", why)
+        self.assertIn(cp.DEFAULT_LANE_QUEUE, why)
+        # Not silent: the disclosure is what keeps "queried and absent" honest.
+        self.assertIn("FLEET FALLBACK", why)
+
+    def test_an_unreadable_CALLERS_OWN_queue_is_STILL_incomplete(self):
+        """The narrowing above must not leak into a caller's OWN root.
+
+        `~/orchestrator/bg` is derived from this caller's environment, so an
+        EACCES there CAN hide this caller's lane. That stays INCOMPLETE — the
+        optional/required split is exactly the difference between "a stranger's
+        directory I cannot read" and "my own queue I could not read".
+        """
+        cp = _tool_module()
+        home = self.tmp / "own-home"
+        home.mkdir()
+        own_queue = os.path.join(str(home), "orchestrator", "bg")
+        real_stat = os.stat
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(own_queue):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *a, **k)
+
+        with mock.patch.dict(os.environ, self._queue_env_without_seam(home),
+                            clear=True), \
+                mock.patch.object(cp.os, "stat", side_effect=_refuse):
+            entries, absent, why = cp._lane_queue_entries("test-owner/test-repo")
+        self.assertIsNone(entries, why)
+        self.assertFalse(absent, why)
+        self.assertIn("could not be examined", why)
+
+    def test_the_fleet_literal_is_REQUIRED_when_it_is_the_callers_own_home(self):
+        """A cmux-box caller gains NO blind spot from the optional classification.
+
+        When `$HOME` IS the fleet home, `~/orchestrator/bg` and the literal are
+        the SAME path — deduplicated, and REQUIRED wins. So the EACCES
+        suppression above cannot be reached by a caller whose own queue is that
+        directory: the failing test is the one thing that would make the fix a
+        fail-open.
+        """
+        cp = _tool_module()
+        fleet_home = os.path.dirname(os.path.dirname(cp.DEFAULT_LANE_QUEUE))
+        with mock.patch.dict(os.environ, self._queue_env_without_seam(Path(fleet_home)),
+                            clear=True):
+            specs = cp._lane_queue_candidates()
+        literal = [opt for path, opt in specs if path == cp.DEFAULT_LANE_QUEUE]
+        self.assertEqual(literal, [False], specs)   # required, exactly once
+
+    def test_the_row_DISCLOSES_an_unreadable_fallback_root(self):
+        """The consumer half: the disclosure reaches the SURFACE ROW.
+
+        `_lane_queue_entries` returning the note is not enough — a note nobody
+        prints is the "a row must say where it looked" rule failing at the other
+        end. Driven through `run_preflight` in-process (the same shape the
+        budget-remedy tests use) so the assertion is on the REAL report.
+        """
+        cp = _tool_module()
+        home = self.home                      # has the fresh "no holders" board
+        board = self.fleet_board()
+        real_stat = os.stat
+
+        def _refuse(path, *a, **k):
+            if os.path.realpath(str(path)) == os.path.realpath(cp.DEFAULT_LANE_QUEUE):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *a, **k)
+
+        env = self._queue_env_without_seam(home)
+        env["GH_STUB_DIR"] = str(self.gh_dir)
+        env["COLLISION_PREFLIGHT_PROCESS_TABLE"] = str(self.ps_rows)
+        target = cp.RepoTarget(
+            slug=SLUG, path=str(self.repo), source="explicit", requested=True,
+        )
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(cp.fleet_state, "DEFAULT_OUT", board), \
+                mock.patch.object(
+                    cp.fleet_state, "build_state",
+                    side_effect=RuntimeError("no live read in this test"),
+                ), \
+                mock.patch.object(cp.os, "stat", side_effect=_refuse):
+            ordered, title, number = cp.run_preflight(
+                ISSUE, target, str(self.gh), "git", 10.0,
+            )
+            report, code = cp.format_report(ordered, number, target, title)
+        # A stranger's unreadable fallback is NOT this run's verdict …
+        self.assertEqual(code, 0, report)
+        self.assertIn("VERDICT: CLEAN", report)
+        # … and the row still says where it could not look.
+        self.assertIn("could not be examined", report)
+        self.assertIn(cp.DEFAULT_LANE_QUEUE, report)
+
+    def test_a_unicode_digit_ppid_from_ps_cannot_crash_into_a_collision(self):
+        """`isdigit()` is not a promise that `int()` succeeds — the `ps` leg too.
+
+        The queue-filename parse was taught `isascii() and isdigit()`; the macOS
+        `_ancestor_pids` fallback kept the bare `isdigit()`, so a `ps` answering a
+        non-ASCII *Digit* (`'²'`, which `int()` refuses) escaped as an uncaught
+        `ValueError` — a traceback standing in for a verdict, on exit 1 = the code
+        this tool reserves for COLLISION (#8881's class). `--ps` is a
+        user-settable binary, so the input is reachable.
+        """
+        cp = _tool_module()
+        # Force the non-procfs leg (`/proc` must be unreadable AND `isdir("/proc")`
+        # must answer False) and a `ps` that answers a Unicode *Digit* for the
+        # parent pid. Without the `/proc` refusal the Linux branch returns first
+        # and this test would silently exercise nothing.
+        real_open = builtins.open
+
+        def _no_procfs(path, *args, **kwargs):
+            if str(path).startswith("/proc/"):
+                raise OSError("no procfs on this host")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", _no_procfs), \
+                mock.patch.object(cp.os.path, "isdir", return_value=False), \
+                mock.patch.object(cp, "_run", return_value=(0, "\u00b2", "", False)):
+            pids = cp._ancestor_pids("ps", 5.0)
+        self.assertIn(os.getpid(), pids)
+        # The walk stops at the unparseable link: no invented ancestor is added.
+        self.assertEqual({os.getpid()}, set(pids))
+
+    def test_a_claim_lease_of_unicode_digits_never_crashes_the_verdict(self):
+        """The third `isdigit()` site: a claim's `lease_until` token.
+
+        `'²²'.isdigit()` is True, `len <= 18` and it is not `"0"`, so the guard
+        passed and `int(lease)` raised — no VERDICT line, exit 1 = COLLISION. The
+        polarity for an unparseable lease is already defined ("LIVE, NOT
+        demoted"), so the fix is to route this input into it rather than invent
+        a new one.
+        """
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-unicodelease")
+        self.live_claim(None, message="claim owner=box-a lease_until=\u00b2\u00b2 nonce=9806")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-unicodelease"))
+        self.assertIn("lease this reader cannot parse", self.row(out, "remote branches"))
+
+
+#: The parent's tests must not be collected twice (this subclass adds the
+#: DEFECT ARMS, not a second copy of the 300-test suite). `unittest` collects
+#: inherited methods, so the parent's are removed from the subclass namespace —
+#: explicitly, and by NAME, so a new parent test cannot be silently skipped here.
+_PARENT_TESTS = [
+    name for name in dir(CollisionPreflightTest)
+    if name.startswith("test_")
+]
+for _name in _PARENT_TESTS:
+    if _name not in BundledToolDefectTests.__dict__:
+        setattr(BundledToolDefectTests, _name, None)
 
 
 class HolderGateTests(unittest.TestCase):
