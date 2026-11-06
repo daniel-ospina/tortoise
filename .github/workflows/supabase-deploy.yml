@@ -197,50 +197,47 @@ jobs:
       # describes the runner, not the deploy. Provide the tool or fail NAMING it.
       - name: Runner tool contract — provide gh (#9018)
         run: bash .github/scripts/runner-tools.sh ensure gh
-      # ⛔ PINNED, not `latest` (#10896). MEASURED: this step was `version: latest`, and the
-      # v2 → v3.0.0 release changed BOTH the config schema (`[inbucket]` removed, which made the
-      # very next `supabase db push` exit 1 on a config parse — see `supabase/config.toml`) and a
-      # flag (`--linked` deprecated in favour of `--remote`). An unpinned third-party binary on the
-      # ONLY automated path that applies production DDL means a routine upstream release silently
-      # disables production migration with no repo change to review: the failure reads as
-      # "deploy blocked", not "the applier is broken". Bump this deliberately, in a PR, with the
-      # config validated against the new schema.
+      # ⛔ PINNED, not `latest` — exact, and on the v2 line ON PURPOSE (#10896, #10593).
+      # The CLI is not an ordinary dependency here: its MAJOR versions change the
+      # `supabase/config.toml` schema, and this workflow is the ONLY door that applies production
+      # DDL. So an unpinned third-party binary means a routine upstream release can silently disable
+      # production migration with no repo change to review — and the failure reads as "deploy
+      # blocked", not "the applier is broken", which is why it survived 18+ runs and two
+      # investigations.
+      #
+      # MEASURED: this step was `version: latest`, which resolved to 3.0.0 (published
+      # 2026-11-02T12:18Z) and refused to load the config, which THEN still declared `[inbucket]`
+      # (`DbConfigLoadError` => exit 1 at CONFIG LOAD, before `db push` contacts the database):
+      #
+      #   [inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.
+      #   ##[error]Process completed with exit code 1.          -- run 42091073635, 19:45:57Z
+      #
+      # TWO applies were dispatched in that window and BOTH died the same way — run 42091073635
+      # (`Apply migrations` 19:45:56Z) and run 42107006180 (same step 21:40:38Z, head `af36e9240`).
+      # That is why `deploy-hosted`'s drift gate stayed red after 2026-11-03T02:53:49Z naming
+      # `20261102000001`/`2`: its own prescribed remedy (`gh workflow run supabase-deploy.yml
+      # --ref main`) could never succeed.
+      #
+      # `supabase/config.toml` HAS since been migrated off `[inbucket]` (#10896), so v3 would now
+      # LOAD it — measured, not assumed: on this tree BOTH 2.122.1 and 3.0.0 reach
+      # `AccessTokenRequiredError` (both get past config load), and `--yes` is a GLOBAL flag in both,
+      # which is why the consent flags below are carried AT THIS PIN: a no-op on v2, and on v3 the
+      # difference between an apply and `HostedMutationConsentRequiredError` applying zero
+      # migrations.
+      #
+      # The pin still stays on the v2 line DELIBERATELY (#11100): the config is not yet v3-NATIVE
+      # (under 3.0.0 it still emits `auth.email.enable_signup` / `auth.sms.enable_signup`
+      # deprecations), so the major moves in its own PR with a full local validation —
+      # `supabase start` / `db reset` plus the local-auth harnesses.
+      # `tests/test_supabase_cli_pin_10593.py` and
+      # `tests/test_supabase_deploy_applier_config.py::_PINNED_CLI_MAJOR` enforce the coupling.
+      #
+      # The exact pin buys schema stability at the cost of MANUAL patch uptake: an `x.y.z` inside a
+      # `with:` input is invisible to Dependabot, so a v2-line security patch will not arrive on its
+      # own. That trade is deliberate (a major that moves itself is what cost the applies above); if
+      # you are here to relax the pin, read those two tests first — and if you decide to move it,
+      # change them deliberately rather than reading their red as a bug.
       - uses: supabase/setup-cli@v1
-        # ⛔ PINNED, NOT `latest` (#10593). The CLI is not an ordinary dependency here: its
-        # MAJOR versions change the `supabase/config.toml` schema, and this workflow is the ONLY
-        # door that applies migrations to production. 3.0.0 was published 2026-11-02T12:18Z, and
-        # TWO applies were dispatched after it — run 42091073635 (`Apply migrations` 19:45:56Z) and
-        # run 42107006180 (same step 21:40:38Z, head `af36e9240`) — and BOTH died the same way: they
-        # refused to load this repo's config, which THEN still declared `[inbucket]`
-        # (`DbConfigLoadError` => exit 1 at CONFIG LOAD, before `db push` contacts the database):
-        #
-        #   [inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.
-        #   ##[error]Process completed with exit code 1.          -- run 42091073635, 19:45:57Z
-        #
-        # Every apply between 2026-11-03T02:53:49Z and this pin died there, which is why
-        # `deploy-hosted`'s drift gate stayed red naming those versions while its own prescribed
-        # remedy (`gh workflow run supabase-deploy.yml --ref main`) could never succeed.
-        # 2.122.1 is `v2.stable`; measured at the same moment, it LOADS this config and fails only
-        # for want of the access token CI supplies.
-        #
-        # The pin stays on the v2 line DELIBERATELY (#11100). `supabase/config.toml` HAS since been
-        # migrated off `[inbucket]` (#10896), so v3 would now LOAD it — measured, not assumed: on
-        # this tree BOTH v2.122.1 and v3.0.0 reach `AccessTokenRequiredError`, i.e. both get past
-        # config load, and `--yes` is a GLOBAL flag present in both. That is why the consent flags
-        # below are carried AT THIS PIN rather than gated on a major bump: on v2 they are a no-op,
-        # on v3 they are the difference between an apply and `HostedMutationConsentRequiredError`
-        # applying zero migrations. The bump itself stays a separate, deliberate change because the
-        # config is not yet v3-NATIVE — under 3.0.0 it still emits `auth.email.enable_signup` /
-        # `auth.sms.enable_signup` deprecations — and #11100 recorded that the major needs its own
-        # PR with a full local run (`supabase start` / `db reset` plus the local-auth harnesses).
-        # `tests/test_supabase_cli_pin_10593.py` enforces the coupling: an exact pin, and no
-        # major-3 pin while the config still declares `[inbucket]`.
-        #
-        # The exact pin buys schema stability at the cost of MANUAL patch uptake: an `x.y.z` inside
-        # a `with:` input is invisible to Dependabot, so a v2-line security patch will not arrive
-        # on its own. That trade is deliberate (a major that moves itself is what cost the applies
-        # above); if you are here to relax the pin, read the test first — and if you decide to,
-        # change the test deliberately rather than reading its red as a bug.
         with:
           version: 2.122.1
         env:
