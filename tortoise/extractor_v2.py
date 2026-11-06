@@ -3733,6 +3733,7 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
         # sections keep the pre-existing coercion (their malformed-section
         # census, `_s4_malformed_sections`, still reports the drop).
         raw_s2, raw_s4 = s2.get(section), s4.get(section)
+        relation_oddities: list = []
         if section == "relations" and not any(
                 isinstance(raw, (list, tuple)) and raw
                 for raw in (raw_s2, raw_s4)):
@@ -3748,6 +3749,24 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
             if mistyped is not None:
                 out[section] = mistyped
                 continue
+        # ── Relations: nothing the union cannot carry as a dict may VANISH ──
+        # Two shapes reach S5 only if they survive this pass: a non-dict ITEM
+        # (`"garbage"`, an array-shaped triple) and a section-level MISTYPE
+        # riding ALONGSIDE a usable list on the other side. Filtering either
+        # one here is the silent loss this section exists to close — a dict
+        # filter over a mistyped mapping yields its KEYS (zero items), so the
+        # whole side vanished and `relations_dropped` stayed 0 with no warning.
+        # They are appended to the union AS ISOLATES and counted by S5's own
+        # census, so there is still exactly one place that reports a drop.
+        if section == "relations":
+            for _raw in (raw_s4, raw_s2):
+                if _raw is None:
+                    continue
+                if isinstance(_raw, (list, tuple)):
+                    relation_oddities.extend(
+                        i for i in _raw if not isinstance(i, dict))
+                else:
+                    relation_oddities.append(_raw)
         s2_items = [i for i in (s2.get(section) or []) if isinstance(i, dict)]
         s4_items = [i for i in (s4.get(section) or []) if isinstance(i, dict)]
         s4_by_key = {_merge_key(section, i): i for i in s4_items}
@@ -3777,7 +3796,7 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
         # included — identity preserved; absent keys stay absent, so the
         # additive E7 ``retractions`` section never fabricates keys)
         if section in s2 or section in s4:
-            out[section] = merged
+            out[section] = merged + relation_oddities
     # ── #11021: the hold DECISIONS survive the union too ──────────────────
     # `mention_held` is the surface-level memory the union pass re-holds from
     # (a hold whose only carrier is an EVENT writes no record, so the record
@@ -3971,6 +3990,15 @@ def _norm(s: str) -> str:
     them and abort the whole union-classify block.
     """
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+# ⛔ The cap on a relation field that could NOT be validated against a closed
+# vocabulary (a predicate with the registry unreadable, or `semantics` with the
+# Layer-2 set unreadable). Unverified is not unbounded: these fields are carried
+# as edge properties by the write leg (#11237), so free text of arbitrary length
+# and control characters is exactly the prose surface the channel exists to keep
+# out (#10000).
+_UNVERIFIED_TEXT_CAP = 64
 
 
 def _clip(value: object, limit: int = 60) -> str:
@@ -5559,11 +5587,19 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
     # only in case leave the endpoint alone here, and the resolver refuses it
     # downstream, instead of this stage guessing a node and S5 keeping it.
     #
-    # The rename map is consulted only when NO emitted spelling matches: that is
-    # the one case the emitted set cannot answer, because the entity the model
-    # named was renamed out from under the endpoint. Folding over `name_map`
-    # FIRST — the shape that produced a wrong attribution — would ask "is
-    # exactly one RESOLVED name spelled like this", a different question.
+    # Order, and why — each arm below is strictly STRONGER evidence than the
+    # next:
+    #   1. an EXACT emitted spelling: the model named a committed entity;
+    #   2. an EXACT pre-rename key of `name_map`: the model named the entity this
+    #      stage renamed, which is precisely what the map is FOR;
+    #   3. a UNIQUE fold hit over emitted names.
+    # ⛔ (2) before (3) is load-bearing. `emitted` holds POST-rename spellings
+    # only, so an endpoint spelled exactly as a renamed entity's ORIGINAL name
+    # has no exact emitted match and fell through to the fold arm — where a
+    # surviving casefold sibling answered for it, attributing the edge to the
+    # WRONG node and reporting it as `relations_dropped == 0` with no warning.
+    # An exact key in `name_map` is stronger evidence than a fold against a
+    # DIFFERENT entity.
     emitted = {str(e.get("name")).strip() for e in out.get("entities") or []
                if isinstance(e, dict) and e.get("name")}
     # Keyed by BOTH folds — `_endpoint_fold_keys`, the same enumeration S5's
@@ -5580,6 +5616,9 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
     def _canonical_endpoint(ref: str) -> str:
         if ref in emitted:
             return ref
+        renamed_exact = name_map.get(ref)
+        if renamed_exact is not None and renamed_exact in emitted:
+            return renamed_exact
         hits = _endpoint_fold_hits(ref, folded_emitted)
         if len(hits) == 1:
             return hits[0]
@@ -8892,10 +8931,16 @@ def _declared_relation_predicates() -> frozenset[str] | None:
 def _endpoint_fold_keys(name: str) -> tuple[str, ...]:
     """The TWO folds an endpoint is matched on — both, always.
 
-    ``_norm`` (whitespace-collapsed + lower) is the pipeline's name identity:
-    ``_merge_key`` builds this section's dedupe key with it and
-    ``vet_gate._norm`` matches entity references with it, so two spellings that
-    differ by a whitespace RUN are the same entity to every other stage.
+    ``_norm`` (whitespace-collapsed + lower) is how entity NAMES are compared in
+    ``_merge_key``'s entity/operator arms, and how ``vet_gate._norm`` matches
+    entity references. ⛔ It is NOT a universal identity, and reading it as one
+    re-introduces a fixed defect: this section's own union key builds the
+    ENDPOINT half from ``str(...).strip()`` — EXACT — and ``execute_embed``'s
+    committed-entity dedupe is ``(str(name).strip(), kind)``, also exact. Two
+    spellings differing by a whitespace run are therefore NOT one entity
+    downstream, which is why an endpoint needs this fold HERE instead of a key
+    that already folded it (`_merge_key`'s comment records the wrong attribution
+    that came of folding it there).
     ``str.casefold()`` is the wider Unicode fold, and it is what
     ``vet_gate._referenced_entity_names``' relation arm probes (the 'Straße' /
     'STRASSE' pair on which ``_norm`` and ``casefold`` DIVERGE).
@@ -8975,7 +9020,11 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     admit an endpoint whose own entity never commits, i.e. an edge to nothing.
     """
     raw = embed_list.get("relations")
-    if not raw:
+    if raw is None:
+        # ⛔ ABSENT, not FALSY. `not raw` also swallowed "" / 0 / {} — a
+        # PRESENT but mistyped value — before the mistype arm below could name
+        # it, so a model emitting `"relations": ""` got no diagnostic at all
+        # and `relations_dropped` stayed 0.
         return [], 0
     if not isinstance(raw, list):
         # A MISTYPED section is a drop, not a no-op: every relation in it is
@@ -8993,10 +9042,13 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
             n = 1
         warnings.append(f"relations section is {type(raw).__name__}, not a "
                         "list — ignored")
-        warnings.append(
-            f"connections_incomplete (#10999): {n} narrative relation(s) "
-            "dropped, 0 carried — the items still commit (S5 Job 1 fails "
-            "open)")
+        if n:
+            # An empty falsy mistype (`{}`) is still a SHAPE error and is named
+            # above, but it carries no relation to report as lost.
+            warnings.append(
+                f"connections_incomplete (#10999): {n} narrative relation(s) "
+                "dropped, 0 carried — the items still commit (S5 Job 1 fails "
+                "open)")
         return [], n
 
     exact = {str(e.get("name") or "").strip()
@@ -9077,11 +9129,6 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 f"({src!r}, {dst!r}, {predicate!r}) — dropped")
             dropped += 1
             continue
-        if _norm(src) == _norm(dst) or src.casefold() == dst.casefold():
-            warnings.append(f"relations[{i}] is a self-relation "
-                            f"('{_clip(src, 40)}') — dropped")
-            dropped += 1
-            continue
         r_src = _resolve_relation_endpoint(src, exact, folded)
         if r_src is None:
             warnings.append(
@@ -9098,11 +9145,16 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 "(#10999: an endpoint is never invented)")
             dropped += 1
             continue
-        # The self-relation guard above runs on the RAW spellings; two of them
-        # can each resolve to the SAME emitted entity through a DIFFERENT fold
-        # while sharing neither fold with each other (`_norm` collapses the
-        # whitespace run, `.casefold()` folds ß→ss). The RESOLVED names are the
-        # identity the edge would actually carry, so re-test on them.
+        # ⛔ The self-relation test runs on the RESOLVED names ONLY, and they are
+        # the identity the edge would actually carry. A RAW fold test looks
+        # equivalent and is not: two entities whose names differ only in case are
+        # DISTINCT Layer-1 Objects (`execute_embed` dedupes on `(name, kind)`), so
+        # `{"src": "Apple", "dst": "APPLE"}` is a real edge between two
+        # Objects — a raw fold dropped it and MISLABELLED it "a self-relation",
+        # the one diagnosis that sends the model to fix a non-problem. Every TRUE
+        # self-edge still lands here, because both spellings then resolve to one
+        # emitted name (a pair that resolves to nothing is dropped, and named, by
+        # the resolver above).
         if r_src == r_dst:
             warnings.append(
                 f"relations[{i}] is a self-relation "
@@ -9122,10 +9174,23 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
             # record the DECLARED spelling (a fold variant is the same verb)
             predicate = canonical_verb
         else:
-            warnings.append(
-                f"relations[{i}] predicate '{_clip(predicate, 40)}' could not "
-                "be checked against the declared vocabulary (registry "
-                "unreadable) — kept, unverified")
+            # Unverified is not UNBOUNDED: with the registry unreadable nothing
+            # clamped this value, and `predicate` is a field the write leg
+            # (#11237) carries as an edge property. Clamp, and say so.
+            _unverified = predicate
+            if len(_unverified) > _UNVERIFIED_TEXT_CAP:
+                warnings.append(
+                    f"relations[{i}] predicate is {len(_unverified)} chars "
+                    "and could not be checked against the declared vocabulary "
+                    f"(registry unreadable) — clamped to "
+                    f"{_UNVERIFIED_TEXT_CAP}, kept, unverified")
+                _unverified = _unverified[:_UNVERIFIED_TEXT_CAP]
+            else:
+                warnings.append(
+                    f"relations[{i}] predicate '{_clip(predicate, 40)}' could "
+                    "not be checked against the declared vocabulary (registry "
+                    "unreadable) — kept, unverified")
+            predicate = _unverified
         # The endpoints are already CANONICAL emitted spellings (resolution
         # returns the emitted name), so folding them adds nothing for a true
         # duplicate and silently merges two DISTINCT entities whose names
@@ -9183,7 +9248,21 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
             else:
                 # Including the unreadable-vocabulary case (`SEMANTICS_VALUES`
                 # empty): an import failure must never strip every meaning.
-                rel["semantics"] = _canonical_semantics or semantics
+                # ⛔ But it must not carry FREE TEXT either — with the closed set
+                # unreadable, nothing validated this value, and `semantics` is a
+                # field the write leg (#11237) carries as an edge property.
+                # Clamp it and say so: bounded, never silently truncated.
+                _kept_semantics = _canonical_semantics
+                if _kept_semantics is None:
+                    _kept_semantics = semantics
+                    if len(_kept_semantics) > _UNVERIFIED_TEXT_CAP:
+                        warnings.append(
+                            f"relations[{i}] semantics is "
+                            f"{len(_kept_semantics)} chars and could not be "
+                            "checked against the closed vocabulary — clamped "
+                            f"to {_UNVERIFIED_TEXT_CAP}")
+                        _kept_semantics = _kept_semantics[:_UNVERIFIED_TEXT_CAP]
+                rel["semantics"] = _kept_semantics
         kept.append(rel)
 
     if dropped:

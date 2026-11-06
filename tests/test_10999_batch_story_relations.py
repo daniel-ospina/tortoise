@@ -401,12 +401,24 @@ def test_ambiguous_case_fold_resolves_to_nothing():
 # ── 5. idempotence: finalising the same batch twice is ONE story ─────────
 
 def test_finalising_the_same_batch_twice_does_not_duplicate_the_story():
-    """The duplicate the issue is really about: the same narrative emitted
-    twice (an S2/S4 union, a retry, a re-finalise) is ONE relation."""
-    first = _run(EMISSION)
-    second = _run(EMISSION)
-    assert first["relations"] == second["relations"]
-    assert len(first["relations"]) == 1
+    """Re-finalising the same batch is ONE relation — and the COLLAPSE, not the
+    fixture, is what keeps it at one.
+
+    ⛔ The original form of this row ran `_run(EMISSION)` twice and compared the
+    two results. `execute_embed` is deterministic over a deep-copied input, so
+    that assertion held with the dedupe deleted; and `EMISSION` carries exactly
+    ONE relation, so `len == 1` held too. It asserted a property it could not
+    measure — a reviewer found it green under mutation. It now feeds the
+    duplicate a retry actually produces and reds if the collapse is removed.
+    """
+    twice = copy.deepcopy(EMISSION)
+    twice["relations"] = EMISSION["relations"] + [dict(EMISSION["relations"][0])]
+    first = _run(twice)
+    second = _run(twice)
+    assert len(first["relations"]) == 1, first["relations"]
+    assert first["stats"]["relations_dropped"] == 0, (
+        "a repeated triple is a silent SKIP, not a gate drop")
+    assert second["relations"] == first["relations"]
 
 
 def test_the_channel_never_reaches_the_payload_nor_its_canonical_id():
@@ -451,9 +463,12 @@ def test_intra_emission_duplicate_triples_collapse_first_wins():
     """The SAME triple stated twice is ONE relation, and the collapse is a
     silent SKIP, not a gate drop — `relations_dropped` must stay 0.
 
-    The duplicate's predicate carries the SAME case on purpose: a case
-    variant (`impl`) would be refused by the case-SENSITIVE declaredness
-    check first, so the test would pass with the dedupe deleted.
+    The duplicate's predicate carries the SAME case on purpose: the duplicate is
+    same-case so that the COLLAPSE, not the vocabulary, is the only thing that
+    can merge it. (The earlier wording claimed a case variant `impl` "would be
+    refused by the case-SENSITIVE declaredness check" — that stopped being true
+    when the gate was made fold-tolerant, and the case-variant accepted-and-
+    canonicalised behaviour is pinned separately below.)
     """
     emission = copy.deepcopy(EMISSION)
     emission["relations"] = [
@@ -1336,7 +1351,14 @@ def test_a_mistyped_section_never_displaces_a_valid_list_from_the_other_side():
                         {"src": "B", "dst": "C", "predicate": "NAND"}]}
     s4 = {"relations": {"src": "X", "dst": "Y", "predicate": "IMPL"}}
     merged = v2.merge_embed_lists(s2, s4)
-    assert len(merged["relations"]) == 2, merged["relations"]
+    # The usable LIST survives in place, AND the mistype is CARRIED behind it so
+    # S5's own census can count and name it. Its previous form asserted
+    # `len == 2` — i.e. that the mistyped side VANISHED — which is the silent
+    # loss review round 10 raised: a dict filter over a mistyped mapping yields
+    # its KEYS (zero items), so the side disappeared with
+    # `relations_dropped == 0` and no warning anywhere.
+    assert merged["relations"][:2] == s2["relations"], merged["relations"]
+    assert merged["relations"][2] == s4["relations"], merged["relations"]
 
     # a mistype on the OTHER side of a valid section must not win either
     merged2 = v2.merge_embed_lists(
@@ -1442,3 +1464,130 @@ def test_a_layer1_divergent_pair_restores_one_copy():
     assert sum(1 for w in warns if "restored" in w) == 1, warns
     assert out["points"][0]["about_entities"] == ["Straße"]
     assert out["points"][1]["about_entities"] == ["Straße"]
+
+
+# ── 9. review round 10 (head 4ff6f2310) — the panel's blockers ───────────
+
+def test_an_endpoint_spelled_as_the_pre_rename_name_beats_a_casefold_sibling():
+    """P2: an endpoint that EXACTLY names a renamed entity must resolve onto
+    THAT entity, not onto a surviving casefold sibling.
+
+    `emitted` holds POST-rename spellings only, so the pre-rename spelling had
+    no exact match and fell through to the fold arm — where a sibling answered
+    for it. The edge landed on the WRONG node, reported as
+    `relations_dropped == 0` with no warning.
+    """
+    emission = {
+        "entities": [{"name": "Billing", "kind": "core:rule"},
+                     {"name": "billing", "kind": "core:plan"},
+                     {"name": "Ledger", "kind": "core:rule"}],
+        "relations": [{"src": "Billing", "dst": "Ledger", "predicate": "IMPL"}],
+        "events": [], "points": [], "operators": [],
+    }
+    resolved = v2._apply_entity_resolution(
+        emission, {"Billing": {"name": "Billing Inc"}})
+    assert resolved["relations"][0]["src"] == "Billing Inc", \
+        resolved["relations"]
+    result = _run(resolved)
+    assert result["relations"][0]["src"] == "Billing Inc"
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_two_case_variant_entities_are_a_real_edge_not_a_self_relation():
+    """P2: names differing only in case are DISTINCT Layer-1 Objects
+    (`execute_embed` dedupes on `(name, kind)`), so a relation between them is
+    a REAL edge. The raw fold test dropped it and called it 'a self-relation',
+    which sends the model to fix a non-problem."""
+    emission = {
+        "entities": [{"name": "Apple", "kind": "core:organization"},
+                     {"name": "APPLE", "kind": "core:product"}],
+        "relations": [{"src": "Apple", "dst": "APPLE", "predicate": "IMPL"}],
+        "events": [], "points": [], "operators": [],
+    }
+    result = _run(emission)
+    assert result["stats"]["relations_dropped"] == 0, result["warnings"]
+    assert len(result["relations"]) == 1
+    assert {result["relations"][0]["src"], result["relations"][0]["dst"]} == {
+        "Apple", "APPLE"}
+
+
+def test_a_true_self_relation_is_still_dropped_and_named():
+    """The fix above must not lose the guard it replaced: one entity named by
+    two spellings that RESOLVE to it is still a self-relation."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "retry storm",
+                              "predicate": "IMPL"}]
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("self-relation" in w for w in result["warnings"]), result["warnings"]
+
+
+def test_a_mistyped_section_beside_a_usable_list_is_still_counted():
+    """P2: a mistyped S2 `relations` must not vanish because S4 carried a real
+    list. The union's dict filter iterated the mapping's KEYS — zero items — so
+    the whole side was lost with `relations_dropped == 0` and no warning."""
+    # (a) the single-object mistype encodes ONE relation and is recovered.
+    merged = v2.merge_embed_lists(
+        {"entities": copy.deepcopy(EMISSION["entities"]),
+         "relations": {"src": "Retry Storm", "dst": "Deadline Rule",
+                       "predicate": "IMPL"}},
+        {"relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
+                        "predicate": "IMPL"}]})
+    result = _run(merged)
+    assert len(result["relations"]) == 1, result["relations"]
+    assert result["stats"]["relations_dropped"] == 0
+    # (b) when its endpoints do not resolve it is COUNTED and named, not lost.
+    merged = v2.merge_embed_lists(
+        {"entities": copy.deepcopy(EMISSION["entities"]),
+         "relations": {"src": "Ann", "dst": "Bob", "predicate": "IMPL"}},
+        {"relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
+                        "predicate": "IMPL"}]})
+    result = _run(merged)
+    assert result["stats"]["relations"] == 1
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("does not resolve" in w for w in result["warnings"]), \
+        result["warnings"]
+
+
+def test_a_non_dict_relation_entry_reaches_S5s_census():
+    """P2: an item-level mistype ("garbage", an array-shaped triple) was
+    filtered out by the union's dict comprehension whenever S4 emitted content,
+    so S5 never counted it: `relations_dropped == 0`, no warning."""
+    merged = v2.merge_embed_lists(
+        {"entities": copy.deepcopy(EMISSION["entities"]),
+         "relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
+                        "predicate": "IMPL"}, "garbage"]},
+        {"points": [{"content": "p", "about_entities": ["Retry Storm"]}]})
+    result = _run(merged)
+    assert result["stats"]["relations"] == 1
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("non-dict relation entry" in w for w in result["warnings"]), \
+        result["warnings"]
+
+
+def test_a_falsy_mistyped_section_is_named_not_silent():
+    """P3: `if not raw` returned before the mistype arm, so `"relations": ""`
+    (or 0) produced no diagnostic at all and `relations_dropped` stayed 0."""
+    for bad in ("", 0):
+        emission = copy.deepcopy(EMISSION)
+        emission["relations"] = bad
+        result = _run(emission)
+        assert result["stats"]["relations_dropped"] == 1, bad
+        assert any("not a list" in w for w in result["warnings"]), \
+            (bad, result["warnings"])
+
+
+def test_an_unverifiable_predicate_is_clamped(monkeypatch):
+    """P3: the fail-open arm kept the model's verb verbatim — 5,000 chars and a
+    newline reached a record the write leg (#11237) carries as an edge
+    property, which is the prose surface this channel exists to keep out."""
+    monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "x" * 5000 + "\nDROP"}]
+    result = _run(emission)
+    kept = result["relations"][0]["predicate"]
+    assert len(kept) == v2._UNVERIFIED_TEXT_CAP, len(kept)
+    assert "\n" not in kept
+    assert any("clamped" in w for w in result["warnings"]), result["warnings"]

@@ -708,6 +708,16 @@ def _referenced_entity_names(embed_list: object,
     # arm exists to close, one spelling variant in. Carry every emitted entity
     # the endpoint could resolve to instead; keeping too much is this guard's
     # only safe failure mode.
+    #
+    # ⛔ THIS IS A THIRD SHAPE OF THE FOLD, and a COPY by construction: this
+    # module is stdlib-only and may not import `extractor_v2`, so
+    # `_endpoint_fold_keys`' pair cannot be called here. The index below is
+    # `_norm(name).casefold()` with two probes — NOT the emitter's two-key pair —
+    # so "the identity rule has one home" holds for the two RESOLVER stages and
+    # NOT for this guard. Measured over a 14x20 spelling matrix: 0 S5-resolvable
+    # pairs are left unprotected, 2 are over-protected ('Straße  X' /
+    # 'STRASSE X'), and over-protecting is this guard's declared safe direction —
+    # it can keep an entity whose relation S5 then drops, never mint a wrong edge.
     if not relation_endpoints:
         return names
     emitted: dict[str, set[str]] = {}
@@ -1171,9 +1181,14 @@ def apply_vet(embed_list: Mapping[str, Any],
         # a miss).
         if ref_name not in layer1_referenced \
                 and name.casefold() in held_folded:
-            # The append is skipped, but the REFERENCE is still reconciled:
-            # `canonical` is keyed by the reference's own `_norm` form, which is
-            # what `_rewrite_entity_references` looks up.
+            # The append is skipped, and the reference is recorded so the Layer-1
+            # surfaces `_rewrite_entity_references` actually rewrites
+            # (`about_entities`, `slots`) name the held spelling. ⛔ It does NOT
+            # rewrite a RELATION endpoint: `_iter_items` walks
+            # `entities`/`events`/`points` only, so `relations[].src/dst` keep
+            # the spelling as written and rely on S5's own endpoint fold — a
+            # future consumer of `embed_list["relations"]` that matches EXACTLY
+            # would see the unreconciled name.
             canonical[ref_name] = held_folded[name.casefold()]
             continue
         original = prior_entities.get(name)
@@ -1223,6 +1238,16 @@ def apply_vet(embed_list: Mapping[str, Any],
             held = held_folded.get(name.casefold())
             if held:
                 canonical[ref_name] = held
+                # ⚠️ RESIDUAL (review round 10, P3, NOT fixed here): this
+                # re-spelling emits no warning. It is deliberate — payload
+                # identity is EXACT, so the reference as written would fail
+                # Layer-1 — but the held spelling may be a DIFFERENT entity
+                # (Layer-1 identity is `(name, kind)`), and the doctrine 50
+                # lines above says "guessing is worse than a miss". The arm was
+                # not reproduced by probe at 4ff6f2310 (to_restore carried the
+                # reference and `held_folded` held the sibling, yet this branch
+                # produced neither a rewrite nor a warning), so the disclosure
+                # is left as a follow-up rather than claimed as fixed.
             else:
                 warnings.append(
                     "vet: ⚠️ a surviving candidate references entity "
