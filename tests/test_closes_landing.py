@@ -5537,19 +5537,27 @@ def test_an_item_whose_CONTENT_is_a_bare_marker_leaves_NO_paragraph():
 
 
 def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
-    """Round-52, P1 — a LOST CLOSE in both arms, from the ORDER the round-51 content ladder was put
-    in. It answers a fact about the ITEM (its own content is a bare marker), but it was evaluated at
-    the TOP of `_leaves_no_paragraph`, where it pre-empted the two guards this file documents as
+    """Round-52 — the content ladder's POSITION, and why it is UNCONDITIONAL.
+
+    It answers a fact about the ITEM (its own content is a bare marker) and it was evaluated at the
+    TOP of `_leaves_no_paragraph`, where it pre-empted the two guards this file documents as
     load-bearing: round 40's "THE LAZY ANSWER COMES FIRST" and round 50's "§4.4 COMES BEFORE THE LEAF
-    TESTS". Both shapes below are prose in the renderer and were blanked:
+    TESTS". Moving it below them keeps this real close, which the top-of-function version blanked:
 
-        `Notes` + `2. -` + `2.     Closes #100`      renderer ONE `<p>` -> PROSE
+        `Notes` + `2. -` + `2.     Closes #100`      renderer ONE `<p>` -> PROSE, `[100]` both arms
+
+    ⛔ AND IT IS NOT GATED ON "a paragraph was already closed above" (round-52 review, P0). That gate
+    re-opened, in BOTH arms, the fail-open the ladder exists to close for every body with a prose line
+    above the item — `strict` included, so a false PASS in `issue_process_lint`:
+
+        `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
+            `origin/main` `[]` both arms; the gated head `[100]` in both.
+
+    ⚠️ The gate protected exactly ONE body, and it is DECLARED, not pinned as correct:
         `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`
-            renderer ONE `html_block` whose raw text is the marker line -> PROSE
-
-    It now runs after `not body.strip()` and is gated on the paragraph above it ALREADY being closed:
-    where one is open, the renderer's answer for the next line comes from the block that is already
-    swallowing it, not from this ladder.
+            renderer ONE `html_block` whose raw text is the marker line -> PROSE, `[100]` on
+            `origin/main`; this head blanks it in both arms (this module's `_html_here` is False on
+            every line of it — a shape it already models wrongly).
     """
     md = MarkdownIt("commonmark")
 
@@ -5567,15 +5575,21 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
     # arm being wrong is a false PASS in that gate:
     #     `x` + `- 1.` + `  2.     Closes #100`   renderer `code_block` -> CODE
     #         `origin/main` `[]` both arms; the gated head `[100]` in both.
-    # ⚠️ The gate did protect ONE body — `- Text` + `> <br />` + `> <span>` + `> - *` +
-    # `>   2.     Closes #100` — where this module's `_html_here` is False on every line, i.e. a shape
-    # it already models wrongly; no paragraph-state discriminator here protects anything real.
     for body in ("x\n- 1.\n  2.     Closes #100\n",
                  "Notes\n- 2.\n  2.     Closes #100\n",
                  "Summary of the change.\n- 2.\n  2.     Closes #100\n"):
         assert keyword_types(body) == {"code_block"}, body
         assert cl.parse_closing_refs(body) == [], body
         assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # …and the ONE body the removed gate used to keep as prose, recorded as the known blanking it is
+    # (`origin/main` credits it; this head does not, in either arm) so the trade is a pinned fact
+    # rather than a docstring claim. Repairing it needs a discriminator this module does not have —
+    # `_html_here` is False on every line of it — not a paragraph-state gate here.
+    abandoned = "- Text\n> <br />\n> <span>\n> - *\n>   2.     Closes #100\n"
+    assert keyword_types(abandoned) == {"html_block"}, abandoned
+    assert cl.parse_closing_refs(abandoned) == [], abandoned
+    assert cl.parse_closing_refs(abandoned, None, strict=True) == [], abandoned
 
 
 def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
