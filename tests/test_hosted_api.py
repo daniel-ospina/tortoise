@@ -7901,8 +7901,10 @@ def test_a_reset_DURING_the_build_is_not_undone_by_the_builder(monkeypatch):
         assert hand is built[1], (
             "the caller was handed a handle built BEFORE the reset returned")
         assert hand.closed == 0, "the served handle was closed before use"
-        assert ha._REGISTRY_PROBE_CACHE == (
-            ha._registry_probe_identity(), built[1]), (
+        assert (
+            ha._registry_probe_identity(),
+            built[1],
+        ) == ha._REGISTRY_PROBE_CACHE, (
             "the cache holds a handle built before the reset returned: "
             f"cache={ha._REGISTRY_PROBE_CACHE}, built={built}")
     finally:
