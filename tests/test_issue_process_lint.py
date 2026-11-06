@@ -1995,3 +1995,80 @@ def test_a_reason_with_no_object_is_an_honest_decline():
     ):
         assert L.claims(body, 1)["declined"] == [100], body
         assert L.classify_pr(body, 1) == [], body
+# --- review round 21 (the same head, the wider diff): the list, the fence/comment order, clause end
+# Round 20's re-review verified its four findings held and then found three more on the WIDER diff.
+# Same discipline: each is pinned as a PAIR, and each fix is a NARROWING or a bound, never a wider
+# grammar — the rounds-13..19 lesson is that a widening trades one direction of error for the other.
+
+
+@pytest.mark.parametrize("separator", [",", " and ", " or "])
+def test_a_conjunction_continues_a_claim_list_like_a_comma_does(separator):
+    """Measured at `ec38978a30c0` (review round 21, P2) — the FALSE PASS direction.
+
+    The continuation admitted a COMMA only, so `Part of #100 and #300` claimed just #100. With #100
+    resolved by a `Satisfies` elsewhere in the body, the run printed NOTHING FLAGGED while #300 —
+    a claimed issue closed by nothing — had dropped out of the population entirely. The module was
+    already inconsistent with itself: `_REF_LIST` admits `and`/`or` when DECLINING the same shape.
+    A continuation is still a CLAIM and never a RESOLUTION (`_claims_in`), so a conjunction after a
+    closing word cannot invent a close — pinned by the `Closes` case below.
+    """
+    body = f"Satisfies #100\n\nPart of #100{separator}#300\n"
+    assert L.claims(body, 11078)["weak"] == [100, 300]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 11078)] == [[300]]
+
+
+def test_a_conjunction_after_a_closing_word_is_a_CLAIM_not_a_resolution():
+    """The bound that makes the widening safe: only the FIRST ref of a closing keyword resolves."""
+    c = L.claims("Closes #100 and #300\n", 11078)
+    assert c["closing"] == [100]
+    assert c["weak"] == [300]
+    assert [f.evidence["unresolved"] for f in L.classify_pr("Closes #100 and #300\n", 11078)] == [[300]]
+
+
+def test_an_unterminated_comment_inside_a_fence_cannot_delete_the_prose_after_it():
+    """Measured at `ec38978a30c0` (review round 21, P3) — the FALSE PASS direction.
+
+    HTML comments were stripped from the RAW body before the fence grammar ran. That order handled
+    the case its own comment gave for it (a COMMENT containing a fence) and left the mirror
+    unhandled: a FENCE containing an unterminated `<!--`, whose opener then paired with a `-->` in
+    the prose after the fence and deleted every line between them — including a real claim:
+
+        ```markdown / <!-- / ``` / (blank) / Part of #100 / (blank) / -->
+
+    read NOTHING FLAGGED, rc 0, and the only signal named the fence (which had hidden nothing). The
+    fence grammar now runs first, so the `<!--` is code and is gone before the comment strip.
+    """
+    body = ("Example of the marker opener:\n\n```markdown\n<!--\n```\n\nPart of #100\n\n-->\n")
+    assert L.claims(body, 1)["weak"] == [100]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]]
+    # the direction the old order was written for still holds: a well-formed comment hides its refs
+    assert L.classify_pr("<!-- tracking: Refs #4282 -->\nNothing claimed.\n", 11064) == []
+    assert L.claims("<!--\n```markdown\nRefs #4282\n```\n-->\n", 11064)["weak"] == []
+
+
+@pytest.mark.parametrize("punct", [".", ";"])
+def test_an_ordinary_english_decline_ends_at_its_clause_too(punct):
+    """Measured at `ec38978a30c0` (review round 21, P3) — the FALSE POSITIVE direction.
+
+    Alternative (a) (`deliberately not …`) admits `$`, `.` and `;` as clause ends; alternative (b),
+    the ordinary-English shapes, demanded END OF LINE. So the same honest sentence was flagged
+    without the convention word and declined with it:
+
+        Refs #100 — not closing it. The plan tracks the rest.          -> flagged
+        Refs #100 — deliberately not closing it. The plan tracks ...   -> CLEAN
+
+    A full stop or a semicolon IS clause-terminal, which is what `_DECLINE_TAIL`'s own comment says
+    the rule is — so this is the code not implementing its stated rule, in the direction the module
+    treats as the one to avoid.
+    """
+    body = f"Refs #100 — not closing it{punct} The plan tracks the rest.\n"
+    assert L.claims(body, 1)["declined"] == [100]
+    assert L.classify_pr(body, 1) == []
+
+
+def test_the_clause_end_admission_still_does_not_reach_a_later_sentence_s_claim():
+    """The bound on the case above: the decline ends at its clause, so a claim in the NEXT sentence
+    is untouched. `#300` is claimed by `Refs #300` and closed by nothing, so it must flag."""
+    body = "Refs #100 — not closing it. Refs #300 is separate.\n"
+    assert L.claims(body, 1)["declined"] == [100]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[300]]

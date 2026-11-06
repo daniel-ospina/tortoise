@@ -211,7 +211,7 @@ CLAIM_RE = re.compile(
     # prose (`Part of #100 and the fix is …`) still claims only `#100`.
     r"(?:(?P<qual>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#(?P<num>\d{1,7})\b"
     r"(?P<more>(?:"
-    r"(?:\s*,\s*(?:(?:and|&)\s+)?|\s+(?:and|&)\s+)"
+    r"(?:\s*,\s*(?:(?:and|or|&)\s+)?|\s+(?:and|or|&)\s+)"
     r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#\d{1,7}\b)*)",
     re.IGNORECASE,
 )
@@ -332,7 +332,7 @@ DECLINE_RE = re.compile(
     rf"|(?P<reason_a>{_REASON_TAIL})))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}(?P<stem_b>{_CLOSING_STEM})"
-    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}$|(?P<reason_b>{_REASON_TAIL}))",
+    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}(?:$|[.;])|(?P<reason_b>{_REASON_TAIL}))",
     re.IGNORECASE,
 )
 # ⛔ A DECLINE IS ABOUT *ITS OWN* REFERENCE — the two properties the grammar alone cannot express,
@@ -476,14 +476,24 @@ def strip_code(body: str) -> tuple[str, int]:
     The FENCE grammar is `tools/closes_landing.py::strip_code`'s — imported, not copied (see the
     module docstring): it knows that a fence may open ON a list-marker line or inside a blockquote,
     and that a fence ends with its container. This wrapper adds the two things that are this
-    module's own concern: HTML comments (which may span lines and contain fences) are removed
-    FIRST, and inline code spans are blanked AFTER, because `gh pr view #1234` is a command being
-    quoted, not a claim.
+    module's own concern: HTML comments (which may span lines) are removed, and inline code spans
+    are blanked last, because `gh pr view #1234` is a command being quoted, not a claim.
+
+    ⛔ FENCES FIRST, THEN COMMENTS (round 21, P3). The order was the other way, and the mirror of
+    its own rationale was unhandled: the comment strip argued that a COMMENT may contain a fence,
+    but a FENCE may contain an unterminated `<!--`, which then paired with a `-->` in the PROSE
+    after the fence and deleted every line between them — including a real claim:
+        ```markdown\n<!--\n```\n\nPart of #100\n\n-->      -> NOTHING FLAGGED, rc 0
+    With the fence grammar first, that `<!--` is code and is gone before the comment strip runs, so
+    the prose survives. The documented direction still works: a well-formed fence inside a comment
+    is stripped as code, and the remaining comment text is removed afterwards. An UNTERMINATED
+    fence still hides the rest of the body — but it does so VISIBLY, through `hidden_lines`, which
+    is the whole point of reporting that count.
     """
-    # HTML comments first — they may span lines and may contain fences.
-    text = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
     stats: dict[str, int] = {}
-    text = _strip_fenced_blocks(text, stats=stats)
+    text = _strip_fenced_blocks(body, stats=stats)
+    # HTML comments, now that code regions are already blanked.
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     # Inline code spans: `gh pr view #1234` is a command being quoted, not a claim. Imported, not
     # re-derived — a single-backtick regex here read a ``Refs #1234`` span as prose (F1).
     text = _strip_inline_code_spans(text)
