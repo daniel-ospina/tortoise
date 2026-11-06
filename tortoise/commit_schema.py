@@ -1247,9 +1247,12 @@ def _bare_kind(k: Any) -> str:
 def _slot_role_refs(slots: Any) -> list[tuple[str, Any]]:
     """(role, ref) pairs for the entity-role slots (subject/object).
 
-    The ``event`` slot is event-as-content (#1417 B2) — its resolution is
-    owned by the #1370 write path, never Layer-1 (a slot name like "the
-    Aug 3 meeting" is not an entity name and must not 422 on that basis).
+    The ``event`` slot is event-as-content (#1417 B2) — its binding belongs
+    to the #1417 ``aboutEvent`` work, which ``subject_binding._ROLE_TARGET``
+    deliberately excludes, and NOTHING resolves it against entities: not
+    Layer-1 and not the #1370 write path (a slot name like "the Aug 3
+    meeting" is not an entity name and must not 422 on that basis).
+    #11021 P3-a.
     Accepts ParticipantSlots models or plain dicts (the local extractor
     mirrors payloads as dicts); non-dict refs are skipped defensively.
     """
