@@ -3513,15 +3513,14 @@ class TestCaptureOrgIngestBound:
         ⛔ SCOPE OF THIS MEASUREMENT, stated so it is not over-read: the HTTP
         fixture builds a JOURNAL-LESS SDK (``tests/_http_fixtures.py`` drops
         ``event_log_path``), where the turn write returns before the emit loop
-        and a turn is 1 node. The SHIPPED shape — ``TORTOISE_EVENT_LOG_BASE_DIR``
-        set (docker-compose, fly.toml) with the record unarmed — runs the emit
-        loop and also writes each turn's ``PointAdded`` ``:GraphEvent``: 2 nodes
-        per turn, measured 21 nodes for a 10-turn capture. The charge therefore
-        takes the WORST shape (``_CAPTURE_TURN_NODES = 2``), which is exactly
-        what this leg checks: the declared count must cover the journal-less
-        request here AND carry the second node the production lane adds, so a
-        future lane that lowers the constant reds this test rather than
-        silently under-charging (the fail-OPEN direction, #4051).
+        and a turn is 1 node — so the marginal here is 1 BY CONSTRUCTION and
+        this leg cannot see the 2-node shape (measured separately on a
+        journal-configured, record-unarmed graph: marginal 2.0 nodes/turn). The
+        charge carries the WORST of the three shapes (``_CAPTURE_TURN_NODES = 2``;
+        an armed record, which is what production runs, costs 0 graph nodes),
+        and the constant pin below is what reds if a future lane lowers it
+        rather than silently under-charging the fallback lanes (the fail-OPEN
+        direction, #4051).
         """
         from tortoise.hosted_api import SessionRequest, declared_capture_write_count
 

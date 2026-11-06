@@ -529,9 +529,11 @@ the `{error}`-only shape whose retry action is different.
   a `MITIGATES` bridge-attack) plus the fixed record/session/source/event
   chain; on the capture lane the `:Session`, the `sessionCaptured` `:Event`,
   the transcript `:Source`, and TWO nodes per conversation entry — the turn
-  `:Point` and its `PointAdded` `:GraphEvent` (the journal-configured lane
-  writes both; the count takes the worst shape, so a deployment with no journal
-  is over-charged rather than under-charged). Exceeding the allowance answers **429** with a
+  `:Point` and a `PointAdded` `:GraphEvent`, which is what a turn costs on the
+  journal-configured/record-unarmed lane. The charge is computed from the
+  request, so it cannot know where the turn lands: an armed-record deployment
+  (production) stores turns in the record and is charged those two nodes anyway,
+  and the no-journal lane costs one. The worst shape is the one charged. Exceeding the allowance answers **429** with a
   `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
   is always **your** spend in the window, and `detail.scope` says which
   allowance refused you — `"org"` (your team's own budget) or `"process"` (the

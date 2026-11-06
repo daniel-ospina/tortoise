@@ -17110,29 +17110,35 @@ class SessionRequest(BaseModel):
 # window can be shorter than the posted conversation — all three over-charge.
 # Under-charging would remove the bound; over-charging delays a request.
 #
-# ⛔ TWO NODES PER TURN — the SHIPPED shape mints the Point AND its durability
-# record. This constant was argued down to 1 twice during review and both
-# arguments were wrong in the same way: they measured the TEST FIXTURE.
+# ⛔ TWO NODES PER TURN — the WORST of the three shapes a capture turn can take.
+# A turn's graph cost depends on where it is stored, and this charge is a pure
+# function of the REQUEST, so it cannot know which shape it is in. There are
+# three, and the rate is the maximum:
 #
-#   * no journal (``_get_event_log() is None``, which is what
-#     ``tests/_http_fixtures.py`` builds — it drops ``event_log_path``):
-#     ``sdk._write_capture_turns`` returns before the emit loop and a turn is
-#     1 node (the ``:Point``). Measured here: 2 turns -> 5 nodes, 10 -> 13.
-#   * JOURNAL CONFIGURED and the record unarmed (``record_holds_turns`` false):
-#     the emit loop runs and each turn also appends ``PointAdded``, which
-#     ``event_store`` CREATEs as its own ``:GraphEvent`` — 2 nodes per turn.
-#     Measured: 2 turns -> 5... i.e. marginal 2.0/turn, 10 turns -> 21 nodes.
+#   * RECORD ARMED (what production runs — ``TORTOISE_RECORD_DSN`` is a Fly
+#     secret, armed since at least 2026-10-26; ``docs/infra-runbook.md`` records
+#     ``"record":{"armed":true,…}``): ``record_holds_turns`` is true, the graph
+#     turn batch write is SKIPPED and the turns ride the ``TurnsRecorded`` record
+#     carrier, which is not a ``:GraphEvent``. **0 graph nodes per turn.**
+#   * JOURNAL CONFIGURED, record UNARMED (``docker-compose.yml``: it sets
+#     ``TORTOISE_EVENT_LOG_BASE_DIR`` and no DSN; also Fly while the record's
+#     connect breaker is open): the graph lane runs and each turn also appends
+#     ``PointAdded``, which ``event_store`` CREATEs as its own ``:GraphEvent``.
+#     **2 nodes per turn** (measured marginal on that shape: 2.0/turn).
+#   * NO JOURNAL at all (the HTTP test fixture — ``tests/_http_fixtures.py``
+#     drops ``event_log_path``): the emit loop returns early, so a turn is its
+#     ``:Point`` only. **1 node per turn** (measured: 2 turns -> 5 new nodes,
+#     10 -> 13).
 #
-# The second shape is what ships: ``docker-compose.yml`` and ``fly.toml`` both
-# set ``TORTOISE_EVENT_LOG_BASE_DIR`` and neither sets ``TORTOISE_RECORD_DSN``,
-# so the record is unarmed and the graph lane with a journal is the default —
-# and even an armed record falls back to this lane whenever its connect breaker
-# trips. A request-pure charge cannot know which shape it is in, so it takes the
-# WORST one: charging 1 would under-charge 50% of the node growth on every
-# production capture, which is the fail-OPEN direction for a throttle.
-# Reference: ``docs/INGEST_CONTRACT.md`` §9 states the same 2-node rate.
+# Charging 0 (the armed shape) would leave the THROTTLE fail-open on both
+# fallback shapes, and neither needs a deploy to reach: a record connect-breaker
+# trip puts Fly on the 2-node lane for its window, and docker-compose is always
+# on it. Charging 1 (this constant's first value) under-charged those by half.
+# So the declared rate is 2 — over-charging an armed-record capture is the
+# accepted direction, and it still admits ~1,460 two-turn captures per minute at
+# the 10 MiB/60 s allowance. ``docs/INGEST_CONTRACT.md`` §9 states the same rate.
 _CAPTURE_FIXED_NODES = 3   # :Session + sessionCaptured :Event + transcript :Source
-_CAPTURE_TURN_NODES = 2    # turn :Point + its ``PointAdded`` ``:GraphEvent``
+_CAPTURE_TURN_NODES = 2    # worst shape: turn :Point + its ``PointAdded`` ``:GraphEvent``
 
 
 def declared_capture_write_count(body: SessionRequest) -> int:
