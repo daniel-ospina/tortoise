@@ -1518,23 +1518,53 @@ def test_the_REAL_rebuild_engine_invokes_the_prose_hook_with_its_own_label(
         f"wrong engine label here")
 
 
-def test_ALL_FOUR_replay_engines_wire_the_hook_with_their_own_literal():
-    """A deleted call site is invisible to the hook tests (they call it directly).
+def test_EACH_replay_file_calls_THIS_hook_exactly_once_with_its_own_label():
+    """⛔ AST, not a substring scan — the substring version could not fail.
 
-    The four whole-journal engines re-mint the prose pair from the journal, so each
-    must run the sweep AND name itself, or a rebuild silently leaves the population
-    and a failure investigation is sent to the wrong engine.
+    The first version of this test scanned each file for `reconcile_after_replay`
+    plus an engine literal. Both ALREADY appear in those files for the #4125
+    sibling hook, so deleting a #11070 call site (or mislabelling it) left the
+    suite green — measured on three separate mutations (#11152 review round 9,
+    MATERIAL: a gate that cannot fail).
+
+    This walks the AST instead and keys on the #11070 IMPORT ALIAS
+    (`sspm.reconcile_after_replay`), which #4125's bare `reconcile_after_replay`
+    calls cannot satisfy. It therefore reds on a deleted site (count 0) and on a
+    wrong label (the kwarg differs).
+
+    Declared limit: it proves the call EXISTS with the right label, not that the
+    engine reaches it at runtime. `rebuild` is driven for real by
+    `test_the_REAL_rebuild_engine_invokes_the_prose_hook_with_its_own_label`; the
+    other three are pinned here because each needs a distinct hostile setup
+    (`rebuild_all`'s string-dir form, `recover_from_log`'s 0-node discriminator,
+    `backup.restore`'s backup dir) and #4125 drives those in its own file.
     """
+    import ast
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
     expected = {
-        "tortoise/projection/__init__.py": ['engine="rebuild"', 'engine="rebuild_all"'],
-        "tortoise/consistency.py": ['engine="recover_from_log"'],
-        "tortoise/backup.py": ['engine="backup.restore"'],
+        "tortoise/projection/__init__.py": ["rebuild", "rebuild_all"],
+        "tortoise/consistency.py": ["recover_from_log"],
+        "tortoise/backup.py": ["backup.restore"],
     }
     for rel, literals in expected.items():
-        text = (root / rel).read_text()
-        assert "reconcile_after_replay" in text, f"{rel} lost its #11070 hook"
-        for literal in literals:
-            assert literal in text, f"{rel} no longer passes {literal}"
+        tree = ast.parse((root / rel).read_text())
+        found: list[str | None] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute)
+                    and func.attr == "reconcile_after_replay"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "sspm"):
+                continue
+            label = None
+            for kw in node.keywords:
+                if kw.arg == "engine" and isinstance(kw.value, ast.Constant):
+                    label = kw.value.value
+            found.append(label)
+        assert sorted(found) == sorted(literals), (
+            f"{rel}: the #11070 hook is called as {found!r}, expected {literals!r} "
+            f"— a deleted call site or a wrong engine label")

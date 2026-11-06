@@ -181,10 +181,14 @@ def main() -> int:
                          "one (typed --record-dsn, or a typed --org-id/"
                          "--graph-id with an exported TORTOISE_RECORD_DSN): "
                          "where it answers the pair is RE-DERIVED, and only the "
-                         "nodes it cannot answer for are cleared. With NO record "
-                         "scope at all it clears every candidate. Without this "
-                         "flag such a candidate is REPORTED and LEFT ALONE. Not "
-                         "required on a census (--dry-run), which never writes.")
+                         "nodes it cannot answer for are cleared. With no usable "
+                         "record at all (no DSN, or only an INHERITED one and no "
+                         "typed scope) it clears every candidate; a TYPED "
+                         "--record-dsn without --org-id/--graph-id is refused "
+                         "instead, because the record cannot be scoped. Without "
+                         "this flag such a candidate is REPORTED and LEFT ALONE. "
+                         "Not required on a census (--dry-run), which never "
+                         "writes.")
     ap.add_argument("--assert-clean", action="store_true",
                     help="exit 1 if any candidate remains (dry run only) — the "
                          "step-3 verification; without it a dry run always exits 0")

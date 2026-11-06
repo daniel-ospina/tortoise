@@ -156,11 +156,13 @@ CACHE_READ_TIMEOUT_MS = 60_000
 _TIMEOUT_CAP_ERR = "TIMEOUT parameter value cannot exceed"
 
 #: A cut of ``record_read.session_turns``'s PARTIAL reason that names the TAIL
-#: witness — kept ONLY as a human-readable fallback for an answer object that
-#: carries no ``Turn.index``. The REAL test is structural (:func:`record_turn_
-#: reader` recomputes ``max(held) < turn_max_index``), because no production
-#: reason string contains this name and matching on wording is how a diagnostic
-#: becomes dead code while its test still passes (#11152 review round 3, P2).
+#: witness. Kept ONLY as a fallback for an answer object that carries no
+#: ``Turn.index`` — the production reasons DO contain this wording
+#: (``… — the tail is missing, so this is a partial transcript``), which is
+#: exactly why it cannot be the primary test: a diagnostic keyed on wording is
+#: what became dead code in round 3 (the constant then held the NAME
+#: ``turn_max_index``, which no reason ever contains) and its test passed over it.
+#: The REAL test is structural, in :func:`record_turn_reader`.
 _TAIL_WITNESS_HINT = "the tail is missing"
 
 #: The property names this repair reads. ⛔ It WRITES only the pair — see
