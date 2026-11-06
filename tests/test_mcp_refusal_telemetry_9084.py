@@ -97,6 +97,7 @@ import pytest
 from fastmcp.tools import FunctionTool
 
 from tortoise import mcp_server as ms
+from tortoise import tool_registry
 
 # ── Harness ───────────────────────────────────────────────────────────────
 
@@ -708,7 +709,7 @@ async def test_get_entity_bad_type_is_recorded_as_a_failure(events, hosted):
 
 @pytest.mark.asyncio
 async def test_http_excluded_tool_refusal_is_recorded_as_a_failure(events, hosted):
-    """`_http_excluded_error()` is ONE funnel feeding six live tool bodies.
+    """`_http_excluded_error()` is ONE funnel feeding five live tool bodies.
 
     Its `error` is a MAPPING (`{"code": ..., "message": ...}`), so the seam's
     text arm cannot classify it — it is matched by value. These are the hosted
@@ -871,3 +872,83 @@ async def test_a_successful_write_carrying_a_user_error_prop_stays_ok(
     row = events[-1]
     assert row["status"] == "ok", row
     assert row["error_kind"] is None, row
+
+
+# ── 6. The funnel's own prose count is derived, not hand-carried ──────────
+
+# The docstring states its population in WORDS, so the guard has to spell the
+# number the same way. Anything past twelve falls through to the digits, which
+# no hand-written sentence matches — the guard then fails and names the real
+# count rather than silently agreeing.
+_NUMBER_WORDS = {
+    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven", 12: "twelve",
+}
+
+
+def _number_word(n: int) -> str:
+    return _NUMBER_WORDS.get(n, str(n))
+
+
+def _http_excluded_funnel_sites() -> list[str]:
+    """Every `mcp_server.py` function whose body returns the #236 refusal."""
+    tree = ast.parse(MCP_SERVER.read_text(encoding="utf-8"))
+    sites: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name == "_http_excluded_error":
+            continue
+        if any(isinstance(call, ast.Call)
+               and isinstance(call.func, ast.Name)
+               and call.func.id == "_http_excluded_error"
+               for call in ast.walk(node)):
+            sites.append(node.name)
+    return sites
+
+
+def test_the_funnel_docstring_states_the_population_it_actually_feeds():
+    """`_http_excluded_error`'s own count is DERIVED here, never hand-kept.
+
+    The docstring is the only place that states how many tool bodies return this
+    payload and how many of them are retired-but-served, and it is a
+    present-tense count with no other pin: #4282 retired `tortoise_dream_health`
+    into this funnel, which moves a name across the live/retired comma AND takes
+    one off the total in the same sentence — and the sentence said `nine …
+    six live` at that head, so it was wrong in both halves. That is the drift
+    class this test closes, by recomputing the population from the source and
+    failing with the correct wording instead of trusting the prose.
+
+    It also pins the membership the split rests on: every funnel site must be a
+    SERVED name (`TOOL_REGISTRY` or `RETIRED_TOOL_REGISTRY`), because "live" and
+    "retired-but-served" are only meaningful for a tool the dispatcher answers.
+    """
+    sites = _http_excluded_funnel_sites()
+    live_names = {d.name for d in tool_registry.TOOL_REGISTRY}
+    retired_names = {d.name for d in tool_registry.RETIRED_TOOL_REGISTRY}
+
+    for name in sites:
+        assert name in live_names or name in retired_names, (
+            f"{name} answers the #236 funnel but is on neither served surface "
+            "— the live/retired split cannot classify it")
+
+    live = [n for n in sites if n in live_names]
+    retired = [n for n in sites if n not in live_names]
+    assert len(live) + len(retired) == len(sites)
+
+    tree = ast.parse(MCP_SERVER.read_text(encoding="utf-8"))
+    funnel = next(node for node in ast.walk(tree)
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.name == "_http_excluded_error")
+    doc = ast.get_docstring(funnel) or ""
+    # The sentence is wrapped to the line width, so compare on the flattened
+    # prose: a re-wrap is formatting, a changed count is the drift this pins.
+    flat_doc = " ".join(doc.split())
+
+    expected = (f"{_number_word(len(sites))} tool bodies "
+                f"({_number_word(len(live))} live, "
+                f"{_number_word(len(retired))} retired-but-served)")
+    assert expected in flat_doc, (
+        f"the docstring's count drifted: measured {expected!r} from "
+        f"{sites} (live={live}, retired={retired}); docstring says:\n{doc}")
