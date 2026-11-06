@@ -1036,6 +1036,14 @@ def apply_vet(embed_list: Mapping[str, Any],
         return dict(base), warnings
 
     referenced = _referenced_entity_names(base, discarded_ids)
+    # The Layer-1 half of the same set, and the ONLY half a downgrade may
+    # truthfully cite as "Layer-1 referential integrity". A relation endpoint
+    # protects its entity (the edge is the story's assertion and would vanish
+    # with it) but the channel is RESULT-level: no Layer-1 reference names the
+    # entity, so it cannot produce a 422 — the same reasoning that excludes it
+    # from the Rule-4 restore leg below (#10999).
+    layer1_referenced = _referenced_entity_names(
+        base, discarded_ids, relation_endpoints=False)
     removed_entity_names: set[str] = set()
     removed_context: set[str] = set()      # norm CONTENT of removed points/events
     # norm entity name -> the spelling that must win in a reference. Populated
@@ -1076,10 +1084,21 @@ def apply_vet(embed_list: Mapping[str, Any],
                     # entity name rewritten verbatim would CREATE the 422 the
                     # reconciliation exists to prevent.
                     canonical[name] = str(item.get("name") or "").strip()
-                    warnings.append(
-                        f"vet: entity {str(item.get('name'))!r} was DISCARDed "
-                        "but is referenced by a surviving candidate — kept "
-                        "(Layer-1 referential integrity)")
+                    if name in layer1_referenced:
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is referenced by a surviving "
+                            "candidate — kept (Layer-1 referential integrity)")
+                    else:
+                        # A relation endpoint is the entity's only tie to the
+                        # emission. The edge is kept, the 422 claim is not:
+                        # `relations` never enters the Layer-1 payload.
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is named by a surviving "
+                            "entity↔entity relation — kept (the relation is "
+                            "the story's own assertion; this is NOT a "
+                            "Layer-1 reference)")
                     kept.append(item)
                     continue
                 if name:
@@ -1104,8 +1123,17 @@ def apply_vet(embed_list: Mapping[str, Any],
     # prune: a restored name is present again, so it must not be pruned as if
     # it were discarded.
     present = set(_entity_map(out))
-    to_restore = _referenced_entity_names(out, set(),
-                                          relation_endpoints=False) - present
+    # #10999: relation endpoints DO count for the restore — a relation naming an
+    # entity an earlier pass removed is exactly the cross-pass case Rule 4
+    # exists for (S4 supplies the conclusion between the two passes). The
+    # `relation_endpoints` flag splits the WARNING, not the restore: it was
+    # applied to this whole computation once, so the entity stayed gone and S5
+    # then dropped the edge as unresolvable — with nothing in the record saying
+    # why. `layer1_referenced` is what may truthfully be called a Layer-1
+    # reference; a relation endpoint is result-level and cannot 422.
+    layer1_referenced = _referenced_entity_names(
+        out, set(), relation_endpoints=False)
+    to_restore = _referenced_entity_names(out, set()) - present
     for name in sorted(to_restore):
         original = prior_entities.get(name)
         if original is not None and str(original.get("name") or ""):
@@ -1115,16 +1143,26 @@ def apply_vet(embed_list: Mapping[str, Any],
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
-            warnings.append(
-                f"vet: entity {name!r} was discarded by an earlier pass but "
-                "is referenced after S4 — restored (Layer-1 referential "
-                "integrity)")
-        else:
+            if name in layer1_referenced:
+                warnings.append(
+                    f"vet: entity {name!r} was discarded by an earlier pass "
+                    "but is referenced after S4 — restored (Layer-1 "
+                    "referential integrity)")
+            else:
+                warnings.append(
+                    f"vet: entity {name!r} was discarded by an earlier pass "
+                    "but an entity↔entity relation now names it — restored "
+                    "(the relation is the story's own assertion; this is NOT "
+                    "a Layer-1 reference)")
+        elif name in layer1_referenced:
             warnings.append(
                 "vet: ⚠️ a surviving candidate references entity "
                 f"{name!r}, which no pass emitted — it cannot be restored "
                 "here; the payload will fail Layer-1 unless the extractor "
                 "emits it")
+        # else: a relation endpoint naming an entity no pass emitted restores
+        # nothing and warns nothing — it cannot 422 (result-level channel), and
+        # S5 names the dropped relation itself.
     if canonical:
         _rewrite_entity_references(out, canonical)
 

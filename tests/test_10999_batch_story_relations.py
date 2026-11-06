@@ -275,7 +275,12 @@ def test_a_discarded_entity_named_only_by_a_relation_is_kept():
     kept, warnings = vet_gate.apply_vet(
         emission, {item_id: {"outcome": "DISCARD"}})
     assert any(e.get("name") == "Deadline Rule" for e in kept["entities"])
-    assert any("referenced by a surviving candidate" in w for w in warnings)
+    # the reason names the ACTUAL tie: a relation endpoint is result-level, so
+    # it is not "Layer-1 referential integrity" (that claim is false here and
+    # the earlier wording made it — #11205 review cycle 3)
+    assert any("named by a surviving entity↔entity relation" in w
+               for w in warnings), warnings
+    assert not any("Layer-1 referential integrity" in w for w in warnings)
     # the relation survives the VET pass intact
     assert kept["relations"] == emission["relations"]
 
@@ -718,7 +723,11 @@ def test_the_vet_guard_protects_an_entity_named_only_by_a_relation_endpoint():
                               prior=None)
     assert [e["name"] for e in out["entities"]] == ["Retry Storm",
                                                     "Deadline Rule"]
-    assert any("referenced by a surviving candidate" in w for w in warns), warns
+    assert any("named by a surviving entity↔entity relation" in w
+               for w in warns), warns
+    # ...and the claim is a TRUE one: a relation endpoint is RESULT-level, so
+    # it is not what keeps the entity inside the Layer-1 payload.
+    assert not any("Layer-1 referential integrity" in w for w in warns), warns
     # ...and the relation still lands, so the guard's protection is not
     # academic — the edge survives the whole S2.2 → S5 path.
     assert _run(out)["relations"] == [
@@ -771,3 +780,129 @@ def test_a_dangling_endpoint_does_not_claim_the_payload_will_fail_layer1():
     assert not [w for w in warns if "Layer-1" in w], warns
     # the dangling endpoint is still REPORTED — by S5, where the drop happens
     assert any("Ghost Rule" in w for w in _run(out)["warnings"])
+
+# ── 9. fresh-context review of the merged head (the third cycle) ──────────
+#
+# Three defects the earlier cycles left, each measured before it was fixed.
+
+def test_a_case_variant_predicate_survives_the_union_and_is_canonicalised():
+    """The S2∪S4 union's identity folds the predicate, so S4's case variant is
+    ONE item that "wins" the collision; the declaredness gate was case-SENSITIVE,
+    so the survivor was dropped as an invented verb the model never invented.
+
+    Measured before the fix at `3edd17702c`: merged `predicate == "impl"` →
+    `relations=[]`, `relations_dropped=1`, warning "predicate 'impl' is not a
+    declared relation verb". An edge lost to a capital letter.
+    """
+    s2 = {"relations": [{"src": "A", "dst": "B", "predicate": "IMPL"}]}
+    s4 = {"relations": [{"src": "A", "dst": "B", "predicate": "impl"}]}
+    merged = v2.merge_embed_lists(s2, s4)
+    result = _run({"entities": [{"name": "A", "kind": "core:object"},
+                                {"name": "B", "kind": "core:object"}],
+                   "relations": merged["relations"]})
+    assert [r["predicate"] for r in result["relations"]] == ["IMPL"], result
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_a_declared_verb_is_recorded_in_its_declared_spelling():
+    """A fold variant is the same verb — and the record carries the DECLARED
+    spelling, so two spellings of one verb cannot become two records later."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "impl"}]
+    result = _run(emission)
+    assert [r["predicate"] for r in result["relations"]] == ["IMPL"]
+
+
+def test_a_case_variant_semantics_resolves_to_the_closed_spelling():
+    """`semantics` is the same closed vocabulary and folds the same way: a case
+    variant is the declared meaning, not an out-of-vocabulary token."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "IMPL", "semantics": "Supports"}]
+    result = _run(emission)
+    assert result["relations"][0]["semantics"] == "supports"
+    assert not [w for w in result["warnings"] if "semantics" in w], result
+
+
+def test_shape_gate_refuses_a_non_string_predicate():
+    """The D5 gate types `predicate` like `src`/`dst`, so a shape error is not
+    reported downstream as a VOCABULARY error (\"not a declared relation verb\")."""
+    ok, issues = v2._validate_output_shape(
+        {"relations": [{"src": "A", "dst": "B", "predicate": 42}]})
+    assert not ok
+    assert any("predicate" in i for i in issues), issues
+
+
+def test_the_declared_vocabulary_has_one_home():
+    """#2766's defect is a vocabulary derived in several places and drifting.
+
+    `pack_registry.declared_relation_predicates` is the ONE home; the write path
+    (`sdk.create_operator`) and S5's gate both read it. This pins the two
+    readers to the same set, so a vocabulary edit cannot land in one only.
+    """
+    from tortoise.domain_loader import _get_registry
+    from tortoise.pack_registry import (
+        CORE_OPERATOR_LABELS,
+        declared_relation_predicates,
+    )
+
+    declared = declared_relation_predicates()
+    assert declared is not None
+    # the write path's set, recomputed from its documented inputs
+    reg = _get_registry()
+    write_path = set(CORE_OPERATOR_LABELS)
+    if reg is not None:
+        write_path |= {r.get("predicate") for r in reg.list_relations()
+                       if isinstance(r, dict) and r.get("predicate")}
+    assert set(declared) == write_path
+    # and S5's gate answers from the same call
+    assert v2._declared_relation_predicates() == declared
+
+
+# ── 10. the cross-pass leg (P1) and the mistype count (P2) ───────────────
+#
+# Both were raised by an earlier review at `3edd17702c` and were still
+# present at `c0d016747`; the fixes here are red-first.
+
+def test_a_relation_endpoint_restores_an_entity_an_earlier_pass_removed():
+    """Rule 4 is the ONLY leg that can bring back an entity an EARLIER pass
+    removed — and S4 arrives between the two passes, so the narrative's
+    conclusion (`relations`) is exactly the cross-pass reference Rule 4 exists
+    for.
+
+    The `relation_endpoints` flag was applied to the whole `to_restore`
+    computation instead of to the WARNING, so a relation-only endpoint restored
+    nothing: the entity stayed gone and S5 dropped the edge as unresolvable,
+    with no warning saying why.
+    """
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"}],
+        "relations": [{"src": "Retry Storm", "dst": "Deadline Rule",
+                       "predicate": "IMPL"}],
+    }
+    prior = {"removed_entities": {
+        "deadline rule": {"name": "Deadline Rule", "kind": "core:rule"}}}
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Retry Storm",
+                                                    "Deadline Rule"]
+    assert any("restored" in w for w in warns), warns
+    # ...and the restore is not claimed as Layer-1 integrity: the channel is
+    # result-level, so this reference cannot 422.
+    assert not any("Layer-1 referential integrity" in w for w in warns), warns
+    assert [(r["src"], r["dst"]) for r in _run(out)["relations"]] == [
+        ("Retry Storm", "Deadline Rule")]
+
+
+def test_a_single_relation_object_where_a_list_was_asked_for_counts_as_one():
+    """The realistic mistype is ONE relation object as the whole section value.
+    `len(dict)` counts its three KEYS, so the counter added to make the report
+    honest over-reported 3 lost relations for 1.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = {"src": "Retry Storm", "dst": "Deadline Rule",
+                             "predicate": "IMPL"}
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("connections_incomplete" in w for w in result["warnings"])
