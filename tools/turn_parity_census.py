@@ -417,12 +417,17 @@ USAGE
                      `tortoise` for --db-path). It selects the GRAPH leg only
                      — it never scopes the record read; the record's tenant is
                      chosen with --org-id/--graph-id. A wrong --graph-name is
-                     indistinguishable from a drained graph, which is why
-                     --expect-empty exists.
+                     NOT the same answer as a drained graph: the name is
+                     checked against the store BEFORE anything is opened
+                     ("Presence", above), so a name the store does not hold
+                     exits 3 naming what it does hold, and never becomes a
+                     graph. A drained graph is the OTHER exit 3 — see
+                     --expect-empty.
     --expect-empty   allow a graph holding ZERO turn-shaped nodes to certify.
-                     Without it that is exit 3: a drained graph and a wrong
-                     --graph-name / --db-path are indistinguishable from the
-                     read side, and the census does not guess which it saw.
+                     Without it that is exit 3. It does NOT bless a wrong
+                     --graph-name / --db-path: the presence check runs first
+                     and refuses those regardless, so this flag can never be
+                     used to pass a target that does not exist.
 """
 
 from __future__ import annotations
@@ -816,7 +821,9 @@ def _refuse_unless_graph_present(proj, requested: str | None) -> None:
     the embedded leg (#11112): seeding a store with `tortoise` only and then
     binding `tortise` left `GRAPH.LIST` at `['tortoise', 'tortise']`. The caller
     here therefore binds with `skip_health_check=True, ensure_indexes=False`,
-    which issues nothing, and only then asks.
+    which issues no `GRAPH.QUERY` (the version probe's `INFO`/`MODULE LIST` may
+    still run, and the embedded leg rewrites its own RDB on open — see the
+    module docstring), and only then asks.
 
     Presence is asked of the STORE (`GRAPH.LIST`, which creates nothing). The
     name asked about is the projection's OWN resolved name, not the caller's
@@ -848,8 +855,28 @@ def _refuse_unless_graph_present(proj, requested: str | None) -> None:
     would classify an ANSWERED refusal as an outage (`tortoise/retry.py`
     records that trap from its own incident, #8827).
     """
-    wanted = getattr(proj, "_graph_name", None) or getattr(
-        proj, "graph_name", None) or requested or "tortoise"
+    # ⛔ PRESENCE-NOT-TRUTHINESS, ON THE NAME ITSELF (#11113 review, P2).
+    # A falsy name is NOT "no name": an `or`-chain here substituted a DIFFERENT
+    # name for it — `FalkorProjection(path, graph_name="")` keeps
+    # `_graph_name == ""` (measured), and `resolve_db_endpoint(uri, "")`
+    # returns `""`, so the guard fell through to `requested` / `"tortoise"`,
+    # verified a graph this run would NOT open, PASSED, and the read then
+    # created the nameless one: `GRAPH.LIST` went `['tortoise']` →
+    # `['tortoise', '']`. That is the #11112 defect one layer down, with this
+    # function's own contract ("asked about the projection's OWN resolved
+    # name") inverted. Neither an empty nor an absent name can be verified, so
+    # both REFUSE before the handle is addressed.
+    wanted = getattr(proj, "_graph_name", None)
+    if wanted is None:
+        wanted = getattr(proj, "graph_name", None)
+    if wanted is None:
+        wanted = requested
+    if not wanted:
+        raise CensusError(
+            f"the graph this run would open has no NAME ({wanted!r}) — so its "
+            "presence cannot be established, and the first query on a nameless "
+            "graph CREATES one. Refused before the handle was addressed "
+            "(#11112); nothing was created.")
     try:
         present = sorted(str(n) for n in proj.db.list_graphs())
     except Exception as exc:
@@ -2215,8 +2242,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expect-empty", action="store_true",
                         help="allow a graph holding ZERO is_episodic nodes to "
                              "certify; without it that is exit 3 (a drained "
-                             "graph and a wrong --graph-name look identical "
-                             "from here)")
+                             "graph). A wrong --graph-name is refused "
+                             "EARLIER, by the presence check, and cannot be "
+                             "blessed by this flag)")
     args = parser.parse_args(argv)
 
     if args.sample < 0:
@@ -2339,10 +2367,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Zero episodic nodes is not evidence of parity — it is the same answer a
     # wrong --graph-name, or a --db-path typo that opens a fresh empty DB, gives
-    # (`FalkorProjection.from_uri` does not verify the graph exists). The record
-    # axis refuses a wrong tenant loudly; the graph axis must refuse a wrong
-    # target too, so an empty graph is exit 3 unless the operator says the
-    # draining is expected (#10017's post-purge re-run).
+    # (`FalkorProjection.from_uri` does not verify the graph exists; the presence
+    # check above does, and it runs FIRST, so by the time this branch is reached
+    # the named graph is KNOWN to exist). The record axis refuses a wrong tenant
+    # loudly; the graph axis refuses a wrong target too — with a DIFFERENT
+    # message and before anything is opened — so an existing-but-empty graph is
+    # exit 3 unless the operator says the draining is expected (#10017's
+    # post-purge re-run).
     # ... and `unidentifiable` is part of that population: a graph whose
     # episodic nodes ALL came back without a usable `t.id` is not an EMPTY
     # graph, and reporting it as "ZERO is_episodic nodes" would be factually
@@ -2353,9 +2384,9 @@ def main(argv: list[str] | None = None) -> int:
     if graph_is_empty and not args.expect_empty:
         sys.stderr.write(
             "turn_parity_census: the graph holds ZERO is_episodic nodes — an "
-            "absence is NOT established (a wrong --graph-name / --db-path is "
-            "indistinguishable from a drained graph). Pass --expect-empty if "
-            "the graph is known to hold no turn nodes.\n")
+            "absence is NOT established. The graph DOES exist (presence was "
+            "checked first); it is its emptiness that is unproven, so pass "
+            "--expect-empty if the graph is known to hold no turn nodes.\n")
         return 3
 
     # ⛔ THE RECORD LEG IS OPENED ONLY WHEN THERE IS SOMETHING TO COMPARE
