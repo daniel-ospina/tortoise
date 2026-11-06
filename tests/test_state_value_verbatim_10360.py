@@ -2643,6 +2643,16 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
     names as a battery: (c) the `4:32` non-clock, (d) `per <unit>` rates,
     (d2) the identifier fail-open, and `20k-mile`/`20000 miles`.
 
+    ⛔ TWO PAIRS IN THAT BATTERY ARE **RE**-PINS, and that is deliberate rather
+    than an oversight: `forty thousand requests per day`/`per week` is already
+    asserted by `test_the_carve_outs_own_ADJACENT_time_units_are_judged`, and
+    `UTC+03:00`/`UTC+3` by
+    `test_a_clock_valid_colon_form_is_excluded_but_a_duration_is_judged`. The
+    rest — `4:32` in both directions, `1:23 seconds`/`83 seconds`, `27:12`,
+    `x4k ms`, `20k-mile` and the two range refusals — had no pin before this
+    test. Repeating the two keeps ONE place that names the whole clause set, so
+    a lane editing a clause finds its verdict beside its siblings.
+
     ⛔ EVERY VERDICT BELOW WAS MEASURED AT `origin/main` `277a559b1`, this file's
     own head, and each assert that holds a row clause names it. SIX of them are
     REFUSALS (`:MM` with a fused unit, its pre-existing `27:12` spelling, an
