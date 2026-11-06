@@ -1303,6 +1303,10 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # non-fence path, so a line that continues a fence would otherwise carry the previous line's
     # answer into the paragraph-state write at the bottom of the loop.
     pushed = False
+    # Whether the PREVIOUS line carried no content (whitespace-only or content-blank). A blank line
+    # ends the open paragraph, and with it §5.2's licence to continue a container WITHOUT re-marking
+    # it — see the item-pop loop below (round 47 review, P1).
+    after_blank = False
     # PARAGRAPH STATE, for §5.2's consumer-side rule (round 34 review, P2). A line is a lazy
     # continuation of the PREVIOUS paragraph only when that paragraph is still open AND in the SAME
     # container — so this is not "the previous line was prose", it is "the previous line was prose,
@@ -1444,15 +1448,62 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             container = None
             own_gap = 0
             _lazy_push = False
-        # ⛔ A BLANK LINE IS BLANK CONTENT, NOT A DEDENT (round 46 review, P1 — a fail-open that swept
-        # in 350,316 bodies). A quote-only line (`>`, `>  `, `> >`) is NON-EMPTY as a raw line but
-        # carries no content after its container prefixes, so `_item_dedented` read it as a dedent,
-        # popped the item — and the HTML block that opened next bound to `None` and could never end.
-        # §4.6 ends types 6/7 at a blank line, which is what `rest.strip()` decides; the pop needs
-        # the same test.
-        if line.strip() and rest.strip():
+            after_blank = True
+        # (round 47 review, P1 — TWO findings, both caused by gating this whole block on `rest.strip()`).
+        # A quote-only line (`>`, `>  `, `> >`) carries no content, so round 46 read it as "blank,
+        # therefore no dedent" and skipped the block below. That third answer is wrong in both
+        # directions, and `_item_dedented`'s COLUMN test cannot decide it on its own:
+        #
+        #   * the pop must FIRE when the blank line's markers put it outside the item — the renderer
+        #     closes `<li>` before the empty `<blockquote>`:
+        #         `- a` + `>` + `  ``` ` + `Closes #100`   renderer `fence`; `origin/main` `[]` (right)
+        #     Suppressing it left the item on the stack, so `_fence_candidate` bound that fence to it
+        #     (`in_list=True`), the next COLUMN-0 line read as a fence-ending dedent, and the freed
+        #     line was re-examined as prose and credited — `[100]`, in BOTH arms. Measured: 43 bodies
+        #     newly credited in a `fence`/`code_block` context over the review's 1,296-body grid, all
+        #     of them attributable to that one suppression.
+        #   * the pop must NOT fire when the blank line stays INSIDE the item's own quote — a blank
+        #     line never ends a list item (§5.2); it only ends the PARAGRAPH:
+        #         `> - item` + `>` + `>   <pre>` + `>` + `> -     Closes #100`   renderer `code_block`
+        #     The column test read `>` as a dedent out of that depth-1 item (residual 0 < content 2),
+        #     popped it — and the html block that opened next bound to `html_item = None`, so nothing
+        #     could end it and round 46's own repro was credited again (this is the shape the round-46
+        #     gate was there for; it is now decided here, where the reason lives).
+        #
+        # And the gate had a second, unrelated cost: `pushed` / `container` / `own_gap` / `_lazy_push`
+        # are assigned ONLY here (the reset above does not fire on `>     `, which is not
+        # whitespace-only as a raw line), so skipping the block carried the previous line's
+        # `pushed=True` forward and the `indent_code` pop below fired on an already-empty stack:
+        #     `- a` + `>     ` + `>     `   strict=True AND indented_code=True -> IndexError
+        # `origin/main` answers `'- a\n>     \n>     '` — round 38's CRASH class (see the reset
+        # above), re-opened by the same gate. Measured: 336 crashing (body, mode) pairs over the
+        # same grid at the gated head, 0 at `origin/main`, 0 at this head.
+        if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
+                # The ONE exception: content-blank, and no marker beyond the item's own depth.
+                if not rest.strip() and _quote_depth(prefix) <= list_items[-1].depth:
+                    break
                 list_items.pop()
+            # ⛔ A BLANK LINE KILLS LAZY CONTINUATION, SO THE ITEM'S OWN MARKERS MUST COME BACK
+            # (round 47 review, P1 — measured, and the third shape is why it is not optional).
+            # §5.2's lazy continuation lets a paragraph line DROP its container markers, and the
+            # column test in `_item_dedented` is deliberately not a marker count (round 40), so a
+            # line that has left the item's quote still reads as "inside" it when its column is
+            # wide enough. That is only ever true for a line CONTINUING AN OPEN PARAGRAPH — a blank
+            # line ends the paragraph, so from the next line on the containers must be re-marked.
+            # Without this, keeping the item across a blank line (the branch above) bound the next
+            # OPENER to an item whose quote had closed:
+            #     `> - item` + `>` + `  ``` ` + `Closes #100`   renderer `fence` -> `[100]` FAIL-OPEN
+            #     `> - a`    + `>` + `  <div>` + `-     Closes #100`  renderer `html_block` -> `[]` LOST
+            # Both were `origin/main`'s answer before round 46, because `main` happened to pop the
+            # item on the blank line for the wrong reason; deciding it here keeps the item alive
+            # where the renderer does and drops it where the renderer does. A depth-0 item needs no
+            # marker at all, so this loop never touches it.
+            if after_blank:
+                while (list_items
+                       and _fence_line_column(line, list_items[-1].depth)[0]
+                       < list_items[-1].depth):
+                    list_items.pop()
             # The container THIS line sits in, captured BEFORE the line can push its own
             # item: an indented code block's first line is very often itself a list marker
             # (`    - [ ] x`), and reading the stack after the push measures that line
@@ -1482,23 +1533,57 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 list_items.append(
                     _ListItem(_quote_depth(prefix), rest_col,
                               len(prefix) + rest_col))
+            # Read by the NEXT line: a blank line (or a content-blank one) ends the paragraph, and
+            # with it the licence to continue a container without re-marking it.
+            after_blank = not rest.strip()
         # ── §4.6 html-block state: the state FOR THIS LINE, advanced once per line ────────────────
         # Computed here, before every `continue` below, so the fence branch and the code branches all
         # read the same answer (a state advanced inside a branch is a bug waiting for the next shape).
+        # ⛔ A LINE THAT ENDS ONE BLOCK CAN OPEN THE NEXT (round 47 review, P2 — the opener scan below
+        # used to run only on a line that found NO block open, so a line that LEFT the block's
+        # container while carrying a new opener opened nothing, and the marker line under it was
+        # blanked by the wide-gap rule):
+        #     `> <div>` + `> >` + `  <div>` + `-     Closes #100`   renderer `html_block` (the
+        #     surviving block is the `  <div>`), `origin/main` `[]`, gated head `[100]`, and the
+        #     gated head was right by accident — its blank-line test ended the first block a line
+        #     early. 21 such bodies in the review grid, all in the LOST-CLOSE direction.
+        # The scan stays OUT of the two in-block endings on purpose: a closer line (types 1-5) and a
+        # blank line (types 6/7) end the leaf block AT that line, so anything after it still belongs
+        # to it and a new block may only start on the NEXT line.
+        _scan_for_opener = False
         if html_closer is not None:
             if (_quote_depth(prefix) < html_depth
                     or (html_item is not None and _item_dedented(line, html_item))):
                 _html_here = False            # left the container that held the block
                 html_closer = None
+                _scan_for_opener = True       # …so this line is FRESH, and may open its own
             else:
                 _html_here = True
                 if html_closer:
                     if html_closer.lower() in rest.lower():
                         html_closer = None    # types 1-5: this line carries the block's own closer
-                elif not rest.strip():
-                    _html_here = False        # types 6/7: the next blank line ends the block
+                # ⛔ "BLANK" IS MEASURED AT THE BLOCK'S OWN DEPTH, NOT AFTER EVERY `>` IN THE PREFIX
+                # (round 47 review, P2 — 180 LOST closes against `origin/main`, every one of them a
+                # body the renderer keeps as prose). §4.6's leaf block ends at a BLANK line, and a `>`
+                # that is LITERAL TEXT inside the block is not one — the round-43 decision one screen
+                # up ("an HTML block's own TEXT is read, not hidden") says the same thing from the
+                # content side. Consuming every marker in the prefix (`rest.strip()`) made a `>`
+                # written at the block's own depth or deeper read as an end condition:
+                #     `<div>` + `>` + `-     Closes #100`            renderer `html_block` (one block),
+                #         `origin/main` `[100]`, gated head `[]`
+                #     `> <div>` + `> >` + `> -     Closes #100`     same, `origin/main` `[100]`, head `[]`
+                # The distinction the fence path already makes (`_fence_line_column`, "consume at most
+                # `depth` markers — a `>` inside a block is text") is the one that is right here: a
+                # line is blank for THIS block only when it carries no marker beyond the `html_depth`
+                # the block opened at. At depth 0 only a raw-block line ends it; at depth 1 `> >` does
+                # not, `>` does. The ITEM term needs nothing extra — a line that dedents out of the
+                # item already ended the block in the branch above.
+                elif _quote_depth(prefix) <= html_depth and not rest.strip():
+                    _html_here = False        # types 6/7: a blank line AT THIS DEPTH ends the block
                     html_closer = None
         else:
+            _scan_for_opener = True
+        if _scan_for_opener:
             _html_here = False
             _opened = (_html_block_open(rest) if line.strip() else None)
             if _opened is None and line.strip():
