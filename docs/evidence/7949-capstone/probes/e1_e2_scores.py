@@ -2051,8 +2051,9 @@ def score(repo: Path = _ROOT) -> dict:
     # `capstone_measure.py` reads it into `gate_drops_total` and renders it into the
     # scored E1 note as `reports value_gate drops <N> of <M> Objects with its positive
     # controls alive`, so an unvalidated value publishes a mechanism claim nothing
-    # measured. The ceiling is this same run's `objects` (`e1_gate_drops.py:84`
-    # writes `len(drops)`, and `drops` is keyed by object name), and the head loop has
+    # measured. The ceiling is this same run's `objects` (`e1_gate_drops.py`'s `measure`
+    # writes `drops_total` as `len(drops)` — `null` when the Objects census is empty,
+    # which the probe refuses on with exit 2 — and `drops` is keyed by object name), and the head loop has
     # already refused a record whose `objects` disagrees with the ON arm's census.
     # ⛔ The gate-drops record is REUSED, not re-read (#10610 review at
     # `1c2130dd9`, P3): `gates_record` above is the read whose graph and census were
@@ -2064,9 +2065,9 @@ def score(repo: Path = _ROOT) -> dict:
     # ⛔ THE CEILING WAS A BOUND, NOT A RECONCILIATION (#10610 review at
     # `6e28a20e1f`, P2). `_count(..., ceiling=gate_objects)` refuses a value
     # above the Object population, which is necessary and not sufficient: the
-    # SAME record carries the drop census itself (`e1_gate_drops.py:83` writes
-    # `value_gate_drops` as a name-keyed dict, `:84` writes `len(drops)` beside
-    # it), and nothing in this file had ever read it. So any value in
+    # SAME record carries the drop census itself (the probe's `measure`
+    # writes `value_gate_drops` as a name-keyed dict and `drops_total` as
+    # `len(drops)` beside it), and nothing in this file had ever read it. So any value in
     # `[0, objects]` scored — measured at the pre-fix head, `drops_total: 61`
     # (equal to the 61-Object ceiling) beside a shipped `value_gate_drops: {}`
     # exited 0 and the record emitted `drops_total: 61`, where 62 was refused.
@@ -2096,10 +2097,11 @@ def score(repo: Path = _ROOT) -> dict:
     #   2. every key IS one of this run's `object_names` (a drop of something the run
     #      never wrote is not a drop);
     #   3. every value is a STRING — the producer writes
-    #      `value_gate.mechanical_verdict(name)["rule_id"]` (`e1_gate_drops.py:73`);
+    #      `value_gate.mechanical_verdict(name)["rule_id"]` (the probe's `measure`);
     #   4. `drops_among_bare_definite` — the record's SECOND statement of the same
-    #      drops, written unconditionally at `e1_gate_drops.py:85` as
-    #      `[n for n in bare if n in drops]` and read by NOTHING until now — is
+    #      drops, written by the probe's `measure` as `[n for n in bare if n in
+    #      drops]` on every run whose Objects census is non-empty (`null` otherwise,
+    #      beside that probe's own exit-2 refusal) and read by NOTHING until now — is
     #      reconciled against the census and the names, so an internally
     #      contradictory record (a bare-definite name dropped, with an empty
     #      `drops_among_bare_definite`) cannot pass on its total alone.
@@ -2133,15 +2135,17 @@ def score(repo: Path = _ROOT) -> dict:
             "the count IS the names it dropped, so a total that disagrees with "
             "its own census is a number edited away from the run")
     # The record's SECOND statement of the same drops, reconciled. `[]` is the
-    # legitimate shipped reading — the producer writes the field unconditionally,
-    # so an ABSENT one is an edit rather than another producer's older shape.
+    # legitimate shipped reading — the producer writes the field on every run
+    # whose Objects census is non-empty (`null` when empty, and such a record is
+    # already refused on `drops_total` first) — so an ABSENT one is an edit.
     among_bare = gate_record.get("drops_among_bare_definite")
     if not isinstance(among_bare, list) or any(
             not isinstance(member, str) for member in among_bare):
         raise _refuse(
             f"{EVIDENCE / GATE_DROPS} carries no `drops_among_bare_definite` "
-            "list — the producer writes it on every run as the bare-definite "
-            "subset of the drops, so a record without it cannot be checked "
+            "list — the producer writes it on every run whose Objects census is "
+            "non-empty, as the bare-definite subset of the drops, so a record "
+            "without it cannot be checked "
             "against its own census")
     expected_bare_drops = [n for n in gate_names
                            if _is_bare_definite(n) and n in gate_census]

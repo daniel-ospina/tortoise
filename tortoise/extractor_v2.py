@@ -156,6 +156,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
+from . import identity_hold as _identity_hold  # #10997: S3's HOLD
 from . import referentiality as _referentiality  # #11021: the referentiality test
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
@@ -3099,6 +3100,77 @@ def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
     return isinstance(ran, list) and key in ran
 
 
+def _hold_endpoint(hold_store: object | None, held: list[dict], *,
+                   content: str, where: str, session_ref: str,
+                   operator: dict | None, ref: str | None = None) -> dict:
+    """Record ONE unresolved operator endpoint as HELD — with its edge (#10997).
+
+    The record keeps the OPERATOR, not just the endpoint, because `#2552` says the
+    disposition must hold *the edge together with its endpoint*: an endpoint held
+    alone would trade a duplicate for a lost operator edge, and I2 forbids that
+    trade. The record is appended to the run's `held` list **before** any store
+    is written, so a store that cannot be written still reports the hold instead
+    of losing it (`persisted: False`) — the run's own report is the floor.
+
+    ⛔ The store is OPTIONAL, and its absence is stated rather than smoothed over:
+    a held item nobody persists cannot be carried forward, which is a real
+    (loudly reported) limitation of the caller, never a silent drop.
+    """
+    rec: dict = {
+        "kind": _identity_hold.HOLD_ENDPOINT,
+        "content": content,
+        # ⛔ The ORIGINAL ref, kept beside the clamped `content` (#10997 review
+        # P1). `_write_span` truncates at `_MAX_CONTENT`, but the operator that
+        # travels with the record still names the FULL ref — a drain that
+        # re-minted from `content` would register a key the restored operator
+        # cannot resolve, so the prune would discard the Point and the item
+        # would be resolved into nothing. `content` stays the KEY (it is what the
+        # entity/value guards were evaluated against); `ref` is what gets minted.
+        "ref": str(ref or content),
+        "where": where,
+        "session_ref": session_ref,
+        "operator": dict(operator or {}),
+        # the same edge in the store's list form, so the run's own `held` and the
+        # persisted record read identically (#10997 review round 4, P1)
+        "operators": [dict(operator)] if operator else [],
+        "persisted": False,
+    }
+    # ⛔ The run's `held` list is an IDENTITY report, and `stats.held` is read off
+    # it — so every record carries the content-addressed key even when no store
+    # is supplied (#10997 review round 2, P2). Keyed on `where` instead, two
+    # operators naming ONE ref counted as two held identities in exactly the
+    # path that ships (`hold_store=None`), and the epic's "held count returns to
+    # zero" census would have read an occurrence count. The key is a pure
+    # function of the normalised text, so the census is the same either way.
+    rec["key"] = _identity_hold.hold_key(_identity_hold.HOLD_ENDPOINT, content)
+    held.append(rec)
+    if hold_store is None:
+        return rec
+    try:
+        stored = hold_store.hold(
+            _identity_hold.HOLD_ENDPOINT, content, where=where,
+            session_ref=session_ref, operator=rec["operator"], ref=rec["ref"])
+        rec["persisted"] = True
+        rec["reopened"] = bool(stored.get("reopened"))
+        # ⛔ AN ALREADY-RESOLVED KEY IS NOT A HOLD (#10997 review round 4, P2).
+        # `hold()` refuses to reopen a RESOLVED key and returns the record it
+        # already has — carrying the id it minted on an earlier resolved run.
+        # Reporting that as "held, and carried in the hold store" was three false
+        # signals at once: the caller then dropped the operator on the ordinary
+        # "src/dst did not resolve" arm, the census counted a candidate that was
+        # committed turns ago, and the epic's own acceptance ("the held count
+        # returns to zero") became unreachable — every ambiguous run after a
+        # resolution re-inflated it by one. The store already knows the answer for
+        # a completed key, so the caller wires the ref to it (the idempotent
+        # consumer's "return the recorded outcome" rule) and holds nothing.
+        if not rec["reopened"] and stored.get("state") == _identity_hold.HOLD_RESOLVED:
+            rec["already_resolved"] = True
+            rec["minted_id"] = stored.get("minted_id")
+    except Exception as exc:  # a store failure must not lose the hold itself
+        rec["persist_error"] = f"{type(exc).__name__}: {exc}"
+    return rec
+
+
 def _identity_report(search: dict, candidates: dict) -> dict:
     """§4.4 G3's run-level report — how much of this run's identity is unresolved.
 
@@ -5231,8 +5303,9 @@ def _resolve_slot_refs(slots: dict | None, entity_keys: set,
     kind) — a stray slot must never sink the whole commit (the
     operator-drop pattern; Layer-1's (name, kind) gate then never fires on
     S5 output). event slots pass through untouched: they are event-as-
-    content (#1417 B2) and the #1370 write path resolves them against
-    events.
+    content (#1417 B2) and NOTHING resolves them against entities — that
+    binding belongs to the #1417 ``aboutEvent`` work, which
+    ``subject_binding._ROLE_TARGET`` deliberately excludes (#11021 P3-a).
     """
     if not slots:
         return slots
@@ -8653,7 +8726,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   master: dict | None = None,
                   session_date: str | None = None,
                   edus: list[dict] | None = None,
-                  merge_flagged: frozenset[str] | set[str] = frozenset()) -> dict:
+                  merge_flagged: frozenset[str] | set[str] = frozenset(),
+                  hold_store: object | None = None) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -8681,12 +8755,34 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         instruction being skipped by the model. A minted endpoint no
         surviving operator references is pruned again.
 
+    ⛔ #10997 (§4.4 I1, the MINT half): the mint is an identity ASSERTION, so it
+    is licensed only by a lookup that RESOLVED. On an `unresolved`/`partial`
+    lookup the pre-pass *holds* the edge WITH its endpoint (#2552) instead — no
+    Point is fabricated from a ref nothing checked — and the held set is
+    reported in ``held``. A ``hold_store`` (``identity_hold.open_store``)
+    carries it to a later run against the same graph, where a resolved lookup
+    commits it exactly once.
+
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
-             "minted_kinds", "stats"}.
+             "minted_kinds", "stats", "held", "held_drained", "hold"}.
     """
     master = master or build_master_list()
     idx = _index_search(search)
     warnings: list[str] = []
+    # #10997: the run-level identity state the mint gate reads, and the two
+    # populations it reports. `held` is what this run did NOT mint and did NOT
+    # drop (I2). `held_drained` is this run's DRAIN of what a previous run held —
+    # one entry per ATTEMPT, each carrying its own `committed` flag, because a
+    # drain can legally be released again (the #2552 prune discarded the Point,
+    # so the item is HELD again). ⛔ The run-level numbers say which is which:
+    # `stats["held_drained"]` counts the entries that COMMITTED and
+    # `stats["held_drain_attempted"]` counts the attempts — a census that reads
+    # "committed" while nothing committed is a false signal on the epic's own
+    # acceptance ("the held count returns to zero"), which is why the two are
+    # never collapsed into one number (#10997 review round 3).
+    _lookup = _failure_policy.lookup_state(search)
+    held: list[dict] = []
+    held_drained: list[dict] = []
 
     # ── entities (dependency order 1) ─────────────────────────────────────
     payload_entities: list[dict] = []
@@ -9398,7 +9494,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # still report ``operator_endpoints_minted == 0``.
     minted_endpoints: list[str] = []
 
-    def _mint_endpoint(ref: str, where: str) -> str:
+    def _mint_endpoint(ref: str, where: str, operator: dict | None = None) -> str:
         # ⛔ `_write_span`, never a bare `[:cap]` (review cycle 15, measured): a
         # HARD cut stores the truncated prefix of a split token, so
         # `_mint_endpoint` fabricated the value `… p95 hit 4` out of
@@ -9504,6 +9600,57 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"{where} named the ENTITY {content[:60]!r} — the "
                 "OPERATOR REFERENCING rule forbids entity endpoints, so no "
                 "claim Point is fabricated for it")
+            return ""
+        # ── #10997 (§4.4 I1): THE MINT IS AN IDENTITY ASSERTION ─────────────
+        # It is licensed by a lookup that RESOLVED, and by nothing else. On an
+        # `unresolved`/`partial` run this ref's own query never ran (a minted
+        # endpoint is by definition NOT one of the model's emitted points, so
+        # `_derive_queries` derived no query for it), and fabricating a
+        # `statement` Point from it asserts `new` about a check that did not
+        # happen — the fail-open §4.4 names as the DUPLICATE MANUFACTURER.
+        # ⛔ The disposition is HOLD, and it holds the EDGE WITH ITS ENDPOINT
+        # (#2552): the operator travels in the record, so the drain re-emits
+        # both and the edge is not traded for the duplicate. ⛔ NOT a drop: I2
+        # forbids trading a duplicate for memory loss, and the held set is
+        # reported on every run (`held`) whether or not it could be persisted.
+        if _lookup != _failure_policy.LOOKUP_RESOLVED:
+            rec = _hold_endpoint(hold_store, held, content=content, where=where,
+                                 session_ref=session_id, operator=operator, ref=ref)
+            # ⛔ The store already RESOLVED this identity on an earlier run: the
+            # ref is not ambiguous any more, it is KNOWN — wiring it to the id the
+            # store recorded is the idempotent-consumer "return the recorded
+            # outcome" arm, and it is the only one that neither re-holds a
+            # committed identity (#10997 review round 4, P2) nor drops the edge
+            # (I2). The recorded id was committed against THIS graph (the store is
+            # per-graph), so the endpoint it names exists there.
+            if rec.get("already_resolved") and rec.get("minted_id"):
+                pid = str(rec["minted_id"])
+                point_ids[n] = pid
+                _full_prev = _norm(ref)
+                if _full_prev != n:
+                    point_ids.setdefault(_full_prev, pid)
+                # It is not held and it is not dropped, so it is not in `held`:
+                # the census stays the epic's own acceptance (a resolved identity
+                # returns the held count to zero).
+                held.remove(rec)
+                warnings.append(
+                    f"operator endpoint WIRED, not re-held (#10997 S3 HOLD): "
+                    f"{where} named {content[:60]!r}, whose identity was already "
+                    f"resolved to {pid} by an earlier run against this graph — "
+                    "the edge is wired to it and nothing is held")
+                return pid
+            if rec.get("persist_error"):
+                _carried = (", and the hold store write FAILED ("
+                            f"{rec['persist_error']}) so it is NOT carried forward")
+            elif rec["persisted"]:
+                _carried = " in the hold store"
+            else:
+                _carried = ", NOT persisted (no hold store was supplied)"
+            warnings.append(
+                f"operator endpoint HELD not minted (#10997 S3 HOLD): {where} "
+                f"named {content[:60]!r} but the identity lookup was {_lookup}, "
+                "so whether this endpoint already exists was never established "
+                "— held with its edge" + _carried)
             return ""
         # ── #4716 Part 2 (Defect A): the mint is not a side door around the
         # consolidation rule the ordinary point path already implements ~100
@@ -9722,14 +9869,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         for _side in ("src", "dst"):
             _ref = str(_op.get(_side, "") or "")
             if _ref and not _resolve(_ref):
-                _mint_endpoint(_ref, f"{_op_type} {_side}")
+                _mint_endpoint(_ref, f"{_op_type} {_side}", _op)
         if _op_type == "MITIGATES":
             _target = _op.get("target") or _op.get("target_edge") or {}
             if isinstance(_target, dict):
                 for _side in ("src", "dst"):
                     _ref = str(_target.get(_side, "") or "")
                     if _ref and not _resolve(_ref):
-                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}")
+                        _mint_endpoint(_ref, f"MITIGATES target_edge {_side}", _target)
 
     # source-turn map over the emitted payload points — the NAND-direction
     # canonicalizer's input (#2552 op_02: newer counter-claim must be src).
@@ -9743,10 +9890,136 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if type(t) is int:
             turn_by_point[_pt["id"]] = t
 
+    # ── #10997 DRAIN: held edges whose identity THIS run resolved ──────────
+    # The named path out of the hold: a later run against the same graph whose
+    # lookup RESOLVED. `claim` makes it exactly-once in both directions (a second
+    # run, or a second pass here, cannot mint the same identity twice) and
+    # `confirm` binds the key to the id it minted. The endpoint goes through the
+    # SAME `_mint_endpoint` the ordinary pre-pass uses — one mint, so the
+    # consolidation fold (#4716), the identity window and the dedup cannot
+    # diverge between a fresh mint and a drained one.
+    _held_operators: list[dict] = []
+    #: (key, point id) pairs a drain has CLAIMED and minted but NOT yet
+    #: confirmed. ⛔ #10997 review P0: a mint is PROVISIONAL until the payload
+    #: knows it survived — the mint-before-wire prune below drops an endpoint no
+    #: surviving operator references. Confirming in the drain loop marked an item
+    #: `resolved` that the payload had already discarded: the hold's own store
+    #: leaking the memory I2 forbids leaking, while printing "COMMITTED".
+    _pending_confirm: list[tuple[str, str, str]] = []
+    if hold_store is not None and _lookup == _failure_policy.LOOKUP_RESOLVED:
+        # ⛔ RECLAIM BEFORE READING (#10997 review round 3): `claim` is a STATE, and
+        # the only thing that makes it recoverable is something that acts on it.
+        # A drain killed between `claim` and the settle leaves a record no later
+        # code path releases — `pending()` is this loop's entire input, so the item
+        # would be invisible to EVERY later drain (the I2 loss the store exists to
+        # prevent, one state further along). This is the idle reclaim scan SQS and
+        # Redis Streams converged on, bounded well above a live drain's own runtime.
+        try:
+            _reclaimed = hold_store.reclaim_stale()
+        except Exception as exc:  # a reclaim sweep must not sink the whole run
+            _reclaimed = []
+            warnings.append(
+                "hold store RECLAIM FAILED (#10997): the drain could not reclaim "
+                "claims left by an interrupted run "
+                f"({type(exc).__name__}: {exc}); those items stay claimed until a "
+                "later run can reclaim them")
+        else:
+            if _reclaimed:
+                warnings.append(
+                    f"hold store RECLAIMED (#10997): {len(_reclaimed)} item(s) left "
+                    "CLAIMED by a drain that never finished were returned to "
+                    "pending and are drained by this run")
+        try:
+            _drainable = hold_store.pending()
+        except Exception as exc:  # a store read must not sink the whole run
+            _drainable = []
+            warnings.append(
+                "hold store UNREADABLE (#10997): the drain was skipped because "
+                f"reading the held set failed ({type(exc).__name__}: {exc}); "
+                "the run's own candidates are unaffected")
+        for _rec in _drainable:
+            _claimed = False
+            try:
+                if not hold_store.claim(_rec["key"]):
+                    continue
+                _claimed = True
+                # ⛔ The ORIGINAL ref, not the truncated `content` (review P1):
+                # `_write_span` clamps the content to `_MAX_CONTENT`, while the
+                # restored operator still carries the untruncated ref — draining
+                # from `content` would mint a key the operator cannot resolve and
+                # the prune would then discard it.
+                _pid = _mint_endpoint(
+                    _rec.get("ref") or _rec["content"],
+                    f"drained {_rec.get('where') or 'held endpoint'}")
+                if not _pid:
+                    # The mint produced nothing (refused / an entity / empty) —
+                    # the item goes back to PENDING rather than leaking out of
+                    # the drainable set on a claim that minted nothing.
+                    hold_store.release(_rec["key"])
+                    continue
+            except Exception as exc:  # a store write must not sink the run
+                # ⛔ A claim taken and then abandoned is INVISIBLE to every later
+                # drain: `pending()` lists only HOLD_PENDING, so a key left
+                # CLAIMED by a raise inside this block would never be drained
+                # again — the silent I2 loss the store exists to prevent
+                # (#10997 review round 2, P2). Give the claim back before
+                # reporting the failure.
+                if _claimed:
+                    with contextlib.suppress(Exception):
+                        hold_store.release(_rec["key"])
+                warnings.append(
+                    "hold store WRITE FAILED (#10997): the drain could not take "
+                    f"{_clip(_rec.get('content'), 60)!r} ({type(exc).__name__}: "
+                    f"{exc}) — it stays held for a later run")
+                continue
+            _pending_confirm.append((_rec["key"], _pid, _rec.get("where") or ""))
+            held_drained.append({"key": _rec["key"], "content": _rec["content"],
+                                 "point_id": _pid, "where": _rec.get("where") or "",
+                                 "committed": False})
+            if _rec.get("operators") or _rec.get("operator"):
+                # ⛔ EVERY edge the record carries (#10997 review round 4, P1).
+                # The store key is the REF, so two operators naming one unresolved
+                # ref share a record; replaying only the first dropped the second
+                # edge for good while the run reported both as carried.
+                for _held_op in _identity_hold.operators_of(_rec):
+                    _held_operators.append(dict(_held_op))
+
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
     mitigates_pending: list[dict] = []
-    for op in embed_list.get("operators", []) or []:
+    # #10997: the run's OWN operators first, then the edges the drain above
+    # restored — deduplicated on the EDGE's identity (src, dst, op_type, plus a
+    # MITIGATES' target), because run 2 usually re-emits the operator it held in
+    # run 1 and ONE edge must not be emitted twice for it.
+    _run_ops = list(embed_list.get("operators", []) or [])
+
+    def _op_identity(o: object) -> tuple:
+        # ⛔ The identity pass 2 EMITS on (`identity_hold.drain_identity`): _norm
+        # endpoints, op_type upper, a MITIGATES' target PAIR — NOT the store's
+        # `operator_identity`, whose case-preserving form missed its own twin.
+        return _identity_hold.drain_identity(o)
+
+    # ⛔ And deduplicated AMONG THEMSELVES, not only against the run's own
+    # operators (#10997 review round 4, P2). One operator whose `src` AND `dst`
+    # are both unresolved is held twice — the pre-pass asks `_mint_endpoint`
+    # about each side, each call carrying the same `_op` — so the drain
+    # restored the same edge twice. Both copies survived the old filter, both
+    # were appended to `payload_operators` (the IMPL/NAND arm has no membership
+    # check), and `reconcile_payload` then marked EACH copy `new` against an
+    # unchanged GraphState: `net_new` and the declared write count — the budget
+    # numerators — counted one edge twice. The `#4971` probe keeps the graph
+    # write itself idempotent, so this was census/budget inflation, not a
+    # duplicate node.
+    _run_op_ids = {_op_identity(o) for o in _run_ops}
+    _dropped_ids: set[tuple] = set()
+    _all_ops = list(_run_ops)
+    for _held_op in _held_operators:
+        _oid = _op_identity(_held_op)
+        if _oid in _run_op_ids or _oid in _dropped_ids:
+            continue
+        _dropped_ids.add(_oid)
+        _all_ops.append(_held_op)
+    for op in _all_ops:
         if not isinstance(op, dict):
             warnings.append(f"non-dict operator entry {op!r} skipped")
             continue
@@ -9866,6 +10139,65 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "surviving operator — dropped rather than committing an "
                 "unsupported claim Point")
 
+    # ── #10997 SETTLE the drained claims (review P0) ───────────────────────
+    # ⛔ A drained item is confirmed ONLY if its Point survived the prune above,
+    # and every other claim is RELEASED back to `pending` — otherwise the store
+    # marks an identity resolved that the payload threw away, and the item is
+    # lost for good (the exact I2 loss this module exists to prevent).
+    if _pending_confirm and hold_store is not None:
+        # ⛔ "did my Point survive?" is NOT the same question as "is it in
+        # `payload_points`" (#10997 review round 2, P1). A drain can legally
+        # return an id that never enters the payload: the #4716 NOOP fold
+        # resolves a ref against a PRIOR point (`_decision.prior_id`), and that
+        # point is already in the graph, so it is neither minted nor appended.
+        # Asking membership alone then reported "no surviving operator
+        # references it, so the Point was pruned" about an item whose edge is
+        # in the payload — and released the claim, so the store re-drained it on
+        # every resolved run forever and the held count could never return to
+        # zero (the epic's own acceptance). The question a fold answers is
+        # "is it still WIRED?", so survival is payload membership OR a
+        # reference from a surviving operator.
+        _surviving = {str(p.get("id")) for p in payload_points}
+        _wired: set[str] = set()
+        for _po in payload_operators:
+            _wired.add(str(_po.get("src") or ""))
+            _wired.add(str(_po.get("dst") or ""))
+            _tgt = _po.get("target")
+            if isinstance(_tgt, dict):
+                _wired.add(str(_tgt.get("src") or ""))
+                _wired.add(str(_tgt.get("dst") or ""))
+        for _key, _pid, _where in _pending_confirm:
+            _entry = next((e for e in held_drained if e["key"] == _key), None)
+            if _pid in _surviving or _pid in _wired:
+                try:
+                    hold_store.confirm(_key, _pid)
+                except Exception as exc:
+                    warnings.append(
+                        "hold store WRITE FAILED (#10997): the drain minted "
+                        f"{_pid} but could not confirm it ({type(exc).__name__}: "
+                        f"{exc}) — the key stays claimed and the next drain will "
+                        "find it already held")
+                    continue
+                if _entry is not None:
+                    _entry["committed"] = True
+                warnings.append(
+                    f"held endpoint COMMITTED (#10997 drain): {_where} held in an "
+                    f"earlier run is now resolved and was minted as {_pid} "
+                    "(exactly once — a resolved key is never re-held or re-minted)")
+                continue
+            # ⛔ Its edge did not survive, so the Point was pruned: the item goes
+            # BACK to the hold rather than being confirmed into a resolution the
+            # payload does not contain.
+            with contextlib.suppress(Exception):
+                hold_store.release(_key)
+            if _entry is not None:
+                _entry["committed"] = False
+            warnings.append(
+                f"held endpoint NOT committed (#10997 drain): {_where} was "
+                f"drained and minted as {_pid}, but no surviving operator "
+                "references it, so the Point was pruned and the item is HELD "
+                "again for a later run")
+
     # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
     # Never from content alone: only the embed list's additive `retractions`
     # refs (resolved with the never-guess discipline) produce deletions.
@@ -9969,6 +10301,31 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             f"emit (a NOOP/duplicate/MERGE folded it away): "
             + ", ".join(sorted({str(m.get("surface")) for m in unresolved})[:8]))
 
+    if held:
+        _held_ids = {r.get("key") or (r["content"], r["where"]) for r in held}
+        # ⛔ The carry-forward clause describes what ACTUALLY persisted, not
+        # whether a store object was passed (#10997 review round 4, P3). With a
+        # store that raises on write (read-only volume, full disk, bad
+        # permissions) each per-occurrence warning already said "the hold store
+        # write FAILED … so it is NOT carried forward", and this aggregate line
+        # said the opposite — two contradicting warnings in one list, on the line
+        # an operator/census reads.
+        _persisted = sum(1 for r in held if r.get("persisted"))
+        if hold_store is None:
+            _carried = "; NOT carried forward — no hold store was supplied"
+        elif _persisted == len(held):
+            _carried = ("; carried in the hold store for the next run against "
+                        "this graph")
+        else:
+            _carried = (
+                f"; {_persisted} of {len(held)} occurrence(s) carried in the "
+                f"hold store, {len(held) - _persisted} NOT persisted (the store "
+                "write failed) and therefore NOT carried forward")
+        warnings.append(
+            f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held because their "
+            f"identity lookup was {_lookup} — not minted (I1) and not dropped "
+            "(I2)" + _carried)
+
     return {
         "payload": payload,
         "noops": noops,                # E7 (D4): result-level, NOT in the payload
@@ -9979,10 +10336,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "link_before_create": link_before_create,
         "warnings": warnings,
         "minted_kinds": minted,
+        "held": held,                  # #10997: HELD — never minted (I1), never dropped (I2)
+        "held_drained": held_drained,  # DRAIN ATTEMPTS this run, each with its own "committed" flag (not a committed count)
+        "hold": {"store_supplied": hold_store is not None,
+                 "store": (hold_store.summary()
+                           if hold_store is not None else None)},
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
             "operator_endpoints_minted": len(minted_endpoints),
+            # #10997 review P2: an IDENTITY count, not an occurrence count — one
+            # ref named by two operators is ONE held item (one store key).
+            "held": len({r.get("key") or (r["content"], r["where"])
+                         for r in held}),
+            # #10997 review round 3: the COMMITTED subset, not `len(held_drained)`.
+            # A run that drains, mints and then PRUNES every endpoint reported
+            # `held_drained=N` with `committed: False` on all N — a census that
+            # reads as success on the epic's own acceptance ("the held count
+            # returns to zero") while nothing was committed. The attempt count is
+            # kept beside it rather than dropped, so the two facts stay readable.
+            "held_drained": sum(1 for e in held_drained if e["committed"]),
+            "held_drain_attempted": len(held_drained),
             "tier_a_points": tier_a_points,
             "noops": len(noops),
             "merges": len(merges),
@@ -10770,9 +11144,11 @@ def _carried_holds(rows: object) -> dict[str, str]:
 
 
 #: The participant-slot roles Layer-1 resolves against the EMITTED entities
-#: (``_resolve_slot_refs``). ``slots.event`` is deliberately absent: it is
-#: event-as-content (#1417 B2), resolved by the write path against events, so a
-#: held SURFACE name in it is not a reference to an entity (#11021).
+#: (``_resolve_slot_refs``). ``slots.event`` is deliberately absent: it binds
+#: event-as-content (#1417 B2) and NOTHING resolves it against the emitted
+#: entities — its binding belongs to the #1417 ``aboutEvent`` work, which
+#: ``subject_binding._ROLE_TARGET`` deliberately excludes — so a held SURFACE
+#: name in it is not a reference to an entity (#11021).
 _SLOT_ENTITY_ROLES = ("subject", "object")
 
 
@@ -10945,13 +11321,17 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     derived and the model-emitted path, so a hallucinated 300-character surface
     cannot 422 the whole session (review P1: the model path bypassed the clamps).
 
-    ⚠️ **A ``span`` entry is read as model offsets ONLY when it declares no
-    provenance** (or declares \"model\"). A record this module already derived
-    carries ``span_source: quote|narrative`` and pass 2 re-reads it through this
-    path — labelling those offsets \"model\" claimed the model emitted an address
-    that came from the cue's own search, on every shipped record (review at
-    ``41fb0c65e``, P1: \"a consumer that resolves the span per ``span_source``
-    reads the wrong bytes\").
+    ⚠️ **A declared ``span`` provenance is a CLAIM and must VERIFY.** An entry
+    that declares none (or declares "model") is read as model offsets. One that
+    declares ``quote``/``narrative`` keeps that space ONLY when its offsets are
+    exactly where that haystack puts the surface — otherwise it is demoted to
+    ``"model"``, so a fabricated ``span_source`` cannot ship an address that
+    names bytes the surface never occupied (review cycle 4, P2). A record this
+    module already derived carries ``span_source: quote|narrative`` and pass 2
+    re-reads it through this path — labelling those offsets "model" claimed the
+    model emitted an address that came from the cue's own search, on every
+    shipped record (review at ``41fb0c65e``, P1: "a consumer that resolves the
+    span per ``span_source`` reads the wrong bytes").
 
     ⛔ ``isinstance(True, int)`` is ``True``, and ``True`` is not an offset: a
     boolean offset is DROPPED, not coerced to ``1``. ``commit_schema.validate_span``
@@ -11244,10 +11624,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
     decision-only model that answers *"should this candidate exist at all?"*.
-    Off-path only when ``vet_arbiter`` is ``None`` **and** all three env
-    switches are off: ``TORTOISE_VET``,
-    ``TORTOISE_VALUE_GATE`` (its ``#4899`` predicate runs inside this pass) and
-    ``TORTOISE_S2_DECISION_SEAM`` (seam arbiter even vs ``TORTOISE_VET=0``; can ``DISCARD``).
+    Off-path only when ``vet_arbiter`` is ``None`` **and** ``TORTOISE_VET`` is off **and**
+    ``TORTOISE_S2_DECISION_SEAM`` is unarmed **and** ``TORTOISE_VALUE_GATE`` reads falsy (``0``,
+    ``false``, and — per ``env_truthy`` — blank or garbage): its leaf reader DEFAULTS ON (#10996), so
+    *unsetting* it is the ON arm and only an explicit falsy value takes this pass off-path.
     A supplied ``vet_arbiter`` arms both passes on its own (``vet_enabled``'s
     FIRST term), so with every switch off an injected arbiter still runs them —
     the state the capstone probes and the seam's armed tests drive.
@@ -11742,7 +12122,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                   "supersessions": [], "noops": [], "deletions": [],
                   "merges": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
-                  "minted_kinds": [], "stats": {}}
+                  "minted_kinds": [], "stats": {},
+                  "held": [], "held_drained": [],
+                  "hold": {"store_supplied": False, "store": None}}
     result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
         "notes": chain_enforcer_notes,
         "stats": chain_enforcer_stats,

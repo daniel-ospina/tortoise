@@ -156,9 +156,9 @@ the arm — and then **reads the values back out of `os.environ`**. The log's `a
 read-back, never a typed literal, and a flag that does not read back as set REFUSES the run.
 ⛔ **`"0"`, not `<unset>`** (`#10996`): the value gate DEFAULTS ON, so an absent value pins nothing —
 absence IS the ON arm. The committed log in this bundle was taken at a PRE-flip head, where absence
-genuinely was OFF; its `<unset>` spelling is admitted by `e1_e2_scores.py` only under that
-campaign-head licence (disclosed as `value_gate_pin` in `docs/evidence/9889/e1-e2-scores.json`) and
-does not license a re-take. The
+genuinely was OFF; its `<unset>` spelling is **history, and no licence follows from it here** — `e1_e2_scores.py`
+is scoped to **9889** (`ON_ARM_LOG = "on-arm.log"`) and never reads this bundle's log, so the `value_gate_pin` in
+`docs/evidence/9889/e1-e2-scores.json` describes that bundle's arms only (`#11201`). The
 earlier stamp of this bundle printed `arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1` while setting
 neither: a re-run following a recipe that exported only `TORTOISE_DB_URI` measured the **OFF**
 population under a log declaring both ON. Pinned by
@@ -226,8 +226,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:10743-10749` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:10753-10757` here — **not** to the `:8534-8538`
+the `result["classify_later"]` block at `:12148-12154` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:12158-12162` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
@@ -313,8 +313,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:10753-10757` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:17086`), so this ❌ is the frozen run's answer, not the seam's reachability |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:10743-10749` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:17086`) |
+| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:12158-12162` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:17086`), so this ❌ is the frozen run's answer, not the seam's reachability |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:12148-12154` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:17086`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -355,7 +355,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:10383-10387` — the classify block starts at `:10383`, the vet surface at `:10387` — and `:10743-10757`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:11740-11744` — the classify block starts at `:11740`, the vet surface at `:11744` — and `:12148-12162`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -366,13 +366,13 @@ non-empty S2 stats) fails CLOSED.
 ⛔ **And the FLAG is not ACTIVITY** — the sharper half, and the one this rule got wrong first. The
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
-is reached. `vet_enabled` is computed at `extractor_v2.py:10367`, i.e. BEFORE the
-`if not edus:` early return (`:10371`), which emits literally
-`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:10387`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:10462`), `if vet_enabled and
-complete_list:` (`:10584`). So a session with the flag ON and an empty list emits `enabled: True`
+is reached. `vet_enabled` is computed at `extractor_v2.py:11724`, i.e. BEFORE the
+`if not edus:` early return (`:11728`), which emits literally
+`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:11744`), and
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:11834`), `if vet_enabled and
+complete_list:` (`:11973`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:10246-10249`). Because `_witness_block` returns the first positive
+`{}` on its fail-open path, `:11603-11606`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -382,10 +382,10 @@ to look.
 ⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
-classify pass has its own flag (`classify_later`, `:10336`), its own early-return block
-(`:10383-10386`), its own gates — `if classify_later and embed_list:` (`:10474`) around `if items:`
-(`:10477`), and `if classify_later and complete_list:` (`:10599`) around `if items:` (`:10609`) — and its
-own fail-open `except` (`:10490` / `:10620`), so an idle classify block comes from no embed list **or
+classify pass has its own flag (`classify_later`, `:11693`), its own early-return block
+(`:11740-11743`), its own gates — `if classify_later and embed_list:` (`:11846`) around `if items:`
+(`:11849`), and `if classify_later and complete_list:` (`:11988`) around `if items:` (`:11998`) — and its
+own fail-open `except` (`:11862` / `:12009`), so an idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
 (`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
 another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
@@ -399,7 +399,7 @@ proves the flag; a classify or vet block can legitimately carry `enabled: True, 
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
-unconditionally at `:10743`/`:10753` and now reaches the receipt through the seam at the meta fold
+unconditionally at `:12148`/`:12158` and now reaches the receipt through the seam at the meta fold
 `sdk.py:17086` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
@@ -426,7 +426,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:747`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2832-2857`,
-reached from the capture path at `sdk.py:17465` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:17472` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -602,6 +602,162 @@ measurement of this number): `EXTRACTOR-V4-ARCHITECTURE.md` §10's
 prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
 29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
+## C9 (`#10990`) — the two stale bars re-derived at this head, and E5's population answered
+
+**Measured at:** `af864a42a6` (`origin/main`, 2026-11-06) — every command and number below was run
+there, so a later head that disagrees is a regression rather than an argument. Both rows were
+re-derived, not re-implemented; nothing here builds a second instrument.
+
+### E4 — `#2552` / `#4716` / `#8503` re-derived: **VERIFIED-RED at 5 of 15**, unpatched
+
+```bash
+# 1. the receipt is chosen by its OWN corpus_hash against the frozen pin, not by filename
+cd docs/evidence/7949-capstone && uv run python -c 'import json,sys
+sys.path.insert(0,"probes"); sys.path.insert(0,"../../..")
+import capstone_measure as m
+prereg = json.load(open("preregistration.json"))
+rel, rec = m.select_e4_receipt(frozen_pin=m.check_corpus(prereg))
+print(rel, rec["operator_audit"]["edge_correct"], rec["operator_audit"]["planted"])'
+#    frozen pin: sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc
+#    selected:   tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json
+#    edge_correct: 5 of 15   commit a999be41e   date 2026-10-24T06:10:47Z
+#    extractor real: True    posture: llm
+
+# 2. the receipt's own evidence rules (the checker that grades an E4 artifact)
+uv run python tools/operator_receipt_check.py \
+    tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json
+#    [PASS] E4-EXTRACTOR: real extractor (tortoise.extractor_v2.extract_session_v2)
+#    [PASS] E4-LANE: product lane (extractor_posture=llm)
+#    [PASS] E4-DENOM: denominator 15 == gold
+#    [PASS] E4-NUMERATOR: edge_correct 5 == the per-edge rows   (content_ok 11)
+#    [PASS] E4-CAUSE: 10 miss(es) individually named
+#    VERDICT: EVIDENCE VALID   (exit 0)
+
+# 3. the shipped verdict table gates it
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log
+#    GREEN=0, RED=3, BLOCKED=2 — 5/5 rows carry an evidence artifact + sha (exit 0)
+```
+
+⇒ **E4 = 5/15 = RED** against `= 15 of 15`. The leg is **unpatched in the sense that matters**: the
+receipt's own `extractor` block records `real: true` with `extractor_posture: llm`, so
+`tortoise.extractor_v2.extract_session_v2` is the SHIPPED function and the number grades whether the
+extractor *forms* the operators. The only *test* still cannot say that —
+`tests/eval/write_path/test_write_path_operator_lane.py` monkeypatches `extract_session_v2` (`:212`)
+and its docstring says so — but a **measurement** can and does, twice: `8503-a`
+(`edge_correct 5`, `content_ok 11`, 06:03:47Z) and `8503-b` (same 5/11, 06:10:47Z) are two
+independent runs seven minutes apart that agree on the numerator, plus `preleg` (5, `content_ok` 13).
+So 5/15 REPRODUCES and is not one lucky draw.
+
+**Both tree figures, named as the issues require** — `2/15` (shipped log, receipt
+`w2b-operator-2026-10-19.json`, `corpus_hash 943a99ec…`, commit `6164c683c`) and `5/15` (frozen pin,
+commit `a999be41e`). The `2/15` is not the bar and is not this row's artifact any more: it measures a
+corpus revision that was never frozen.
+
+**The gap, split two ways — and the two splits do not agree on WHICH half dominates.** At the
+frozen pin (10 lost of 15): **6** `edge_missing` — both endpoints present, no qualifying operator,
+the **operator-selection** half — and **4** endpoint-recall misses (`3 to_content_missing` +
+`1 from_content_missing`, `wp02_lumen_refactor_op_01`). `#8503` reports the same numerator on a
+**14**-edge population (wp02 excluded as unmeasured) as **4 selection / 5 recall** — so selection is
+the larger half in the frozen reading only, and the older reading has recall larger.
+
+⛔ **The split did NOT move because wp02 joined the population — that was this section's first
+draft, and the receipts refute it.** Re-grading the frozen receipt over exactly the 14 edges `#8503`
+scored gives **6 selection / 3 recall** (not 4/5), and `#8503`'s own four `edge_missing` edges grade
+`edge_correct` (`wp03_ember_design_op_01`) and `to_content_missing` (`wp01_quarry_debug_op_02`) in
+that receipt. Four of the frozen run's six `edge_missing` edges were not `edge_missing` in `#8503`.
+So what changed is **per-edge attribution across runs**, not the denominator: LLM non-determinism
+moves which edge is missed, while the **numerator is stable at 5**.
+
+⚠️ **Which means the 5 is reproducible and the attribution is NOT.** `8503-a` and `8503-b` — seven
+minutes apart on the same commit — agree on `edge_correct 5` but disagree on **five of fifteen**
+individual verdicts (`wp01_op_01`, `wp03_op_01`, `wp03_op_02`, `wp05_op_02`, `wp06_op_01`), and
+`preleg` splits its 10 misses **8 selection / 2 recall**. Read the 5 as the measurement and any split
+as one run's draw: a single reading of "where the 10 go" is not a stable fact at this corpus.
+
+**Blocker named, not assumed satisfied: `#9596`.** The row's retrievability dimension is UNMEASURED —
+and this re-derivation found the reason is stronger than that issue says: `#9596` describes a fix (a
+v2 receipt carrying `operators_seen` / `operators_unprovenanced`, plus an `E4-PERSIST-OPS` rule in
+`tools/operator_receipt_check.py`), and **that fix is not in the tree**:
+`git log --all -S'operators_unprovenanced'` and `-S'E4-PERSIST-OPS'` return NOTHING on any ref, all
+four receipts are `receipt_version: 1`, and the checker's persistence rule still reads the
+eventId-filtered list whose numerator and denominator come from the same query. So `N/N` here is
+still the layer's SIZE, not a rate — `#9596` stays the row's blocker and its described repair has to
+be re-landed.
+
+### E5 — the raw arm re-derived: **VERIFIED-RED at raw 0.4800**, and the 25-vs-29 population answered
+
+```bash
+# 1. the registered scorer, re-run over the committed arm receipts
+uv run python -m tests.eval.write_path.score_qualifiers \
+    --sessions wp01_quarry_debug wp02_lumen_refactor wp03_ember_design wp04_aurora_perf \
+               wp05_retro_writeup wp06_quarry_rollout wp07_bluepeak_followup \
+    --arms-dir tests/eval/write_path/receipts/7947-arms-2026-10-18 --out /tmp/e5-rescore.json
+#    raw        n=25  loss 13  recovery 0.480000   <- bar >= 0.80  FAILS
+#    narrative  n=25  loss 12  recovery 0.520000
+#    ratio      0.52/0.48 = 1.0833                 <- bar >= 0.90  PASSES
+#    INCOMPLETE RECEIPTS IN THE HOLDOUT: wp07_bluepeak_followup:raw partial=True
+
+# 2. the committed artifact is byte-identical to that run
+python3 -c "print(open('/tmp/e5-rescore.json','rb').read() == \
+    open('docs/evidence/7949-capstone/e5-rescore.json','rb').read())"     # True  (44 092 B)
+
+# 3. the population question, answered mechanically
+uv run python docs/evidence/7949-capstone/probes/e5_population_reconcile.py
+```
+
+⇒ **E5 = RED on the absolute floor** (0.4800 < 0.80) with the ratio passing (1.0833) — the asymmetry
+the record required two bars to catch. Blocker **`#5087`** (S3 selection recovery), named by id and
+still OPEN.
+
+**The 25-vs-29 population is now answered, and the answer is that no arithmetic reconciliation
+exists.** The two counts are different **instruments over different units**, not one population
+counted twice:
+
+| | what it counts | derived by |
+|---|---|---|
+| **29** | **sentences** in the corpus fixture matching the pre-registration's own 24 `hedge_scope_lexemes` (of 343 sentences) | `capstone_preregistration_check.derive_corpus_facts` |
+| **25** | **planted qualifiers** in the sealed gold, which is what `score_qualifiers` classifies | `gold/<session>.gold.json → planted_qualifiers` |
+
+| session | marker sentences | planted qualifiers |
+|---|---|---|
+| wp01_quarry_debug | 8 | 3 |
+| wp02_lumen_refactor | 6 | 4 |
+| wp03_ember_design | 3 | 4 |
+| wp04_aurora_perf | 5 | 4 |
+| **wp05_retro_writeup** | **0** | **3** |
+| wp06_quarry_rollout | 4 | 4 |
+| wp07_bluepeak_followup | 3 | 3 |
+| **total** | **29** | **25** |
+
+Markers **exceed** qualifiers in three sessions (wp01, wp02, wp04) and **fall short** in two (wp03,
+wp05), so no monotone map exists and the 29 cannot be reached by adding rows to the 25. **wp05 is the
+decisive case**: its three qualifiers (`about`, `they are both good`, `that was the decision after the
+August incident`) are in the fixture text, but no word of theirs is in the corpus lexeme table — the
+two vocabularies differ (13 of the 24 corpus lexemes appear nowhere in the scorer's 78 markers). The
+registered *"29 marker-bearing sentences"* therefore binds **no gold**: it cannot be scored, and the
+only population that can is the 25. Pinned by `tests/test_7949_e5_population_reconcile.py` (5 tests)
+so the argument cannot rot silently.
+
+⚠️ **This narrows the open reconciliation, it does not decide it.** Which count is *canonical* — i.e.
+whether E5's registration should keep a denominator it cannot score — is carried by **`#5087`** (the
+S3 epic), and this bundle says so instead of re-registering the row: `preregistration.json` still
+carries `hedge_scope_sentences: 29` and E5's `post_registration_measurement` still names both
+figures. ⚠️ `#9738` — which owned this until 2026-11-02 — **CLOSED that morning on its own §10
+*record* correction, which is not a measurement of this number** (the re-attribution is the README's
+dependency table, not this section's).
+
+**Two questions, kept apart** — conflating them is what made "unreconciled" unreadable:
+
+| question | state |
+|---|---|
+| *Are the 29 and the 25 one population counted twice?* — arithmetic | **ANSWERED**: no, different instruments over different units (the table above) |
+| *Which count is E5's denominator?* — policy | **OPEN**, `#5087`'s to carry; `preregistration.json` still pins 29, so neither number is called final here |
+
+> ⚠️ **What is NOT claimed.** E5's *other* two halves stay green and separate: the scorer regenerates
+> the committed artefact byte-identically (verified above), and §10's write-back pin
+> (`tests/test_7949_e5_section10_writeback.py`) still passes. Neither is E5's registered outcome, and
+> reporting either as the verdict is the substitution this bundle exists to refuse.
+
 ## E1 / E2 — the `#9889` record: E1 still UNDECIDED (n=1 per arm), E2 would score 8 of 14 on a RE-RUN
 
 **These two rows no longer read `e1-e2.log` — no row the current builder emits does.** Their `evidence` is
@@ -727,8 +883,8 @@ made V5 pass on a step nobody observed; its derivation figure was also circular 
 defined by the link it measures). `6020cbd5f` (the stamped run THIS one replaces) fixed that rule but
 left two prose defects this round repairs: its flag-on/no-activity cause was templated for the surface
 NAME while every citation in it was the VET pass's, so the S2.3 line sent a reader to code the
-classify pass never runs (`classify_later` at `:10336`, its `if classify_later and …` / `if items:`
-gates at `:10474`/`:10477`/`:10599`/`:10609`), and its absent-surface cause asserted "so the pass RAN"
+classify pass never runs (`classify_later` at `:10631`, its `if classify_later and …` / `if items:`
+gates at `:10769`/`:10772`/`:10894`/`:10904`), and its absent-surface cause asserted "so the pass RAN"
 from the forced-and-read-back flag alone — the very equation `_pass_ran` rejects — so an unobserved
 step read as a pass that ran and was merely hidden. Keeping any of them alongside the corrected run
 would leave two artifacts claiming to be THE measurement. **Superseding is how a row moves: re-run the probe, DELETE
@@ -905,11 +1061,14 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   pre-`#8503` receipt on another revision); the run's own operator-shaped
   relationships (`IMPL=65 INPUT=68 NAND=14` — the log's `step S5`
   line carry the same three numbers) are a *step witness*, not the 15-edge gold.
-- **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
-  the record's denominator is 29 marker-bearing sentences. `#5087` carries that reconciliation
-  (`#9738`, which owned it until 2026-11-02, CLOSED that morning on its own §10 *record*
-  correction — which is not a measurement of this number), and this bundle says
-  so instead of calling the numbers final.
+- **E5's population is reconciled as "two different populations", not as one denominator.** The
+  instrument's `n` is 25 planted qualifiers; the record's denominator is 29 marker-bearing
+  sentences; the C9 section above measures why those cannot be reconciled arithmetically (markers
+  exceed qualifiers in 3 sessions and fall short in 2; wp05 has 3 qualifiers and 0 marker sentences)
+  and pins it in `tests/test_7949_e5_population_reconcile.py`. The ARITHMETIC question is answered;
+  which count is CANONICAL — i.e. what E5's denominator should be — is `#5087`'s to carry (`#9738`,
+  which owned it until 2026-11-02, CLOSED that morning on its own §10 *record* correction — which is
+  not a measurement of this number), so neither number is called final here.
 - **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated limit: it
   closes *inference* (green rows with no artifact), not forgery.
 - **Nothing about the five dependencies beyond their state** — the states above are the tracker
@@ -996,7 +1155,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
 `sdk._extract_session_v2` (`sdk.py:16258`; called at `:15295`) →
-`extractor_v2.extract_session_v2` (`extractor_v2.py:10252`), which calls, in one pass.
+`extractor_v2.extract_session_v2` (`extractor_v2.py:11609`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
 re-derived from the tree at the head it is stamped at and is paired with the symbol it names —
@@ -1021,13 +1180,13 @@ the same lesson (cite the symbol, not the line).
 
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
-| S0 READ | `_edus_from_conversation` `:10370` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:10410` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
-| S2.1 EXTRACT | `run_s2` `:10434` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:10463` | `result["vet"]` — built at `extractor_v2.py:10753-10757`, copied onto the receipt at the meta fold `sdk.py:17086` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:10479` | `result["classify_later"]` — built at `extractor_v2.py:10743-10749`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
-| S3 RESOLVE | `search_graph` `:10495` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
-| S5 CONNECT | `execute_embed` `:10715` (+ `run_s4` `:10516` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
+| S0 READ | `_edus_from_conversation` `:11727` | `stats["edus"]`, `stats["chunks"]` | ✅ |
+| S1 NARRATE | `run_s1` `:11767` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:11791` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S2.2 VET | `_run_vet_pass` `:11835` | `result["vet"]` — built at `extractor_v2.py:12158-12162`, copied onto the receipt at the meta fold `sdk.py:17086` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:10422` | `result["classify_later"]` — built at `extractor_v2.py:12148-12154`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
+| S3 RESOLVE | `search_graph` `:11867` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
+| S5 CONNECT | `execute_embed` `:8722` (+ `run_s4` `:11888` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop RESOLVED — created or folded onto an existing canonical, so a fully-folded capture reports the folded count, never 0) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
 
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself — the
