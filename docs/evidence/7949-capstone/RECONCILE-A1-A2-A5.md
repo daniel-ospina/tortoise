@@ -116,10 +116,9 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:17472`). ⚠️ **`probes/capstone_measure.py:279`'s docstring says
-   `sdk.py:17465`, which is stale** — line 17465 is `summary=stored_summary,`; the call is 17472, at the
-   measured head too. Corrected here rather than propagated; the probe's own docstring is a follow-up,
-   not this record's to edit. What is missing is the *declared part-whole* edge, not every structural
+   the capture path at `tortoise/sdk.py:17472`). (The probe's own docstring cites `sdk.py:17472` too —
+   `#11212` corrected a stale `:17465` there while this lane ran, so there is nothing to fix at the
+   probe.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2238-2243`
@@ -207,14 +206,17 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
 ⛔ **The blocker `#10985` names by id has LANDED — and it did not move the number.** Its body: *"⛔ The id
 is `#10997` (S3 — an unresolved identity is HELD, never minted)"*. `#10997` is **CLOSED
 2026-11-06T21:33:55Z**; `tortoise/identity_hold.py` is **PRESENT** on `origin/main`; the share above was
-re-measured on a tree containing it (`tests/test_10997_identity_hold.py`, 35 tests, green). So the seam
+re-measured on a tree containing it (`tests/test_10997_identity_hold.py`, 33 tests, green — and the
+four-suite run below is 254). So the seam
 `#10985` declared itself blocked by is **no longer the gap** — what remains is the measurement, which is
 the half `#10985` actually owns. Its other premise blocker, `#10996`, is CLOSED too, and S2.2's
-mechanical half now defaults ON — the composition is `extractor_v2.py:11350-11352`
+mechanical half now defaults ON — the composition is `extractor_v2.py:11731-11732`
 (`vet_enabled = (vet_arbiter is not None or _vet_enabled() or _value_gate_enabled())`), and the
 default-ON itself lives at `tortoise/value_gate.py:81` (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
-`extractor_v2.py:1153` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
-nothing else. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
+`extractor_v2.py:1154` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
+nothing else. ⚠️ Both cites are line numbers **at `80c912244`**: the forward merge that brought `#11212`
+in inserted ~381 lines above them and moved these from `:11350-11352`/`:1153`, which is the class of
+defect §0 exists to catch — a number true at one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
 
 **Exact remaining gap for `#10985`:** (a) the attach rate must be a reported census number, per candidate,
 with HOLD as a third bucket; (b) E1/E1b must be scored against the registered arithmetic rather than
@@ -282,7 +284,11 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 ## 4. What this changes for the epic
 
 - **`#10984` is dispatchable.** Its `blocked-by #11001` is CLOSED; nothing else blocks it. It has no
-  implementation lane and no PR, so the sequence is: census leg (§1(b)) → rollup query + ground truth
+  **implementation** lane and no implementation PR — ⚠️ the only open thing under `#10984` is **this
+  record's own docs PR `#11265`**, which builds nothing. `tools/who-is-on.sh 10984 --repo .` therefore
+  returns four signals (a local branch, a worktree, the open PR, a remote branch) and every one of them
+  is this record — the same self-matching hazard this document warns about for its own `git grep`, in the
+  tracker surface. The sequence is: census leg (§1(b)) → rollup query + ground truth
   (§1(c)) → re-run (d). ⛔ **Its `config/v4-mechanisms.yml` row does not exist today** — the file carries
   **13** mechanism ids (`vet`, `source_dedup`, `exact_dedup`, `near_dup_detect`, `near_dup_merge`,
   `against_priors_consolidation`, `span_link`, `embed_gate`, `sufficiency_router`, `fanout_cap`,
@@ -322,7 +328,7 @@ grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none fo
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '17472p' tortoise/sdk.py                             # the call (the probe's `:17465` is stale)
+sed -n '17472p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
@@ -333,7 +339,8 @@ git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-caps
     > /tmp/e1e2.log 2>&1                                   # exits 3 = UNPREREGISTERED, by design
 grep -E '^e1 |metric=objects|vet-downgrades|metric=real_facts' /tmp/e1e2.log
 grep -n -E 'after_share <= 0.50|>= 90 of 90' docs/evidence/7949-capstone/PRE-REGISTRATION.md
-sed -n '11350,11352p' tortoise/extractor_v2.py; sed -n '81p' tortoise/value_gate.py   # the default-ON composition
+sed -n '11731,11732p' tortoise/extractor_v2.py; sed -n '81p' tortoise/value_gate.py   # the default-ON composition
+sed -n '1154p' tortoise/extractor_v2.py                      # the `TORTOISE_VET` toggle (OFF by default)
 # the 62.3 % share is QUOTED from a research record, re-read (not re-derived):
 sed -n '192p;314p' docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md
 sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#4894 is the mechanism audit"
