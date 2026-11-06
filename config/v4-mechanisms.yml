@@ -1368,6 +1368,8 @@ mechanisms:
     pins:
       - tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints
       - tests/test_v4_declared_mechanisms.py::test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render
+      - tests/test_10997_identity_hold.py::TestTheGate::test_an_unresolved_lookup_holds_the_endpoint_and_its_edge
+      - tests/test_10997_identity_hold.py::TestTheHoldIsDrainable::test_run_1_holds_and_run_2_commits_it_exactly_once
     note: >-
       §4.4 states its own status in its closing paragraph: it *"is a SPEC, not a
       description of what runs"*, and the load-bearing instance is S3. The
@@ -1391,19 +1393,30 @@ mechanisms:
       the empty-conversation early return precedes it, so it emits none — and the
       three are different facts).
       ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
-      `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
-      needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function
-      is the sole carrier for retractions (whose same-session leg needs no graph
-      lookup), supersessions and chain notes, so a wholesale suppression drops
-      memory I2 forbids dropping (#5095's PLAN-VERIFY round 1 measured it).
-      §4.4's carry-forward store also does not exist. Pinned by
-      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`, which
-      asserts a CALL that the mint is still UNGATED (`execute_embed` commits a
-      Point and an entity for an unresolved lookup — the day a create gate lands
-      it reds and this row must flip), together with
+      `not-implemented`:** the gate covers the MINTED candidate only. `#10997`
+      landed that half: `extractor_v2._mint_endpoint` no longer fabricates a
+      `statement` Point from a ref on an `unresolved`/`partial` lookup — it HOLDS
+      the edge WITH its endpoint (`#2552`) in `tortoise/identity_hold.py`, a
+      durable per-graph store whose drain commits a held item exactly once on a
+      later run whose lookup RESOLVED (`claim` before the mint, `confirm` binds
+      the id, `hold` never re-arms a resolved key). ⛔ It is NOT the whole create
+      gate: a Point/Entity the MODEL emitted is still created on an unresolved
+      lookup, so duplicates remain mintable through that path (the S5-Job-2 half),
+      and the S3-attach/S5-connect/S6-commit transaction boundary (I3) is
+      untouched. ⛔ Nor is it `execute_embed({})`: that function is the sole
+      carrier for retractions (whose same-session leg needs no graph lookup),
+      supersessions and chain notes, so a wholesale suppression drops memory I2
+      forbids dropping (#5095's PLAN-VERIFY round 1 measured it). Pinned in both
+      directions: `tests/test_10997_identity_hold.py` proves the mint is HELD (and
+      proves non-vacuity by flipping the predicate — a resolved lookup mints
+      again), and
+      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence` still
+      asserts the REMAINING absence with a CALL (`execute_embed` commits a Point
+      and an entity the MODEL emitted for an unresolved lookup — the day the
+      model-emitted half is gated it reds and this row must flip), together with
       `test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render`,
       which pins the record half's presence and this row's state. #5087 (E1)
-      remains the code-owner of the mint half.
+      remains the code-owner of the rest.
       ⚠️ NOT registered as one mechanism: §4.4 also gives each of the eight
       steps its own direction and transaction boundary. Those are per-step
       policies of THIS mechanism, not eight more mechanisms, and a row per step
