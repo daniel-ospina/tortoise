@@ -7265,9 +7265,10 @@ def _maybe_onboarding_auto_complete(*,
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
-# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402;
-# the tool docstring below carries the full list, including the inner
-# extractor-provider 503 that can follow them.
+# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402
+# → ingest_rate_limited 429 (#4051 §3.1 — the per-org window, NOT the
+# admission 429 above); the tool docstring below carries the full list,
+# including the inner extractor-provider 503 that can follow them.
 # A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires

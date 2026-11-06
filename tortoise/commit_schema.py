@@ -1112,7 +1112,9 @@ def payload_envelope_bytes(model) -> int:
     """
     try:
         return len(model.model_dump_json().encode("utf-8"))
-    except Exception:  # a charge must never fail a write — or shrink to 0
+    except Exception:  # never shrink to 0; model_dump() is the only branch
+        # that can still raise (the docstring scopes the guarantee to any ``str``
+        # a JSON body can carry, not to the model itself)
         return len(json.dumps(model.model_dump(), default=str,
                               ensure_ascii=True)
                    .encode("utf-8", "surrogatepass"))

@@ -6141,6 +6141,56 @@ class TestSessionFloodGate:
         assert f"{detail['used']} in use + {detail['estimate']} estimated" in msg, msg
         assert f"exceeds {detail['limit']}." in msg, msg
 
+    def test_the_ingest_window_does_not_run_ahead_of_the_points_cap(
+            self, client, monkeypatch):
+        """#10175: the PERMANENT 402 outranks the retryable 429 on THIS lane too.
+
+        An org at ``max_points`` must be answered its quota refusal, never
+        "retry shortly": a 429 promises a wait after which the request fits, and
+        a request that can never fit is the unbreakable-loop class
+        ``quota.commit_ingest_admit`` warns about.
+
+        ⛔ THIS IS THE ONLY LEG THAT PINS THE ORDERING ON THIS LANE, and the
+        charge whose placement it guards is the one #4051 §3.1 ADDED here.
+        `TestCommitPointsGate::test_the_points_cap_refuses_before_the_ingest_window`
+        pins the COMMIT lane; `TestCaptureOrgIngestBound`'s legs cannot reach
+        this gate at all — they run with `no_provider_keys`, i.e. the #3892
+        store-only path that skips the estimate gate by design (measured: a
+        store-only capture at `max_points=1` returns 200).
+
+        THE DISCRIMINATOR is the second POST: the window is armed at exactly one
+        capture's charge, so a charge taken BEFORE the 402 would spend the whole
+        window and the retry would answer 429 — "retry shortly" for a request
+        that can never fit — while a charge taken after the gate leaves the
+        window empty and the retry answers the SAME 402.
+        """
+        import tortoise.quota as quota_mod
+        from tortoise.hosted_api import SessionRequest, capture_ingest_charge_bytes
+
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conv = [{"role": "user", "content": dense}] * 51
+        bodies = [
+            {"session_id": "quota-order-session", "conversation": conv},
+            {"session_id": "quota-order-session-2", "conversation": conv},
+        ]
+        unit = max(capture_ingest_charge_bytes(SessionRequest(**b))
+                   for b in bodies)
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG", unit)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+
+        first = client.post("/v1/sessions", json=bodies[0])
+        assert first.status_code == 402, (
+            f"the first capture was answered {first.status_code} — the points "
+            "refusal must precede the ingest charge")
+        assert first.json()["detail"]["resource"] == "points"
+
+        retry = client.post("/v1/sessions", json=bodies[1])
+        assert retry.status_code == 402, (
+            f"the retry after a points refusal answered {retry.status_code} — "
+            "the 402 CHARGED the ingest window, so an org at its cap is told "
+            "\"retry shortly\" for a request that can never fit (#10175)")
+
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
