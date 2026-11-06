@@ -3423,6 +3423,80 @@ def test_a_wide_gap_MARKER_LINE_can_be_code_on_its_own():
     assert L.claims("-    Closes #100")["closing"] == [100]
 
 
+def test_a_wide_gap_MARKER_LINE_after_an_OPEN_PARAGRAPH_is_PROSE():
+    """Round 34 review, P2 — a REGRESSION the round-32 `own_code` rule introduced.
+
+    `own_code` reads §5.2's **producer** rule (where a 5+-space gap puts an item's content) and
+    ignored §5.2's **consumer** rule (*"a list item can interrupt a paragraph only if it is a bullet
+    list item or an ordered list item that starts with 1"*). So an ordered marker ≥ 2 that merely
+    CONTINUES a paragraph was blanked as if it had opened a list item:
+
+        `Notes\n2.     Closes #100`   renderer <p>Notes\n2.     Closes #100</p>   PROSE
+
+    `parse_closing_refs` returned `[]` — at the parent head and on `main` it returns `[100]`. That is
+    the class-A direction (a delivered close nothing reports, so the stacked-PR `Closes #N` warning
+    in `.github/workflows/closes-coherence.yml` cannot fire) AND a false positive in arm 1 of this
+    lint (honest work flagged as claiming an issue nothing closes).
+
+    ⛔ THE SWEEP IN THE TEST ABOVE COULD NOT SEE THIS BY CONSTRUCTION: it wraps its line in
+    `"…To be derived.\n\n" + line`, i.e. after a CLOSED paragraph. The families below are all the
+    containers a paragraph can still be open in — and the two that OVER-KEEP if the rule is read as
+    "the previous line was prose" rather than "…in the SAME container", which is why the state this
+    pins is (container, blockquote depth, content column) and not the previous line's text:
+
+        `- Notes\n2.     Closes #100`   the ul CLOSES (col 0 is left of its content column) -> CODE
+        `> Notes\n2.     Closes #100`   the blockquote closes at depth 0                      -> CODE
+
+    Measured over 2,592 bodies (9 container families x 8 markers x gaps 1-9 x indents 0-3) with
+    `MarkdownIt("commonmark")` as the oracle: the parent head and `main` credit **1,060** lines the
+    renderer puts in a `code_block` and lose **0** prose lines; the round-33 head loses **380** prose
+    lines and credits **0**; the tree this test ships in is **0 and 0**. The sweep is the evidence —
+    the numbers are a snapshot of the heads named, not a constant.
+    """
+    from tools.closes_landing import parse_closing_refs
+    md = MarkdownIt("commonmark")
+
+    def in_code(body: str, needle: str) -> bool:
+        return any(t.type == "code_block" and needle in t.content for t in md.parse(body))
+
+    families = {
+        "bare": lambda line: line + "\n",
+        "preceded": lambda line: "Notes\n" + line + "\n",
+        "blanksep": lambda line: "Notes\n\n" + line + "\n",      # para CLOSED: still code
+        "preceded_item": lambda line: "- Notes\n" + line + "\n",
+        "quoted_prec": lambda line: "> Notes\n" + line + "\n",
+        "in_quote": lambda line: "> Notes\n> " + line + "\n",
+        "in_item": lambda line: "- Notes\n  " + line + "\n",
+        "deep": lambda line: "Notes\n   more text\n" + line + "\n",
+        "after_ol": lambda line: "1. Notes\n" + line + "\n",
+    }
+    sweep = 0
+    for family, wrap in families.items():
+        for marker in ("-", "*", "+", "1.", "2.", "10.", "0.", "3)"):
+            for gap in range(1, 10):
+                for indent in (0, 1, 2, 3):
+                    sweep += 1
+                    line = " " * indent + marker + " " * gap + "Closes #100"
+                    body = wrap(line)
+                    quoted = in_code(body, "Closes #100")
+                    claimed = 100 in parse_closing_refs(body)
+                    assert not (quoted and claimed), ("credits code", family, marker, gap, indent)
+                    assert not (not quoted and not claimed),                         ("loses prose", family, marker, gap, indent)
+    assert sweep == 2592, sweep
+    # The three shapes the rule names, spelled out, so a reader does not have to trust the sweep's
+    # parameterisation to know what it commits to.
+    assert parse_closing_refs("Notes\n2.     Closes #100\n") == [100]
+    assert parse_closing_refs("Notes\n10.     Closes #100\n") == [100]
+    assert parse_closing_refs("Notes\n1.     Closes #100\n") == []      # §5.2: `1.` CAN interrupt
+    assert parse_closing_refs("Notes\n-     Closes #100\n") == []       # …and so can a bullet
+    assert parse_closing_refs("Notes\n\n2.     Closes #100\n") == []    # para already closed
+
+    # `strict` must not resurrect the loss: the blanking decision is above the strictness choice.
+    assert parse_closing_refs("Notes\n2.     Closes #100\n", strict=True) == [100]
+    # …and the INDENTED-code arm is untouched, so the residual the two rules share is unchanged.
+    assert parse_closing_refs("Notes\n   more text\n    - [ ] x\n") == []
+
+
 def test_a_deeper_heading_ends_the_satisfies_section():
     """Round 28 P2 — the false PASS that the "same-or-higher level" terminator introduced.
 

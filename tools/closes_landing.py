@@ -799,7 +799,11 @@ def _content_column(rest: str) -> int | None:
     and `strict` arms too. Measured over a 5,760-body sweep (markers `-`/`*`/`1.`/`10.` x gap 1-9 x
     fence indent 0-7 x claim indent 0-4 x closer x blank): 660 divergences at the default and 440 at
     `strict`, and EVERY one is a claim the parent LOST and this keeps, confirmed against
-    `MarkdownIt("commonmark")` — 0 in the other direction. The old column put a wide-gap item's
+    `MarkdownIt("commonmark")` — 0 in the other direction. ⚠️ THOSE TWO COUNTS ARE A SNAPSHOT of the
+    head that measured them, before round 34's consumer-side fix moved `own_code` off this column's
+    reach; the DIRECTION is the claim and the sweep is the authority
+    (`tests/test_issue_process_lint.py::test_a_wide_gap_MARKER_LINE_after_an_OPEN_PARAGRAPH_is_PROSE`
+    re-derives both directions on every run). The old column put a wide-gap item's
     content at the marker's raw width, so a fence opened under it was measured past the item and a
     real `Closes #N` in its prose was blanked away:
         `-     item` + blank + `  ``` Closes #100 ``` `  -> renderer keeps it as PROSE, parent dropped it
@@ -812,6 +816,38 @@ def _content_column(rest: str) -> int | None:
     gap = len(marker.group("gap"))
     marker_w = len(marker.group(0)) - m_indent - gap
     return m_indent + marker_w + (gap if gap <= 4 else 1)
+
+
+def _ordered_marker_at_least_two(rest: str) -> bool:
+    """True if `rest` opens an ORDERED list item whose number is not 1.
+
+    ⛔ THIS IS §5.2's OTHER INTERRUPTION RULE, THE ONE ON THE **CONSUMER** SIDE (round 34 review,
+    P2 — a REGRESSION this file's own `own_code` introduced). The producer rule says where a marker
+    line's CONTENT column is; the consumer rule says whether the line starts a list item AT ALL:
+    *"a list item can interrupt a paragraph only if it is a bullet list item or an ordered list item
+    that starts with 1."* So a bullet or `1.` always opens its item — and a wide gap there really does
+    put the item's content in an indented code block — while an ordered marker ≥ 2 preceded by an
+    OPEN PARAGRAPH is a lazy continuation of that paragraph, and its text is PROSE.
+
+    Measured with `MarkdownIt("commonmark")` as the oracle at the parent head and on `main`:
+
+        `Notes\n2.     Closes #100`  -> <p>Notes\n2.     Closes #100</p>   PROSE, the close is real
+        head before this fix          -> parse_closing_refs -> []        the close was SILENTLY LOST
+        parent / main                -> parse_closing_refs -> [100]
+
+    That is the class-A direction (a delivered close nothing reports) AND a false positive in
+    `tools/issue_process_lint.py` arm 1 (honest work flagged as claiming an issue nothing closes),
+    so it is fixed rather than declared — but ONLY for the shape the rule names: the caller supplies
+    the paragraph state (`prev_prose`), and nothing else about the line changes.
+    """
+    marker = _LIST_MARKER_RE.match(rest)
+    if marker is None:
+        return False
+    token = marker.group(0)[len(marker.group("indent")):]
+    num = token[:len(token) - len(marker.group("gap"))]
+    if not num[0].isdigit():
+        return False           # a bullet CAN interrupt a paragraph (§5.2), so this rule never fires
+    return int(num.rstrip(".)")) != 1
 
 
 def _marker_gap(rest: str) -> int:
@@ -899,14 +935,22 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                indented_code: bool = False) -> str:
     """Blank out the parts of a PR body that are CODE, not prose.
 
-    ONLY fenced blocks are stripped. An INDENTED block is deliberately NOT: where
-    a 4-space line is code and where it is a list item's continuation or a
-    multi-paragraph bullet depends on the enclosing container's content column,
-    and getting that wrong in the stripping direction loses a REAL claim — a
-    false pass, the worst class here (two review cycles found it: first every
-    indented line, then every indented line after a blank line). A warn-only
-    instrument loses nothing by over-reporting a quoted keyword; it loses the
-    reader by under-reporting a real one.
+    THREE RULES, and the docstring used to claim only the first (round 34 review, P3 — the claim
+    outlived the code by three rounds):
+
+    * **fences** — always stripped, in every mode.
+    * **a marker line's OWN content** — a gap wider than four spaces after the marker puts that
+      content in an indented code block starting on the marker line itself (§5.2 + §4.4), blanked
+      in every mode. ⚠️ ONLY where the marker line really opens an item: an ordered marker ≥ 2
+      that continues an open paragraph does not (§5.2's consumer rule) and stays PROSE.
+    * **a leading indent past `_MAX_FENCE_INDENT`** — `strict` blanks all of it; `indented_code`
+      blanks only what the block grammar calls code (past the enclosing item's content column
+      plus four). The lenient default blanks neither, because where a 4-space line is code and
+      where it is a list item's continuation depends on the enclosing container's content column,
+      and getting that wrong in the stripping direction loses a REAL claim — a false pass, the
+      worst class here (two review cycles found it: first every indented line, then every
+      indented line after a blank line). A warn-only instrument loses nothing by over-reporting a
+      quoted keyword; it loses the reader by under-reporting a real one.
 
     A fence belongs to its CONTAINER, and ends when that container ends:
 
@@ -976,6 +1020,22 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     container: _ListItem | None = None
     # The spaces after this line's own list marker (0 = not a marker line, or a blank one).
     own_gap = 0
+    # Whether THIS line opened a list item. Reset per line: the block below sets it only on the
+    # non-fence path, so a line that continues a fence would otherwise carry the previous line's
+    # answer into the paragraph-state write at the bottom of the loop.
+    pushed = False
+    # PARAGRAPH STATE, for §5.2's consumer-side rule (round 34 review, P2). A line is a lazy
+    # continuation of the PREVIOUS paragraph only when that paragraph is still open AND in the SAME
+    # container — so this is not "the previous line was prose", it is "the previous line was prose,
+    # in this blockquote depth, inside this same list item". Measured: both of the narrower readings
+    # over-keep, and the renderer says the marker line is CODE in each:
+    #     `- Notes\n2.     Closes #100`  -> the ul CLOSES and a new top-level <ol> opens (col 0 is
+    #                                       left of the item's content column) -> <pre><code>
+    #     `> Notes\n2.     Closes #100`  -> the blockquote closes at depth 0 -> <pre><code>
+    # Stored as the last EMITTED line's own container, because `out` keeps no columns.
+    prev_prose = False
+    prev_quote_depth = 0
+    prev_container: _ListItem | None = None
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.
     hidden_lines = 0
@@ -1048,6 +1108,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # block's tail does not.
                 hidden_lines = 0 if fence is None else hidden_lines + 1
                 out.append("")
+                prev_prose = False
                 continue
             # The container ended, so this line is FRESH: it may open a new fence
             # (review c10-2), and — outside the block — it is also where the list
@@ -1086,6 +1147,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         if fence:
             hidden_lines = 0
             out.append("")
+            prev_prose = False
             continue
         # `rest_indent` is the ONLY indentation test: `line` was `expandtabs(4)`d
         # a few lines up, so a tab can never survive into `rest` — the
@@ -1153,7 +1215,24 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # quoted marker read as live, a quoted close credited (in BOTH arms, so `strict` did not save
         # it either). Arm-independent: this is a fact about the renderer, not a strictness choice.
         # `gap <= 4` stays prose, which is the control the pin asserts.
-        own_code = own_gap > 4
+        # ⛔ AND THE MARKER LINE'S OWN CONTENT IS ONLY CODE IF THE MARKER LINE OPENS AN ITEM AT ALL
+        # (round 34 review, P2 — a REGRESSION `own_code` introduced). The producer rule above says
+        # where a 5+-space gap puts the content; it says nothing about whether the line is a list
+        # item, and §5.2's CONSUMER rule does: an ordered marker ≥ 2 cannot interrupt a paragraph.
+        # The sweep in the test used `…\n\n<line>`, i.e. a paragraph that had already ENDED, so the
+        # one shape where the two rules disagree was structurally invisible to it:
+        #     `Notes\n2.     Closes #100`   renderer <p>Notes\n2.     Closes #100</p>  PROSE
+        #     measured before this fix       parse_closing_refs -> []   (parent and `main`: [100])
+        # `prev_prose` is read from the line we last EMITTED, which is the only definition that stays
+        # true across the three blanks above: a fence line and a blanked code line both append `""`,
+        # a blank body line emits its own blank text, and a paragraph line emits `raw` — so a code
+        # line or a blank line can never pose as an open paragraph.
+        ordered_continuation = (prev_prose
+                                and _ordered_marker_at_least_two(rest)
+                                and _quote_depth(prefix) == prev_quote_depth
+                                and container is prev_container
+                                and (container is None or rest_indent >= container.rest_col))
+        own_code = own_gap > 4 and not ordered_continuation
         indent_code = rest_indent > _MAX_FENCE_INDENT and (
             strict or (indented_code
                        and (container is None
@@ -1175,8 +1254,16 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             if pushed and indent_code:
                 list_items.pop()
             out.append("")
+            prev_prose = False
             continue
         out.append(raw)   # prose: keep it, keywords and all
+        # A blank line emits a blank `raw`, and a blank line ENDS a paragraph — so the state is
+        # `raw.strip()`, not "we took the prose branch".
+        prev_prose = bool(raw.strip())
+        prev_quote_depth = _quote_depth(prefix)
+        # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
+        # text inside the `<li>`), not in the item it sat in before.
+        prev_container = (list_items[-1] if pushed else container)
     if stats is not None:
         stats["hidden_lines"] = hidden_lines if fence is not None else 0
     return "\n".join(out)
