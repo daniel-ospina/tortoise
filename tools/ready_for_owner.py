@@ -1390,6 +1390,26 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
     already documents for this projection: `tools/mergify_config_guard.py --recut`
     rewrites `emitters`.
     """
+    # ⛔ THE FIELD ITSELF AND THEN THE MATERIALISATION, because a shape rule that is not a
+    # TOTAL function of the input is not a shape rule. `Probe.merge_emit_files` is an
+    # annotation and `Probe` is a documented hand-buildable construction, so three classes
+    # have to land on a VERDICT rather than on a traceback or a PASS:
+    #   * a non-`Mapping` field  → the `.get` below would raise `AttributeError`;
+    #   * a truthy NON-ITERABLE  (`17`, `1.0`, `True`) → iterating it raises `TypeError`;
+    #   * a ONE-SHOT ITERATOR    (`iter`, `map`, a generator) → `all()` below EXHAUSTS it,
+    #     so the later `_run_emits` comparison sees an empty sequence, matches nothing, and
+    #     answers DEFERRED — a PASS on an absent aggregate whose workflow ran on the head.
+    #     The empty-generator case is the worse half: it must be UNATTRIBUTABLE (no
+    #     emitters), and read as "recorded, nothing matched" instead.
+    # Measured at `08fab8605` for all three. Normalising ONCE, here, means every consumer
+    # below sees a tuple — the materialisation is what makes the rule total.
+    if not isinstance(probe.merge_emit_files, Mapping):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the emitter projection is a "
+            f"{type(probe.merge_emit_files).__name__}, not a mapping of context to workflow "
+            "file names, so 'no run of the emitter' is not a measurement; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
     files = probe.merge_emit_files.get(context) or ()
     if not files:
         return "unattributable", (
@@ -1420,6 +1440,25 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
             "the emitter' is not a measurement; re-cut with "
             "`tools/mergify_config_guard.py --recut`)"
         )
+    try:
+        files = tuple(files)
+    except TypeError:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection is a "
+            f"{type(files).__name__} and cannot be enumerated, so 'no run of the emitter' "
+            "is not a measurement; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    # A projection that is EMPTY once materialised is the "no emitter recorded" state, and
+    # it takes the same arm a literal `()` does. Without this an empty GENERATOR read as
+    # "recorded, nothing matched" → DEFERRED (PASS) while an empty TUPLE read as
+    # UNATTRIBUTABLE — the same state graded two ways depending on its container.
+    if not files:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection is empty for "
+            f"{context} — its absence cannot be read as DEFERRED; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
     if not all(isinstance(f, str) and f for f in files):
         return "unattributable", (
             f"{context}=UNATTRIBUTABLE(the recorded emitter projection carries an entry "
@@ -1431,17 +1470,34 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
             f"{context}=UNATTRIBUTABLE(the head's workflow runs could not be read, so "
             "absence cannot be told apart from a pending aggregate)"
         )
+    # The same materialisation on the LISTING side: a one-shot iterator would be exhausted
+    # by the `all(...)` below, leaving the match loop with nothing to iterate and reporting
+    # "no run of the emitter exists" from a listing nobody finished reading.
+    if isinstance(probe.head_runs, (str, bytes, Mapping)):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's run listing is a "
+            f"{type(probe.head_runs).__name__}, not a sequence of run entries, so 'no run "
+            "of the emitter' is not a measurement)"
+        )
+    try:
+        head_runs = tuple(probe.head_runs)
+    except TypeError:
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the head's run listing is a "
+            f"{type(probe.head_runs).__name__} and cannot be enumerated, so 'no run of "
+            "the emitter' is not a measurement)"
+        )
     # A listing with an unreadable ENTRY is not a reading of the listing — the same rule
     # the fixture door enforces (`_fixture_head_runs`). "No run matched" is a MEASUREMENT
     # only when every entry was readable, so a hand-built `Probe` carrying a malformed
     # entry must land on the same FAIL, never on the DEFERRED (PASS) arm.
-    if not all(_readable_run(run) for run in probe.head_runs):
+    if not all(_readable_run(run) for run in head_runs):
         return "unattributable", (
             f"{context}=UNATTRIBUTABLE(the head's run listing carries an entry that is not "
             "a READABLE run — not a mapping, or carrying no workflow `path` — so 'no run "
             "of the emitter' is not a measurement)"
         )
-    matched = [_run_file(run) for run in probe.head_runs if _run_emits(run, files)]
+    matched = [_run_file(run) for run in head_runs if _run_emits(run, files)]
     if matched:
         return "missing", (
             f"{context}=MISSING(its workflow {matched[0]!r} ran on this head, so the "

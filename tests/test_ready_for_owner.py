@@ -3837,6 +3837,16 @@ def test_an_emitter_recorded_with_its_full_path_still_attributes_the_absence() -
         {"workflow": "python-ci.yml"},
         # A non-`str` element escaped as an AttributeError, not a verdict.
         ("python-ci.yml", None),
+        # A TRUTHY NON-ITERABLE: the shape rule is not a total function unless the
+        # container itself is materialised, and iterating this raises `TypeError` out of
+        # `check_gates` — read by a caller as "a required check is red".
+        17,
+        # A ONE-SHOT ITERATOR: `all(...)` in the shape check used to EXHAUST it, so the
+        # later comparison saw an empty sequence. Empty, it must be UNATTRIBUTABLE (no
+        # emitters) — not "recorded, nothing matched" → DEFERRED, which is what an empty
+        # TUPLE is graded as. (The non-empty case needs a run on the head to be observable
+        # at all; see `test_a_one_shot_emitter_projection_still_attributes_a_measured_run`.)
+        (f for f in ()),
     ],
 )
 def test_a_type_confused_emitter_on_a_hand_built_probe_is_unattributable(shape: Any) -> None:
@@ -3861,6 +3871,84 @@ def test_a_type_confused_emitter_on_a_hand_built_probe_is_unattributable(shape: 
     gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
     assert gates.passed is False, (shape, gates.raw)
     assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
+def test_a_non_mapping_emitter_projection_is_unattributable_not_a_traceback() -> None:
+    """★ The FIELD itself is checked, not only the value's shape.
+
+    `probe.merge_emit_files.get(context)` raises `AttributeError` for a non-`Mapping`
+    field, and `check_gates` converts every unreadable input into a VERDICT — an exception
+    escaping to the CLI exits 1, which a caller reads as "a required check is red" rather
+    than "I could not read the projection". Measured at `08fab8605`: `merge_emit_files=[]`
+    and `merge_emit_files=None` both raised `AttributeError: 'list' object has no attribute
+    'get'` from `_merge_time_absence`.
+    """
+    for field in ([("python-ci.yml",)], None, 17):
+        probe = dataclasses.replace(
+            rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+            merge_emit_files=field,  # type: ignore[arg-type]
+        )
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (field, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (field, gates.reason)
+
+
+def test_a_one_shot_run_listing_is_unattributable_not_a_deferral() -> None:
+    """★ The LISTING is materialised too, for the same reason the projection is.
+
+    `head_runs` is a `tuple` on every live path and via both fixture doors, but `Probe`
+    documents a hand-built construction. A one-shot iterator was exhausted by the
+    readability `all(...)`, leaving the match loop nothing to iterate: the gate then read
+    "no run of the emitter exists" from a listing it had itself consumed, and answered
+    DEFERRED — a PASS. Measured at `08fab8605` for `iter(...)`, `map(...)` and a generator.
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    for listing in (iter(ran), map(lambda r: r, ran), (r for r in ran)):
+        probe = dataclasses.replace(
+            rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+            head_runs=listing,  # type: ignore[arg-type]
+        )
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        # The emitter's workflow DID run here, so the absence is MISSING — a FAIL either
+        # way; what may never happen is DEFERRED (a PASS) on a listing nobody finished.
+        assert gates.passed is False, (listing, gates.raw)
+
+
+def test_a_one_shot_emitter_projection_still_attributes_a_measured_run() -> None:
+    """★ A consumed projection is the case that made the one-shot defect a PASS.
+
+    The shape check walked the projection, and the match loop then walked whatever was left
+    of it. With a run of the emitting workflow ON THE HEAD, the exhausted projection matched
+    nothing and the absence answered `DEFERRED` — a PASS on a head where the aggregate was
+    pending or never posted. Measured at `08fab8605`: `iter(...)`, `map(...)` and a generator
+    all returned PASS where the materialised tuple returns `missing:` (a FAIL).
+    """
+    ran = [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}]
+    for projection in (
+        iter(("python-ci.yml",)),
+        map(lambda f: f, ("python-ci.yml",)),
+        (f for f in ("python-ci.yml",)),
+    ):
+        probe = rfo.probe_from_dict(
+            _fixture_with_head_runs(
+                {"head_runs": ran, "merge_emit_files": {MERGE_TIME_REQUIRED[0]: ["python-ci.yml"]}}
+            )
+        )
+        probe = dataclasses.replace(probe, merge_emit_files={MERGE_TIME_REQUIRED[0]: projection})
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (projection, gates.raw)
+        assert f"missing:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (projection, gates.reason)
+
+
+def test_a_non_iterable_run_listing_is_unattributable_not_a_traceback() -> None:
+    """The counterpart on the listing side: `17` is truthy and not iterable."""
+    probe = dataclasses.replace(
+        rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+        head_runs=17,  # type: ignore[arg-type]
+    )
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
 
 
 def test_an_explicit_empty_head_runs_still_defers() -> None:
