@@ -1121,7 +1121,14 @@ def test_the_embedded_leg_honours_graph_name(monkeypatch):
 # being distinguishable in practice, not just in the message).
 
 def _embedded_store_with_tortoise(tmp_path, monkeypatch):
-    """A real embedded store holding exactly one graph, `tortoise`, with ONE node."""
+    """A real embedded store: graph `tortoise`, with one Point and one Meta node.
+
+    Measured on the result: `MATCH (n) RETURN count(n)` → 2 — the `(:Point)` this
+    helper creates, plus the `(:Meta)` the bind's schema DDL writes. So the store
+    holds exactly ONE TURN node, which is the population the census reads; a
+    "ONE node" shorthand would be wrong in the same way the EMPTY twin's
+    docstring was (see its note below).
+    """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     from tortoise.projection import FalkorProjection
 
