@@ -1950,11 +1950,12 @@ jobs:
         if: always()
         uses: ./.github/actions/falkordb-teardown
 
-      # ─────────── The ONLY cache writer this job carries, bounded twice (#11063)
+      # ────── The ONLY DEPENDENCY-cache writer this job carries, bounded twice (#11063)
       #
-      # An explicit step, not an `actions/cache` POST step: a post step cannot be
-      # ordered against anything else in the job, which is half of why the
-      # implicit save cost a green shard (see the restore steps' comment).
+      # "Dependency"-cache: `Save pytest last-failed state (#6142)` above is a SECOND
+      # writer with NO time bound — disclosed, not hidden (#11063). An explicit step,
+      # not an `actions/cache` POST step: a post step cannot be ordered against
+      # anything else in the job, which is half of why the implicit save cost a green shard.
       #
       # Bound 1 — SIZE. `uv cache prune` (uv docs, "Caching dependencies":
       # removes unused entries and centralised project environments, both of which
