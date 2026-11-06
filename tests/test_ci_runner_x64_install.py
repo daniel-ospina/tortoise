@@ -3744,24 +3744,24 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 
 
 #: Files OUTSIDE the two runbooks that cite `python-ci.yml:<line>` for the `test-slow` header's
-#: refusal-cost paragraph. Both were exactly right on `main` (`:1891`) and #6744's +70-line insert in the
-#: `test` job's `strategy` block moved the paragraph to `:1961` — and NOTHING read either file, so the
-#: drift shipped green: a reader (or a fixer) sent to `:1891` lands one job earlier on the `test`
-#: job's FalkorDB-teardown comment and never finds the refusal it was sent to read. (`origin/main`
-#: moved it once more during the #11032 rebase, to `:1966`; the numbers below are re-derived at THIS
-#: head, and the citation that accompanies them is read from the file rather than from this note.
-#: ⚠ The `:1891` half of that sentence is now off by the rebase's own inserts: at this head `:1891`
-#: is the `test` job's `orphan-bound.sh --count` invocation and the teardown comment it used to
-#: point at is `:1897-1898` — the same drift, one layer out, and unpinned prose is why it is note
-#: rather than assertion.)
+#: refusal-cost paragraph. On the `main` this landed against, both were exactly right (the anchor
+#: line was `:1891`), and #6744's +70-line insert in the `test` job's `strategy` block moved it — so
+#: a reader (or a fixer) sent to `:1891` never found the refusal it was sent to read, and NOTHING
+#: read either file, so the drift shipped green. The numbers keep moving, and the anchors are NOT
+#: the same line: at this head the paragraph's OPENER is `:1966` (what the pin below requires), the
+#: prohibition is `:1996`, and `:1891` is now the `test` job's `orphan-bound.sh --count` invocation
+#: (the teardown comment `:1891` used to reach is `:1897-1898`). Which is why the citation is read
+#: from the file, never from a note like this one.
 _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
 
 #: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
 #: sentence is about. Separate from `_REFUSAL_CITATION_SITES` because the anchor differs: these
-#: point at install/cache STEPS, not at the `test-slow` refusal paragraph, so one anchor cannot
-#: serve both. (§1's postgres row, §1's falkor install row, §6's arm-1 cache-key row, §2's
-#: save-arm note — the last one added with the `test-track-b` launch, whose save surface is a
-#: `setup-python cache: pip` argument rather than an `actions/cache` step of its own.)
+#: point at install/cache STEPS, not at the `test-slow` cost paragraph's opener, so one anchor cannot
+#: serve both. (The postgres-extra install row, the falkor/torch install row, the arm-1 cache-key
+#: row, and the save-arm note — the last one added with the `test-track-b` launch, whose save
+#: surface is a `setup-python cache: pip` argument rather than an `actions/cache` step of its own.)
+#: ⚠ Named by ROW, not by section: all four sit in §2 today, and a §-number would re-stale on the
+#: next section this doc gains — the same failure mode as the citations themselves.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("python-ci.yml:4355", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2755-2760", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
@@ -3915,6 +3915,10 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # block (`python-ci.yml:748`) and 15/12 further down, so both numbers now land on unrelated
     # comments (`:1844` on a host-wide `ps`-count note, `:1911` on the presence-form header) — and
     # NOTHING red, because the only cross-file-ref gate in the repo read `ci-runner-x64.md` alone.
+    # ⚠ Both figures are measured at the head that wrote them; the numbers have moved since, which
+    # is the whole point. On `origin/main` the two anchors sit at `:1850`/`:1917`; at this head they
+    # are `:1920`/`:1987`. The pin reads the citation from the file, so a reader should not treat
+    # either pair above as current — and a fixer re-anchoring should trust the red, not this note.
     # Both sentences are load-bearing there: the first carries the "ARM64 VMs resolve
     # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at 32m12s
     # of a 30m budget" measurement the section argues a fold-routing decision on.
@@ -3981,10 +3985,12 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
 
     # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
-    # This doc cites `python-ci.yml:<n>` for four cost arguments (§1's postgres cache row, §1's
-    # falkor install row, §2's save-arm note, §6's arm-1 exemption). All four were correct when
-    # written and had drifted since — and `_REFUSAL_CITATION_SITES` above cannot cover them,
-    # because its anchor is the `test-slow` cost paragraph's opener and these cite other steps.
+    # This doc cites `python-ci.yml:<n>` for four cost arguments (the postgres-extra install row,
+    # the falkor/torch install row, the save-arm note, the arm-1 cache-key row — all four in §2;
+    # named by row rather than by section, see the note on `_WALL_CLOCK_CITATION_ANCHORS`). All four
+    # were correct when written and had drifted since — and `_REFUSAL_CITATION_SITES` above cannot
+    # cover them, because its anchor is the `test-slow` cost paragraph's opener and these cite
+    # other steps.
     # Nothing read this file either, so its drift shipped green exactly like ci.yml's and
     # actionlint.yaml's did. Pinned by SENTENCE inside the cited range, so a number that lands
     # elsewhere reds here.

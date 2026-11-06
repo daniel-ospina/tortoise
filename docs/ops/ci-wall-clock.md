@@ -188,8 +188,9 @@ names:
   collection on run 42135045069. The run then finished CLEAN — verbatim
   `256 passed, 39 skipped, 46812 deselected, 14 warnings in 855.20s (0:14:15)` — and the watchdog SIGINT-killed the process at 900 s while it unwound —
   which `pytest-attribution` reads as `INCOMPLETE`, so a green leg certified nothing (#5219).
-  #10212 predicted exactly this and is what sizes the in-step cap: 14 m 30 s at the worst observed
-  collect cost → **15 → 20 m** (1.38×), and the save arm then sizes the job cap:
+  #10212 predicted exactly this and is what sizes the in-step cap: the worst observed COLLECT was
+  11 m 10 s (against 4 m 59 s on the earlier run), on a leg whose start-to-summary wall was
+  14 m 30 s → **15 → 20 m** (1.38×), and the save arm then sizes the job cap:
   20 + ~1 + ~9 = 30 m × 1.5 = 45 → **50**.
 - `test-track-b` (job 127701854910) — `4 passed, 9 deselected in 44.96s`, then
   `setup-python cache: pip` tarred the SAME shared archive in its POST step and GitHub cancelled the
