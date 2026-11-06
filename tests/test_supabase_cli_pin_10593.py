@@ -123,12 +123,16 @@ def _setup_cli_step(workflow_text: str) -> dict:
 
 
 def _setup_cli_step_node(text: str) -> yaml.MappingNode:
-    """The PARSED node for the `supabase/setup-cli` step — the one reader of *which step it is*.
+    """The PARSED node for the `supabase/setup-cli` step — the one NODE locator.
 
     `_setup_cli_step` (the comparison) and `_literal_version_lines` (the literal-line check) must
     resolve the SAME step, or the guard can assert a pin read from a different place than CI
-    installs from. Both reach it through this node, and neither has a second dialect for "which
-    step" to drift in. (`_setup_cli_block` slices the same span, but it is NOT on the guard path —
+    installs from. They share the `_is_setup_cli_step` predicate — `_literal_version_lines` reaches
+    the step through THIS node, `_setup_cli_step` through `yaml.safe_load` — so neither has a second
+    dialect for WHICH ACTION the step is. That predicate is all they share: the two can still
+    disagree about the COUNT (one anchored step aliased twice), which is why `_is_setup_cli_step`'s
+    docstring treats the count as a separate question rather than as something this locator
+    settles. (`_setup_cli_block` slices the same span, but it is NOT on the guard path —
     `_literal_version_lines` takes each line from the pin's own key node's mark, so editing the
     block slicer cannot change a verdict. Its own docstring says so.)
     """
