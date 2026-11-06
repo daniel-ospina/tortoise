@@ -76,7 +76,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: af36e9240f30cf7f3ec37f1d82a18a91d45c08e0
+cut_at_commit: 277a559b1a69390e1439717224072d5d650e60f1
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -4635,16 +4635,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.link_entities.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: engine'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: engine'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:link_source_to_entity
   method: link_source_to_entity
   approved: false
