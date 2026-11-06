@@ -270,11 +270,11 @@ reporting one is the defect, not the small number.
 | **E3** | derived nodes written by the run (`Point` + `Event` + `Document`) carrying a version anchor | **all** derived nodes written by the run — `Point` + `Event` + `Document` (the classes the model anchors: `Point` on the node, `Event`/`Document` on their derivation link; floor ≥ 30 nodes) | `= 1.000` (zero unanchored) |
 | **E4** | planted operator edges **wired AND persisted** with endpoint refs remapped | the **15** planted operator edges of the full 7-session corpus | `= 15 of 15` |
 | **E5** | hedge/scope/stance-bearing claims recovered as claims in the **narrative** arm | the same claims recovered in the **raw** arm of the same run, both over the **29** marker-bearing sentences (the ratio's denominator); the raw arm's absolute recovery is reported too | `>= 0.90` ratio `and >= 0.80` raw absolute |
-| **A1** | `object→object` edges written by the run, by **declared relation type** and by **endpoint kind**, plus the number of **rollup queries** the run asks that answer (return at least one row) | every `:Object` node written by the run, same arm, same commit (floor of at least 30 Objects); and the rollup queries asked (floor of at least 1 query) | `>= 1` edge for **each** relation family the A-corpus's pack declares, and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED |
-| **A2** | S3 RESOLVE candidates **attached** to an existing `:Object` versus **minted**, plus candidates **held** and each held candidate named with its reason | all S3 RESOLVE candidate mentions in the scored run (floor of at least 30 candidates) | `attach_share >= 0.50` of **decided** candidates, and every `held` candidate named with its reason — a run that holds candidates without naming them is **RED** |
-| **A3** | statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event`/session root) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar | all statements written by the run — `Point` nodes whose `pointKind` is `statement` (floor of at least 30 statements); the `NULL` `pointKind` population is reported separately, never folded in | `chain_join_rate >= 0.50` under the registered definition; the cheap rate is reported and never compared to this bar |
-| **A4** | typed claims — statements whose `pointKind` is present and is not `statement` — reported by kind, with the `statement` and `NULL` populations reported beside them | all `Point` nodes written by the run (floor of at least 30 typed statements) | UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED above the floor of `>= 30` typed statements and compared to no bar) |
-| **A5** | `:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family, plus the statements carrying at least one of them | the distinct actors the A-corpus names — the Subjects the run could write (floor of at least 30 `Point` nodes written by the run) | `>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away |
+| **A1** | `object→object` edges written by the run, by **declared relation type** and by **endpoint kind**, plus the number of **rollup queries** the run asks that answer (return at least one row) | every `:Object` node written by the run, same arm, same commit (floor of at least 30 Objects); and the rollup queries asked (floor of at least 1 query) | `>= 1` edge for **each** of the two relation families pinned in `a1_relation_families` (`decomposesInto`, `hasPart`), and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED |
+| **A2** | S3 RESOLVE candidates **attached** to an existing `:Object` versus **minted**, plus candidates **held** and each held candidate named with its reason | the **decided** S3 RESOLVE candidates in the scored run (floor of at least 30 decided candidates — `a2_decided_candidates`; the all-candidate count is reported beside it, never used as the floor) | `attach_share >= 0.50` of **decided** candidates, and every `held` candidate named with its reason — a run that holds candidates without naming them is **RED** |
+| **A3** | statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event` root, with an `eventId` on **both** ends) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar | the statements written by the run that carry an `eventId` — `Point` nodes whose `pointKind` is `statement` **and** whose `eventId` is present (floor of at least 30 statements AND an event-root coverage of at least 0.50); the unstamped statements and the `NULL` `pointKind` population are reported separately, never folded in | `cross_batch_rate >= 0.50` over the stamped statements; the cheap rate and the coverage are reported and never compared to this bar |
+| **A4** | typed claims — **claim** Points (neither a truthy `is_episodic` nor a truthy `is_operator`) whose `pointKind` is present, not blank and not `statement` — reported by kind, with the `statement` and `NULL`/blank populations reported beside them | all **claim** `Point` nodes written by the run (floor of at least 30 typed statements); the excluded turn-row and operator-Point populations are counted and reported beside it, never folded in | UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED above the floor of `>= 30` typed statements and compared to no bar) |
+| **A5** | `:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family (`count(DISTINCT r)`), plus the statements carrying at least one of them | the distinct actors the A-corpus names — `a5_actors`, floor of at least 30 named actors — with the `:Subject` count and the `Point` population reported beside them, never used as the actor denominator | `>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away |
 
 ⚠️ The **step set** these rows are measured over is not all-unconditional: §11 records which of §4.1's
 eight steps are required and which is conditional on the pipeline having work for it (`#10215`).
@@ -425,24 +425,37 @@ one (`#7949` §2 R7).
 - **A1 — pack business logic is load-bearing.** *Metric:* `object→object` edges **by declared relation
   type and by endpoint kind**, plus rollup queries answered. *Denominator:* `:Object` nodes in the
   scored graph (floor **30**), and the rollup queries asked (floor **1**). *Bar:* at least one edge per
-  relation family the pack declares **and** every rollup query answering. *Basis:* the 2026-11-04
+  of the two relation families pinned in `a1_relation_families` (`decomposesInto`, `hasPart` — the
+  pair the record's own basis cites) **and** every rollup query answering. The set is PINNED rather
+  than "whatever the pack declares", because an unpinned family list makes the bar unfalsifiable — a
+  scorer could read one, two, nine or thirty-six edges as the requirement — and `#10983` may widen it
+  only as a reviewed edit to this record. *Basis:* the 2026-11-04
   reading measured `object→object edges []` — zero of every relation type — against 5,314 Objects,
   while the declared vocabulary already exists (`packs/dev/manifest.yaml:142` `decomposesInto`,
   `:148` `hasPart`). **Not `E6`** (`#11083`): `E6` measures the declared→writable→written chain per
   pack across all 36 declared relations; `A1` measures what the **written** graph can answer.
 - **A2 — S3 attaches instead of minting.** *Metric:* candidates **attached** vs **minted**, plus
-  **held** (each named with its reason). *Denominator:* S3 RESOLVE candidates (floor **30**). *Bar:*
-  `attach_share >= 0.50` of decided candidates, and no unnamed hold. *Basis:* it is a two-way decision,
-  so the bar is its half-way point. The measured context it exists to reverse is the backfill's own
-  census (`tortoise/definite_description_backfill.py:15-23`): of a drop-shaped population of **6,533**
-  Objects, **2,614 are single-use** and 402 unused, on **7,870** Objects and 27,324 reference edges.
-  ⚠️ The 62.3% figure in §1.2 is a **different** measurement (`the `-prefixed rows: 4,901 of 7,870, of
-  which 2,570 are load-bearing) and it is **not** a single-reference share — a bar must not be
-  justified by a class it does not describe. No `A2` run exists, so nothing is fitted to one.
+  **held** (each named with its reason). *Denominator:* **decided** candidates, floor **30**
+  (`a2_decided_candidates`) — the floor sits under the RATE's own denominator, because a floor on all
+  candidates lets a run hold 29 of 30, decide one, and score `1.000` on a single decision. The
+  all-candidate count is reported beside it and is never the floor. *Bar:* `attach_share >= 0.50` of
+  decided candidates, and no unnamed hold. *Basis:* it is a two-way decision, so the bar is its
+  half-way point. The measured context it exists to reverse is the backfill's own census
+  (`tortoise/definite_description_backfill.py:15-23`): of a drop-shaped population of **6,533** Objects,
+  **2,614 are single-use** and 402 unused, on **7,870** Objects and 27,324 reference edges — i.e. 40%
+  of that class is single-use. ⚠️ The 62.3% figure in §1.2 is a **different** measurement (`the `
+  -prefixed rows: 4,901 of 7,870, of which 2,570 are load-bearing) and it is **not** a single-reference
+  share — a bar must not be justified by a class it does not describe. No `A2` run exists, so nothing
+  is fitted to one.
 - **A3 — S5 emits the batch's story *and* the cross-batch link.** *Metric:* chain-join rate under the
   **registered** definition — an incident `IMPL`/`NAND` **and** at least one such edge crossing a batch
-  boundary. *Denominator:* statements (`pointKind = statement`; floor **30**), with `NULL` `pointKind`
-  reported separately. *Bar:* `chain_join_rate >= 0.50`; the **cheap** rate (any incident `IMPL`/`NAND`)
+  boundary, with an `eventId` on **both** ends (a `coalesce(eventId,'')` comparison counted an
+  unanchored row as "crossing", which is a fail-open, not a measurement). *Denominator:* the
+  **stamped** statements (`pointKind = statement` **and** an `eventId`) — floor **30** statements and
+  an event-root coverage of at least **0.50**; below either floor the row is REFUSED. The rate is over
+  the stamped population, not over every statement: an unstamped statement can never be counted as
+  crossing, so dividing by all of them reports coverage as if it were chain-joining. The unstamped
+  count and the `NULL` `pointKind` population are reported separately. *Bar:* `chain_join_rate >= 0.50`; the **cheap** rate (any incident `IMPL`/`NAND`)
   is reported beside it and is **not** the bar. *Basis:* 9,910 of 15,534 statements (63.8%) carried
   **neither** edge in the 2026-11-04 reading, so 36.2% join cheaply — half is a reversal of the
   measured majority. The cross-batch requirement is what makes the *claim* the measured thing: intra-
@@ -450,8 +463,13 @@ one (`#7949` §2 R7).
   (⚠️ "member of a connected component of ≥ 2" is **not** a third definition — any incident edge
   already makes a component of two, so that phrasing collapses into the cheap one and is rejected for
   exactly the reason it looks attractive.)
-- **A4 — typing is applied.** *Metric:* typed claims by kind, with `statement` and `NULL` beside them.
-  *Denominator:* `Point` nodes written by the run (floor **30** typed statements). *Bar:*
+- **A4 — typing is applied.** *Metric:* typed claims by kind, with `statement` and `NULL`/blank beside
+  them, over the **claim** class — Points with neither a truthy `is_episodic` nor a truthy
+  `is_operator` (TRUTHINESS, because `create_point(is_episodic=False)` really writes the property).
+  *Denominator:* **claim** `Point` nodes written by the run (floor **30** typed statements); the
+  excluded turn-row and operator-Point populations are counted and reported beside it, because they
+  are capture rows and not claims — 159 of the committed run's 354 Points are turn rows, so counting
+  them read ≈45% "typed" against the owner's 0.6% ceiling. *Bar:*
   **`UNMEASURED`** — deliberately, and this is a registration of that fact rather than an omission.
   The owner's *"0.6% typed is the ceiling the capstone must beat"* points **opposite** to `D3`'s
   "statement only"; `#10988` (C7) is blocked on that reopen and `#1022` carries the decision, so a bar
@@ -459,17 +477,22 @@ one (`#7949` §2 R7).
   **reported** above its floor and compared to nothing.
 - **A5 — Subjects are populated.** *Metric:* `:Subject` nodes, the **four** subject-edge families
   (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) per family, and statements carrying one.
-  *Denominator:* the distinct actors the corpus names (floor **30** `Point`s written by the run).
-  *Bar:* at least one `:Subject` per distinct actor named, and at least one statement carrying a subject
-  edge; a family that is zero is **named with its reason**. *Basis:* 26 Subjects against 19,300 points
+  *Denominator:* the distinct actors the corpus names — `a5_actors`, floor **30** named actors, which
+  `#10983` (C2) registers as the corpus's actor list; the `:Subject` count is **not** that denominator
+  (`:Subject` nodes are what the run WRITES, so using them would let the bar satisfy itself). Until the
+  actor list exists the count is `UNMEASURED` and the row is REFUSED, never scored on the Subject
+  count. *Bar:* at least one `:Subject` per distinct actor named, and at least one **statement**
+  carrying a subject edge; a family that is zero is **named with its reason**. *Basis:* 26 Subjects against 19,300 points
   in the 2026-11-04 reading, while `#4889` is CLOSED — the bar is the corpus's own actor count, not the
   number **26**, so it cannot be satisfied by writing one Subject per run. `#10987` (C6) owns the
   scoring and the `#4889` verdict.
 
 **Floors, in one place.** `pins.denominator_floors` carries `a1_objects`, `a2_candidates`,
-`a3_statements`, `a4_typed_statements` and `a5_points`, all **30** — the `E1` object floor, applied
-uniformly, because a per-row floor chosen after seeing a population is a floor fitted to its own
-result. Below a floor a row is **REFUSED**, which §3 defines as neither a pass nor a fail.
+`a2_decided_candidates`, `a3_statements`, `a4_typed_statements`, `a5_points` and `a5_actors`, all
+**30** — the `E1` object floor, applied uniformly, because a per-row floor chosen after seeing a
+population is a floor fitted to its own result. ⚠️ Two of them (`a2_decided_candidates`, `a5_actors`)
+are floors under the **rate's** own denominator, not merely under the population it is drawn from: a
+floor that guards a population the bar does not divide by is a floor a one-of-one decision clears. Below a floor a row is **REFUSED**, which §3 defines as neither a pass nor a fail.
 
 **A zero denominator is REFUSED, and it is never `0/0`.** Two bars divide by a population the floor
 does not itself guarantee: `A2`'s is **decided** candidates (a run that holds all 30 candidates clears
@@ -786,9 +809,14 @@ denominator_floors:
   # floor chosen after seeing its population is a floor fitted to its own result (§3.7).
   a1_objects: 30
   a2_candidates: 30
+  a2_decided_candidates: 30
   a3_statements: 30
   a4_typed_statements: 30
   a5_points: 30
+  a5_actors: 30
+a1_relation_families:
+  - decomposesInto
+  - hasPart
 pre_existing_unscored_logs:
   e1-e2.log:
     added_at: bc547406f

@@ -281,7 +281,7 @@ def test_the_pointkind_histogram_keeps_null_as_a_THIRD_state_and_drops_capture_r
     """
     probe = _probe()
     projection = _FakeProjection({
-        "is_operator IS NOT NULL": [[193]],
+        "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[193]],
         "coalesce(n.pointKind, 'NULL')": [["statement", 150], ["NULL", 10], ["", 3],
                                           ["constraint", 88], ["preference", 21]],
     })
@@ -307,7 +307,9 @@ def test_the_chain_join_denominator_is_STATEMENTS_only_and_the_cheap_rate_is_not
     assert out["statements_with_an_event_root"] == 184
     assert out["cheap_joined"] == 5624 and out["cross_batch_joined"] == 5624
     assert out["cheap_rate"] == 5624 / 15534
-    assert out["cross_batch_rate"] == 5624 / 15534
+    assert out["event_root_coverage"] == 184 / 15534
+    assert out["cross_batch_rate"] == 5624 / 184, (
+        "the cross-batch rate divides by the STAMPED subpopulation, not by every statement")
     # the registered definition can never exceed the cheap one — the invariant a broader strict
     # query would break (#10982 review, finding 12).
     if isinstance(out["cross_batch_joined"], int) and isinstance(out["cheap_joined"], int):
@@ -346,7 +348,7 @@ def test_a_zero_denominator_reports_UNMEASURED_never_a_number():
     out = probe._a3_chain_join(projection)
     assert str(out["cheap_rate"]).startswith("UNMEASURED("), out["cheap_rate"]
     a4 = probe._a4_pointkind(_FakeProjection({
-        "is_operator IS NOT NULL": [[0]],
+        "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[0]],
         "coalesce(n.pointKind, 'NULL')": [],
     }))
     assert str(a4["typed_share"]).startswith("UNMEASURED("), a4["typed_share"]
@@ -357,7 +359,7 @@ def test_the_four_subject_families_are_counted_per_family_and_only_statements_ca
     probe = _probe()
     projection = _FakeProjection({
         "MATCH (n:Subject) RETURN count(n)": [[26]],
-        "RETURN type(r) AS t, count(*) AS n": [["aboutSubject", 40]],
+        "RETURN type(r) AS t, count(DISTINCT r) AS n": [["aboutSubject", 40]],
         "WHERE n.pointKind = 'statement'": [[40]],
     })
     out = probe._a5_subjects(projection)
@@ -365,10 +367,13 @@ def test_the_four_subject_families_are_counted_per_family_and_only_statements_ca
     assert out["families"] == {"aboutSubject": 40, "memberOf": 0,
                                "ownedBy": 0, "managedBy": 0}
     assert out["statements_with_a_subject_edge"] == 40
-    # both legs are undirected AND the carrying leg is statement-filtered — the two properties
-    # whose absence let a turn row satisfy the registered bar (#10982 review, finding 7).
+    # the three properties whose absence published a wrong number or let a turn row satisfy the bar:
+    # undirected, `count(DISTINCT r)` (an undirected multi-rel-type pattern is traversed in BOTH
+    # orientations, so `count(*)` reports 2x the edges — measured on falkordb-server:v4.20.6), and a
+    # statement filter on the carrying leg.
     families_query, carrying_query = projection.g.queries[1], projection.g.queries[2]
     assert "]-()" in families_query and "]->()" not in families_query
+    assert "count(DISTINCT r)" in families_query, families_query
     assert "n.pointKind = 'statement'" in carrying_query
 
 
@@ -390,20 +395,22 @@ def test_object_object_edges_are_reported_by_type_and_by_objectKind():
     assert out["by_endpoint_kind"][0]["from_kind"] == "dev:epic"
     assert "a.kind AS ak" not in "".join(projection.g.queries), (
         "the census reads a property no writer stamps")
+    assert out["by_pinned_family"] == {"decomposesInto": 7, "hasPart": 0}
 
 
 def _full_census(probe) -> dict:
     return {
         "criteria": list(probe.A_CRITERIA),
         "A1": {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
+               "by_pinned_family": {name: 0 for name in probe.A1_RELATION_FAMILIES},
                "rollup_queries": probe.unmeasured("a rollup query")},
         "A2": {"attach": probe.unmeasured("a counter"), "mint": probe.unmeasured("a counter")},
         "A3": {"statements": 10, "statements_with_an_event_root": 10,
-               "cheap_joined": 2, "cheap_rate": 0.2,
+               "cheap_joined": 2, "cheap_rate": 0.2, "event_root_coverage": 0.5,
                "cross_batch_joined": 1, "cross_batch_rate": 0.1, "relations": ["IMPL", "NAND"]},
         "A4": {"claim_points": 10, "excluded_capture_rows": 0, "typed": 1, "statement": 8,
                "null": 1, "typed_share": 0.1, "typed_by_kind": {"constraint": 1}},
-        "A5": {"subjects": 2, "families": {"aboutSubject": 1, "memberOf": 0,
+        "A5": {"subjects": 2, "named_actors": probe.unmeasured("the corpus's actor list"), "families": {"aboutSubject": 1, "memberOf": 0,
                                            "ownedBy": 0, "managedBy": 0},
                "statements_with_a_subject_edge": 1},
         "TAGGED": {"edges": 0, "note": probe.TAGGED_NOTE},
@@ -441,10 +448,10 @@ def test_the_PRODUCTION_tagged_note_is_the_not_a_target_annotation(monkeypatch):
         "WHERE n.pointKind = 'statement' RETURN count(n)": [[0]],
         "AND n.eventId IS NOT NULL RETURN count(n)": [[0]],
         "WHERE n.pointKind = 'statement' RETURN count(DISTINCT n)": [[0]],
-        "is_operator IS NOT NULL": [[0]],
+        "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[0]],
         "coalesce(n.pointKind, 'NULL')": [],
         "MATCH (n:Subject) RETURN count(n)": [[0]],
-        "RETURN type(r) AS t, count(*) AS n": [],
+        "RETURN type(r) AS t, count(DISTINCT r) AS n": [],
         "WHERE n.pointKind = 'statement'": [[0]],
     })
     monkeypatch.setattr(probe, "FalkorProjection", None, raising=False)
@@ -454,14 +461,24 @@ def test_the_PRODUCTION_tagged_note_is_the_not_a_target_annotation(monkeypatch):
     census = probe.a_row_census("docker://h:1/g")
     assert census["TAGGED"]["note"] == probe.TAGGED_NOTE
     assert "NOT a target" in census["TAGGED"]["note"]
-    # …and one broken row does not discard the others (finding 11).
-    class _A4Breaks(_FakeProjection):
+    # …and one broken row does not discard the others (findings 2 and 11). The break must be on the
+    # GRAPH (the projection delegates to `projection.g.query`), not on the projection.
+    class _A4BreaksGraph(_FakeGraph):
         def query(self, cypher):
-            if "is_operator IS NOT NULL" in cypher:
+            if "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)" in cypher:
                 raise RuntimeError("boom")
             return super().query(cypher)
+
+    class _A4Breaks(_FakeProjection):
+        def __init__(self, rows):
+            self.g = _A4BreaksGraph(rows)
+
     monkeypatch.setattr(projection_module.FalkorProjection, "from_uri",
                         classmethod(lambda cls, uri: _A4Breaks(dict(empty.g._rows))))
     census = probe.a_row_census("docker://h:1/g")
     assert str(census["A4"]["typed_share"]).startswith("UNMEASURED(")
+    # ⛔ a thrown row publishes NO numeric measurement under a key a real measurement occupies —
+    # otherwise a consumer reads "measured absence" and scores the row RED on an infra failure.
+    for key in ("claim_points", "typed", "statement", "null"):
+        assert str(census["A4"][key]).startswith("UNMEASURED("), (key, census["A4"][key])
     assert census["A5"]["subjects"] == 0, "a broken A4 row discarded A5's measured number"

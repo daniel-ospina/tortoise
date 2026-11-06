@@ -2294,6 +2294,13 @@ def census(uri: str) -> dict:
 #: The registered object-layer rows, in the order the record lists them.
 A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
 
+#: ⛔ `A1`'s bar is "at least one edge for EACH relation family the A-corpus's pack declares", and
+#: an unpinned set makes that bar unfalsifiable — a scorer could read 1, 2, 9 or 36 (#10982 review
+#: cycle 2, finding 6). These two are the ones the record's own basis cites
+#: (`packs/dev/manifest.yaml:142` `decomposesInto`, `:148` `hasPart`); #10983 may widen the list as a
+#: reviewed edit to the record, never as a private instrument choice.
+A1_RELATION_FAMILIES = ("decomposesInto", "hasPart")
+
 #: The four subject-edge families (`#10987`). Counted PER FAMILY so that one wired family cannot
 #: read as "Subjects are populated" — the failure the owner's assertion exists to catch.
 SUBJECT_EDGE_FAMILIES = ("aboutSubject", "memberOf", "ownedBy", "managedBy")
@@ -2338,9 +2345,13 @@ def _a1_object_edges(projection) -> dict:
             "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, a.objectKind AS ak, "
             "b.objectKind AS bk, count(*) AS n ORDER BY n DESC, t, ak, bk").result_set
     ]
+    counts = {entry["relation"]: entry["edges"] for entry in by_type}
     return {"by_type": by_type,
             "by_endpoint_kind": by_kind,
-            "edges_total": sum(entry["edges"] for entry in by_type)}
+            "edges_total": sum(entry["edges"] for entry in by_type),
+            # per PINNED family, so the logged numbers map onto the registered bar
+            "by_pinned_family": {name: counts.get(name, 0)
+                                 for name in A1_RELATION_FAMILIES}}
 
 
 def _a3_chain_join(projection) -> dict:
@@ -2390,7 +2401,13 @@ def _a3_chain_join(projection) -> dict:
         "cross_batch_joined": strict if stamped else unmeasured(
             "an eventId stamp on the statement population — no statement carries one, so no "
             "'different Event root' can be established"),
-        "cross_batch_rate": (strict / statements) if (statements and stamped) else unmeasured(
+        # ⛔ The rate's denominator is the STAMPED subpopulation, not all statements: a statement
+        # with no `eventId` can never be counted as crossing, so dividing by every statement would
+        # report "0% join chains" as a measurement of stamp coverage (#10982 review cycle 2,
+        # finding 7). The coverage is emitted beside it and the row REFUSES below its floor.
+        "event_root_coverage": (stamped / statements) if statements else unmeasured(
+            "a statement population"),
+        "cross_batch_rate": (strict / stamped) if stamped else unmeasured(
             "a statement population carrying an eventId on both ends of an IMPL/NAND edge"),
         "relations": list(CHAIN_RELATIONS),
     }
@@ -2410,12 +2427,17 @@ def _a4_pointkind(projection) -> dict:
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
     and reported, never silently dropped.
     """
+    # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
+    # (`projection/entities.py:2715-2717`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
+    # from the denominator while the capture count reported it as a turn row it is not. The same
+    # predicate the file's own `POINT_COMPOSITION_CYPHER` and `tortoise/quota.py:1133` use.
     capture = projection.g.query(
-        "MATCH (n:Point) WHERE n.is_episodic IS NOT NULL OR n.is_operator IS NOT NULL "
+        "MATCH (n:Point) WHERE coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false) "
         "RETURN count(n)").result_set
     capture = int(capture[0][0] or 0) if capture else 0
     rows = projection.g.query(
-        "MATCH (n:Point) WHERE n.is_episodic IS NULL AND n.is_operator IS NULL "
+        "MATCH (n:Point) WHERE NOT coalesce(n.is_episodic, false) "
+        "AND NOT coalesce(n.is_operator, false) "
         "RETURN coalesce(n.pointKind, 'NULL') AS k, count(*) AS n "
         "ORDER BY n DESC").result_set
     by_kind: dict[str, int] = {}
@@ -2447,8 +2469,12 @@ def _a5_subjects(projection) -> dict:
     subjects = projection.g.query("MATCH (n:Subject) RETURN count(n)").result_set
     subjects = int(subjects[0][0] or 0) if subjects else 0
     pattern = "|".join(SUBJECT_EDGE_FAMILIES)
+    # ⛔ `count(DISTINCT r)`, NOT `count(*)`: an UNDIRECTED multi-rel-type pattern is traversed in
+    # both orientations, so `count(*)` reports 2x the edges (measured on falkordb-server:v4.20.6:
+    # two `aboutSubject` edges -> count(*)=4, count(DISTINCT r)=2). `tortoise/taxonomy.py:40` already
+    # records that these patterns are unreliable across versions (#10982 review cycle 2, finding 1).
     rows = projection.g.query(
-        f"MATCH ()-[r:{pattern}]-() RETURN type(r) AS t, count(*) AS n "
+        f"MATCH ()-[r:{pattern}]-() RETURN type(r) AS t, count(DISTINCT r) AS n "
         "ORDER BY t").result_set
     families = {str(row[0]): int(row[1] or 0) for row in rows}
     carrying = projection.g.query(
@@ -2456,6 +2482,13 @@ def _a5_subjects(projection) -> dict:
         "RETURN count(DISTINCT n)").result_set
     carrying = int(carrying[0][0] or 0) if carrying else 0
     return {"subjects": subjects,
+            # ⛔ A5's BAR divides by the distinct actors the A-corpus NAMES, so the census must carry
+            # that population or the bar is not producible from the block (review cycle 2, finding 8).
+            # The corpus's actor list is #10983's to register, and until it does the count is a
+            # NAMED gap rather than the Subject count standing in for it.
+            "named_actors": unmeasured(
+                "the distinct actors the A-corpus names — #10983 (C2) registers the actor list; the "
+                "`:Subject` count is NOT it, or the bar would be satisfied by the run's own writes"),
             "families": {name: int(families.get(name, 0))
                          for name in SUBJECT_EDGE_FAMILIES},
             "statements_with_a_subject_edge": carrying}
@@ -2485,14 +2518,21 @@ def a_row_census(uri: str) -> dict:
         try:
             return fn(projection)
         except Exception as exc:  # the row is named; the rest of the census still reports
-            block = dict(empty)
-            block["error"] = unmeasured(
+            reason = unmeasured(
                 f"{name}'s queries could not run — {type(exc).__name__}: {exc}")
+            # ⛔ NOT the zero skeleton: a numeric `0` under a key a real measurement also occupies
+            # reads as a MEASURED ABSENCE and scores the row RED on an infrastructure failure —
+            # the exact number this block exists to not print (#10982 review cycle 2, finding 2).
+            block: dict = {"error": reason}
+            for key, value in empty.items():
+                block[key] = ({name_: reason for name_ in value}
+                              if isinstance(value, dict) else reason)
             return block
 
     # A1 — the object→object graph, plus the rollup half.
     result["A1"] = row("A1", _a1_object_edges,
-                       {"by_type": [], "by_endpoint_kind": [], "edges_total": 0})
+                       {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
+                        "by_pinned_family": {name: 0 for name in A1_RELATION_FAMILIES}})
     # ⛔ The rollup half of A1 is NOT the edge count: A1's real criterion is a query ANSWERING, and
     # no pack-declared rollup query is registered for this corpus yet (`#10984` owns both). An edge
     # count with no query behind it is the shape this row exists to refuse, so it is named.
@@ -2509,6 +2549,7 @@ def a_row_census(uri: str) -> dict:
 
     result["A3"] = row("A3", _a3_chain_join, {"statements": 0,
                                               "statements_with_an_event_root": 0,
+                                              "event_root_coverage": unmeasured("a statement population"),
                                               "cheap_joined": 0, "cheap_rate": unmeasured("a statement population"),
                                               "cross_batch_joined": unmeasured("an eventId stamp"),
                                               "cross_batch_rate": unmeasured("an eventId stamp"),
@@ -2518,7 +2559,7 @@ def a_row_census(uri: str) -> dict:
                         "null": 0, "typed": 0, "typed_by_kind": {},
                         "typed_share": unmeasured("a claim-point population")})
     result["A5"] = row("A5", _a5_subjects,
-                       {"subjects": 0,
+                       {"subjects": 0, "named_actors": 0,
                         "families": {name: 0 for name in SUBJECT_EDGE_FAMILIES},
                         "statements_with_a_subject_edge": 0})
     tagged: dict = {"note": TAGGED_NOTE}
@@ -2551,7 +2592,8 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
         "gate's, and no A-row has a scored run yet (#10984-#10988 own those)")
 
     a1 = census_a["A1"]
-    add(f"a1 object_object_edges={a1['edges_total']} by_type={a1['by_type'] or '[]'}"
+    add(f"a1 object_object_edges={a1['edges_total']} by_type={a1['by_type'] or '[]'} "
+        f"by_pinned_family={a1['by_pinned_family']}"
         + (f" error={a1['error']}" if a1.get("error") else ""))
     add(f"a1 by_endpoint_kind={a1['by_endpoint_kind'] or '[]'}")
     add(f"a1 rollup_queries={a1['rollup_queries']}")
@@ -2562,6 +2604,7 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
     a3 = census_a["A3"]
     add(f"a3 statements={a3['statements']} "
         f"statements_with_an_event_root={a3['statements_with_an_event_root']} "
+        f"event_root_coverage={a3['event_root_coverage']} "
         f"cheap_joined={a3['cheap_joined']} cheap_rate={a3['cheap_rate']} "
         f"cross_batch_joined={a3['cross_batch_joined']} "
         f"cross_batch_rate={a3['cross_batch_rate']} relations={a3['relations']}"
@@ -2580,7 +2623,8 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
         "claims; the bar is UNMEASURED by registration (D3 fork, #10988/#1022)")
 
     a5 = census_a["A5"]
-    add(f"a5 subjects={a5['subjects']} families={a5['families']} "
+    add(f"a5 subjects={a5['subjects']} named_actors={a5['named_actors']} "
+        f"families={a5['families']} "
         f"statements_with_a_subject_edge={a5['statements_with_a_subject_edge']}"
         + (f" error={a5['error']}" if a5.get("error") else ""))
 

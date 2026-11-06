@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:634b127e191128adbea3b95b4f67f97c64eb0be75db00a7d5ca3ed96b84ea9be",
+  "document_sha256": "sha256:5c40e3413f85f9b9783b31b9fc18bfcfaae74f4c622fc4793a40416ec7378528",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -105,7 +105,7 @@
       "id": "A1",
       "metric": "`object→object` edges written by the run, by **declared relation type** and by **endpoint kind**, plus the number of **rollup queries** the run asks that answer (return at least one row)",
       "denominator": "every `:Object` node written by the run, same arm, same commit (floor of at least 30 Objects); and the rollup queries asked (floor of at least 1 query)",
-      "threshold": "`>= 1` edge for **each** relation family the A-corpus's pack declares, and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED",
+      "threshold": "`>= 1` edge for **each** of the two relation families pinned in `a1_relation_families` (`decomposesInto`, `hasPart`), and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED",
       "threshold_basis": "the owner's 2026-11-04 live-v4 reading measured `object→object edges []` — zero of every relation type — against 5,314 Objects (#7949 comment 6645275147), while the declared vocabulary already exists (packs/dev/manifest.yaml:142 `decomposesInto`, :148 `hasPart`); the bar is the pack's own declaration, not a number invented here. A1 is NOT E6 (#11083): E6 measures the declared→writable→written chain per pack across all 36 declared relations; A1 measures what the WRITTEN graph can answer.",
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "no A-row has been measured. The 2026-11-04 live-v4 table that motivated the row was taken by hand on the hosted graph, has NO committed artifact and is not re-derivable from any command in this repository (docs/epics/2026-11-05-5087-extractor-v4/01-align.md:20,31), so it is this row's THRESHOLD BASIS and never its measurement; #10984 (C3) owns the scoring run.",
@@ -114,18 +114,18 @@
     {
       "id": "A2",
       "metric": "S3 RESOLVE candidates **attached** to an existing `:Object` versus **minted**, plus candidates **held** and each held candidate named with its reason",
-      "denominator": "all S3 RESOLVE candidate mentions in the scored run (floor of at least 30 candidates)",
+      "denominator": "the **decided** S3 RESOLVE candidates in the scored run (floor of at least 30 decided candidates — `a2_decided_candidates`; the all-candidate count is reported beside it, never used as the floor)",
       "threshold": "`attach_share >= 0.50` of **decided** candidates, and every `held` candidate named with its reason — a run that holds candidates without naming them is **RED**",
-      "threshold_basis": "it is a two-way decision, so the bar is its half-way point; the measured context it exists to reverse is #4894's 62.3% of Objects being `the <X>` descriptions referenced by exactly one Point. No A2 run exists, so nothing is fitted to one; #10985 (C4) owns the scoring run.",
+      "threshold_basis": "it is a two-way decision, so the bar is its half-way point. The measured context it exists to reverse is the backfill's own census (tortoise/definite_description_backfill.py:15-23): of a drop-shaped population of 6,533 Objects, 2,614 are single-use and 402 unused, on 7,870 Objects and 27,324 reference edges - i.e. 40% of that class is single-use. The 62.3% figure in section 1.2 is a DIFFERENT measurement (the '-prefixed rows: 4,901 of 7,870) and is NOT a single-reference share; a bar must not be justified by a class it does not describe. No A2 run exists, so nothing is fitted to one; #10985 (C4) owns the scoring run.",
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "no S3-RESOLVE attach/mint census has ever been taken on any graph, so no measurement of this metric exists anywhere; #10985 (C4) owns it.",
-      "floor": "a2_candidates"
+      "floor": "a2_decided_candidates"
     },
     {
       "id": "A3",
-      "metric": "statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event`/session root) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar",
-      "denominator": "all statements written by the run — `Point` nodes whose `pointKind` is `statement` (floor of at least 30 statements); the `NULL` `pointKind` population is reported separately, never folded in",
-      "threshold": "`chain_join_rate >= 0.50` under the registered definition; the cheap rate is reported and never compared to this bar",
+      "metric": "statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event` root, with an `eventId` on **both** ends) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar",
+      "denominator": "the statements written by the run that carry an `eventId` — `Point` nodes whose `pointKind` is `statement` **and** whose `eventId` is present (floor of at least 30 statements AND an event-root coverage of at least 0.50); the unstamped statements and the `NULL` `pointKind` population are reported separately, never folded in",
+      "threshold": "`cross_batch_rate >= 0.50` over the stamped statements; the cheap rate and the coverage are reported and never compared to this bar",
       "threshold_basis": "9,910 of 15,534 statements (63.8%) carried NEITHER IMPL nor NAND in the owner's 2026-11-04 live-v4 reading (#7949 comment 6645275147), i.e. 36.2% join at the CHEAP definition, so one half is a reversal of the measured majority and still below a demand the operator lane has never met. The cross-batch requirement is what makes the CLAIM the measured thing: intra-session CONTAINS/extractedFrom/INPUT already exist and may not count as the link. 'member of a connected component of >= 2' is NOT a third definition — any incident edge already makes a component of two, so it collapses into the cheap one. #10986 (C5) owns the scoring run.",
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "the 2026-11-04 live-v4 figure is a hand reading of the hosted graph with no committed artifact (docs/epics/2026-11-05-5087-extractor-v4/01-align.md:31), so no artifact carrying this metric exists; #10986 (C5) owns in-graph measurement of it.",
@@ -133,8 +133,8 @@
     },
     {
       "id": "A4",
-      "metric": "typed claims — statements whose `pointKind` is present and is not `statement` — reported by kind, with the `statement` and `NULL` populations reported beside them",
-      "denominator": "all `Point` nodes written by the run (floor of at least 30 typed statements)",
+      "metric": "typed claims — **claim** Points (neither a truthy `is_episodic` nor a truthy `is_operator`) whose `pointKind` is present, not blank and not `statement` — reported by kind, with the `statement` and `NULL`/blank populations reported beside them",
+      "denominator": "all **claim** `Point` nodes written by the run (floor of at least 30 typed statements); the excluded turn-row and operator-Point populations are counted and reported beside it, never folded in",
       "threshold": "UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED above the floor of `>= 30` typed statements and compared to no bar)",
       "threshold_basis": "NO BAR EXISTS and this registration may not invent one: the owner's assertion ('0.6% typed is the ceiling the capstone must beat') points OPPOSITE to D3's 'statement only', #10988 (C7) is BLOCKED on that reopen, and #1022 carries the decision. The row is REPORTED above its floor and compared to nothing until the fork is ruled.",
       "measurement_visible_to_author": false,
@@ -144,13 +144,13 @@
     },
     {
       "id": "A5",
-      "metric": "`:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family, plus the statements carrying at least one of them",
-      "denominator": "the distinct actors the A-corpus names — the Subjects the run could write (floor of at least 30 `Point` nodes written by the run)",
+      "metric": "`:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family (`count(DISTINCT r)`), plus the statements carrying at least one of them",
+      "denominator": "the distinct actors the A-corpus names — `a5_actors`, floor of at least 30 named actors — with the `:Subject` count and the `Point` population reported beside them, never used as the actor denominator",
       "threshold": "`>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away",
       "threshold_basis": "the owner's 2026-11-04 live-v4 reading measured 26 Subjects against 19,300 points (#7949 comment 6645275147) while #4889 is CLOSED and the symptom persists; the bar is the corpus's OWN actor count, not the number 26, so it cannot be satisfied by writing one Subject per run. #10987 (C6) owns the scoring and the #4889 verdict.",
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "no four-family subject-edge census exists on any graph; the 26-Subject figure is a hand reading of the hosted graph with no committed artifact; #10987 (C6) owns the measurement.",
-      "floor": "a5_points"
+      "floor": "a5_actors"
     }
   ],
   "prior_measurements": {
@@ -250,7 +250,9 @@
     "a2_candidates": 30,
     "a3_statements": 30,
     "a4_typed_statements": 30,
-    "a5_points": 30
+    "a5_points": 30,
+    "a2_decided_candidates": 30,
+    "a5_actors": 30
   },
   "below_floor": "REFUSED, which is neither a pass nor a fail",
   "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over.",
@@ -260,6 +262,10 @@
     "pinned_by": "the SAME fixtures_hash the E-rows pin; a run handed a DIFFERENT corpus is REFUSED by the record's own G1 rule, never scored",
     "requires": "a pack that declares a part-whole hierarchy (goal to initiative to work item) for A1, and statements carrying bindable subject slots for A5. Until #10983 lands a session exercising both, a row whose population is absent is REFUSED with the absent population NAMED, never scored on a population of three objects",
     "why_one_corpus": "the record's corpus pin is a single fixtures_hash (#9075); two corpora would make the A-rows and the E-rows incomparable on one run",
-    "zero_denominator": "REFUSED for every A-row: A2's decided-candidate count of zero and A5's named-actor count of zero make the row REFUSED, and the instrument emits UNMEASURED(<the absent population>) — never a 0/0 rate"
-  }
+    "zero_denominator": "REFUSED for every A-row: A2's decided-candidate count of zero and A5's named-actor count of zero make the row REFUSED, and the instrument emits UNMEASURED(<the absent population>) - never a 0/0 rate. The floors a2_decided_candidates and a5_actors sit under the RATE's own denominator, not merely under the population it is drawn from."
+  },
+  "a1_relation_families": [
+    "decomposesInto",
+    "hasPart"
+  ]
 }
