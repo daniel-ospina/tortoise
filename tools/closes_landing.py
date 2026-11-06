@@ -681,6 +681,32 @@ class _Fence:
     item_depth: int = 0
 
 
+def _consume_blockquote_markers(line: str, depth: int) -> tuple[int, str]:
+    """(markers consumed, the text LEFT after at most `depth` of them).
+
+    The ONE consumption loop behind two questions that must agree: `_fence_line_column` measures the
+    indent and raw column of what is left, and §4.6's type-6/7 end condition asks whether what is
+    left is BLANK. A block that lives at `depth` ends only on a line that is blank in THAT
+    container — a deeper quote's marker on the same line is the block's own literal text, not a
+    blank line — so the end condition must not consume every `>` in the prefix.
+    """
+    i = 0
+    consumed = 0
+    while consumed < depth:
+        j = i
+        while j < len(line) and line[j] in " \t":
+            j += 1
+        if j < len(line) and line[j] == ">":
+            j += 1
+            if j < len(line) and line[j] == " ":
+                j += 1
+            consumed += 1
+            i = j
+            continue
+        break
+    return consumed, line[i:]
+
+
 def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
     """(markers consumed, indent after them, RAW column of the content).
 
@@ -708,21 +734,9 @@ def _fence_line_column(line: str, depth: int) -> tuple[int, int, int]:
     each way of getting it wrong is a false `lands` on a quoted keyword (#10634
     review).
     """
-    i = 0
-    consumed = 0
-    while consumed < depth:
-        j = i
-        while j < len(line) and line[j] in " \t":
-            j += 1
-        if j < len(line) and line[j] == ">":
-            j += 1
-            if j < len(line) and line[j] == " ":
-                j += 1
-            consumed += 1
-            i = j
-            continue
-        break
-    start = i
+    consumed, remainder = _consume_blockquote_markers(line, depth)
+    start = len(line) - len(remainder)
+    i = start
     while i < len(line) and line[i] in " \t":
         i += 1
     return consumed, i - start, i
@@ -1297,6 +1311,20 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # The list item the CURRENT line sits inside (None at top level). Set per line, before the
     # line can push its own item — see the `indented_code` branch at the end of the loop.
     container: _ListItem | None = None
+    # ⛔ A BLANK LINE DOES NOT CLOSE A LIST ITEM — THE NEXT NON-BLANK LINE DOES (round 47 review: the
+    # P1 fail-open the pop guard was reaching for, WITHOUT the two regressions the guard introduced).
+    # `_item_dedented` is a COLUMN test, and a quote-only line's residual is 0 in the item's own
+    # space, so the pop below fires on a BLANK line — one line EARLIER than the renderer closes the
+    # `<li>`. Popping there is harmless for the fence and marker paths (they see exactly what
+    # `origin/main` sees), but the item was then FORGOTTEN, so an HTML block opening on the very next
+    # line bound to `html_item = None` and a type-1 block lost the only end-condition it has:
+    #     `> - item` + `>` + `>   <pre>` + `>` + `> -     Closes #N`   renderer `code_block`
+    # This is NOT the pop guard re-added: the item stays OFF `list_items`, it is carried only when
+    # the blank line stayed INSIDE the item's own quote (a deeper marker opens a container the item
+    # cannot hold, and then the item really has closed — `- a` + `>`), and it is consulted for
+    # exactly ONE non-blank line, to bind a block that opens while still inside the item. That is
+    # the renderer's own rule for when the `<li>` ends.
+    blank_carried: _ListItem | None = None
     # The spaces after this line's own list marker (0 = not a marker line, or a blank one).
     own_gap = 0
     # Whether THIS line opened a list item. Reset per line: the block below sets it only on the
@@ -1429,8 +1457,10 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # saw it — the block it opened under then had no edge and the keyword
         # inside the block the renderer calls CODE read as prose (#10634 review
         # P1, fail-open). `_item_dedented` is the matching pop, in the same space.
-        # ⛔ THE PER-LINE STATE MUST BE RESET ON A WHITESPACE-ONLY LINE (round 38 review, P1 — a
-        # CRASH, and a regression against `origin/main`). `pushed`, `container` and `own_gap` were
+        # ⛔ THE PER-LINE STATE MUST BE RESET ON A LINE WITH NO CONTENT — WHITESPACE-ONLY OR
+        # QUOTE-ONLY (round 38 review, P1 — a CRASH, and a regression against `origin/main`; round 47
+        # review, F2, widened it from `line.strip()` to `rest.strip()` so the reset and the per-line
+        # ASSIGNMENT below agree on what "blank" means). `pushed`, `container` and `own_gap` were
         # assigned only inside `if line.strip():`, so a whitespace-only line carried the PREVIOUS
         # line's `pushed=True` forward — and the `indent_code` branch had already popped the items
         # the flag referred to. Two shapes then raise IndexError, both of which `main` answers:
@@ -1439,18 +1469,32 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # A crash is not a narrow blast radius in this tool: `sweep()` has no per-PR guard, so one
         # such body aborts `--sweep` for EVERY PR and the run exits 1 against a documented 0/3/2
         # contract. Reset at the top of the iteration, which is where "this line's own" begins.
-        if not line.strip():
+        if not rest.strip():
             pushed = False
             container = None
             own_gap = 0
             _lazy_push = False
-        # ⛔ A BLANK LINE IS BLANK CONTENT, NOT A DEDENT (round 46 review, P1 — a fail-open that swept
-        # in 350,316 bodies). A quote-only line (`>`, `>  `, `> >`) is NON-EMPTY as a raw line but
-        # carries no content after its container prefixes, so `_item_dedented` read it as a dedent,
-        # popped the item — and the HTML block that opened next bound to `None` and could never end.
-        # §4.6 ends types 6/7 at a blank line, which is what `rest.strip()` decides; the pop needs
-        # the same test.
-        if line.strip() and rest.strip():
+            # The item a quote-only line leaves is still open in the renderer until the NEXT
+            # non-blank line — but only if the line stayed inside that item's own quote, and only if
+            # it carries a marker at all: a wholly empty line closes the blockquote, so it carries
+            # nothing.
+            blank_carried = (list_items[-1]
+                             if (line.strip() and list_items
+                                 and _quote_depth(prefix) <= list_items[-1].depth)
+                             else None)
+        # ⛔ A QUOTE-ONLY LINE IS BLANK CONTENT, AND THE END CONDITION — NOT THE POP — IS WHAT MUST
+        # LEARN IT (round 47 review, F1/F2 — the fail-open this branch fixes, without the two
+        # regressions its first version introduced). `>`, `>  ` and `> >` are NON-EMPTY as raw lines
+        # and empty of content after their container prefixes, so §4.6's type-6/7 blank-line
+        # end-condition never fired and the block stayed open over the next marker line. That is
+        # fixed where the content is MEASURED (the `_consume_blockquote_markers` test below), not by
+        # suppressing the pop: a blank line does not end an item, but `_item_dedented` is a COLUMN
+        # test and gating the pop on `rest.strip()` broke the shapes next door in both directions —
+        # `- a` + `>` + a column-0 fence was newly CREDITED (43 bodies of a 1,296-body grid), and
+        # `- a` + `>     ` + `>     ` raised IndexError in BOTH non-lenient arms (336 pairs), which
+        # aborts `--sweep` for every PR. The pop stays `main`'s; `blank_carried` is what keeps the
+        # type-1 repro fixed without it.
+        if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
             # The container THIS line sits in, captured BEFORE the line can push its own
@@ -1495,7 +1539,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 if html_closer:
                     if html_closer.lower() in rest.lower():
                         html_closer = None    # types 1-5: this line carries the block's own closer
-                elif not rest.strip():
+                elif not _consume_blockquote_markers(line, html_depth)[1].strip():
                     _html_here = False        # types 6/7: the next blank line ends the block
                     html_closer = None
         else:
@@ -1505,9 +1549,16 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 _opened = _html_block_leaf(rest, prev_prose)
             if _opened is not None:
                 html_item = container
+                if html_item is None and blank_carried is not None:
+                    _carried_consumed, _ = _consume_blockquote_markers(line, blank_carried.depth)
+                    if (_carried_consumed >= blank_carried.depth
+                            and not _item_dedented(line, blank_carried)):
+                        html_item = blank_carried   # the block opened inside the item after all
                 html_depth = _quote_depth(prefix)
                 _html_here = True
                 html_closer = None if (_opened and _opened.lower() in rest.lower()) else _opened
+        if rest.strip():
+            blank_carried = None    # the carry covers exactly ONE non-blank line
         fence = _fence_candidate(prefix, rest, list_items)
         if fence:
             hidden_lines = 0

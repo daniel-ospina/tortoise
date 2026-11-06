@@ -4109,6 +4109,15 @@ def test_a_quote_only_line_is_BLANK_CONTENT_and_ends_the_block():
     of them in `strict=True` too — the direction this module ranks worst. End to end,
     `issue_process_lint --body-file` printed `NOTHING FLAGGED` on the quoted body while the identical
     body without its `>` prefixes flagged `pr-unclaimed-issue`.
+
+    ⛔ THE POP IS NOT SUPPRESSED (round 47 review, F1/F2). The cause stated above is accurate — the
+    item was popped one line BEFORE the renderer closes the `<li>`, which is why the block bound to
+    `None` — but the repair is NOT "never pop on a quote-only line": that left an item open where
+    the renderer has already closed it (43 bodies newly credited in a `fence`/`code_block` context
+    over a 1,296-body grid) and raised IndexError on `- a` + `>     ` + `>     ` (336 crashing pairs)
+    in BOTH non-lenient arms. The end condition alone closes the fail-open; `blank_carried` carries
+    the popped item for exactly ONE line, so the type-1 repro (the `<pre>` body, which has no
+    blank-line end condition at all) still ends with the item that held it.
     """
     md = MarkdownIt("commonmark")
 
@@ -4132,3 +4141,124 @@ def test_a_quote_only_line_is_BLANK_CONTENT_and_ends_the_block():
                  ">  <div>\n> -     Closes #100\n"):
         assert token_type(body) == "html_block", body
         assert cl.parse_closing_refs(body) == [100], body
+
+
+def test_a_quote_only_line_does_NOT_dedent_an_item_out_of_its_own_container():
+    """Round 47 review (F1) — a FAIL-OPEN the first version of this branch created, against `main`.
+
+    A blank line does not end a list item: §5.2 keeps the `<li>` open until a following line does not
+    fit inside it. Suppressing the item-pop for a quote-only line therefore left the item on the stack
+    in the ONE case where the renderer has already closed it — a `>` that opens a container the item
+    cannot hold — and the fence below then bound INSIDE that item:
+
+        `- a` + `>` + `  ```` ` + `Closes #100`   renderer `fence` (top level, never closed)
+                                                  `origin/main` `[]`, the pop-guard head `[100]`
+
+    With the item open, `_fence_candidate` bound the fence at the item's content column, so the
+    column-0 line below it read as a fence-ending DEDENT and was then re-examined as fresh prose and
+    CREDITED. Measured with only that guard applied to `origin/main`: 43 bodies newly credited in a
+    `fence`/`code_block` context over a 1,296-body grid (leads × blanks × mids × tails × both modes).
+
+    The pop stays `origin/main`'s; what the branch carries instead is `blank_carried`, which binds a
+    block that opens while still inside the item (pinned by
+    `test_a_quote_only_line_is_BLANK_CONTENT_and_ends_the_block`).
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body in ("- a\n>\n  ```\nCloses #100\n",
+                 "- [ ] a\n>\n  ```\nCloses #100\n",
+                 "- a\n>\n  ```\nCloses #100\n  ```\n"):
+        assert token_type(body) == "fence", body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # Controls: a quote-only line is NOT "the item ended" — the item's own paragraph continues across
+    # it, so the same keyword one line later is still credited.
+    for body in ("- a\n>\n  Closes #100\n",
+                 "> - a\n>\n>   Closes #100\n",
+                 "> - a\n>\n>   b\n>   Closes #100\n"):
+        assert token_type(body) == "inline", body
+        assert cl.parse_closing_refs(body) == [100], body
+
+
+def test_the_per_line_item_state_is_RESET_on_a_quote_only_line():
+    """Round 47 review (F2) — a CRASH the first version of this branch created, against `main`.
+
+    Round 38 made `pushed` / `container` / `own_gap` / `_lazy_push` per-line state, reset on a
+    whitespace-only line. Gating the ASSIGNMENT block on `rest.strip()` skipped that assignment for a
+    quote-only line without resetting it — so `pushed=True` survived from the previous line into the
+    `indent_code` branch, which had already popped the item it referred to, and the second pop came
+    off an EMPTY list:
+
+        `- a` + `>     ` + `>     `     `origin/main` `[]`;  the head raised
+                                        `IndexError: pop from empty list` in `strict=True`
+
+    A crash is not a narrow blast radius here: `sweep()` has no per-PR guard, so one such body aborts
+    `--sweep` for EVERY PR and the run exits 1 against a documented 0/3/2 contract; arm 1
+    (`issue_process_lint.py:1245`, `strict=True`) turns it into a traceback instead of a verdict.
+    Measured at the head over the 1,296-body grid: 336 crashing (body, mode) pairs; `origin/main` and
+    this head: 0.
+    """
+    for body in ("- a\n>     \n>     \n",
+                 "- [ ] a\n>     \n>     \n",
+                 "- a\n>     \n>     \n>     \n"):
+        # The answer is `origin/main`'s; the point of the assertion is that it is an ANSWER at all.
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # The whitespace-only shape round 38 was filed for is unchanged.
+    assert cl.parse_closing_refs("- [ ] b\n        \n\n", None, strict=True) == []
+
+
+def test_a_DEEPER_quote_marker_inside_an_HTML_block_is_TEXT_not_a_blank_line():
+    """Round 47 review (F3) — a LOST close the first version of this branch created, against `main`.
+
+    §4.6 ends a type-6/7 block at a BLANK line, and the branch tested `rest.strip()` — but `rest` is
+    what is left after consuming EVERY `>` in the prefix, so a marker belonging to a DEEPER quote on
+    the same line read as "blank" and ended the block, while the renderer keeps it as the block's own
+    literal text (`origin/main` credits these, and its rule is recorded at `:1305`: *an HTML block's
+    own text is READ, not hidden*):
+
+        `<div>` + `>` + `-     Closes #100`           renderer `html_block`, `main` `[100]`
+        `> <div>` + `> >` + `> -     Closes #100`     same (the extra `>` is text, not a blank line)
+
+    A line is blank FOR THIS BLOCK only after consuming the markers the block's own container holds —
+    `html_depth` — which is what `_consume_blockquote_markers` measures; at `html_depth == 0` only a
+    raw blank line ends the block. Measured at the head over a 960-body grid (8 openers × 5 blanks ×
+    3 prefixes × 4 tails × both modes): 180 lost closes, all of them non-code and all credited by
+    `origin/main`, and 0 new fail-opens in that grid.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body in ("<div>\n>\n-     Closes #100\n",
+                 "<div>\n> >\n-     Closes #100\n",
+                 "> <div>\n> >\n> -     Closes #100\n",
+                 "   <div>\n>\n-     Closes #100\n",
+                 ">   <div>\n>   >\n>   -     Closes #100\n",
+                 "> <pre>\n> >\n> -     Closes #100\n"):
+        assert token_type(body) == "html_block", body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # Controls: a RAW blank line still ends a type-6 block, a type-1 block still survives one (it
+    # ends at its own closer), and a type-2 block ends at ITS closer before the `>` is reached.
+    closed = "<div>\n\n-     Closes #100\n"
+    assert token_type(closed) == "code_block"
+    assert cl.parse_closing_refs(closed) == []
+    assert token_type("<pre>\n\n-     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<pre>\n\n-     Closes #100\n") == [100]
+    for comments in ("<!-- c -->\n>\n-     Closes #100\n",
+                     "<?php ?>\n>\n-     Closes #100\n"):
+        assert token_type(comments) == "code_block", comments
+        assert cl.parse_closing_refs(comments) == [], comments
