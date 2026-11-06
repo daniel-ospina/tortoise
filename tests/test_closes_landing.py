@@ -5491,3 +5491,49 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
         assert keyword_types(body) <= {"inline", "html_block"}, body
         assert cl.parse_closing_refs(body) == [100], body
         assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+
+def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
+    """A leaf-block state this module GUESSED must not outrank the `strict` arm's own contract.
+
+    `strict` is the PASS arm — `classify` refuses `lands` on it, and `issue_process_lint` reads the
+    carrier body through it — so its documented rule is "blank every indented line". `_html_here` is
+    THIS MODULE's HTML-block state machine, and a state machine that is wrong about a line (it can
+    only ever be wrong in the direction of believing a leaf block is open) must not be able to
+    exempt that line from the arm whose whole contract is to blank it. The exempting term was a
+    shared prefix on the `indented_code` branch, so it took `strict` with it:
+
+        `-` + `    code` + `<br />` + `     -     Closes #100`
+            renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
+            `origin/main` `[]` in `strict`; the pre-fix head `[100]` — a FALSE PASS.
+
+    The mechanism is the strict arm's own declared over-blank feeding the guess: `strict` blanks
+    `    code`, so no paragraph looks open, so `<br />` is read as a legal type-7 opener (§4.6: type
+    7 cannot interrupt a paragraph), and the block it invents then exempts the marker line below it
+    — a line the renderer puts inside a real `<li>`'s code block.
+
+    The lenient controls are here because the fix must not move them: the lenient and
+    `indented_code` arms keep the term, where it protects a real close (a leaf block's own TEXT is
+    read, not hidden — see `test_an_HTML_blocks_own_text_is_READ_not_hidden`).
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "-\n    code\n<br />\n     -     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert "#100" not in cl.strip_code(body, strict=True), body
+    # …and the LENIENT arms keep it (round 5 review, P3 — the docstring claimed this control and the
+    # only assertions were on `leaf`, a different body): the warn arms must not lose a real claim
+    # while the PASS arm stops crediting a false one.
+    assert cl.parse_closing_refs(body) == [100], body
+    assert "#100" in cl.strip_code(body, indented_code=True), body
+    # …the CONTROL the fix must not touch: a wide-gap marker line inside a REAL html block is still
+    # credited in every arm (round 44 pinned the policy: an html block does not hide its own text).
+    leaf = "<pre>\n-     Closes #100\n"
+    assert keyword_types(leaf) == {"html_block"}, leaf
+    assert cl.parse_closing_refs(leaf) == [100], leaf
+    assert cl.parse_closing_refs(leaf, None, strict=True) == [100], leaf
+    assert "#100" in cl.strip_code(leaf, indented_code=True), leaf
