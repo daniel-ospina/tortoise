@@ -94,9 +94,17 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `:447` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999`.
-2. **The extraction lane still emits no structural edge of any kind.** `grep -c -E
+2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
+   Object→Object edge, including the declared `hasPart` pairs: `grep -c -E
    'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py` → **0**. This is `#10984`'s
    own third bullet, still true after the merge.
+   ⚠️ **Scoped on purpose.** The narrower claim is the one the command proves. "The extraction lane emits
+   no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
+   (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
+   produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
+   the capture path at `tortoise/sdk.py:17465`). What is missing is the *declared part-whole* edge, not
+   every structural edge — and saying otherwise would send a lane off to build a writer the graph already
+   has (the "second producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2238-2243`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
@@ -213,15 +221,28 @@ asks for **already exists**, and reads below the bar — on the C1 pre-registere
   clause in A5's own body is satisfied by a corpus that fails both halves of the target anyway.
 
 **The `#4889` contradiction is reconcilable, and here is the reading.** `#4889` measured the **hosted
-production graph** (complete 13-type inventory: `CONTAINS` 35,046 … `COMPLETED_STEP` 2 — no
-`aboutSubject`/`memberOf`/`ownedBy`/`managedBy`; `:Subject` = **1**), and closed after establishing the
-mechanism: the capture spine writes **every** emitted entity through one label —
-`create_entity("object", …)` — so the extractor names a Subject and the spine relabels it an Object
-(routed to `#4934`/`#4938`/`#1370`/`#1509` as non-goals). The capstone's **19** is a *different graph* —
-a fresh, disposable, pre-registered corpus — so 1-vs-19 is not a contradiction, it is explanation (3) in
-`#10987`'s own list: *"the surface the owner measured is a different graph/deployment than the one
-production serves"*. That is a **reading this record offers, not an adjudication** — `#10987` owns the
-adjudication and has not made it.
+production graph** (**2026-09-23**; complete 13-type inventory: `CONTAINS` 35,046 … `COMPLETED_STEP` 2 —
+no `aboutSubject`/`memberOf`/`ownedBy`/`managedBy`; `:Subject` = **1**) and closed on a diagnosis that was
+accurate **then**: the capture spine wrote **every** emitted entity through one label, so the extractor
+named a Subject and the spine relabelled it an Object.
+
+⛔ **That mechanism has since been FIXED, and it must not be relayed in the present tense** — the
+four ids `#4889` routed it to are all **CLOSED**, and `#4934` (CLOSED 2026-09-29T23:50:40Z, *"the capture
+entity spine mints SUBJECT-kind entities as Objects"*) **is** the fix. At the head this record is
+measured on, the write seam routes by kind (`tortoise/sdk.py:16414-16428`):
+`_ekind = _payload_entity_kind(e)` → `_is_subject = is_subject_kind(_ekind or "")` →
+`create_entity("subject", …)` **or** `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z),
+`#1370` (CLOSED 2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the
+relabelling is **historical**, and a reader must not file it as a live defect.
+
+The capstone's **19** is a *different graph* — a fresh, disposable, pre-registered corpus — so 1-vs-19 is
+not a contradiction. Two explanations are live and this record does **not** choose between them:
+`#10987`'s own **(3)** — *"the surface the owner measured is a different graph/deployment than the one
+production serves"* — and a fourth this record adds, that **the kind→label routing landed between the two
+measurements** (2026-09-29 `#4934` vs the capstone run stamped `9152448d7`, 2026-11-02), which would move
+`:Subject` from ~1 to 19 with no change to the corpus. That is a **reading this record offers, not an
+adjudication** — `#10987` owns the adjudication and has not made it; weighing (3) against the routing is
+part of what it owes.
 
 **Exact remaining gap for `#10987`:** (a) the binder's attach rate **per point** (resolved / no bindable
 slot / probe unavailable), so explanation (1) — the fail-open `subject_binding_available` probe
@@ -261,6 +282,8 @@ ls tortoise/identity_hold.py                                 # absent
 .venv/bin/python3 -m tortoise pack validate packs/dev         # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                            # tests + definition only
 grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # 0
+# …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
+sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 git grep -in 'rollup' -- '*.py' '*.md'                       # no graph rollup query anywhere
 # ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
@@ -274,6 +297,8 @@ grep -n -E 'after_share <= 0.50|>= 90 of 90' docs/evidence/7949-capstone/PRE-REG
 sed -n '11350,11352p' tortoise/extractor_v2.py; sed -n '81p' tortoise/value_gate.py   # the default-ON composition
 
 # A5 (§3) — Subject 19, three of four families at zero
+sed -n '16414,16428p' tortoise/sdk.py        # the kind→label routing at the write seam (#4934's fix)
+for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 ```
