@@ -62,9 +62,10 @@ this PR that flatly retracted it was wrong. Both are stated here with their
 measurements, taken with the shadow file this rename moved
 (`tests/eval/eval_types.py` restored as `types.py`), CPython 3.12:
 
-* The interpreter a `python-ci` job that installs the package EDITABLE uses fails AT STARTUP.
-  Those jobs install it editable — the `Install package + test extras` steps run
-  `pip install -e '<extras>'` — so site-packages carries setuptools' **import-based editable finder**
+* The interpreter a `python-ci` job that installs the package EDITABLE uses fails AT
+  STARTUP. Those jobs install it editable — `pip install -e .` or `pip install -e '<extras>'`,
+  in an `Install…` step whose exact name and extras spec vary — so
+  site-packages carries setuptools' **import-based editable finder**
   (`__editable___tortoise_graph_*_finder.py`,
   forced by this repo's package mapping) and `site.addpackage` imports it before
   any user code runs -> `importlib.util` -> ... -> `types`:

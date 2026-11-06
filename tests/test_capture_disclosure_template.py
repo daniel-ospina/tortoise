@@ -88,7 +88,8 @@ def _shadows_the_stdlib(directory: str) -> bool:
 
     * an interpreter with setuptools' import-based editable install — what
       `pip install -e .` writes, this repo's layout forces, and every `python-ci`
-      job has — dies at startup: `init_import_site: Failed to import the site
+      job that installs the package carries — dies at startup:
+      `init_import_site: Failed to import the site
       module` -> `ImportError: cannot import name 'MappingProxyType' from
       partially initialized module 'types'`, exit 1;
     * a BARE interpreter exits 0 for `-c "pass"` and dies later, on the first
