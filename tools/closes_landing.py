@@ -791,6 +791,16 @@ class _ListItem:
     #: never from a LAZY line: `> - ` + `> text` renders `<li></li><p>text</p>`, because a lazy line
     #: continues a PARAGRAPH and an empty item has none — so that item is still empty here too.
     has_content: bool = False
+    #: ⛔ A MARKER LINE THAT IS A PARAGRAPH CONTINUATION OPENS NO ITEM IN THE RENDERER, so an item it
+    #: pushes here is PHANTOM — and a phantom item must never be recorded as the container of the
+    #: paragraph above it (`dropped_paragraph_item`). §4.4: an indented block cannot interrupt a
+    #: paragraph, so `Notes` + `    - x` (four columns under the paragraph's own base) is ONE `<p>`
+    #: with the marker as its text, and the `<li>` a phantom push invents then makes the NEXT marker
+    #: look dedented:
+    #:     `Notes` + `    - x` + `<span>` + `2.     Closes #100`   renderer ONE `<p>` -> PROSE
+    #: Measured against `MarkdownIt("commonmark")`: at 0-3 columns the marker DOES open a `<ul>`; at
+    #: 4+ it is the paragraph's continuation text.
+    real: bool = True
 
 
 def _item_dedented(line: str, item: _ListItem) -> bool:
@@ -969,9 +979,19 @@ _HTML_TYPE6_TAGS = (
 #: read this string, so the three cannot drift apart (round 48 review, P2 — the START set had the arm
 #: and the INTERRUPT set did not, which is what left `<pre>` not ending a paragraph).
 _HTML_TYPE1_TAGS = "script|pre|style|textarea"
+#: ⛔ §4.6 TYPE 6 STARTS AT `<tag` **AND** `</tag` (round 49 fix round — a LOST close the container
+#: repair exposed). The preamble is "line begins with `<` or `</` followed by one of these names", and
+#: the missing `</` arm read every closing block tag as a TYPE-7 line instead — which the module
+#: treats as inline prose that never ends a paragraph, while the renderer ends it:
+#:     `- a bullet` + `</div>` + `2.     Closes #100`
+#:         renderer: the `</div>` closes the list and starts its OWN type-6 block, whose raw text is
+#:         the marker line -> PROSE (`[100]` on `origin/main`)
+#: Measured against §4.6's tag list: `</div>`, `</table>` and `</p>` interrupt a paragraph, while
+#: `</pre>` and `</span>` do not (`pre` is type 1, `span` type 7 — neither is type 6), which is what
+#: this arm now reproduces.
 _HTML_BLOCK_INTERRUPT_RE = re.compile(
     rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE1_TAGS})(?:[ \t]|/?>|$)"
-    rf"|<(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
+    rf"|</?(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
 
 #: ⛔ §4.6's SIX TYPES DO NOT END THE SAME WAY, AND THE START SET IS NOT ONE REGEX (round 44 review,
 #: P2 — a fail-open: crediting a CODE line). Types 2-5 end at their OWN closing token (`-->`, `?>`,
@@ -991,38 +1011,55 @@ _HTML_BLOCK_INTERRUPT_RE = re.compile(
 #:     renderer: an `html_block` (`<span>`'s) whose raw text is the marker line — PROSE
 #:     `origin/main` `[100]`, round-48 head `[]`
 #: The tag list is now ONE constant shared by all three readers.
+#: ⛔ …AND §4.6 TYPE 1 ENDS AT **ANY** OF THE FOUR CLOSERS, NOT AT THE OPENER'S OWN (round 49 review,
+#: P2 — a fail-open in `strict`, the PASS arm). The end condition is stated as a LINE CONTAINING
+#: `</script>`, `</pre>`, `</style>` or `</textarea>`, with no pairing to the opener: `<pre>` …
+#: `</style>` ends the block, so the marker under it is NOT that block's text. Pairing each opener
+#: with its own closer kept 12 of the 16 combinations open — `<pre>` + `x` + `</style>` + blank +
+#: `    Closes #N` (renderer `code_block`) was CREDITED while the matched pairings were refused.
+#: This set is DERIVED from `_HTML_TYPE1_TAGS`, which is what the comment above has claimed since
+#: round 48: the old independent dict let an editor add a tag to the constant alone and get a
+#: `KeyError` from inside `strip_code` (the crash class that aborts `--sweep` for every PR).
 _HTML_TYPE1_TAG_RE = re.compile(rf" {{0,3}}<({_HTML_TYPE1_TAGS})(?:[ \t]|/?>|$)", re.IGNORECASE)
-_HTML_TYPE1_CLOSERS = {"script": "</script>", "pre": "</pre>",
-                       "style": "</style>", "textarea": "</textarea>"}
+_HTML_TYPE1_END_TOKENS = frozenset(f"</{tag}>" for tag in _HTML_TYPE1_TAGS.split("|"))
 
 
-def _html_block_open(rest: str) -> str | None:
-    """§4.6's html-block START for types 1-6, with the token that ENDS it ("" = a blank line).
+def _html_block_ended(closer: frozenset[str], rest: str) -> bool:
+    """Does `rest` carry the block's OWN end condition? (an empty `closer` = a blank line ends it)"""
+    if not closer:
+        return False
+    lowered = rest.lower()
+    return any(token in lowered for token in closer)
 
-    `None` means "this line opens no HTML block". Type 7 is deliberately absent: it cannot
-    interrupt a paragraph, and the paragraph rule tests only this function's types (see
+
+def _html_block_open(rest: str) -> frozenset[str] | None:
+    """§4.6's html-block START for types 1-6, with the tokens that END it (empty = a blank line).
+
+    `None` means "this line opens no HTML block". A NON-EMPTY set is "a line carrying ANY of these
+    ends the block" — one token for types 2-5, and all four for type 1, whose end condition §4.6
+    states over the whole tag family rather than per opener. Type 7 is deliberately absent: it
+    cannot interrupt a paragraph, and the paragraph rule tests only this function's types (see
     `_HTML_BLOCK_INTERRUPT_RE`'s own note).
     """
-    match = _HTML_TYPE1_TAG_RE.match(rest)
-    if match:
-        return _HTML_TYPE1_CLOSERS[match.group(1).lower()]
+    if _HTML_TYPE1_TAG_RE.match(rest):
+        return _HTML_TYPE1_END_TOKENS   # type 1 — ANY of `</script>`/`</pre>`/`</style>`/`</textarea>`
     if re.match(r" {0,3}<!--", rest):
-        return "-->"                      # type 2 (§4.6: the block ends at the `-->`)
+        return frozenset({"-->"})     # type 2 (§4.6: the block ends at the `-->`)
     if re.match(r" {0,3}<\?", rest):
-        return "?>"                       # type 3
+        return frozenset({"?>"})      # type 3
     if re.match(r" {0,3}<!\[CDATA\[", rest, re.IGNORECASE):
-        return "]]>"                      # type 5 — BEFORE the `<!` arm below, which also matches it
+        return frozenset({"]]>"})     # type 5 — BEFORE the `<!` arm below, which also matches it
     if re.match(r" {0,3}<![A-Za-z]", rest):
-        return ">"                        # type 4 (a declaration: `<!DOCTYPE html>`)
+        return frozenset({">"})       # type 4 (a declaration: `<!DOCTYPE html>`)
     if _HTML_BLOCK_INTERRUPT_RE.match(rest):
-        return ""                         # type 6 — the only one a blank line ends
+        return frozenset()             # type 6 — the only one a blank line ends
     return None
 
 
 _HTML_TYPE7_RE = re.compile(r" {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>[ \t]*$")
 
 
-def _html_block_leaf(rest: str, prev_prose: bool) -> str | None:
+def _html_block_leaf(rest: str, prev_prose: bool) -> frozenset[str] | None:
     """Type 7 — a COMPLETE tag alone on a line — as a block whose text is prose (`""` closer).
 
     ⛔ TYPE 7 IS NOT AN ENDER, BUT IT IS STILL A BLOCK (round 45 review, P2 — 1,680 lost closes
@@ -1038,13 +1075,14 @@ def _html_block_leaf(rest: str, prev_prose: bool) -> str | None:
     """
     if prev_prose or not _HTML_TYPE7_RE.match(rest):
         return None
-    return ""
+    return frozenset()
 
 
 def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
                     prev_quote_depth: int, container: _ListItem | None,
                     prev_container: _ListItem | None,
-                    line_col: int, rest_indent: int, raw_indent: int) -> bool:
+                    line_col: int, rest_indent: int, raw_indent: int,
+                    dropped_paragraph_item: _ListItem | None = None) -> bool:
     """Is this ordered marker ≥ 2 a LAZY CONTINUATION of the open paragraph?
 
     ⛔ §5.2's "an ordered marker ≥ 2 cannot interrupt a paragraph" IS CONDITIONAL ON THERE BEING A
@@ -1102,6 +1140,26 @@ def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
     if depth > prev_quote_depth:
         return False                     # a DEEPER container interrupts the paragraph
     if depth == prev_quote_depth:
+        # ⛔ "NO CONTAINER HERE" IS NOT "NO CONTAINER ABOVE" (round 49 review, P1 — a FAIL-OPEN in
+        # `strict=True`, the `issue_process_lint` PASS arm). The `container is None` arm below is the
+        # top-level paragraph: with no item at all, a marker that cannot interrupt a paragraph is
+        # that paragraph's lazy continuation. It is answered from the STACK, and the stack drops an
+        # item on a line the column test reads as a dedent even when the renderer keeps the paragraph
+        # open as a LAZY continuation — so by the marker line there is no item left to compare with,
+        # `container` and `prev_container` are both `None`, and the guard above is vacuously true:
+        #     `- a bullet` + `Summary of the change.` + `    indented code` + `2.     Closes #100`
+        #         renderer: ONE `<li><p>` for the first three lines, then a NEW `<ol start="2">`
+        #         whose wide-gap content is `<pre><code>` -> CODE; `origin/main` `[]`, head `[100]`
+        # The paragraph those lines describe lives INSIDE an item, so the fact that is missing is not
+        # "is there a container" but "the item that held the paragraph has ENDED" — recorded where it
+        # ended (`dropped_paragraph_item`, set by the pop) and measured in that item's own column, the
+        # way every other in-item line is. ⚠️ Two obvious guards are FALSIFIED at this head and must
+        # not be re-tried (measured on a 32,760-body grid): `container is not None and container is
+        # prev_container` and keeping `prev_container` across a lazy line each close ~610 fail-opens
+        # and hand back 870-2,170 real closes, because they move EVERY reader of `prev_container`,
+        # not just this one question.
+        if container is None and dropped_paragraph_item is not None:
+            return line_col >= dropped_paragraph_item.rest_col
         return container is None or line_col >= container.rest_col
     # depth < prev_quote_depth: the line dropped a `>` — see the docstring's third bullet.
     return _dropped_quote_is_lazy(prefix, prev_quote_depth, container, prev_container,
@@ -1467,6 +1525,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     prev_prose = False
     prev_quote_depth = 0
     prev_container: _ListItem | None = None
+    # The item that HELD the still-open paragraph when the pop loop dropped it (see
+    # `_is_lazy_marker`'s `container is None` note). `prev_container` cannot carry this: it is also
+    # read by the dropped-`>` rule, the lazy-indent rule and the item-identity guard, all of which
+    # answer correctly off the LIVE stack, and moving it for every one of them costs real closes.
+    dropped_paragraph_item: _ListItem | None = None
     # ⛔ AN HTML BLOCK'S OWN TEXT IS READ, NOT HIDDEN (round 43 review, P2 — a LOST close this module
     # introduced AGAINST `origin/main`). §4.6 makes an HTML block a LEAF BLOCK: a `- ` written inside
     # it opens no list, so the line is raw HTML text, not code — the same rule this module already
@@ -1481,7 +1544,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # `-->`, `?>`, `>` and `]]>`, type 1 at its closing tag, and only type 6 at a blank line, so
     # `<!-- c -->` + `-     Closes #100` (renderer `code_block`) was CREDITED. `_html_block_open`
     # owns both the start set (types 1-6, type 1 included) and the closer.
-    html_closer: str | None = None
+    html_closer: frozenset[str] | None = None
     # ⛔ THE BLOCK LIVES IN A CONTAINER, NOT IN A COLUMN (round 45 review, P2 — a lost close this
     # state machine introduced one commit earlier by binding the block to the OPENER'S INDENT). §4.6
     # gives an html block no indentation end-condition at all, and a top-level block may legally open
@@ -1505,6 +1568,10 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     for raw in body.splitlines():
         line = raw.expandtabs(4)
         indent = len(line) - len(line.lstrip(" "))
+        # The dropped-item fact describes exactly ONE open paragraph, so it is stale the moment that
+        # paragraph ends — clear it here, once, rather than at every `prev_prose = False` write.
+        if not prev_prose:
+            dropped_paragraph_item = None
         prefix, rest = _split_prefix(line)
         # The line's indent AFTER its blockquote prefix: `close_base` is measured
         # there, which is the space the strict arm below reports in.
@@ -1692,7 +1759,13 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                     or (not list_items[-1].has_content
                         and _consume_blockquote_markers(line, list_items[-1].depth)[0]
                         < list_items[-1].depth)):
-                list_items.pop()
+                _popped = list_items.pop()
+                # …and if THAT item was holding the paragraph open above this line, the fact has to
+                # outlive the pop: the renderer keeps the paragraph (and the `<li>`) on a LAZY
+                # continuation, so the marker below is measured against a container the stack no
+                # longer has. See `_is_lazy_marker`'s `container is None` note (round 49 review, P1).
+                if prev_prose and prev_container is _popped and _popped.real:
+                    dropped_paragraph_item = _popped
             # An item that was empty on its marker line gains CONTENT from the first line that stays
             # inside it — and only then: a lazy line never reaches here (it dedents by the column
             # test above and pops the item), which is exactly the distinction the renderer makes.
@@ -1719,7 +1792,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 else (0, rest_indent, rest_indent))
             _lazy_push = (_is_lazy_marker(rest, prefix, prev_prose, prev_quote_depth,
                                           container, prev_container, line_col_raw, rest_indent,
-                                          indent)
+                                          indent, dropped_paragraph_item)
                           or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                     prev_container, rest_indent, indent))
             pushed = (rest_col is not None and not _lazy_push
@@ -1733,14 +1806,38 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                       # …and only in the SAME container: a `-` that dropped out of an item (or a
                       # quote) has no paragraph above it to underline, so it IS an item —
                       #     `> - item` + `- ` + `    Closes #N`   renderer `<li>Closes #N</li>`
+                      # ⛔ "THE SAME CONTAINER" IS AN ITEM IDENTITY **AND** A DEPTH (round 49 review, P1 —
+                      # the exclusion moved BOTH ways: a lost close in both arms, and a fail-open in
+                      # both arms). `container is prev_container` is vacuous when both are `None`,
+                      # which is exactly a bare marker that DROPPED a blockquote — so a `- ` under a
+                      # quoted paragraph read as that paragraph's underline while the renderer had
+                      # already closed the quote (§4.3: a setext underline cannot be a lazy
+                      # continuation), and the line under it lost its container:
+                      #     `> Notes` + `- ` + `  ``` ` + `Closes #100`
+                      #         renderer: quote, then `<ul><li><pre><code></code></pre></li></ul>`,
+                      #         then a `<p>` — the marker line is PROSE (`[100]` on `origin/main`)
+                      #         head `[]`: the fence became top-level and ran to EOF
+                      #     `> Notes` + `- ` + `  <pre>` + `2.     Closes #100`
+                      #         renderer `<code_block>`; `origin/main` `[]`, head `[100]`
+                      # The paragraph the underline would belong to lives at `prev_quote_depth`
+                      # (round 38's own rule), so that is the term that was missing.
                       and not (prev_prose and container is prev_container
+                               and _quote_depth(prefix) == prev_quote_depth
                                and _SETEXT_UNDERLINE_RE.match(rest.strip())))
             own_gap = _marker_gap(rest)
             if pushed:
+                # …and whether that item is REAL: a marker line that is a paragraph continuation
+                # (4+ columns past the paragraph's own base) opens no `<li>` (§4.4), so the item is
+                # a phantom the state machine needs for its columns and nothing else. See `real`.
+                _continuation = bool(
+                    prev_prose and rest_indent >= _MAX_FENCE_INDENT
+                    and (container is None
+                         or rest_indent >= container.rest_col + _MAX_FENCE_INDENT))
                 list_items.append(
                     _ListItem(_quote_depth(prefix), rest_col,
                               len(prefix) + rest_col,
-                              bool(rest[rest_col:].strip())))
+                              bool(rest[rest_col:].strip()),
+                              not _continuation))
         # ── §4.6 html-block state: the state FOR THIS LINE, advanced once per line ────────────────
         # Computed here, before every `continue` below, so the fence branch and the code branches all
         # read the same answer (a state advanced inside a branch is a bug waiting for the next shape).
@@ -1756,6 +1853,19 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # blank line (types 6/7) end the leaf block AT that line, so anything after it still belongs
         # to it and a new block may only start on the NEXT line.
         _scan_for_opener = False
+        # ⛔ A LINE INSIDE AN ALREADY-OPEN LEAF BLOCK IS THAT BLOCK'S RAW TEXT, SO IT OPENS NO
+        # PARAGRAPH (round 49 review, P1 — a FAIL-OPEN in `strict=True`, the PASS arm). The prose
+        # write below asks `_leaves_no_paragraph`, which answers about BLOCK BOUNDARIES: an html
+        # block does not hide its own text (round 43), so a ` ``` ` line written inside one is read
+        # and reported as prose-leaving-a-paragraph-OPEN. The block is a LEAF — there is no paragraph
+        # in it — and the phantom then survived the very line that left the block's container:
+        #     `> <!--` + `> ``` ` + `    - x` + `> 2.     Closes #100`
+        #         renderer: the quote's type-2 block (its raw text is ` ``` `), then a top-level
+        #         `<pre><code>` whose content is the marker line -> CODE
+        #         `origin/main` `[]`, head `[100]` in `strict`
+        # The OPENER line is the opposite case and is deliberately NOT flagged: `<br />` +
+        # `-     Closes #100` is pinned `[100]`, and there the line is the block's start, not its text.
+        _html_leaf_text = False
         if html_closer is not None:
             if (_quote_depth(prefix) < html_depth
                     or (html_item is not None and _item_dedented(line, html_item))):
@@ -1764,6 +1874,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 _scan_for_opener = True       # …so this line is FRESH, and may open its own
             else:
                 _html_here = True
+                _html_leaf_text = True        # …and it is a LEAF block's own raw text, not prose
                 # ⛔ AN HTML BLOCK IS A LEAF, SO NO ITEM OPENS INSIDE ITS RAW TEXT (round 49 review —
                 # the round-43/48 decisions, applied to the ITEM STACK and not only to the fence
                 # path). A marker written in the block's text was counted as an item, and its content
@@ -1777,7 +1888,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                     list_items.pop()
                     pushed = False
                 if html_closer:
-                    if html_closer.lower() in rest.lower():
+                    if _html_block_ended(html_closer, rest):
                         html_closer = None    # types 1-5: this line carries the block's own closer
                 # ⛔ "BLANK" IS MEASURED AT THE BLOCK'S OWN DEPTH, NOT AFTER EVERY `>` IN THE PREFIX
                 # (round 47 review, P2 — 180 LOST closes against `origin/main`, every one of them a
@@ -1821,7 +1932,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                         html_item = blank_carried   # the block opened inside the item after all
                 html_depth = _quote_depth(prefix)
                 _html_here = True
-                html_closer = None if (_opened and _opened.lower() in rest.lower()) else _opened
+                html_closer = None if _html_block_ended(_opened, rest) else _opened
         if rest.strip():
             blank_carried = None    # the carry covers exactly ONE non-blank line
         # ⛔ AN HTML BLOCK IS A LEAF, SO A LINE INSIDE ONE OPENS NO FENCE (round 48 review — the
@@ -2019,7 +2130,8 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # owner while this line computed a second, differently-shaped answer; that second copy is
         # what hid round 40's finding: it diverged from the push on a dropped-`>` lazy line).
         _lazy_marker = _is_lazy_marker(rest, prefix, prev_prose, prev_quote_depth,
-                                       container, prev_container, _line_col, rest_indent, indent)
+                                       container, prev_container, _line_col, rest_indent, indent,
+                                       dropped_paragraph_item)
         ordered_continuation = (_lazy_indent or _lazy_marker
                                 or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                           prev_container, rest_indent, indent))
@@ -2159,9 +2271,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         #         `origin/main` `[]`; reading `Notes` as a continuation of a depth-1 paragraph made the
         #         depth-1 marker below look like the same container -> `[100]` in `strict=True`.
         _paragraph_was_open = prev_prose
-        prev_prose = bool(raw.strip()) and not _leaves_no_paragraph(
-            rest, rest_indent, container, prev_prose,
-            _lazy_push if line.strip() else False)
+        # ⛔ …AND A LEAF BLOCK'S OWN RAW TEXT LEAVES NO PARAGRAPH EITHER (see `_html_leaf_text`).
+        prev_prose = (bool(raw.strip()) and not _html_leaf_text
+                      and not _leaves_no_paragraph(
+                          rest, rest_indent, container, prev_prose,
+                          _lazy_push if line.strip() else False))
         # ⛔ THE PARAGRAPH'S CONTAINER DEPTH, WHICH IS NOT THE LINE'S OWN PREFIX DEPTH (round 38
         # review, P2 — a false PASS). Two shapes put a paragraph at a depth its line's prefix does
         # not show, and both made `_lazy_marker`'s depth term answer "same container" when the
@@ -2198,6 +2312,15 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # starts nothing and the quote is still open. `not pushed` and `_BLOCK_START_RE` are the two
         # spellings of "this line started something of its own"; both are required, because a line
         # can start a heading or a break without `_content_column` seeing an item.
+        # ⛔ THE DROPPED-ITEM FACT BELONGS TO THE PARAGRAPH THAT WAS OPEN BEFORE THIS LINE, and a
+        # line in a DEEPER container opens a new one (§5.1: a blockquote opener does interrupt a
+        # paragraph), so the fact is stale from here on. Without this, a quote opened after an item
+        # was abandoned inherited the item's column and refused a genuine lazy continuation:
+        #     `- Notes` + `> Notes` + `> 2.     Closes #100`
+        #         renderer: `<li>Notes</li>` then ONE `<blockquote><p>` holding both of the last two
+        #         lines -> PROSE; `origin/main` and the round-49 head both credit it.
+        if _own_depth > prev_quote_depth:
+            dropped_paragraph_item = None
         prev_quote_depth = (max(_own_depth, prev_quote_depth)
                             if (_paragraph_was_open and prev_prose and not pushed
                                 and not _BLOCK_START_RE.match(rest))

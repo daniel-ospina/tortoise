@@ -4908,3 +4908,162 @@ def test_a_BARE_DASH_leaves_NO_paragraph_open_so_the_type7_leaf_under_it_OPENS()
     # the paragraph stays open and the marker line below it is prose.
     assert keyword_types("text\n1.\n2.     Closes #100\n") == {"inline"}
     assert cl.parse_closing_refs("text\n1.\n2.     Closes #100\n") == [100]
+
+
+def test_an_HTML_blocks_own_TEXT_leaves_NO_phantom_paragraph():
+    """Round 49 fix round — a FAIL-OPEN in `strict=True`, the `issue_process_lint` PASS arm.
+
+    §4.6 makes an HTML block a LEAF: a ` ``` ` written inside one is the block's raw TEXT, so it
+    opens no paragraph. The prose state was written as if it did (`_leaves_no_paragraph` answers
+    about BLOCK BOUNDARIES, and an html block does not hide its own text — round 43), and the
+    phantom then survived the very line that left the block's container, because the §4.4 carry
+    only compares quote depths:
+
+        `> <!--` + `> ` + ` ``` ` + `    - x` + `> 2.     Closes #100`
+            renderer: the quote's type-2 block (its raw text is the fence marker), then a
+            top-level `<pre><code>` holding the marker line -> CODE
+            pre-fix head `[100]` in `strict`, `[]` in lenient
+
+    The OPENER line is the opposite case and must keep its answer — `<br />` + `-     Closes #100`
+    is a type-7 block whose raw text IS the marker line (PROSE), and it is pinned below.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for opener in ("<!--", "<div>", "<pre>", "<br />", "<?", "<!DOCTYPE x"):
+        for text in ("```", "~~~"):
+            for exit_line in ("    x", "    - x"):
+                body = f"> {opener}\n> {text}\n{exit_line}\n> 2.     Closes #100\n"
+                assert keyword_types(body) == {"code_block"}, body
+                assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # CONTROLS — the block's own TEXT is still READ (round 43), it just is not a paragraph, and an
+    # OPENER line is not its text.
+    for body in ("<br />\n-     Closes #100\n",
+                 "> <div>\n>\n> -\n> <br />\n> -     Closes #100\n"):
+        assert keyword_types(body) == {"html_block"}, body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+
+def test_a_bare_marker_that_DROPS_a_quote_is_an_ITEM_not_a_setext_underline():
+    """Round 49 fix round — a LOST close AND a FAIL-OPEN, both arms, from one missing term.
+
+    The setext exclusion read `container is prev_container` as "the same container", and both sides
+    are `None` at top level — so a bare marker that DROPPED a blockquote was read as the underline
+    of a paragraph the renderer had already closed (§4.3: a setext underline cannot be a lazy
+    continuation). The paragraph it would underline lives at `prev_quote_depth`, and that is the
+    term that was missing:
+
+        (a) `> Notes` + `- ` + `  ``` ` + `Closes #100`
+            renderer: quote, an empty `<li>` holding an empty `<pre>`, then a `<p>` — PROSE.
+            `origin/main` `[100]`; pre-fix head `[]` (the fence became top-level and ran to EOF).
+        (b) `> Notes` + `- ` + `  <pre>` + `2.     Closes #100`
+            renderer: `<pre><code>` — CODE. Pre-fix head `[100]`; `origin/main` `[]`.
+    """
+    # (a) the LOST close
+    for body in ("> Notes\n- \n  ```\nCloses #100\n", "> <span>\n- \n  ```\nCloses #100\n"):
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    # (b) the FAIL-OPEN
+    for body in ("> Notes\n- \n  <pre>\n2.     Closes #100\n",
+                 "> <span>\n- \n  <pre>\n2.     Closes #100\n"):
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # CONTROLS — in the SAME container the exclusion still applies: `**bold**` + `-` is a SETEXT
+    # heading (so no paragraph is left open) and `> - item` + `- ` opens a real item.
+    assert cl.parse_closing_refs("**bold**\n-\n<span>\n1.     Closes #100\n") == [100]
+    assert cl.parse_closing_refs("**bold**\n-\n<span>\n1.     Closes #100\n",
+                                 None, strict=True) == [100]
+    assert cl.parse_closing_refs("> - item\n- \n    Closes #100\n") == [100]
+
+
+def test_a_DROPPED_items_column_still_ends_the_paragraph_laziness():
+    """Round 49 fix round — a FAIL-OPEN in `strict=True` from a VACUOUS container test.
+
+    `_is_lazy_marker`'s equal-depth arm answered `container is None` as "the top-level paragraph",
+    and the stack drops an item on a line the COLUMN test reads as a dedent even when the renderer
+    keeps the paragraph open as a LAZY continuation — so by the marker line there is no item to
+    compare with, `container` and `prev_container` are both `None`, and the identity guard above is
+    vacuously true:
+
+        `- a bullet` + `Summary of the change.` + `    indented code` + `2.     Closes #100`
+            renderer: ONE `<li><p>` for the first three lines, then a NEW `<ol start="2">` whose
+            wide-gap content is `<pre><code>` -> CODE; `origin/main` `[]` strict, pre-fix head `[100]`
+
+    The fact that was missing is "the paragraph's item ENDED", recorded where it ended — and it must
+    not be claimed from a PHANTOM item (`Notes` + `    - x` pushes one; §4.4 makes that line the
+    paragraph's own continuation text, so the renderer opens no `<li>` there).
+    """
+    body = "- a bullet\nSummary of the change.\n    indented code\n2.     Closes #100\n"
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert cl.parse_closing_refs(body) == [], body
+
+    # CONTROLS. (a) the phantom item's column must NOT be used: the paragraph stays open and the
+    # marker line is its lazy continuation (one `<p>` in the renderer).
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(b: str) -> set[str]:
+        return {t.type for t in md.parse(b) if "Closes #100" in getattr(t, "content", "")}
+
+    for keep in ("Notes\n    - x\n?>\n2.     Closes #100\n",
+                 "Notes\n    - x\n</script>\n2.     Closes #100\n"):
+        assert keyword_types(keep) == {"inline"}, keep
+        assert cl.parse_closing_refs(keep) == [100], keep
+        assert cl.parse_closing_refs(keep, None, strict=True) == [100], keep
+    # …and (b) a deeper container opens a NEW paragraph, so the dropped item's column is stale.
+    deeper = "- Notes\n> Notes\n> 2.     Closes #100\n"
+    assert keyword_types(deeper) == {"inline"}, deeper
+    assert cl.parse_closing_refs(deeper) == [100], deeper
+    assert cl.parse_closing_refs(deeper, None, strict=True) == [100], deeper
+
+
+def test_TYPE1_ends_at_ANY_of_the_four_closers_not_only_the_openers_own():
+    """Round 49 fix round — §4.6 type 1's end condition is a LINE CONTAINING **any** closer.
+
+    The table mapped each opener to its OWN closer (`pre -> </pre>`), so 12 of the 16 combinations
+    stayed open across a real closer and the marker under the block was credited as the block's
+    text: `<pre>` + `x` + `</style>` + blank + `    Closes #100` (renderer `code_block`) was
+    `[100]` in `strict` — the `issue_process_lint` PASS arm — while the 4 matched pairings were
+    refused correctly. `origin/main` refuses all 16.
+    """
+    tags = ("script", "pre", "style", "textarea")
+    for opener in tags:
+        for closer in tags:
+            body = f"<{opener}>\nx\n</{closer}>\n\n    Closes #100\n"
+            assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+
+def test_the_type1_closer_SET_is_DERIVED_from_the_tag_CONSTANT():
+    """The comment says the tag list is ONE constant for all three readers; the closer table was an
+    independent literal, and `_html_block_open` subscripted it unguarded — so an editor who added a
+    tag to the constant alone got a `KeyError` from inside `strip_code` (`sweep()` has no per-PR
+    guard, so one such body aborts `--sweep` for EVERY PR). The set is derived now, and this pins it.
+    """
+    assert {f"</{tag}>" for tag in cl._HTML_TYPE1_TAGS.split("|")} == cl._HTML_TYPE1_END_TOKENS
+    # …and every tag the start test accepts has an end condition (the KeyError path).
+    for tag in cl._HTML_TYPE1_TAGS.split("|"):
+        assert cl._html_block_open(f"<{tag}>") == cl._HTML_TYPE1_END_TOKENS, tag
+
+
+def test_a_CLOSING_block_tag_opens_a_TYPE6_block():
+    """§4.6 type 6 starts at `<tag` **and** `</tag`. The missing `</` arm read every closing block
+    tag as a TYPE-7 line — inline prose that never ends a paragraph — while the renderer ends it:
+
+        `- a bullet` + `</div>` + `2.     Closes #100`
+            renderer: the `</div>` closes the list and opens its OWN block, whose raw text is the
+            marker line -> PROSE
+
+    `pre` is type 1 and `span` type 7, so their closers are NOT type-6 openers (measured against
+    `MarkdownIt("commonmark")`: `</div>`, `</table>` and `</p>` interrupt a paragraph, `</pre>` and
+    `</span>` do not).
+    """
+    for opener in ("<div>", "</div>", "<table>", "</table>", "<p>", "</p>"):
+        assert cl._html_block_open(opener) == frozenset(), opener   # type 6: a blank line ends it
+    for not_type6 in ("</pre>", "</span>", "<pre>"):
+        assert cl._html_block_open(not_type6) != frozenset(), not_type6
+    body = "- a bullet\n</div>\n2.     Closes #100\n"
+    assert cl.parse_closing_refs(body) == [100], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [100], body
