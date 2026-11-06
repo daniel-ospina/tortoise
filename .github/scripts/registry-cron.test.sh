@@ -143,6 +143,11 @@
 #      #2375) does NOT red — round 3's broader guard would have red every run
 #  78c-ii. #10234: a rc=0 `empty_response` with no completion evidence reds with a
 #      title that says "no report body", never "timed out"
+#  78j. #10234: no report + ABSENT stamp + measured-EMPTY pool is the pre-beta
+#      envelope — silent, no filing (an edit that reds it would recreate #10234)
+#  78k. #10234: the unparseable COUNT is real (two teams => "2 team(s)"), not a
+#      hardcoded 1
+#  78l. #10234: an UNMEASURABLE pool never reads as measured-empty
 #  78i. #10234: a MIXED pool (one stale team AND one unparseable timestamp) files
 #      a POOL_STALE whose body names the corrupt stamp and whose title covers both
 #      causes — the placeholder bullet must not be gated on the stale count
@@ -1993,7 +1998,10 @@ assert_contains "$OUT" "no sweep report was read (status=empty_response)" "78c-i
 # willing to wait, so the driver killed a healthy sweep every run. The default
 # is derived from the job's own timeout (45 min) minus the driver's other work;
 # the knob exists so ops can retune without a code change.
-assert_file_match "$DRIVER" 'SWEEP_TIMEOUT_S="\$\{SWEEP_TIMEOUT_S:-[0-9]+\}"' "78d. the sweep ceiling is an overridable knob"
+assert_file_match "$DRIVER" 'SWEEP_TIMEOUT_S="\$\{SWEEP_TIMEOUT_S:-1500\}"' "78d. the sweep ceiling is an overridable knob with the documented default"
+# Round 13: the SHAPE alone let 1500 -> 200 (below the measured 19-34 min sweep,
+# i.e. #10234 itself) ship green. Pin the magnitude against the documented floor.
+assert_file_match "$DRIVER" 'SWEEP_TIMEOUT_S:-1[0-9]{3}' "78d. the default is at least four digits (a 200s default would recreate #10234)"
 assert_file_match "$DRIVER" 'curl -sS -m "\$SWEEP_TIMEOUT_S"' "78d. the sweep POST uses the knob, not a literal"
 # Review P2 finding 2: the pre-fix assertion grepped only lines containing
 # `backups/sweep`, but the URL and the ceiling sit on DIFFERENT physical lines of
@@ -2040,6 +2048,39 @@ export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export SWEEP_TIMEOUT_S=3000
 run_driver
 assert_eq "$RC" 1 "78d-iii. a ceiling above the job budget is refused"
+# Round 13: the COMPARISON constants were unpinned — widening 1800 to 2400 (which
+# overruns the 45-min job ceiling) or lowering the 60 floor shipped green, while
+# the refusal message still promised "between 60 and 1800".
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=59
+run_driver
+assert_eq "$RC" 1 "78d-iii. 59s is below the floor and refused"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export SWEEP_TIMEOUT_S=60
+run_driver
+assert_eq "$RC" 0 "78d-iii. 60s is accepted (the floor boundary)"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export SWEEP_TIMEOUT_S=1800
+run_driver
+assert_eq "$RC" 0 "78d-iii. 1800s is accepted (the ceiling boundary)"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=1801
+run_driver
+assert_eq "$RC" 1 "78d-iii. 1801s is refused (the ceiling boundary)"
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -2199,6 +2240,22 @@ export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78k. two unparseable teams red"
 assert_file_match "$LOG" 'pool age UNMEASURABLE, 2 team\(s\)' "78k. the TITLE counts BOTH unparseable teams"
+
+# ── 78l. #10234 review P2 (round 13): an UNMEASURABLE pool is never "empty" ──
+# The `R2_LIST_OK != 1` term of the timeout arm's fail-closed branch was unpinned:
+# deleting it made the run log "the pool is measured empty — leaving silent" from
+# a listing that never answered — a pool claim the leg did not measure, which is
+# the class this PR closes. The sibling held-lock arm has the same condition
+# pinned by case 38; this is the mirror.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78l. an unmeasurable pool with no completion evidence reds"
+assert_not_contains "$OUT" "leaving silent" "78l. it does NOT call the pool measured-empty"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78l. it files SWEEP_NO_COVERAGE"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case

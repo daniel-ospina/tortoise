@@ -1163,7 +1163,7 @@ if [ "$R2_OK" = "1" ]; then
           # an operator holding the incident cannot tell which LastModified to fix
           # without the 90-day run log.
           UNPARSEABLE_COUNT=$(( ${UNPARSEABLE_COUNT:-0} + 1 ))
-          UNPARSEABLE_TEAMS="${UNPARSEABLE_TEAMS}- ${org_id} — newest archive timestamp '${newest}' could not be parsed
+          UNPARSEABLE_TEAMS="${UNPARSEABLE_TEAMS}- ${org_id} — newest archive timestamp '$(redact_truncate "$newest" 80)' could not be parsed
 "
         else
           age_min=$(( ($(date +%s) - newest_ts) / 60 ))
