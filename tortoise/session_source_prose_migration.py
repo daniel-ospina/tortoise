@@ -820,7 +820,12 @@ def reconcile_after_replay(projection, *, engine: str,
             "%s: pre-#10852 session :Source prose reconciliation FAILED — the "
             "graph is rebuilt but nodes captured before the fix still carry the "
             "transcript's utterance in `summary`/`_searchText`; re-run "
-            "graph-scripts/11070_repair_session_source_prose.py (#11070)",
+            "graph-scripts/11070_repair_session_source_prose.py --repair "
+            "--graph <THE CACHE GRAPH THIS REPLAY JUST WROTE> --record-dsn … "
+            "--org-id … --graph-id … (#11070). ⛔ NAME THE CACHE GRAPH: "
+            "without --graph the CLI reads derive_uri_graph($TORTOISE_DB_URI), "
+            "which on a hosted or multi-graph box is NOT the graph --graph-id "
+            "names (#11152 review round 6).",
             engine)
         return None
     if report["candidates"]:

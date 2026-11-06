@@ -1300,3 +1300,77 @@ def test_a_dry_run_writes_nothing_and_reports_no_writes():
         graph, read_transcript=_reader("User: friday plan"))
     assert report["written"] == []
     assert graph.writes == []
+
+
+def test_the_embedded_arm_honours_graph_and_the_report_names_what_it_opened(
+        monkeypatch, capsys):
+    """⛔ A clean verdict must never describe a graph the run did not open.
+
+    `open_projection` dropped `graph_name` on the EMBEDDED branch, so
+    `--db <path> --graph X` opened the default `tortoise` graph while printing
+    `graph: X` — and `--dry-run --assert-clean` then passed over a graph the run
+    never touched. And `--json` printed no graph field at all, so a
+    machine-readable record of a DESTRUCTIVE run could not say which cache graph
+    it wrote (#11152 review round 6).
+    """
+    from tortoise import projection as projection_mod
+
+    seen = {}
+
+    class _Proj:
+        def __init__(self, graph_name):
+            self.graph_name = graph_name
+            self.g = _RecordingGraph([(_session_node(),)])
+
+        def close(self):
+            pass
+
+    real = projection_mod.FalkorProjection
+
+    class _Capturing:
+        def __init__(self, *a, **kw):
+            seen["graph_name"] = kw.get("graph_name")
+            self._inner = _Proj(kw.get("graph_name") or "tortoise")
+
+        def __getattr__(self, item):
+            return getattr(self._inner, item)
+
+    monkeypatch.setattr(_cli, "FalkorProjection", _Capturing)
+    monkeypatch.setattr(sys, "argv", [
+        _CLI_PATH.name, "--db", "/tmp/embedded-11070", "--graph",
+        "org_acme_tortoise", "--dry-run", "--json"])
+
+    _cli.main()
+    payload = json.loads(capsys.readouterr().out)
+    assert seen["graph_name"] == "org_acme_tortoise", (
+        "the embedded branch dropped --graph and opened the default graph")
+    assert payload["graph"] == "org_acme_tortoise", (
+        "--json could not name the cache graph the run addressed")
+    assert real is projection_mod.FalkorProjection
+
+
+def test_the_runbook_commands_that_touch_the_cache_all_name_the_graph():
+    """One operator instruction must not contradict the next.
+
+    Step 1 (`--dry-run`) omitted `--graph` while the docstring ten lines below
+    warns that omitting it counts a different graph; the same defect appeared in
+    the replay hook's FAILED-path message. Both are the command an operator
+    copies, so both are pinned here against the source that emits them.
+    """
+    from pathlib import Path
+
+    import tortoise.session_source_prose_migration as mod
+
+    cli = Path(_CLI_PATH).read_text()
+    module = Path(mod.__file__).read_text()
+
+    for label, text in (("the CLI runbook", cli), ("the module", module)):
+        for line in text.splitlines():
+            if "11070_repair_session_source_prose.py" not in line:
+                continue
+            if "--dry-run" in line or "--repair" in line or "re-run" in line:
+                following = text[text.index(line):text.index(line) + 400]
+                assert "--graph" in following or line.rstrip().endswith(
+                    "11070_repair_session_source_prose.py"), (
+                    f"{label} hands the operator a cache-touching command that "
+                    f"does not name the graph: {line.strip()}")

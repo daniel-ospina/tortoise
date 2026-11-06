@@ -26,8 +26,11 @@ IDENTITY plus the display-prefix WITNESS — see the module docstring.
 
 Usage:
   # 1) census + plan, no writes (the default). ⚠️ NO RECORD SCOPE IS NEEDED:
-  #    the census reads the CACHE only and the record is not consulted at all.
-  uv run python graph-scripts/11070_repair_session_source_prose.py --dry-run
+  #    the census reads the CACHE only and the record is not consulted at all —
+  #    but the CACHE GRAPH still has to be named (see step 2), or the census counts
+  #    a different graph and reports 0 candidates with confidence.
+  uv run python graph-scripts/11070_repair_session_source_prose.py \\
+      --graph org_acme_tortoise --dry-run
 
   # 2) repair, re-deriving each lexicon FROM THE RECORD (the only arm that
   #    needs the scope). ⛔ PASS --graph: without it the CACHE graph is
@@ -124,7 +127,12 @@ def derive_uri_graph(uri: str) -> str:
 def open_projection(uri: str, graph_name: str):
     """Open the projection for *uri* — a server URI, or an embedded DB path."""
     if "://" not in uri:
-        return FalkorProjection(uri, allow_nonstandard_path=True)
+        # ⛔ `--graph` MUST REACH THE EMBEDDED ARM TOO. Dropping it here made
+        # `--db <path> --graph X` open the DEFAULT embedded graph while the report
+        # printed `graph: X` — a clean verdict over a graph the run never opened
+        # (#11152 review round 6).
+        return FalkorProjection(uri, graph_name=graph_name,
+                                allow_nonstandard_path=True)
     return FalkorProjection.from_uri(uri, graph_name=graph_name)
 
 
@@ -142,7 +150,10 @@ def main() -> int:
                     help="WRITE the repair (the default is a dry run)")
     ap.add_argument("--record-dsn", default=None,
                     help="record DSN — re-derive each lexicon from the RECORD "
-                         "(default: env TORTOISE_RECORD_DSN; absent = clear only)")
+                         "(default: env TORTOISE_RECORD_DSN). ⛔ ABSENT IS NOT "
+                         "'clear only': the writing arm REFUSES without a DSN "
+                         "unless --clear-without-record asks for the clear arm "
+                         "by name")
     ap.add_argument("--org-id", default=None,
                     help="tenant org id for the record read (REQUIRED with "
                          "--record-dsn on the WRITING arm — a scope is never "
@@ -191,6 +202,8 @@ def main() -> int:
     org_id = args.org_id or os.environ.get("TORTOISE_ORG_ID", "")
     graph_id = args.graph_id
     record_conn = None
+    # Replaced by the projection's OWN name once one is opened (see `report["graph"]`).
+    actual_graph = graph_name
     scope_given = bool(org_id and graph_id)
     # ⛔ REFUSE, never degrade — AND ONLY WHERE THE RUN CAN DESTROY SOMETHING. A
     # missing scope reads as "the record did not answer" for EVERY session
@@ -256,6 +269,7 @@ def main() -> int:
     proj = None
     try:
         proj = open_projection(uri, graph_name)
+        actual_graph = getattr(proj, "graph_name", None) or graph_name
         if args.repair:
             report = reconcile_session_source_prose(
                 proj.g, read_transcript=read_transcript, dry_run=False,
@@ -302,6 +316,11 @@ def main() -> int:
     if not args.repair:
         scope_unproven = False
     report["scope_unproven"] = scope_unproven
+    # ⛔ THE GRAPH THE RUN ACTUALLY OPENED, not the name it computed. The report
+    # line is the operator's only check that `--graph` reached the projection, and
+    # `--json` printed no such line at all — so a MACHINE-READABLE record of a
+    # destructive run could not say which cache graph it wrote (#11152 r6).
+    report["graph"] = actual_graph
 
     code = 0
     if scope_unproven:
@@ -327,7 +346,7 @@ def main() -> int:
               f"--clear-without-record.", file=sys.stderr)
         return code
 
-    print(f"graph: {graph_name or '(URI default)'}   mode: "
+    print(f"graph: {actual_graph or '(URI default)'}   mode: "
           f"{'REPAIR' if args.repair else 'dry run'}")
     print(f"census BEFORE: {report['census_before']}")
     print(f"candidates: {len(report['candidates'])}  "
