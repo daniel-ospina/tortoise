@@ -3127,8 +3127,13 @@ whole reason this path exists.
 #    present but EMPTY (a carrier, or in a source checkout the doc itself, that
 #    parses to zero rows) — a fault in the INSTALL, not in the record, and since
 #    #10663 the verb names it as such INSTEAD of collapsing it into "the record
-#    is unreadable". No DSN or credential change clears it; regenerate/ship the
-#    carrier (`uv run python tools/gen_placement_table.py`).
+#    is unreadable". No DSN or credential change clears it, and the remedy
+#    depends on WHICH arm it names: regenerate/ship the carrier
+#    (`uv run python tools/gen_placement_table.py`) when the CARRIER is the
+#    fault — but ⛔ if the message names the DOC (`The DOC is the fault here`),
+#    restore the doc's table FIRST: the generator parses the doc, so over an
+#    empty doc it writes an empty carrier, prints `wrote … (0 rows)`, exits 0,
+#    and `--check` then agrees — two green reports over a still-broken install.
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \

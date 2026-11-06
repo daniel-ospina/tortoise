@@ -1008,6 +1008,13 @@ _PLACEMENT_SECTION_TABLE: dict[str, str] = {
     "Edges": "relation",
 }
 
+#: The physical tables a carrier row may name — the allowed `row[0]` set.
+#: DERIVED from the section map, never restated: a new section must not be able
+#: to leave the reader refusing a table the generator emits, and a row naming
+#: anything else is a silent partial namespace (the property lands under a key
+#: no accessor asks for, with the row count still matching).
+_DECLARED_TABLES = frozenset(_PLACEMENT_SECTION_TABLE.values())
+
 _SECTION_RE = re.compile(r"^## (Event|Source|Session|Object|Subject|Point) \(node\)")
 _EDGES_RE = re.compile(r"^## Edges / operators")
 _HEADING_RE = re.compile(r"^#{2,3} ")
@@ -1032,23 +1039,32 @@ class PlacementTableUnavailable(CacheProjectionError):
     1. **neither carrier** — no packaged table (:data:`PACKAGED_PLACEMENT_TABLE`)
        AND no source document (:data:`PLACEMENT_DOC`);
     2. **a present-but-corrupt carrier** — the packaged file exists and does not
-       parse, or does not DECODE. Undecodable bytes raise `UnicodeDecodeError`,
-       a `ValueError` and not an `OSError`, so they are caught here explicitly;
-       left alone they escaped to the caller's "record is unreadable" wrapper,
-       which is the misdiagnosis this type exists to end. The doc is
-       deliberately NOT consulted: papering a corrupt carrier over with a
-       fallback hides the packaging fault instead of reporting it;
+       parse, or does not DECODE, or cannot be READ at all (EACCES / EISDIR /
+       ELOOP — NOT absence: only ENOENT takes the doc fallback). Undecodable
+       bytes raise `UnicodeDecodeError`, a `ValueError` and not an `OSError`, so
+       they are caught here explicitly; left alone they escaped to the caller's
+       "record is unreadable" wrapper, which is the misdiagnosis this type
+       exists to end. The doc is deliberately NOT consulted: papering a corrupt
+       carrier over with a fallback hides the packaging fault instead of
+       reporting it;
     3. **a present-but-EMPTY carrier** — the packaged file parses to zero rows.
        An empty carrier is never legitimate, and accepting it would project
        every record property as unmapped, silently, in production;
     4. **a stale or malformed carrier** — written by another generator version,
-       carrying a row that is not two non-empty strings, or holding fewer rows
-       than its own `_row_count` declares;
-    5. **the source document fails the same way** — it is undecodable, or it
-       parses to zero rows. A checkout is not exempt from the checks an image's
-       carrier gets: the doc IS the declaration the carrier is generated from,
-       and a doc that lost its table projected every record property as
-       unmapped with no error at all.
+       carrying a row that is not two non-empty strings or names no declared
+       table, or holding a row count that differs from its own `_row_count`
+       (truncated by a bad merge, or hand-edited);
+    5. **the source document fails in the same three ways** — it is undecodable,
+       it cannot be read (EACCES / EISDIR / ELOOP), or it parses to zero rows.
+       A checkout is not exempt from the checks an image's carrier gets: the doc
+       IS the declaration the carrier is generated from, and a doc that lost its
+       table projected every record property as unmapped with no error at all.
+       ⚠️ The doc arm is NOT at full parity: a doc has no `_row_count` and no
+       per-row provenance, so a row LINE the parser cannot match is dropped
+       silently (`parse_placement_rows` skips it) — a PARTIAL doc is caught by
+       the placement pins in `tests/test_cache_projection.py`, not here. Stated
+       because an unqualified "refuses exactly like the carrier" is how the next
+       reader concludes this arm is closed.
 
     It is a distinct type because the message it replaces — *"the record is
     unreadable"* — sent an operator to Postgres credentials for a file that was
@@ -1174,11 +1190,17 @@ def parse_placement_rows(text: str) -> list[tuple[str, str]]:
 def _placement_rows_from_doc(path: Path) -> list[tuple[str, str]]:
     """Parse `path` (an explicit doc, or :data:`PLACEMENT_DOC`).
 
-    Refuses exactly like the packaged arm: bytes that do not decode and a table
-    that parses to ZERO rows are both install faults, never an empty namespace.
-    The EMPTY guard landed on the carrier first (#11227) and this arm kept the
-    hole one file over, where a doc that lost its table projected every record
-    property as unmapped with no error at all.
+    Refuses the states the packaged arm refuses: bytes that do not decode, a
+    read that fails (EACCES / EISDIR / ELOOP), and a table that parses to ZERO
+    rows are all install faults, never an empty namespace. The EMPTY guard
+    landed with the carrier (#11210, closing #10663) and this arm kept the hole
+    one file over, where a doc that lost its table projected every record
+    property as unmapped with no error at all — which is what #11227 filed.
+
+    NOT at full parity with the carrier, and the difference is named rather than
+    implied: a doc declares no row count and carries no per-row provenance, so a
+    single row LINE the parser cannot match is dropped silently. A partial doc is
+    caught by the placement pins in `tests/test_cache_projection.py`, not here.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -1321,6 +1343,16 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
             raise _fault(
                 f"has a MALFORMED row at index {index} ({row!r}) — every row "
                 f"must be a two-element list of non-empty strings")
+        if row[0] not in _DECLARED_TABLES:
+            # A table name nothing reads is a SILENT partial namespace: the row
+            # parses, the count can still match, and the property lands under a
+            # key no accessor asks for. `parse_placement_rows` cannot produce
+            # one (it maps through _PLACEMENT_SECTION_TABLE), so a carrier is
+            # strictly weaker without this check.
+            raise _fault(
+                f"has a row naming {row[0]!r}, which is not one of the declared "
+                f"tables {sorted(_DECLARED_TABLES)} at index {index} — its "
+                f"SHAPE is unknown here")
         parsed.append((row[0], row[1]))
 
     if not parsed:
@@ -1351,7 +1383,14 @@ def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
     :class:`PlacementTableUnavailable` and names BOTH locations.
     """
     if doc is not None:
-        return _placed_rows_with_extras(_placement_rows_from_doc(doc))
+        try:
+            return _placed_rows_with_extras(_placement_rows_from_doc(doc))
+        except _PlacementDocAbsent as e:
+            # The private absence type is for INSPECTION here, never for escape:
+            # a caller of a public accessor must be able to NAME what it catches,
+            # and the no-arg form of this same function raises the public type
+            # for the identical condition.
+            raise PlacementTableUnavailable(str(e)) from e
     packaged = _read_packaged_placement_rows()
     if packaged is not None:
         return _placed_rows_with_extras(packaged)

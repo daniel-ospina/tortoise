@@ -468,6 +468,63 @@ def test_a_doc_that_parses_to_zero_rows_is_refused_not_read_as_the_extras_only(
         cp.placement_columns()
 
 
+def test_a_carrier_row_naming_no_declared_table_is_refused(tmp_path,
+                                                         monkeypatch):
+    """A row under a table nothing reads parses fine and projects NOTHING.
+
+    Measured pre-fix: `["pointz", "id"]` with a matching `_row_count` was
+    ACCEPTED, and the property landed under a `pointz` key no accessor asks for
+    — a silently partial namespace, the same class as the empty carrier, with
+    the count check unable to see it. `parse_placement_rows` cannot produce such
+    a row (it maps sections through `_PLACEMENT_SECTION_TABLE`), so the carrier
+    was strictly weaker than the doc it is generated from.
+    """
+    payload = _real_payload()
+    payload["rows"][0] = ["pointz", "id"]
+    _carrier(tmp_path, payload, monkeypatch)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+    message = str(excinfo.value)
+    assert "pointz" in message, message
+    assert "declared" in message, message
+
+
+def test_the_explicit_doc_arm_raises_only_the_PUBLIC_type(tmp_path):
+    """The private absence type must never escape a public accessor.
+
+    Measured pre-fix: `_read_placement_rows(doc=<absent>)` re-raised
+    `_PlacementDocAbsent` — a class that is not exported, so no out-of-module
+    handler could name what it caught, while the no-arg form of the SAME
+    function raised the public type for the identical condition.
+    """
+    absent = tmp_path / "not-there.md"
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows(doc=absent)
+
+    assert type(excinfo.value).__name__ == "PlacementTableUnavailable", (
+        f"a public accessor leaked {type(excinfo.value).__name__} — a caller "
+        f"outside this module cannot catch a name it cannot import")
+    assert str(absent) in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_doc_arm_success_path_is_pinned():
+    """Both new refusals above must not have eaten the arm's WORKING case.
+
+    The other `doc=` uses in this file assert only refusal, and the drift pin
+    calls `parse_placement_rows` directly — so without this one, a regression
+    that made the explicit-doc arm refuse (or return unextended rows) would
+    merge green.
+    """
+    rows = cp._read_placement_rows(doc=cp.PLACEMENT_DOC)
+
+    doc_rows = cp.parse_placement_rows(cp.PLACEMENT_DOC.read_text(encoding="utf-8"))
+    assert doc_rows, "the real doc must parse to rows for this pin to mean anything"
+    assert rows == cp._placed_rows_with_extras(doc_rows)
+    assert ("point", "pointKind") in rows, rows[:3]
+
+
 # ── 3. The carrier reaches an installed user ───────────────────────────────
 
 
