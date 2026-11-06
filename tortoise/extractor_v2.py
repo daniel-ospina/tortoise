@@ -1704,7 +1704,6 @@ def compile_stories(stories: list[str]) -> str:
 
 OUTPUT_CONTRACT = """{
   "entities": [{"name": str, "kind": str, "lifecycle": "created|changed|unchanged|superseded", "supersedes": "existing-id|null", "note": str|null}],
-  "mentions": [{"surface": str, "claim_ref": str|null, "quote": str|null, "kind_guess": str|null}],  # a phrase that POINTS rather than NAMES (a pronoun, `the former`, `the problem`): recorded against the claim that used it, NEVER an entity (#11021)
   "events": [{"content": str, "eventKind": str, "about_entities": [str], "startedAt": "YYYY-MM-DD|YYYY-MM-DDThh:mm:ss|null", "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
   "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "when": "YYYY-MM-DD|null",
               "slots": {"subject": [...], "object": [...], "event": [...]},
@@ -2136,7 +2135,7 @@ def render_s2_prompt(master: dict | None = None, *,
         core_only = _classify_later_enabled()
     transcript = _render_source_transcript(edus)
     tmpl = S2_TMPL_CORE_ONLY if core_only else S2_TMPL
-    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    contract = _prompt_contract(core_only=core_only)
     chains = "" if core_only else _render_chains(master)
     # The pack-namespace list is DYNAMIC — derived from the INSTALLED packs
     # (master["pack_kinds"] keys), never hardcoded (epistemic-team is not
@@ -3519,7 +3518,7 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
         tmpl = S4_TMPL_CORE_ONLY_DELTA if core_only else S4_TMPL_DELTA
     else:
         tmpl = S4_TMPL_CORE_ONLY if core_only else S4_TMPL
-    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    contract = _prompt_contract(core_only=core_only)
     chains = "" if core_only else _render_chains(master)
     rendered = _fill_template(tmpl, {
         "master_list": _render_master(master, story, core_only=core_only),
@@ -10547,7 +10546,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             surface=surface, claim=carrier,
             kind_guess=str(entry.get("kind_guess") or "").strip() or None,
             rule_id=str(entry.get("rule_id") or _referentiality.RULE_CHANNEL),
-            reason="emitted by the extraction model on the mention channel",
+            reason=(str(entry.get("reason") or "").strip()
+                    or "emitted by the extraction model on the mention channel"),
             narrative=narrative,
             quote=str(entry.get("quote") or claim.get("quote") or ""),
             span=entry))
@@ -10641,17 +10641,32 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     cannot 422 the whole session (review P1: the model path bypassed the clamps).
     """
     surface = str(surface or "")[:200]
+    # ⛔ The record's own text is CLAMPED FIRST, because the span is located in it:
+    # locating in the unclamped quote and then storing 200 chars shipped
+    # `span_source: "quote"` with offsets pointing past the end of the quote the
+    # record names — an address that resolves to nothing, which is worse than no
+    # address (review cycle 3, P2).
+    quote = str(quote or "")[:_MAX_QUOTE]
     span_start: int | None = None
     span_end: int | None = None
     span_source = ""
     if span is not None:
-        # model-emitted offsets: accepted only as a COMPLETE pair of ints
+        # offsets arriving ON the channel: accepted only as a COMPLETE pair of ints
         try:
             s0, s1 = span.get("span_start"), span.get("span_end")
             if (isinstance(s0, int) and isinstance(s1, int)
                     and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
                 span_start, span_end = s0, s1
-                span_source = "model"
+                # ⛔ A record RE-ENTERING through the channel keeps the space it was
+                # derived in. The union pass re-records every existing entry through
+                # this branch, so hard-setting "model" overwrote the
+                # "quote"/"narrative" provenance pass 1 computed: the field that
+                # says WHICH text the offsets address stopped saying it, and the
+                # `reason` re-described a derived record as a model-emitted one
+                # (review cycle 3, P2).
+                declared = str(span.get("span_source") or "")
+                span_source = (declared if declared in _MENTION_SPAN_SOURCES
+                               else "model")
         except Exception:
             span_start, span_end, span_source = None, None, ""
     else:
@@ -10667,7 +10682,7 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
             # for any claim over `_MAX_CONTENT`, losing the mention AND reporting
             # it as a fold that never happened (review cycle 3, P2).
             "claim_ref": _write_span(str(claim.get("content") or ""), _MAX_CONTENT),
-            "quote": str(quote or "")[:_MAX_QUOTE],
+            "quote": quote,
             "span_start": span_start,
             "span_end": span_end,
             "span_source": span_source,
@@ -10737,6 +10752,43 @@ _MENTION_SPAN_SOURCES = ("quote", "narrative", "model")
 #: fails the moment the two disagree — a mirrored constant with no drift pin is
 #: how the address ceiling rots.
 _SPAN_OFFSET_MAX = 2**63 - 1
+
+
+#: The ``mentions[]`` channel line, injected into the prompt contract **only when the
+#: cue is armed** — never part of ``OUTPUT_CONTRACT`` itself.
+_MENTION_CONTRACT_LINE = (
+    '  "mentions": [{"surface": str, "claim_ref": str|null, "quote": str|null, '
+    '"kind_guess": str|null}],  # a phrase that POINTS rather than NAMES (a '
+    'pronoun, `the former`, `the problem`): recorded against the claim that used '
+    'it, NEVER an entity (#11021)')
+
+#: The anchor the mention line is injected ABOVE. ``content`` is the one field the
+#: core-only variants do not rewrite, so this marker is stable in all four.
+_CONTRACT_EVENTS_ANCHOR = '  "events": [{"content": str,'
+
+
+def _prompt_contract(*, core_only: bool = False) -> str:
+    """The ``output_contract`` text a prompt renders — armed-aware for **#11021**.
+
+    The ``mentions[]`` channel is asked for **only when the cue is armed**. An
+    UNARMED run discards that channel (``route_mentions`` returns the list
+    unchanged, and nothing attaches or counts it), so asking the model for it moved
+    a referential phrase OUT of ``entities[]`` into a channel nobody reads: the
+    phrase was then neither minted nor recorded, which is the opposite of plan
+    **R1** (*fail-open to entity until measured*) — the recorded decision the OFF
+    default exists for (review cycle 3, P1).
+
+    Unarmed this returns ``OUTPUT_CONTRACT`` (or its core-only variant) BYTE-
+    IDENTICAL to the pre-#11021 contract, which is what makes the default path
+    unchanged and keeps the flag-off prompt pins honest; armed it is the same
+    contract with the channel line injected above ``events[]``.
+    """
+    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    if not _referentiality.enabled():
+        return contract
+    return contract.replace(_CONTRACT_EVENTS_ANCHOR,
+                            _MENTION_CONTRACT_LINE + "\n" + _CONTRACT_EVENTS_ANCHOR,
+                            1)
 
 
 def _mentions_for_claim(embed_list: dict, content: str,

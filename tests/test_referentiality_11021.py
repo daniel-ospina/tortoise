@@ -228,6 +228,41 @@ def test_a_mention_is_idempotent_under_two_passes():
     assert len(twice["mentions"]) == len(once["mentions"]) == 1
 
 
+def test_a_second_pass_keeps_the_record_s_span_provenance():
+    """The union pass re-records every existing entry THROUGH the channel branch,
+    which hard-set `span_source = "model"` — so by the end of a session the field
+    that says WHICH text the offsets address claimed the model supplied offsets
+    this module derived, and the `reason` described a derived record as a
+    model-emitted one (review cycle 3, P2)."""
+    el = _embed_list("it")
+    once = route_mentions(copy.deepcopy(el), "")
+    twice = route_mentions(copy.deepcopy(once), "")
+    first, second = once["mentions"][0], twice["mentions"][0]
+    assert first["span_source"] == "quote" and second["span_source"] == "quote"
+    assert (first["span_start"], first["span_end"]) == (
+        second["span_start"], second["span_end"])
+    assert second["reason"] == first["reason"], (
+        "pass 2 re-described a derived record as a model-emitted one")
+
+
+def test_a_span_never_addresses_bytes_the_record_does_not_store():
+    """The span was located in the carrier's UNCLAMPED quote and then the stored
+    quote was cut to 200: a surface past offset 200 shipped `span_source: "quote"`
+    with offsets that resolve to nothing in the quote the record names (review
+    cycle 3, P2)."""
+    tail = "a claim that uses it at the very end"
+    quote = ("lead " * 45) + tail          # > 200 chars, `it` lands past the cap
+    el = _embed_list("it")
+    el["points"] = [{"content": "a claim that uses it in its own sentence",
+                     "pointKind": "statement", "about_entities": ["it"],
+                     "quote": quote}]
+    held = route_mentions(copy.deepcopy(el), "")
+    rec = held["mentions"][0]
+    assert len(rec["quote"]) <= 200
+    if rec["span_source"] == "quote":
+        assert rec["quote"][rec["span_start"]:rec["span_end"]] == "it", rec
+
+
 # ── the flag ───────────────────────────────────────────────────────────────
 
 def test_the_predicate_is_off_at_the_default(monkeypatch):
@@ -502,13 +537,49 @@ def test_route_mentions_never_mutates_the_callers_lists():
 def test_the_contract_carries_the_channel():
     """Decomposition row J's contract pin: `mentions[]` must be IN the prompt
     contract and IN the shape gate, or the channel is a decoration on
-    `entities[]` and the model is never asked for it."""
-    from tortoise.extractor_v2 import _OUTPUT_SCHEMA, OUTPUT_CONTRACT
-    assert '"mentions":' in OUTPUT_CONTRACT
+    `entities[]` and the model is never asked for it.
+
+    ⚠️ ARMED contract, not `OUTPUT_CONTRACT`: the channel is injected into the
+    prompt only when the cue is armed (see the row below), because an unarmed run
+    discards it — and a model asked for a channel nobody reads routes referents
+    into it, neither minted nor recorded (review cycle 3, P1)."""
+    from tortoise.extractor_v2 import (
+        _OUTPUT_SCHEMA,
+        _prompt_contract,
+        render_s4_prompt,
+    )
+    assert '"mentions":' in _prompt_contract()
+    # BOTH prompt builders read the same owner, so S4 asks for the channel too
+    assert '"mentions":' in render_s4_prompt(
+        "a story", {}, {"entities": [], "points": []})
     assert "mentions" in _OUTPUT_SCHEMA
     assert _OUTPUT_SCHEMA["mentions"] == (), (
         "a required key here turns a salvageable partial response into a "
         "_ParseError on the default path")
+
+
+def test_an_unarmed_prompt_does_not_ask_for_the_mention_channel(monkeypatch):
+    """`OUTPUT_CONTRACT` carried the channel line unconditionally, so an UNARMED
+    run — the production default — moved a referential phrase OUT of `entities[]`
+    into a channel that is then discarded: the phrase was neither minted nor
+    recorded, the opposite of plan R1's *fail-open to entity until measured*
+    (review cycle 3, P1)."""
+    from tortoise.extractor_v2 import (
+        OUTPUT_CONTRACT,
+        OUTPUT_CONTRACT_CORE_ONLY,
+        _prompt_contract,
+        render_s2_prompt,
+    )
+
+    monkeypatch.delenv(ref.ENV_FLAG, raising=False)
+    assert '"mentions":' not in render_s2_prompt(), (
+        "the default (unarmed) prompt still asks for a channel the run discards")
+    # …and the unarmed contract is the constant it always was, so the flag-off
+    # prompt stays byte-identical to pre-#11021
+    assert _prompt_contract() == OUTPUT_CONTRACT
+    assert _prompt_contract(core_only=True) == OUTPUT_CONTRACT_CORE_ONLY
+    monkeypatch.setenv(ref.ENV_FLAG, "1")
+    assert '"mentions":' in render_s2_prompt()
 
 
 def test_an_unarmed_run_reports_no_record_it_did_not_make(monkeypatch):
