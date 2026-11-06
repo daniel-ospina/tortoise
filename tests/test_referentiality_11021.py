@@ -1927,3 +1927,139 @@ def test_the_record_builder_agrees_with_the_clamp_on_an_ABSENT_narrative():
                             narrative="alpha it beta", quote="", span=dict(span))
     assert agree["span_source"] == "narrative", (
         f"a verifiable declaration was demoted: {agree!r}")
+
+
+def test_the_fail_open_path_keys_a_record_to_the_claim_the_write_KEEPS(monkeypatch):
+    """⛔ `_clamped_mention` re-derives "every model CLAIM" — except the one that
+    decides ATTACHMENT. A `claim_ref` copied raw keys apart from its own point for
+    any claim over `_MAX_CONTENT` (the write stores `_write_span(stripped, 1000)`),
+    so the mention never attached and the run reported a claim it HAD emitted as
+    folded away by a NOOP/duplicate/MERGE that never happened — the defect
+    `_mention_record` fixed at its own call site (review cycle 4, P1-c), left open
+    at the last door on the fail-open path (review at `b791a3eb2`, P2). Both sides
+    of the match must use the same window, so the clamp cuts the ref AND
+    `_mentions_for_claim` keys on the cut."""
+    import tortoise.extractor_v2 as ex
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("selection exploded — the fail-open path")
+
+    monkeypatch.setattr(ex, "route_mentions", _boom)
+    long_claim = ("the budget is 40k and " * 90).strip()
+    assert len(long_claim) > ex._MAX_CONTENT
+    el = _embed_list("it")
+    el["points"][0]["content"] = long_claim
+    el["mentions"] = [{"surface": "it", "claim_ref": long_claim,
+                       "quote": "it", "rule_id": ref.RULE_PRONOUN}]
+    res = ex.execute_embed(copy.deepcopy(el), {}, session_id="fail-open-long-claim")
+    payload = res["payload"]
+    attached = [m for p in payload["points"] for m in (p.get("mentions") or [])]
+    assert [m["surface"] for m in attached] == ["it"], (
+        "the mention did not attach to the claim the write kept: "
+        f"{attached!r}")
+    ref_len = len(attached[0]["claim_ref"])
+    assert ref_len <= ex._MAX_CONTENT, (
+        f"the record's claim_ref is longer than the write's window: {ref_len}")
+    assert res["stats"]["mentions_attached"] == 1, (
+        f"an attached record was not counted: {res['stats']!r}")
+    assert res["stats"]["mentions_unresolved"] == 0, (
+        f"a claim the run DID emit was reported unresolved: {res['stats']!r}")
+
+
+def test_the_accounting_counts_what_the_run_PUBLISHED(monkeypatch):
+    """⛔ Two raw entries whose surfaces agree only AFTER the 200-character cap were
+    counted twice by `stats["mentions_recorded"]` while both published lists said
+    one — the raw dedupe keys on the untruncated surface. That number is what plan
+    R1's arming gate reads, so it has to be the records the run actually published
+    (review at `b791a3eb2`, P3)."""
+    long_a = "a" * 201 + "X"
+    long_b = "a" * 201 + "Y"
+    out = _fail_open_session(monkeypatch, [
+        {"surface": long_a, "claim_ref": "the budget is 40k", "rule_id": ref.RULE_CHANNEL},
+        {"surface": long_b, "claim_ref": "the budget is 40k", "rule_id": ref.RULE_CHANNEL},
+    ])
+    published = len(out["mentions"]["records"])
+    assert out["stats"]["mentions_recorded"] == published, (
+        "the arming number disagrees with the surface it describes: "
+        f"{out['stats']['mentions_recorded']} recorded vs {published} published")
+    assert published == 1, (
+        f"two entries that converge after the cap were published twice: {published}")
+
+
+def test_a_deduped_pair_keeps_the_entry_that_carries_the_ADDRESS():
+    """⛔ `_dedupe_mentions` kept the FIRST entry, so a spanless duplicate listed
+    first replaced a VERIFIED address listed second — the shipped record had no
+    address while one was available, and the address is the record's whole point
+    (review at `b791a3eb2`, P3)."""
+    from tortoise.extractor_v2 import _clamped_mention, _dedupe_mentions
+
+    account = "the budget is 40k"
+    spanless = _clamped_mention({"surface": "it", "claim_ref": account})
+    verified = _clamped_mention({"surface": "it", "claim_ref": account,
+                                 "quote": "x it y", "span_source": "quote",
+                                 "span_start": 2, "span_end": 4})
+    assert "span_start" not in spanless and verified.get("span_start") == 2
+    kept = _dedupe_mentions([spanless, verified])
+    assert len(kept) == 1
+    assert kept[0].get("span_start") == 2, (
+        f"the spanless duplicate won the dedupe: {kept!r}")
+    # …and the preference does not reorder anything else: the first entry still
+    # wins when neither (or both) carry a pair.
+    assert _dedupe_mentions([spanless, dict(spanless)]) == [spanless]
+
+    # ⛔ THE SHAPE THAT WAS ACTUALLY BROKEN: `_mention_record` ALWAYS emits both
+    # keys (`None` when it could not locate the surface) while `_clamped_mention`
+    # POPS them, so a presence test was inert on the builder the defect was
+    # observed on — the row above used only `_clamped_mention` products and was
+    # green over a no-op rule (review at `9561959ed7`, P2). And the ADDRESS is
+    # merged into the first record, not swapped with it: the cue's `rule_id` must
+    # survive taking the duplicate's address.
+    from tortoise.extractor_v2 import _mention_record
+
+    cue = _mention_record(surface="it", claim={"content": account},
+                          kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                          reason="cue derived", narrative="", quote="")
+    assert cue.get("span_start") is None and "span_start" in cue
+    addr = _mention_record(surface="it", claim={"content": account},
+                           kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                           reason="carried", narrative="", quote="x it y",
+                           span={"span_start": 2, "span_end": 4,
+                                 "span_source": "quote"})
+    assert addr["span_start"] == 2
+    merged = _dedupe_mentions([cue, addr])
+    assert len(merged) == 1
+    assert merged[0]["span_start"] == 2 and merged[0]["span_source"] == "quote", (
+        f"the address was dropped on a `_mention_record` pair: {merged!r}")
+    assert merged[0]["rule_id"] == ref.RULE_PRONOUN and merged[0]["reason"] == "cue derived", (
+        f"the cue's provenance was replaced by the duplicate's: {merged!r}")
+
+
+def test_an_over_cap_claim_is_not_reported_as_CLAIMLESS():
+    """⛔ `claims_by_ref` is keyed on the CUT identity (`_mention_ref`), but the
+    channel loop compared the model's RAW `claim_ref` against it, so an entry whose
+    claim is present over `_MAX_CONTENT` was counted `channel_refused_no_claim` and
+    named in `channel_refused_surfaces` — an evidence surface whose own comment
+    reads "a mention with no resolvable claim is not a record" — while the run held
+    it, recorded it and attached it. The same window must be used on every lookup
+    (review at `9561959ed7`, P3)."""
+    long_claim = ("the budget is 40k and " * 90).strip()
+    el = {"entities": [], "events": [],
+          # ⛔ NO carrier names the surface: the claim link is the ONLY thing that can
+          # hold it, so this row sees the claim window itself. With a carrier the
+          # `_claims_naming` fallback masks a raw-vs-cut mismatch (measured: the
+          # gate mutant stays green with one).
+          "points": [{"content": long_claim, "pointKind": "statement"}],
+          "operators": [],
+          "mentions": [{"surface": "it", "claim_ref": long_claim,
+                        "quote": "it", "rule_id": ref.RULE_PRONOUN}]}
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 1, (
+        f"the mention-only shape was not held: {held['mention_stats']!r}")
+    assert held["mention_stats"].get("channel_refused_no_claim", 0) == 0, (
+        "a claim the run HELD and recorded was reported claimless: "
+        f"{held['mention_stats']!r}")
+    assert not held["mention_stats"].get("channel_refused_surfaces"), (
+        f"a held surface was named refused: {held['mention_stats']!r}")
+    payload, _ = _mint(copy.deepcopy(el))
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"], (
+        f"the record was lost: {_mentions_of(payload)!r}")
