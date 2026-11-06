@@ -13308,19 +13308,43 @@ class TortoiseSDK:
                 # nor an authored word (a bare dedup hit), so that path costs no
                 # extra query.
                 #
-                # ⛔ `props` is NEVER empty at this point, so the guard cannot be
-                # `props or …`: `content_hash` is set on it unconditionally
-                # above ("dedup flag only gates the existing-point lookup, not
-                # hash persistence", fix #80) and is not popped until the fold's
-                # own write leg, far below. A guard that reads `props` therefore
-                # admits EVERY dedup hit and spends a `LIFECYCLE_FANOUT_QUERY` on
-                # the bare one this comment promises costs nothing (#10841
-                # review, P3). The condition is the CALLER'S props — the set
-                # minus the hash this function itself added — which is what the
-                # sentence above actually describes.
-                _caller_props = set(props) - {"content_hash"}
+                # ⛔ THE GATE IS WHAT THE FOLD COULD **WRITE**, not the `props`
+                # dict as it happens to sit on this line. `content_hash` was put
+                # into `props` UNCONDITIONALLY at the top of this door and is not
+                # popped until after the #7704 provenance retrofit below, and
+                # `extractedFrom` is that retrofit (deliberately NOT refused) —
+                # so `if props` was ALWAYS true here, the "bare dedup hit costs
+                # no extra query" arm was unreachable, and every dedup hit spent
+                # a fan-out read on the NORMAL path ("the self-host surface
+                # dedups by DEFAULT", see the #10368 note above).
+                #
+                # ⚠️ THIS DEFECT WAS FIXED TWICE, INDEPENDENTLY: `origin/main`
+                # gates on `_caller_props = set(props) - {"content_hash"}` (#10841
+                # review, P3) and this fold gates on `_fold_words`, one name
+                # narrower. Both are the same repair; the difference is the
+                # DIRECTION of the subset: `_fold_words` is a SUBSET of
+                # `_caller_props`, so every hit that takes the read HERE would
+                # also have taken it under main's gate, and the evidence-only hit
+                # (an `extractedFrom` retrofit alone) is the only case that
+                # differs — main reads a verdict there, this gate does NOT, and
+                # there is nothing to decide: that hit writes no prop and no word.
+                #
+                # `_fold_words` is the PRE-POP image of what
+                # `_terminal_fold_refused` reads after its own pops, so the two
+                # can never disagree: `_TEMPORAL_RESTAMP_PROPS` shares no member
+                # with the two excluded names, so `_temporal ⊆ _fold_words` and
+                # the #7819 arm keeps its verdict; `key` stays in `_fold_words`,
+                # so a KEY-resolved fold is still governed (#6110); and an
+                # empty `_fold_words` with no authored word leaves the props leg
+                # with nothing to write, so there is no refusal to decide.
+                # Pinned by BOTH tests the two fixes brought, which is why the
+                # merge keeps both suites' cases:
+                # `tests/test_10368_terminal_create_fold.py::
+                # test_a_bare_dedup_hit_costs_no_terminal_read` (this fold) and
+                # `…::test_a_bare_dedup_hit_spends_no_terminal_read` (main).
+                _fold_words = set(props) - {"content_hash", "extractedFrom"}
                 _terminal = (self._lifecycle_terminal_marker(pid)
-                             if (_caller_props or cred_prior is not None)
+                             if (_fold_words or cred_prior is not None)
                              else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _terminal is not None:
