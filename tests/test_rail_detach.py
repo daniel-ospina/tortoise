@@ -440,14 +440,17 @@ def test_a_LIVE_pid_in_ANOTHER_group_is_not_our_rail():
     (`assert rd._in_group(pid, 42) is False`, its own control arm), which the
     forward-merge brought in — so "NOTHING pinned it" is false at this head, and
     the figure is a frozen count of a file the merge has since grown (45
-    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`, 76 here). ⛔ TWO COUNTING
+    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`; ⛔ no live figure is restated
+    here — a population count drifts with every test added, so it belongs keyed
+    to the commit it was measured at or nowhere). ⛔ TWO COUNTING
     DEFINITIONS meet in this paragraph and neither figure is wrong: the `46
     passed` quoted above is pytest's COLLECTED population at `e49e641f4^` (45
     `^def test_` functions, one of them carrying a 2-case `parametrize`, so
     45 + 1 = 46), while the parenthetical counts `^def test_` definitions. Do
     not "correct" one figure to match the other. Reproduce with a plugin that
-    sets `rail_detach._in_group = lambda pid, pgid: True`:
-    `2 failed, 75 passed`.
+    sets `rail_detach._in_group = lambda pid, pgid: True`; measured at
+    `71f6d4acb` that reads `2 failed, 96 passed`, and only the NAMES matter —
+    this test and that control arm red, nothing else.
 
     The gap this test fills survives that correction, and it is narrower than the
     old sentence claimed: every other test reaches `_in_group`'s rejecting
@@ -1049,6 +1052,480 @@ def test_a_pid_d_claim_refusal_names_the_check_and_the_remedy(tmp_path):
         wrapper.wait()
 
 
+def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, monkeypatch):
+    """⛔ TWO SPELLINGS OF ONE REPO ARE ONE RAIL (#10691 review).
+
+    A `flock` is held on the open FILE (`flock(2)`), so the guard is only as strong
+    as the identity the path is keyed on — and the artifact used to be named from the
+    RAW repo string. Measured at the pre-fix head: `launch(7, "o/r")` and
+    `launch(7, "github.com/o/r")` wrote two records, took two locks and BOTH STARTED
+    — two live rails on one PR, the #3061 collision this guard exists to refuse —
+    while a third launch with the SAME spelling was correctly refused (the case
+    above).
+
+    Non-vacuity, and ⛔ THE CARRIER IS NOT THE ONE THIS DOCSTRING USED TO NAME (#10963
+    review, measured). The identity is enforced at THREE sites THIS CASE DEPENDS ON, and the
+    count is scoped deliberately: `_repo_key` decides repo identity at nine call sites in
+    `tools/rail_detach.py` (`_record_names_repo`, `_names_this_repo`, the `collect` CLI
+    resolution, and `launch`'s own `art_key` attestation among them — `:2115` is the site
+    that actually fires in the `launch`-alone experiment below). THIS case's
+    spelling-insensitivity is carried by the RECORD side, not the write side:
+    `_waiting_record` → `_candidate_records` (`tools/rail_detach.py`) globs
+    `rail-*-{pr}.md` and canonicalises each record's OWN `REPO=` line, so a record
+    written under a different spelling is found by its CONTENT.
+    * Reverting BOTH write-side canonicalisers — `launch`'s `repo = _repo_key(...)`
+      and `_slug`'s `return _repo_key(repo).replace("/", "-")` — leaves this case
+      GREEN (measured): the content scan still refuses the second spelling. The
+      earlier text here claimed the opposite and its recipe, followed, would have
+      removed the real carrier on the belief that the two named sites were it.
+    * Reverting `launch`'s site ALONE reds this case (the record is written under the
+      raw spelling, so the shared-path refusal fires first and `ALREADY LIVE` is
+      absent) — the write-side sites are pinned by their own cases too.
+    * The content scan is pinned by THREE sibling cases —
+      `test_a_record_written_under_an_older_spelling_still_blocks`,
+      `test_a_torn_record_cannot_certify_or_shadow_a_live_rail` and
+      `test_the_duplicate_rail_guard_asks_a_liveness_question` — which all RED when
+      it is removed, while this one stays green (measured).
+    * `_slug`'s site ALONE is pinned by a case this one is not:
+      `test_one_record_is_readable_under_any_spelling_of_its_repo` REDS when
+      `_slug` loses its `_repo_key` (measured), which is why the negative
+      results above are about THIS case and not about the keying.
+
+
+    ⛔ EVERY SPELLING A CLONE URL CAN PRODUCE, because each one is a paste: `.git` is
+    the suffix a clone URL always ends in and the SCP form glues the host to the owner
+    (`git@github.com:o/r.git`). Both used to key a DIFFERENT artifact — measured
+    `rail-o-r.git-7.md` and `rail-git@github.com:o-r.git-7.md` — so a `--repo`/cord
+    value pasted from `git remote -v` started a second live rail on the same PR while
+    this guard reported the PR free.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "20")
+    ln = rd.launch(7, cwd=co, state_dir=sd, repo="o/r")
+    try:
+        assert wait_state(sd, 7, rd.WAITING).state == rd.WAITING
+        for spelling in ("github.com/o/r", "GitHub.com/O/R", "o/r",
+                         "o/r.git", "https://github.com/o/r.git",
+                         "git@github.com:o/r.git"):
+            with pytest.raises(rd.Refused) as exc:
+                rd.launch(7, cwd=co, state_dir=sd, repo=spelling)
+            assert "ALREADY LIVE" in str(exc.value), spelling
+    finally:
+        kill_group(ln.pid)
+
+
+def test_one_record_is_readable_under_any_spelling_of_its_repo(tmp_path, monkeypatch):
+    """The record a spelling resolves to is ONE file, in every direction.
+
+    A canonical lock path is only half the property: if `collect` resolved a
+    different file for a differently-spelled repo, the guard's holder check and the
+    operator's `collect` would disagree about which record describes the rail — the
+    same split, one verb over.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "4")
+    ln = rd.launch(76, cwd=co, state_dir=sd, repo="o/r")
+    try:
+        assert (rd.artifact_path(sd, "github.com/o/r", 76)
+                == rd.artifact_path(sd, "o/r", 76))
+        # A clone URL's own spellings resolve to the SAME file, both directions.
+        for spelling in ("o/r.git", "https://github.com/o/r.git",
+                         "git@github.com:o/r.git"):
+            assert (rd.artifact_path(sd, spelling, 76)
+                    == rd.artifact_path(sd, "o/r", 76)), spelling
+        st = rd.collect(sd, "github.com/o/r", 76)
+        assert st is not None, "collect lost a record that launch just wrote"
+        assert st.pr == 76
+        assert st.state == rd.WAITING, st.as_dict()
+    finally:
+        kill_group(ln.pid)
+
+
+def _guaranteed_dead_pid() -> int:
+    """A pid that cannot be live here.
+
+    ⛔ `PID=999999` IS NOT DEAD ON A BOX WITH `kernel.pid_max` 4194304 (this cell's
+    value): once that number is recycled into any session/group leader, a record
+    pointing at it reads LIVE through `_rail_alive`'s group fallback, and a test
+    that seeds a "dead" record reds for a reason that has nothing to do with the
+    code under test. `pid_max + 1` is outside the namespace on procfs boxes; where
+    procfs is absent, a spawned-and-reaped process's pid is the best available
+    answer (it may be recycled, and the assertion is then a false red, never a
+    false green).
+    """
+    try:
+        return int(Path("/proc/sys/kernel/pid_max").read_text().strip() or 0) + 1
+    except (OSError, ValueError):
+        dead = subprocess.Popen(["/bin/true"], start_new_session=True,
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        dead.wait()
+        return dead.pid
+
+
+def test_a_record_written_under_an_older_spelling_still_blocks(tmp_path):
+    """⛔ A RECORD THE NEW NAME CANNOT SEE IS THE DUPLICATE-RAIL GUARD BYPASSED.
+
+    `_slug` used to be the RAW repo string, so records written before this module
+    keyed on `_repo_key` live under names like `rail-github.com-o-r-7.md`. Reading
+    only `artifact_path(...)` misses them: `collect` answers `absent` (3) and
+    `launch`'s duplicate guard therefore sees a free PR and starts a SECOND rail —
+    the #3061 collision, moved to a version boundary rather than closed. `collect
+    --assert-merged` is the fleet's MACHINE GATE and would answer 3/1 about a rail
+    whose record sits on disk with a live pid in it.
+
+    Non-vacuity: the canonical path is asserted ABSENT, so this cannot pass by the
+    record happening to sit where the new code already looks. Revert
+    `_artifact_for_any_spelling` to a bare `artifact_path` and every assert here
+    fails (the first one on `None`).
+
+    ⛔ THE SCAN IS ANCHORED ON `REPO=`, NOT ON THE FILENAME — the second half pins
+    that a legacy-named record for a DIFFERENT repo is NOT adopted, so "same PR
+    number" alone never resurrects someone else's rail.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    legacy = sd / "rail-github.com-o-r-771.md"
+    legacy_other = sd / "rail-someone-else-772.md"
+    # a session leader stands in for the wrapper: `ps -p <pid>` answers it, which is
+    # the read that keeps the record `waiting` rather than `lost`.
+    live = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"LOG={sd}/rail-github.com-o-r-771.log\nPID={live.pid}\n",
+                          encoding="utf-8")
+        legacy_other.write_text(f"PR=772\nREPO=someone/else\nSTARTED_AT={rd._iso_now()}\n"
+                                f"PID={live.pid}\n", encoding="utf-8")
+
+        assert not rd.artifact_path(sd, "o/r", 771).exists(), \
+            "fixture is not the legacy-spelling shape: the canonical path exists"
+
+        # collect reads it under EITHER spelling of the query.
+        for spelling in ("o/r", "github.com/o/r", "git@github.com:o/r.git"):
+            st = rd.collect(sd, spelling, 771)
+            assert st is not None, f"collect lost the record for {spelling!r}"
+            assert st.state == rd.WAITING, (spelling, st.as_dict())
+            assert st.artifact == str(legacy), (spelling, st.artifact)
+
+        # …and the duplicate-rail guard REFUSES a second launch on that PR.
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(771, cwd=co, state_dir=sd, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value)
+        assert str(legacy) in str(exc.value), "the refusal must name the record it read"
+        assert not rd.artifact_path(sd, "o/r", 771).exists(), \
+            "the refused launch wrote a second record for one PR"
+
+        # The REPO= anchor: same PR number, different repo, is NOT this repo's rail.
+        assert rd.collect(sd, "o/r", 772) is None
+        other = rd.collect(sd, "someone/else", 772)
+        assert other is not None and other.artifact == str(legacy_other)
+
+        # ── COEXISTENCE: canonical + legacy for ONE PR, and the choice is LIVENESS
+        # ⛔ MEASURED PRE-FIX: a DEAD canonical record beside a LIVE legacy one read
+        # `lost` (the record alone read `waiting`), so `launch`'s guard accepted the
+        # PR and started a SECOND rail — the module's own P1. Both orders are pinned,
+        # because "prefer the canonical path" fails in exactly one of them.
+        canonical = rd.artifact_path(sd, "o/r", 771)
+        dead_pid = _guaranteed_dead_pid()
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID={dead_pid}\n", encoding="utf-8")        # DEAD
+        canonical.write_text(f"PR=771\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                             f"PID={live.pid}\n", encoding="utf-8")     # LIVE
+        st = rd.collect(sd, "o/r", 771)
+        assert st is not None and st.state == rd.WAITING, (st and st.as_dict())
+        assert st.artifact == str(canonical), "the live record must win"
+
+        canonical.write_text(f"PR=771\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                             f"PID={dead_pid}\n", encoding="utf-8")     # DEAD
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID={live.pid}\n", encoding="utf-8")        # LIVE
+        st = rd.collect(sd, "o/r", 771)
+        assert st is not None and st.state == rd.WAITING, (st and st.as_dict())
+        assert st.artifact == str(legacy), "a dead canonical record must not shadow a live one"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(771, cwd=co, state_dir=sd, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value), str(exc.value)
+
+        # …and the CLI's disk-first resolution counts REPOS, not FILES: one repo, two
+        # spellings, no `gh` — the answer is on disk, so `collect` must not ask (and
+        # must not exit 2 for an ambiguity that is not one).
+        assert rd.main(["collect", "771", "--state-dir", str(sd)]) == 0
+
+        # Both dead: the record is still reported (never "absent") — the guard reads
+        # it as finished, which is what lets the next `start` through.
+        legacy.write_text(f"PR=771\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID={dead_pid}\n", encoding="utf-8")
+        st = rd.collect(sd, "o/r", 771)
+        assert st is not None and st.state == rd.LOST, (st and st.as_dict())
+
+        # ── A TERMINAL MERGE OUTRANKS A LIVE-LOOKING STALE RECORD
+        # ⛔ MEASURED ON d957903d4: ranking by LIVENESS ALONE hid a merged canonical
+        # record behind a stale legacy record whose pid read live through
+        # `_rail_alive`'s group fallback (a record with no `CHILD_PID`/`STARTED_AT`
+        # gets the unbounded group claim). `collect --assert-merged` then answered 1 —
+        # "did NOT merge" — about a merged PR, with the merge sha unreachable. A
+        # merge is monotone: nothing downstream can un-merge it, while `waiting` is
+        # not evidence of anything.
+        sd2 = tmp_path / "state2"
+        sd2.mkdir()
+        canon2 = rd.artifact_path(sd2, "o/r", 55)
+        logp2 = canon2.with_suffix(".log")
+        canon2.write_text(
+            f"PR=55\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nATTEMPT_ID=abc\n"
+            f"EXIT_ATTEMPT=abc\nEXIT=0\nLOG={logp2}\n", encoding="utf-8")
+        logp2.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=abc (detached) =====\n"
+            "admin-merge: ✅ merged PR #55 at deadbeefcafe1234 "
+            "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+        # …and a stale legacy record that READS LIVE (no STARTED_AT ⇒ unbounded
+        # group claim, and `live` is a session leader whose group answers).
+        stale = sd2 / "rail-github.com-o-r-55.md"
+        stale.write_text(f"PR=55\nREPO=github.com/o/r\nPID={live.pid}\n",
+                         encoding="utf-8")
+        assert rd._record_is_live(stale), (
+            "fixture is not the shape this arm pins: the stale record must read live")
+        st = rd.collect(sd2, "o/r", 55)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+        assert st.merge_sha == "deadbeefcafe1234"
+        assert rd.main(["collect", "55", "--state-dir", str(sd2),
+                        "--assert-merged"]) == 0
+
+        # ── THE FORK-WINDOW CARRIER (`SPAWNING=1` + `CHILD_PID`, no `PID`)
+        # ⛔ MEASURED: `_record_is_live` called `_rail_alive(0, child, …)`, which is
+        # False because `_pid_alive` refuses `pid <= 0` — so the LIVE carrier was
+        # skipped, the dead canonical fallback won, `collect` answered `lost`, and
+        # `launch` started a SECOND rail. This is the artifact an old copy leaves
+        # when its launcher dies between `Popen` returning and the `PID=` append.
+        sd3 = tmp_path / "state3"
+        sd3.mkdir()
+        carrier = sd3 / "rail-github.com-o-r-88.md"
+        carrier.write_text(f"PR=88\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"SPAWNING=1\nCHILD_PID={live.pid}\n", encoding="utf-8")
+        dead_c = rd.artifact_path(sd3, "o/r", 88)
+        dead_c.write_text(f"PR=88\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"PID={dead_pid}\n", encoding="utf-8")
+        assert rd._record_is_live(carrier), \
+            "a CHILD_PID-carried rail must read live (the fork-window shape)"
+        st = rd.collect(sd3, "o/r", 88)
+        assert st is not None and st.state == rd.WAITING, (st and st.as_dict())
+        assert st.artifact == str(carrier), "the live carrier must outrank a dead record"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(88, cwd=co, state_dir=sd3, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value), str(exc.value)
+
+        # ── TWO REPOS, ONE SLUG: `_repo_key` identity on the READ **and the WRITE**
+        # ⛔ `_slug` folds `/` to `-`, so `a/b-c` and `a-b/c` share
+        # `rail-a-b-c-9.md` (and its `.log`). The occupying record is MERGED on
+        # purpose: that is the shape `--assert-merged` can certify, so the pre-fix
+        # reading is the FALSE PASS — exit 0 for a repo that never merged — that
+        # this arm is named after. A non-merged record only pins 1→3 and would
+        # leave the false 0 uncovered while looking covered.
+        sd4 = tmp_path / "state4"
+        sd4.mkdir()
+        colliding = sd4 / "rail-a-b-c-9.md"
+        logp9 = colliding.with_suffix(".log")
+        colliding.write_text(
+            f"PR=9\nREPO=a/b-c\nSTARTED_AT={rd._iso_now()}\nATTEMPT_ID=xyz\n"
+            f"EXIT_ATTEMPT=xyz\nEXIT=0\nLOG={logp9}\n", encoding="utf-8")
+        logp9.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=xyz (detached) =====\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        assert rd.collect(sd4, "a-b/c", 9) is None, \
+            "another repo's record was served to this repo"
+        # ⛔ PRE-FIX THIS WAS 0 — a machine gate certifying a merge that never happened.
+        assert rd.main(["collect", "9", "--repo", "a-b/c", "--state-dir", str(sd4),
+                        "--assert-merged"]) == 3
+        # …while the repo the record NAMES is still answered, merge and all.
+        st = rd.collect(sd4, "a/b-c", 9)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+        assert st.merge_sha == "deadbeefcafe1234"
+        assert rd.main(["collect", "9", "--repo", "a/b-c", "--state-dir", str(sd4),
+                        "--assert-merged"]) == 0
+
+        # ⛔ AND `launch` MUST REFUSE THAT SHARED PATH, NOT CLOBBER IT. Declining to
+        # serve the record is only half the fix: the write below is unconditional
+        # (artifact `write_text`, log TRUNCATION), so with `collect` correctly silent
+        # the guard passed and the launch rewrote the other repo's `REPO=`, destroyed
+        # its log — including a real `✅ merged` line — and ran a second rail
+        # appending into the same two files. Measured before this arm existed.
+        logp9.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=z (detached) =====\n"
+                         "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 "
+                         "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+        before = colliding.read_text(encoding="utf-8")
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(9, cwd=co, state_dir=sd4, repo="a-b/c")
+        assert "ANOTHER repo's record" in str(exc.value), str(exc.value)
+        assert colliding.read_text(encoding="utf-8") == before, \
+            "the refused launch rewrote another repo's record"
+        assert "✅ merged PR #9" in logp9.read_text(encoding="utf-8"), \
+            "the refused launch truncated another repo's log"
+
+        # ── A TORN RECORD NAMES NO REPO — SO IT MAY NOT CERTIFY A MERGE
+        # ⛔ `_record_names_repo` ADMITS a record whose `REPO=` is absent, on purpose:
+        # a header write cut before that line (SIGKILL/ENOSPC mid-`write_text`) must
+        # still read. But the record's EMPTY repo was then handed to
+        # `_merge_evidence`, whose own repo cross-check is one-sided — so the log's
+        # `admin-merge: repo <other>` line, the reason that check exists, was skipped
+        # and `--assert-merged` exited 0 for a repo that never merged. The requested
+        # repo is now the fallback, so a torn record still reads for the repo it
+        # actually belongs to and certifies nothing for anyone else.
+        sd5 = tmp_path / "state5"
+        sd5.mkdir()
+        torn = sd5 / "rail-a-b-c-9.md"
+        torn_log = torn.with_suffix(".log")
+        torn.write_text("# rail artifact — a/b-c#9\nPR=9\n", encoding="utf-8")
+        torn_log.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=t (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        st = rd.collect(sd5, "a/b-c", 9)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+        assert rd.main(["collect", "9", "--repo", "a/b-c", "--state-dir", str(sd5),
+                        "--assert-merged"]) == 0
+        # ⛔ PRE-FIX THIS WAS 0 — the torn record certified `a/b-c`'s merge to `a-b/c`.
+        assert rd.main(["collect", "9", "--repo", "a-b/c", "--state-dir", str(sd5),
+                        "--assert-merged"]) == 1
+
+        # ── THE LOG IS THE OTHER HALF OF THE SHARED PATH
+        # ⛔ With the artifact gone — the state this tool's OWN remedy creates
+        # (`rm <artifact>` clears a claim and stops nothing) — the artifact check is
+        # skipped and `launch` truncated the orphan log, including its merge line.
+        sd6 = tmp_path / "state6"
+        sd6.mkdir()
+        orphan = sd6 / "rail-a-b-c-9.log"
+        orphan.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=o (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        assert not (sd6 / "rail-a-b-c-9.md").exists(), \
+            "fixture is not the orphan-log shape: the artifact exists"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(9, cwd=co, state_dir=sd6, repo="a-b/c")
+        assert "belongs to ANOTHER repo" in str(exc.value), str(exc.value)
+        assert "✅ merged PR #9" in orphan.read_text(encoding="utf-8"), \
+            "the refused launch truncated an orphaned log's merge evidence"
+
+        # ── …AND A TORN ARTIFACT MUST NOT DEFEAT THAT LOG GUARD
+        # ⛔ The guard was gated on `not art.exists()`, but the ARTIFACT arm admits a
+        # record whose `REPO=` is absent (a torn header must still read), so a torn
+        # artifact skipped BOTH guards: `launch` rewrote it and truncated the
+        # colliding repo's log. The very shape fix #1 blesses is the shape that
+        # bypassed fix #2, so it is pinned here.
+        sd8 = tmp_path / "state8"
+        sd8.mkdir()
+        torn2 = sd8 / "rail-a-b-c-9.md"
+        torn2_log = torn2.with_suffix(".log")
+        torn2.write_text("# rail artifact — a/b-c#9\nPR=9\n", encoding="utf-8")
+        torn2_log.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=t2 (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        torn_before = torn2.read_text(encoding="utf-8")
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(9, cwd=co, state_dir=sd8, repo="a-b/c")
+        assert "belongs to ANOTHER repo" in str(exc.value), str(exc.value)
+        assert torn2.read_text(encoding="utf-8") == torn_before, \
+            "the refused launch rewrote a torn record"
+        assert "✅ merged PR #9" in torn2_log.read_text(encoding="utf-8"), \
+            "the refused launch truncated a torn record's log"
+
+        # ── THE CARRIER ARM REQUIRES `SPAWNING=` (the shape `_collect_read` uses)
+        # ⛔ Without the conjunct, `CHILD_PID` alone read LIVE — while the verdict
+        # path only reaches its carrier logic under `SPAWNING=`. The two probes had
+        # drifted once already, and the resolver's answer decides which record the
+        # verdict is drawn from. Pinned so the conjunct cannot be dropped silently.
+        sd7 = tmp_path / "state7"
+        sd7.mkdir()
+        no_sentinel = sd7 / "rail-o-r-91.md"
+        no_sentinel.write_text(f"PR=91\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                              f"CHILD_PID={live.pid}\n", encoding="utf-8")
+        assert not rd._record_is_live(no_sentinel), \
+            "a CHILD_PID with no SPAWNING= is not the fork-window carrier"
+        st = rd.collect(sd7, "o/r", 91)
+        assert st is not None and st.state == rd.LOST, (st and st.as_dict())
+    finally:
+        live.kill()
+        live.wait()
+
+
+def test_a_torn_record_cannot_certify_or_shadow_a_live_rail(tmp_path):
+    """⛔ THE REQUESTED REPO IS HALF OF EVERY MERGE VERDICT — PIN BOTH SITES.
+
+    `_record_names_repo` admits a record whose `REPO=` is absent (a header write cut
+    before that line must still read). The record then names NO repo, so every
+    `_merge_evidence` call needs the REQUESTED repo as its fallback — otherwise the
+    log's `admin-merge: repo <x>` cross-check is one-sided on an empty value and
+    silently skipped, which is how a torn record certified a merge it never made.
+
+    Two of those four fallback sites had no pin, so each could be reverted with the
+    suite still green: the RANKING site (`_record_is_merged`) let a torn record that
+    merely sits beside another repo's merged log outrank a genuinely LIVE rail,
+    reporting `lost`; the EXIT site (`_exit_verdict`) certified `merged` for the
+    wrong repo. The ranking one is reachable; the EXIT one is defence-in-depth (a
+    torn record is a PREFIX of one `write_text`, so it cannot carry `EXIT=` in
+    practice) and is pinned anyway, because "unreachable today" is how it re-opens.
+    """
+    live = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        # ── THE RANKING SITE: a torn record beside another repo's merged log must
+        # NOT outrank this repo's live rail.
+        sd = tmp_path / "state"
+        sd.mkdir()
+        torn = sd / "rail-a-b-c-9.md"            # canonical for BOTH spellings
+        torn.write_text("# rail artifact — a/b-c#9\nPR=9\n", encoding="utf-8")
+        torn_log = torn.with_suffix(".log")
+        torn_log.write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=xyz (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        mine = sd / "rail-github.com-a-b-c-9.md"   # this repo's LIVE rail, legacy name
+        mine.write_text(f"PR=9\nREPO=github.com/a-b/c\nSTARTED_AT={rd._iso_now()}\n"
+                        f"PID={live.pid}\n", encoding="utf-8")
+        st = rd.collect(sd, "a-b/c", 9)
+        assert st is not None and st.state == rd.WAITING, (
+            "a torn record borrowed another repo's merge and shadowed the live "
+            f"rail: {st and st.as_dict()}")
+        assert st.artifact == str(mine), st.artifact
+
+        # ── THE EXIT SITE: the same torn shape, now carrying EXIT=, must not
+        # certify `merged` for a repo the log says was never graded.
+        sd2 = tmp_path / "state2"
+        sd2.mkdir()
+        torn2 = sd2 / "rail-a-b-c-9.md"
+        torn2.write_text("PR=9\nATTEMPT_ID=t\nEXIT_ATTEMPT=t\nEXIT=0\n",
+                         encoding="utf-8")
+        torn2.with_suffix(".log").write_text(
+            f"\n{rd.ATTEMPT_MARK} x attempt=t (detached) =====\n"
+            "admin-merge: repo a/b-c (resolved from --repo)\n"
+            "admin-merge: ✅ merged PR #9 at deadbeefcafe1234 (state=MERGED)\n",
+            encoding="utf-8")
+        st = rd.collect(sd2, "a-b/c", 9)
+        assert st is not None and st.state != rd.MERGED, (st and st.as_dict())
+        assert rd.main(["collect", "9", "--repo", "a-b/c", "--state-dir", str(sd2),
+                        "--assert-merged"]) == 1
+        # …while the repo the log NAMES is still certified by the SAME record.
+        st = rd.collect(sd2, "a/b-c", 9)
+        assert st is not None and st.state == rd.MERGED, (st and st.as_dict())
+    finally:
+        live.kill()
+        live.wait()
+
+
 def test_an_announced_merge_outranks_a_recycled_child_pid(tmp_path):
     """⛔ ANNOUNCED BEATS `lost` — INCLUDING THE `lost` A RECYCLED PID DRAWS.
 
@@ -1267,6 +1744,16 @@ def test_cli_collect_answers_absent_without_asking_gh(tmp_path, monkeypatch, cap
     assert capsys.readouterr().out.startswith("RAIL(#95, absent, ")
     assert not called.exists(), "collect asked the network a question disk settles"
 
+    # ⛔ THE ZERO-CANDIDATE RETURN IS A SEPARATE ARM FROM THE `st is None` ONE, and
+    # `--json` must answer JSON on BOTH. Pinning only the `--repo` path left THIS
+    # arm's prose answer alive (measured: mutating it back to the `RAIL(...)` print
+    # left the whole file green at 100 passed, and the real CLI then emitted prose
+    # with rc 3 — the exact defect the fix was written for, one arm over).
+    rc = rd.main(["collect", "95", "--state-dir", str(sd), "--json"])
+    assert rc == 3, rc
+    doc = json.loads(capsys.readouterr().out)      # pre-fix: JSONDecodeError here
+    assert doc["state"] == "absent" and doc["pr"] == 95
+
     # An absent rail is NOT "not merged": the machine gate must not read 1 here.
     rc = rd.main(["collect", "95", "--state-dir", str(sd), "--assert-merged"])
     assert rc == 3, f"absent must not wear the gate's code (1): got {rc}"
@@ -1316,6 +1803,103 @@ def test_torn_exit_line_does_not_crash_collect(tmp_path):
     art.write_text(art.read_text() + f"EXIT_ATTEMPT={attempt}\nEXIT=\n")  # the torn append
     st = rd.collect(sd, "o/r", 66)
     assert st.state == rd.REFUSED and st.exit_code is None   # fail closed, no crash
+
+
+def test_a_torn_LOG_header_does_not_crash_collect(tmp_path):
+    """⛔ A HEADER CUT AT `LOG=` RESOLVES TO `Path(".")`, WHICH *EXISTS*.
+
+    `_read_snapshot` reads `LOG=` out of the artifact and then `read_text()`s it. A
+    header write cut at `LOG=` yields the EMPTY value, and `Path("")` is `Path(".")`
+    — a DIRECTORY, for which `.exists()` answers True — so the read raises
+    `IsADirectoryError` out of `collect`. That is a traceback on a read-only verb,
+    and under `--assert-merged` it exits 1: the code this tool reserves for "the
+    state is NOT merged". A crash must not wear the machine gate's verdict, which is
+    the whole reason the guard is `.is_file()` and not `.exists()`.
+
+    ⛔ THIS IS THE `.is_file()` GUARD'S ONLY REGRESSION DETECTOR. Reverting it to
+    `.exists()` leaves every other case in this file green (measured: 98 passed
+    either way), because no other test constructs the torn-`LOG=` shape.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 91)
+    real_log = rd.log_path(sd, "o/r", 91)
+    art.write_text(
+        f"PR=91\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG=\n"
+        f"SPAWNING=1\nATTEMPT_ID=a91\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    # The real log DOES carry a success line, so a guard that fell back to
+    # "read everything" would answer MERGED on evidence this attempt cannot name.
+    real_log.write_text(
+        f"\n{rd.ATTEMPT_MARK} x attempt=a91 (detached) =====\n"
+        "admin-merge: ✅ merged PR #91 at deadbeefcafe1234 "
+        "(state=MERGED confirmed via the API)\n",
+        encoding="utf-8",
+    )
+
+    st = rd.collect(sd, "o/r", 91)                     # pre-fix: IsADirectoryError
+    assert st is not None, "a torn header is a state, never an absent record"
+    assert st.state != rd.MERGED, st.as_dict()
+    assert rd.main(["collect", "91", "--repo", "o/r", "--state-dir", str(sd),
+                    "--assert-merged"]) == 1
+
+    # ARM 2 — `LOG=` naming a real DIRECTORY is the same read by another route.
+    (tmp_path / "a-dir").mkdir()
+    art.write_text(
+        f"PR=91\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+        f"LOG={tmp_path / 'a-dir'}\n"
+        f"SPAWNING=1\nATTEMPT_ID=a91\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    st = rd.collect(sd, "o/r", 91)
+    assert st is not None and st.state != rd.MERGED, st.as_dict()
+    assert rd.main(["collect", "91", "--repo", "o/r", "--state-dir", str(sd),
+                    "--assert-merged"]) == 1
+
+
+def test_absent_collect_answers_json_when_json_was_asked_for(tmp_path, capsys):
+    """⛔ `--json` MUST ANSWER JSON ON THE ABSENT PATH TOO — that is the path a lane hits most.
+
+    Both absent returns printed a bare `RAIL(#n, absent, -, -)` line even under
+    `--json`, so `json.loads(stdout)` raised `JSONDecodeError` on the single most
+    common answer ("this PR was never railed here"). The exit code (3) was correct
+    the whole time, which is exactly why a key-on-exit-code caller never noticed: the
+    broken surface is the documented machine one, and it breaks only when there is
+    nothing to report.
+
+    Both output SHAPES are asserted here — a fix that made ABSENT json-only would
+    break the human surface, which is the shape a person reads in a terminal. The
+    OTHER absent return (zero candidates, no `--repo` given) is a SEPARATE code path;
+    it is pinned by `test_cli_collect_answers_absent_without_asking_gh`.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+
+    rc = rd.main(["collect", "424242", "--repo", "o/r", "--state-dir", str(sd), "--json"])
+    out = capsys.readouterr().out
+    assert rc == 3
+    doc = json.loads(out)                      # pre-fix: JSONDecodeError here
+    assert doc["state"] == "absent" and doc["pr"] == 424242
+    real = rd.RailState(pr=1, state=rd.LOST).as_dict()
+    assert set(doc) == set(real), (
+        "the absent document must carry the SAME key set as a real status, or a "
+        "consumer needs two schemas")
+    # ⛔ KEY SET IS NOT ENOUGH: emitting `None` where a real status emits `""` (and
+    # `0` for `pid`/`child`) makes `int(doc["pid"])` raise for a consumer that
+    # learned the schema on the NORMAL path — the same break, one level down.
+    # VGATE caught exactly that in this fix's first cut, which is why the types and
+    # not just the names are pinned.
+    assert {k: type(v) for k, v in doc.items()} == {k: type(v) for k, v in real.items()}, (
+        f"per-key TYPES must match a real status: "
+        f"absent={ {k: type(v).__name__ for k, v in doc.items()} } "
+        f"real={ {k: type(v).__name__ for k, v in real.items()} }")
+
+    # ARM 2 — without `--json` the human line is unchanged.
+    rc = rd.main(["collect", "424242", "--repo", "o/r", "--state-dir", str(sd)])
+    out = capsys.readouterr().out
+    assert rc == 3
+    assert out.strip() == "RAIL(#424242, absent, -, -)", out
 
 
 def test_a_named_rail_under_spawning_is_not_no_rail(tmp_path):
@@ -3119,3 +3703,161 @@ def test_two_processes_racing_start_produce_exactly_one_rail(tmp_path, monkeypat
         st = rd.collect(sd, "o/r", 76)
         if st is not None and st.pid:
             kill_group(st.pid)
+
+
+def test_the_duplicate_rail_guard_asks_a_liveness_question(tmp_path):
+    """⛔ A MERGED RECORD COEXISTING WITH A LIVE ONE MUST NOT READ AS "FREE" (#10963).
+
+    `collect` answers a VERDICT, and merged-first ranking (correct: a merge is
+    monotone) means it returns the MERGED record when a merged one coexists with a
+    live one. `launch` read that as `prior.state == WAITING` being false — so it
+    truncated the LIVE record and started a second rail on one PR, the #3061
+    collision the guard exists to refuse, and stripping the live attempt's
+    `ATTEMPT_ID=` made its own announcements unreadable (#2235). Measured.
+
+    Non-vacuity: revert `prior` to `collect(state_dir, repo, pr)` and this launch is
+    ACCEPTED, so the `pytest.raises` fails.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    live = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        # the MERGED record, under the legacy spelling so it is not the canonical path
+        merged = sd / "rail-github.com-o-r-55.md"
+        logp = merged.with_suffix(".log")
+        merged.write_text(f"PR=55\nREPO=github.com/o/r\nSTARTED_AT={rd._iso_now()}\n"
+                          f"ATTEMPT_ID=m1\nEXIT_ATTEMPT=m1\nEXIT=0\nLOG={logp}\n",
+                          encoding="utf-8")
+        logp.write_text(f"\n{rd.ATTEMPT_MARK} x attempt=m1 (detached) =====\n"
+                        "admin-merge: ✅ merged PR #55 at deadbeefcafe1234 "
+                        "(state=MERGED confirmed via the API)\n", encoding="utf-8")
+        # …and a LIVE attempt for the same PR, under the canonical name
+        canon = rd.artifact_path(sd, "o/r", 55)
+        canon.write_text(f"PR=55\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+                         f"PID={live.pid}\n", encoding="utf-8")
+
+        assert rd.collect(sd, "o/r", 55).state == rd.MERGED, "the merged record wins the verdict"
+        with pytest.raises(rd.Refused) as exc:
+            rd.launch(55, cwd=co, state_dir=sd, repo="o/r")
+        assert "ALREADY LIVE" in str(exc.value), str(exc.value)
+        assert canon.read_text(encoding="utf-8").startswith("PR=55\nREPO=o/r"), \
+            "the refused launch rewrote the live record"
+    finally:
+        live.kill()
+        live.wait()
+
+
+def test_the_shared_log_is_refused_even_without_the_artifact(tmp_path):
+    """⛔ `rm <artifact>` IS THE DOCUMENTED RECOVERY, AND THE LOG SURVIVES IT.
+
+    The shared-path refusal was gated on `art.exists()`, so after the recovery both
+    refusal hints print the artifact is gone while the log is not, and the refusal
+    did not fire: `a-b/c#9` truncated the surviving log and the still-live `a/b-c#9`
+    rail appended its `✅ merged PR #9` into it — whose last evidence line then read
+    as `a-b/c`'s own, so `--assert-merged` exited 0 for a repo that never merged
+    (measured end-to-end). One-sided: a log with no evidence line still allows the
+    launch, so this repo's own rm-and-relaunch flow is untouched.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    sd.mkdir(parents=True)
+    shared = sd / "rail-a-b-c-9.log"
+    shared.write_text("admin-merge: repo a/b-c (resolved from --repo)\n",
+                      encoding="utf-8")
+    with pytest.raises(rd.Refused) as exc:
+        rd.launch(9, cwd=co, state_dir=sd, repo="a-b/c")
+    assert "ANOTHER repo's rail" in str(exc.value), str(exc.value)
+    assert "a/b-c" in shared.read_text(encoding="utf-8"), \
+        "the refused launch truncated another repo's log"
+
+    # …and the SAME repo's own log does NOT block its relaunch (the rule is
+    # one-sided: a log its own rail wrote is not evidence against it).
+    shared.write_text("admin-merge: repo a-b/c (resolved from --repo)\n",
+                      encoding="utf-8")
+    ln = rd.launch(9, cwd=co, state_dir=sd, repo="a-b/c")
+    try:
+        assert ln.pid > 0
+    finally:
+        kill_group(ln.pid)
+
+
+def test_a_record_that_ALREADY_EXITED_is_not_live_whatever_its_pid_answers(
+        tmp_path, monkeypatch):
+    """`_record_is_live` must honour `EXIT=` before it consults `PID=`/`CHILD_PID=`.
+
+    ⛔ Deleting `if _attempt_exits(text): return False` left this whole suite green
+    (measured at `06ba8c8c5^`: arm present → 98 passed, arm DELETED → 98 passed), so
+    the arm had no
+    regression detector. The consequence is the ordering it exists for: during the
+    window where a finished attempt's carrier is still exiting, its pid (possibly
+    recycled) still answers alive, so a FINISHED attempt would outrank the
+    genuinely-live record at `_artifact_for_any_spelling`'s liveness pass — and
+    `collect` would publish that attempt's `refused`/`lost`. `lost` is exactly the
+    state `launch`'s duplicate-rail guard ACCEPTS, i.e. the #3061 direction (a second
+    rail on one PR).
+
+    ⛔ AND THE PIN ITSELF WAS VACUOUS UNTIL THE PROBE WAS FORCED ALIVE. Its first
+    form wrote `PID=<pytest's own pid>`, whose argv does not carry the artifact path,
+    so `_rail_alive` answered "not ours" at `_pid_alive`'s marker test and the
+    assertion held for a reason with nothing to do with `EXIT=`: arm present → this
+    test passed, arm DELETED → this test passed (measured at `34e57cb58`). An
+    assertion satisfied by an unrelated branch is not a detector, however green it
+    is. `_rail_alive` is therefore monkeypatched to answer ALIVE, which is the one
+    condition under which `EXIT=`'s precedence is observable at all: arm present →
+    passed, arm deleted → FAILED (measured, same fixture).
+
+    The same-record-differing-only-in-`EXIT=` assertion is the vacuity guard for the
+    patch itself: if the monkeypatch were not in effect (wrong symbol, silently
+    unapplied), the unterminated record would read NOT live and fail here instead of
+    letting the pin pass for the old wrong reason.
+
+    The control half matters as much as the pinned half: the same record WITHOUT the
+    `EXIT=` line must still read LIVE under the REAL probe, so this cannot be
+    satisfied by a blanket `False` (which would make every rail look dead and re-open
+    the duplicate launch from the other side).
+    """
+    head = f"PR=77\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nPID={os.getpid()}\n"
+    exited = tmp_path / "rail-o-r-77.md"
+    exited.write_text(head + "EXIT=0\n", encoding="utf-8")
+    # Byte-identical to `exited` minus the `EXIT=` line: under ONE probe, the two
+    # answers can only be produced by `EXIT=`.
+    unterminated = tmp_path / "rail-o-r-77-live.md"
+    unterminated.write_text(head, encoding="utf-8")
+
+    probes: list[str] = []
+
+    def forced_alive(*_a, **_k):
+        probes.append("probe")
+        return True
+
+    with monkeypatch.context() as m:
+        m.setattr(rd, "_rail_alive", forced_alive)
+        assert rd._record_is_live(unterminated), (
+            "the forced-alive probe must be IN EFFECT — with no EXIT= this record "
+            "reads live, or the pin below is measuring an unrelated branch again"
+        )
+        assert not rd._record_is_live(exited), (
+            "a record whose writer already wrote EXIT= is FINISHED — a recycled pid "
+            "must not resurrect it, even when the liveness probe answers alive"
+        )
+    assert probes, "the pinned half never consulted the liveness probe"
+
+    alive = subprocess.Popen(["/bin/sleep", "20"], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        live = tmp_path / "rail-o-r-78.md"
+        live.write_text(
+            f"PR=78\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nPID={alive.pid}\n",
+            encoding="utf-8",
+        )
+        assert rd._record_is_live(live), (
+            "control: the same record with no EXIT= must read live, or the pin above "
+            "is satisfiable by a blanket False"
+        )
+    finally:
+        alive.kill()
+        alive.wait()
