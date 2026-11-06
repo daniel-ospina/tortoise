@@ -1128,7 +1128,12 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
     is left to the read arm, which already refuses with its own message.
     """
     path = getattr(proj, "_path", None)
-    if not path:                  # a URI leg: recovery never applies there
+    if not path or str(path) == ":memory:":
+        # A URI leg has no `_path`; an IN-MEMORY store has one but no directory
+        # (deriving one from it would point at the process CWD — measured: it
+        # refused a `:memory:` store over an unrelated `.jsonl` in the working
+        # directory, #11113 review cycle 10, P3). Recovery never applies to
+        # either.
         return
     try:
         events_dir = os.path.dirname(
@@ -1152,20 +1157,26 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
     # propagates), then the log.
     snapshot = _pending_prewipe_snapshot(events_dir)   # may raise: untrustworthy
     log = _one_replayable_log(events_dir)
+    # ⛔ THE LOG COUNT, not `log is None`, decides the diagnosis (#11113 review
+    # cycle 10, P2): `_one_replayable_log` answers None for "no logs" (recovery
+    # rebuilds from a pending snapshot) AND for "2+ logs" (recovery REFUSES them
+    # as ambiguous), and those two states need opposite sentences.
+    logs = _jsonl_names(events_dir)
     if snapshot is None and log is None:
         return                    # recovery would refuse this record set too
     record = snapshot or log
-    if snapshot is not None and log is None:
+    if snapshot is not None and len(logs) > 1:
+        why = ("tortoise's own recovery REFUSES to auto-rebuild here — a pending "
+               f"pre-wipe snapshot plus {len(logs)} adjacent JSONL logs is an "
+               "ambiguous log set (#2943/#428)")
+    elif snapshot is not None:
         why = ("tortoise's own recovery REBUILDS from that pending pre-wipe "
                "snapshot — it is the only surviving record of a rebuild's "
                "graph-only Points (#2943)")
-    elif snapshot is not None:
-        why = ("tortoise's own recovery would act on these records — it "
-               "rebuilds from the pending snapshot, and refuses when the "
-               "adjacent log set is ambiguous")
     else:
-        why = ("these are the SAME conditions under which tortoise's own "
-               "recovery would REPLAY that log and refill the graph")
+        why = ("tortoise's own recovery ACTS on that log — it replays it, and "
+               "refuses it outright when the log carries a torn tail it cannot "
+               "replay (#3316); either way it never treats the log as absent")
     kind = "pre-wipe snapshot" if snapshot is not None else "event log"
     raise CensusError(
         "the graph EXISTS and holds ZERO nodes of ANY label, while the "
@@ -1179,6 +1190,14 @@ def _refuse_if_the_store_looks_LOST(proj) -> None:
         "(python -m tortoise rebuild --dir <log-dir> --db <db>) and re-run; if "
         "the store really is meant to be empty, remove or archive that record "
         "first so the state is unambiguous.")
+
+
+def _jsonl_names(events_dir: str) -> list[str]:
+    """The `*.jsonl` entries in `events_dir`, sorted (`[]` on any error)."""
+    try:
+        return sorted(n for n in os.listdir(events_dir) if n.endswith(".jsonl"))
+    except OSError:
+        return []
 
 
 def _one_replayable_log(events_dir: str) -> str | None:
@@ -1206,18 +1225,16 @@ def _one_replayable_log(events_dir: str) -> str | None:
     without being read — the conservative direction, because a huge log does
     hold events and reading it on a shared directory is how a certification run
     exhausts memory.
-    text-lines are decoded STRICTLY, one line at a time, like `read_all` (#11113
-    review cycle 9, P3): a record carrying an invalid UTF-8 byte is "0 events,
-    torn tail" to the reader, so decoding the whole file with `errors=replace`
-    made this arm refuse where recovery does nothing.
+
+    The decoded text is read line by line and each line is decoded STRICTLY,
+    like `read_all` (#11113 review cycle 9, P3): a record carrying an invalid
+    UTF-8 byte is "0 events, torn tail" to the reader, so decoding the whole
+    file with `errors="replace"` made this arm refuse where recovery does
+    nothing.
     """
     import stat
 
-    try:
-        names = sorted(n for n in os.listdir(events_dir)
-                       if n.endswith(".jsonl"))
-    except OSError:
-        return None
+    names = _jsonl_names(events_dir)
     if len(names) != 1:           # 0 = nothing; 2+ = ambiguous, recovery refuses
         return None
     path = os.path.join(events_dir, names[0])

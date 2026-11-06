@@ -1533,7 +1533,7 @@ def test_a_LOST_graph_with_a_replayable_log_is_REFUSED_not_certified(
         tpc.read_graph_turns(None, db_path, "tortoise")
     message = str(exc.value)
     assert "LOST-STORE shape" in message, message
-    assert "would REPLAY that log" in message, message
+    assert "ACTS on that log" in message, message
 
 
 def test_a_DRAINED_graph_is_never_mistaken_for_a_LOST_one(
@@ -1560,9 +1560,10 @@ def test_a_FIFO_named_like_a_log_does_NOT_hang_the_refusal_arm(
     `_one_replayable_log` reads a file beside the store, which the operator may
     share; a plain `O_RDONLY` open on a FIFO blocks FOREVER, and this runs on
     exactly the empty-graph state #10017 ends on — so the gate would hang
-    silently instead of refusing. The sibling `_load_prewipe_snapshot` was
-    hardened this way for the same reason; this pin keeps the census on that
-    rule (no symlink follow, non-blocking, REGULAR file only).
+    silently instead of refusing. What protects it is `O_NONBLOCK` + `S_ISREG`
+    on the fd; `O_NOFOLLOW` is deliberately NOT used (recovery FOLLOWS a
+    symlinked log, so refusing to look through it failed open — see the sibling
+    `test_a_SYMLINKED_log_is_still_replayable_because_recovery_follows_it`).
     """
     db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
     fifo = tmp_path / "session-events.jsonl"
@@ -1768,8 +1769,12 @@ def test_a_pending_sidecar_with_TWO_logs_says_RECOVERY_REFUSES_not_replays(
     with pytest.raises(tpc.CensusError) as exc:
         tpc.read_graph_turns(None, db_path, "tortoise")
     message = str(exc.value)
-    # 2 logs + pending snapshot: recovery declines ("ambiguous log set").
-    assert "ambiguous" in message, message
+    # 2 logs + pending snapshot: recovery declines ("ambiguous log set"). The
+    # assertion is the PHRASE, not the bare word — "unambiguous" appears in the
+    # trailing remedy sentence and silently satisfied a bare `in` check
+    # (#11113 review cycle 10, P3).
+    assert "ambiguous log set" in message, message
+    assert "REBUILDS" not in message, message
     assert "would REPLAY" not in message, message
 
 
