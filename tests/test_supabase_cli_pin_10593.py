@@ -165,17 +165,25 @@ def _setup_cli_block(workflow_text: str) -> list[str]:
       `with: version: 2.122.1` while the setup-cli step itself carried none — so "a matching line
       exists somewhere" is not the claim the guard needs to make.
     """
-    lines = workflow_text.splitlines()
     node = _setup_cli_step_node(workflow_text)
-    # `start_mark` is the step's first key (on the `- uses:` line, or on `with:` when it comes
-    # first); `end_mark` points AT the next token after the mapping, so the slice is exclusive.
-    # A one-line flow mapping (`- {uses: …, with: {version: …}}`) starts and ends ON that line, so
-    # the exclusive slice would be empty — widen it to include the line, which is what makes the
-    # pin check refuse a flow-mapping pin for the RIGHT reason (no literal `version:` line).
-    end = node.end_mark.line
-    if end <= node.start_mark.line:
-        end = node.start_mark.line + 1
-    block = lines[node.start_mark.line : end]
+    # ⛔ SLICE BY MARK INDEX, NOT BY LINE (#11134 review cycle 2, P2 — a false block). `end_mark` is
+    # the first character AFTER the mapping, so at EOF it sits ON the mapping's last line — a
+    # position like `(8, 26)`, not `(9, 0)`. A LINE slice `lines[start.line:end.line]` is exclusive
+    # and therefore DROPS that last line, which for a step that is the file's final node is the PIN
+    # ITSELF. Measured: a legal workflow ending `          version: 2.122.1` with no trailing newline
+    # gave `block == ['      - uses: ...', '        with:']`, `_literal_version_lines` returned `[]`,
+    # and the guard refused it with "not a literal `version:` line … write `version:` on its own
+    # line" — a remedy the file already satisfied. ONE BYTE decided it: appending `\n` moved
+    # `end_mark` to `(9, 0)` and the same file passed. GitHub parses either byte-identically, so
+    # refusing one is a false block, and the message sent the reader after a construct that was not
+    # there.
+    #
+    # Index slicing is byte-precise, which is also why it needs NO widening for a one-line flow
+    # mapping (`- {uses: …, with: {version: …}}`): that shape yields its own line as a non-empty
+    # block and is refused for the RIGHT reason — no literal `version:` line — instead of tripping
+    # the "resolved to no source lines" assert below, which blamed the reader for a step it had
+    # resolved perfectly.
+    block = workflow_text[node.start_mark.index : node.end_mark.index].splitlines()
     # Trailing blank/comment lines belong to the NEXT step (comments are no node's children), and
     # `version:` is never inside a comment, so trimming them cannot hide a pin — it only stops this
     # block from swallowing the neighbour's prose.
@@ -763,16 +771,18 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     with pytest.raises(AssertionError, match="not a literal"):
         _requested_version(flow)
 
-    # (a2) ⛔ THE WHOLE STEP ON ONE LINE (#11134 review P3). Case (a) keeps `- uses:` on its own
-    # line and flow-izes only `with:`, so the step still spans several lines and the block slice is
-    # non-empty with or without the widening in `_setup_cli_block`. THIS shape is the one that needs
-    # it: a one-line flow mapping starts AND ends on the same line, so without the widening the
-    # exclusive slice is empty and `_setup_cli_block` asserts out with "resolved to no source lines"
-    # — a FALSE diagnosis that blames the reader for a step it resolved perfectly.
+    # (a2) ⛔ THE WHOLE STEP ON ONE LINE (#11134 review cycle 1, P3). Case (a) keeps `- uses:` on
+    # its own line and flow-izes only `with:`, so the step still spans several lines and the block
+    # slice is non-empty either way — it cannot test how a ONE-LINE step is sliced. THIS shape can:
+    # a one-line flow mapping starts AND ends on the same line, so a LINE slice is empty (or, with
+    # the old `end <= start` widening, empty-but-padded) and `_setup_cli_block` then asserts out with
+    # "resolved to no source lines" — a FALSE diagnosis that blames the reader for a step it
+    # resolved perfectly.
     #
-    # Measured on this tree: real code refuses with `not a literal`; removing the widening refuses
-    # with `no source lines`. Asserting the REASON is what makes this case red on that reversion —
-    # case (a) cannot, because it passes either way.
+    # Measured on this tree: the byte-precise slice refuses with `not a literal`; reverting
+    # `_setup_cli_block` to a LINE slice throws the widening away with it and refuses with `no source
+    # lines`. Asserting the REASON is what makes this case red on that reversion — case (a) cannot,
+    # because it passes either way.
     one_line = workflow.replace(
         "      - uses: supabase/setup-cli@v1\n"
         "        with:\n"
@@ -788,6 +798,32 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     )
     with pytest.raises(AssertionError, match="not a literal"):
         _requested_version(one_line)
+
+    # (a3) ⛔ NO TRAILING NEWLINE, STEP IS THE FILE'S LAST NODE (#11134 review cycle 2, P2).
+    # `end_mark` is the first character AFTER the mapping, so at EOF it sits ON the mapping's last
+    # line — a position like `(8, 26)`, not `(9, 0)`. A LINE slice is exclusive and DROPS that last
+    # line, which here is the PIN ITSELF, so the guard refused a legal workflow with "not a literal
+    # `version:` line … write `version:` on its own line" — a remedy the file already satisfied —
+    # while ONE BYTE decided it: appending `\n` moved `end_mark` to `(9, 0)` and the same file
+    # passed. GitHub parses both identically, so this is a FALSE BLOCK, and the byte-precise slice
+    # is what makes it go away. Reverting to a LINE slice reds this case.
+    eof = (
+        "name: t\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: supabase/setup-cli@v1\n"
+        "        with:\n"
+        f"          version: {pin}"
+    )
+    assert not eof.endswith("\n"), "this case must end at the pin with NO trailing newline"
+    assert _requested_version(eof) == pin, (
+        "a workflow whose LAST line is the pin, with no trailing newline, was refused — the block "
+        "slice dropped the final line, so the guard blamed a step it had resolved correctly"
+    )
+    assert _violations(eof, CONFIG.read_text(encoding="utf-8")) == [], (
+        "a legal, correctly pinned workflow was refused at the GUARD level over a trailing byte"
+    )
+    # The same file WITH the byte must behave identically — the two must not disagree, which is the
+    # whole claim: the trailing newline carries no meaning.
+    assert _requested_version(eof + "\n") == pin
 
     # (b) two literal pins in the step must be refused, not silently resolved to one.
     duplicated = literal_pin.sub(lambda mm: f"{mm.group(1)}version: latest\n{mm.group(1)}version: {pin}", workflow, count=1)
