@@ -672,9 +672,13 @@ exactly this question and the tree cannot answer it today.
 > and reported a coherent pair as divergent. That is the counterfactual the read-back prevents — it
 > was never an observed event, because at the census point the DSN was unset on the deployment.
 > ⚠️ **SUPERSEDED (2026-10-26):** the record has been **ARMED** since then (`#9548` comment
-> `6407834085`: `armed: true`, `tortoise_record_app` granted `LOGIN`), so the read-back now runs on a
-> connection that really carries production writes. What is still not observed is a landing
-> `journal_event` + `point` row — an empty `record_write_failures` is *not* evidence of one.
+> `6407834085`: `armed: true`, `tortoise_record_app` granted `LOGIN`), so the read-back now runs on the
+> live deployment's connection — the one production write ATTEMPTS traverse. ⛔ **That is not the same
+> as "a connection that carries production writes"** (this sentence used to say exactly that, and it
+> read as *the write path works* — the empty-counter-as-health misread this section exists to close):
+> an attempt is not a landing, and an empty `record_write_failures` is *not* evidence that a row was
+> written. What is still not observed is a landing
+> `journal_event` + `point` row.
 > ⚠️ **This corrects R1's DSN above**: its `postgres.<ref>` user is the table owner and would
 > bypass RLS. R1 must arm
 > `postgresql://tortoise_record_app.<ref>:…@…pooler.supabase.com:5432/postgres?sslmode=require`

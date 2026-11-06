@@ -408,10 +408,24 @@ _INDEX_ARMED_EVIDENCE = ("record_write_failures",)
 #: rewrite cannot degrade the reading into an anonymous assertion.
 _INDEX_ARMED_BUILD_RE = re.compile(r"build `[0-9a-f]{7,40}`")
 #: The retired live-state sentences. They may STAY as history — this repo keeps a
-#: superseded statement in place, labelled and dated (the shape #11064 used at
-#: `08:205-238`, `09:196-212` and in the runbook) — but a row that carries one
+#: superseded statement in place, labelled and dated — but a row that carries one
 #: with no `SUPERSEDED` marker BEFORE it is telling a lane, in the present tense,
 #: something measured false on 2026-10-26.
+#:
+#: The three sites are named by DESCRIPTION, not by character offset (#11064
+#: review round 9, P3): they used to be cited as `08:205-238` and `09:196-212`,
+#: and the second was wrong the moment it was written — `09:196` is the tail of
+#: the PREVIOUS bullet and `09:208-212` is a blank line plus `## Reopening`, while
+#: the SUPERSEDED block is `09:197-207`. Eight lines above this comment is the
+#: rule that predicts exactly that decay:
+#: "No character offsets here on purpose: they were pinned once and were stale by
+#: the next round." A description survives the next edit; an offset does not.
+#:   * `08` §R1 — the `SUPERSEDED`-labelled block in its read-back bullet;
+#:   * `09` §6 — the third bullet under *Not verified by this lane* (the one that
+#:     opens "This decision does not arm anything itself — but the arming has
+#:     since happened", carrying `SUPERSEDED in part`);
+#:   * the runbook — its `AUTHORISED AND PARTLY DONE` box at
+#:     §"Arming the Postgres record".
 _INDEX_RETIRED_ARMING = (
     "the record is NOT ARMED on the hosted deployment",
     "because R1 has still not armed the DSN",
